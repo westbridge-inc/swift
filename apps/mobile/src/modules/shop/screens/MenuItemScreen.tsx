@@ -4,7 +4,7 @@ import { Dimensions, ScrollView, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, radius, space } from '@swift/ui';
+import { color, elevation, radius, space } from '@swift/ui';
 import { useAddToCart, useItemSlots, useVendor } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore, type ServiceVisitMode } from '../../../stores/bookingStore';
@@ -421,7 +421,7 @@ export function MenuItemScreen() {
           backgroundColor: color.surface.base,
           borderTopLeftRadius: radius.xl,
           borderTopRightRadius: radius.xl,
-          boxShadow: '0px -4px 12px rgba(33,26,26,0.08)',
+          ...elevation.dock,
           elevation: 12,
           flexDirection: 'row',
           alignItems: 'center',

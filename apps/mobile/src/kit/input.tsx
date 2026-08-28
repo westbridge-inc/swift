@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { TextInput, View, type TextInputProps, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { color, radius, space } from '@swift/ui';
+import { color, fontSize, lineHeight, radius, space } from '@swift/ui';
 import { T } from './text';
 
 /** Kit input — gluestack-grade field: label above, a DEFINED rounded-rectangle
@@ -33,7 +33,7 @@ export function LabeledInput({
   return (
     <View style={containerStyle}>
       {label ? (
-        <T variant="label" weight="semibold" style={{ marginBottom: space.sm, ...(dark ? { color: '#FFFFFF' } : {}) }}>
+        <T variant="label" weight="semibold" style={{ marginBottom: space.sm, ...(dark ? { color: color.white } : {}) }}>
           {label}
         </T>
       ) : null}
@@ -44,7 +44,7 @@ export function LabeledInput({
           // 1.5 on focus/error so the state reads without shifting layout much.
           borderWidth: focused || error ? 1.5 : 1,
           borderColor,
-          backgroundColor: dark ? '#212127' : color.surface.base,
+          backgroundColor: dark ? color.dark.field : color.surface.base,
           flexDirection: 'row',
           alignItems: 'center',
           paddingHorizontal: space.lg,
@@ -64,7 +64,16 @@ export function LabeledInput({
           }}
           placeholderTextColor={dark ? 'rgba(255,255,255,0.4)' : color.text.muted}
           style={[
-            { flex: 1, fontFamily: 'Hanken', fontSize: 16, color: dark ? '#FFFFFF' : color.text.primary, paddingVertical: 14 },
+            // [D4 — decided] `fontSize.input` (16), not a bare 16. Below 16
+            // mobile Safari zooms the page on focus, so this is a deliberate
+            // step with a name rather than a stray number the next tidy-up
+            // rounds onto the 15/17 scale.
+            //
+            // The old `paddingVertical: 14` is gone: with a 22 line height it
+            // asked for 50 inside a wrapper whose `minHeight` is 52, so the two
+            // constraints fought and the padding never won. One of them has to
+            // own the height — the wrapper does, and it centres its children.
+            { flex: 1, fontFamily: 'Hanken', fontSize: fontSize.input, lineHeight: lineHeight.input, color: dark ? color.white : color.text.primary },
             input.style,
           ]}
         />

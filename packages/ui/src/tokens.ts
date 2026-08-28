@@ -100,6 +100,37 @@ export const color = {
     danger: '#FCEEEE',
     info: '#EBEFF2',
   },
+  /**
+   * [D3 — DECIDED 2026-08-28] THE DARK SURFACE SET.
+   *
+   * The earner app runs on dark surfaces, and the values for them had been
+   * inlined as raw hex across three kit files — a pressed button in `button.tsx`,
+   * a field background in `input.tsx`, five pill foregrounds in `controls.tsx`.
+   * That is the "second palette" the design register flagged: not a rival
+   * system anyone designed, but a real one that had grown by accretion, in
+   * places a rebuild would copy without noticing.
+   *
+   * The decision was to derive from the functional tokens rather than ratify a
+   * rival set, and this is that — ONE definition, named, beside the light one.
+   * The pill foregrounds stay hand-tuned rather than computed tints because
+   * they carry contrast against dark fills that arithmetic lightening does not
+   * reliably clear; naming them is what removes the drift, not deriving them.
+   *
+   * `dk` in the mover module aliases these — it mints nothing of its own.
+   */
+  dark: {
+    /** Field / inset background on a dark surface. */
+    field: '#212127',
+    /** Pressed state of a dark primary button — the warm ink, lifted. */
+    pressed: '#3A2F2F',
+    /** Tone-pill foregrounds on dark fills. Each clears 4.5:1 on its own
+     *  fill; they are the dark counterparts of the functional hues above. */
+    onBrandFill: '#E9B9B9',
+    onSuccessFill: '#5AD695',
+    onErrorFill: '#F09A9A',
+    onWarningFill: '#F0C070',
+    onInfoFill: '#8FB8E8',
+  },
   /** Focus ring for keyboard / switch-access — visible on every surface. */
   focusRing: '#803B3B',
   /** Scrim behind sheets/dialogs — ink at 40%. */
@@ -148,6 +179,19 @@ export const fontSize = {
   xs: 13,
   sm: 13,
   base: 15,
+  /**
+   * [D4 — DECIDED 2026-08-28, founder] THE INPUT STEP.
+   *
+   * 16 was hard-coded in the input primitive and appeared nowhere on this
+   * scale, which runs 15 → 17 straight past it. It looked like a stray value.
+   * It is not: 16px is the threshold below which mobile Safari ZOOMS THE PAGE
+   * on focus, so an input at `base` (15) makes the whole layout jump when
+   * someone taps it. The value is deliberate, so it gets a name — a named step
+   * cannot be "tidied" onto the scale by the next person who finds it odd.
+   *
+   * Type only. It is not a spacing step and never a heading size.
+   */
+  input: 16,
   lg: 17,
   xl: 22,
   '2xl': 22,
@@ -160,6 +204,8 @@ export const lineHeight = {
   xs: 18,
   sm: 18,
   base: 22,
+  /** [D4] Pairs with `fontSize.input`. */
+  input: 22,
   lg: 24,
   xl: 28,
   '2xl': 28,
@@ -250,10 +296,27 @@ export const radius = {
   full: 9999,
 } as const;
 
-/** §Elevation — web/CSS strings (NativeWind boxShadow classes). */
+/**
+ * §Elevation — web/CSS strings (NativeWind boxShadow classes).
+ *
+ * [D1 — DECIDED 2026-08-28, founder] THE CARD SHADOW HAD THREE AUTHORS:
+ *
+ *   shadow.card       0px 1px  3px rgba(0,0,0,0.08)      ← web token
+ *   elevation.card    0px 6px 14px rgba(11,11,15,0.08)   ← RN token
+ *   kit/card.tsx      0px 4px 12px rgba(33,26,26,0.06)   ← what cards ACTUALLY used
+ *
+ * Three geometries (1/3, 6/14, 4/12) and three inks — pure black, a cold blue
+ * black, and the warm brown-black. A card looked different depending on which
+ * of the three a screen happened to reach for.
+ *
+ * The decision: ELEVATION'S 6/14 GEOMETRY WITH THE CARD'S WARM INK. The warm
+ * ink is not a new value — `rgba(33,26,26,…)` is already `color.scrim`, the
+ * platform's one black. A cold shadow under a warm paper palette is what made
+ * the old cards read faintly grey.
+ */
 export const shadow = {
-  card: '0px 1px 3px rgba(0,0,0,0.08)',
-  raised: '0px 6px 16px rgba(0,0,0,0.12)',
+  card: '0px 6px 14px rgba(33,26,26,0.08)',
+  raised: '0px 8px 16px rgba(33,26,26,0.12)',
 } as const;
 
 /**
@@ -265,9 +328,18 @@ export const shadow = {
  */
 export const elevation = {
   flat: { elevation: 0 },
-  card: { boxShadow: '0px 6px 14px rgba(11,11,15,0.08)', elevation: 3 },
-  raised: { boxShadow: '0px 8px 16px rgba(11,11,15,0.12)', elevation: 5 },
-  floating: { boxShadow: '0px 12px 24px rgba(11,11,15,0.22)', elevation: 10 },
+  // [D1] Geometry kept; ink warmed to the platform black so RN and web agree.
+  card: { boxShadow: shadow.card, elevation: 3 },
+  raised: { boxShadow: shadow.raised, elevation: 5 },
+  floating: { boxShadow: '0px 12px 24px rgba(33,26,26,0.22)', elevation: 10 },
+  /**
+   * A bottom dock casting UPWARD — the only shadow with a negative offset.
+   * It is not a card and must not borrow one: a dock's job is to separate
+   * itself from the content scrolling beneath it, so the light comes from the
+   * other side. Was inlined in MenuItemScreen; a shape the kit lacked is
+   * added to the kit, never to the screen (WS-3.1).
+   */
+  dock: { boxShadow: '0px -4px 12px rgba(33,26,26,0.08)', elevation: 8 },
 } as const;
 
 /** §Motion — durations (ms), easings, spring presets and press values: every
