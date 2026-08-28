@@ -24,7 +24,17 @@ export const SOS_TRANSITIONS: Record<SosStatus, SosStatus[]> = {
   CANCELLED: [],
 };
 
-const GRACE_SECONDS = Math.min(5, Math.max(0, Number(process.env['SOS_CANCEL_GRACE_SECONDS'] ?? 3)));
+// [REPORT-036 F036-06 · S1] Math.max/Math.min do NOT repair NaN: a malformed
+// SOS_CANCEL_GRACE_SECONDS made graceEndsAt an Invalid Date, which Prisma
+// rejects — a 5xx on NORMAL SOS creation from one bad env var. An explicit
+// finite check (not `|| default`, which would eat the VALID 0 = skip-grace
+// value) selects the default for any unparseable input. Exported pure so the
+// matrix is testable without module-reset games.
+export function parseGraceSeconds(raw: string | undefined): number {
+  const n = Number(raw ?? 3);
+  return Math.min(5, Math.max(0, Number.isFinite(n) ? n : 3));
+}
+const GRACE_SECONDS = parseGraceSeconds(process.env['SOS_CANCEL_GRACE_SECONDS']);
 
 /** The states in which an alert is still someone's live emergency. A POSITIVE
  *  list, so a status added to the enum later is NOT silently treated as live. */
