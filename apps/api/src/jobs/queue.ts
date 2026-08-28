@@ -3,7 +3,7 @@ import type Redis from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type { FastifyBaseLogger } from 'fastify';
-import { captureError } from '../plugins/observability';
+import { captureError, osrmOutcomeCounter } from '../plugins/observability';
 import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
 import { runWithTenant } from '../plugins/tenant-context';
@@ -70,6 +70,45 @@ export function bullConnectionOpts(redis: Redis): ConnectionOptions {
  *  reconcile sweep. removeOnFail keeps the last failures for inspection only
  *  AFTER the attempts are exhausted. Env-tunable so ops can widen it without a
  *  deploy. Exported so a test can pin the policy without opening a Redis socket. */
+/**
+ * [C2 · WS-0.2] When OSRM is configured but a call times out, errors, or
+ * returns no route, `OsrmMapsProvider` degrades to the straight-line estimate
+ * and dispatch carries on. That is the right behaviour — a routing outage must
+ * not stop deliveries — but it is INVISIBLE, and it is not a small error.
+ *
+ * Measured on the live Guyana extract, 2026-08-28, Stabroek Market to
+ * Vreed-en-Hoop (across the Demerara, via the Harbour Bridge): the road route
+ * is 19.07 km, the straight-line estimate 6.72 km. So a silent fallback prices
+ * that delivery at about a THIRD of the distance the mover actually rides, and
+ * the mover absorbs the difference on every cross-river job until someone
+ * notices. Fares, ETAs and dispatch ranking all read from the same seam, so
+ * they go wrong together.
+ *
+ * The Prometheus counter has always made the rate visible. Nothing PAGED on it,
+ * and there is no metrics backend deployed yet, so "visible" meant visible to
+ * nobody.
+ */
+export function osrmFallbackAlertPct(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['OSRM_FALLBACK_ALERT_PCT']?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return 25;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 1 && value <= 100 ? value : 25;
+}
+
+/** Minimum calls in the window before a rate means anything. One fallback out
+ *  of one call is 100% and pages nobody usefully. */
+export function osrmFallbackMinCalls(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['OSRM_FALLBACK_ALERT_MIN_CALLS']?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return 20;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 1 ? value : 20;
+}
+
+/** Previous heartbeat's cumulative OSRM totals, so the alarm reads the RATE
+ *  OVER THE LAST INTERVAL rather than since process start. A lifetime ratio
+ *  stays high for days after a resolved outage and then means nothing. */
+let lastOsrmTotals: { ok: number; fallback: number } | null = null;
+
 /** How many dead letters must be sitting there before admins are paged.
  *  Default 1 — one dead money job is worth a page, and `opsPageOnce` already
  *  caps the noise at one page per 30 minutes. Total-parsed (REPORT-036): a
@@ -832,6 +871,44 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // an alarm that silently stops alarming is the defect it exists to
           // prevent.
           ctx.log.warn({ err }, 'DLQ depth check failed — dead-letter paging is blind this cycle');
+        }
+
+        // [C2 / WS-0.2] Routing degradation page. See osrmFallbackAlertPct above
+        // for why a silent fallback is expensive rather than merely suboptimal.
+        try {
+          const metric = await osrmOutcomeCounter.get();
+          const totals = { ok: 0, fallback: 0 };
+          for (const sample of metric.values) {
+            const outcome = sample.labels['outcome'];
+            if (outcome === 'ok') totals.ok += sample.value;
+            else if (outcome === 'fallback') totals.fallback += sample.value;
+          }
+          const previous = lastOsrmTotals;
+          lastOsrmTotals = totals;
+          // A negative delta means the counter was reset (a restart, or a test).
+          // Skip the cycle and re-baseline rather than reporting nonsense.
+          if (previous && totals.ok >= previous.ok && totals.fallback >= previous.fallback) {
+            const ok = totals.ok - previous.ok;
+            const fallback = totals.fallback - previous.fallback;
+            const calls = ok + fallback;
+            const pct = calls > 0 ? Math.round((fallback / calls) * 100) : 0;
+            if (calls >= osrmFallbackMinCalls() && pct >= osrmFallbackAlertPct()) {
+              const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+              await opsPageOnce(ctx, 'osrm-fallback', 1800, () =>
+                notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                  tenantId: null,
+                  title: 'Routing has fallen back to straight-line distance',
+                  // Name the CONSEQUENCE, not the metric. An operator paged at
+                  // 3am needs to know what is currently wrong for customers,
+                  // not that a ratio crossed a threshold.
+                  body: `${pct}% of the last ${calls} routing calls could not reach OSRM. Fares, ETAs and dispatch ranking are being computed from crow-flies distance right now — across the river that is about a third of the real distance. Check the OSRM host.`,
+                  data: { kind: 'ops_osrm_fallback', pct, calls, fallback },
+                }),
+              );
+            }
+          }
+        } catch (err) {
+          ctx.log.warn({ err }, 'OSRM fallback-rate check failed — routing degradation paging is blind this cycle');
         }
         return;
       }
