@@ -4,7 +4,7 @@ import { AppState, Linking, Modal, Pressable, ScrollView, Share, View, useWindow
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { SvgXml } from 'react-native-svg';
-import { Card, Chip, ErrorState, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TonePill } from '../../../kit';
+import { Card, ErrorState, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Segmented, SettingsRow, T, TonePill } from '../../../kit';
 import { useVendorProfile, type QrAnalytics, type VendorQrPayload } from '../../../hooks/vendorops';
 import { GUTTER, SubHeader } from '../shared';
 import { toast } from '../../../kit/toast';
@@ -424,11 +424,13 @@ export function VendorMyQrScreen({ navigation }: any) {
             <T variant="body" weight="semibold">
               Performance
             </T>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
-              {RANGES.map((r) => (
-                <Chip key={r.value} label={r.label} selected={range === r.value} onPress={() => setRange(r.value)} />
-              ))}
-            </View>
+            {/* [Wave 3 · ref 21 idiom] A range selector is a lens — Segmented,
+                not chips (one value is always selected). */}
+            <Segmented
+              options={RANGES.map((r) => ({ key: r.value, label: r.label }))}
+              value={range}
+              onChange={(key) => setRange(key)}
+            />
           </View>
           {analyticsLoading ? (
             <LoadingBlock style={{ flex: 0, padding: space.lg }} />

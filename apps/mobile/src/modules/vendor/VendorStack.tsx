@@ -24,6 +24,7 @@ import {
   PopupCard,
   PopupTitle,
   Screen,
+  Segmented,
   SettingsRow,
   T,
   TonePill,
@@ -4005,11 +4006,15 @@ function VendorInsightsScreen() {
           <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
             Completed-order revenue. Swift never holds order money; cash and MMG settle peer-to-peer along the handoff.
           </T>
-          <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.md }}>
-            {PERIODS.map((p) => (
-              <Chip key={p} label={`${p}d`} selected={period === p} onPress={() => setPeriod(p)} style={{ flex: 1 }} />
-            ))}
-          </View>
+          {/* [Wave 3 · ref 21] A range switch is a LENS — one value is always
+              selected — so it rides Segmented (raised chip on a sunken track),
+              not a row of ChoiceChips. Predates the primitive; no longer. */}
+          <Segmented
+            options={PERIODS.map((p) => ({ key: String(p), label: `${p}d` }))}
+            value={String(period)}
+            onChange={(key) => setPeriod(Number(key) as (typeof PERIODS)[number])}
+            style={{ marginTop: space.md }}
+          />
         </View>
 
         {primaryLoading ? (
