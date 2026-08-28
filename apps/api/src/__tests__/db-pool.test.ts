@@ -5,9 +5,12 @@ import {
   resolveDatabaseUrl,
   poolSizeFor,
   poolTimeoutSeconds,
+  poolRoleForApiProcess,
   DEFAULT_API_POOL,
   DEFAULT_WORKER_POOL,
+  DEFAULT_COMBINED_POOL,
   DEFAULT_POOL_TIMEOUT_SECONDS,
+  POOL_HEADROOM,
 } from '../utils/db-pool';
 
 /**
@@ -55,9 +58,28 @@ describe('resolveDatabaseUrl — supplying the missing number', () => {
 describe('resolveDatabaseUrl — the cases where it must NOT act', () => {
   it('never overrules an explicit connection_limit', () => {
     // An operator who states a limit may have sized it against a PgBouncer
-    // budget this process cannot see. Returned byte-for-byte unchanged.
-    const stated = `${BASE}?connection_limit=3`;
-    expect(resolveDatabaseUrl(stated, 'worker', {})).toBe(stated);
+    // budget this process cannot see. The limit is left exactly as stated.
+    const url = new URL(resolveDatabaseUrl(`${BASE}?connection_limit=3`, 'worker', {})!);
+    expect(url.searchParams.get('connection_limit')).toBe('3');
+  });
+
+  it('still applies a configured pool_timeout alongside an explicit limit [R037-03]', () => {
+    // The two settings are INDEPENDENT. Returning early on an explicit limit
+    // silently discarded a separately configured DB_POOL_TIMEOUT_SECONDS: both
+    // dials read as set, and only one was in effect — so pool-wait failures
+    // began at a different moment than the configuration said they would.
+    const url = new URL(
+      resolveDatabaseUrl(`${BASE}?connection_limit=3`, 'worker', { DB_POOL_TIMEOUT_SECONDS: '45' })!,
+    );
+    expect(url.searchParams.get('connection_limit')).toBe('3');
+    expect(url.searchParams.get('pool_timeout')).toBe('45');
+  });
+
+  it('lets an explicit URL pool_timeout win over the configured one', () => {
+    const url = new URL(
+      resolveDatabaseUrl(`${BASE}?pool_timeout=90`, 'worker', { DB_POOL_TIMEOUT_SECONDS: '45' })!,
+    );
+    expect(url.searchParams.get('pool_timeout')).toBe('90');
   });
 
   it('leaves a non-Postgres connection string alone', () => {
@@ -118,11 +140,42 @@ describe('the pool still fits the jobs that are actually declared', () => {
     expect(declared.length).toBeGreaterThan(0);
     const total = declared.reduce((sum, n) => sum + n, 0);
 
-    // Headroom covers the work that runs in the same process OUTSIDE a job slot:
-    // the scheduler heartbeat, repeatable-job registration, and interactive
-    // $transaction callbacks that hold their connection for the callback body.
-    const HEADROOM = 5;
-    expect(DEFAULT_WORKER_POOL).toBeGreaterThanOrEqual(total + HEADROOM);
+    // Assert the EXPORTED headroom, not a copy of it. A private copy of 5 in
+    // this test meant dropping the worker pool to 24 stayed green while
+    // contradicting the module's own documented sizing [R037-06].
+    expect(POOL_HEADROOM).toBe(6);
+    expect(DEFAULT_WORKER_POOL).toBe(total + POOL_HEADROOM);
+  });
+});
+
+describe('the DEFAULT topology is sized too [R037-01]', () => {
+  // `RUN_WORKERS` unset means ONE process serves HTTP and runs all 19 job
+  // consumers off a single Prisma client (server.ts hands the runtime
+  // `app.prisma`). Sized at the API budget it stayed starved for exactly the
+  // workload this module exists to fix — the first version only helped the
+  // split topology, which is the one nobody runs by default.
+  it('unset RUN_WORKERS means this process also consumes the queue', () => {
+    expect(poolRoleForApiProcess({})).toBe('combined');
+    expect(poolRoleForApiProcess({ RUN_WORKERS: '1' })).toBe('combined');
+    expect(poolRoleForApiProcess({ RUN_WORKERS: '' })).toBe('combined');
+  });
+
+  it('only an explicit RUN_WORKERS=0 makes it HTTP-only', () => {
+    expect(poolRoleForApiProcess({ RUN_WORKERS: '0' })).toBe('api');
+  });
+
+  it('the combined budget carries BOTH workloads, not a compromise', () => {
+    expect(DEFAULT_COMBINED_POOL).toBe(DEFAULT_API_POOL + DEFAULT_WORKER_POOL);
+    expect(poolSizeFor('combined', {})).toBe(DEFAULT_COMBINED_POOL);
+    // The failure this encodes: a combined process must never be sized at the
+    // API budget while running the whole queue.
+    expect(DEFAULT_COMBINED_POOL).toBeGreaterThan(DEFAULT_API_POOL);
+    expect(DEFAULT_COMBINED_POOL).toBeGreaterThan(DEFAULT_WORKER_POOL);
+  });
+
+  it('has its own override, distinct from the other two roles', () => {
+    expect(poolSizeFor('combined', { DB_POOL_SIZE_COMBINED: '60' })).toBe(60);
+    expect(poolSizeFor('combined', { DB_POOL_SIZE_API: '60' })).toBe(DEFAULT_COMBINED_POOL);
   });
 });
 
@@ -130,12 +183,25 @@ describe('the chain: both clients are wired to the resolver', () => {
   // The resolver being correct is worthless if nothing calls it. #807 shipped a
   // fully-tested SOS fan-out that had nobody to text; the break was BETWEEN the
   // layers, which is the one place a unit test never looks.
-  const src = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf8');
+  const raw = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf8');
+  /** Source with comments stripped. The chain assertions below name the exact
+   *  code they guard, and the comments explaining that code necessarily quote
+   *  it — so scanning raw text let a mutation delete the real property while a
+   *  matching comment kept the gate green [R037-05]. Standing hazard-matching
+   *  rule: match declarations, not prose. */
+  const src = (rel: string) =>
+    raw(rel)
+      .split('\n')
+      .filter((l) => {
+        const t = l.trim();
+        return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*');
+      })
+      .join('\n');
 
   it('the API client resolves its own URL', () => {
     const plugin = src('src/plugins/prisma.ts');
     expect(plugin).toContain("from '../utils/db-pool'");
-    expect(plugin).toMatch(/datasourceUrl:\s*resolveDatabaseUrl\([^)]*'api'\)/);
+    expect(plugin).toMatch(/datasourceUrl:\s*resolveDatabaseUrl\([^)]*poolRoleForApiProcess\(\)\)/);
   });
 
   it('the worker client resolves its own URL', () => {
@@ -144,11 +210,25 @@ describe('the chain: both clients are wired to the resolver', () => {
     expect(worker).toMatch(/datasourceUrl:\s*resolveDatabaseUrl\([^)]*'worker'\)/);
   });
 
-  it('.env.example documents both dials the alarm tells an operator to turn', () => {
+  it('.env.example documents every dial the alarm tells an operator to turn', () => {
     // POOL_WAIT_ALERT_THRESHOLD's page says "raise connection_limit". Before
     // this change there was no documented variable that did.
-    const env = src('.env.example');
+    const env = raw('.env.example');
     expect(env).toContain('DB_POOL_SIZE_API');
     expect(env).toContain('DB_POOL_SIZE_WORKER');
+    expect(env).toContain('DB_POOL_SIZE_COMBINED');
+  });
+
+  it('the DEPLOY template documents them too [R037-07]', () => {
+    // An operator self-hosting from deploy/ follows THIS file and never opens
+    // apps/api/.env.example, so the dials the alarm names were invisible to
+    // exactly the person the alarm wakes.
+    const deployEnv = raw('../../deploy/.env.deploy.example');
+    expect(deployEnv).toContain('DB_POOL_SIZE_COMBINED');
+    expect(deployEnv).toContain('DB_POOL_SIZE_WORKER');
+    expect(deployEnv).toContain('DB_POOL_TIMEOUT_SECONDS');
+    // And it must warn that this is a SHARED budget — sizing one process in
+    // isolation is how five replicas silently consume max_connections.
+    expect(deployEnv).toMatch(/max_connections/);
   });
 });

@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
 import { getTenantId } from './tenant-context';
-import { resolveDatabaseUrl } from '../utils/db-pool';
+import { poolRoleForApiProcess, resolveDatabaseUrl } from '../utils/db-pool';
 
 // Multi-tenancy stage 2 — tenant scoping at the ORM layer. When a request has
 // bound a tenant (tenant-context), EVERY direct operation on a tenant-owned
@@ -150,7 +150,14 @@ const prisma = new PrismaClient({
   // CPU-derived default — five connections on a 2-vCPU instance. An explicit
   // `connection_limit` already in DATABASE_URL is left exactly as the operator
   // set it; see utils/db-pool.ts.
-  datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], 'api'),
+  //
+  // The role is NOT hardcoded to 'api'. With `RUN_WORKERS` unset — the default
+  // single-process topology — this same client also serves all 19 job
+  // consumers, because server.ts hands the job runtime `app.prisma`. Sized at
+  // the API budget it stayed starved for exactly the workload this fix
+  // addresses. `poolRoleForApiProcess` reads the same variable server.ts reads,
+  // so the two cannot disagree about which topology is running.
+  datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], poolRoleForApiProcess()),
 }).$extends({
   name: 'orderStatusLogAppendOnly',
   query: {
