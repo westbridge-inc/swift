@@ -52,6 +52,7 @@ import {
 import { VendorOrderDetailScreen } from './screens/VendorOrderDetailScreen';
 import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
+import { VendorCategoryReviewScreen } from './screens/VendorCategoryReviewScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../components/onboarding/PricingCard';
@@ -4893,6 +4894,9 @@ export function VendorStack() {
       <Stack.Screen name="VendorOrderDetail" component={VendorOrderDetailScreen} />
       <Stack.Screen name="VendorOrderHistory" component={VendorOrderHistoryScreen} />
       <Stack.Screen name="VendorMyQr" component={VendorMyQrScreen} />
+      {/* [MKT G3] Where the backfill's "review your categories" push lands.
+          Accepting a suggestion is what writes the tag the Market feed reads. */}
+      <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
       <Stack.Screen name="VendorMySwiftNumber" component={VendorSwiftNumberScreen} />
       {/* [B-support] Role-agnostic ticket screen — the vendor stack had NO
           route to a human. Registration, not a rewrite. */}

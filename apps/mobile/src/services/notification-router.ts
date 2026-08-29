@@ -104,6 +104,14 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
     const respondBy = typeof data['respondBy'] === 'string' ? (data['respondBy'] as string) : undefined;
     return { screen: 'LivenessCheck', params: respondBy ? { profile, respondBy } : { profile } };
   }
+  // [MKT G3] "Review your categories — takes about 2 minutes." The backfill
+  // sends this to a STORE OWNER (`vendor.owner.userId`), and accepting one of
+  // those suggestions is the only thing that writes the tag the Market feed
+  // filters on. It was unrouted, and the census had it filed under "admins" —
+  // so the one action that fills the marketplace arrived as a push that opened
+  // the app on whatever screen was last shown.
+  if (kind === 'category_backfill_review') return { screen: 'VendorCategoryReview' };
+
   if (kind === 'liveness_locked') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } };
   }

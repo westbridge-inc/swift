@@ -258,6 +258,17 @@ export const discoveryApi = {
 /** [MKT G1] The market feed — items across every store, by discovery category.
  *  The Market tab used to call the VENDORS api and render shops; this returns
  *  things. Same `ItemHit` shape search returns, deliberately. */
+/** [MKT G3] The store's category-suggestion queue. The backfill proposes tags
+ *  and notifies the vendor to review them; accepting one is what actually
+ *  creates the tag the market feed filters on. Without a caller for these the
+ *  queue only ever grows. */
+export const vendorDiscoveryApi = {
+  suggestions: (session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.get('/vendor/category-suggestions', capturedVendorAuthConfig(session, storeId)),
+  resolve: (id: string, action: 'accept' | 'dismiss', session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.post(`/vendor/category-suggestions/${id}/${action}`, {}, capturedVendorAuthConfig(session, storeId)),
+};
+
 export const marketApi = {
   items: (params?: { category?: string; sort?: string; cursor?: string; limit?: number }) =>
     api.get('/market/items', { params }),

@@ -336,7 +336,7 @@ const CENSUS: Case[] = [
   { k: 'settlement_deposit_mismatch', to: null, why: 'admins' },
   { k: 'earnings_missing', to: null, why: 'admins' },
   { k: 'agent_cash_sla', to: null, why: 'admins' },
-  { k: 'category_backfill_review', to: null, why: 'admins' },
+  { k: 'category_backfill_review', to: { screen: 'VendorCategoryReview' }, why: 'the STORE OWNER, not an admin — the backfill notifies `vendor.owner.userId`, and accepting a suggestion is the ONLY thing that writes the tag the Market feed reads. It was unrouted and mislabelled; 50 suggestions sat PENDING against 0 tags' },
   { k: 'incident_new', d: { caseId: 'c1', caseNumber: 'INC-1' }, to: null, why: 'admins' },
   { k: 'incident_sla_breach', d: { caseId: 'c1' }, to: null, why: 'admins' },
   { k: 'incident_weekly_digest', to: null, why: 'admins' },
