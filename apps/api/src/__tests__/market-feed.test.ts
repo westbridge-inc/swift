@@ -42,7 +42,7 @@ const PHONE_PREFIX = '+59200941';
 const SLUG = `mkt-tools-${nanoid(6)}`;
 
 let seq = 0;
-async function makeVendor(name: string, opts: { visible?: boolean } = {}) {
+async function makeVendor(name: string, opts: { visible?: boolean; type?: 'STORE' | 'RESTAURANT' | 'SERVICE' | 'SUPERMARKET' } = {}) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
@@ -59,7 +59,7 @@ async function makeVendor(name: string, opts: { visible?: boolean } = {}) {
       ownerId: owner.id,
       name,
       slug: `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${nanoid(6)}`,
-      vendorType: 'STORE',
+      vendorType: opts.type ?? 'STORE',
       // The visibility predicate is the subject of one test below; an invisible
       // vendor is made invisible the way the platform actually does it.
       status: opts.visible === false ? 'SUSPENDED' : 'ACTIVE',
@@ -192,6 +192,68 @@ describe('it lists THINGS, across stores — not shops', () => {
     const res = await get('/items?category=not-a-real-category');
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe('CATEGORY_NOT_FOUND');
+  });
+});
+
+describe('the Market is GOODS — not dishes, not services', () => {
+  // SHIPPED BROKEN AND CAUGHT ON A DEVICE. `vertical` was parsed and then never
+  // used in the query, so the goods tab filled with restaurant dishes — Dhal
+  // Puri, Pork Chops, Margherita — beside service listings. A parameter that
+  // filters nothing is the same lie this feed refuses `lat`/`lng` for.
+  //
+  // It returned PLAUSIBLE data, which is why it survived review: real items,
+  // real stores, real prices, correctly paginated. Only the wrong ones.
+  it('a restaurant dish never reaches the market tab', async () => {
+    const kitchen = await makeVendor('Royal Roti Hut', { type: 'RESTAURANT' });
+    // Tagged into the fixture category so the assertion is about the VERTICAL
+    // filter and not about which page a busy catalogue put the row on. An
+    // earlier version queried the unfiltered feed at limit=50 and passed
+    // vacuously — the dish was simply not on page one.
+    const dish = await makeItem(kitchen.id, `Dhal Puri ${nanoid(4)}`, { discovery: categoryId, shelf: 'Roti' });
+
+    const res = await get(`/items?category=${SLUG}&limit=50`);
+
+    expect(res.statusCode).toBe(200);
+    expect(
+      res.json().data.items.map((i: any) => i.id),
+      'a dish is a real catalogue item with its own tab — it is not this one',
+    ).not.toContain(dish.id);
+  });
+
+  it('a service listing never reaches it either', async () => {
+    const trade = await makeVendor('Kingston Electrical', { type: 'SERVICE' });
+    const job = await makeItem(trade.id, `Rewire ${nanoid(4)}`, { discovery: categoryId, shelf: 'Jobs' });
+
+    const res = await get(`/items?category=${SLUG}&limit=50`);
+    expect(res.json().data.items.map((i: any) => i.id)).not.toContain(job.id);
+  });
+
+  it('a supermarket aisle is not the market either', async () => {
+    const shop = await makeVendor('Bounty Super', { type: 'SUPERMARKET' });
+    const tin = await makeItem(shop.id, `Milk ${nanoid(4)}`, { discovery: categoryId, shelf: 'Dairy' });
+
+    const res = await get(`/items?category=${SLUG}&limit=50`);
+    expect(res.json().data.items.map((i: any) => i.id)).not.toContain(tin.id);
+  });
+
+  it("but a STORE's goods do (guards the guard)", async () => {
+    // Without this the three assertions above pass on a feed that returns
+    // nothing at all.
+    const store = await makeVendor('Ogle Hardware', { type: 'STORE' });
+    const hammer = await makeItem(store.id, `Claw hammer ${nanoid(4)}`, { discovery: categoryId, shelf: 'Tools' });
+
+    const res = await get(`/items?category=${SLUG}&limit=50`);
+    expect(res.json().data.items.map((i: any) => i.id)).toContain(hammer.id);
+  });
+
+  it('the category filter is scoped to goods too', async () => {
+    // A tagged DISH must not appear under a market category either — the tag
+    // says what a thing is, the vertical says whose tab it belongs on.
+    const kitchen = await makeVendor('Demerara Grill House', { type: 'RESTAURANT' });
+    const dish = await makeItem(kitchen.id, `Pork Chops ${nanoid(4)}`, { discovery: categoryId, shelf: 'Grill' });
+
+    const res = await get(`/items?category=${SLUG}&limit=50`);
+    expect(res.json().data.items.map((i: any) => i.id)).not.toContain(dish.id);
   });
 });
 

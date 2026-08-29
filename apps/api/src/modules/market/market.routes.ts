@@ -31,6 +31,14 @@ import { AppError } from '../../utils/errors';
  *  items); a breach is LOGGED, never silently truncated. */
 const CATEGORY_ITEM_CAP = 5_000;
 
+/**
+ * Which sellers a vertical means. RETAIL is the STORE — "goods, not food:
+ * clothes, tools, household things, the stuff a STORE sells", in the Market
+ * screen's own words. A restaurant's dishes and a tradesperson's services are
+ * real catalogue items with their own tabs; they are not this one.
+ */
+const VERTICAL_VENDOR_TYPE = { RETAIL: 'STORE' } as const;
+
 const SORTS = ['new', 'popular', 'price_asc', 'price_desc'] as const;
 type Sort = (typeof SORTS)[number];
 
@@ -135,9 +143,19 @@ export async function marketRoutes(app: FastifyInstance) {
 
     const where = {
       isAvailable: true,
-      // [M4] The ONE visibility predicate, imported. Re-expressing it here would
-      // be its seventh copy, and the copies already disagree.
-      vendor: VISIBLE_VENDOR_REL,
+      vendor: {
+        // [M4] The ONE visibility predicate, imported. Re-expressing it here
+        // would be its seventh copy, and the copies already disagree.
+        ...VISIBLE_VENDOR_REL,
+        // THE MARKET IS GOODS. Without this the feed returned every item from
+        // every vendor type, so the goods tab filled with restaurant dishes —
+        // Dhal Puri, Pork Chops, Margherita — and service listings. `vertical`
+        // was parsed and then never used: a parameter that filters nothing,
+        // which is the same lie this file refuses `lat`/`lng` for six lines
+        // above. Openness and type are per-surface extras and belong at the
+        // call site by that predicate's own rule; visibility does not.
+        vendorType: VERTICAL_VENDOR_TYPE[q.vertical],
+      },
       // [§4.2] The CROSS-VENDOR taxonomy. Never `Item.categoryId`, which is the
       // store's own shelf and would return one shop's aisle wearing a
       // category's name.
