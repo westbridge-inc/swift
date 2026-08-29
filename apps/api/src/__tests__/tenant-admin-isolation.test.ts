@@ -12,6 +12,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { NotificationService, notifyAdmins } from '../modules/notification/notification.service';
 import { luhnCheckDigit } from '../modules/billing/san';
 import { loginWithOtp } from './helpers/otp';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // HTTP proof for the arbitrary-id admin path in SPS-F-0012. An administrator
 // is an operator inside one tenant, not a platform-wide principal. A real id
@@ -159,6 +160,7 @@ beforeAll(async () => {
         riderType: 'DELIVERY',
         vehicleType: 'MOTORCYCLE',
         isOnline: true,
+        locationSessionId: syntheticLocationOwner('tenant-adm'),
         currentLat: 6.8123,
         currentLng: -58.1623,
       },
@@ -183,6 +185,7 @@ beforeAll(async () => {
         vehicleInsuranceUrl: 'private://tenant-b/vehicle-insurance',
         bodyType: 'UNKNOWN',
         isOnline: true,
+        locationSessionId: syntheticLocationOwner('tenant-adm'),
         currentLat: 6.8234,
         currentLng: -58.1734,
       },
@@ -344,7 +347,10 @@ beforeAll(async () => {
         status: 'DELIVERED',
         deliveryAddress: 'Tenant B private settlement',
         deliveryLat: 6.8, deliveryLng: -58.15,
-        subtotalBase: 1_000, subtotalMarkup: 100, subtotalCustomer: 1_100,
+        // chk_orders_zero_markup: the keep-100%/flat-fee model forbids a
+        // non-zero markup in production. subtotalCustomer stays distinctive
+        // so the cross-tenant leak assertions keep their sentinel.
+        subtotalBase: 1_000, subtotalMarkup: 0, subtotalCustomer: 1_100,
         deliveryFee: 87_654_321, totalAmount: 87_655_421,
         paymentMethod: 'MOBILE_MONEY',
       },
@@ -1423,7 +1429,7 @@ describe('tenant-qualified admin access', () => {
             deliveryLat: 6.8,
             deliveryLng: -58.15,
             subtotalBase: 123_456_789,
-            subtotalMarkup: 98_765_432,
+            subtotalMarkup: 0, // chk_orders_zero_markup — keep-100%/flat-fee
             subtotalCustomer: 222_222_221,
             deliveryFee: 88_888_888,
             totalAmount: 311_111_109,

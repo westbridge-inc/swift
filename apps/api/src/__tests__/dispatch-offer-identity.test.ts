@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // [REPORT-014 F-014-04/05/06/10] Offer ATTEMPT identity. The Redis offer pair,
@@ -69,6 +70,7 @@ async function makeRider(opts: { lat?: number; lng?: number } = {}) {
       documentsVerified: true,
       floatLimit: 1_000_000,
       isOnline: true,
+      locationSessionId: syntheticLocationOwner('dispatch-offer'),
       isAvailable: true,
       currentLat: opts.lat ?? PICKUP.lat,
       currentLng: opts.lng ?? PICKUP.lng,

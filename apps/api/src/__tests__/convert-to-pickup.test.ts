@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { customerRoutes } from '../modules/user/customer.routes';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // Delivery→pickup conversion (availability spec §4.2): the ONE additive
@@ -207,7 +208,7 @@ describe('conversion and rider claims are mutually exclusive on one locked money
     for (let round = 0; round < 4; round += 1) {
       await app.prisma.rider.update({
         where: { id: riderId },
-        data: { isOnline: true, isAvailable: true, currentOrderId: null },
+        data: { isOnline: true, isAvailable: true, locationSessionId: syntheticLocationOwner('convert'), currentOrderId: null },
       });
       const order = await makeOrder();
       const claim = app.prisma

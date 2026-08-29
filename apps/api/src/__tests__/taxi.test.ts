@@ -16,6 +16,7 @@ import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { pointInPolygon } from '../utils/geo';
 import { transitionUserRoleAuthority } from '../modules/mover-authority';
 import { AuthService } from '../modules/auth/auth.service';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // taxi on the same mover pool and dispatch engine. Hardest paths:
@@ -930,6 +931,7 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
         vehicleType: 'MOTORCYCLE',
         documentsVerified: true,
         isOnline: true,
+        locationSessionId: syntheticLocationOwner('taxi'),
         isAvailable: true,
         currentLat: CENTRAL.lat,
         currentLng: CENTRAL.lng,

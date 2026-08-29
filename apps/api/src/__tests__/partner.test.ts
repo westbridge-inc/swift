@@ -10,6 +10,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestOtp } from './helpers/otp';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // Unique phone prefix per file (parallel-test gotcha).
 const BIKE_PHONE = '+59200199001';
@@ -267,7 +268,7 @@ describe('partner provisioning — happy paths', () => {
     const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: BIKE_PHONE } });
     const rider = await app.prisma.rider.update({
       where: { userId: user.id },
-      data: { isOnline: true, isAvailable: false, currentOrderId: 'partner-active-job' },
+      data: { isOnline: true, isAvailable: false, currentOrderId: 'partner-active-job', locationSessionId: syntheticLocationOwner('partner') },
     });
     const blocked = await post('/api/v1/partner/become', {
       role: 'VENDOR',

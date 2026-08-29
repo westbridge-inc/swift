@@ -11,6 +11,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestOtp, loginWithOtp } from './helpers/otp';
 import { nanoid } from 'nanoid';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // auth & accounts: role+country signup (OTP-mandatory), password
@@ -109,6 +110,7 @@ async function ensureMoverProfiles(userId: string) {
       vehicleType: 'MOTORCYCLE',
       documentsVerified: true,
       isOnline: true,
+      locationSessionId: syntheticLocationOwner('auth-accounts'),
       isAvailable: true,
     },
     update: {},
@@ -126,6 +128,7 @@ async function ensureMoverProfiles(userId: string) {
       vehicleInsuranceUrl: 'storage://auth-test/insurance.jpg',
       documentsVerified: true,
       isOnline: true,
+      locationSessionId: syntheticLocationOwner('auth-accounts'),
       isAvailable: true,
     },
     update: {},
@@ -776,11 +779,13 @@ describe('Role-crossing authorization', () => {
         vehicleType: 'MOTORCYCLE',
         documentsVerified: true,
         isOnline: true,
+        locationSessionId: syntheticLocationOwner('auth-accounts'),
         isAvailable: true,
       },
       update: {
         currentOrderId: null,
         isOnline: true,
+        locationSessionId: syntheticLocationOwner('auth-accounts'),
         isAvailable: true,
       },
     });
@@ -812,9 +817,10 @@ describe('Role-crossing authorization', () => {
         vehicleInsuranceUrl: 'verified',
         documentsVerified: true,
         isOnline: true,
+        locationSessionId: syntheticLocationOwner('auth-accounts'),
         isAvailable: true,
       },
-      update: { currentRideId: null, isOnline: true, isAvailable: true },
+      update: { currentRideId: null, isOnline: true, locationSessionId: syntheticLocationOwner('auth-accounts'), isAvailable: true },
     });
 
     try {
@@ -843,7 +849,7 @@ describe('Role-crossing authorization', () => {
         }),
         app.prisma.rider.update({
           where: { id: rider.id },
-          data: { currentOrderId: null, isOnline: true, isAvailable: true },
+          data: { currentOrderId: null, isOnline: true, locationSessionId: syntheticLocationOwner('auth-accounts'), isAvailable: true },
         }),
       ]);
       const toDriver = await inject('POST', '/api/v1/customer/switch-role', { role: 'MOVER' }, token);
@@ -880,7 +886,7 @@ describe('Role-crossing authorization', () => {
     await inject('POST', '/api/v1/customer/switch-role', { role: 'MOVER' }, token);
     await app.prisma.rider.update({
       where: { id: rider.id },
-      data: { isOnline: true, isAvailable: false, currentOrderId: 'active-role-switch-job' },
+      data: { isOnline: true, locationSessionId: syntheticLocationOwner('auth-accounts'), isAvailable: false, currentOrderId: 'active-role-switch-job' },
     });
 
     const blocked = await inject('POST', '/api/v1/customer/switch-role', { role: 'CUSTOMER' }, token);

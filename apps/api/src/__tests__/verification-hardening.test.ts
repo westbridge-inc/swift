@@ -8,6 +8,7 @@ import { isProviderVerified, providerChecklist, refreshProviderVerification } fr
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // Onboarding-spec gaps (task #15, PR B): the electrician GEI licence is a
@@ -185,7 +186,7 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
     await app.prisma.rider.create({
       data: {
         userId: sparky.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE',
-        isOnline: true, isAvailable: true,
+        isOnline: true, isAvailable: true, locationSessionId: syntheticLocationOwner('verif-hard'),
       },
     });
 

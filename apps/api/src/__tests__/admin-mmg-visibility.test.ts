@@ -13,6 +13,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { OrderService } from '../modules/order/order.service';
 import { FloatService } from '../modules/dispatch/float.service';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // MMG Phase 4 — admin sees the money story without touching money: the
@@ -88,6 +89,7 @@ async function makeTaxiCustodyOrder(fixture: TaxiCustodyFixture) {
       driverLicenseUrl: 'storage://test/admin-refund-license',
       vehicleInsuranceUrl: 'storage://test/admin-refund-insurance',
       isOnline: true,
+      locationSessionId: syntheticLocationOwner('admin-mmg'),
       isAvailable: false,
     },
   });
@@ -131,6 +133,7 @@ async function makePickedUpOrder(orderType: Extract<OrderType, 'FOOD_DELIVERY' |
       riderType: 'DELIVERY',
       vehicleType: 'MOTORCYCLE',
       isOnline: true,
+      locationSessionId: syntheticLocationOwner('admin-mmg'),
       isAvailable: false,
     },
   });
@@ -476,6 +479,7 @@ describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
         riderType: 'DELIVERY',
         vehicleType: 'MOTORCYCLE',
         isOnline: true,
+        locationSessionId: syntheticLocationOwner('admin-mmg'),
         isAvailable: true,
         floatLimit: 100_000,
       },
@@ -542,6 +546,7 @@ describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
         riderType: 'DELIVERY',
         vehicleType: 'MOTORCYCLE',
         isOnline: true,
+        locationSessionId: syntheticLocationOwner('admin-mmg'),
         isAvailable: true,
         floatLimit: 100_000,
       },
