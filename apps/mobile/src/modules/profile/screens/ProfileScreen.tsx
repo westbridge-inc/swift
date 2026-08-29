@@ -281,6 +281,18 @@ export function ProfileScreen() {
               onPress={() => navigation.navigate('EmergencyContacts')}
             />
             <SettingsRow
+              icon="user-x"
+              label="Blocked people"
+              // [STORE-002] The block list has to be reachable from somewhere
+              // calm. Blocking happens in the moment, inside a chat; UNDOING it
+              // happens later, and a block nobody can find again is a trap for
+              // the person who placed it. No count in `sub` for the same reason
+              // as the row above — the profile payload does not carry one, and
+              // a guessed number would be the UI lying about who is cut off.
+              sub="People who cannot message or be matched with you"
+              onPress={() => navigation.navigate('BlockedUsers')}
+            />
+            <SettingsRow
               icon="shield"
               label="Identity verification"
               // No status chip here on purpose: /customer/profile carries no

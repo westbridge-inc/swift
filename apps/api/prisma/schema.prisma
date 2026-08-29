@@ -2746,6 +2746,55 @@ model ContentReport {
   @@map("content_reports")
 }
 
+/// [STORE-002] The third leg of App Store Guideline 1.2 / Google Play UGC:
+/// carrying user-generated content obliges the app to offer a content filter,
+/// a way to REPORT, a way to BLOCK, and a published contact. Swift had the
+/// other three; a person could report someone and then keep being matched
+/// with them.
+///
+/// Directional for VISIBILITY (the blocker stops seeing the blocked author's
+/// content) and SYMMETRIC for CONTACT (neither side may open or continue a
+/// conversation) — a one-way contact rule just means the blocked party keeps
+/// talking in the other direction.
+///
+/// One row per ordered pair, re-blocking clears `unblockedAt` rather than
+/// inserting again: blocking someone you already blocked is idempotent, the
+/// same call the sibling ContentReport makes above. The trade is that a
+/// block/unblock/block cycle keeps only its latest bounds; a full cycle
+/// history would need an append-only ledger, which is a moderation-evidence
+/// question and not this one.
+model UserBlock {
+  id          String    @id @default(cuid())
+  /// Bare column with no Tenant relation, matching AlgoConfig, the most recent
+  /// table admitted to the wall: RLS binds on the COLUMN, and a relation here
+  /// would only add a back-reference Tenant has to carry.
+  tenantId    String    @default("swift-default")
+  /// Bare user ids, exactly as ContentReport.reporterId — no relation, so the
+  /// User model gains no back-reference it would have to carry forever.
+  blockerId   String
+  blockedId   String
+  /// Why, in the blocker's own words. Optional: requiring a reason to escape
+  /// someone is a barrier in front of a safety control.
+  reason      String?
+  /// When the row was first written. Distinct from `blockedAt` on purpose:
+  /// because re-blocking reuses the row, a single timestamp would let the
+  /// screen say "blocked 3 months ago" about a block placed this morning.
+  createdAt   DateTime  @default(now())
+  /// When the STANDING block began — refreshed every time it is re-applied.
+  /// This is the one the screen may show.
+  blockedAt   DateTime  @default(now())
+  /// NULL = in force. A lifted block is kept, not deleted: "they blocked me
+  /// then unblocked me" is the shape a harassment review needs to see.
+  unblockedAt DateTime?
+
+  @@unique([tenantId, blockerId, blockedId])
+  /// "who have I blocked" — the Blocked people screen.
+  @@index([tenantId, blockerId, unblockedAt])
+  /// "may these two be put in contact" — dispatch and chat both ask this.
+  @@index([tenantId, blockedId, unblockedAt])
+  @@map("user_blocks")
+}
+
 // ==========================================
 // ACCOUNT RECOVERY
 // ==========================================

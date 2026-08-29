@@ -4,6 +4,8 @@ import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
 import { digitRun, mediaUrlCarriesSecret, redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
 
 import { NotificationService } from '../notification/notification.service';
+import { assertUsersMayContact } from '../moderation/user-block.service';
+import { getTenantId } from '../../plugins/tenant-context';
 import { NotFoundError, ForbiddenError } from '../../utils/errors';
 
 /** How far back the split-code check looks. Bounded on BOTH axes on purpose:
@@ -69,6 +71,14 @@ export async function chatRoutes(app: FastifyInstance) {
       throw new ForbiddenError('You are not part of this order');
     }
 
+    // [STORE-002] A block stops contact in BOTH directions. Checked before the
+    // room is created rather than only on send, so a blocked party never gets
+    // an open room they can watch.
+    const tenantId = getTenantId() ?? 'swift-default';
+    for (const other of participantUserIds.filter((uid) => uid !== request.user.userId)) {
+      await assertUsersMayContact(app.prisma, tenantId, request.user.userId, other);
+    }
+
     // Find existing room
     let room = await app.prisma.chatRoom.findFirst({
       where: { orderId },
@@ -109,6 +119,24 @@ export async function chatRoutes(app: FastifyInstance) {
       where: { chatRoomId: roomId, userId: request.user.userId },
     });
     if (!participant) throw new ForbiddenError('Not a participant');
+
+    // [STORE-002] Someone can be blocked mid-conversation — which is exactly
+    // when a person reaches for it. Refuse the SEND, in both directions, and
+    // say so plainly: a message silently swallowed leaves the sender believing
+    // it arrived, and that is its own kind of harm.
+    //
+    // Reading is deliberately still allowed. The transcript already written is
+    // how a customer finds "I left it inside your gate" after they have blocked
+    // the person who wrote it; deleting or hiding it would destroy the record
+    // at the moment it matters most.
+    const roomParticipants = await app.prisma.chatRoomParticipant.findMany({
+      where: { chatRoomId: roomId, userId: { not: request.user.userId } },
+      select: { userId: true },
+    });
+    const chatTenantId = getTenantId() ?? 'swift-default';
+    for (const other of roomParticipants) {
+      await assertUsersMayContact(app.prisma, chatTenantId, request.user.userId, other.userId);
+    }
 
     // Off-platform contact detection (spec §2): the message still delivers —
     // the sender gets a soft nudge and the flag feeds risk signals. Detection,

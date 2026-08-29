@@ -72,6 +72,11 @@ const TENANT_QUERY_EXTENSIONS = {
   adEvent: scoped, houseAd: scoped, adsSettings: scoped, adsAuditLog: scoped,
   // Ratings.
   actorRatingStat: scoped, ratingReport: scoped, itemFeedback: scoped, ratingTagDef: scoped,
+  // [STORE-002] Who a person refuses contact with is theirs and their
+  // operator's; it must never be readable or writable through another's
+  // session. (ContentReport beside it carries no tenantId and is therefore not
+  // here — a pre-existing shape, not a decision made by this change.)
+  userBlock: scoped,
   // Growth / QR attribution.
   slugRedirect: scoped, pendingAttribution: scoped, attributionClaim: scoped, scanDailyRollup: scoped,
   // Batching + scheduling.

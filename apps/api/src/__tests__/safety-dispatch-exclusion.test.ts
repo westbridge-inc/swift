@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { IncidentService } from '../modules/safety/incident.service';
+import { activateUserBlock, deactivateUserBlock } from '../modules/moderation/user-block.service';
 
 // M6d — §8.5 retaliation guard + §8.3 SHADOW_RESTRICTED in dispatch.
 // The guard lives INSIDE findCandidates, keyed on the booking user: a mover
@@ -91,6 +92,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await app.prisma.userBlock.deleteMany({ where: { OR: [{ blockerId: { in: userIds } }, { blockedId: { in: userIds } }] } });
   await app.prisma.incidentCase.deleteMany({ where: { subjectUserId: { in: userIds } } });
   await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
@@ -164,5 +166,61 @@ describe('§8.3 SHADOW_RESTRICTED', () => {
     const cleared = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driver.id } });
     expect(cleared.safetyShadowRestrictedAt).toBeNull();
     expect((await find(enhanced.id)).map((c) => c.userId)).toContain(d.userId);
+  });
+});
+
+// [STORE-002] The customer's OWN block, in the same exclusion set as §8.5.
+// A block is the retaliation guard stated by the person rather than by an
+// incident case, so it belongs in the same place and behaves the same way:
+// symmetric, liftable, and invisible to the availability probe.
+describe('STORE-002 user blocks', () => {
+  it('keeps blocked parties apart in BOTH directions, releases on unblock, and never touches probes or bystanders', async () => {
+    const customer = await makeUser(['CUSTOMER']);
+    const a = await makeDriverAt(4);
+    const b = await makeDriverAt(5);
+
+    // Baseline: both drivers reachable for this customer.
+    let ids = (await find(customer.id)).map((c) => c.userId);
+    expect(ids).toContain(a.userId);
+    expect(ids).toContain(b.userId);
+
+    // The customer blocks driver A.
+    await activateUserBlock(app.prisma, {
+      tenantId: 'swift-default', blockerId: customer.id, blockedId: a.userId, reason: 'block fixture A',
+    });
+    ids = (await find(customer.id)).map((c) => c.userId);
+    expect(ids).not.toContain(a.userId);
+    expect(ids).toContain(b.userId);
+
+    // Reverse direction: driver B blocked the CUSTOMER. A mover's refusal is
+    // as real as a customer's, so B leaves the pool too.
+    await activateUserBlock(app.prisma, {
+      tenantId: 'swift-default', blockerId: b.userId, blockedId: customer.id, reason: 'block fixture B',
+    });
+    ids = (await find(customer.id)).map((c) => c.userId);
+    expect(ids).not.toContain(a.userId);
+    expect(ids).not.toContain(b.userId);
+
+    // The availability probe has no booking user: it still sees the whole
+    // pool, so a block never makes the map read "no cars in your area".
+    const probe = (await find(null)).map((c) => c.userId);
+    expect(probe).toContain(a.userId);
+    expect(probe).toContain(b.userId);
+
+    // A bystander is unaffected — one person's block is not a moderation
+    // decision anybody else inherits.
+    const other = await makeUser(['CUSTOMER']);
+    const forOther = (await find(other.id)).map((c) => c.userId);
+    expect(forOther).toContain(a.userId);
+    expect(forOther).toContain(b.userId);
+
+    // Lifting it puts them back. A block that could not be undone would be a
+    // trap for the person who placed it.
+    await deactivateUserBlock(app.prisma, {
+      tenantId: 'swift-default', blockerId: customer.id, blockedId: a.userId,
+    });
+    ids = (await find(customer.id)).map((c) => c.userId);
+    expect(ids).toContain(a.userId);
+    expect(ids).not.toContain(b.userId); // B's own block still stands
   });
 });

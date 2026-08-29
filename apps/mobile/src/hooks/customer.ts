@@ -224,6 +224,52 @@ export function useReportContent() {
   });
 }
 
+/** [STORE-002] One person this user refuses contact with. */
+export interface BlockedPerson {
+  id: string;
+  userId: string;
+  name: string;
+  blockedAt: string;
+  reason: string | null;
+}
+
+const blockKeys = { all: ['customer', 'blocks'] as const };
+
+export function useBlockedUsers() {
+  return useQuery<BlockedPerson[]>({
+    queryKey: blockKeys.all,
+    queryFn: () => unwrap<BlockedPerson[]>(moderationApi.listBlocks()),
+  });
+}
+
+/** Both writes refetch the list. A block is a safety control, and a stale list
+ *  would tell someone they are protected from a person they are not — or that
+ *  they are still cut off from someone they just let back in. */
+function useBlockMutation<TArg>(fn: (arg: TArg) => Promise<unknown>, event: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      track(event, {});
+      // Dispatch and chat both consult blocks, so anything showing people —
+      // an active order, a conversation — can be wrong until it refetches.
+      qc.invalidateQueries({ queryKey: blockKeys.all });
+      qc.invalidateQueries({ queryKey: ['chat'] });
+    },
+  });
+}
+
+export function useBlockUser() {
+  return useBlockMutation(
+    (input: { blockedUserId: string; reason?: string }) => unwrap(moderationApi.block(input)),
+    'user_blocked',
+  );
+}
+
+export function useUnblockUser() {
+  return useBlockMutation((userId: string) => unwrap(moderationApi.unblock(userId)), 'user_unblocked');
+}
+
 export function useItemSlots<T = any>(itemId: string, date: string) {
   return useQuery<T>({
     queryKey: ['customer', 'slots', itemId, date],

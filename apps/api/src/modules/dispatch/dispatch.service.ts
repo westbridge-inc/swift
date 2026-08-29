@@ -652,17 +652,18 @@ export class DispatchService {
     let eligible = rows.filter((r) => !declined.includes(r.id));
     if (eligible.length === 0) return [];
 
-    // Safety exclusions [safety spec §8.5/§8.3]. Keyed on the BOOKING user
-    // (excludeUserId at the real dispatch call; null on availability probes,
-    // so the hot browse path pays nothing): a mover who shares an incident
-    // case with this customer — either direction — is never matched with
-    // them again (retaliation guard), and a SHADOW_RESTRICTED mover is
-    // excluded from enhanced-monitoring passengers pending review.
+    // Safety exclusions [safety spec §8.5/§8.3] and user blocks [STORE-002].
+    // Keyed on the BOOKING user (excludeUserId at the real dispatch call; null
+    // on availability probes, so the hot browse path pays nothing): a mover who
+    // shares an incident case with this customer — either direction — is never
+    // matched with them again (retaliation guard), a SHADOW_RESTRICTED mover is
+    // excluded from enhanced-monitoring passengers pending review, and either
+    // party having blocked the other keeps them apart.
     if (excludeUserId && eligible.length > 0) {
       const safetyExcluded = await this.safetyExcludedUserIds(excludeUserId, eligible.map((r) => r.userId), pool);
       if (safetyExcluded.size > 0) {
         eligible = eligible.filter((r) => !safetyExcluded.has(r.userId));
-        log().warn({ orderId, customerUserId: excludeUserId, excluded: safetyExcluded.size }, 'dispatch: safety exclusions removed candidates from the pool');
+        log().warn({ orderId, customerUserId: excludeUserId, excluded: safetyExcluded.size }, 'dispatch: safety or block exclusions removed candidates from the pool');
         if (eligible.length === 0) return [];
       }
     }
@@ -690,8 +691,9 @@ export class DispatchService {
   }
 
   /** Safety-driven pool exclusions (spec §8.5 retaliation guard + §8.3
-   *  SHADOW_RESTRICTED). Two indexed reads, only when a booking user exists
-   *  AND candidates survived the geo query — never on availability probes. */
+   *  SHADOW_RESTRICTED) plus the customer's own blocks [STORE-002]. Three
+   *  indexed reads, only when a booking user exists AND candidates survived
+   *  the geo query — never on availability probes. */
   private async safetyExcludedUserIds(customerUserId: string, candidateUserIds: string[], pool: DispatchPool): Promise<Set<string>> {
     const excluded = new Set<string>();
     // §8.5: subject and reporter on ANY shared case (365d, either direction)
@@ -724,6 +726,37 @@ export class DispatchService {
           ? await this.prisma.driver.findMany({ where: { userId: { in: candidateUserIds }, safetyShadowRestrictedAt: { not: null } }, select: { userId: true } })
           : await this.prisma.rider.findMany({ where: { userId: { in: candidateUserIds }, safetyShadowRestrictedAt: { not: null } }, select: { userId: true } });
       for (const r of restricted) excluded.add(r.userId);
+    }
+    // [STORE-002] A block the customer placed themselves. This belongs in the
+    // same set as §8.5 rather than in a filter of its own: the retaliation
+    // guard above already says "these two are never matched again", and a
+    // block is that same policy stated by the person instead of by an incident
+    // case. Symmetric, so a mover who blocked this customer is also kept away
+    // — the mover's refusal is as real as the customer's.
+    //
+    // Bounded to the candidates actually in front of us, so the cost is one
+    // indexed read over a short id list and does not grow with how many people
+    // the customer has ever blocked.
+    //
+    // Deliberately keyed on ids and not on tenantId, unlike the rest of the
+    // moderation module. A user id belongs to exactly one tenant, so an
+    // id-bounded read cannot cross the wall — while THREADING tenantId here
+    // would fail OPEN: dispatch also runs from sockets and workers where
+    // getTenantId() is null, and `where: { tenantId: null }` matches no rows,
+    // which would silently stop excluding anybody. Fail-closed by construction
+    // beats a scope that is only correct on the HTTP path.
+    const blocked = await this.prisma.userBlock.findMany({
+      where: {
+        unblockedAt: null,
+        OR: [
+          { blockerId: customerUserId, blockedId: { in: candidateUserIds } },
+          { blockedId: customerUserId, blockerId: { in: candidateUserIds } },
+        ],
+      },
+      select: { blockerId: true, blockedId: true },
+    });
+    for (const b of blocked) {
+      excluded.add(b.blockerId === customerUserId ? b.blockedId : b.blockerId);
     }
     return excluded;
   }

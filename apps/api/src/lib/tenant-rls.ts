@@ -42,7 +42,10 @@ export const TENANT_TABLES = [
   'rating_reports', 'rating_tag_defs', 'receipt_counters',
   'ride_queue_entries', 'san_tombstones', 'scan_daily_rollups', 'scan_events',
   'settlement_batches', 'slug_redirects', 'storage_orphans', 'supply_watches',
-  'tenant_billing_currency', 'trial_grants', 'trip_share_tokens', 'users',
+  'tenant_billing_currency', 'trial_grants', 'trip_share_tokens',
+  // [STORE-002] Who a person refuses contact with.
+  'user_blocks',
+  'users',
   'vendor_discovery_categories', 'vendors',
 ] as const;
 
