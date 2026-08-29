@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -40,9 +39,19 @@ type Verdict =
   /** Mentions the names without reading a value — a comment, a type, an index
    *  name. Listed so the census is complete and so a real read added to one of
    *  these files shows up as a change of verdict, not as silence. */
-  | 'NAME_ONLY';
+  | 'NAME_ONLY'
+  /** THE SEAM. The one file whose job is to answer the capacity question, so
+   *  it names the columns on purpose. Distinct from MUST_MIGRATE because those
+   *  break silently; this one is where the change is MEANT to happen. */
+  | 'SEAM';
 
 const CENSUS: Record<string, { verdict: Verdict; why: string }> = {
+  // ── the seam ─────────────────────────────────────────────────────────────
+  'apps/api/src/modules/dispatch/concurrency-policy.ts': {
+    verdict: 'SEAM',
+    why: 'B1. It owns moverCapacity() and renders the live-leg predicate for all four gates, so it names both columns deliberately. Raising the capacity changes THIS file — that is the point of it. It arrived after this census was first written and the gate caught its own omission in CI, which is exactly the thirteenth-file failure §15.4 describes.',
+  },
+
   // ── must migrate ─────────────────────────────────────────────────────────
   'apps/api/src/modules/dispatch/dispatch.service.ts': {
     verdict: 'MUST_MIGRATE',
@@ -104,21 +113,34 @@ const CENSUS: Record<string, { verdict: Verdict; why: string }> = {
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 
-/** The census as the tree reports it right now, from git rather than from a
- *  walk of the working directory — a co-writer's uncommitted edit must not
- *  change what this gate grades. */
+/** The census as the FILESYSTEM reports it — the code actually under test.
+ *
+ *  This used to `git grep HEAD`, which was wrong in a way that only showed up
+ *  in CI: the shared worktree ships via a temp index and never moves HEAD, so
+ *  HEAD here is ~90 commits stale. The gate passed locally against an ancient
+ *  tree and failed in CI against the real one. Every other source gate in this
+ *  suite walks the filesystem; this one now does too. */
+const ROOTS = [
+  'apps/api/src', 'apps/mobile/src', 'apps/web/src', 'apps/admin/src', 'packages',
+];
+
+function walk(dir: string, out: string[] = []): string[] {
+  let entries: string[];
+  try { entries = readdirSync(dir); } catch { return out; }
+  for (const entry of entries) {
+    if (entry === 'node_modules' || entry === '__tests__' || entry === 'dist' || entry === 'generated') continue;
+    const full = path.join(dir, entry);
+    if (statSync(full).isDirectory()) walk(full, out);
+    else if (/\.(ts|tsx)$/.test(entry) && !/\.test\.tsx?$/.test(entry)) out.push(full);
+  }
+  return out;
+}
+
 function filesMentioningThePointer(): string[] {
-  const out = execFileSync(
-    'git',
-    ['grep', '-l', '-E', 'currentOrderId|currentRideId', 'HEAD', '--',
-      'apps/api/src', 'apps/mobile/src', 'apps/web/src', 'apps/admin/src', 'packages'],
-    { cwd: REPO_ROOT, encoding: 'utf8' },
-  );
-  return out
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => line.replace(/^HEAD:/, ''))
-    .filter((f) => !f.includes('__tests__') && !f.includes('.test.'))
+  return ROOTS
+    .flatMap((root) => walk(path.join(REPO_ROOT, root)))
+    .filter((f) => /currentOrderId|currentRideId/.test(readFileSync(f, 'utf8')))
+    .map((f) => path.relative(REPO_ROOT, f))
     .sort();
 }
 
@@ -148,11 +170,11 @@ describe('the singular-pointer census [B2 / SWIFT_CONCURRENCY §15.4]', () => {
       acc[verdict] = (acc[verdict] ?? 0) + 1;
       return acc;
     }, {});
-    // 13 files: 6 must migrate, 5 untouched, 2 name-only.
+    // 14 files: 1 seam, 6 must migrate, 5 untouched, 2 name-only.
     // The spec says "eleven of the twelve untouched". It is not eleven, and it
     // is not twelve. If these numbers move, the migration's scope moved with
     // them and someone should notice deliberately rather than in passing.
-    expect(counts).toEqual({ MUST_MIGRATE: 6, UNTOUCHED: 5, NAME_ONLY: 2 });
+    expect(counts).toEqual({ SEAM: 1, MUST_MIGRATE: 6, UNTOUCHED: 5, NAME_ONLY: 2 });
   });
 
   it('every entry carries a reason someone can act on', () => {

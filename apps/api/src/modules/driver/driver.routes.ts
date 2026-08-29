@@ -40,6 +40,7 @@ import {
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { arrivalEvidence } from '../dispatch/arrival-evidence';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -1011,15 +1012,35 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot mark arrived from status ${order.status}`);
     }
 
+    const arrivedAt = new Date();
     const claimed = await app.prisma.order.updateMany({
       where: { id, status: 'DRIVER_EN_ROUTE' },
-      data: { status: 'DRIVER_ARRIVED' },
+      data: { status: 'DRIVER_ARRIVED', driverArrivedAt: arrivedAt },
     });
     if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot mark arrived from status ${order.status}`);
-    // "reported", not "arrived": pressing the button is the driver's claim
-    // about where they are, and nothing here tests it against a position.
+
+    // [Band F] Still "reported", not "arrived" — pressing the button remains
+    // the driver's claim. What changed is that the claim is now WRITTEN DOWN
+    // beside the position the platform already had, so an appeal can read what
+    // was true at the moment the customer's clock started.
+    //
+    // The position comes from the driver's own location stream, NOT from a
+    // request body. That is the point: a body would let the client state where
+    // it is, which is the one thing a spoofed arrival needs. This is the same
+    // stream the customer's map reads, so a driver who fakes it has to fake it
+    // to the customer too.
+    //
+    // It does NOT refuse. `SWIFT_BUILD_NOW.md` Band F and cash-rules' own
+    // philosophy agree: flag into human review, never refuse a money outcome
+    // outright. A refusal here would strand a driver who is genuinely at the
+    // door under a tin roof with no fix.
+    const evidence = arrivalEvidence(
+      { lat: driver.currentLat, lng: driver.currentLng, at: driver.lastLocationUpdate },
+      { lat: order.pickupLat, lng: order.pickupLng },
+      arrivedAt,
+    );
     await app.prisma.orderStatusLog.create({
-      data: { orderId: id, status: 'DRIVER_ARRIVED', changedBy: request.user.userId, note: 'Driver reported arriving at the pickup point' },
+      data: { orderId: id, status: 'DRIVER_ARRIVED', changedBy: request.user.userId, note: evidence.note },
     });
     const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
 
