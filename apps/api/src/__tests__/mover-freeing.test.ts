@@ -888,18 +888,117 @@ describe('delivery watchdog under stacking: every leg, one pointer rule', () => 
     await app.prisma.order.update({ where: { id: earlier.id }, data: { acceptedAt: new Date(Date.now() - 60_000) } });
     await app.prisma.order.update({ where: { id: later.id }, data: { acceptedAt: new Date() } });
 
-    const settled = await app.prisma.$transaction((tx) => settleRiderLegs(tx, app.prisma, rider.riderId));
+    const settled = await app.prisma.$transaction((tx) => settleRiderLegs(tx, rider.riderId, { prisma: app.prisma }));
     expect(settled.primaryLegId).toBe(earlier.id);
     expect(settled.legsLeft).toBe(2);
 
     // Excluding the earlier leg (as a completion does) moves the primary on.
-    const moved = await app.prisma.$transaction((tx) => settleRiderLegs(tx, app.prisma, rider.riderId, { excludeOrderId: earlier.id }));
+    const moved = await app.prisma.$transaction((tx) => settleRiderLegs(tx, rider.riderId, { prisma: app.prisma, excludeOrderId: earlier.id }));
     expect(moved.primaryLegId).toBe(later.id);
 
     // `offline` pins availability false whatever the room.
     await app.prisma.order.updateMany({ where: { riderId: rider.riderId }, data: { status: 'DELIVERED' } });
-    const empty = await app.prisma.$transaction((tx) => settleRiderLegs(tx, app.prisma, rider.riderId, { availability: 'offline' }));
+    const empty = await app.prisma.$transaction((tx) => settleRiderLegs(tx, rider.riderId, { availability: 'offline' }));
     expect(empty.primaryLegId).toBeNull();
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } })).isAvailable).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [B2 under stacking] Session revocation decides custody on EVERY leg.
+//
+// Logging out is a security action that may never be refused, so the policy
+// is stage-aware per leg: goods still at the store are released and made
+// dispatchable; goods with the rider are preserved and paged. Deciding on the
+// primary pointer alone released the primary and left a stacked sibling
+// assigned to a rider who had just logged out — or released a pre-pickup
+// primary while a second leg's goods were already in the rider's hands.
+// ---------------------------------------------------------------------------
+describe('session revocation under stacking: custody on every leg', () => {
+  async function revoke(userId: string, sessionId: string | null) {
+    const { retireMoverSessionAuthorityInTransaction } = await import('../modules/mover-authority');
+    return app.prisma.$transaction(async (tx) => {
+      // The caller MUST hold the User row lock; the auth service does.
+      await tx.$queryRaw`SELECT id FROM "users" WHERE id = ${userId} FOR UPDATE`;
+      return retireMoverSessionAuthorityInTransaction(tx, userId, sessionId);
+    });
+  }
+
+  it('two pre-pickup CASH legs: both released for re-dispatch, both floats back, rider offline with no pointer', async () => {
+    const c1 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const c2 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const vendor = await makeVendor();
+    const rider = await makeRider({ online: true, committedFloat: 4000 });
+    const a = await makeOrder(c1.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId, subtotalBase: 1500 });
+    const b = await makeOrder(c2.userId, vendor.vendorId, 'RIDER_EN_ROUTE_PICKUP', { riderId: rider.riderId, subtotalBase: 2500 });
+    await app.prisma.order.update({ where: { id: a.id }, data: { readyAt: new Date() } });
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: a.id } });
+
+    const cleanup = await revoke(rider.userId, rider.sessionId);
+    expect(cleanup.riderId).toBe(rider.riderId);
+    expect(cleanup.orders.map((o) => [o.orderId, o.action]).sort()).toEqual([[a.id, 'REDISPATCH'], [b.id, 'REDISPATCH']].sort());
+
+    const freshB = await app.prisma.order.findUniqueOrThrow({ where: { id: b.id } });
+    expect(freshB.riderId).toBeNull();
+    expect(freshB.status).toBe('ACCEPTED');
+    const r = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(r.isOnline).toBe(false);
+    expect(r.isAvailable).toBe(false);
+    expect(r.locationSessionId).toBeNull();
+    expect(r.currentOrderId).toBeNull();
+    expect(Number(r.committedFloat)).toBe(0);
+  });
+
+  it('leg A pre-pickup + leg B WITH the goods: A released, B preserved and paged, pointer re-points to B', async () => {
+    const c1 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const c2 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const vendor = await makeVendor();
+    const rider = await makeRider({ online: true, committedFloat: 4000 });
+    const c3 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const a = await makeOrder(c1.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId, subtotalBase: 1500 });
+    const b = await makeOrder(c2.userId, vendor.vendorId, 'PICKED_UP', { riderId: rider.riderId, subtotalBase: 2500 });
+    // A third, pre-pickup leg accepted AFTER the in-custody one: the decision
+    // must keep going past an ESCALATE, not stop at it.
+    const c = await makeOrder(c3.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId, subtotalBase: 0 });
+    await app.prisma.order.update({ where: { id: a.id }, data: { acceptedAt: new Date(Date.now() - 3 * 60_000) } });
+    await app.prisma.order.update({ where: { id: b.id }, data: { acceptedAt: new Date(Date.now() - 2 * 60_000) } });
+    await app.prisma.order.update({ where: { id: c.id }, data: { acceptedAt: new Date(Date.now() - 1 * 60_000) } });
+    // The PRIMARY points at the pre-pickup leg. The old decision would have
+    // released A "safely" and said nothing about the goods in hand for B.
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: a.id } });
+
+    const cleanup = await revoke(rider.userId, rider.sessionId);
+    const actions = Object.fromEntries(cleanup.orders.map((o) => [o.orderId, o.action]));
+    expect(actions[a.id]).toBe('REDISPATCH');
+    expect(actions[b.id], 'goods in hand on a NON-primary leg must page').toBe('ESCALATE');
+    expect(actions[c.id], 'a leg after the escalated one is still decided').toBe('REDISPATCH');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: c.id } })).riderId).toBeNull();
+
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: a.id } })).riderId).toBeNull();
+    const freshB = await app.prisma.order.findUniqueOrThrow({ where: { id: b.id } });
+    expect(freshB.status).toBe('PICKED_UP');
+    expect(freshB.riderId).toBe(rider.riderId);
+    const r = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(r.currentOrderId, 'the primary follows the leg still held').toBe(b.id);
+    expect(r.isOnline).toBe(false);
+    expect(Number(r.committedFloat), "only A's float returns; B's cash was fronted").toBe(2500);
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: null, committedFloat: 0 } });
+  });
+
+  it('a revocation for a session that does not own the supply touches nothing', async () => {
+    const c1 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const vendor = await makeVendor();
+    const rider = await makeRider({ online: true, committedFloat: 1500 });
+    const a = await makeOrder(c1.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId, subtotalBase: 1500 });
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: a.id } });
+
+    const cleanup = await revoke(rider.userId, 'some-other-session');
+    expect(cleanup.riderId).toBeNull();
+    expect(cleanup.orders).toEqual([]);
+    const r = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(r.isOnline).toBe(true);
+    expect(r.currentOrderId).toBe(a.id);
+    expect(Number(r.committedFloat)).toBe(1500);
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: null, committedFloat: 0, isOnline: false } });
   });
 });

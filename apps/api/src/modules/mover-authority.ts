@@ -7,6 +7,7 @@ import { FloatService } from './dispatch/float.service';
 import { closeOnlineSession } from './rider/online-hours';
 import { processMoverRevocationOutboxById } from './mover-revocation-outbox';
 import { TERMINAL_ORDER_STATUSES } from './order/order-status';
+import { settleRiderLegs } from './dispatch/concurrency-policy';
 import {
   hasTaxiPassengerCustody,
   lockTaxiOrderForCustodyDecision,
@@ -317,123 +318,86 @@ export async function retireMoverSessionAuthorityInTransaction(
     ? owner !== null || profile.isOnline || profile.isAvailable
     : owner === sessionId;
 
-  const riderPreview = await tx.rider.findUnique({
-    where: { userId },
-    select: { id: true, currentOrderId: true },
-  });
-  if (riderPreview?.currentOrderId) {
-    // Canonical order -> profile lock order. The User lock held by the caller
-    // prevents a new accept from being inserted between the preview and locks.
-    await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${riderPreview.currentOrderId} FOR UPDATE`;
-  }
+  const riderPreview = await tx.rider.findUnique({ where: { userId }, select: { id: true } });
   if (riderPreview) {
+    // [B2 under stacking] Custody is decided on EVERY live leg, not on the
+    // primary pointer. Since #899 a rider may hold more than one order, and
+    // deciding on `currentOrderId` alone did two wrong things at once: it
+    // released the primary and left a stacked sibling assigned to a rider who
+    // had just logged out; and when the primary was still pre-pickup it
+    // released it "safely" while goods from a SECOND leg were already in the
+    // rider's hands, with nobody paged. "Cash in hand on any leg" is the
+    // custody question, so every leg is asked.
+    //
+    // Canonical order -> profile lock order, legs in acceptance order. The
+    // User lock held by the caller prevents a new accept from being inserted
+    // between the preview and the locks.
+    const legPreview = await tx.order.findMany({
+      where: { riderId: riderPreview.id, orderType: { not: 'TAXI' }, status: { notIn: TERMINAL_ORDER_STATUSES } },
+      select: { id: true },
+      orderBy: { acceptedAt: 'asc' },
+    });
+    for (const leg of legPreview) {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${leg.id} FOR UPDATE`;
+    }
     await tx.$queryRaw`SELECT id FROM "riders" WHERE id = ${riderPreview.id} FOR UPDATE`;
     const rider = await tx.rider.findUniqueOrThrow({
       where: { id: riderPreview.id },
-      select: {
-        id: true,
-        locationSessionId: true,
-        currentOrderId: true,
-        isOnline: true,
-        isAvailable: true,
-      },
+      select: { id: true, locationSessionId: true, currentOrderId: true, isOnline: true, isAvailable: true },
     });
     if (ownsGeneration(rider.locationSessionId, rider)) {
       cleanup.riderId = rider.id;
-      const order = rider.currentOrderId && rider.currentOrderId === riderPreview.currentOrderId
-        ? await tx.order.findUnique({
-            where: { id: rider.currentOrderId },
+      // Re-read under the locks: a leg may have finished between the preview
+      // and the lock, and a finished leg is not a custody question.
+      const legs = legPreview.length === 0
+        ? []
+        : await tx.order.findMany({
+            where: { id: { in: legPreview.map((l) => l.id) }, riderId: rider.id, status: { notIn: TERMINAL_ORDER_STATUSES } },
             select: {
-              id: true,
-              orderNumber: true,
-              orderType: true,
-              customerId: true,
-              riderId: true,
-              status: true,
-              acceptedAt: true,
-              preparingAt: true,
-              readyAt: true,
-              paymentMethod: true,
-              subtotalBase: true,
+              id: true, orderNumber: true, orderType: true, customerId: true, riderId: true, status: true,
+              acceptedAt: true, preparingAt: true, readyAt: true, paymentMethod: true, subtotalBase: true,
             },
-          })
-        : null;
-
-      if (
-        order
-        && order.riderId === rider.id
-        && RIDER_PRE_HANDOFF.includes(order.status)
-      ) {
-        const resumed = resumeDeliveryStatus(order);
-        await tx.order.update({
-          where: { id: order.id },
-          data: { riderId: null, status: resumed },
-        });
-        if (order.paymentMethod === 'CASH') {
-          await new FloatService(tx).release(tx, rider.id, Number(order.subtotalBase));
-        }
-        await tx.rider.update({
-          where: { id: rider.id },
-          data: {
-            locationSessionId: null,
-            isOnline: false,
-            isAvailable: false,
-            currentOrderId: null,
-          },
-        });
-        await tx.orderStatusLog.create({
-          data: {
-            orderId: order.id,
-            status: resumed,
-            changedBy: 'system:session-revocation',
-            note: 'Mover session ended before pickup — assignment released for re-dispatch',
-          },
-        });
-        cleanup.orders.push({
-          orderId: order.id,
-          orderNumber: order.orderNumber,
-          customerId: order.customerId,
-          pool: 'RIDER',
-          status: resumed,
-          action: 'REDISPATCH',
-        });
-      } else {
-        const ownsLiveOrder = Boolean(
-          order
-          && order.riderId === rider.id
-          && !TERMINAL_ORDER_STATUSES.includes(order.status),
-        );
-        await tx.rider.update({
-          where: { id: rider.id },
-          data: {
-            locationSessionId: null,
-            isOnline: false,
-            isAvailable: false,
-            // Preserve a live custody pointer. A dangling/terminal pointer is
-            // healed so the account is not permanently trapped by old data.
-            ...(ownsLiveOrder
-              ? {}
-              : { currentOrderId: null }),
-          },
-        });
-        if (
-          order
-          && order.riderId === rider.id
-          && ownsLiveOrder
-        ) {
+            orderBy: { acceptedAt: 'asc' },
+          });
+      for (const order of legs) {
+        if (RIDER_PRE_HANDOFF.includes(order.status)) {
+          // Goods still at the store: release the assignment and make it
+          // dispatchable again — exactly what a rider-cancel would have done.
+          const resumed = resumeDeliveryStatus(order);
+          await tx.order.update({ where: { id: order.id }, data: { riderId: null, status: resumed } });
+          // MONEY stays with the leg it belongs to: this leg's committed CASH
+          // float, released with this leg's assignment, in this transaction.
+          if (order.paymentMethod === 'CASH') {
+            await new FloatService(tx).release(tx, rider.id, Number(order.subtotalBase));
+          }
+          await tx.orderStatusLog.create({
+            data: {
+              orderId: order.id,
+              status: resumed,
+              changedBy: 'system:session-revocation',
+              note: 'Mover session ended before pickup — assignment released for re-dispatch',
+            },
+          });
           cleanup.orders.push({
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            customerId: order.customerId,
-            pool: 'RIDER',
-            status: order.status,
-            action: 'ESCALATE',
+            orderId: order.id, orderNumber: order.orderNumber, customerId: order.customerId,
+            pool: 'RIDER', status: resumed, action: 'REDISPATCH',
+          });
+        } else {
+          // Goods WITH the rider: never reassign — preserve and page.
+          cleanup.orders.push({
+            orderId: order.id, orderNumber: order.orderNumber, customerId: order.customerId,
+            pool: 'RIDER', status: order.status, action: 'ESCALATE',
           });
         }
       }
+      // Session and online-ness end here; the pointer and availability are
+      // settled by the ONE rule in the seam — the primary re-points to the
+      // first leg still held (an in-custody one), else null, and a rider who
+      // has just logged out is not free supply whatever the count says.
+      await tx.rider.update({ where: { id: rider.id }, data: { locationSessionId: null, isOnline: false } });
+      await settleRiderLegs(tx, rider.id, { availability: 'offline' });
     }
   }
-
   const driverPreview = await tx.driver.findUnique({
     where: { userId },
     select: { id: true, currentRideId: true },

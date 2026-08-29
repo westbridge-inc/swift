@@ -1498,7 +1498,7 @@ export class OrderService {
     // order's status flipped terminal earlier in this same transaction, so the
     // count already excludes it; excludeOrderId guards the same-transaction
     // read either way.
-    await settleRiderLegs(tx, this.prisma, riderId, { excludeOrderId: orderId, countDelivery });
+    await settleRiderLegs(tx, riderId, { prisma: this.prisma, excludeOrderId: orderId, countDelivery });
   }
 
   /** Driver equivalent of stageRiderRelease (currentRideId is the authority). */
