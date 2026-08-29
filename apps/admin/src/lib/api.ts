@@ -450,3 +450,74 @@ export const requeueDeadLetter = (queue: string, id: string, row: Pick<DeadLette
   apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue${identity(row)}`, { method: 'POST' });
 export const discardDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>) =>
   apiFetch(`/api/v1/admin/dlq/${queue}/${id}${identity(row)}`, { method: 'DELETE' });
+
+// ---------------------------------------------------------------------------
+// Category discovery governance.
+//
+// Eight routes, built with the taxonomy engine and reachable from nothing:
+// `git grep discovery apps/admin/src` returned zero. The consequence is
+// measurable — 1 of 57 live retail items carries a discovery tag, because the
+// backfill that would tag them is admin-triggered and no admin could trigger
+// it. Same shape as the moderation queue (#817) and the ads gates (#822).
+// ---------------------------------------------------------------------------
+
+export interface DiscoveryCategory {
+  id: string;
+  slug: string;
+  name: string;
+  emoji: string | null;
+  iconKey: string | null;
+  aliases: string[];
+  kind: string;
+  vertical: string;
+  status: 'ACTIVE' | 'HIDDEN';
+  sortWeight: number;
+  mergedIntoId: string | null;
+}
+
+export interface DiscoveryRequest {
+  id: string;
+  vendorId: string;
+  vendorName: string | null;
+  proposedName: string;
+  note: string | null;
+  status: 'PENDING' | 'APPROVED' | 'MERGED' | 'REJECTED';
+  createdAt: string;
+  resolutionNote: string | null;
+}
+
+export const fetchDiscoveryCategories = () => apiFetch('/api/v1/admin/discovery/categories');
+export const fetchDiscoveryRequests = (status: string) =>
+  apiFetch(`/api/v1/admin/discovery/requests?status=${status}`);
+
+export const updateDiscoveryCategory = (
+  id: string,
+  body: Partial<Pick<DiscoveryCategory, 'name' | 'emoji' | 'iconKey' | 'aliases' | 'sortWeight' | 'status'>>,
+) => apiFetch(`/api/v1/admin/discovery/categories/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+
+/** Approve a vendor's request as a NEW category. `emoji`, `kind` and `vertical`
+ *  are required by the route — kind and vertical against enums, so the page
+ *  offers selects and never a text box. */
+export const approveDiscoveryRequest = (
+  id: string,
+  body: { name?: string; emoji: string; kind: string; vertical: string },
+) => apiFetch(`/api/v1/admin/discovery/requests/${id}/approve`, { method: 'POST', body: JSON.stringify(body) });
+
+/** Resolve a request onto an EXISTING category instead of minting a near-duplicate. */
+export const mapDiscoveryRequest = (id: string, targetSlug: string) =>
+  apiFetch(`/api/v1/admin/discovery/requests/${id}/map`, { method: 'POST', body: JSON.stringify({ targetSlug }) });
+
+/** Reject with a reason the vendor is shown VERBATIM (route: 3–300 chars). */
+export const rejectDiscoveryRequest = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/discovery/requests/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) });
+
+/** Merge a category into another. `mergedIntoId` is why an existing slug is
+ *  never edited — the redirect is the migration. */
+export const mergeDiscoveryCategory = (id: string, targetId: string) =>
+  apiFetch(`/api/v1/admin/discovery/categories/${id}/merge-into`, { method: 'POST', body: JSON.stringify({ targetId }) });
+
+/** Enqueue the backfill. Returns 503 QUEUES_OFF when the worker fleet is not
+ *  running — a real and expected state, not a generic failure, so the page says
+ *  so in those words. */
+export const runDiscoveryBackfill = () =>
+  apiFetch('/api/v1/admin/discovery/backfill', { method: 'POST' });
