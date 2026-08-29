@@ -303,10 +303,26 @@ export async function authRoutes(app: FastifyInstance) {
         isActive: config.isActive,
         trialDays: TRIAL_DAYS,
         weekly: {
+          // `mover` = STANDARD band (bike, motorbike, car, wagon car);
+          // `moverHeavy` = HEAVY band (buses, canters, box trucks). A market
+          // that has not set a heavy rate reports null, and every surface
+          // renders one mover price — never a free or a guessed one.
           mover: tiers['mover'] ?? null,
+          moverHeavy: tiers['moverHeavy'] ?? null,
+          serviceVendor: tiers['serviceVendor'] ?? null,
           smallVendor: tiers['smallVendor'] ?? null,
           largeVendor: tiers['largeVendor'] ?? null,
+          departmentVendor: tiers['departmentVendor'] ?? null,
         },
+        // The franchise is a discount on each location's own rate, not a
+        // separate price, so it is quoted as the rule rather than a number.
+        franchise:
+          tiers['franchiseMinLocations'] != null && tiers['franchiseDiscountPct'] != null
+            ? {
+                minLocations: tiers['franchiseMinLocations'],
+                discountPct: tiers['franchiseDiscountPct'],
+              }
+            : null,
       },
     });
   });

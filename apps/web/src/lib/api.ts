@@ -8,7 +8,19 @@ export interface CountryPricing {
   currencySymbol: string;
   isActive: boolean;
   trialDays: number;
-  weekly: { mover: number; smallVendor: number; largeVendor: number };
+  /** `moverHeavy` is the bus/canter/box-truck band; null in a market that has
+   *  not priced one, where the page shows a single mover card. */
+  weekly: {
+    mover: number;
+    moverHeavy: number | null;
+    serviceVendor: number | null;
+    smallVendor: number;
+    largeVendor: number;
+    departmentVendor: number | null;
+  };
+  /** From `minLocations` stores, every location takes `discountPct` off its
+   *  own weekly rate. Null in a market with no franchise pricing. */
+  franchise: { minLocations: number; discountPct: number } | null;
 }
 
 /** Public weekly price list — the same numbers the app's signup shows. */

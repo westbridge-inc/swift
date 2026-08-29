@@ -78,7 +78,10 @@ describe('public pricing (price on the door)', () => {
     const d = res.json().data;
     expect(d.countryCode).toBe('GY');
     expect(d.trialDays).toBe(TRIAL_DAYS);
-    expect(d.weekly.mover).toBe(12000);
+    // Two mover bands: standard (bike/motorbike/car/wagon) and heavy
+    // (bus/canter/box truck). The public endpoint quotes both.
+    expect(d.weekly.mover).toBe(10000);
+    expect(d.weekly.moverHeavy).toBe(12000);
     expect(d.weekly.smallVendor).toBe(20000);
     expect(d.weekly.largeVendor).toBe(30000);
   });

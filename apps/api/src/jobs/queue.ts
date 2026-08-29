@@ -545,7 +545,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         }
         case 'tier-recalc': {
           const changed = await billing.recalculateVendorTiers();
-          ctx.log.info({ changed }, 'Vendor tier recalculation complete');
+          // Movers re-tier on the same cadence: a vendor's basis is catalogue
+          // size, a mover's is the vehicle they currently have registered.
+          const moversChanged = await billing.recalculateMoverTiers();
+          ctx.log.info({ changed, moversChanged }, 'Tier recalculation complete');
           break;
         }
         case 'convert-trials': {
