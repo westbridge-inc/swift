@@ -585,6 +585,33 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const verificationWorker = buildWorker(
     QUEUE_NAMES.VERIFICATION,
     async (job: Job) => {
+      // Backup freshness. Reads the heartbeat deploy/backup.sh writes after a
+      // verified dump. Pages once a day at most — a missing backup is a
+      // standing condition, not an event, and repeating it hourly would train
+      // the founder to ignore it.
+      if (job.name === 'backup-freshness') {
+        const { checkBackupFreshness } = await import('../modules/ops/backup-freshness');
+        const result = await checkBackupFreshness(ctx.prisma);
+        if (result.stale) {
+          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'backup-freshness', 20 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              // Platform-wide infrastructure alarm, not one tenant's event.
+              tenantId: null,
+              title: 'Backups are not safe',
+              body: result.reason,
+              data: {
+                kind: 'ops_backup_stale',
+                ageHours: result.ageHours,
+                offsite: result.offsite,
+              },
+            }),
+          );
+        }
+        ctx.log.info({ ...result }, 'backup freshness checked');
+        return;
+      }
+
       // [DCR-1 CW] Commencement Watch: scan the Gazette/parliament sources,
       // dedupe alerts, notify the founder channels. Observes and alerts ONLY.
       if (job.name === 'cw-scan') {
@@ -1575,6 +1602,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Settlements: weekly on Sunday at midnight
   await queues.settlementQueue.add('process-settlements', {}, {
     repeat: { pattern: '0 0 * * 0' }, // Sunday midnight
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // Backup freshness: daily at 05:30, before the working day. Reads the
+  // heartbeat deploy/backup.sh writes; pages when backups have quietly stopped
+  // or are staying on the machine they protect.
+  await queues.verificationQueue.add('backup-freshness', {}, {
+    repeat: { pattern: '30 5 * * *' },
     removeOnComplete: 10,
     removeOnFail: 10,
   });
