@@ -101,8 +101,10 @@ function publicCatalog(store: StorefrontDetail): DisplayVendor {
     logoUrl: store.logoUrl,
     coverImageUrl: store.coverImageUrl,
     cuisineTypes: store.cuisineTypes,
-    averageRating: store.averageRating,
-    totalRatings: store.totalRatings,
+    displayRating: store.displayRating,
+    ratingBucket: store.ratingBucket,
+    ratingCount: store.ratingCount,
+    topRated: store.topRated,
     estimatedPrepTime: store.estimatedPrepTime,
     isCurrentlyOpen: store.isCurrentlyOpen,
     acceptingOrders: store.acceptingOrders,
@@ -729,10 +731,14 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
             </p>
             <h1 id="store-name" className={styles.storeName}>{catalog.name}</h1>
             <div className={styles.meta}>
-              {catalog.totalRatings > 0 ? (
+              {/* [M-D6] displayRating is null below the rating-display floor,
+                  which is a different thing from having no ratings — but both
+                  mean "we will not put a number on this yet", and the honest
+                  copy already here says exactly that. */}
+              {catalog.displayRating !== null ? (
                 <span className={styles.metaItem}>
                   <Star size={16} className={styles.star} fill="currentColor" aria-hidden="true" />
-                  {Number(catalog.averageRating).toFixed(1)} ({catalog.totalRatings})
+                  {catalog.displayRating.toFixed(1)} {catalog.ratingBucket}
                 </span>
               ) : (
                 <span>No ratings yet</span>

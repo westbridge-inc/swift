@@ -83,8 +83,10 @@ export default async function StoresPage({ searchParams }: { searchParams: Promi
                 <p className={styles.meta}>
                   <span className={styles.metaItem}>
                     <Star size={16} className={styles.star} aria-hidden="true" />
-                    {s.averageRating.toFixed(1)}
-                    {s.totalRatings > 0 && <span>({s.totalRatings})</span>}
+                    {/* A store nobody has rated says so. It used to say 5.0,
+                        because the raw mean defaults to 5 with no ratings. */}
+                    {s.displayRating === null ? 'New' : s.displayRating.toFixed(1)}
+                    {s.ratingCount > 0 && <span>{s.ratingBucket}</span>}
                   </span>
                   <span className={styles.metaItem}>
                     <Clock size={16} aria-hidden="true" /> ~{s.estimatedPrepTime} min

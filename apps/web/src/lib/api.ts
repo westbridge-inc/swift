@@ -41,8 +41,14 @@ export interface StorefrontSummary {
   region: string;
   cuisineTypes: string[];
   tags: string[];
-  averageRating: number;
-  totalRatings: number;
+  // [M-D6] The public star line, from the API's shared rating mapper. null =
+  // below the display floor, which the UI must render as "New" rather than as
+  // a number — the raw lifetime mean it replaced defaulted to 5.0 for an actor
+  // nobody had rated.
+  displayRating: number | null;
+  ratingBucket: string;
+  ratingCount: number;
+  topRated: boolean;
   isCurrentlyOpen: boolean;
   acceptingOrders: boolean;
   estimatedPrepTime: number;

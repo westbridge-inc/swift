@@ -15,7 +15,7 @@ export function VendorCard({ v }: { v: Vendor }) {
       <div className="p-3">
         <p className="font-bold group-hover:text-[var(--swift-red)]">{v.name}</p>
         <p className="mt-1 flex items-center gap-3 text-sm text-[var(--swift-muted)]">
-          <span className="flex items-center gap-1"><Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />{(v.averageRating ?? 0).toFixed(1)}</span>
+          <span className="flex items-center gap-1"><Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />{v.displayRating === null ? 'New' : v.displayRating.toFixed(1)}</span>
           <span className="flex items-center gap-1"><Clock className="h-3.5 w-3.5" />~{v.estimatedPrepTime} min</span>
           {v.distanceKm != null && <span>· {v.distanceKm.toFixed(1)} km</span>}
         </p>
