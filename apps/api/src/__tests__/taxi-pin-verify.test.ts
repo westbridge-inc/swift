@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { AuthService } from '../modules/auth/auth.service';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // Taxi ride PIN gate. The customer reads a 6-digit PIN to the driver; the
@@ -209,7 +210,7 @@ describe('Taxi PIN verification — PUT /driver/rides/:id/verify-pin', () => {
     const ride = await makeArrivedRide(driver.driverId, customer.userId, '314159');
     await app.prisma.driver.update({
       where: { id: driver.driverId },
-      data: { currentRideId: ride.id, isOnline: true, isAvailable: false },
+      data: { currentRideId: ride.id, isOnline: true, locationSessionId: syntheticLocationOwner('taxi-pin-verif'), isAvailable: false },
     });
 
     const [verify, cancel] = await Promise.all([

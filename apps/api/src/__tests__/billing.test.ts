@@ -14,6 +14,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // the revenue engine. Hardest paths: idempotency under
@@ -109,7 +110,7 @@ async function makeVendorWithSub(opts: { rate: number; prepaid: number; due: Dat
 async function makeMoverWithCardSub(opts: { token: string; due: Date }) {
   const { userId, token } = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
   const rider = await app.prisma.rider.create({
-    data: { userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true },
+    data: { userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true, locationSessionId: syntheticLocationOwner('billing') },
   });
   const sub = await app.prisma.subscription.create({
     data: {

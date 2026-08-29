@@ -14,6 +14,7 @@ import { VerificationService } from '../modules/verification/verification.servic
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // verification behind KycProvider: checklists from config, the
@@ -986,7 +987,7 @@ describe('Taxi hire-class insurance — the manual 5-point check is enforced', (
 describe('Lapsed documents force movers offline (daily sweep)', () => {
   it('an online taxi whose insurance lapses is pulled offline immediately', async () => {
     const taxi = await app.prisma.user.findUniqueOrThrow({ where: { phone: TAXI_MOVER_PHONE } });
-    await app.prisma.driver.updateMany({ where: { userId: taxi.id }, data: { isOnline: true } });
+    await app.prisma.driver.updateMany({ where: { userId: taxi.id }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('verification') } });
     await app.prisma.verificationDocument.updateMany({
       where: { userId: taxi.id, docType: 'vehicle_insurance', status: 'APPROVED' },
       data: { expiresAt: new Date(Date.now() - 60 * 1000) },
@@ -1009,9 +1010,9 @@ describe('Lapsed documents force movers offline (daily sweep)', () => {
   it('an online courier is pulled offline when their police clearance lapses — others untouched', async () => {
     // A bystander who stays online through someone else's expiry
     const cyclist = await app.prisma.user.findUniqueOrThrow({ where: { phone: BICYCLE_MOVER_PHONE } });
-    await app.prisma.rider.updateMany({ where: { userId: cyclist.id }, data: { isOnline: true } });
+    await app.prisma.rider.updateMany({ where: { userId: cyclist.id }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('verification') } });
 
-    await app.prisma.rider.updateMany({ where: { userId: moverUserId }, data: { isOnline: true } });
+    await app.prisma.rider.updateMany({ where: { userId: moverUserId }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('verification') } });
     await app.prisma.verificationDocument.updateMany({
       where: { userId: moverUserId, docType: 'police_clearance', status: 'APPROVED' },
       data: { expiresAt: new Date(Date.now() - 60 * 1000) },

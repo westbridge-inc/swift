@@ -6,6 +6,7 @@ import { SosService } from '../modules/safety/sos.service';
 import { IncidentService } from '../modules/safety/incident.service';
 import { EvidenceService } from '../modules/safety/evidence.service';
 import { devChannelLog, resetDevChannelLog } from '../providers/notifications/channels';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // Fixes for the 2026-08-01 independent hostile-audit findings (P16). Each test
 // FAILS on the pre-fix code and passes after. The bugs were downstream
@@ -39,6 +40,7 @@ async function makeDriver() {
     data: {
       userId: u.id, vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
       licensePlate: `AF ${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', isOnline: true, isAvailable: true,
+      locationSessionId: syntheticLocationOwner('safety-audit'),
     },
   });
   return { user: u, driver: d };

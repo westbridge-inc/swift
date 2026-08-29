@@ -12,6 +12,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // §13 MMG billing rail: the weekly fee as a merchant-initiated request the
@@ -42,7 +43,7 @@ async function makeMoverWithMmgSub(opts: { due: Date; msisdn?: string }) {
     data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'rail-test', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
   });
   const rider = await app.prisma.rider.create({
-    data: { userId: user.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true },
+    data: { userId: user.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true, locationSessionId: syntheticLocationOwner('billing-mmg-ra') },
   });
   const sub = await app.prisma.subscription.create({
     data: {

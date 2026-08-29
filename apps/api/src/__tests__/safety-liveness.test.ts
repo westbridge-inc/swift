@@ -11,6 +11,7 @@ import { safetyRoutes } from '../modules/safety/safety.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { LivenessService, assertShiftLiveness } from '../modules/safety/liveness.service';
 import type { KycProvider } from '../providers/kyc/kyc-provider';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // Identity Assurance M5 (safety spec §7.1) — the go-online liveness ladder.
 // The provider tri-state IS the ladder: approved→PASS, pending_manual→
@@ -51,7 +52,7 @@ async function makeDriver(extra: Record<string, unknown> = {}) {
       userId: u.userId,
       vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
       licensePlate: `LIV ${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
-      isOnline: true, isAvailable: true,
+      isOnline: true, isAvailable: true, locationSessionId: syntheticLocationOwner('liveness'),
     },
   });
   return { ...u, driver };

@@ -8,6 +8,7 @@ import { ComplianceAuditService } from '../modules/verification/compliance-audit
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // Compliance audit — the liability shield. The invariant: nobody live-operates
@@ -51,6 +52,7 @@ async function makeMover(opts: { docStatus?: 'APPROVED' | 'EXPIRED' | 'REJECTED'
         driverLicenseUrl: `/uploads/test/${marker}-dl.jpg`,
         vehicleInsuranceUrl: `/uploads/test/${marker}-ins.jpg`,
         isOnline: opts.online ?? true,
+        locationSessionId: syntheticLocationOwner('compliance-driver'),
         documentsVerified: true, // legacy grandfathered
       },
     });
@@ -63,6 +65,7 @@ async function makeMover(opts: { docStatus?: 'APPROVED' | 'EXPIRED' | 'REJECTED'
       riderType: 'DELIVERY',
       vehicleType: 'MOTORCYCLE',
       isOnline: opts.online ?? true,
+      locationSessionId: syntheticLocationOwner('compliance-rider'),
     },
   });
 

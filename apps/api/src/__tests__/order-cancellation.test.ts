@@ -12,6 +12,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { autoCancelUnresponsiveOrder, autoCompleteDeliveredOrder } from '../jobs/queue';
 import { OrderService } from '../modules/order/order.service';
 import { FloatService } from '../modules/dispatch/float.service';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // Cancellation & rejection lifecycle — the failure paths of an order, hit over
@@ -162,6 +163,7 @@ async function makeTaxiDriver() {
       driverLicenseUrl: 'storage://test/license',
       vehicleInsuranceUrl: 'storage://test/insurance',
       isOnline: true,
+      locationSessionId: syntheticLocationOwner('cancel'),
       isAvailable: false,
     },
   });
@@ -380,7 +382,7 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
     const rider = await makeRider();
     await app.prisma.rider.update({
       where: { id: rider.riderId },
-      data: { isOnline: true, isAvailable: true, floatLimit: 100_000, committedFloat: 0 },
+      data: { isOnline: true, isAvailable: true, locationSessionId: syntheticLocationOwner('cancel'), floatLimit: 100_000, committedFloat: 0 },
     });
     const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED');
 

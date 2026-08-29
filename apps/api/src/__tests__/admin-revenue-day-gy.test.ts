@@ -10,6 +10,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { loginWithOtp } from './helpers/otp';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // DASH-06 — THE ADMIN REVENUE DAY IS A GUYANA DAY.
@@ -299,7 +300,7 @@ describe('live ops never emits a half position [OpsMap crash]', () => {
     // constraint tying them, so this row is representable in production.
     const rider = await app.prisma.rider.create({
       data: {
-        userId: riderUser.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE', isOnline: true, isAvailable: true,
+        userId: riderUser.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE', isOnline: true, isAvailable: true, locationSessionId: syntheticLocationOwner('admin-rev'),
         currentLat: 6.8, currentLng: null,
       },
     });
@@ -311,7 +312,7 @@ describe('live ops never emits a half position [OpsMap crash]', () => {
     });
     const wholeRider = await app.prisma.rider.create({
       data: {
-        userId: wholeRiderUser.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE', isOnline: true, isAvailable: true,
+        userId: wholeRiderUser.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE', isOnline: true, isAvailable: true, locationSessionId: syntheticLocationOwner('admin-rev'),
         currentLat: 6.81, currentLng: -58.16,
       },
     });

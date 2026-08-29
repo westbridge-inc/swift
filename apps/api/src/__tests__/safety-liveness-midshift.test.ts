@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { LivenessService, assertShiftLiveness } from '../modules/safety/liveness.service';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // Identity Assurance M5b — §7.2 random mid-shift checks + §7.3 "this isn't
 // my driver". The mid-shift prompt/deadline is DB state enforced by a CAS
@@ -48,7 +49,7 @@ async function makeDriver(extra: Record<string, unknown> = {}) {
       userId: u.userId,
       vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
       licensePlate: `MID ${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
-      isOnline: true, isAvailable: true,
+      isOnline: true, isAvailable: true, locationSessionId: syntheticLocationOwner('live-mid'),
       ...extra,
     },
   });
@@ -58,7 +59,7 @@ async function makeDriver(extra: Record<string, unknown> = {}) {
 async function makeRider(extra: Record<string, unknown> = {}) {
   const u = await makeUser(['MOVER']);
   const rider = await app.prisma.rider.create({
-    data: { userId: u.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', isOnline: true, isAvailable: true, ...extra },
+    data: { userId: u.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', isOnline: true, isAvailable: true, locationSessionId: syntheticLocationOwner('live-mid'), ...extra },
   });
   return { ...u, rider };
 }

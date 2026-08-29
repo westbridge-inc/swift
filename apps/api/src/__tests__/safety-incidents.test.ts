@@ -12,6 +12,7 @@ import {
   IncidentService,
   assertNotSafetySuspended,
 } from '../modules/safety/incident.service';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // Incident Management M6a (safety spec §8) — the case machine. Severity is
 // auto-suggested from category, SLA clocks stamp at intake, S0/S1 auto-apply
@@ -53,7 +54,7 @@ async function makeDriver() {
       userId: u.userId,
       vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
       licensePlate: `INC ${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
-      isOnline: true, isAvailable: true,
+      isOnline: true, isAvailable: true, locationSessionId: syntheticLocationOwner('sfty-inc'),
     },
   });
   return { ...u, driver };

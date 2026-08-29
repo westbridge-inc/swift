@@ -20,6 +20,7 @@ import { transitionUserRoleAuthority, transitionUserStatusAuthority } from '../m
 import { FloatService } from '../modules/dispatch/float.service';
 import { OrderService } from '../modules/order/order.service';
 import { AuthService } from '../modules/auth/auth.service';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // dispatch. Hardest paths: the no-acceptance path
@@ -98,6 +99,8 @@ async function makeRider(opts: {
       // enough that CASH offers aren't filtered out by the dispatch float gate.
       floatLimit: 1_000_000,
       isOnline: opts.online ?? true,
+      // An online mover must own a location session (riders_online_requires_location_owner).
+      locationSessionId: syntheticLocationOwner('dispatch'),
       isAvailable: opts.available ?? true,
       currentLat: opts.lat ?? PICKUP.lat,
       currentLng: opts.lng ?? PICKUP.lng,
@@ -522,7 +525,7 @@ describe('Rider location authority', () => {
         vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
         vehicleColor: 'Silver', licensePlate: `DUAL-${seq}`,
         driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', documentsVerified: true,
-        isOnline: true, isAvailable: true,
+        isOnline: true, locationSessionId: syntheticLocationOwner('dispatch'), isAvailable: true,
         currentLat: PICKUP.lat, currentLng: PICKUP.lng, lastLocationUpdate: new Date(),
       },
     });
@@ -553,7 +556,7 @@ describe('Rider location authority', () => {
         vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
         vehicleColor: 'Silver', licensePlate: `ACTIVE-${seq}`,
         driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', documentsVerified: true,
-        isOnline: true, isAvailable: false, currentRideId: 'active-sibling-ride',
+        isOnline: true, locationSessionId: syntheticLocationOwner('dispatch'), isAvailable: false, currentRideId: 'active-sibling-ride',
         currentLat: PICKUP.lat, currentLng: PICKUP.lng, lastLocationUpdate: new Date(),
       },
     });
@@ -2033,7 +2036,7 @@ describe('Account-status authority', () => {
         vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
         vehicleColor: 'Silver', licensePlate: `STATUS-${seq}`,
         driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', documentsVerified: true,
-        isOnline: true, isAvailable: true,
+        isOnline: true, locationSessionId: syntheticLocationOwner('dispatch'), isAvailable: true,
         currentLat: PICKUP.lat, currentLng: PICKUP.lng, lastLocationUpdate: new Date(),
       },
     });
@@ -2063,7 +2066,7 @@ describe('Account-status authority', () => {
     const rider = await makeRider({});
     await app.prisma.rider.update({
       where: { id: rider.riderId },
-      data: { currentOrderId: 'status-active-job', isOnline: true, isAvailable: false },
+      data: { currentOrderId: 'status-active-job', isOnline: true, locationSessionId: syntheticLocationOwner('dispatch'), isAvailable: false },
     });
 
     await expect(transitionUserStatusAuthority(app, rider.userId, 'SUSPENDED'))

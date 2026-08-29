@@ -14,6 +14,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { CashRulesService, orderingRestriction } from '../modules/cash/cash-rules.service';
 import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // ---------------------------------------------------------------------------
 // cash rules. The cash-rules table as tests: a simulated dishonest rider
@@ -97,7 +98,7 @@ async function makeRider() {
   const rider = await app.prisma.rider.create({
     data: {
       userId: u.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE',
-      documentsVerified: true, isOnline: true, currentLat: GPS.lat, currentLng: GPS.lng,
+      documentsVerified: true, isOnline: true, locationSessionId: syntheticLocationOwner('cash'), currentLat: GPS.lat, currentLng: GPS.lng,
     },
   });
   return { ...u, riderId: rider.id };
