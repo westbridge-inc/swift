@@ -36,6 +36,7 @@ import { publicWebBase } from '../qr/qr-codes';
 import { processReviewText } from '../rating/review-scrub';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
+import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { riderCounterpartySelect } from '../../utils/counterparty';
 
 // ---------------------------------------------------------------------------
@@ -150,6 +151,9 @@ const createItemSchema = z.object({
   basePrice: z.number().min(0).max(10_000_000),
   sku: z.string().max(64).optional(),
   unit: z.string().max(30).optional(),
+  // [G2] How much room one unit takes, as the WORD the shopkeeper chose. The
+  // integer behind it lives in utils/load.ts and never crosses the wire.
+  bulk: z.enum(BULK_CHOICES as [BulkChoice, ...BulkChoice[]]).optional(),
   stockQuantity: z.number().int().min(0).nullable().optional(),
   lowStockThreshold: z.number().int().min(0).nullable().optional(),
   isAvailable: z.boolean().optional(),
@@ -166,6 +170,13 @@ const createItemSchema = z.object({
 });
 
 const updateItemSchema = createItemSchema.omit({ optionGroups: true }).partial();
+
+/** The row with its bulk as a WORD and the integer removed, so no client ever
+ *  sees units — in either direction. */
+function withBulkWord<T extends { bulkUnits: number | null }>(item: T): Omit<T, 'bulkUnits'> & { bulk: BulkChoice } {
+  const { bulkUnits, ...rest } = item;
+  return { ...rest, bulk: bulkChoiceForUnits(bulkUnits) };
+}
 
 // Operator promotions (master plan §4.2). Vendor codes never touch delivery
 // fees (not vendor revenue) — PERCENTAGE or FIXED_AMOUNT only.
@@ -1872,7 +1883,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // is too — raw rows shipped both as strings to the menu editor, the web
     // storefront and the POS.
     const data = items.map((item) => ({
-      ...coerceMoney(item, ITEM_MONEY_FIELDS),
+      ...coerceMoney(withBulkWord(item), ITEM_MONEY_FIELDS),
       optionGroups: item.optionGroups.map((group) => ({
         ...group,
         options: group.options.map((option) => coerceMoney(option, OPTION_MONEY_FIELDS)),
@@ -1913,6 +1924,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         basePrice: body.basePrice,
         sku: body.sku,
         unit: body.unit,
+        ...(body.bulk !== undefined ? { bulkUnits: bulkUnitsForChoice(body.bulk) } : {}),
         stockQuantity: body.stockQuantity,
         lowStockThreshold: body.lowStockThreshold,
         isAvailable: body.isAvailable ?? true,
@@ -1953,7 +1965,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // fire-and-forget; suggestions are garnish, the save never waits.
     void discovery.runMatcherForItem(item).catch(() => undefined);
 
-    return { success: true, data: item };
+    return { success: true, data: withBulkWord(item) };
   });
 
   /** GET /items/import/template — CSV template for bulk import */
@@ -2281,6 +2293,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(body.basePrice !== undefined && { basePrice: body.basePrice }),
         ...(body.sku !== undefined && { sku: body.sku }),
         ...(body.unit !== undefined && { unit: body.unit }),
+        ...(body.bulk !== undefined && { bulkUnits: bulkUnitsForChoice(body.bulk) }),
         ...(body.stockQuantity !== undefined && { stockQuantity: body.stockQuantity }),
         ...(body.lowStockThreshold !== undefined && { lowStockThreshold: body.lowStockThreshold }),
         ...(unhide && { isAvailable: true, autoHiddenAt: null }),
@@ -2301,7 +2314,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     scheduleVendorSearchSync(app, vendorId);
     void discovery.runMatcherForItem(item).catch(() => undefined);
 
-    return { success: true, data: item };
+    return { success: true, data: withBulkWord(item) };
   });
 
   /** DELETE /items/:id — Delete an item and its option groups/options */

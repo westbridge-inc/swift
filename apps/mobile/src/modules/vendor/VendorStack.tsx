@@ -3038,6 +3038,10 @@ function VendorItemEditorScreen({ navigation, route }: any) {
   const [popular, setPopular] = useState<boolean>(!!existing?.isPopular);
   const [sku, setSku] = useState<string>(existing?.sku ?? '');
   const [unit, setUnit] = useState<string>(existing?.unit ?? '');
+  // [G2] The load hint dispatch needs to keep a 20 kg rice bag off a bicycle.
+  // Three words, never units: the server maps them. An item saved before the
+  // field existed reads as normal, which is exactly how it has always behaved.
+  const [bulk, setBulk] = useState<'normal' | 'bulky' | 'very_bulky'>(existing?.bulk ?? 'normal');
   const [stock, setStock] = useState<string>(existing?.stockQuantity != null ? String(existing.stockQuantity) : '');
   const [lowStock, setLowStock] = useState<string>(existing?.lowStockThreshold != null ? String(existing.lowStockThreshold) : '');
   const [localPhoto, setLocalPhoto] = useState<{ uri: string; name: string; type: string } | null>(null);
@@ -3118,6 +3122,7 @@ function VendorItemEditorScreen({ navigation, route }: any) {
           : {
               sku: sku.trim() || undefined,
               unit: unit.trim() || undefined,
+              bulk,
               // '' clears tracking (null) so a vendor can stop tracking stock.
               stockQuantity: stock.trim() === '' ? null : Number.isFinite(stockNum as number) ? stockNum : undefined,
               lowStockThreshold: lowStock.trim() === '' ? null : Number(lowStock) >= 0 ? Number(lowStock) : undefined,
@@ -3269,6 +3274,30 @@ function VendorItemEditorScreen({ navigation, route }: any) {
               <View style={{ flexDirection: 'row', gap: space.md }}>
                 <InlineInput style={{ flex: 1 }} value={stock} onChangeText={setStock} placeholder="Stock qty" keyboardType="number-pad" />
                 <InlineInput style={{ flex: 1 }} value={unit} onChangeText={setUnit} placeholder="Unit (kg, ea)" />
+              </View>
+              {/* How big is one of these to carry? Riders on bicycles cannot take
+                  a very bulky order, and dispatch uses this to keep it off them.
+                  A choice, not a number — nobody should be asked to think in units. */}
+              <View>
+                <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.sm }}>
+                  How bulky is one of these to carry?
+                </T>
+                <Segmented
+                  options={[
+                    { key: 'normal', label: 'Normal' },
+                    { key: 'bulky', label: 'Bulky' },
+                    { key: 'very_bulky', label: 'Very bulky' },
+                  ] as const}
+                  value={bulk}
+                  onChange={setBulk}
+                />
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                  {bulk === 'very_bulky'
+                    ? 'Like a 20 kg bag of rice or a case of water. Only riders with a bigger vehicle will be offered it.'
+                    : bulk === 'bulky'
+                      ? 'Like a crate of drinks or a large box.'
+                      : 'Fits in a delivery bag with room to spare.'}
+                </T>
               </View>
               <InlineInput value={sku} onChangeText={setSku} placeholder="SKU / barcode (optional)" />
               <InlineInput value={lowStock} onChangeText={setLowStock} placeholder="Low-stock alert at (e.g. 5)" keyboardType="number-pad" />
