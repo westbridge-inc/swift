@@ -26,7 +26,7 @@ import { partnerRoutes } from './modules/partner/partner.routes';
 import { aiRoutes } from './modules/ai/ai.routes';
 import { setAppLogger } from './utils/logger';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
-import { evaluateSchedulerHealth, schedulerStallMs } from './utils/scheduler-health';
+import { evaluateSchedulerHealth, schedulerStallMs, workerCheckStatus } from './utils/scheduler-health';
 import { prismaPlugin, beginRequestTenantContext } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
 import { socketPlugin } from './plugins/socket';
@@ -184,17 +184,25 @@ async function buildApp() {
       checks['redis'] = 'error';
     }
 
+    // [BUILD_NOW Band A] The worker fleet, reported as its own check. A green
+    // /health that does not look at the workers is exactly the lie that
+    // matters: RUN_WORKERS unset means holds, expiry sweeps, billing and
+    // settlements are silently not running while every probe says healthy.
+    // ONE read of ONE heartbeat key, evaluated ONCE — the paging block below
+    // reuses this verdict rather than forming a second opinion.
+    const beat = await app.redis.get('scheduler:heartbeat').catch(() => null);
+    const workerHealth = evaluateSchedulerHealth({ beat, nowMs: Date.now(), bootAtMs: SERVER_BOOTED_AT, stallMs: schedulerStallMs() });
+    checks['worker'] = workerCheckStatus(workerHealth, beat);
+
     // SWIFT-AUD-D7-02: scheduler-stall paging. A stalled worker can't page
     // about itself, so the check rides the load balancer's /health polls —
     // the one thing still running when the job scheduler is dead. Dedup'd
     // (30 min) and fire-and-caught: paging never slows a probe.
     void (async () => {
-      const beat = await app.redis.get('scheduler:heartbeat');
-      const stallMs = schedulerStallMs();
       // `!beat` is NOT benign: the heartbeat key has no TTL, so its absence means
       // the worker fleet never booted (crash / RUN_WORKERS misconfigured). Page it
       // once we're past the grace window — the case this check used to swallow.
-      const health = evaluateSchedulerHealth({ beat, nowMs: Date.now(), bootAtMs: SERVER_BOOTED_AT, stallMs });
+      const health = workerHealth;
       if (!health.page) return;
       const neverBooted = health.kind === 'never-booted';
       // Separate dedup keys so a "never booted" alert and a later "stall" don't mask each other.
@@ -220,7 +228,9 @@ async function buildApp() {
       }
     })().catch(() => {});
 
-    const allOk = Object.values(checks).every((v) => v === 'ok');
+    // `starting` is the worker inside its boot grace: not a failure, and not a
+    // reason to call a freshly deployed API degraded. Everything else must be ok.
+    const allOk = Object.values(checks).every((v) => v === 'ok' || v === 'starting');
     const status = allOk ? 'healthy' : 'degraded';
 
     const detailToken = process.env['HEALTH_DETAIL_TOKEN'];

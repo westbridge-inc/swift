@@ -65,3 +65,23 @@ export function evaluateSchedulerHealth(input: {
   if (ageMs <= stallMs) return { page: false };
   return { page: true, kind: 'stall', ageMs };
 }
+
+/**
+ * The word `/health` reports for the worker fleet, derived from the SAME
+ * evaluation that decides whether to page — one heartbeat, one verdict.
+ *
+ *   ok        heartbeat seen within the stall window
+ *   starting  no heartbeat yet, but the API is still inside its boot grace
+ *   error     stalled, or never booted past the grace window
+ *
+ * `starting` is deliberately not `error`: an API that reports degraded for its
+ * first minute after every deploy trains people to ignore degraded. It is also
+ * deliberately not `ok`: a green word for a worker nobody has heard from is the
+ * exact lie [BUILD_NOW Band A] names. Three words, each true.
+ */
+export type WorkerCheck = 'ok' | 'starting' | 'error';
+
+export function workerCheckStatus(health: SchedulerHealth, beat: string | null): WorkerCheck {
+  if (health.page) return 'error';
+  return beat ? 'ok' : 'starting';
+}
