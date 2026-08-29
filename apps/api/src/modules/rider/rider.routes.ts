@@ -14,7 +14,7 @@ import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.servi
 import { FloatService } from '../dispatch/float.service';
 import { riderStackingCapacity, riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
-import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
+import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
@@ -42,6 +42,7 @@ import {
   staleMoverAuthorityError,
 } from '../mover-authority';
 
+import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
@@ -751,14 +752,27 @@ export async function riderRoutes(app: FastifyInstance) {
     // emit below; the persistent path is the throttled DB write above
     // (currentLat/Lng, read by dispatch/presence). There is no third copy.
 
-    // Broadcast to order room if rider has an active order.
-    if (authorized.currentOrderId) {
+    // Broadcast to EVERY live leg's order room [B3]. Since #899 a rider may
+    // carry more than one order and `currentOrderId` is only the primary; a
+    // publish to that one room left the other customer's map frozen. Legs are
+    // read once per ping, in acceptance order, so the chained ETA below knows
+    // which delivery comes first.
+    const liveLegs = authorized.currentOrderId
+      ? await app.prisma.order.findMany({
+          where: { riderId: rider.id, orderType: { not: 'TAXI' }, status: { notIn: TERMINAL_ORDER_STATUSES } },
+          select: { id: true, status: true, pickupLat: true, pickupLng: true, deliveryLat: true, deliveryLng: true },
+          orderBy: { acceptedAt: 'asc' },
+        })
+      : [];
+    if (liveLegs.length > 0) {
       // Live-leg ETA [SWIFT-UG-RT-01]: recomputed on the same ≥10 s throttle
       // as the DB write, served from cache on the pings in between — the
-      // tracking screen gets a moving ETA without a maps call per ping.
-      const etaMinutes = shouldWriteDb
-        ? await refreshLegEta(app, authorized.currentOrderId, { lat: latitude, lng: longitude })
-        : await cachedLegEta(app, authorized.currentOrderId);
+      // tracking screen gets a moving ETA without a maps call per ping. The
+      // second leg's ETA is the chain through the first, labelled so the
+      // screen can say "after another delivery" rather than lie.
+      const legEtas = shouldWriteDb
+        ? await refreshLegEtas(app, liveLegs, { lat: latitude, lng: longitude })
+        : await cachedLegEtas(app, liveLegs);
 
       // Authorization above and the live emit cannot be one unguarded read /
       // publish pair: another device may win GO while ETA is being computed.
@@ -809,17 +823,28 @@ export async function riderRoutes(app: FastifyInstance) {
           };
         }
 
-        // If completion/reassignment changed the pointer while ETA was in
-        // flight, skip this one old-leg sample; the next ping targets the new
-        // job. The session itself remains authoritative.
-        if (current.currentOrderId === authorized.currentOrderId) {
-          app.io.to(`order:${authorized.currentOrderId}`).emit('rider:location', {
+        // Re-read which legs are STILL live under the shared lock: a leg that
+        // completed or was reassigned while the ETA was in flight gets no
+        // stale sample — the next ping reflects the new shape. The session
+        // itself remains authoritative.
+        const stillLive = new Set(
+          (await tx.order.findMany({
+            where: { id: { in: liveLegs.map((l) => l.id) }, riderId: rider.id, status: { notIn: TERMINAL_ORDER_STATUSES } },
+            select: { id: true },
+          })).map((o) => o.id),
+        );
+        for (const leg of legEtas) {
+          if (!stillLive.has(leg.orderId)) continue;
+          app.io.to(`order:${leg.orderId}`).emit('rider:location', {
             riderId: rider.id,
             lat: latitude,
             lng: longitude,
             heading: heading ?? null,
             speed: speed ?? null,
-            etaMinutes,
+            etaMinutes: leg.etaMinutes,
+            // 'direct' for the leg the rider is on; 'after_current' for a leg
+            // behind another delivery. The screen labels it honestly.
+            etaBasis: leg.basis,
             ts: now.toISOString(),
           });
         }
