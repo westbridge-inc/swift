@@ -1,0 +1,17 @@
+[Unit]
+Description=Nightly Swift database backup
+# A backup nobody scheduled is a backup that does not exist. This unit is the
+# difference between "we have a backup script" and "we have backups".
+
+[Timer]
+# 02:15 UTC — after the day's orders have settled, before anyone is working.
+OnCalendar=*-*-* 02:15:00
+# A server that was off at 02:15 still backs up when it comes back, rather than
+# silently skipping a day.
+Persistent=true
+# Stagger so a fleet does not hammer object storage at the same second.
+RandomizedDelaySec=300
+Unit=swift-backup.service
+
+[Install]
+WantedBy=timers.target

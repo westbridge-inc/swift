@@ -1,0 +1,28 @@
+[Unit]
+Description=Swift database backup (dump, verify, upload offsite, heartbeat)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Adjust WorkingDirectory to wherever the repo lives on the server.
+WorkingDirectory=/opt/swift
+EnvironmentFile=/opt/swift/deploy/.env
+ExecStart=/opt/swift/deploy/backup.sh /var/backups/swift
+
+# The script exits non-zero when a dump cannot be verified or the offsite
+# upload cannot be proven. systemd records that as a failed unit, which is what
+# makes `systemctl list-units --failed` a real check rather than decoration.
+# It does NOT retry: a second attempt at a full backup on a failing disk is
+# rarely the right move, and the freshness alarm in the API will page anyway.
+
+# The dump contains every customer record. Keep it readable only by root.
+UMask=0077
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/backups/swift
+
+[Install]
+WantedBy=multi-user.target
