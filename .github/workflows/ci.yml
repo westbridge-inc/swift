@@ -89,8 +89,18 @@ jobs:
       - run: corepack enable && corepack prepare --activate
       - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: cd apps/api && npx prisma generate
-      - name: Run database migrations
-        run: cd apps/api && npx prisma db push --skip-generate
+      # A step named "Run database migrations" that ran `db push` instead was
+      # how this survived unnoticed. `db push` reconciles the SCHEMA SHAPE and
+      # executes no migration SQL, so the api-test database carried 9 of 13
+      # triggers and 14 of 29 CHECK constraints — every money-integrity check,
+      # the double-entry balance trigger, consent immutability and the safety
+      # evidence chain of custody were all absent. The whole suite has been
+      # grading itself against a permissive schema.
+      #
+      # It now replays the real migrations. Measured on both, 29 Aug 2026:
+      # migrated = 13 triggers / 29 CHECKs / 54 RLS policies.
+      - name: Replay migrations (the real production schema)
+        run: cd apps/api && npx prisma migrate deploy
         env:
           DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
       - name: Seed database

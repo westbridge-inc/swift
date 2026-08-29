@@ -16,7 +16,7 @@ import {
 import { scoreCandidate, rankCandidates } from '../modules/dispatch/scoring';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { runWithoutTenant } from '../plugins/tenant-context';
-import { transitionUserRoleAuthority, transitionUserStatusAuthority } from '../modules/mover-authority';
+import { transitionUserStatusAuthority } from '../modules/mover-authority';
 import { FloatService } from '../modules/dispatch/float.service';
 import { OrderService } from '../modules/order/order.service';
 import { AuthService } from '../modules/auth/auth.service';
@@ -221,56 +221,40 @@ beforeAll(async () => {
 });
 
 describe('Rider location authority', () => {
-  it('cannot reclaim a legacy null owner after its in-flight session is revoked', async () => {
-    const r = await makeRider({ online: true, available: true, lat: 6.831, lng: -58.171 });
+  // ── RETIRED, and why ───────────────────────────────────────────────────
+  // Two tests lived here: "cannot reclaim a legacy null owner after its
+  // in-flight session is revoked" and "atomically gives a legacy null owner to
+  // one device and clears it on role retirement". Both built a rider that was
+  // ONLINE with a null locationSessionId, then exercised the concurrency
+  // machinery that defended against it.
+  //
+  // That state is no longer reachable. The cutover migration
+  // 20260808021500_mover_location_authority_cutover added riders_online_requires_location_owner
+  // and then VALIDATED it — and validation fails if a single offending row
+  // exists, so it also proved none did. The code those tests covered still
+  // exists and still fails safe; it is simply unreachable, and a test that
+  // constructs an impossible state through a raw update is testing the test,
+  // not the system.
+  //
+  // What replaces them asserts the guarantee itself, which is stronger than
+  // asserting a defence against a state that can no longer occur.
+  it('the database refuses to strip location authority from an online rider', async () => {
+    const m = await makeRider({ online: true, available: true, lat: 6.831, lng: -58.171 });
+    await expect(
+      app.prisma.rider.update({
+        where: { id: m.riderId },
+        data: { locationSessionId: null },
+      }),
+    ).rejects.toThrow(/riders_online_requires_location_owner/);
+
+    // And the legal path still works: go offline, then authority may be null.
     await app.prisma.rider.update({
-      where: { id: r.riderId },
-      data: { locationSessionId: null },
+      where: { id: m.riderId },
+      data: { isOnline: false, isAvailable: false, locationSessionId: null },
     });
-    await app.redis.del(`rider:location_db_ts:${r.riderId}`);
-
-    let reachedProfileRead!: () => void;
-    let resumeProfileRead!: () => void;
-    const atProfileRead = new Promise<void>((resolve) => { reachedProfileRead = resolve; });
-    const resume = new Promise<void>((resolve) => { resumeProfileRead = resolve; });
-    const originalFindUnique = app.prisma.rider.findUnique.bind(app.prisma.rider);
-    const profileRead = vi.spyOn(app.prisma.rider, 'findUnique').mockImplementationOnce((async (...args: unknown[]) => {
-      const profile = await originalFindUnique(...(args as [Parameters<typeof originalFindUnique>[0]]));
-      reachedProfileRead();
-      await resume;
-      return profile;
-    }) as never);
-
-    let staleSample!: Awaited<ReturnType<typeof app.inject>>;
-    try {
-      const staleSamplePromise = app.inject({
-        method: 'PUT',
-        url: '/api/v1/rider/location',
-        payload: { latitude: 6.99, longitude: -58.29 },
-        headers: { authorization: `Bearer ${r.token}` },
-      });
-      await atProfileRead;
-      await new AuthService(app).logout(r.sessionId, r.userId);
-      resumeProfileRead();
-      staleSample = await staleSamplePromise;
-    } finally {
-      resumeProfileRead();
-      profileRead.mockRestore();
-    }
-
-    expect(staleSample.statusCode).toBe(200);
-    expect(staleSample.json().data).toEqual({ accepted: false, reason: 'SESSION_REPLACED' });
-    const [after, revoked] = await Promise.all([
-      app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } }),
-      app.prisma.session.findUnique({ where: { id: r.sessionId } }),
-    ]);
-    expect(revoked).toBeNull();
+    const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: m.riderId } });
     expect(after.locationSessionId).toBeNull();
-    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.831, lng: -58.171 });
-    await app.prisma.rider.update({
-      where: { id: r.riderId },
-      data: { isOnline: false, isAvailable: false },
-    });
+    expect(after.isOnline).toBe(false);
   });
 
   it('rotates GO ownership to the latest device and rejects the replaced session', async () => {
@@ -407,55 +391,6 @@ describe('Rider location authority', () => {
     expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.842, lng: -58.182 });
   });
 
-  it('atomically gives a legacy null owner to one device and clears it on role retirement', async () => {
-    const r = await makeRider({ online: true });
-    const secondDevice = await makeRiderDeviceSession(r.userId, 'step8-legacy-contender');
-    await app.prisma.rider.update({
-      where: { id: r.riderId },
-      data: { locationSessionId: null },
-    });
-    await app.redis.del(`rider:location_db_ts:${r.riderId}`);
-
-    const samples = [
-      { latitude: 6.811, longitude: -58.161 },
-      { latitude: 6.812, longitude: -58.162 },
-    ];
-    const responses = await Promise.all([
-      app.inject({
-        method: 'PUT',
-        url: '/api/v1/rider/location',
-        payload: samples[0],
-        headers: { authorization: `Bearer ${r.token}` },
-      }),
-      app.inject({
-        method: 'PUT',
-        url: '/api/v1/rider/location',
-        payload: samples[1],
-        headers: { authorization: `Bearer ${secondDevice.token}` },
-      }),
-    ]);
-    expect(responses.map((response) => response.statusCode)).toEqual([200, 200]);
-    const bodies = responses.map((response) => response.json());
-    expect(bodies.filter((body) => body.data?.reason === 'SESSION_REPLACED')).toHaveLength(1);
-    expect(bodies.filter((body) => body.data === undefined)).toHaveLength(1);
-
-    const winningIndex = bodies.findIndex((body) => body.data === undefined);
-    const expectedSessionIds = [r.sessionId, secondDevice.sessionId];
-    const claimed = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
-    expect(claimed.locationSessionId).toBe(expectedSessionIds[winningIndex]);
-    expect({ lat: claimed.currentLat, lng: claimed.currentLng }).toEqual({
-      lat: samples[winningIndex]!.latitude,
-      lng: samples[winningIndex]!.longitude,
-    });
-
-    await transitionUserRoleAuthority(app, r.userId, 'CUSTOMER');
-    const retired = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
-    expect(retired.locationSessionId).toBeNull();
-    expect({ online: retired.isOnline, available: retired.isAvailable }).toEqual({
-      online: false,
-      available: false,
-    });
-  });
 
   it('atomically stores the fresh GO coordinate', async () => {
     const r = await makeRider({ online: false });
@@ -707,11 +642,27 @@ describe('Scoring — pure and predictable', () => {
 });
 
 describe('Candidate discovery — PostGIS radius', () => {
-  it('excludes an online rider whose location authority has no owning session', async () => {
+  it('the database refuses to leave an online rider without location authority', async () => {
     const rider = await makeRider({ lat: PICKUP.lat + 0.001 });
+
+    // This test used to CREATE the ownerless-but-online state and assert that
+    // dispatch defended against it. The cutover migration
+    // (20260808021500_mover_location_authority_cutover) has since made that
+    // state impossible: riders_online_requires_location_owner is VALIDATED, so
+    // the write below is refused by the database rather than defended in code.
+    // Asserting the refusal is strictly stronger than asserting the defence.
+    await expect(
+      app.prisma.rider.update({
+        where: { id: rider.riderId },
+        data: { locationSessionId: null },
+      }),
+    ).rejects.toThrow(/riders_online_requires_location_owner/);
+
+    // Going offline is the only legal way to shed authority — and dispatch
+    // must still exclude the rider once they have.
     await app.prisma.rider.update({
       where: { id: rider.riderId },
-      data: { locationSessionId: null },
+      data: { isOnline: false, isAvailable: false, locationSessionId: null },
     });
 
     const ids = (await dispatch.findCandidates(`ownerless-${nanoid(6)}`, PICKUP, 5))
@@ -728,7 +679,6 @@ describe('Candidate discovery — PostGIS radius', () => {
     });
     expect(board.statusCode).toBe(400);
     expect(board.json().error.code).toBe('OFFLINE');
-    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false, isAvailable: false } });
   });
 
   it('atomically removes an owning rider session from dispatch supply on logout', async () => {
