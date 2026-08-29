@@ -18,6 +18,7 @@ export type PictogramName =
   | 'services'
   | 'orders'
   | 'favourites'
+  | 'scan'
   | 'sedan'
   | 'estate'
   | 'van'
@@ -209,6 +210,20 @@ export function Pictogram({
           <Path {...s} d="M7 12 H17" />
           <Path {...s} d="M12 7 V10.8 M10.3 8 L13.7 9.9 M13.7 8 L10.3 9.9" />
           <Path {...s} d="M7.5 18.8 C7.5 16.8 8.5 16.5 8.5 14.8 M12 18.8 V14.8 M16.5 18.8 C16.5 16.8 15.5 16.5 15.5 14.8" />
+        </>
+      )}
+      {name === 'scan' && (
+        <>
+          {/* four viewfinder corners around a code plate — the shape a person
+              already reads as "point the camera here" */}
+          <Path {...s} d="M4 8.6 V6 A2 2 0 0 1 6 4 H8.6" />
+          <Path {...s} d="M15.4 4 H18 A2 2 0 0 1 20 6 V8.6" />
+          <Path {...s} d="M20 15.4 V18 A2 2 0 0 1 18 20 H15.4" />
+          <Path {...s} d="M8.6 20 H6 A2 2 0 0 1 4 18 V15.4" />
+          <Path {...s} d="M9.2 9.2 H11.4 V11.4 H9.2 Z" />
+          <Path {...s} d="M14.8 9.2 H12.6 V11.4 H14.8 Z" />
+          <Path {...s} d="M9.2 14.8 H11.4 V12.6 H9.2 Z" />
+          <Path {...s} d="M12.6 14 H14.8 M13.6 12.6 V14.8" />
         </>
       )}
       {name === 'mason' && (
