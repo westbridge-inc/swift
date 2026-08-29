@@ -29,6 +29,7 @@ import {
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
 import { riderCounterpartySelect } from '../../utils/counterparty';
+import { capacityPredicateSql, capacityWhere } from './concurrency-policy';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -292,7 +293,7 @@ export class DispatchService {
             id: moverId,
             isOnline: true,
             isAvailable: true,
-            currentRideId: null,
+            ...capacityWhere('DRIVER'),
             locationSessionId: { not: null },
             user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'DRIVER'] } },
           },
@@ -302,7 +303,7 @@ export class DispatchService {
             id: moverId,
             isOnline: true,
             isAvailable: true,
-            currentOrderId: null,
+            ...capacityWhere('RIDER'),
             locationSessionId: { not: null },
             user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'RIDER'] } },
           },
@@ -591,7 +592,7 @@ export class DispatchService {
           JOIN "users" u ON u."id" = d."userId"
           WHERE d."isOnline" = true
             AND d."isAvailable" = true
-            AND d."currentRideId" IS NULL
+            ${capacityPredicateSql('DRIVER')}
             AND d."locationSessionId" IS NOT NULL
             AND d."lastLocationUpdate" >= ${locationFreshSince}
             AND u."status" = 'ACTIVE'
@@ -624,7 +625,7 @@ export class DispatchService {
           JOIN "users" u ON u."id" = r."userId"
           WHERE r."isOnline" = true
             AND r."isAvailable" = true
-            AND r."currentOrderId" IS NULL
+            ${capacityPredicateSql('RIDER')}
             AND r."locationSessionId" IS NOT NULL
             AND r."lastLocationUpdate" >= ${locationFreshSince}
             AND u."status" = 'ACTIVE'
@@ -1487,7 +1488,7 @@ export class DispatchService {
             id: moverId,
             isOnline: true,
             isAvailable: true,
-            currentRideId: null,
+            ...capacityWhere('DRIVER'),
             locationSessionId: { not: null },
             user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'DRIVER'] } },
           },
@@ -1502,7 +1503,7 @@ export class DispatchService {
             id: moverId,
             isOnline: true,
             isAvailable: true,
-            currentOrderId: null,
+            ...capacityWhere('RIDER'),
             locationSessionId: { not: null },
             user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'RIDER'] } },
           },
