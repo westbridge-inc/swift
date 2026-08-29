@@ -135,7 +135,17 @@ function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[numb
           width: 56,
           height: 56,
           borderRadius: radius.lg,
-          backgroundColor: isFlagship ? color.brand[500] : color.surface.subtle,
+          // [Wave 3 audit vs reference 03] `sunken`, NOT `subtle`. The decision
+          // above is right and stands — one accent, a quiet ground for the rest.
+          // It just never rendered: `surface.subtle` IS the page colour (the
+          // token file calls it "paper — the app background", and this screen
+          // paints its own background with it), so the seven quiet tiles were
+          // painted the same colour as the paper behind them and had no ground
+          // at all. `sunken` is the token for exactly this — "grouped sections
+          // / tracks — 3% brand tint on paper" — and it is what the reference
+          // shows. A ground you cannot see is not a quiet ground; it is a
+          // missing one.
+          backgroundColor: isFlagship ? color.brand[500] : color.surface.sunken,
           alignItems: 'center',
           justifyContent: 'center',
         }}
@@ -220,9 +230,13 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
         </View>
 
         {/* The window, drawn. `progress` is remaining/total from the server's
-            own two timestamps — it is not a duration this screen assumed. */}
+            own two timestamps — it is not a duration this screen assumed.
+            The TRACK takes `sunken`, the same correction as the tiles: at
+            `subtle` on a white card it was a 0.4% difference from its own
+            card, so the window read as a floating maroon bar with no channel
+            and "how much is left" lost its reference edge. */}
         {hold ? (
-          <View style={{ height: 4, borderRadius: 2, backgroundColor: color.surface.subtle, overflow: 'hidden' }}>
+          <View style={{ height: 4, borderRadius: 2, backgroundColor: color.surface.sunken, overflow: 'hidden' }}>
             <View
               style={{
                 width: `${Math.round(hold.progress * 100)}%`,
