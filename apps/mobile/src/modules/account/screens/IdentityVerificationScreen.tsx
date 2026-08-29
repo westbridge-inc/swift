@@ -28,8 +28,8 @@ function UploadRow({
   return (
     <PressableScale disabled={busy} onPress={onPress}>
       <Card style={[{ marginBottom: space.sm }, done ? { borderWidth: 1, borderColor: color.brand[500] } : null]}>
-        <View className="flex-row items-center justify-between">
-          <View className="flex-1 pr-md">
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <View style={{ flex: 1, paddingRight: space.md }}>
             <T variant="micro" tone="muted">{done ? 'Uploaded' : 'Get started'}</T>
             <T variant="body" weight="semibold">{title}</T>
           </View>
@@ -78,8 +78,8 @@ export function IdentityVerificationScreen({ navigation }: any) {
 
   if (submitted) {
     return (
-      <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-        <View className="flex-1 items-center justify-center px-2xl">
+      <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top']}>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space['2xl'] }}>
           <Feather name="check-circle" size={48} color={color.success} />
           <T variant="heading" center style={{ marginTop: space.md }}>
             ID submitted for review
@@ -94,14 +94,14 @@ export function IdentityVerificationScreen({ navigation }: any) {
   }
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-      <View className="flex-row items-center px-lg py-sm">
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top']}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space.lg, paddingVertical: space.sm }}>
         <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
         </PressableScale>
         <T variant="body" weight="bold" style={{ marginLeft: space.md }}>Verify your identity</T>
       </View>
-      <ScrollView className="flex-1" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
           A one-time check, required for larger cash orders and rides. Upload a government ID and a selfie — verify once and the limit is gone.
         </T>

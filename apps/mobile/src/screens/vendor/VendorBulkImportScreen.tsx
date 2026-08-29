@@ -3,7 +3,7 @@ import { View, ScrollView, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import { Feather } from '@expo/vector-icons';
-import { color, space } from '@swift/ui';
+import { color, fontSize, radius, space } from '@swift/ui';
 import { Card, PillButton, T } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
 import { toast } from '../../kit/toast';
@@ -124,15 +124,15 @@ export function VendorBulkImportScreen({ navigation }: any) {
   const failedCount = result?.failed ?? result?.errors?.length ?? result?.failedCount ?? 0;
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top']} className="bg-surface-base">
-      <View className="flex-row items-center px-lg py-sm">
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top']}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space.lg, paddingVertical: space.sm }}>
         <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
         </PressableScale>
         <T variant="body" weight="bold" style={{ marginLeft: space.md }}>Bulk import</T>
       </View>
       <ScrollView
-        className="flex-1"
+        style={{ flex: 1 }}
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -168,8 +168,18 @@ export function VendorBulkImportScreen({ navigation }: any) {
           multiline
           editable={!previewType}
           textAlignVertical="top"
-          style={{ minHeight: 140 }}
-          className="mb-md rounded-2xl border border-border-subtle bg-surface-base px-lg py-md font-body text-sm text-text-primary"
+          style={{
+            minHeight: 140,
+            marginBottom: space.md,
+            borderRadius: radius.lg,
+            borderWidth: 1,
+            borderColor: color.border.subtle,
+            backgroundColor: color.surface.base,
+            paddingHorizontal: space.lg,
+            paddingVertical: space.md,
+            fontSize: fontSize.sm,
+            color: color.text.primary,
+          }}
         />
         <PillButton
           label="Analyze CSV"
@@ -197,7 +207,7 @@ export function VendorBulkImportScreen({ navigation }: any) {
               </T>
             )}
             {(mapped.preview ?? []).slice(0, 5).map((r: any, i: number) => (
-              <View key={i} className="mt-sm flex-row items-center justify-between border-t border-border-subtle pt-sm">
+              <View key={i} style={{ marginTop: space.sm, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: color.border.subtle, paddingTop: space.sm }}>
                 <T variant="label" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
                   {r.name ?? '—'}
                 </T>
@@ -219,7 +229,7 @@ export function VendorBulkImportScreen({ navigation }: any) {
 
         {result ? (
           <Card style={{ marginTop: space.md, borderWidth: 1, borderColor: color.brand[500] }}>
-            <View className="flex-row items-center">
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               <Feather name="check-circle" size={18} color={color.success} />
               <T variant="body" weight="semibold" style={{ marginLeft: space.sm }}>Import complete</T>
             </View>

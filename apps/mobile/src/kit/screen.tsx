@@ -51,9 +51,11 @@ export function CircleChip({
   label?: string;
 }) {
   return (
-    // NB: never a function-form `style` on Pressable — the NativeWind interop
-    // corrupts the touch box (it can bleed over siblings). Pressed feedback
-    // lives on the inner View via the function child.
+    // Pressed feedback lives on the inner View via the function child, not in a
+    // function-form `style` on Pressable. The original cause is gone (the NativeWind
+    // interop that corrupted the touch box went with R4), so plain RN would now allow
+    // either — the shape is kept because it is the kit-wide one and the inner View is
+    // what carries the transform.
     <Pressable
       onPress={onPress}
       hitSlop={8}

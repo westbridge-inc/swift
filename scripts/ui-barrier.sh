@@ -49,5 +49,29 @@ if grep -rnE "#(803B3B|5C2A2C|F5EBEC|FBFBF9|211A1A)" \
   leak "brand hex hardcoded outside packages/ui — use @swift/ui tokens"
 fi
 
+# ── R4: NativeWind is gone from MOBILE, and it stays gone ──────────────────
+# Mobile styles from @swift/ui tokens through the kit. A second styling system
+# beside it is how two of them drift — and while it was there, `rounded-2xl`,
+# `rounded-3xl`, `mb-1` and `h-1.5` were silently taking TAILWIND'S DEFAULTS
+# rather than the design system, because the theme maps no such steps. Nothing
+# announced that; the classes simply looked like tokens.
+#
+# ⚠️ MOBILE ONLY. apps/web and apps/admin legitimately use Tailwind and are not
+# in scope here — a gate that swept them would be wrong, not stricter.
+if grep -rn "className=" "$MOBILE" --include='*.tsx' --include='*.ts' 2>/dev/null | grep -v '\.test\.'; then
+  leak "className in mobile — NativeWind was removed (R4); style from @swift/ui tokens via src/kit"
+fi
+# react-native-css-interop is the ENGINE nativewind is a wrapper over. Naming only
+# the wrapper is how this gate stayed green with the engine still installed.
+if grep -qE '"(nativewind|tailwindcss|react-native-css-interop)"' apps/mobile/package.json 2>/dev/null; then
+  leak "nativewind/tailwindcss/css-interop is back in apps/mobile/package.json — R4 removed it"
+fi
+for f in apps/mobile/tailwind.config.ts apps/mobile/nativewind-env.d.ts apps/mobile/global.css; do
+  if [ -e "$f" ]; then leak "$f has returned — R4 removed the NativeWind wiring"; fi
+done
+if grep -rn "nativewind" apps/mobile/babel.config.js apps/mobile/metro.config.js 2>/dev/null; then
+  leak "nativewind is wired back into the mobile babel/metro config"
+fi
+
 if [ "$fail" -eq 0 ]; then echo "✅ UI barrier holds"; fi
 exit $fail
