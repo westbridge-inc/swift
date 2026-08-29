@@ -126,12 +126,25 @@ describe('no customer-facing card renders a raw lifetime mean', () => {
     ).toBe(false);
   });
 
-  it('the two fixed surfaces now read displayRating', () => {
+  it('the fixed surface still reads displayRating', () => {
     // Named so the fix cannot be quietly reverted to the raw field.
-    for (const f of ['modules/shop/screens/MarketScreen.tsx', 'modules/services/screens/ServicesScreen.tsx']) {
-      const src = code(join(SRC, f));
-      expect(src, `${f} must render displayRating`).toMatch(/rating=\{[^}]*displayRating/);
-    }
+    const src = code(join(SRC, 'modules/services/screens/ServicesScreen.tsx'));
+    expect(src, 'ServicesScreen must render displayRating').toMatch(/rating=\{[^}]*displayRating/);
+  });
+
+  it('MarketScreen renders NO rating at all — and that is the correct answer', () => {
+    // It used to list SHOPS, so it showed a vendor's stars (and briefly the raw
+    // mean, which is why this file exists). It now lists ITEMS [MKT G2], and
+    // `Item` has no rating: a per-item star is a founder decision (M-D2), and
+    // putting the SELLER's stars on a PRODUCT card is a different claim than
+    // the one the number supports.
+    //
+    // So the honest state is no star — and the guard has to say that
+    // explicitly, or the next person "restores" the rating this screen
+    // deliberately dropped.
+    const src = code(join(SRC, 'modules/shop/screens/MarketScreen.tsx'));
+    expect(src, 'no star belongs on a product card until Item carries a rating').not.toMatch(/rating=\{/);
+    expect(src, 'and certainly not a raw mean').not.toMatch(/averageRating/);
   });
 });
 
