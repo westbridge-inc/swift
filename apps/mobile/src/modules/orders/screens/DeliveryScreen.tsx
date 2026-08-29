@@ -21,7 +21,7 @@ import { money } from '../../../lib/money';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
 import { toast } from '../../../kit/toast';
-import { CircleChip, DecorativeIcon, ErrorState, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, holdRingCaption, holdRingWindow } from '../../../kit';
+import { CircleChip, DecorativeIcon, ErrorState, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 
@@ -70,22 +70,13 @@ function isTerminalOrderSnapshot(order: any): boolean {
 }
 
 type ServerTimelineEntry = { status?: string; timestamp?: string | null; note?: string | null };
-type TimelineStep = {
-  key: string;
-  label: string;
-  description: string;
-  doneDescription?: string;
-  upcomingDescription?: string;
-  icon: React.ComponentProps<typeof Feather>['name'];
-  timestamp?: string | null;
-};
+// [WS-2.1] The step shape is the kit's now — one definition, imported. A local
+// copy here is how the screen and the primitive drift apart on what a step is.
+type TimelineStep = KitTimelineStep;
 
-function formatServerTime(value?: string | null): string | null {
-  if (!value) return null;
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return null;
-  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-}
+// `formatServerTime` lived here and is gone with the inline timeline: the kit
+// primitive formats its own clock, and two functions turning a server timestamp
+// into "4:05 pm" is the same duplication one notch smaller.
 
 function humanStatus(status: string): string {
   return status.toLowerCase().replace(/_/g, ' ').replace(/^\w/, (letter) => letter.toUpperCase());
@@ -261,68 +252,34 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
           </T>
         </View>
       ) : null}
+      {/* [WS-2.1] The kit Timeline, not a copy of it. This screen is where the
+          primitive was generalized FROM, and leaving the original here would
+          have left two implementations of "where is this in its journey" — the
+          exact drift the kit exists to end, committed while extracting it.
+
+          THE DOMAIN RULE SURVIVES, and it is why `state` is a per-step
+          override rather than something the primitive infers: rider dispatch
+          runs alongside kitchen preparation, so a rider status must not tick
+          off Preparing unless a server prep fact did. The primitive is told;
+          it never guesses. */}
       <View style={{ marginTop: space.lg }}>
-        {steps.map((step, index) => {
-          let done = currentIndex == null ? index === 0 : index < currentIndex;
-          let current = currentIndex === index;
-          // Rider dispatch can run alongside kitchen preparation. A rider
-          // status must not check off Preparing unless a server prep fact did.
-          if (step.key === 'preparing' && !courier && !appointment && currentIndex != null && currentIndex >= 2) {
-            if (currentIndex === 2) {
-              done = false;
-              current = true;
-            } else {
-              done = preparationFinished;
-              current = !done && (preparationStarted || acceptedRecorded);
+        <Timeline
+          currentIndex={currentIndex}
+          steps={steps.map((step, index) => {
+            let done = currentIndex == null ? index === 0 : index < currentIndex;
+            let current = currentIndex === index;
+            if (step.key === 'preparing' && !courier && !appointment && currentIndex != null && currentIndex >= 2) {
+              if (currentIndex === 2) {
+                done = false;
+                current = true;
+              } else {
+                done = preparationFinished;
+                current = !done && (preparationStarted || acceptedRecorded);
+              }
             }
-          }
-          const time = formatServerTime(step.timestamp);
-          const state = done ? 'Complete' : current ? 'Current' : 'Upcoming';
-          const description = done
-            ? step.doneDescription ?? step.description
-            : current
-              ? step.description
-              : step.upcomingDescription ?? step.description;
-          return (
-            <View
-              key={step.key}
-              accessible
-              accessibilityLabel={`${step.label}. ${state}${time ? ` at ${time}` : ''}. ${description}`}
-              style={{ flexDirection: 'row', alignItems: 'stretch' }}
-            >
-              <View style={{ width: space['3xl'], alignItems: 'center' }}>
-                <View
-                  style={{
-                    width: space['2xl'],
-                    height: space['2xl'],
-                    borderRadius: radius.full,
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    backgroundColor: current ? color.brand[500] : done ? color.brand[50] : color.surface.sunken,
-                    borderWidth: current ? space.xs / 2 : StyleSheet.hairlineWidth,
-                    borderColor: done || current ? color.brand[500] : color.border.strong,
-                  }}
-                >
-                  <Feather name={done ? 'check' : step.icon} size={13} color={current ? color.white : done ? color.brand[600] : color.text.muted} />
-                </View>
-                {index < steps.length - 1 ? (
-                  <View style={{ flex: 1, width: StyleSheet.hairlineWidth, minHeight: space['3xl'], backgroundColor: done ? color.brand[200] : color.border.subtle }} />
-                ) : null}
-              </View>
-              <View style={{ flex: 1, paddingLeft: space.sm, paddingBottom: index < steps.length - 1 ? space.xl : 0 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: space.md }}>
-                  <T variant="body" weight={current ? 'semibold' : 'medium'} tone={done || current ? 'ink' : 'faint'}>
-                    {step.label}
-                  </T>
-                  {time ? <T variant="caption" tone="muted">{time}</T> : null}
-                </View>
-                <T variant="caption" tone={current ? 'muted' : 'faint'} style={{ marginTop: space.xs }}>
-                  {description}
-                </T>
-              </View>
-            </View>
-          );
-        })}
+            return { ...step, state: done ? ('done' as const) : current ? ('current' as const) : ('upcoming' as const) };
+          })}
+        />
       </View>
     </View>
   );

@@ -63,6 +63,23 @@ const DRIVER_STEP_LABELS = ['Assigned', 'En route', 'Arrived', 'Riding'];
 const RIDER_STEP_LABELS = ['Assigned', 'Picked up', 'Delivered'];
 
 /** Where this job stands — the same statuses the state machine enforces. */
+/**
+ * TOMBSTONE [WS-2.1 → WS-3.2 item 6]. This is the horizontal twin of the kit's
+ * `StatusRail`: the same idea — where a job stands in its sequence — drawn a
+ * second time, in bare 12pt dots instead of the kit's icon nodes.
+ *
+ * `StatusRail` exists and is the replacement. It is NOT swapped in here yet on
+ * purpose: adopting it changes this screen's appearance, and ActiveJobScreen is
+ * item 6 on Wave 3's rebuild list, where the change belongs beside its
+ * reference PNG rather than smuggled in ahead of it. DeliveryScreen's vertical
+ * timeline WAS swapped, because the primitive was generalized from it and the
+ * result is pixel-identical.
+ *
+ * When this screen is rebuilt: delete this and pass the rider's leg as
+ * `TimelineStep[]`. The state rule below (mid-leg states collapse onto the
+ * "Picked up" dot) becomes a per-step `state` override, which is what that prop
+ * is for.
+ */
 function StatusStepper({ status, isDriver }: { status?: string; isDriver: boolean }) {
   const steps = isDriver ? DRIVER_STEPS : RIDER_STEPS;
   const labels = isDriver ? DRIVER_STEP_LABELS : RIDER_STEP_LABELS;
