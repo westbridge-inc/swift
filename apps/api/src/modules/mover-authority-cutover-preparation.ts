@@ -1,4 +1,5 @@
-import { type Prisma, type PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
+import { TERMINAL_ORDER_STATUSES } from './order/order-status';
 
 /**
  * Bounded, restart-safe preparation for the non-rolling mover authority cutover.
@@ -84,7 +85,7 @@ export async function readMoverAuthorityCutoverState(
         SELECT COUNT(*)::text
         FROM "orders" o
         WHERE (o."riderId" IS NOT NULL OR o."driverId" IS NOT NULL)
-          AND o."status" NOT IN ('DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED')
+          AND o."status"::text NOT IN (${Prisma.join(TERMINAL_ORDER_STATUSES)})
       ) AS "activeAssignments",
       (
         SELECT COUNT(*)::text
@@ -99,13 +100,13 @@ export async function readMoverAuthorityCutoverState(
         SELECT COUNT(*)::text
         FROM "riders" r
         JOIN "orders" o ON o."id" = r."currentOrderId"
-        WHERE o."status" NOT IN ('DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED')
+        WHERE o."status"::text NOT IN (${Prisma.join(TERMINAL_ORDER_STATUSES)})
       ) AS "riderLivePointers",
       (
         SELECT COUNT(*)::text
         FROM "drivers" d
         JOIN "orders" o ON o."id" = d."currentRideId"
-        WHERE o."status" NOT IN ('DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED')
+        WHERE o."status"::text NOT IN (${Prisma.join(TERMINAL_ORDER_STATUSES)})
       ) AS "driverLivePointers",
       (SELECT COUNT(*)::text FROM "riders" WHERE "currentOrderId" IS NOT NULL) AS "riderPointers",
       (SELECT COUNT(*)::text FROM "drivers" WHERE "currentRideId" IS NOT NULL) AS "driverPointers",
@@ -153,7 +154,7 @@ async function clearTerminalRiderPointers(tx: Prisma.TransactionClient, batchSiz
           SELECT 1
           FROM "orders" o
           WHERE o."id" = r."currentOrderId"
-            AND o."status" NOT IN ('DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED')
+            AND o."status"::text NOT IN (${Prisma.join(TERMINAL_ORDER_STATUSES)})
         )
       ORDER BY r."id"
       FOR UPDATE SKIP LOCKED
@@ -177,7 +178,7 @@ async function clearTerminalDriverPointers(tx: Prisma.TransactionClient, batchSi
           SELECT 1
           FROM "orders" o
           WHERE o."id" = d."currentRideId"
-            AND o."status" NOT IN ('DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED')
+            AND o."status"::text NOT IN (${Prisma.join(TERMINAL_ORDER_STATUSES)})
         )
       ORDER BY d."id"
       FOR UPDATE SKIP LOCKED

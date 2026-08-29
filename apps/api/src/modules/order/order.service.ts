@@ -5,6 +5,7 @@ import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrde
 import { estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
+import { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus } from './order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
@@ -171,8 +172,24 @@ const IN_TRANSIT: OrderStatus[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 
  *
  * Anything asking "is this order finished" imports this. A second list is a
  * second answer, and the two only have to disagree once.
+ *
+ * That law was right, and was then broken TWELVE more times: locals in
+ * mover-authority (custody), dispatch.service, delivery-watchdog (rescue),
+ * order-sla, account.service and trip-share; an inline literal in admin.routes
+ * — in a file already importing this very constant 1,500 lines above it; and
+ * FIVE raw SQL string literals in the mover-authority cutover preparation.
+ *
+ * All thirteen agreed, and nothing made them. `OrderStatus[]` is not
+ * exhaustive, so a new state produced no compile error anywhere and the copies
+ * would have split in silence — in custody, which decides who holds authority
+ * over an order, and in the watchdog, which decides what gets rescued. The SQL
+ * strings could never be type-checked at all.
+ *
+ * The list now lives in ./order-status.ts behind a `Record<OrderStatus, …>`
+ * that fails the BUILD until a new state is classified — a guarantee, not a
+ * convention. Re-exported here so every existing importer is untouched.
  */
-export const TERMINAL_ORDER_STATUSES: OrderStatus[] = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+export { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus };
 
 // ---------------------------------------------------------------------------
 // [SPS-F-0016 / LB-015] The MMG payment-first law. An MMG marketplace order is

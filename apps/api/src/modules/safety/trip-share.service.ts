@@ -6,6 +6,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { checkOtpRateLimit } from '../../utils/otp';
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { log } from '../../utils/logger';
+import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
 // Trip Share (safety spec §6) — a tokenized PUBLIC live-trip page. The token
 // is 128-bit CSPRNG and grants ONLY the public payload below, never API
@@ -21,7 +22,7 @@ import { log } from '../../utils/logger';
 
 const MINT_CEILING_HOURS = 12;
 const SHARE_GRACE_MINUTES = Number(process.env['SHARE_GRACE_MINUTES'] ?? 60);
-const TERMINAL: string[] = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+const TERMINAL: string[] = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 
 // Human-worded statuses for the public page — no internal enum leakage.
 const PUBLIC_STATUS: Record<string, string> = {

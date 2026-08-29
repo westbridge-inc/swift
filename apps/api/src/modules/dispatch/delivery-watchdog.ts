@@ -5,6 +5,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { FloatService } from './float.service';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { log } from '../../utils/logger';
+import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
 const STALE_LOCATION_MINUTES = 15;
 
@@ -47,7 +48,7 @@ export async function recoverStrandedDeliveries(
   const notifications = new NotificationService(prisma, io);
   const PRE_CUSTODY: OrderStatus[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
   const IN_CUSTODY: OrderStatus[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'];
-  const TERMINAL: OrderStatus[] = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+  const TERMINAL = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
   const recovered: string[] = [];
   const flagged: string[] = [];
 
