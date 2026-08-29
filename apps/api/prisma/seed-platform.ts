@@ -63,30 +63,20 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
     WHERE "isOnline" = true AND "currentLat" IS NOT NULL AND "currentLng" IS NOT NULL
   `;
 
-  // Platform config defaults
+  // Platform config defaults — ONLY keys production code actually reads.
+  //
+  // This list used to seed 22 keys; 20 were read by nothing while the admin
+  // config page rendered them as working controls (the 19-field lying panel,
+  // master audit G10). Fares and fees live in CountryConfig per market;
+  // cancellation and dispatch numbers are shipped constants. A key belongs
+  // here ONLY together with the code that reads it — the namespaced
+  // billing.mmg_agent.* keys (seeded where they are used) are the pattern.
+  //
+  // delivery_base_fee stays for now: admin-audit.test.ts uses it as the
+  // fixture for the config-write audit trail. Nothing else reads it.
   const configs = [
-    { key: 'markup_percentage', value: 5 },
-    { key: 'delivery_base_fee', value: 500 },
-    { key: 'delivery_per_km', value: 200 },
-    { key: 'delivery_included_km', value: 2 },
-    { key: 'taxi_base_fare', value: 1000 },
-    { key: 'taxi_per_km', value: 300 },
-    { key: 'taxi_per_minute', value: 50 },
-    { key: 'taxi_minimum_fare', value: 1500 },
-    { key: 'surge_threshold', value: 0.8 },
-    { key: 'surge_max_multiplier', value: 2.0 },
-    { key: 'subscription_grace_period_hours', value: 24 },
-    { key: 'settlement_cycle_days', value: 7 },
-    { key: 'min_rider_rating', value: 4.0 },
-    { key: 'max_failed_payment_attempts', value: 3 },
     { key: 'order_auto_reject_minutes', value: 5 },
-    { key: 'ride_request_timeout_seconds', value: 15 },
-    { key: 'courier_base_fee', value: 1000 },
-    { key: 'courier_per_km', value: 300 },
-    { key: 'order_free_cancellation_window_minutes', value: 5 },
-    { key: 'order_cancel_fee_after_acceptance', value: 500 },
-    { key: 'taxi_cancel_fee_before_arrival', value: 500 },
-    { key: 'taxi_cancel_fee_after_arrival', value: 1000 },
+    { key: 'delivery_base_fee', value: 500 },
   ];
   for (const config of configs) {
     await prisma.platformConfig.upsert({
