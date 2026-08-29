@@ -5,6 +5,7 @@ import { AppError, ForbiddenError } from '../../utils/errors';
 import { sortByDistance } from '../../utils/distance';
 import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL } from '../vendor/vendor-visibility';
 import { ratingSurfaces } from '../rating/rating-surface';
+import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
 
 // [B2] ONE wire contract whichever engine answered. The route used to hand
 // clients raw Meilisearch hits on the fast path and raw Prisma rows on the
@@ -18,10 +19,11 @@ type VendorHit = {
   estimatedPrepTime: number | null; isCurrentlyOpen: boolean;
   displayRating: number | null; ratingCount: number; topRated: boolean;
 };
-type ItemHit = {
-  id: string; name: string; basePrice: number; imageUrl: string | null;
-  vendorId: string; vendorName: string; categoryName: string | null;
-};
+// The item half of that contract is not declared here. It lives in
+// `./item-hit`, which the Market feed also imports — one shape, one mapper per
+// engine. This file used to carry its own `type ItemHit` and build it by hand
+// on both paths, which is how `isNew` could have shipped on the market card and
+// silently not on the search card for the same item.
 
 const searchQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),
@@ -96,15 +98,9 @@ export async function searchRoutes(app: FastifyInstance) {
           ratingCount: (h['rating_count'] as number | null) ?? 0,
           topRated: Boolean(h['top_rated']),
         }));
-        const items: ItemHit[] = (itemResults.hits as Record<string, unknown>[]).map((h) => ({
-          id: String(h['id']),
-          name: String(h['name']),
-          basePrice: Number(h['basePrice'] ?? 0),
-          imageUrl: (h['imageUrl'] as string | null) ?? null,
-          vendorId: String(h['vendorId']),
-          vendorName: String(h['vendorName'] ?? ''),
-          categoryName: (h['categoryName'] as string | null) ?? null,
-        }));
+        const items: ItemHit[] = (itemResults.hits as Record<string, unknown>[]).map(
+          itemHitFromSearchDoc,
+        );
 
         return {
           success: true,
@@ -172,15 +168,9 @@ export async function searchRoutes(app: FastifyInstance) {
             { description: { contains: q, mode: 'insensitive' } },
           ],
         },
-        select: {
-          id: true,
-          name: true,
-          basePrice: true,
-          imageUrl: true,
-          vendorId: true,
-          vendor: { select: { name: true } },
-          category: { select: { name: true } },
-        },
+        // The shared select, so the fallback cannot quietly serve fewer fields
+        // than the fast path and make the engine visible to the client.
+        select: ITEM_HIT_SELECT,
         take: parsedLimit,
         orderBy: { totalOrdered: 'desc' },
       }),
@@ -220,15 +210,7 @@ export async function searchRoutes(app: FastifyInstance) {
       sortedVendors = [...sortByDistance(locatable, userLat, userLng), ...unlocatable];
     }
 
-    const shapedItems: ItemHit[] = items.map((i) => ({
-      id: i.id,
-      name: i.name,
-      basePrice: Number(i.basePrice),
-      imageUrl: i.imageUrl,
-      vendorId: i.vendorId,
-      vendorName: i.vendor.name,
-      categoryName: i.category?.name ?? null,
-    }));
+    const shapedItems: ItemHit[] = items.map(toItemHit);
 
     return {
       success: true,
@@ -278,22 +260,20 @@ export async function searchRoutes(app: FastifyInstance) {
   app.get('/search/trending', { preHandler: [app.authenticate] }, async (_request) => {
     const items = await app.prisma.item.findMany({
       where: { isAvailable: true, vendor: { ...VISIBLE_VENDOR, isCurrentlyOpen: true } },
-      include: { vendor: { select: { name: true, slug: true } } },
+      // The shared select again. Trending is the Market tab's fallback rail, so
+      // its cards land in the SAME component as the feed's; the fifth hand-built
+      // copy of this shape lived here and served an item with no `isNew` and no
+      // `categoryName` beside feed items that had both.
+      select: { ...ITEM_HIT_SELECT, totalOrdered: true },
       orderBy: { totalOrdered: 'desc' },
       take: 20,
     });
 
     return {
       success: true,
-      data: items.map((i) => ({
-        id: i.id,
-        name: i.name,
-        basePrice: Number(i.basePrice),
-        imageUrl: i.imageUrl,
-        vendorId: i.vendorId,
-        vendorName: i.vendor.name,
-        totalOrdered: i.totalOrdered,
-      })),
+      // ItemHit plus the one field that makes it *trending* — a superset, never
+      // a different shape.
+      data: items.map((i) => ({ ...toItemHit(i), totalOrdered: i.totalOrdered })),
     };
   });
 

@@ -8,6 +8,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { marketRoutes } from '../modules/market/market.routes';
+import { NEW_ITEM_WINDOW_DAYS, toItemHit } from '../modules/search/item-hit';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
@@ -368,6 +369,62 @@ describe('sorting and paging hold under duplicates', () => {
   });
 });
 
+describe('`NEW` is derived, and it is the ONLY badge that is', () => {
+  // The founder's reference draws three badges on a product card: LIMITED, NEW
+  // and HANDMADE. Exactly one of them has a field behind it. Shipping the other
+  // two would mean inventing an attribute and then decorating cards with it —
+  // the badge would be a guess wearing the authority of a label.
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it('a listing inside the window is new; one outside it is not', async () => {
+    const v = await makeVendor('Fresh Stock Co');
+    const fresh = await makeItem(v.id, `Fresh ${nanoid(4)}`, {
+      discovery: categoryId,
+      createdAt: new Date(Date.now() - 1 * DAY),
+    });
+    const old = await makeItem(v.id, `Old ${nanoid(4)}`, {
+      discovery: categoryId,
+      createdAt: new Date(Date.now() - (NEW_ITEM_WINDOW_DAYS + 30) * DAY),
+    });
+
+    const body = (await get(`/items?category=${SLUG}&limit=50`)).json();
+    const byId = new Map<string, any>((body.data.items ?? []).map((i: any) => [i.id, i]));
+    expect(byId.get(fresh.id)?.isNew, 'listed yesterday').toBe(true);
+    expect(byId.get(old.id)?.isNew, 'listed months ago').toBe(false);
+  });
+
+  it('the boundary is the named window, not a number typed into a screen', async () => {
+    // Grading the EDGE is what makes this a real test of the constant: an item
+    // one day either side of it must fall on opposite sides. If someone
+    // silently changes 14 to 90, `justInside` at 89 days would still pass a
+    // sloppy test; this one moves with the constant.
+    const v = await makeVendor('Boundary Goods');
+    const justInside = await makeItem(v.id, `Inside ${nanoid(4)}`, {
+      discovery: categoryId,
+      createdAt: new Date(Date.now() - (NEW_ITEM_WINDOW_DAYS - 1) * DAY),
+    });
+    const justOutside = await makeItem(v.id, `Outside ${nanoid(4)}`, {
+      discovery: categoryId,
+      createdAt: new Date(Date.now() - (NEW_ITEM_WINDOW_DAYS + 1) * DAY),
+    });
+
+    const body = (await get(`/items?category=${SLUG}&limit=50`)).json();
+    const byId = new Map<string, any>((body.data.items ?? []).map((i: any) => [i.id, i]));
+    expect(byId.get(justInside.id)?.isNew).toBe(true);
+    expect(byId.get(justOutside.id)?.isNew).toBe(false);
+  });
+
+  it('no LIMITED or HANDMADE field rides along on the wire', async () => {
+    // The absence is the assertion. If either ever appears, it appeared from
+    // somewhere invented — no column produces it.
+    const res = await get(`/items?category=${SLUG}&limit=1`);
+    const keys = Object.keys(res.json().data.items[0]).map((k) => k.toLowerCase());
+    for (const invented of ['limited', 'handmade', 'rating', 'stars', 'favorite', 'favourite']) {
+      expect(keys, `${invented} has no source on Item — see M-D2/M-D3/M-D7`).not.toContain(invented);
+    }
+  });
+});
+
 describe('the response is the EXISTING item shape', () => {
   it('returns ItemHit, not a new market-only model', async () => {
     // "One catalogue, one cart, one search index" — a second item shape is the
@@ -375,9 +432,23 @@ describe('the response is the EXISTING item shape', () => {
     const res = await get(`/items?category=${SLUG}&limit=1`);
     const item = res.json().data.items[0];
     expect(Object.keys(item).sort()).toEqual(
-      ['basePrice', 'categoryName', 'id', 'imageUrl', 'name', 'vendorId', 'vendorName'].sort(),
+      ['basePrice', 'categoryName', 'id', 'imageUrl', 'isNew', 'name', 'vendorId', 'vendorName'].sort(),
     );
     expect(typeof item.basePrice, 'price is a number, never a Decimal string').toBe('number');
+  });
+
+  it('the key set is the one the shared mapper produces — no hand-built copy', async () => {
+    // The point of `item-hit.ts` is that this endpoint does not assemble its own
+    // object. Grading the WIRE against the MAPPER is what makes that structural
+    // rather than aspirational: add a field to the route by hand and the two
+    // sides part company here.
+    const row = {
+      id: 'i1', name: 'Claw Hammer', basePrice: 2500, imageUrl: null,
+      createdAt: new Date(), vendorId: 'v1',
+      vendor: { name: 'City Hardware' }, category: { name: 'Power Tools' },
+    };
+    const res = await get(`/items?category=${SLUG}&limit=1`);
+    expect(Object.keys(res.json().data.items[0]).sort()).toEqual(Object.keys(toItemHit(row)).sort());
   });
 
   it('reports the honest total for the category', async () => {

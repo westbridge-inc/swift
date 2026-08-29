@@ -115,16 +115,27 @@ export function useDiscoveryCategories(lat?: number, lng?: number) {
 export type MarketItem = {
   id: string; name: string; basePrice: number; imageUrl: string | null;
   vendorId: string; vendorName: string; categoryName: string | null;
+  /** Recently listed. SERVER-DERIVED — the client never computes "new" from a
+   *  timestamp of its own, or two screens would disagree about the same item. */
+  isNew: boolean;
 };
 
+/**
+ * `sort` defaults to `new`, and the screen's section header says "New arrivals"
+ * because of it. The endpoint's own default is `popular`, which is the right
+ * default for an established catalogue and the wrong one here: at launch depth
+ * almost every `totalOrdered` is zero, so "popular" would rank by a tiebreaker
+ * while a header called it popular — the UI lying about its own ordering.
+ */
 export function useMarketItems(params: { category?: string; sort?: string } = {}) {
+  const sort = params.sort ?? 'new';
   return useInfiniteQuery({
-    queryKey: ['market', 'items', params.category ?? 'all', params.sort ?? 'popular'],
+    queryKey: ['market', 'items', params.category ?? 'all', sort],
     initialPageParam: undefined as string | undefined,
     queryFn: async ({ pageParam }) => {
       const res = await marketApi.items({
         ...(params.category ? { category: params.category } : {}),
-        ...(params.sort ? { sort: params.sort } : {}),
+        sort,
         ...(pageParam ? { cursor: pageParam } : {}),
         limit: 24,
       });

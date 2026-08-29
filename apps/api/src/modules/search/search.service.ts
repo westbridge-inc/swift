@@ -2,6 +2,7 @@ import { MeiliSearch } from 'meilisearch';
 import type { PrismaClient } from '@prisma/client';
 import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL, VISIBLE_VENDOR_SELECT, isVendorVisible } from '../vendor/vendor-visibility';
 import { ratingSurfaces } from '../rating/rating-surface';
+import { toItemSearchDoc } from './item-hit';
 
 const VENDOR_INDEX = 'vendors';
 const ITEM_INDEX = 'items';
@@ -149,23 +150,7 @@ export class SearchService {
     });
 
     const itemSlugs = await this.itemCategorySlugs(items.map((i) => i.id));
-    const docs = items
-      .map((i) => ({
-        id: i.id,
-        name: i.name,
-        description: i.description || '',
-        vendorId: i.vendorId,
-        vendorName: i.vendor.name,
-        categoryName: i.category.name,
-        basePrice: Number(i.basePrice),
-        imageUrl: i.imageUrl,
-        isAvailable: i.isAvailable,
-        isPopular: i.isPopular,
-        dietaryTags: i.dietaryTags,
-        allergens: i.allergens,
-        totalOrdered: i.totalOrdered,
-        categories: itemSlugs.get(i.id) ?? [],
-      }));
+    const docs = items.map((i) => toItemSearchDoc(i, itemSlugs.get(i.id) ?? []));
 
     await this.client.index(ITEM_INDEX).addDocuments(docs);
     return docs.length;
@@ -295,22 +280,7 @@ export class SearchService {
     if (live.length > 0) {
       const itemSlugs = await this.itemCategorySlugs(live.map((i) => i.id));
       await this.client.index(ITEM_INDEX).addDocuments(
-        live.map((i) => ({
-          id: i.id,
-          name: i.name,
-          description: i.description || '',
-          vendorId: i.vendorId,
-          vendorName: i.vendor.name,
-          categoryName: i.category.name,
-          basePrice: Number(i.basePrice),
-          imageUrl: i.imageUrl,
-          isAvailable: i.isAvailable,
-          isPopular: i.isPopular,
-          dietaryTags: i.dietaryTags,
-          allergens: i.allergens,
-          totalOrdered: i.totalOrdered,
-          categories: itemSlugs.get(i.id) ?? [],
-        })),
+        live.map((i) => toItemSearchDoc(i, itemSlugs.get(i.id) ?? [])),
       );
     }
     if (gone.length > 0) {
