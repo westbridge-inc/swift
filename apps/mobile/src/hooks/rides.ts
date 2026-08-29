@@ -1,6 +1,7 @@
 import { track } from '../lib/analytics';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { rideApi, type RideClass, type TieredEstimate } from '../services/api';
+import { customerKeys } from './customer';
 
 type Point = { lat: number; lng: number };
 
@@ -129,7 +130,12 @@ export function useCancelRide() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, reason }: { id: string; reason?: string }) => unwrap(rideApi.cancel(id, reason)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['rides', 'active'] }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['rides', 'active'] });
+      // Home's live-order card shows the ride too. Without this it keeps the
+      // cancelled ride on screen until the customer happens to pull to refresh.
+      void qc.invalidateQueries({ queryKey: customerKeys.homeAll });
+    },
   });
 }
 

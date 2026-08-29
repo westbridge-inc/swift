@@ -12,6 +12,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { enterTenant, getTenantId } from '../../plugins/prisma';
+import { invalidateHomeCache } from '../user/home-cache';
 
 // ---------------------------------------------------------------------------
 // Taxi: the fare is computed and SHOWN before any driver
@@ -341,6 +342,9 @@ export async function ridesRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>('/:id/cancel', auth, async (request) => {
     const body = cancelSchema.parse(request.body ?? {});
     const result = await orderService.cancelOrder(request.params.id, request.user.userId, body.reason);
+    // A ride is an Order, and Home's live card shows it. Drop the cached feed
+    // so a cancelled ride does not keep being "in progress" for a minute.
+    await invalidateHomeCache(app, request.user.userId).catch(() => {});
     return { success: true, data: result };
   });
 
