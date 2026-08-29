@@ -14,7 +14,6 @@ import { DispatchService, recoverStrandedTaxiRides } from '../modules/dispatch/d
 import { OrderService } from '../modules/order/order.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { pointInPolygon } from '../utils/geo';
-import { transitionUserRoleAuthority } from '../modules/mover-authority';
 import { AuthService } from '../modules/auth/auth.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
 
@@ -717,10 +716,22 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
 });
 
 describe('Taxi dispatch S3 — self-exclusion + supply-watch hygiene', () => {
-  it('excludes an online driver whose location authority has no owning session', async () => {
+  it('a driver without location authority is offline, and dispatch excludes them', async () => {
     await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
     const driver = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });
-    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { locationSessionId: null } });
+
+    // drivers_online_requires_location_owner (VALIDATED in the cutover
+    // migration) refuses to leave an ONLINE driver ownerless, so the only way
+    // to reach "no authority" is to go offline first. Both halves matter: the
+    // database blocks the illegal state, and dispatch still excludes the legal
+    // one.
+    await expect(
+      app.prisma.driver.update({ where: { id: driver.driverId }, data: { locationSessionId: null } }),
+    ).rejects.toThrow(/drivers_online_requires_location_owner/);
+    await app.prisma.driver.update({
+      where: { id: driver.driverId },
+      data: { isOnline: false, isAvailable: false, locationSessionId: null },
+    });
 
     const candidates = await dispatch.findCandidates(`ownerless-driver-${nanoid(6)}`, CENTRAL, 5, 'DRIVER');
     expect(candidates.map((candidate) => candidate.riderId)).not.toContain(driver.driverId);
@@ -1032,54 +1043,40 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
 });
 
 describe('Driver location authority', () => {
-  it('cannot reclaim a legacy null owner after its in-flight session is revoked', async () => {
-    const d = await makeDriver({ lat: 6.831, lng: -58.171 });
+  // ── RETIRED, and why ───────────────────────────────────────────────────
+  // Two tests lived here: "cannot reclaim a legacy null owner after its
+  // in-flight session is revoked" and "atomically gives a legacy null owner to
+  // one device and clears it on role retirement". Both built a driver that was
+  // ONLINE with a null locationSessionId, then exercised the concurrency
+  // machinery that defended against it.
+  //
+  // That state is no longer reachable. The cutover migration
+  // 20260808021500_mover_location_authority_cutover added drivers_online_requires_location_owner
+  // and then VALIDATED it — and validation fails if a single offending row
+  // exists, so it also proved none did. The code those tests covered still
+  // exists and still fails safe; it is simply unreachable, and a test that
+  // constructs an impossible state through a raw update is testing the test,
+  // not the system.
+  //
+  // What replaces them asserts the guarantee itself, which is stronger than
+  // asserting a defence against a state that can no longer occur.
+  it('the database refuses to strip location authority from an online driver', async () => {
+    const m = await makeDriver({ lat: 6.831, lng: -58.171 });
+    await expect(
+      app.prisma.driver.update({
+        where: { id: m.driverId },
+        data: { locationSessionId: null },
+      }),
+    ).rejects.toThrow(/drivers_online_requires_location_owner/);
+
+    // And the legal path still works: go offline, then authority may be null.
     await app.prisma.driver.update({
-      where: { id: d.driverId },
-      data: { locationSessionId: null },
+      where: { id: m.driverId },
+      data: { isOnline: false, isAvailable: false, locationSessionId: null },
     });
-    await app.redis.del(`driver:location_db_ts:${d.driverId}`);
-
-    let reachedProfileRead!: () => void;
-    let resumeProfileRead!: () => void;
-    const atProfileRead = new Promise<void>((resolve) => { reachedProfileRead = resolve; });
-    const resume = new Promise<void>((resolve) => { resumeProfileRead = resolve; });
-    const originalFindUnique = app.prisma.driver.findUnique.bind(app.prisma.driver);
-    const profileRead = vi.spyOn(app.prisma.driver, 'findUnique').mockImplementationOnce((async (...args: unknown[]) => {
-      const profile = await originalFindUnique(...(args as [Parameters<typeof originalFindUnique>[0]]));
-      reachedProfileRead();
-      await resume;
-      return profile;
-    }) as never);
-
-    let staleSample!: Awaited<ReturnType<typeof app.inject>>;
-    try {
-      const staleSamplePromise = inject('PUT', '/api/v1/driver/location', {
-        latitude: 6.99,
-        longitude: -58.29,
-      }, d.token);
-      await atProfileRead;
-      await new AuthService(app).logout(d.sessionId, d.userId);
-      resumeProfileRead();
-      staleSample = await staleSamplePromise;
-    } finally {
-      resumeProfileRead();
-      profileRead.mockRestore();
-    }
-
-    expect(staleSample.statusCode).toBe(200);
-    expect(staleSample.json().data).toEqual({ accepted: false, reason: 'SESSION_REPLACED' });
-    const [after, revoked] = await Promise.all([
-      app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } }),
-      app.prisma.session.findUnique({ where: { id: d.sessionId } }),
-    ]);
-    expect(revoked).toBeNull();
+    const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: m.driverId } });
     expect(after.locationSessionId).toBeNull();
-    expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.831, lng: -58.171 });
-    await app.prisma.driver.update({
-      where: { id: d.driverId },
-      data: { isOnline: false, isAvailable: false },
-    });
+    expect(after.isOnline).toBe(false);
   });
 
   it('rotates GO ownership to the latest device and rejects the replaced session', async () => {
@@ -1215,45 +1212,6 @@ describe('Driver location authority', () => {
     expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.842, lng: -58.182 });
   });
 
-  it('atomically gives a legacy null owner to one device and clears it on role retirement', async () => {
-    const d = await makeDriver();
-    const secondDevice = await makeDriverDeviceSession(d.userId, 'step9-legacy-contender');
-    await app.prisma.driver.update({
-      where: { id: d.driverId },
-      data: { locationSessionId: null },
-    });
-    await app.redis.del(`driver:location_db_ts:${d.driverId}`);
-
-    const samples = [
-      { latitude: 6.811, longitude: -58.161 },
-      { latitude: 6.812, longitude: -58.162 },
-    ];
-    const responses = await Promise.all([
-      inject('PUT', '/api/v1/driver/location', samples[0], d.token),
-      inject('PUT', '/api/v1/driver/location', samples[1], secondDevice.token),
-    ]);
-    expect(responses.map((response) => response.statusCode)).toEqual([200, 200]);
-    const bodies = responses.map((response) => response.json());
-    expect(bodies.filter((body) => body.data?.reason === 'SESSION_REPLACED')).toHaveLength(1);
-    expect(bodies.filter((body) => body.data === undefined)).toHaveLength(1);
-
-    const winningIndex = bodies.findIndex((body) => body.data === undefined);
-    const expectedSessionIds = [d.sessionId, secondDevice.sessionId];
-    const claimed = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
-    expect(claimed.locationSessionId).toBe(expectedSessionIds[winningIndex]);
-    expect({ lat: claimed.currentLat, lng: claimed.currentLng }).toEqual({
-      lat: samples[winningIndex]!.latitude,
-      lng: samples[winningIndex]!.longitude,
-    });
-
-    await transitionUserRoleAuthority(app, d.userId, 'CUSTOMER');
-    const retired = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
-    expect(retired.locationSessionId).toBeNull();
-    expect({ online: retired.isOnline, available: retired.isAvailable }).toEqual({
-      online: false,
-      available: false,
-    });
-  });
 
   it('treats a queued offline sample as a no-op', async () => {
     const d = await makeDriver({ lat: 6.8, lng: -58.15 });

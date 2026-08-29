@@ -38,8 +38,8 @@ export const guyanaTiers = {
 
 export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
   // The single current SaaS tenant MUST exist before any tenant-owned row
-  // (users/vendors/orders default their tenantId to it via FK). CI uses
-  // `db push` + this seed, so the tenant is created here first.
+  // (users/vendors/orders default their tenantId to it via FK), so the tenant
+  // is created here first, before anything that references it.
   await prisma.tenant.upsert({
     where: { id: 'swift-default' },
     update: {},
@@ -47,13 +47,15 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
   });
 
   // Partial unique index Prisma cannot express: one LIVE booking per item per
-  // slot (CANCELLED frees the slot). CI uses `db push`, so it lands here.
+  // slot (CANCELLED frees the slot). Idempotent, so it is harmless alongside
+  // the migration that also creates it.
   await prisma.$executeRaw`
     CREATE UNIQUE INDEX IF NOT EXISTS "bookings_item_slot_live_key"
     ON "bookings"("itemId", "slotStart") WHERE "status" <> 'CANCELLED'
   `;
 
-  // PostGIS + the dispatch candidate index — also here for db push
+  // PostGIS + the dispatch candidate index. Idempotent (IF NOT EXISTS), so it
+  // is a no-op on a migrated database and a safety net on any other.
   await prisma.$executeRaw`CREATE EXTENSION IF NOT EXISTS postgis`;
   await prisma.$executeRaw`
     CREATE INDEX IF NOT EXISTS "riders_geo_gist"
