@@ -1417,6 +1417,12 @@ model Order {
   releasedToVendorAt    DateTime?
   placedAt              DateTime  @default(now())
   acceptedAt            DateTime?
+  /// [Band F] When the mover REPORTED arriving at the pickup point. The
+  /// customer's waiting clock and every no-show decision hang off this
+  /// moment, so it gets a column rather than being re-derived by scanning
+  /// the status log for the newest DRIVER_ARRIVED row. Named distinctly from
+  /// RunStop.arrivedAt so a query can never confuse the two.
+  driverArrivedAt   DateTime?
   preparingAt           DateTime?
   readyAt               DateTime?
   pickedUpAt            DateTime?
