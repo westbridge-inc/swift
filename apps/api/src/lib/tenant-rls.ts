@@ -56,6 +56,32 @@ export const TENANT_POLICY_NAME = 'tenant_isolation';
 const POLICY_PREDICATE = `("tenantId" = current_setting('app.current_tenant', true)
       OR pg_has_role(current_user, 'swift_bypass_rls', 'MEMBER'))`;
 
+/** Does a policy expression READ BACK from PostgreSQL still say what
+ *  POLICY_PREDICATE says?
+ *
+ *  [F-021-11 repair] It has to be a predicate over the stored expression
+ *  rather than string equality with the literal above: PostgreSQL reparses and
+ *  re-renders `qual`/`with_check` (adding `::text` casts, uppercasing
+ *  CURRENT_USER, normalising parentheses), so the text it hands back never
+ *  matches the text we sent. What must hold is the MEANING — scoped by the
+ *  request's tenant, and bypassed only by a role capability a constrained role
+ *  cannot grant itself.
+ *
+ *  This lives here, three lines under the predicate it describes, so the two
+ *  cannot drift apart unnoticed. `20260828120000_algo_config` is why it
+ *  exists: it installed its policy by copying an older migration's DDL text
+ *  instead of calling rlsDdlFor(), and shipped the retired GUC bypass onto the
+ *  one table holding the algorithm tunables. Every layer that should have
+ *  caught it was counting policies, not reading them. */
+export function policyPredicateIsCanonical(expression: string | null | undefined): boolean {
+  if (!expression) return false;
+  return expression.includes('app.current_tenant')
+    && expression.includes('pg_has_role')
+    // The retired form. Named explicitly because its absence is the whole
+    // point of the repair, and a silent re-appearance is what we are guarding.
+    && !expression.includes('app.bypass_tenant');
+}
+
 /** Idempotent DDL for one table. Also used by the test installer so db-push
  *  provisioned environments (CI API tests) carry the wall too. */
 export function rlsDdlFor(table: string): string[] {

@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { TENANT_TABLES, allRlsDdl, appRoleDdl } from '../lib/tenant-rls';
+import { TENANT_TABLES, allRlsDdl, appRoleDdl, policyPredicateIsCanonical } from '../lib/tenant-rls';
 import { installDdl } from './helpers/install-ddl';
 
 // [ELV-1 W-201 stage 1] The database tenant wall, VERIFIED. A NOBYPASSRLS
@@ -19,6 +19,12 @@ const A = `rls-a-${nanoid(6)}`;
 const B = `rls-b-${nanoid(6)}`;
 let userA: string;
 let userB: string;
+interface PolicyRow { relname: string; qual: string | null; withCheck: string | null }
+/** The wall AS FOUND, before the db-push healer touches anything. A migrated
+ *  database (Migration Replay, production) presents a full wall here and any
+ *  drift in it is a migration defect; a db-push database presents an empty
+ *  one, which is the healer's whole reason to exist. */
+let preHealSurvey: PolicyRow[] = [];
 
 async function probeCount(guc: Record<string, string>): Promise<number> {
   return app.prisma.$transaction(async (tx) => {
@@ -45,13 +51,25 @@ beforeAll(async () => {
   // install the wall from the same module the migration froze. Skip when
   // already complete: 51 ALTER TABLEs take brief ACCESS EXCLUSIVE locks the
   // rest of the parallel suite shouldn't have to queue behind.
-  const walled = await app.prisma.$queryRaw<{ n: bigint }[]>(Prisma.sql`
-    SELECT count(*)::bigint AS n FROM pg_class c
+  //
+  // [F-021-11 repair] "Complete" used to mean a COUNT of policies. A table
+  // walled with the WRONG predicate counts exactly like a table walled with
+  // the right one, so the installer skipped the one repair it existed to make
+  // — which is how `algo_config` kept the retired GUC bypass for a full day
+  // with this file, the census test and the CI gate all green. Read the
+  // predicate back and heal on drift, not on arithmetic.
+  preHealSurvey = await app.prisma.$queryRaw<PolicyRow[]>(Prisma.sql`
+    SELECT c.relname,
+           pg_get_expr(p.polqual, p.polrelid) AS qual,
+           pg_get_expr(p.polwithcheck, p.polrelid) AS "withCheck"
+    FROM pg_class c
     JOIN pg_namespace n2 ON n2.oid = c.relnamespace
     JOIN pg_policy p ON p.polrelid = c.oid AND p.polname = 'tenant_isolation'
     WHERE n2.nspname = 'public' AND c.relrowsecurity AND c.relname = ANY(${[...TENANT_TABLES]})`);
+  const sound = preHealSurvey.filter((r) =>
+    policyPredicateIsCanonical(r.qual) && policyPredicateIsCanonical(r.withCheck));
   const setup: string[] = [];
-  if (Number(walled[0]!.n) !== TENANT_TABLES.length) setup.push(...allRlsDdl());
+  if (sound.length !== TENANT_TABLES.length) setup.push(...allRlsDdl());
   // [W-201b] The real future app role + grants (idempotent, heals db-push envs).
   setup.push(...appRoleDdl());
   await installDdl(app.prisma, setup);
@@ -117,6 +135,48 @@ describe('database tenant wall [W-201 / F-201]', () => {
       WHERE n.nspname = 'public' AND c.relname = ANY(${[...TENANT_TABLES]})
         AND (NOT c.relrowsecurity OR p.oid IS NULL)`);
     expect(rows).toEqual([]);
+  });
+
+  // [F-021-11 repair] The three assertions above and the CI gate beside them
+  // all ask whether a policy EXISTS. None of them read it. `algo_config`
+  // shipped walled-but-wrong and every one of them stayed green, so the next
+  // two grade the predicate itself.
+  it('the wall AS FOUND carries no drifted predicate — a migration cannot install the retired GUC bypass', () => {
+    const drifted = preHealSurvey
+      .filter((r) => !policyPredicateIsCanonical(r.qual) || !policyPredicateIsCanonical(r.withCheck))
+      .map((r) => r.relname)
+      .sort();
+    // A db-push database presents an empty survey and passes vacuously — it
+    // has no migrations to have got wrong. A migrated one names the table.
+    expect(drifted).toEqual([]);
+  });
+
+  it('one definition, every table: all walled tables share a single policy expression', async () => {
+    const rows = await app.prisma.$queryRaw<PolicyRow[]>(Prisma.sql`
+      SELECT c.relname,
+             pg_get_expr(p.polqual, p.polrelid) AS qual,
+             pg_get_expr(p.polwithcheck, p.polrelid) AS "withCheck"
+      FROM pg_class c
+      JOIN pg_namespace n2 ON n2.oid = c.relnamespace
+      JOIN pg_policy p ON p.polrelid = c.oid AND p.polname = 'tenant_isolation'
+      WHERE n2.nspname = 'public' AND c.relname = ANY(${[...TENANT_TABLES]})`);
+    expect(rows).toHaveLength(TENANT_TABLES.length);
+
+    // Distinct-expression check rather than comparison against a literal:
+    // PostgreSQL re-renders what we sent it, so the only text we can trust is
+    // its own. If all 53 agree, no single table can have drifted; the
+    // canonical check below then catches the case where they drifted together.
+    const shapes = new Map<string, string[]>();
+    for (const r of rows) {
+      const key = `${r.qual}\n--with check--\n${r.withCheck}`;
+      shapes.set(key, [...(shapes.get(key) ?? []), r.relname].sort());
+    }
+    expect([...shapes.values()].map((tables) => tables.join(', '))).toHaveLength(1);
+
+    const [expression] = [...shapes.keys()];
+    expect(policyPredicateIsCanonical(expression)).toBe(true);
+    // Named directly, because its absence is the point of the repair.
+    expect(expression).not.toContain('app.bypass_tenant');
   });
 
   it('tenant A sees ONLY tenant A — through raw SQL, the path app scoping cannot reach', async () => {

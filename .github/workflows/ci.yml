@@ -354,6 +354,37 @@ jobs:
             exit 1
           fi
           echo "ok: $(echo "$expected" | grep -c .) tables walled, name-for-name"
+      - name: Tenant RLS predicate is the role capability, not the GUC
+        # [F-021-11 repair] The check above asks whether a policy EXISTS. It
+        # cannot see WHAT the policy says — so `20260828120000_algo_config`,
+        # which installed its policy by copying an older migration's DDL text
+        # instead of calling rlsDdlFor(), shipped the retired bypass:
+        #   OR current_setting('app.bypass_tenant', true) = 'on'
+        # A GUC is settable by the very role the wall constrains, which is why
+        # that form was replaced by membership in swift_bypass_rls. It passed
+        # the name-set diff, the census test and the suite, because all four
+        # were counting policies rather than reading them.
+        #
+        # This runs against swift_migrate — a database built by REPLAYING the
+        # migrations — so it grades the migrations themselves, with no test
+        # installer able to heal the answer first.
+        run: |
+          DB="postgresql://swift:swift@localhost:5432/swift_migrate"
+          drifted=$(psql "$DB" -tAc "
+            SELECT c.relname FROM pg_class c
+            JOIN pg_namespace ns ON ns.oid = c.relnamespace
+            JOIN pg_policy p ON p.polrelid = c.oid AND p.polname = 'tenant_isolation'
+            WHERE ns.nspname = 'public' AND c.relrowsecurity
+              AND (pg_get_expr(p.polqual, p.polrelid) NOT LIKE '%pg_has_role%'
+                OR pg_get_expr(p.polqual, p.polrelid) LIKE '%bypass_tenant%'
+                OR pg_get_expr(p.polwithcheck, p.polrelid) NOT LIKE '%pg_has_role%'
+                OR pg_get_expr(p.polwithcheck, p.polrelid) LIKE '%bypass_tenant%')
+            ORDER BY 1")
+          if [ -n "$drifted" ]; then
+            echo "::error::Tenant RLS predicate drifted on: $(echo $drifted). The bypass must be membership in the swift_bypass_rls ROLE, never the app.bypass_tenant GUC (REPORT-021 F-021-11). Install policies with rlsDdlFor() from src/lib/tenant-rls.ts — never by copying an older migration's DDL."
+            exit 1
+          fi
+          echo "ok: every walled table bypasses by role capability, none by GUC"
       - name: Schema matches migration state
         run: >
           cd apps/api && npx prisma migrate diff
