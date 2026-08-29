@@ -43,7 +43,15 @@ type Verdict =
   /** THE SEAM. The one file whose job is to answer the capacity question, so
    *  it names the columns on purpose. Distinct from MUST_MIGRATE because those
    *  break silently; this one is where the change is MEANT to happen. */
-  | 'SEAM';
+  | 'SEAM'
+  /** Was MUST_MIGRATE; has migrated. Capacity questions go through the seam
+   *  (riderLiveLegCount / reserveRiderLeg / settleRiderLegs), and any pointer
+   *  read that remains is a PRIMARY-leg read, which is safe under the
+   *  invariant the seam maintains: pointer-null ⇔ zero live legs
+   *  (reserveRiderLeg COALESCEs the first leg in; settleRiderLegs re-points
+   *  to the next live leg, else null). The `why` records what moved and in
+   *  which PR, so the migration is auditable rather than assumed. */
+  | 'MIGRATED';
 
 const CENSUS: Record<string, { verdict: Verdict; why: string }> = {
   // ── the seam ─────────────────────────────────────────────────────────────
@@ -52,30 +60,30 @@ const CENSUS: Record<string, { verdict: Verdict; why: string }> = {
     why: 'B1. It owns moverCapacity() and renders the live-leg predicate for all four gates, so it names both columns deliberately. Raising the capacity changes THIS file — that is the point of it. It arrived after this census was first written and the gate caught its own omission in CI, which is exactly the thirteenth-file failure §15.4 describes.',
   },
 
-  // ── must migrate ─────────────────────────────────────────────────────────
+  // ── migrated (Band B, 2026-08-29: #899 #902 #903 #904) ───────────────────
   'apps/api/src/modules/dispatch/dispatch.service.ts': {
-    verdict: 'MUST_MIGRATE',
-    why: 'candidate filtering, the offer gate and the claim CAS all require the pointer to be null, so a decided second order can neither be offered nor accepted. B1 routed these through concurrency-policy; raising the capacity is the migration.',
+    verdict: 'MIGRATED',
+    why: '#899: candidate filtering counts live legs at capacity>1 (capacityPredicateSql), the offer gate and both claim doors reserve through reserveRiderLeg. The pointer is no longer the capacity answer anywhere in this file.',
   },
   'apps/api/src/modules/rider/rider.routes.ts': {
-    verdict: 'MUST_MIGRATE',
-    why: ':809 publishes GPS/ETA to one room, so the sibling customer\'s map freezes; :840/:1039 reject a second job; :998 can mark the rider free while sibling work is still live.',
+    verdict: 'MIGRATED',
+    why: '#899: board, go-online/offline and accept gate on riderLiveLegCount. #903: the location publish fans out to every live leg\'s room with a per-leg chained ETA. The stale-pointer heal on the current-order read settles through the seam. What remains reads the pointer only as "the primary leg" (session authorization: online OR holds a leg).',
   },
   'apps/api/src/modules/driver/driver.routes.ts': {
-    verdict: 'MUST_MIGRATE',
-    why: ':555 publishes GPS/ETA to one room. Latent today because taxi is capacity one by policy, not by accident — but the shape is identical to the rider side.',
+    verdict: 'UNTOUCHED',
+    why: ':555 publishes GPS/ETA to one room. A taxi carries one passenger at a time by LAW, not by accident: moverCapacity(\'DRIVER\') is a literal 1 with no configuration path to widen it (#899 mutation-tested that a widened DRIVER is a law breach). With exactly one leg ever, one room is correct. If that law ever moves, this entry moves to MUST_MIGRATE first.',
   },
   'apps/api/src/modules/order/order.service.ts': {
-    verdict: 'MUST_MIGRATE',
-    why: 'direct assignment requires a null pointer; cancellation and completion clear it and mark the rider available instead of advancing to a still-live sibling leg.',
+    verdict: 'MIGRATED',
+    why: '#899: direct assignment reserves through reserveRiderLeg. #902/#904: release and the legacy cancellation cleanup settle through settleRiderLegs — the pointer advances to a still-live sibling and availability is the count against capacity, never a bare `true`.',
   },
   'apps/api/src/modules/mover-authority.ts': {
-    verdict: 'MUST_MIGRATE',
-    why: 'session revocation builds cleanup for the current leg ONLY, so a sibling can stay assigned to a revoked rider with no redispatch, no escalation, no customer notice and no float release. The outbox emitters downstream are already per-effect and correct — this producer is the defect.',
+    verdict: 'MIGRATED',
+    why: '#904: session revocation decides custody on EVERY live leg (locked in acceptance order): pre-handoff legs released with their own float and REDISPATCH, in-custody legs kept and ESCALATE, then the pointer settled by the seam. The outbox emitters downstream were already per-effect.',
   },
   'apps/api/src/modules/dispatch/delivery-watchdog.ts': {
-    verdict: 'MUST_MIGRATE',
-    why: 'finds a GPS-dark rider through one pointer and rescues that order; a sibling stays assigned and unrescued, and clearing the pointer removes even the routing key while its work is still live.',
+    verdict: 'MIGRATED',
+    why: '#902: the pointer finds the dark rider, then EVERY live leg gets its own custody decision; the rider is quarantined first and the pointer is settled once through the seam afterwards, re-pointing to a surviving in-custody leg rather than being nulled under it.',
   },
 
   // ── untouched under current-leg semantics ────────────────────────────────
@@ -174,7 +182,9 @@ describe('the singular-pointer census [B2 / SWIFT_CONCURRENCY §15.4]', () => {
     // The spec says "eleven of the twelve untouched". It is not eleven, and it
     // is not twelve. If these numbers move, the migration's scope moved with
     // them and someone should notice deliberately rather than in passing.
-    expect(counts).toEqual({ SEAM: 1, MUST_MIGRATE: 6, UNTOUCHED: 5, NAME_ONLY: 2 });
+    // 2026-08-29: the six MUST_MIGRATE files became five MIGRATED and one
+    // UNTOUCHED-by-law (taxi). Zero MUST_MIGRATE is the state Band B was for.
+    expect(counts).toEqual({ SEAM: 1, MIGRATED: 5, UNTOUCHED: 6, NAME_ONLY: 2 });
   });
 
   it('every entry carries a reason someone can act on', () => {
@@ -197,5 +207,66 @@ describe('the singular-pointer census [B2 / SWIFT_CONCURRENCY §15.4]', () => {
       const readsValue = /\.\s*current(Order|Ride)Id\b|current(Order|Ride)Id\s*:/.test(stripped);
       expect(readsValue, `${file} is registered NAME_ONLY but now reads the pointer — reclassify it`).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE INVARIANT, ENFORCED RATHER THAN OBSERVED.
+//
+// Everything MIGRATED above is safe only while pointer-null ⇔ zero live legs
+// holds, and that holds only while the pointer has exactly two writers:
+// reserveRiderLeg (COALESCEs the first leg in) and settleRiderLegs (re-points
+// to the next live leg, else null). A third writer — a bare `currentOrderId:
+// null` in some cleanup — is how the invariant dies silently. Two such
+// writers existed the day this was added (a legacy cancellation cleanup and a
+// stale-pointer heal) and were routed through the seam in the same change.
+// ---------------------------------------------------------------------------
+describe('rider.currentOrderId has exactly one home for its writers', () => {
+  const PRODUCTION_ROOTS = ['apps/api/src'];
+  const SEAM = 'apps/api/src/modules/dispatch/concurrency-policy.ts';
+  /** A one-time cutover script that nulled the pointer as it existed before
+   *  the seam. Historical and correct for what it did; it must never run again
+   *  against live stacking data, which is a separate guarantee. */
+  const HISTORICAL = new Set(['apps/api/src/modules/mover-authority-cutover-preparation.ts']);
+
+  function writesOfRiderPointer(file: string, src: string): string[] {
+    const hits: string[] = [];
+    const lines = src.split('\n');
+    lines.forEach((line, i) => {
+      // Prisma write: `currentOrderId: <value>` inside a `data:` block. A
+      // select (`: true`), a where (`{ not: null }`), a type (`: string`) and a
+      // response projection (`: rider.currentOrderId`) are not writes.
+      if (/currentOrderId\s*:\s*(null|[A-Za-z_$][\w.?$]*(\s*\?\?\s*null)?)\b/.test(line)
+        && !/currentOrderId\s*:\s*(true|string|rider\.currentOrderId|riderPreview\.currentOrderId)/.test(line)) {
+        // A write iff the NEAREST enclosing block opener above is `data:` —
+        // a `where:`/`select:`/`OR:` opened more recently means this is a
+        // predicate or projection, even when a `data:` block sits a few lines
+        // earlier in the same statement (liveness.service.ts has exactly that).
+        const window = lines.slice(Math.max(0, i - 8), i + 1).join('\n');
+        const upToMatch = window.slice(0, window.lastIndexOf('currentOrderId'));
+        const lastData = upToMatch.lastIndexOf('data:');
+        const lastRead = Math.max(upToMatch.lastIndexOf('where:'), upToMatch.lastIndexOf('select:'), upToMatch.lastIndexOf('OR:'));
+        if (lastData > lastRead) hits.push(`${file}:${i + 1}`);
+      }
+      // Raw SQL write: SET "currentOrderId" = …
+      if (/"currentOrderId"\s*=/.test(line) && !/WHERE|AND\s+/.test(line)) hits.push(`${file}:${i + 1}`);
+    });
+    return hits;
+  }
+
+  it('only the seam (and the historical cutover script) writes the pointer', () => {
+    const offenders = PRODUCTION_ROOTS
+      .flatMap((root) => walk(path.join(REPO_ROOT, root)))
+      .filter((f) => !f.includes('__tests__') && /\.ts$/.test(f))
+      .map((f) => path.relative(REPO_ROOT, f))
+      .filter((f) => f !== SEAM && !HISTORICAL.has(f))
+      .flatMap((f) => writesOfRiderPointer(f, readFileSync(path.join(REPO_ROOT, f), 'utf8')));
+    expect(offenders, 'route this write through settleRiderLegs / reserveRiderLeg instead').toEqual([]);
+  });
+
+  it('the seam itself still has both writers', () => {
+    const src = readFileSync(path.join(REPO_ROOT, SEAM), 'utf8');
+    expect(src).toContain('"currentOrderId" = COALESCE(r."currentOrderId", ${orderId})');
+    expect(src).toContain('currentOrderId: nextLeg?.id ?? null');
   });
 });

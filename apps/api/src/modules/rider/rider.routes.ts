@@ -12,7 +12,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
 import { FloatService } from '../dispatch/float.service';
-import { riderStackingCapacity, riderLiveLegCount } from '../dispatch/concurrency-policy';
+import { riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -1032,11 +1032,10 @@ export async function riderRoutes(app: FastifyInstance) {
     });
 
     if (!order) {
-      // Stale pointer — clean up.
-      await app.prisma.rider.update({
-        where: { id: rider.id },
-        data: { currentOrderId: null, isAvailable: true },
-      });
+      // Stale pointer — heal it through the seam: it re-points to any other
+      // live leg rather than nulling under one, and settles availability from
+      // the count instead of declaring the rider free.
+      await app.prisma.$transaction((tx) => settleRiderLegs(tx, rider.id, { prisma: app.prisma }));
       return { success: true, data: null };
     }
 
