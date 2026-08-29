@@ -901,7 +901,7 @@ export const vendorApi = {
   deleteBookingException: (id: string) => api.delete(`/vendor/bookings/exceptions/${id}`),
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; selfDeliveryEnabled?: boolean }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean }) =>
     api.put('/vendor/profile', data),
   importItems: (
     csv: string,
