@@ -74,6 +74,28 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
   //
   // delivery_base_fee stays for now: admin-audit.test.ts uses it as the
   // fixture for the config-write audit trail. Nothing else reads it.
+  // Stacking capacity — founder directive 2026-08-29: "riders and delivery
+  // guys can accept multiple orders, only taxis can't". Written as version 1
+  // of the AlgoConfig key the concurrency seam reads; a higher-version row
+  // with value 1 is the no-deploy kill switch. create-if-absent so replays
+  // never clobber a later founder-set version.
+  const stackingRow = await prisma.algoConfig.findFirst({
+    where: { tenantId: 'swift-default', key: 'stacking.riderCapacity' },
+    select: { id: true },
+  });
+  if (!stackingRow) {
+    await prisma.algoConfig.create({
+      data: {
+        tenantId: 'swift-default',
+        key: 'stacking.riderCapacity',
+        value: 2,
+        version: 1,
+        founderGated: true,
+        updatedBy: 'seed:founder-directive-2026-08-29',
+      },
+    });
+  }
+
   const configs = [
     { key: 'order_auto_reject_minutes', value: 5 },
     { key: 'delivery_base_fee', value: 500 },

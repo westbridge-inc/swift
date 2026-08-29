@@ -77,13 +77,20 @@ export function DispatchOfferCard({
   onDecline: () => void;
 }) {
   const total: number = offer.expiresInSeconds ?? 0;
-  const [secs, setSecs] = useState<number>(total);
+  const deadlineAt: number | undefined = (offer as { deadlineAt?: number }).deadlineAt;
+  const remaining = () =>
+    deadlineAt ? Math.max(0, Math.ceil((deadlineAt - Date.now()) / 1000)) : total;
+  const [secs, setSecs] = useState<number>(remaining());
   useEffect(() => {
-    if (!total) return;
-    setSecs(total);
-    const t = setInterval(() => setSecs((s) => (s <= 1 ? 0 : s - 1)), 1000);
+    if (!total && !deadlineAt) return;
+    setSecs(remaining());
+    // Recompute from the wall clock every tick: a backgrounded interval that
+    // fires late lands on the true remainder instead of resuming a stale
+    // decrement — the card can run out while unwatched, never lie on return.
+    const t = setInterval(() => setSecs(remaining()), 1000);
     return () => clearInterval(t);
-  }, [offer.orderId, total]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offer.orderId, total, deadlineAt]);
 
   const isDriver = kind === 'DRIVER';
   const fare = job ? jobAmount(job) : null;
@@ -432,7 +439,7 @@ export function MoverHomeScreen({ navigation }: any) {
   const active = useActiveJob(kind);
   const online = !!profile?.isOnline;
   const available = useAvailableJobs(kind, online);
-  const { offer, dismiss } = useDispatchOffers(kind, online);
+  const { offer, queuedBehind, dismiss } = useDispatchOffers(kind, online);
 
   const liveLocation = grantedLocationFix(latitude, longitude, locationStatus);
   const here = liveLocation
@@ -964,8 +971,14 @@ export function MoverHomeScreen({ navigation }: any) {
       </BottomSheet>
 
       {/* Incoming dispatch request — focused, above everything */}
-      {offer && online && !activeJob ? (
-        <DispatchOfferCard
+      {offer && online ? (
+        <>
+          {queuedBehind > 0 ? (
+            <View style={{ position: 'absolute', top: 8, alignSelf: 'center', zIndex: 30 }}>
+              <TonePill label={`${queuedBehind} more waiting`} tone="brand" />
+            </View>
+          ) : null}
+          <DispatchOfferCard
           offer={offer}
           job={jobs.find((j) => j.id === offer.orderId)}
           kind={k}
@@ -983,6 +996,7 @@ export function MoverHomeScreen({ navigation }: any) {
             dismiss();
           }}
         />
+        </>
       ) : null}
 
       {/* Play-mandated background-location disclosure. Rendered at the root so

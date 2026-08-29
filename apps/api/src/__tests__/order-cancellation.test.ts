@@ -438,7 +438,14 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
       app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'CANCELLED' } }),
     ]);
     expect(afterOrder).toEqual({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });
-    expect(afterRider.isAvailable).toBe(false);
+    // Stacking (2026-08-29): availability now means "room for another leg",
+    // so with capacity > 1 the winner of this race legitimately stays
+    // available. The invariants that matter here are unchanged: the leg is
+    // bound, the pointer holds it, the float is committed.
+    const winnerLegs = await app.prisma.order.count({
+      where: { riderId: rider.riderId, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'] } },
+    });
+    expect(winnerLegs).toBe(1);
     expect(afterRider.currentOrderId).toBe(order.id);
     expect(Number(afterRider.committedFloat)).toBe(1000);
     expect(cancelledLogs).toBe(0);

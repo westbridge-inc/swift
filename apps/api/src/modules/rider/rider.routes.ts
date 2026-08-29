@@ -12,6 +12,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
 import { FloatService } from '../dispatch/float.service';
+import { riderStackingCapacity, riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -573,7 +574,9 @@ export async function riderRoutes(app: FastifyInstance) {
         where: { id: rider.id },
         data: {
           isOnline: true,
-          isAvailable: !snapshot.currentOrderId,
+          // Stacking: available = room for another leg, from the live count —
+          // a rider mid-delivery with capacity spare is back on the board.
+          isAvailable: (await riderLiveLegCount(tx, rider.id)) < (await riderStackingCapacity(app.prisma)),
           currentLat: location.latitude,
           currentLng: location.longitude,
           lastLocationUpdate: new Date(),
@@ -610,14 +613,17 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/go-offline', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
 
-    if (rider.currentOrderId) {
+    if ((await riderLiveLegCount(app.prisma, rider.id)) > 0) {
       throw new ConflictError('You cannot go offline while you have an active delivery. Complete or cancel the current order first.');
     }
 
     // Database authority goes first. A concurrent offer accept and this CAS
-    // cannot both win; if a delivery pointer appears, the 409 keeps native GPS
-    // alive for the newly assigned job.
+    // cannot both win; the guarded update re-counts live legs INSIDE the
+    // transaction (stacking: the pointer alone no longer proves idleness).
     const updated = await app.prisma.$transaction(async (tx) => {
+      if ((await riderLiveLegCount(tx, rider.id)) > 0) {
+        throw new ConflictError('You cannot go offline while you have an active delivery. Complete or cancel the current order first.');
+      }
       const stopped = await tx.rider.updateMany({
         where: { id: rider.id, currentOrderId: null },
         data: { isOnline: false, isAvailable: false, locationSessionId: null },
@@ -838,8 +844,16 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!rider.isOnline || !rider.locationSessionId) {
       throw new AppError(400, 'OFFLINE', 'You must be online to see available orders');
     }
-    if (rider.currentOrderId) {
-      return { success: true, data: [], message: 'Complete your current delivery first' };
+    const boardCap = await riderStackingCapacity(app.prisma);
+    const liveLegs = await riderLiveLegCount(app.prisma, rider.id);
+    if (liveLegs >= boardCap) {
+      // At capacity. The copy stays honest for both worlds: singular at 1,
+      // plural above it.
+      return {
+        success: true,
+        data: [],
+        message: boardCap > 1 ? 'You are at your delivery limit — finish one to take another' : 'Complete your current delivery first',
+      };
     }
     if (rider.currentLat === null || rider.currentLng === null) {
       throw new ValidationError('Location not available. Please enable location services.');
@@ -1036,9 +1050,14 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'OFFLINE', 'You must be online to accept orders');
     }
 
-    // Must not have an active order already.
-    if (rider.currentOrderId) {
-      throw new ConflictError('You already have an active delivery. Complete it before accepting a new one.');
+    // Stacking: room is a COUNT vs capacity, not a null pointer. The seam's
+    // guarded reservation re-checks this atomically; this early gate exists
+    // only to answer fast with the honest copy.
+    const acceptCap = await riderStackingCapacity(app.prisma);
+    if ((await riderLiveLegCount(app.prisma, rider.id)) >= acceptCap) {
+      throw new ConflictError(acceptCap > 1
+        ? 'You are at your delivery limit — finish one before accepting another.'
+        : 'You already have an active delivery. Complete it before accepting a new one.');
     }
 
     // Atomic check: order must still be unassigned. findFirst (not findUnique)

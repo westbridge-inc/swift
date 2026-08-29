@@ -29,7 +29,8 @@ import {
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
 import { riderCounterpartySelect } from '../../utils/counterparty';
-import { capacityPredicateSql, capacityWhere } from './concurrency-policy';
+import { capacityPredicateSql, capacityWhere, riderStackingCapacity, riderLiveLegCount, reserveRiderLeg } from './concurrency-policy';
+import { stackVerdict } from './stack-eligibility';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -286,7 +287,7 @@ export class DispatchService {
   }
 
   /** Re-read database authority after installing the advisory Redis offer. */
-  private async canReceiveOffer(pool: DispatchPool, moverId: string): Promise<boolean> {
+  private async canReceiveOffer(pool: DispatchPool, moverId: string, riderCap = 1): Promise<boolean> {
     const count = pool === 'DRIVER'
       ? await this.prisma.driver.count({
           where: {
@@ -303,12 +304,20 @@ export class DispatchService {
             id: moverId,
             isOnline: true,
             isAvailable: true,
-            ...capacityWhere('RIDER'),
+            // capacity checked below against the live leg COUNT — the null
+            // pointer stops being the capacity answer under stacking.
             locationSessionId: { not: null },
             user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'RIDER'] } },
           },
         });
-    return count === 1;
+    if (count !== 1) return false;
+    if (pool === 'RIDER') {
+      // The capacity half of the re-check, from the orders table — the same
+      // truth the candidate SQL counted, so the two gates cannot disagree.
+      const legs = await riderLiveLegCount(this.prisma, moverId);
+      if (legs >= riderCap) return false;
+    }
+    return true;
   }
 
   /**
@@ -542,6 +551,9 @@ export class DispatchService {
      *  the same GROUP tier as BUS_15 (15 seats). */
     passengerCount?: number | null,
   ): Promise<DispatchCandidate[]> {
+    // Stacking: the RIDER pool's live capacity (AlgoConfig, cached ~30s;
+    // clamped 1..3; 1 = historical behaviour and the kill switch).
+    const riderCap = await riderStackingCapacity(this.prisma);
     const declined = await this.redis.smembers(declinedKey(orderId));
     const locationFreshSince = new Date(Date.now() - DISPATCH_LOCATION_FRESH_SECONDS * 1000);
 
@@ -625,7 +637,7 @@ export class DispatchService {
           JOIN "users" u ON u."id" = r."userId"
           WHERE r."isOnline" = true
             AND r."isAvailable" = true
-            ${capacityPredicateSql('RIDER')}
+            ${capacityPredicateSql('RIDER', riderCap)}
             AND r."locationSessionId" IS NOT NULL
             AND r."lastLocationUpdate" >= ${locationFreshSince}
             AND u."status" = 'ACTIVE'
@@ -773,6 +785,9 @@ export class DispatchService {
      *  stale/malformed job cannot dispatch an ID from a different tenant. */
     expectedTenantId?: string,
   ): Promise<{ offered?: string; exhausted?: boolean }> {
+    // Stacking: live RIDER capacity for this cascade round (cached ~30s; 1 =
+    // historical behaviour and the kill switch).
+    const riderCap = await riderStackingCapacity(this.prisma);
     // [F-014-06] The old widen/withdraw recursion is one flat loop: every
     // pass re-reads order authority (status can change mid-cascade), and the
     // terminal exhaust below is SINGLE-FLIGHT so concurrent triggers of one
@@ -862,7 +877,15 @@ export class DispatchService {
         // Revalidate after both pointers exist so either role-switch ordering is
         // safe: switch-before-install is caught here; install-before-switch is
         // removed by the switch's releaseHeldOffer call. Never emit to stale supply.
-        if (!(await this.canReceiveOffer(pool, top.riderId))) {
+        const stackedOfferBlocked = pool === 'RIDER' && riderCap > 1
+          ? await (async () => {
+              const legs = await riderLiveLegCount(this.prisma, top.riderId);
+              if (legs === 0) return false;
+              const v = await stackVerdict(this.prisma, top.riderId, orderId);
+              return !v.eligible; // refused pairs are logged inside, rule-named
+            })()
+          : false;
+        if (stackedOfferBlocked || !(await this.canReceiveOffer(pool, top.riderId, riderCap))) {
           const removed = await this.removeOfferIfOwned(orderId, top.riderId, attemptId);
           if (removed) {
             await this.redis.sadd(declinedKey(orderId), top.riderId);
@@ -1556,22 +1579,28 @@ export class DispatchService {
           throw new AppError(409, 'DRIVER_BUSY', 'You already have an active ride — finish it before taking another');
         }
       } else {
-        const reserved = await tx.rider.updateMany({
-          where: {
-            id: moverId,
-            isOnline: true,
-            isAvailable: true,
-            ...capacityWhere('RIDER'),
-            locationSessionId: { not: null },
-            user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'RIDER'] } },
-          },
-          data: {
-            isAvailable: false,
-            currentOrderId: orderId,
-          },
-        });
-        if (reserved.count === 0) {
-          throw new AppError(409, 'DRIVER_BUSY', 'You already have an active job — finish it before taking another');
+        // Stacking [B5]: BOTH claim doors (offer accept and board grab) come
+        // through this one reservation. The guarded raw update is the
+        // FloatService.commit idiom — the count condition and the write are one
+        // statement, so two concurrent claims cannot both slip under the cap.
+        const claimCap = await riderStackingCapacity(this.prisma);
+        if (claimCap > 1) {
+          // Between legs, the pairing must satisfy the batching rulebook — a
+          // refusal names its rule and rolls the claim CAS back with it.
+          const v = await stackVerdict(tx, moverId, orderId);
+          if (!v.eligible && v.legs > 0) {
+            throw new AppError(
+              409,
+              'STACK_INELIGIBLE',
+              `This job can't be stacked with your current delivery (${v.rule}: ${v.detail})`,
+            );
+          }
+        }
+        const reserved = await reserveRiderLeg(tx, moverId, orderId, claimCap);
+        if (!reserved) {
+          throw new AppError(409, 'DRIVER_BUSY', claimCap > 1
+            ? 'You are at your delivery limit — finish one before taking another'
+            : 'You already have an active job — finish it before taking another');
         }
         // D.3 — commit the rider's float for a CASH order (released on
         // delivery/cancel/fail) through the GUARDED atomic writer, from the

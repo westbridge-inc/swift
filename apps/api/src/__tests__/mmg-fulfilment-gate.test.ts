@@ -416,6 +416,14 @@ describe('paid money is never silently rewritten [REPORT-004 F-004-04]', () => {
 describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
   // The board-grab route requires a live GO session before it reads the order.
   async function riderOnline() {
+    // Capacity is now a COUNT of live orders, not a pointer (stacking,
+    // 2026-08-29). Earlier tests here "freed" the rider old-style by nulling
+    // the pointer while leaving their orders live — phantoms that now make the
+    // rider look at-capacity. Terminalize them so "online and free" is true.
+    await app.prisma.order.updateMany({
+      where: { riderId, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'] } },
+      data: { status: 'CANCELLED', riderId: null },
+    });
     const session = await app.prisma.session.findFirst({ where: { userId: rider.userId } });
     await app.prisma.rider.update({
       where: { id: riderId },

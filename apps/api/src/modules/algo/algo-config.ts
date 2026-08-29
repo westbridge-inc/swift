@@ -62,6 +62,16 @@ export const ALGO_DEFAULTS = {
    * that the algorithm document's seed list omits.
    */
   'batching.pairDedupMinutes': 30,
+  /**
+   * How many live delivery legs one RIDER may hold at once. The concurrency
+   * seam (dispatch/concurrency-policy.ts) resolves through this; the DRIVER
+   * pool never reads it — a taxi carries one passenger's custody at a time as
+   * law, not configuration. Default 1 = the platform's historical behaviour;
+   * the founder-directed launch value is seeded as a row (2026-08-29:
+   * "riders and delivery guys can accept multiple orders, only taxis can't").
+   * Clamped 1..3 at the reader; 1 is the kill switch, no deploy needed.
+   */
+  'stacking.riderCapacity': 1,
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;
