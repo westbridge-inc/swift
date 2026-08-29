@@ -43,15 +43,38 @@ const CATALOGUE: Record<VendorPreviewType, Array<{ name: string; basePrice: numb
   ],
 };
 
+// The sample dataset is what a PROSPECTIVE vendor is shown as "the working
+// experience", so none of its dates may be absolute. Written as fixed ISO
+// strings they were true on the day they were typed and have been rotting ever
+// since: the live queue reads as weeks stale and the billing card advertises a
+// bill that fell due last month — which is precisely the impression the preview
+// exists to avoid. Everything below is an offset from the moment it is built.
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+const agoIso = (ms: number, now: number) => new Date(now - ms).toISOString();
+const aheadIso = (ms: number, now: number) => new Date(now + ms).toISOString();
+
+/** A wall-clock time on a day relative to today, in the VIEWER's timezone —
+ *  a 10:00 appointment has to read as 10:00 in Georgetown, not as whatever
+ *  10:00Z lands on locally. */
+function atLocal(dayOffset: number, hour: number, minute: number, now: number): string {
+  const d = new Date(now);
+  d.setDate(d.getDate() + dayOffset);
+  d.setHours(hour, minute, 0, 0);
+  return d.toISOString();
+}
+
 // Type-tailored live orders. Services surface as APPOINTMENT; the rest DELIVERY.
-function ordersFor(type: VendorPreviewType) {
+function ordersFor(type: VendorPreviewType, now: number) {
   const fulfillment = type === 'SERVICE' ? 'APPOINTMENT' : 'DELIVERY';
   const orderType = type === 'RESTAURANT' ? 'FOOD_DELIVERY' : type === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : type === 'SERVICE' ? 'SERVICE' : 'STORE_DELIVERY';
   const rows = CATALOGUE[type];
   return [
-    { id: 'pv-o1', orderNumber: 'SW-3041', status: 'PENDING', orderType, fulfillment, isExpress: type === 'RESTAURANT', totalAmount: 2300, createdAt: '2026-07-28T13:40:00Z', customer: { firstName: 'Ava' }, items: [{ id: 'pv-o1-line-1', name: rows[0]!.name, quantity: 1 }] },
-    { id: 'pv-o2', orderNumber: 'SW-3040', status: 'ACCEPTED', orderType, fulfillment, totalAmount: 1600, createdAt: '2026-07-28T13:22:00Z', customer: { firstName: 'Ken' }, items: [{ id: 'pv-o2-line-1', name: rows[1 % rows.length]!.name, quantity: 2 }] },
-    { id: 'pv-o3', orderNumber: 'SW-3038', status: type === 'SERVICE' ? 'ACCEPTED' : 'READY_FOR_PICKUP', orderType, fulfillment, totalAmount: 3400, createdAt: '2026-07-28T12:58:00Z', customer: { firstName: 'Mara' }, items: [{ id: 'pv-o3-line-1', name: rows[2 % rows.length]!.name, quantity: 1 }] },
+    { id: 'pv-o1', orderNumber: 'SW-3041', status: 'PENDING', orderType, fulfillment, isExpress: type === 'RESTAURANT', totalAmount: 2300, createdAt: agoIso(6 * MINUTE, now), customer: { firstName: 'Ava' }, items: [{ id: 'pv-o1-line-1', name: rows[0]!.name, quantity: 1 }] },
+    { id: 'pv-o2', orderNumber: 'SW-3040', status: 'ACCEPTED', orderType, fulfillment, totalAmount: 1600, createdAt: agoIso(24 * MINUTE, now), customer: { firstName: 'Ken' }, items: [{ id: 'pv-o2-line-1', name: rows[1 % rows.length]!.name, quantity: 2 }] },
+    { id: 'pv-o3', orderNumber: 'SW-3038', status: type === 'SERVICE' ? 'ACCEPTED' : 'READY_FOR_PICKUP', orderType, fulfillment, totalAmount: 3400, createdAt: agoIso(48 * MINUTE, now), customer: { firstName: 'Mara' }, items: [{ id: 'pv-o3-line-1', name: rows[2 % rows.length]!.name, quantity: 1 }] },
   ];
 }
 
@@ -86,6 +109,7 @@ const LOYALTY_BASE: Record<VendorPreviewType, { totalCustomers: number; repeatCu
 };
 
 export function vendorPreviewDataset(type: VendorPreviewType): VendorPreviewDataset {
+  const now = Date.now();
   const store = {
     id: 'pv-store',
     name: TYPE_LABEL[type],
@@ -101,7 +125,7 @@ export function vendorPreviewDataset(type: VendorPreviewType): VendorPreviewData
     region: 'Demerara-Mahaica',
     prepTimeMinutes: type === 'RESTAURANT' ? 20 : 10,
   };
-  const orders = ordersFor(type);
+  const orders = ordersFor(type, now);
   const items = CATALOGUE[type].map((r, i) => ({
     id: `pv-item-${i}`,
     name: r.name,
@@ -122,7 +146,7 @@ export function vendorPreviewDataset(type: VendorPreviewType): VendorPreviewData
     busyHours: [11, 12, 13, 18, 19, 20].map((h) => ({ hour: h, orders: 6 + (h % 5) })),
     popularItems: items.slice(0, 3).map((it, i) => ({ name: it.name, count: 40 - i * 8, revenue: (40 - i * 8) * it.basePrice })),
     hours: DAY_LABELS.map((d) => ({ day: d, open: '09:00', close: '21:00', closed: false })),
-    subscription: { status: 'ACTIVE', type: 'VENDOR', weeklyRate: type === 'RESTAURANT' ? 20000 : 15000, currencyCode: 'GYD', currentPeriodEnd: '2026-08-04T00:00:00Z', nextBillingDate: '2026-08-04T00:00:00Z' },
+    subscription: { status: 'ACTIVE', type: 'VENDOR', weeklyRate: type === 'RESTAURANT' ? 20000 : 15000, currencyCode: 'GYD', currentPeriodEnd: aheadIso(5 * DAY, now), nextBillingDate: aheadIso(5 * DAY, now) },
     // useVendorMenu shape: categories with items (grocery/goods) or a flat menu.
     menu: { categories: [{ id: 'pv-cat', name: type === 'SERVICE' ? 'Services' : type === 'SUPERMARKET' ? 'Groceries' : 'Menu', items }] },
     // A fully-approved store so the dashboard shows the working experience.
@@ -130,9 +154,9 @@ export function vendorPreviewDataset(type: VendorPreviewType): VendorPreviewData
     // Services surface a schedule; the goods types have no appointments.
     bookings: type === 'SERVICE'
       ? [
-          { id: 'pv-b1', serviceName: items[0]!.name, price: items[0]!.basePrice, slotStart: '2026-07-28T10:00:00Z', slotEnd: '2026-07-28T10:45:00Z', status: 'RESERVED', orderId: null, customer: { firstName: 'Ava' } },
-          { id: 'pv-b2', serviceName: items[1 % items.length]!.name, price: items[1 % items.length]!.basePrice, slotStart: '2026-07-28T13:30:00Z', slotEnd: '2026-07-28T14:00:00Z', status: 'CONFIRMED', orderId: null, customer: { firstName: 'Ken' } },
-          { id: 'pv-b3', serviceName: items[2 % items.length]!.name, price: items[2 % items.length]!.basePrice, slotStart: '2026-07-29T11:00:00Z', slotEnd: '2026-07-29T12:30:00Z', status: 'RESERVED', orderId: null, customer: { firstName: 'Mara' } },
+          { id: 'pv-b1', serviceName: items[0]!.name, price: items[0]!.basePrice, slotStart: atLocal(0, 10, 0, now), slotEnd: atLocal(0, 10, 45, now), status: 'RESERVED', orderId: null, customer: { firstName: 'Ava' } },
+          { id: 'pv-b2', serviceName: items[1 % items.length]!.name, price: items[1 % items.length]!.basePrice, slotStart: atLocal(0, 13, 30, now), slotEnd: atLocal(0, 14, 0, now), status: 'CONFIRMED', orderId: null, customer: { firstName: 'Ken' } },
+          { id: 'pv-b3', serviceName: items[2 % items.length]!.name, price: items[2 % items.length]!.basePrice, slotStart: atLocal(1, 11, 0, now), slotEnd: atLocal(1, 12, 30, now), status: 'RESERVED', orderId: null, customer: { firstName: 'Mara' } },
         ]
       : [],
     loyalty: {

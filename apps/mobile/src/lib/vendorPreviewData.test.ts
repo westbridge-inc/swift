@@ -93,3 +93,58 @@ describe('vendorPreview store', () => {
     useVendorPreview.getState().exitPreview();
   });
 });
+
+// ---------------------------------------------------------------------------
+// The preview is what a prospective vendor is shown as "the working experience".
+// Its dates were written as absolute ISO strings, so by the time this was found
+// on a real device the sample advertised a bill that fell due three weeks
+// earlier and a queue of month-old orders. Absolute dates in a canned dataset
+// do not fail on the day they are written — they fail silently, later, in front
+// of exactly the person the sample is meant to convince.
+//
+// These assert the PROPERTY (the sample is current) rather than any value, so
+// they cannot rot the same way.
+// ---------------------------------------------------------------------------
+describe('the sample never goes stale', () => {
+  const TYPES = ['RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE'] as const;
+
+  it.each(TYPES)('%s: the next bill is ahead of today, never behind it', (type) => {
+    const { subscription } = vendorPreviewDataset(type);
+    const next = new Date(subscription.nextBillingDate).getTime();
+    expect(next).toBeGreaterThan(Date.now());
+    // The advertised rate is WEEKLY, so a next-bill date further out than a
+    // week would be describing a plan the vendor is not being sold.
+    expect(next - Date.now()).toBeLessThanOrEqual(7 * 24 * 60 * 60 * 1000);
+    expect(new Date(subscription.currentPeriodEnd).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it.each(TYPES)('%s: the live queue is live — every order arrived within the hour', (type) => {
+    const { orders } = vendorPreviewDataset(type);
+    expect(orders.length).toBeGreaterThan(0);
+    for (const o of orders) {
+      const age = Date.now() - new Date(o.createdAt).getTime();
+      expect(age).toBeGreaterThanOrEqual(0);          // never dated in the future
+      expect(age).toBeLessThanOrEqual(60 * 60 * 1000); // a queue, not an archive
+    }
+  });
+
+  it('SERVICE: the schedule is today and tomorrow, not a past week', () => {
+    const { bookings } = vendorPreviewDataset('SERVICE');
+    expect(bookings.length).toBeGreaterThan(0);
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+    for (const b of bookings) {
+      expect(new Date(b.slotStart).getTime()).toBeGreaterThanOrEqual(startOfToday.getTime());
+      expect(new Date(b.slotEnd).getTime()).toBeGreaterThan(new Date(b.slotStart).getTime());
+    }
+  });
+
+  it('no absolute date literal survives in the dataset source', async () => {
+    // The three assertions above pass for a dataset that hardcodes dates far
+    // enough in the future to still be valid today. This is what actually stops
+    // the pattern coming back.
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('./vendorPreviewData.ts', import.meta.url), 'utf8');
+    const stripped = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    expect(stripped).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
+  });
+});

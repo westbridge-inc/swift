@@ -2170,11 +2170,15 @@ function VendorRoot() {
         <VendorTabs />
       )}
       {/* Per-store keying prevents an ordinary A→B switch from masquerading
-          as B's approval moment. A real status flip within one store persists. */}
-      <VendorWentLiveLayer key={store.id} status={String(store.status ?? '')} />
+          as B's approval moment. A real status flip within one store persists.
+          The key is PREFIXED because these two layers are siblings: keyed on the
+          bare store id they collide with each other on every vendor session, and
+          React's response to duplicate sibling keys is explicitly unspecified —
+          which would put the remount this comment relies on at its mercy. */}
+      <VendorWentLiveLayer key={`went-live-${store.id}`} status={String(store.status ?? '')} />
       {/* Keying this layer by store also clears queued alerts during a store
           handoff; the old socket is disconnected before the cache reset. */}
-      {store.status === 'ACTIVE' ? <VendorLiveOrderLayer key={store.id} vendorId={store.id} /> : null}
+      {store.status === 'ACTIVE' ? <VendorLiveOrderLayer key={`live-orders-${store.id}`} vendorId={store.id} /> : null}
     </>
   );
 }
