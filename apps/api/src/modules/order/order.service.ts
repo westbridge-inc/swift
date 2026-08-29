@@ -661,6 +661,8 @@ export class OrderService {
         itemId: string; name: string; quantity: number; basePrice: number;
         unitPrice: number; totalBase: number; specialInstructions?: string | null;
         options: ResolvedOption[]; tracksStock: boolean;
+        /** [G2] Snapshot of Item.bulkUnits at checkout — see the create below. */
+        bulkUnits: number | null;
       }>;
     }> = [];
 
@@ -838,6 +840,7 @@ export class OrderService {
           specialInstructions: ci.specialInstructions,
           options,
           tracksStock: ci.item.stockQuantity !== null,
+          bulkUnits: ci.item.bulkUnits ?? null,
         };
       });
       const subtotal = orderItems.reduce((s, i) => s + i.totalBase, 0);
@@ -1190,6 +1193,13 @@ export class OrderService {
                 totalMarkup: 0,
                 totalCustomer: oi.totalBase,
                 specialInstructions: oi.specialInstructions,
+                // [G2] SNAPSHOT, like name and every price above (ADR
+                // SWIFT-AUD-D5-04): itemId is a loose reference with no FK, so
+                // a vendor marking rice bulky next week must not change what
+                // THIS order weighed when it was dispatched. Read by the load
+                // gate shadow (#894) and by stack-eligibility's size class —
+                // until this line, both saw NULL for every order ever placed.
+                bulkUnits: oi.bulkUnits,
                 ...(oi.options.length > 0 && {
                   selectedOptions: {
                     create: oi.options.map((o) => ({
