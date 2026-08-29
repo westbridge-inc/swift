@@ -57,6 +57,7 @@ import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 import { DocumentChecklist } from '../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../components/onboarding/PricingCard';
 import { MmgPayLinkCard } from '../../components/MmgPayLinkCard';
+import { PublicCallNumberCard } from '../../components/PublicCallNumberCard';
 import { CopyButton } from '../../components/billing/BillingSurfaces';
 import { StandingCard } from '../../components/StandingCard';
 import { API_URL, vendorApi } from '../../services/api';
@@ -4173,6 +4174,22 @@ function VendorAccountScreen() {
     mutationFn: (mmgPayUrl: string | null) => vendorApi.updateProfile({ mmgPayUrl }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
   });
+  // The server owns what a publishable number is (a complete +592 subscriber
+  // line), so a rejection is surfaced in ITS words rather than re-guessed here —
+  // two opinions about a valid number is how a shopkeeper gets told their own
+  // shop number is wrong for a reason that is not true.
+  const [callNumberError, setCallNumberError] = useState<string | null>(null);
+  const saveCallNumber = useMutation({
+    mutationFn: (publicPhone: string | null) => vendorApi.updateProfile({ publicPhone }),
+    onMutate: () => setCallNumberError(null),
+    onSuccess: () => {
+      setCallNumberError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setCallNumberError(
+      e?.response?.data?.error?.message ?? 'That number could not be saved. Check it and try again.',
+    ),
+  });
 
   const [days, setDays] = useState<DayHours[]>([]);
   useEffect(() => {
@@ -4231,6 +4248,15 @@ function VendorAccountScreen() {
             value={store?.mmgPayUrl}
             saving={saveMmgLink.isPending}
             onSave={(u) => saveMmgLink.mutate(u)}
+          />
+        ) : null}
+
+        {isManager ? (
+          <PublicCallNumberCard
+            value={store?.publicPhone}
+            saving={saveCallNumber.isPending}
+            error={callNumberError}
+            onSave={(p) => saveCallNumber.mutate(p)}
           />
         ) : null}
 

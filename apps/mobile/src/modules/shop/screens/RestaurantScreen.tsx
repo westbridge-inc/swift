@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useMemo, useState } from 'react';
-import { Dimensions, FlatList, Pressable, ScrollView, Share, TextInput, View } from 'react-native';
+import { Dimensions, FlatList, Linking, Pressable, ScrollView, Share, TextInput, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -10,6 +10,7 @@ import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
 import {
@@ -462,6 +463,43 @@ export function RestaurantScreen() {
                 </T>
                 <Feather name="chevron-right" size={20} color={color.text.muted} />
               </View>
+              )}
+            </Pressable>
+          ) : null}
+
+          {/* The store's own number, published by the store. Shown whether or
+              not it is open: a closed store is exactly when someone wants to
+              ask when it reopens. The server withholds this for suspended and
+              unapproved stores, so its presence here is already the decision —
+              this renders what it is given and adds no rule of its own. */}
+          {v.publicPhone ? (
+            <Pressable
+              onPress={() => { void Linking.openURL(`tel:${v.publicPhone}`); }}
+              accessibilityRole="button"
+              accessibilityLabel={`Call ${v.name} on ${formatPhoneForDisplay(v.publicPhone)}`}
+            >
+              {({ pressed }) => (
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: space.md,
+                    paddingHorizontal: GUTTER,
+                    marginTop: space.xl,
+                    opacity: pressed ? 0.7 : 1,
+                  }}
+                >
+                  <IconChip icon="phone" />
+                  <View style={{ flex: 1 }}>
+                    <T variant="body" weight="medium">
+                      Call the store
+                    </T>
+                    <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                      {formatPhoneForDisplay(v.publicPhone)}
+                    </T>
+                  </View>
+                  <Feather name="chevron-right" size={20} color={color.text.muted} />
+                </View>
               )}
             </Pressable>
           ) : null}
