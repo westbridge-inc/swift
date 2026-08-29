@@ -135,3 +135,35 @@ export function requiredPackageSizeForOrder(
   if (total <= 0) return null;
   return bandForBulk(total, bands);
 }
+
+// ---------------------------------------------------------------------------
+// [G2] The words a shopkeeper picks, and the units they mean.
+//
+// The spec: "surface it in the vendor item editor as a three-way choice
+// (normal / bulky / very bulky), never as a raw integer — a shopkeeper should
+// not be asked to think in units." So the integer never crosses the wire in
+// EITHER direction: the API accepts a word and stores units, and returns the
+// word beside the row. This table is the only place the two are related; a
+// client that invented its own mapping would make two shops' "bulky" mean two
+// different loads.
+// ---------------------------------------------------------------------------
+
+export type BulkChoice = 'normal' | 'bulky' | 'very_bulky';
+export const BULK_CHOICES: readonly BulkChoice[] = ['normal', 'bulky', 'very_bulky'];
+
+/** normal = an ordinary item (stored as NULL, exactly what every existing row
+ *  already is). bulky ≈ a crate of drinks. very_bulky ≈ a 20 kg bag of rice —
+ *  the spec's own example, at 8. */
+const UNITS_FOR_CHOICE: Record<BulkChoice, number | null> = { normal: null, bulky: 4, very_bulky: 8 };
+
+export function bulkUnitsForChoice(choice: BulkChoice): number | null {
+  return UNITS_FOR_CHOICE[choice];
+}
+
+/** The inverse, for reads. Any stored value that is not one of the three
+ *  (a hand edit, an import) rounds to the nearest word rather than erroring —
+ *  a menu must never fail to render over a load hint. */
+export function bulkChoiceForUnits(units: number | null | undefined): BulkChoice {
+  if (units == null || units <= DEFAULT_BULK_UNITS) return 'normal';
+  return units < UNITS_FOR_CHOICE.very_bulky! ? 'bulky' : 'very_bulky';
+}

@@ -803,6 +803,9 @@ export interface VendorItemInput {
   isPopular?: boolean;
   sku?: string;
   unit?: string;
+  /** [G2] How much room one unit takes — a WORD, never a number. The server
+   *  owns what each word means in units, so every shop's "bulky" is the same. */
+  bulk?: 'normal' | 'bulky' | 'very_bulky';
   stockQuantity?: number;
   imageUrl?: string;
 }
