@@ -9,7 +9,10 @@ const locationWhenInUse =
 const locationAlways =
   'Swift keeps your live position on the map while you are online for deliveries or rides.';
 const cameraPermission =
-  'Swift uses the camera for your profile selfie and to photograph documents and deliveries.';
+  // Scanning a store's QR code is a NEW use of the camera [SCAN-1]. The prompt
+  // is the only place a person is told what the camera is for, so a use the
+  // string does not name is a use they never agreed to.
+  'Swift uses the camera for your profile selfie, to photograph documents and deliveries, and to scan a store QR code.';
 const photosPermission =
   'Swift needs your photo library so you can attach an existing photo to a delivery, a document or a support message.';
 

@@ -16,6 +16,7 @@ import { CategoryGridScreen } from '../modules/shop/screens/CategoryGridScreen';
 import { RestaurantScreen } from '../modules/shop/screens/RestaurantScreen';
 import { MenuItemScreen } from '../modules/shop/screens/MenuItemScreen';
 import { FavoritesScreen } from '../modules/shop/screens/FavoritesScreen';
+import { ScanScreen } from '../modules/shop/screens/ScanScreen';
 import { VendorReviewsScreen } from '../modules/shop/screens/VendorReviewsScreen';
 import { CartScreen } from '../modules/cart/screens/CartScreen';
 import { OrdersHistoryScreen } from '../modules/orders/screens/OrdersHistoryScreen';
@@ -137,6 +138,7 @@ export function CustomerStack() {
       <Stack.Screen name="Restaurant" component={RestaurantScreen} />
       <Stack.Screen name="MenuItem" component={MenuItemScreen} />
       <Stack.Screen name="Favorites" component={FavoritesScreen} />
+      <Stack.Screen name="Scan" component={ScanScreen} />
       <Stack.Screen name="VendorReviews" component={VendorReviewsScreen} />
       {/* Orders */}
       <Stack.Screen name="OrdersHistory" component={OrdersHistoryScreen} />

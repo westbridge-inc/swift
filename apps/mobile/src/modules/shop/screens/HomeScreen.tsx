@@ -61,10 +61,16 @@ const HERO_CARD_W = Math.round(SCREEN_W * 0.72);
 // Home. Icons are the Swift pictogram set (design-100× 9.6) — one hand, never
 // glyph-font clipart, never emoji. All destinations are REAL routes.
 // [MKT-2] "Shops" is NOT here any more, and that is the point: goods got
-// promoted from a tile to the Market tab. Seven tiles, not eight — Food,
-// Groceries, Taxi, Send, Services, Orders, Favourites. Orders now opens the
-// OrdersHistory stack screen directly, because the Activity tab it used to jump
-// to no longer exists (the same history is also in Profile -> My orders).
+// promoted from a tile to the Market tab. Orders opens the OrdersHistory stack
+// screen directly, because the Activity tab it used to jump to no longer exists
+// (the same history is also in Profile -> My orders).
+//
+// [SCAN-1] The eighth tile is Scan, and it is NOT Shops returning — MKT-2's
+// decision stands, goods still live in the Market tab. Scan is here because the
+// vendor dashboard has told stores "Customers scan this to order" since the QR
+// feature shipped while the customer app had no scanner, and because
+// POST /qr/:code/app-open exists to record an in-app open and had no caller.
+// It is a door onto something already built, not a new destination.
 const SERVICES: {
   key: PictogramName;
   label: string;
@@ -77,6 +83,7 @@ const SERVICES: {
   { key: 'services', label: 'Services', nav: (n) => n.navigate('Services') },
   { key: 'orders', label: 'Orders', nav: (n) => n.navigate('OrdersHistory') },
   { key: 'favourites', label: 'Favourites', nav: (n) => n.navigate('Favorites') },
+  { key: 'scan', label: 'Scan', nav: (n) => n.navigate('Scan') },
 ];
 
 // Status wording moved to lib/orderStatus.ts: it has to know the order

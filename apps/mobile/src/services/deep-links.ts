@@ -28,27 +28,67 @@ const FAIL_TOAST = "That link didn't work — here's home instead.";
 let pendingUrl: string | null = null;
 let installed = false;
 
-async function resolveAndGo(dest: LinkDestination): Promise<void> {
-  if (dest.kind === 'short') {
-    // The app-side twin of GET /s/:code — same classify, JSON instead of 302.
-    const res = await api.get(`/public/qr/${dest.code}`);
-    const data = res.data?.data as { verdict: string; vendorId: string | null } | undefined;
-    reportAppOpen(dest.code);
-    if (data?.verdict === 'WEB_RENDER' && data.vendorId) {
-      if (!safeNavigate('Restaurant', { vendorId: data.vendorId })) throw new Error('nav');
-      return;
+/**
+ * Why a code did not open a store. The IN-APP SCANNER needs these apart — the
+ * person is standing at the counter holding the phone and "replaced" and "not
+ * a Swift code" call for different next moves — whereas a deep link that
+ * already dumped them on Home only needs one apology.
+ *
+ * `unavailable` never says WHY: the server deliberately collapses "no such
+ * entity" and "not publicly live" into one verdict so the endpoint cannot be
+ * used to enumerate stores, and repeating that reason here would undo it.
+ */
+export type ResolveFailure = 'not-a-swift-code' | 'replaced' | 'unavailable' | 'offline';
+export type ResolveOutcome =
+  | { ok: true; vendorId: string }
+  | { ok: false; reason: ResolveFailure };
+
+/**
+ * ONE resolver for a scanned code and a tapped link. They are the same
+ * question — "what store is this, and may it be shown?" — and the server owns
+ * the answer. A second copy in the scanner is how the two would come to
+ * disagree about a retired code.
+ *
+ * Also files the APP_OPEN funnel event, which is the reason
+ * POST /qr/:code/app-open exists and has had no caller from the scanner path.
+ */
+export async function resolveDestination(dest: LinkDestination): Promise<ResolveOutcome> {
+  try {
+    if (dest.kind === 'short') {
+      // The app-side twin of GET /s/:code — same classify, JSON instead of 302.
+      const res = await api.get(`/public/qr/${dest.code}`);
+      const data = res.data?.data as { verdict?: string; vendorId?: string | null } | undefined;
+      reportAppOpen(dest.code);
+      if (data?.verdict === 'WEB_RENDER' && data.vendorId) return { ok: true, vendorId: data.vendorId };
+      if (data?.verdict === 'RETIRED_PAGE') return { ok: false, reason: 'replaced' };
+      if (data?.verdict === 'UNAVAILABLE_PAGE') return { ok: false, reason: 'unavailable' };
+      return { ok: false, reason: 'not-a-swift-code' };
     }
-    toast.show(FAIL_TOAST);
+    // /store/{slug}: the public storefront endpoint resolves slug → id.
+    const res = await api.get(`/public/storefronts/${dest.slug}`);
+    const vendorId = (res.data?.data as { id?: string } | undefined)?.id;
+    reportAppOpen(dest.code);
+    return vendorId ? { ok: true, vendorId } : { ok: false, reason: 'unavailable' };
+  } catch {
+    // A dead network is NOT a dead code. Saying "this code is invalid" to
+    // someone holding a perfectly good printed sign is the lie this separates.
+    return { ok: false, reason: 'offline' };
+  }
+}
+
+async function resolveAndGo(dest: LinkDestination): Promise<void> {
+  const outcome = await resolveDestination(dest);
+  if (outcome.ok) {
+    if (!safeNavigate('Restaurant', { vendorId: outcome.vendorId })) throw new Error('nav');
     return;
   }
-  // /store/{slug}: the public storefront endpoint resolves slug → id.
-  const res = await api.get(`/public/storefronts/${dest.slug}`);
-  const vendorId = (res.data?.data as { id?: string } | undefined)?.id;
-  reportAppOpen(dest.code);
-  if (vendorId) {
-    if (!safeNavigate('Restaurant', { vendorId })) throw new Error('nav');
-    return;
-  }
+  // A network failure must still THROW here. handleUrl's catch is what queues a
+  // cold-start link for RootNavigator's onReady to flush, and on a cold start
+  // the request can fail simply because the app is still coming up. Swallowing
+  // it would turn a link that used to open on the retry into a dead toast.
+  // resolveDestination folds that case into a value for the scanner's benefit;
+  // this path puts it back.
+  if (outcome.reason === 'offline') throw new Error('resolve');
   toast.show(FAIL_TOAST);
 }
 
