@@ -33,6 +33,7 @@ import {
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
+import { vendorResponseSlaMinutes } from '../order/response-sla';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
  *  constrained to the known set — never a hardcoded guess. */
@@ -1943,7 +1944,11 @@ export async function customerRoutes(app: FastifyInstance) {
       // [F036-03b] Same default as holdWindowMs (5, the settled value) — the
       // preview and the writer must never disagree about the window.
       const holdMin = process.env['LIFECYCLE_V2'] === '1' ? Number(process.env['ORDER_HOLD_MINUTES'] ?? 5) : 0;
-      const slaMin = Number(process.env['VENDOR_RESPONSE_SLA_MINUTES'] ?? 10);
+      // The response window now comes from `order_auto_reject_minutes` in
+      // PlatformConfig — the field the admin config page has always shown and
+      // nothing has ever read. Falls back to the env var, then to the shipped
+      // default, so a missing row can never leave an order without a deadline.
+      const slaMin = await vendorResponseSlaMinutes(app.prisma);
       for (const order of result.orders) {
         await app.queues.notificationQueue.add('vendor-alert-escalate', { orderId: order.id, level: 0 }, {
           // Alerts spec §A1 ladder: second alert at +30s when loud alerts are
