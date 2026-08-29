@@ -5,7 +5,7 @@ import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrde
 import { estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
-import { riderStackingCapacity, riderLiveLegCount, reserveRiderLeg } from '../dispatch/concurrency-policy';
+import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
 import { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus } from './order-status';
 import { NotificationService } from '../notification/notification.service';
@@ -1492,27 +1492,13 @@ export class OrderService {
       safeToFree = newerLiveJob == null;
     }
     if (!safeToFree) return;
-    // Stacking: the finished leg may not be the only one. Re-point the primary
-    // pointer at another live leg (single-job readers keep working), and
-    // availability comes from the live count vs capacity — not from "pointer
-    // is null", which stops being the capacity answer above 1. This order's
-    // status flipped terminal earlier in this same transaction, so the count
-    // below already excludes it.
-    const nextLeg = await tx.order.findFirst({
-      where: { riderId, id: { not: orderId }, status: { notIn: TERMINAL_ORDER_STATUSES } },
-      orderBy: { acceptedAt: 'asc' },
-      select: { id: true },
-    });
-    const stackCap = await riderStackingCapacity(this.prisma);
-    const legsLeft = await riderLiveLegCount(tx, riderId);
-    await tx.rider.update({
-      where: { id: riderId },
-      data: {
-        isAvailable: legsLeft < stackCap,
-        currentOrderId: nextLeg?.id ?? null,
-        ...(countDelivery ? { totalDeliveries: { increment: 1 } } : {}),
-      },
-    });
+    // Stacking: the finished leg may not be the only one. The re-point rule
+    // ("next live leg, else null; available iff legs < capacity") lives in the
+    // seam so the delivery watchdog ends a leg the same way this does. This
+    // order's status flipped terminal earlier in this same transaction, so the
+    // count already excludes it; excludeOrderId guards the same-transaction
+    // read either way.
+    await settleRiderLegs(tx, this.prisma, riderId, { excludeOrderId: orderId, countDelivery });
   }
 
   /** Driver equivalent of stageRiderRelease (currentRideId is the authority). */

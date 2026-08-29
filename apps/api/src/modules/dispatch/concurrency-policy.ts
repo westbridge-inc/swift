@@ -111,8 +111,16 @@ export async function riderLiveLegCount(tx: Tx, riderId: string): Promise<number
  * `count < capacity`. The pointer COALESCEs — a first leg sets it, a stacked
  * leg leaves the primary alone.
  *
- * Returns false when the rider was not eligible (offline, no location
- * authority, wrong role, or at capacity) — the caller rolls the claim back.
+ * Demands `isAvailable` as well as the count: availability now MEANS "room for
+ * another leg" and is the flag the delivery watchdog clears to quarantine a
+ * GPS-dark rider before rescuing their legs. A reserve that ignored it would
+ * let a dark rider whose app is still awake board-grab straight through that
+ * quarantine. At capacity 1, settle-from-count keeps the two in agreement, so
+ * behaviour is unchanged.
+ *
+ * Returns false when the rider was not eligible (offline, unavailable, no
+ * location authority, wrong role, or at capacity) — the caller rolls the claim
+ * back.
  */
 export async function reserveRiderLeg(
   tx: Tx,
@@ -134,10 +142,52 @@ export async function reserveRiderLeg(
       AND u."status" = 'ACTIVE'
       AND u."activeRole"::text IN ('MOVER', 'RIDER')
       AND r."isOnline" = true
+      AND r."isAvailable" = true
       AND (SELECT COUNT(*) FROM "orders" o
             WHERE o."riderId" = r."id" AND o."status"::text NOT IN (${TERMINAL_SQL})
           ) <= ${capacity}`;
   return rows === 1;
+}
+
+/**
+ * Settle a rider's PRIMARY pointer and availability from the legs they still
+ * hold — the ONE rule, used by every path that ends a leg.
+ *
+ * Extracted from stageRiderRelease so the delivery watchdog (which ends legs
+ * by rescuing them) does not carry a second copy of "re-point to the next live
+ * leg, else null; available iff legs < capacity". Two copies of that rule is
+ * how a dark rider and a finishing rider come to leave the pointer in
+ * different shapes.
+ *
+ * `availability: 'offline'` pins isAvailable false regardless of room — a
+ * rider who went GPS-dark is not free supply even with an empty hand.
+ */
+export async function settleRiderLegs(
+  tx: Tx,
+  prisma: PrismaClient,
+  riderId: string,
+  opts: { excludeOrderId?: string; availability?: 'from-count' | 'offline'; countDelivery?: boolean } = {},
+): Promise<{ primaryLegId: string | null; legsLeft: number }> {
+  const nextLeg = await tx.order.findFirst({
+    where: {
+      riderId,
+      ...(opts.excludeOrderId ? { id: { not: opts.excludeOrderId } } : {}),
+      status: { notIn: TERMINAL_ORDER_STATUSES },
+    },
+    orderBy: { acceptedAt: 'asc' },
+    select: { id: true },
+  });
+  const stackCap = await riderStackingCapacity(prisma);
+  const legsLeft = await riderLiveLegCount(tx, riderId);
+  await tx.rider.update({
+    where: { id: riderId },
+    data: {
+      isAvailable: opts.availability === 'offline' ? false : legsLeft < stackCap,
+      currentOrderId: nextLeg?.id ?? null,
+      ...(opts.countDelivery ? { totalDeliveries: { increment: 1 } } : {}),
+    },
+  });
+  return { primaryLegId: nextLeg?.id ?? null, legsLeft };
 }
 
 /** The two candidate queries alias drivers `d` and riders `r`. Both fragments

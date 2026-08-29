@@ -772,3 +772,134 @@ describe('sweepStaleMovers', () => {
     await app.redis.del(dayKey);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [B2 under stacking] A rider may hold more than one live leg since #899, and
+// `currentOrderId` is only the PRIMARY. The watchdog used to rescue that one
+// order and stop, leaving a stacked sibling assigned to a rider nobody could
+// reach — the exact condition the watchdog exists for, on the other leg.
+// ---------------------------------------------------------------------------
+describe('delivery watchdog under stacking: every leg, one pointer rule', () => {
+  it('a dark rider with TWO pre-custody CASH legs: both re-open, both floats return, pointer nulls', async () => {
+    const { recoverStrandedDeliveries } = await import('../modules/dispatch/delivery-watchdog');
+    const c1 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const c2 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const vendor = await makeVendor();
+    // Float committed for BOTH legs at claim time: 1500 + 2500.
+    const rider = await makeRider({ online: true, lastLocationUpdate: new Date(Date.now() - 25 * 60_000), committedFloat: 4000 });
+    const a = await makeOrder(c1.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId, subtotalBase: 1500 });
+    const b = await makeOrder(c2.userId, vendor.vendorId, 'RIDER_EN_ROUTE_PICKUP', { riderId: rider.riderId, subtotalBase: 2500 });
+    await app.prisma.order.update({ where: { id: a.id }, data: { readyAt: new Date() } });
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: a.id } });
+
+    const enqueued: string[] = [];
+    const result = await recoverStrandedDeliveries(app.prisma, app.redis, app.io, async (id) => { enqueued.push(id); });
+    expect(result.recovered).toEqual(expect.arrayContaining([a.id, b.id]));
+
+    // The sibling the old sweep never saw is re-opened too.
+    const freshB = await app.prisma.order.findUniqueOrThrow({ where: { id: b.id } });
+    expect(freshB.status).toBe('ACCEPTED');
+    expect(freshB.riderId).toBeNull();
+    expect(enqueued).toEqual(expect.arrayContaining([a.id, b.id]));
+
+    const freshRider = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(freshRider.currentOrderId).toBeNull();
+    expect(freshRider.isAvailable).toBe(false); // gone dark is not free supply
+    // MONEY: each rescued leg releases ITS OWN float, at the rescue site.
+    expect(Number(freshRider.committedFloat)).toBe(0);
+    for (const id of [a.id, b.id]) await app.redis.del(`dispatch:declined:${id}`);
+  });
+
+  it('leg A pre-custody + leg B WITH the goods: A re-opens, B is flagged and kept, pointer re-points to B', async () => {
+    const { recoverStrandedDeliveries } = await import('../modules/dispatch/delivery-watchdog');
+    const c1 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const c2 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const vendor = await makeVendor();
+    const rider = await makeRider({ online: true, lastLocationUpdate: new Date(Date.now() - 25 * 60_000), committedFloat: 4000 });
+    const a = await makeOrder(c1.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId, subtotalBase: 1500 });
+    const b = await makeOrder(c2.userId, vendor.vendorId, 'PICKED_UP', { riderId: rider.riderId, subtotalBase: 2500 });
+    // The PRIMARY points at A — the leg that will be rescued. The old sweep
+    // would have nulled the pointer under B.
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: a.id } });
+
+    const result = await recoverStrandedDeliveries(app.prisma, app.redis, app.io, async () => {});
+    expect(result.recovered).toContain(a.id);
+    expect(result.flagged).toContain(b.id);
+
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: a.id } })).riderId).toBeNull();
+    const freshB = await app.prisma.order.findUniqueOrThrow({ where: { id: b.id } });
+    expect(freshB.status).toBe('PICKED_UP'); // custody preserved
+    expect(freshB.riderId).toBe(rider.riderId);
+
+    const freshRider = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(freshRider.currentOrderId, 'the primary re-points to the leg still held').toBe(b.id);
+    expect(freshRider.isAvailable).toBe(false);
+    // Only A's float returns; B's cash was fronted and stays committed.
+    expect(Number(freshRider.committedFloat)).toBe(2500);
+    await app.redis.del(`dispatch:declined:${a.id}`);
+    await app.redis.del(`ops_page:delivery_rider_dropped:${b.id}`);
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: null, committedFloat: 0 } });
+  });
+
+  it('the rider is quarantined BEFORE any leg is rescued — no window for a fresh leg to bind', async () => {
+    // Each rescue frees headroom. If the rider were only marked unavailable
+    // after the last rescue, a cascade round in between could bind a new leg
+    // to a rider about to be marked dark. The source order is the guarantee.
+    const { readFileSync } = await import('node:fs');
+    const path = await import('node:path');
+    const src = readFileSync(path.join(__dirname, '..', 'modules', 'dispatch', 'delivery-watchdog.ts'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    // Between the end of the empty-legs branch and the rescue loop there must
+    // be a settle to 'offline'. (The empty-legs branch has its own; anchoring
+    // AFTER it is what makes this pin unfakeable.)
+    const emptyBranch = src.indexOf('legs.length === 0');
+    const emptyBranchEnd = src.indexOf('continue;', emptyBranch);
+    const rescueLoop = src.indexOf('for (const leg of legs)');
+    expect(emptyBranch).toBeGreaterThan(-1);
+    expect(rescueLoop).toBeGreaterThan(emptyBranchEnd);
+    const between = src.slice(emptyBranchEnd, rescueLoop);
+    expect(between, 'quarantine must sit between the empty-legs branch and the rescue loop').toContain("availability: 'offline'");
+  });
+
+  it('a quarantined rider (online, unavailable, room to spare) cannot reserve a leg', async () => {
+    // isAvailable now MEANS "room for another leg", so the reserve must demand
+    // it. Without this, a GPS-dark rider whose app is still awake could
+    // board-grab straight through the quarantine window.
+    const { reserveRiderLeg } = await import('../modules/dispatch/concurrency-policy');
+    const c1 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const vendor = await makeVendor();
+    const rider = await makeRider({ online: true, available: false });
+    const order = await makeOrder(c1.userId, vendor.vendorId, 'READY_FOR_PICKUP', { riderId: rider.riderId });
+    const ok = await app.prisma.$transaction((tx) => reserveRiderLeg(tx, rider.riderId, order.id, 2));
+    expect(ok).toBe(false);
+    // And the same rider, available, reserves fine.
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isAvailable: true } });
+    const ok2 = await app.prisma.$transaction((tx) => reserveRiderLeg(tx, rider.riderId, order.id, 2));
+    expect(ok2).toBe(true);
+  });
+
+  it('settleRiderLegs is the one pointer rule: next live leg by acceptedAt, else null', async () => {
+    const { settleRiderLegs } = await import('../modules/dispatch/concurrency-policy');
+    const c1 = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const vendor = await makeVendor();
+    const rider = await makeRider({ online: true });
+    const later = await makeOrder(c1.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId });
+    const earlier = await makeOrder(c1.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId });
+    await app.prisma.order.update({ where: { id: earlier.id }, data: { acceptedAt: new Date(Date.now() - 60_000) } });
+    await app.prisma.order.update({ where: { id: later.id }, data: { acceptedAt: new Date() } });
+
+    const settled = await app.prisma.$transaction((tx) => settleRiderLegs(tx, app.prisma, rider.riderId));
+    expect(settled.primaryLegId).toBe(earlier.id);
+    expect(settled.legsLeft).toBe(2);
+
+    // Excluding the earlier leg (as a completion does) moves the primary on.
+    const moved = await app.prisma.$transaction((tx) => settleRiderLegs(tx, app.prisma, rider.riderId, { excludeOrderId: earlier.id }));
+    expect(moved.primaryLegId).toBe(later.id);
+
+    // `offline` pins availability false whatever the room.
+    await app.prisma.order.updateMany({ where: { riderId: rider.riderId }, data: { status: 'DELIVERED' } });
+    const empty = await app.prisma.$transaction((tx) => settleRiderLegs(tx, app.prisma, rider.riderId, { availability: 'offline' }));
+    expect(empty.primaryLegId).toBeNull();
+    expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } })).isAvailable).toBe(false);
+  });
+});

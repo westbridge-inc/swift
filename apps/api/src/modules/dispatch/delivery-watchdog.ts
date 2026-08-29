@@ -3,6 +3,7 @@ import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { FloatService } from './float.service';
+import { settleRiderLegs } from './concurrency-policy';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { log } from '../../utils/logger';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
@@ -53,7 +54,36 @@ export async function recoverStrandedDeliveries(
   const flagged: string[] = [];
 
   for (const r of stale) {
-    const orderId = r.currentOrderId!;
+    // [B2 under stacking] The pointer found the rider; it is not the rider's
+    // only leg. Since #899 a rider may carry up to `stacking.riderCapacity`
+    // live orders and `currentOrderId` is only the PRIMARY one. Rescuing that
+    // order and stopping left a stacked sibling assigned to a rider nobody can
+    // reach — invisible to every other sweep, exactly the condition this
+    // watchdog exists for. So every live delivery leg gets the same custody
+    // decision, one lock each; at capacity 1 the list has one entry and the
+    // behaviour is byte-identical to before.
+    const legs = await prisma.order.findMany({
+      where: { riderId: r.id, orderType: { not: 'TAXI' }, status: { notIn: TERMINAL } },
+      select: { id: true },
+      orderBy: { acceptedAt: 'asc' },
+    });
+    if (legs.length === 0) {
+      // A pointer with no live leg behind it is damage, not custody — heal it
+      // the same way a finished leg would, through the seam.
+      await prisma.$transaction((tx) => settleRiderLegs(tx, prisma, r.id, { availability: 'offline' }));
+      continue;
+    }
+    // QUARANTINE FIRST. Each rescue below frees headroom (the rescued leg no
+    // longer counts against the rider), so between a rescue and the final
+    // settle a cascade round could bind a NEW leg to a rider about to be
+    // marked dark — recreating the exact state this sweep exists to end, one
+    // transaction later. Marking the rider unavailable before touching any
+    // leg closes that window. The pointer is untouched here (every leg is
+    // still live) and is re-settled once the sweep is done.
+    await prisma.$transaction((tx) => settleRiderLegs(tx, prisma, r.id, { availability: 'offline' }));
+    let releasedAny = false;
+    for (const leg of legs) {
+    const orderId = leg.id;
     const decision = await prisma.$transaction(async (tx) => {
       // The canonical orders row lock (the helper locks ANY order row).
       await lockTaxiOrderForCustodyDecision(tx, orderId);
@@ -76,13 +106,9 @@ export async function recoverStrandedDeliveries(
         return { kind: 'FLAGGED' as const, order };
       }
 
-      // Terminal/foreign/non-live pointer is damage, not custody — heal it
-      // under the same lock.
+      // Raced away between the select and the lock (completed, cancelled,
+      // reassigned) — nothing to decide for this leg.
       if (!assignedLiveDelivery || !PRE_CUSTODY.includes(order.status)) {
-        await tx.rider.updateMany({
-          where: { id: r.id, currentOrderId: orderId },
-          data: { currentOrderId: null },
-        });
         return { kind: 'IGNORED' as const };
       }
 
@@ -93,10 +119,9 @@ export async function recoverStrandedDeliveries(
         where: { id: orderId },
         data: { status: reopenStatus, riderId: null },
       });
-      await tx.rider.updateMany({
-        where: { id: r.id, currentOrderId: orderId },
-        data: { isAvailable: false, currentOrderId: null }, // gone dark → not free supply
-      });
+      // The pointer and availability are NOT written here: they are settled
+      // once, after every leg, through the seam — so a dark rider and a
+      // finishing rider leave the pointer in the same shape.
       // The rider fronted NOTHING yet (goods never left the store), but their
       // committed CASH float was reserved at claim — release it with the
       // assignment, atomically, or their headroom leaks forever.
@@ -157,7 +182,15 @@ export async function recoverStrandedDeliveries(
     await enqueue(orderId).catch(() => {});
     log().info({ orderId, riderId: r.id }, 'delivery-watchdog: pre-custody release + redispatch');
     recovered.push(orderId);
+    releasedAny = true;
+    }
+    // Settle the primary pointer and availability ONCE from what the rider
+    // still holds. `offline` pins isAvailable false — gone dark is not free
+    // supply, even with an empty hand — which is what the old per-order write
+    // did; the pointer now re-points to a surviving in-custody leg instead of
+    // being nulled under it.
+    await prisma.$transaction((tx) => settleRiderLegs(tx, prisma, r.id, { availability: 'offline' }));
+    if (releasedAny) log().info({ riderId: r.id, legs: legs.length }, 'delivery-watchdog: rider legs settled');
   }
-
   return { recovered, flagged };
 }
