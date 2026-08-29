@@ -35,6 +35,7 @@ import { cachedRender, renderQrPng, renderQrSvg, renderTemplatePdf } from '../qr
 import { publicWebBase } from '../qr/qr-codes';
 import { processReviewText } from '../rating/review-scrub';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
 import { riderCounterpartySelect } from '../../utils/counterparty';
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,10 @@ const updateVendorProfileSchema = z.object({
   maxConcurrentOrders: z.number().int().min(1).max(1000).nullable().optional(),
   // The vendor's own MMG "pay me" link (opt-in). null/empty clears it → cash-only.
   mmgPayUrl: z.string().trim().max(500).nullable().optional(),
+  // The number customers may call before ordering. Opt-in; null/'' takes it
+  // down. Shape is enforced by publicPhoneForWrite, not here, so the write
+  // and read boundaries cannot drift apart on what a valid number is.
+  publicPhone: z.string().trim().max(32).nullable().optional(),
 });
 
 const acceptOrderSchema = z.object({
@@ -843,6 +848,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const safeVendors = vendors.map((vendor) => ({
       ...vendor,
       mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
+      publicPhone: safePublicPhone(vendor.publicPhone),
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
@@ -939,6 +945,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     const mmgPayUrl = body.mmgPayUrl === undefined
       ? undefined
       : mmgPayUrlForWrite(body.mmgPayUrl);
+    // undefined = field not sent (leave as-is); null/'' = the store takes its
+    // number down. publicPhoneForWrite collapses both of the latter to null.
+    const publicPhone = body.publicPhone === undefined
+      ? undefined
+      : publicPhoneForWrite(body.publicPhone);
 
     const vendor = await app.prisma.vendor.update({
       where: { id: vendorId },
@@ -963,6 +974,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
         ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
         ...(mmgPayUrl !== undefined && { mmgPayUrl }),
+        ...(publicPhone !== undefined && { publicPhone }),
       },
       include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
     });

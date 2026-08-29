@@ -34,6 +34,7 @@ import {
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorResponseSlaMinutes } from '../order/response-sla';
+import { safePublicPhone } from '../../utils/vendor-public-phone';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
  *  constrained to the known set — never a hardcoded guess. */
@@ -1389,6 +1390,21 @@ export async function customerRoutes(app: FastifyInstance) {
         longitude: vendor.longitude,
         isCurrentlyOpen: vendor.isCurrentlyOpen,
         acceptingOrders: vendor.acceptingOrders,
+        // The number the STORE chose to publish so a customer can ask before
+        // ordering. Never `vendor.phone` — that is the account/ops contact and
+        // is deliberately not projected here.
+        //
+        // safePublicPhone re-validates rather than trusting the row: this value
+        // ends up in a dialler, and rows predate validators and get edited by
+        // hand. Bad row -> no button, never a wrong call.
+        //
+        // Withheld for SUSPENDED and PENDING_APPROVAL. A CLOSED store keeps its
+        // number (a customer asking "when do you reopen?" is exactly who this
+        // serves), but a store the PLATFORM has suspended, or one it has not yet
+        // approved, must not have Swift advertising a way to reach it.
+        publicPhone: vendor.status === 'SUSPENDED' || vendor.status === 'PENDING_APPROVAL'
+          ? null
+          : safePublicPhone(vendor.publicPhone),
         averageRating: vendor.averageRating,
         totalRatings: vendor.totalRatings,
         ...ratingSurface,
