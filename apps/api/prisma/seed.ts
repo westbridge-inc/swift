@@ -442,10 +442,14 @@ async function main() {
     'Orange Juice 1L': '1613478223719-2ab802602423',
     'Plantain Chips 150g': '1762884601729-0eeeafbdfb8a',
     'Cream Crackers 200g': '1691332663036-6f196621c2ee',
-    'Screwdriver Set (6pc)': '1663638964046-4b576e739a3a',
+    // NOTE ON `Measuring Tape 5m` (kept): the photo is a Stanley PowerLock
+    // 5m/16' — the right goods, at the right length, but a BRANDED product
+    // standing in for a generic listing. That is a weaker problem than a wrong
+    // product and a real one on a live marketplace, where a shopper reads the
+    // brand as part of the offer. Registered for the founder rather than
+    // decided here; demo data showing a real tape measure is not a lie about
+    // what the item is.
     'Measuring Tape 5m': '1703756291638-b1774ae3c186',
-    'Emulsion Paint 4L — White': '1562259949-e8e7689d7828',
-    'LED Bulb 9W (2-pack)': '1529310399831-ed472b81d589',
     'Beard Trim': '1621605815971-fbc98d665033',
     'Hot Towel Shave': '1599351431202-1e0f0137899a',
     'Home Visit Cut': '1599351431613-18ef1fdd27e1',
@@ -475,9 +479,40 @@ async function main() {
   // hold the bad URL — so they are actively nulled here and the honest
   // PhotoPlaceholder names the dish instead. A verified photograph can be
   // added later; a wrong one cannot be un-seen.
+  // [MKT] THE RETAIL PASS — F-264 was a FOOD pass, and it stopped there.
+  //
+  // Nine restaurant dishes were checked by opening the photographs; the STORE's
+  // stock never was. That mattered less while the Market tab drew placeholders
+  // for everything. It stopped mattering less the moment the card started
+  // rendering `imageUrl`, because these five items ARE the Market tab — City
+  // Hardware is the only STORE on the platform, so its shelf is the whole
+  // catalogue a shopper sees.
+  //
+  // Same method as F-264: download each one and look at it. Three of five
+  // misrepresent the goods, and each fails on the exact attribute the item
+  // name promises:
+  //
+  //   Screwdriver Set (6pc)      ONE flat-head screwdriver. The listing sells
+  //                              six; the picture shows one.
+  //   Emulsion Paint 4L — White  A roller spreading BLUE paint across a wall.
+  //                              No tin in frame at all. Colour is the only
+  //                              attribute in that item's name.
+  //   LED Bulb 9W (2-pack)       A single glowing INCANDESCENT bulb, tungsten
+  //                              filament clearly lit — a photograph of the
+  //                              technology this product replaces. Also one
+  //                              bulb, not two.
+  //
+  //   Claw Hammer                a claw hammer. Correct; kept.
+  //   Measuring Tape 5m          a 5m tape measure. Correct goods; see the
+  //                              brand note on the map above.
+  //
+  // A customer buying paint chooses by colour and a customer buying LEDs is
+  // choosing NOT to buy a filament bulb. These are the F-264 defect exactly,
+  // on the tab the founder is most likely to open.
   const UNVERIFIED_PHOTOS = [
     'Mauby', 'Cook-Up Rice', 'Pork Chops', 'Grilled Snapper', 'Fish & Bakes',
     'Cheese Roll', 'Dhal Puri (2)', 'Garlic Knots (6)', 'Veg Spring Rolls (4)',
+    'Screwdriver Set (6pc)', 'Emulsion Paint 4L — White', 'LED Bulb 9W (2-pack)',
   ];
   await prisma.item.updateMany({
     where: { name: { in: UNVERIFIED_PHOTOS }, imageUrl: { startsWith: 'https://images.unsplash.com/' } },
