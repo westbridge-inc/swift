@@ -97,7 +97,7 @@ export default function VendorPage() {
       <div>
         <h1 className="text-2xl font-extrabold md:text-3xl">{v.name}</h1>
         <p className="mt-1 flex flex-wrap items-center gap-3 text-sm text-[var(--swift-muted)]">
-          <span className="flex items-center gap-1"><Star className="h-4 w-4 fill-amber-400 text-amber-400" />{(v.averageRating ?? 0).toFixed(1)} {v.totalRatings > 0 && `(${v.totalRatings})`}</span>
+          <span className="flex items-center gap-1"><Star className="h-4 w-4 fill-amber-400 text-amber-400" />{v.displayRating === null ? 'New' : `${v.displayRating.toFixed(1)} ${v.ratingBucket}`}</span>
           <span className="flex items-center gap-1"><Clock className="h-4 w-4" />~{v.estimatedPrepTime} min</span>
           {v.deliveryFee != null && <span>· {money(Number(v.deliveryFee))} delivery</span>}
           {!v.isCurrentlyOpen && <span className="font-bold text-[var(--swift-red)]">· Closed now</span>}

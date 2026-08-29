@@ -71,7 +71,12 @@ export async function becomePartner(body: any) {
 export interface Vendor {
   id: string; name: string; slug: string; vendorType: string;
   logoUrl?: string | null; coverImageUrl?: string | null;
-  cuisineTypes: string[]; averageRating: number; totalRatings: number;
+  cuisineTypes: string[];
+  // [M-D6] The API spreads the shared rating surface onto every vendor; it
+  // does NOT send averageRating. Declaring that field made `v.averageRating
+  // ?? 0` type-check while being undefined at runtime, so every vendor card
+  // on the web rendered 0.0.
+  displayRating: number | null; ratingBucket: string; ratingCount: number; topRated: boolean;
   estimatedPrepTime: number; distanceKm?: number | null;
   isCurrentlyOpen: boolean; acceptingOrders: boolean; city?: string;
   deliveryFee?: number | string | null; etaMin?: number | null;

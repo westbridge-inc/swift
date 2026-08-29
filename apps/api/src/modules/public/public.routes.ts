@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { NotFoundError, AppError } from '../../utils/errors';
+import { ratingSurfaces } from '../rating/rating-surface';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -31,8 +32,17 @@ const PUBLIC_VENDOR_SELECT = {
   region: true,
   cuisineTypes: true,
   tags: true,
-  averageRating: true,
-  totalRatings: true,
+  // [M-D6] NOT averageRating/totalRatings. The raw lifetime mean carries a 5.0
+  // sentinel for an actor nobody has rated, so this crawlable page rendered
+  // "5.0" for 21 never-rated vendors and "1.0" for four with a single unhappy
+  // rating — on the one surface a stranger and Google see first. The public
+  // star line comes from rating-surface like every other surface; removing the
+  // field here makes any consumer that still reaches for it a type error.
+  //
+  // totalRatings is gone for the same reason: it is the legacy counter, and on
+  // this machine six vendors carry one (421 and 209 among them) while only 57
+  // rating rows exist in total — seeded numbers with nothing behind them. The
+  // honest count is ratingCount/ratingBucket from the same mapper as the stars.
   isCurrentlyOpen: true,
   acceptingOrders: true,
   estimatedPrepTime: true,
@@ -144,9 +154,18 @@ export async function publicRoutes(app: FastifyInstance) {
       take: 200,
     });
 
+    // One batched read for the whole page, then the SAME mapper every other
+    // surface uses — so the storefront directory, the app and search cannot
+    // disagree about what a vendor's stars say.
+    const surfaces = await ratingSurfaces(app.prisma, 'VENDOR', vendors.map((v) => v.id));
+
     return {
       success: true,
-      data: vendors.map((v) => ({ ...v, minOrderAmount: Number(v.minOrderAmount) })),
+      data: vendors.map((v) => ({
+        ...v,
+        minOrderAmount: Number(v.minOrderAmount),
+        ...(surfaces.get(v.id) ?? { displayRating: null, ratingBucket: '(0)', ratingCount: 0, topRated: false }),
+      })),
     };
   });
 
@@ -189,10 +208,15 @@ export async function publicRoutes(app: FastifyInstance) {
     });
     if (!vendor) throw new NotFoundError('Storefront');
 
+    // [M-D6] Same mapper as the directory list, so a store's own page and its
+    // card in the list can never show different stars.
+    const surface = (await ratingSurfaces(app.prisma, 'VENDOR', [vendor.id])).get(vendor.id);
+
     return {
       success: true,
       data: {
         ...vendor,
+        ...(surface ?? { displayRating: null, ratingBucket: '(0)', ratingCount: 0, topRated: false }),
         minOrderAmount: Number(vendor.minOrderAmount),
         categories: vendor.categories
           .map((c) => ({
