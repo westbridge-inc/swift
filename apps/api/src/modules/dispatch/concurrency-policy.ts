@@ -162,11 +162,18 @@ export async function reserveRiderLeg(
  * `availability: 'offline'` pins isAvailable false regardless of room — a
  * rider who went GPS-dark is not free supply even with an empty hand.
  */
+export type SettleRiderLegsOptions =
+  /** A rider who is leaving supply (logout, gone dark): availability is
+   *  pinned false and NO capacity question is asked, so no client is needed. */
+  | { availability: 'offline'; excludeOrderId?: string; countDelivery?: boolean }
+  /** A leg ended normally: availability is settled from the live-leg count
+   *  against the stacking capacity, which needs a client to read. */
+  | { availability?: 'from-count'; prisma: PrismaClient; excludeOrderId?: string; countDelivery?: boolean };
+
 export async function settleRiderLegs(
   tx: Tx,
-  prisma: PrismaClient,
   riderId: string,
-  opts: { excludeOrderId?: string; availability?: 'from-count' | 'offline'; countDelivery?: boolean } = {},
+  opts: SettleRiderLegsOptions,
 ): Promise<{ primaryLegId: string | null; legsLeft: number }> {
   const nextLeg = await tx.order.findFirst({
     where: {
@@ -177,12 +184,16 @@ export async function settleRiderLegs(
     orderBy: { acceptedAt: 'asc' },
     select: { id: true },
   });
-  const stackCap = await riderStackingCapacity(prisma);
   const legsLeft = await riderLiveLegCount(tx, riderId);
+  // The union makes "offline asks no capacity question" a compile-time fact:
+  // a caller cannot reach the count branch without handing over a client.
+  const available = opts.availability === 'offline'
+    ? false
+    : legsLeft < await riderStackingCapacity(opts.prisma);
   await tx.rider.update({
     where: { id: riderId },
     data: {
-      isAvailable: opts.availability === 'offline' ? false : legsLeft < stackCap,
+      isAvailable: available,
       currentOrderId: nextLeg?.id ?? null,
       ...(opts.countDelivery ? { totalDeliveries: { increment: 1 } } : {}),
     },

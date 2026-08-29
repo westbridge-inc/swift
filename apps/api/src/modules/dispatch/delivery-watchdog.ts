@@ -70,7 +70,7 @@ export async function recoverStrandedDeliveries(
     if (legs.length === 0) {
       // A pointer with no live leg behind it is damage, not custody — heal it
       // the same way a finished leg would, through the seam.
-      await prisma.$transaction((tx) => settleRiderLegs(tx, prisma, r.id, { availability: 'offline' }));
+      await prisma.$transaction((tx) => settleRiderLegs(tx, r.id, { availability: 'offline' }));
       continue;
     }
     // QUARANTINE FIRST. Each rescue below frees headroom (the rescued leg no
@@ -80,7 +80,7 @@ export async function recoverStrandedDeliveries(
     // transaction later. Marking the rider unavailable before touching any
     // leg closes that window. The pointer is untouched here (every leg is
     // still live) and is re-settled once the sweep is done.
-    await prisma.$transaction((tx) => settleRiderLegs(tx, prisma, r.id, { availability: 'offline' }));
+    await prisma.$transaction((tx) => settleRiderLegs(tx, r.id, { availability: 'offline' }));
     let releasedAny = false;
     for (const leg of legs) {
     const orderId = leg.id;
@@ -189,7 +189,7 @@ export async function recoverStrandedDeliveries(
     // supply, even with an empty hand — which is what the old per-order write
     // did; the pointer now re-points to a surviving in-custody leg instead of
     // being nulled under it.
-    await prisma.$transaction((tx) => settleRiderLegs(tx, prisma, r.id, { availability: 'offline' }));
+    await prisma.$transaction((tx) => settleRiderLegs(tx, r.id, { availability: 'offline' }));
     if (releasedAny) log().info({ riderId: r.id, legs: legs.length }, 'delivery-watchdog: rider legs settled');
   }
   return { recovered, flagged };
