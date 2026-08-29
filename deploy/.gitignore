@@ -4,3 +4,9 @@
 !.env.deploy.example
 # Store submission key (Play Console service account).
 google-play-service-account.json
+
+# Database dumps written by backup.sh. A committed dump is every user's row in
+# a PUBLIC repo — names, phone numbers, addresses, order history.
+backups/
+*.dump
+*.dump.partial
