@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # A repo nobody pushes to for two weeks can still rot — a registry retires an
+  # endpoint (it retired pnpm audit's), an action deprecates, a cert expires.
+  # Monday's run makes decay visible the week it happens, not the day it blocks
+  # an urgent fix. workflow_dispatch = a manual "prove it still builds" button.
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
