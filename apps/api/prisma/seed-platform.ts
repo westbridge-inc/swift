@@ -17,7 +17,24 @@ import type { PrismaClient } from '@prisma/client';
 // Weekly SaaS tiers (GYD) — single source for the GY CountryConfig AND any
 // seeded subscription rows, so a tier change never leaves accounts on a stale
 // rate. Exported so the dev seed's demo drivers bill at the same rate.
-export const guyanaTiers = { mover: 12000, smallVendor: 20000, largeVendor: 30000 };
+// `mover` is the STANDARD fee band (bicycle, motorbike, car, wagon car);
+// `moverHeavy` is the HEAVY band (buses, canters, box trucks). Which band a
+// vehicle falls in is config/vehicle-classes.ts — this file only prices them.
+export const guyanaTiers = {
+  mover: 10000,
+  moverHeavy: 12000,
+  // Services carry no catalogue — a solo tradesman is not a restaurant.
+  serviceVendor: 12000,
+  smallVendor: 20000,
+  largeVendor: 30000,
+  departmentVendor: 50000,
+  largeCatalogueThreshold: 1000,
+  departmentCatalogueThreshold: 10000,
+  // From the 5th store, every location takes 50% off its OWN rate. At the
+  // standard shop rate that is exactly 50,000/week for five locations.
+  franchiseMinLocations: 5,
+  franchiseDiscountPct: 50,
+};
 
 export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
   // The single current SaaS tenant MUST exist before any tenant-owned row
@@ -174,7 +191,14 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
   // BZD/XCD are hard USD pegs. DEFAULTS to refine per market with local business/legal
   // input: subscription tiers + taxi rates are USD-pegged off Guyana's; documentChecklists
   // and cashRules reuse Guyana's as a template. (Dial codes live in the /auth/countries map.)
-  const USD = { mover: 12000 / 209, smallVendor: 20000 / 209, largeVendor: 30000 / 209 };
+  const USD = {
+    mover: guyanaTiers.mover / 209,
+    moverHeavy: guyanaTiers.moverHeavy / 209,
+    serviceVendor: guyanaTiers.serviceVendor / 209,
+    smallVendor: guyanaTiers.smallVendor / 209,
+    largeVendor: guyanaTiers.largeVendor / 209,
+    departmentVendor: guyanaTiers.departmentVendor / 209,
+  };
   const USD_TAXI = { base: 1000 / 209, perKm: 300 / 209, perMin: 25 / 209, minimum: 1500 / 209 };
   // D.3 float limits, USD-pegged off Guyana's (L1 8000 / L2 20000 / L3 40000 GYD).
   const USD_FLOAT = { l1: 8000 / 209, l2: 20000 / 209, l3: 40000 / 209 };
@@ -210,8 +234,17 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
       floatL3: niceRound(USD_FLOAT.l3 * c.rate),
       subscriptionTiers: {
         mover: niceRound(USD.mover * c.rate),
+        moverHeavy: niceRound(USD.moverHeavy * c.rate),
+        serviceVendor: niceRound(USD.serviceVendor * c.rate),
         smallVendor: niceRound(USD.smallVendor * c.rate),
         largeVendor: niceRound(USD.largeVendor * c.rate),
+        departmentVendor: niceRound(USD.departmentVendor * c.rate),
+        // Catalogue sizes are counts, not money — they never convert.
+        largeCatalogueThreshold: guyanaTiers.largeCatalogueThreshold,
+        departmentCatalogueThreshold: guyanaTiers.departmentCatalogueThreshold,
+        // A count and a percentage — neither is money, so neither converts.
+        franchiseMinLocations: guyanaTiers.franchiseMinLocations,
+        franchiseDiscountPct: guyanaTiers.franchiseDiscountPct,
       },
       documentChecklists: guyanaChecklists,
       taxiRates: {

@@ -1,14 +1,126 @@
 import type { PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
 import { mergeDeliveryRates, type DeliveryRates } from '../../utils/markup';
-import { docProfilesFor } from '../../config/vehicle-classes';
+import { docProfilesFor, feeBandFor } from '../../config/vehicle-classes';
 
 /** Weekly subscription tiers in local currency. */
 export interface SubscriptionTiers {
+  /** STANDARD fee band — bicycle, motorbike, car, wagon car. */
   mover: number;
+  /** HEAVY fee band — buses, canters, box trucks. Absent in a market that has
+   *  not set it, which `moverRateFor` resolves back to `mover`. */
+  moverHeavy?: number;
+  /** Services with no catalogue — a plumber, electrician or barber. Falls back
+   *  to `smallVendor` in a market that has not priced services separately. */
+  serviceVendor?: number;
+  /** Standard catalogue, below `largeCatalogueThreshold` items. */
   smallVendor: number;
+  /** At or above `largeCatalogueThreshold` items. */
   largeVendor: number;
-  [tier: string]: number;
+  /** Department-store scale — at or above `departmentCatalogueThreshold`. */
+  departmentVendor?: number;
+  largeCatalogueThreshold?: number;
+  departmentCatalogueThreshold?: number;
+  /** Franchise: from `franchiseMinLocations` stores under one owner, every
+   *  location takes `franchiseDiscountPct` off ITS OWN rate. Both must be set
+   *  for franchise pricing to apply at all. */
+  franchiseMinLocations?: number;
+  franchiseDiscountPct?: number;
+  [tier: string]: number | undefined;
+}
+
+export const DEFAULT_LARGE_CATALOGUE_THRESHOLD = 1000;
+export const DEFAULT_DEPARTMENT_CATALOGUE_THRESHOLD = 10000;
+
+/** What a vendor's weekly rate is decided from. */
+export interface VendorRateBasis {
+  /** SERVICE vendors have no catalogue to count. */
+  isService: boolean;
+  /** Active listings on this store. */
+  activeListings: number;
+  /** How many stores this owner holds — the franchise basis. */
+  ownedStores: number;
+}
+
+/** Which tier a vendor's rate is built from, before any franchise discount. */
+export type VendorRateReason = 'department' | 'large' | 'service' | 'small';
+
+export interface VendorRate {
+  /** What this store owes per week, discount already applied. */
+  rate: number;
+  /** The tier the rate was built from. */
+  reason: VendorRateReason;
+  /** Whether the franchise discount was applied. */
+  franchised: boolean;
+}
+
+/**
+ * The weekly rate a vendor pays. ONE definition, shared by signup and the
+ * weekly re-tier, for the same reason `moverRateFor` is: a rate quoted at
+ * signup that disagrees with the rate billing later decides is a support
+ * incident, not a rounding difference.
+ *
+ * TIER first, then DISCOUNT:
+ *   1. The store's own rate — service (no catalogue), else department, large
+ *      or small by active listing count. The threshold count itself qualifies.
+ *   2. If the owner holds `franchiseMinLocations` or more stores, take
+ *      `franchiseDiscountPct` off THAT rate.
+ *
+ * The discount is deliberately applied to each store's own tier rather than
+ * replacing it with a flat bundle. At the standard shop rate the two are
+ * identical — five shops at 20,000 less 50% is the 50,000-for-five bundle —
+ * but a flat bundle would also let a chain of five department stores pay less
+ * than a single one, which is not a volume discount, it is a loophole.
+ *
+ * Every threshold, price and percentage is config. A market that has set none
+ * of the optional keys behaves exactly as it did before they existed.
+ */
+export function vendorRateFor(tiers: SubscriptionTiers, basis: VendorRateBasis): VendorRate {
+  let rate: number;
+  let reason: VendorRateReason;
+
+  if (basis.isService) {
+    rate = tiers.serviceVendor ?? tiers.smallVendor;
+    reason = 'service';
+  } else {
+    const deptFloor = tiers.departmentCatalogueThreshold ?? DEFAULT_DEPARTMENT_CATALOGUE_THRESHOLD;
+    const largeFloor = tiers.largeCatalogueThreshold ?? DEFAULT_LARGE_CATALOGUE_THRESHOLD;
+    if (tiers.departmentVendor != null && basis.activeListings >= deptFloor) {
+      rate = tiers.departmentVendor;
+      reason = 'department';
+    } else if (basis.activeListings >= largeFloor) {
+      rate = tiers.largeVendor;
+      reason = 'large';
+    } else {
+      rate = tiers.smallVendor;
+      reason = 'small';
+    }
+  }
+
+  const { franchiseMinLocations: minStores, franchiseDiscountPct: pct } = tiers;
+  const franchised =
+    minStores != null && pct != null && minStores > 0 && pct > 0 && basis.ownedStores >= minStores;
+
+  // Round to whole currency units: a weekly fee is a number a shop owner reads
+  // off an invoice, and 787.7 is not one. GYD has no subunit in practice, and
+  // the column is Decimal(10,2), so this never loses money to rounding drift.
+  if (franchised) rate = Math.round(rate * (1 - pct / 100));
+
+  return { rate, reason, franchised };
+}
+
+/**
+ * The weekly rate a mover pays, given the vehicle they registered.
+ *
+ * ONE definition. Signup (SubscriptionService) and the weekly re-tier
+ * (BillingService) must both come through here, or a mover's rate at signup
+ * can drift from the rate the billing run later decides they owe.
+ *
+ * A market that has not set `moverHeavy` falls back to the standard rate —
+ * never to zero, and never to a code constant.
+ */
+export function moverRateFor(tiers: SubscriptionTiers, vehicleType: VehicleType): number {
+  return feeBandFor(vehicleType) === 'HEAVY' ? (tiers.moverHeavy ?? tiers.mover) : tiers.mover;
 }
 
 /**

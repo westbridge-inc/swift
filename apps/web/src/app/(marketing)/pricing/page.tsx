@@ -5,10 +5,15 @@ import { site } from '@/site.config';
 
 export const metadata: Metadata = { title: 'Pricing' };
 
+// The mover fee has two bands, set by the VEHICLE. `moverHeavy` is optional:
+// a market that has not priced its heavy fleet simply shows one mover card.
 const TIER_META = [
-  { key: 'mover' as const, label: 'Movers', blurb: 'Taxi drivers, delivery riders and couriers — every fare, fee and tip is yours.' },
-  { key: 'smallVendor' as const, label: 'Businesses', blurb: 'Restaurants, shops and services with a standard catalogue.' },
+  { key: 'mover' as const, label: 'Riders & drivers', blurb: 'Bicycle, motorbike, car or wagon car — taxi, delivery and courier work. Every fare, fee and tip is yours.' },
+  { key: 'moverHeavy' as const, label: 'Buses, canters & trucks', blurb: 'The commercial fleet — 9- and 15-seater buses, short- and long-base canters, box trucks.' },
+  { key: 'serviceVendor' as const, label: 'Services', blurb: 'Plumbers, electricians, mechanics, barbers — trades that book work rather than sell a catalogue.' },
+  { key: 'smallVendor' as const, label: 'Businesses', blurb: 'Restaurants, shops and stores with a standard catalogue.' },
   { key: 'largeVendor' as const, label: 'Large catalogues', blurb: 'Supermarkets and stores with 1,000+ items.' },
+  { key: 'departmentVendor' as const, label: 'Department stores', blurb: 'Full department-store scale — 10,000+ items.' },
 ];
 
 // Live from the same endpoint the app's signup shows — never a hardcoded table.
@@ -31,8 +36,8 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
             <p className="text-sm font-semibold text-[var(--swift-muted)]">
               {pricing.countryCode} · prices in {pricing.currencyCode}
             </p>
-            <div className="mt-4 grid gap-5 md:grid-cols-3">
-              {TIER_META.map((t) => (
+            <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+              {TIER_META.filter((t) => pricing.weekly[t.key] != null).map((t) => (
                 <div key={t.key} className="rounded-2xl bg-white p-7 shadow-sm">
                   <h3 className="font-bold">{t.label}</h3>
                   <p className="mt-3 text-3xl font-extrabold">
@@ -47,9 +52,28 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                 </div>
               ))}
             </div>
+            {pricing.franchise && (
+              <div className="mt-6 rounded-2xl bg-white p-7 shadow-sm">
+                <h3 className="font-bold">Franchises</h3>
+                <p className="mt-3 text-3xl font-extrabold">
+                  {pricing.franchise.discountPct}% off
+                  <span className="text-base font-medium text-[var(--swift-muted)]"> every location</span>
+                </p>
+                <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                  From your {pricing.franchise.minLocations}th store, every location takes{' '}
+                  {pricing.franchise.discountPct}% off its own weekly rate — so five standard shops come to{' '}
+                  {pricing.currencySymbol}
+                  {Math.round(
+                    pricing.weekly.smallVendor * (1 - pricing.franchise.discountPct / 100),
+                  ).toLocaleString()}{' '}
+                  each. It applies to whichever tier a store is on, however large its catalogue.
+                </p>
+              </div>
+            )}
             <p className="mt-6 text-sm text-[var(--swift-muted)]">
-              Franchises pay per store; catalogue-size tiers apply above 1,000 items. Your exact rate is
-              confirmed when your business is approved.
+              Your weekly fee follows the vehicle you register, so a bus or canter is priced apart from a
+              bike or car. Catalogue-size tiers apply above 1,000 items. Your exact rate is confirmed when
+              your business is approved.
             </p>
           </>
         ) : (

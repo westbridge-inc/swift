@@ -16,6 +16,20 @@ import type { VehicleType, PackageSize, RideClass } from '@prisma/client';
 
 export type MoverService = 'RIDE' | 'COURIER' | 'DELIVERY';
 
+/**
+ * Which weekly-fee band a mover bills on.
+ *
+ * STANDARD is the everyday fleet — bicycle, motorbike, car, wagon car — the
+ * riders, delivery drivers and taxi drivers who make up most of the platform.
+ * HEAVY is the commercial fleet — buses, canters and box trucks — which takes
+ * larger, higher-value jobs and is priced accordingly.
+ *
+ * This is a CLASSIFICATION, not a price. The rate each band pays lives in
+ * `CountryConfig.subscriptionTiers` (`mover` / `moverHeavy`) so it stays
+ * config per market, exactly like every other number in this system.
+ */
+export type MoverFeeBand = 'STANDARD' | 'HEAVY';
+
 export interface VehicleClass {
   type: VehicleType;
   /** Display label — matches the mover's vehicle picker. */
@@ -35,6 +49,9 @@ export interface VehicleClass {
   docProfiles: string[];
   /** Display / capability order, small → large. */
   order: number;
+  /** Weekly-fee band this vehicle bills on. Classification only — the rate for
+   *  each band is CountryConfig.subscriptionTiers, never a constant in code. */
+  feeBand: MoverFeeBand;
 }
 
 /** PackageSize rank for capacity comparisons (bigger number = bigger parcel). */
@@ -48,51 +65,51 @@ const SIZE_RANK: Record<string, number> = { SMALL: 1, MEDIUM: 2, LARGE: 3, EXTRA
 export const VEHICLE_CLASSES: Record<VehicleType, VehicleClass> = {
   BICYCLE: {
     type: 'BICYCLE', label: 'Bicycle', maxPackageSize: 'MEDIUM', seats: 0,
-    rideClass: null, services: ['COURIER', 'DELIVERY'], docProfiles: [], order: 1,
+    rideClass: null, services: ['COURIER', 'DELIVERY'], docProfiles: [], order: 1, feeBand: 'STANDARD',
   },
   MOTORCYCLE: {
     type: 'MOTORCYCLE', label: 'Motorbike', maxPackageSize: 'LARGE', seats: 0,
-    rideClass: null, services: ['COURIER', 'DELIVERY'], docProfiles: ['MOVER_MOTOR'], order: 2,
+    rideClass: null, services: ['COURIER', 'DELIVERY'], docProfiles: ['MOVER_MOTOR'], order: 2, feeBand: 'STANDARD',
   },
   CAR: {
     type: 'CAR', label: 'Car', maxPackageSize: 'EXTRA_LARGE', seats: 4,
     rideClass: 'ECONOMY', services: ['RIDE', 'COURIER', 'DELIVERY'],
-    docProfiles: ['MOVER_MOTOR', 'MOVER_TAXI_EXTRA'], order: 3,
+    docProfiles: ['MOVER_MOTOR', 'MOVER_TAXI_EXTRA'], order: 3, feeBand: 'STANDARD',
   },
   WAGON_CAR: {
     type: 'WAGON_CAR', label: 'Wagon Car', maxPackageSize: 'EXTRA_LARGE', seats: 5,
     rideClass: 'COMFORT', services: ['RIDE', 'COURIER', 'DELIVERY'],
-    docProfiles: ['MOVER_MOTOR', 'MOVER_TAXI_EXTRA'], order: 4,
+    docProfiles: ['MOVER_MOTOR', 'MOVER_TAXI_EXTRA'], order: 4, feeBand: 'STANDARD',
   },
   BUS_9: {
     type: 'BUS_9', label: 'Bus (9-seater)', maxPackageSize: 'EXTRA_LARGE', seats: 9,
     rideClass: 'GROUP', services: ['RIDE', 'COURIER'],
-    docProfiles: ['MOVER_MOTOR', 'MOVER_TAXI_EXTRA', 'MOVER_COMMERCIAL'], order: 5,
+    docProfiles: ['MOVER_MOTOR', 'MOVER_TAXI_EXTRA', 'MOVER_COMMERCIAL'], order: 5, feeBand: 'HEAVY',
   },
   BUS_15: {
     type: 'BUS_15', label: 'Bus (15-seater)', maxPackageSize: 'EXTRA_LARGE', seats: 15,
     rideClass: 'GROUP', services: ['RIDE', 'COURIER'],
-    docProfiles: ['MOVER_MOTOR', 'MOVER_TAXI_EXTRA', 'MOVER_COMMERCIAL'], order: 6,
+    docProfiles: ['MOVER_MOTOR', 'MOVER_TAXI_EXTRA', 'MOVER_COMMERCIAL'], order: 6, feeBand: 'HEAVY',
   },
   CANTER_SHORT: {
     type: 'CANTER_SHORT', label: 'Short-Base Canter (Open Back)', maxPackageSize: 'EXTRA_LARGE', seats: 0,
     rideClass: null, services: ['COURIER', 'DELIVERY'],
-    docProfiles: ['MOVER_MOTOR', 'MOVER_COMMERCIAL'], order: 7,
+    docProfiles: ['MOVER_MOTOR', 'MOVER_COMMERCIAL'], order: 7, feeBand: 'HEAVY',
   },
   CANTER_LONG: {
     type: 'CANTER_LONG', label: 'Long-Base Canter (Open Back)', maxPackageSize: 'EXTRA_LARGE', seats: 0,
     rideClass: null, services: ['COURIER', 'DELIVERY'],
-    docProfiles: ['MOVER_MOTOR', 'MOVER_COMMERCIAL'], order: 8,
+    docProfiles: ['MOVER_MOTOR', 'MOVER_COMMERCIAL'], order: 8, feeBand: 'HEAVY',
   },
   BOX_TRUCK_SHORT: {
     type: 'BOX_TRUCK_SHORT', label: 'Short-Base Box Truck', maxPackageSize: 'EXTRA_LARGE', seats: 0,
     rideClass: null, services: ['COURIER', 'DELIVERY'],
-    docProfiles: ['MOVER_MOTOR', 'MOVER_COMMERCIAL'], order: 9,
+    docProfiles: ['MOVER_MOTOR', 'MOVER_COMMERCIAL'], order: 9, feeBand: 'HEAVY',
   },
   BOX_TRUCK_LONG: {
     type: 'BOX_TRUCK_LONG', label: 'Long-Base Box Truck', maxPackageSize: 'EXTRA_LARGE', seats: 0,
     rideClass: null, services: ['COURIER', 'DELIVERY'],
-    docProfiles: ['MOVER_MOTOR', 'MOVER_COMMERCIAL'], order: 10,
+    docProfiles: ['MOVER_MOTOR', 'MOVER_COMMERCIAL'], order: 10, feeBand: 'HEAVY',
   },
 };
 
@@ -114,6 +131,19 @@ export function vehicleTypesForPackageSize(size: string | null | undefined): Veh
 /** The document-checklist keys a given vehicle adds on top of the base MOVER list. */
 export function docProfilesFor(vehicleType: VehicleType): string[] {
   return VEHICLE_CLASSES[vehicleType]?.docProfiles ?? [];
+}
+
+/**
+ * The weekly-fee band a vehicle bills on — the ONE place that answers "does this
+ * mover pay the standard rate or the heavy-fleet rate".
+ *
+ * An unknown vehicle bills STANDARD: a new VehicleType enum value that lands
+ * without a band must never silently charge a mover the higher rate. The
+ * exhaustive `Record<VehicleType, VehicleClass>` above makes that unreachable
+ * at compile time; this is the runtime floor behind it.
+ */
+export function feeBandFor(vehicleType: VehicleType): MoverFeeBand {
+  return VEHICLE_CLASSES[vehicleType]?.feeBand ?? 'STANDARD';
 }
 
 /** A passenger-carrying vehicle (has a ride class): car, wagon, bus. These carry

@@ -75,7 +75,7 @@ describe('CountryConfig — Guyana seeded, everything reads from config', () => 
     expect(Number(gy.idGateThresholdUsd)).toBe(50);
 
     const tiers = await countryConfig.getSubscriptionTiers('GY');
-    expect(tiers).toMatchObject({ mover: 12000, smallVendor: 20000, largeVendor: 30000 });
+    expect(tiers).toMatchObject({ mover: 10000, moverHeavy: 12000, smallVendor: 20000, largeVendor: 30000 });
   });
 
   it('converts the USD ID-gate to local currency from config', async () => {

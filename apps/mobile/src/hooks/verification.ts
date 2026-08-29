@@ -45,7 +45,7 @@ export function usePartnerPricing(countryCode?: string) {
       currencyCode: string;
       currencySymbol: string;
       trialDays: number;
-      weekly: { mover: number | null; smallVendor: number | null; largeVendor: number | null };
+      weekly: { mover: number | null; moverHeavy: number | null; serviceVendor: number | null; smallVendor: number | null; largeVendor: number | null; departmentVendor: number | null };
     }>(authApi.pricing(countryCode)),
     staleTime: 60 * 60 * 1000,
   });

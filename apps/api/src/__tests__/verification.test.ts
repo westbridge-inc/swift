@@ -773,7 +773,8 @@ describe('Subscriptions are born on verification (auto-approval path)', () => {
     });
     expect(rider.subscription).not.toBeNull();
     expect(rider.subscription!.status).toBe('TRIAL');
-    expect(Number(rider.subscription!.weeklyRate)).toBe(12000);
+    // MOTORCYCLE is the STANDARD fee band. A bus/canter mover would be 12,000.
+    expect(Number(rider.subscription!.weeklyRate)).toBe(10000);
 
     // afterApproval fired once per approved document — birth must be idempotent
     const count = await app.prisma.subscription.count({ where: { riderId: rider.id } });
@@ -784,7 +785,8 @@ describe('Subscriptions are born on verification (auto-approval path)', () => {
     const subs = await app.prisma.subscription.findMany({ where: { vendorId: serviceVendorId } });
     expect(subs).toHaveLength(1);
     expect(subs[0]!.status).toBe('TRIAL');
-    expect(Number(subs[0]!.weeklyRate)).toBe(20000);
+    // vendorType SERVICE — a trade with no catalogue, priced apart from shops.
+    expect(Number(subs[0]!.weeklyRate)).toBe(12000);
   });
 
   it('a mover on TRIAL can go online (the trial is not a dead-end)', async () => {

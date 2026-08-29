@@ -1,6 +1,6 @@
 import { Prisma, type PrismaClient, type SubscriptionType, type VendorType } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
-import { CountryConfigService } from '../country/country-config.service';
+import { CountryConfigService, moverRateFor, vendorRateFor } from '../country/country-config.service';
 import { TrialEntitlementService } from '../integrity/trial-entitlement.service';
 import { log } from '../../utils/logger';
 
@@ -36,6 +36,7 @@ export class SubscriptionService {
       where: { id: riderId },
       select: {
         riderType: true,
+        vehicleType: true,
         subscription: true,
         user: { select: { countryCode: true } },
       },
@@ -45,13 +46,17 @@ export class SubscriptionService {
 
     const tiers = await this.countryConfig.getSubscriptionTiers(rider.user.countryCode);
     const type: SubscriptionType = rider.riderType === 'COURIER' ? 'COURIER_RIDER' : 'DELIVERY_RIDER';
-    return this.create({ riderId }, type, tiers.mover, rider.user.countryCode);
+    // The weekly fee follows the VEHICLE, not the service: a canter doing
+    // deliveries bills the heavy band exactly like a canter doing courier work.
+    const rate = moverRateFor(tiers, rider.vehicleType);
+    return this.create({ riderId }, type, rate, rider.user.countryCode);
   }
 
   async startTrialForDriver(driverId: string) {
     const driver = await this.prisma.driver.findUnique({
       where: { id: driverId },
       select: {
+        vehicleType: true,
         subscription: true,
         user: { select: { countryCode: true } },
       },
@@ -60,7 +65,10 @@ export class SubscriptionService {
     if (driver.subscription) return driver.subscription;
 
     const tiers = await this.countryConfig.getSubscriptionTiers(driver.user.countryCode);
-    return this.create({ driverId }, 'TAXI_DRIVER', tiers.mover, driver.user.countryCode);
+    // A minibus driver is a TAXI_DRIVER on the heavy band — the subscription
+    // type says what they do, the vehicle says what they pay.
+    const rate = moverRateFor(tiers, driver.vehicleType);
+    return this.create({ driverId }, 'TAXI_DRIVER', rate, driver.user.countryCode);
   }
 
   async startTrialForVendor(vendorId: string) {
@@ -69,7 +77,12 @@ export class SubscriptionService {
       select: {
         vendorType: true,
         subscription: true,
-        owner: { select: { user: { select: { countryCode: true } } } },
+        owner: {
+          select: {
+            user: { select: { countryCode: true } },
+            _count: { select: { vendors: true } },
+          },
+        },
       },
     });
     if (!vendor) throw new NotFoundError('Vendor', vendorId);
@@ -77,7 +90,16 @@ export class SubscriptionService {
 
     const countryCode = vendor.owner.user.countryCode;
     const tiers = await this.countryConfig.getSubscriptionTiers(countryCode);
-    return this.create({ vendorId }, VENDOR_SUB_TYPE[vendor.vendorType], tiers.smallVendor, countryCode);
+    // A brand-new store has no catalogue yet, so it is born on the small tier
+    // and the weekly re-tier moves it up once its listings are counted. The
+    // franchise basis IS known at signup, though: the owner's fifth store
+    // should not spend its first week at the single-store price.
+    const { rate } = vendorRateFor(tiers, {
+      isService: vendor.vendorType === 'SERVICE',
+      activeListings: 0,
+      ownedStores: vendor.owner._count.vendors,
+    });
+    return this.create({ vendorId }, VENDOR_SUB_TYPE[vendor.vendorType], rate, countryCode);
   }
 
   /** The human behind the entity + their trial-law role (§3: the trial
