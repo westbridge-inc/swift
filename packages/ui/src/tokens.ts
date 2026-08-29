@@ -293,6 +293,13 @@ export const radius = {
   md: 12,
   lg: 16,
   xl: 20,
+  /**
+   * The bottom-sheet top corners (WS-2). Deliberately larger than `xl`: a sheet
+   * is a surface rising over the whole screen, and at 20 it reads as a tall
+   * card rather than something that came from the bottom edge. Named so a sheet
+   * cannot quietly settle back onto the card radius.
+   */
+  sheet: 28,
   full: 9999,
 } as const;
 
