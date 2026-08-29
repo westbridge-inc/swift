@@ -3,7 +3,7 @@ import { View, Linking, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Feather } from '@expo/vector-icons';
-import { color, space } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { withAlpha } from '../../modules/mover/surface';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { authApi } from '../../services/api';
@@ -99,8 +99,11 @@ export function SelfieCaptureScreen() {
 
   const frame = (
     <View
-      className="self-center overflow-hidden rounded-full border-4"
       style={{
+        alignSelf: 'center',
+        overflow: 'hidden',
+        borderRadius: radius.full,
+        borderWidth: 4,
         width: FRAME,
         height: FRAME,
         borderColor: color.brand[500],
@@ -114,7 +117,7 @@ export function SelfieCaptureScreen() {
       ) : permission?.granted ? (
         <CameraView ref={cameraRef} facing="front" style={{ width: FRAME, height: FRAME }} />
       ) : (
-        <View className="flex-1 items-center justify-center bg-surface-subtle">
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface.subtle }}>
           <Feather name="camera-off" size={40} color={color.text.muted} />
         </View>
       )}
@@ -122,15 +125,15 @@ export function SelfieCaptureScreen() {
   );
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-base">
-      <View className="flex-row items-center justify-end px-lg pt-md">
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top', 'bottom']}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', paddingHorizontal: space.lg, paddingTop: space.md }}>
         <PressableScale onPress={logout} hitSlop={12}>
           <T variant="label" tone="muted">Sign out</T>
         </PressableScale>
       </View>
 
-      <View className="flex-1 justify-center px-lg">
-        <View className="mb-sm items-center"><SwiftMark size={34} /></View>
+      <View style={{ flex: 1, justifyContent: 'center', paddingHorizontal: space.lg }}>
+        <View style={{ marginBottom: space.sm, alignItems: 'center' }}><SwiftMark size={34} /></View>
         <T variant="title" center>Add your photo</T>
         <T variant="body" tone="muted" center style={{ marginTop: space.xs, marginBottom: space.xl }}>
           Take a quick selfie — it becomes your profile photo so people know
@@ -141,7 +144,7 @@ export function SelfieCaptureScreen() {
 
         {error ? <T variant="label" tone="error" center style={{ marginTop: space.md }}>{error}</T> : null}
 
-        <View className="mt-xl">
+        <View style={{ marginTop: space.xl }}>
           {photoUri ? (
             <>
               <PillButton label="Use this photo" loading={uploading} onPress={upload} />

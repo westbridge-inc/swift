@@ -1,6 +1,5 @@
 /** @jsxImportSource react */
 import 'react-native-gesture-handler';
-import '../global.css';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -194,8 +193,11 @@ function SecureStorageRecovery({
 }
 
 export default function App() {
-  // Register under the exact names @swift/ui tokens reference (font.display / font.body)
-  // so the `font-display` / `font-body` NativeWind classes resolve to the brand typefaces.
+  // Register under the exact names @swift/ui tokens reference (font.display / font.body).
+  // These strings ARE the contract: the tokens pass them straight to RN `fontFamily`, so a
+  // rename here silently falls back to the system face rather than failing. (There are no
+  // `font-display` classes to grep for any more — R4 removed NativeWind — but this call is
+  // still what makes the brand typefaces resolve.)
   // Splash holds until loaded, so there is no fallback swap (zero layout shift).
   const [fontsLoaded] = useFonts({
     Bricolage: BricolageGrotesque_700Bold,

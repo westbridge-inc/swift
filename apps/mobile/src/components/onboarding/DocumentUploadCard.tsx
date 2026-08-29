@@ -2,7 +2,7 @@ import { Alert, Pressable, View, ActivityIndicator } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useNavigation } from '@react-navigation/native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { color, space } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { Badge, Card, LinkText, T } from '../../kit';
 import { useUploadDocument } from '../../hooks/verification';
 import {
@@ -164,14 +164,14 @@ export function DocumentUploadCard({
           isNext && !status ? { borderWidth: 1, borderColor: color.brand[500] } : null,
         ]}
       >
-        <View className="h-11 w-11 items-center justify-center rounded-full" style={{ backgroundColor: color.surface.subtle }}>
+        <View style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: radius.full, backgroundColor: color.surface.subtle }}>
           <MaterialCommunityIcons
             name={approved ? 'check-decagram' : docIcon(docType)}
             size={20}
             color={approved ? color.success : expired || expiringSoon ? color.warning : color.brand[500]}
           />
         </View>
-        <View className="ml-md flex-1">
+        <View style={{ marginLeft: space.md, flex: 1 }}>
           <T
             variant="micro"
             tone="muted"

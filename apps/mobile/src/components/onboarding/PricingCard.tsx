@@ -1,6 +1,6 @@
 import { View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { color, space } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { Card, T } from '../../kit';
 import { usePartnerPricing } from '../../hooks/verification';
 import { useAuthStore } from '../../stores/authStore';
@@ -20,11 +20,11 @@ export function PricingCard({ kind }: { kind: 'mover' | 'vendor' }) {
 
   return (
     <Card style={{ marginBottom: space.md }}>
-      <View className="flex-row items-center">
-        <View className="h-11 w-11 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <View style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: radius.full, backgroundColor: color.brand[50] }}>
           <MaterialCommunityIcons name="tag-heart-outline" size={20} color={color.brand[500]} />
         </View>
-        <View className="ml-md flex-1">
+        <View style={{ marginLeft: space.md, flex: 1 }}>
           <T variant="body" weight="semibold">{p.trialDays} days free, then {fmt(rate)}/week</T>
           <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
             {kind === 'mover'

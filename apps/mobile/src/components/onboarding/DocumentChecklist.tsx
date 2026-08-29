@@ -1,8 +1,13 @@
 import { View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { color, space } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { EmptyState, Spinner, T } from '../../kit';
 import { DocumentUploadCard } from './DocumentUploadCard';
+
+/** The progress track. `h-1.5` was 6px via Tailwind's default scale — the
+ *  theme maps no numeric spacing, so it was never a token. Named here so the
+ *  bar and its fill cannot drift apart. */
+const TRACK_HEIGHT = 6;
 
 /**
  * Renders GET /verification/status?role= as the "Required steps" checklist.
@@ -26,7 +31,7 @@ export function DocumentChecklist({
 }) {
   if (isLoading) {
     return (
-      <View className="items-center justify-center py-2xl">
+      <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: space['2xl'] }}>
         <Spinner />
       </View>
     );
@@ -85,8 +90,8 @@ export function DocumentChecklist({
         Upload these to activate your account. We review within 24 hours.
       </T>
       {/* Progress — how far through the door they are */}
-      <View className="mb-md">
-        <View className="mb-1 flex-row items-center justify-between">
+      <View style={{ marginBottom: space.md }}>
+        <View style={{ marginBottom: space.xs, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
           <T variant="micro" weight="semibold" tone="muted">
             {approvedCount} of {checklist.length} approved
           </T>
@@ -96,10 +101,14 @@ export function DocumentChecklist({
             </T>
           ) : null}
         </View>
-        <View className="h-1.5 overflow-hidden rounded-full" style={{ backgroundColor: color.surface.subtle }}>
+        <View style={{ height: TRACK_HEIGHT, overflow: 'hidden', borderRadius: radius.full, backgroundColor: color.surface.subtle }}>
           <View
-            className="h-1.5 rounded-full"
-            style={{ width: `${Math.round((approvedCount / checklist.length) * 100)}%`, backgroundColor: color.success }}
+            style={{
+              height: TRACK_HEIGHT,
+              borderRadius: radius.full,
+              width: `${Math.round((approvedCount / checklist.length) * 100)}%`,
+              backgroundColor: color.success,
+            }}
           />
         </View>
       </View>
@@ -118,7 +127,7 @@ export function DocumentChecklist({
           />
         );
       })}
-      <View className="mt-sm flex-row items-start rounded-2xl bg-surface-subtle p-md">
+      <View style={{ marginTop: space.sm, flexDirection: 'row', alignItems: 'flex-start', borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.md }}>
         <MaterialCommunityIcons name="shield-check-outline" size={16} color={color.text.muted} style={{ marginTop: 1 }} />
         <T variant="micro" tone="muted" style={{ marginLeft: space.sm, flex: 1 }}>
           We confirm your documents are genuine and that they&apos;re yours, and re‑check expiry every day — we&apos;ll

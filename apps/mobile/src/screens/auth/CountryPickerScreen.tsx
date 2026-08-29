@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { Feather } from '@expo/vector-icons';
-import { color, elevation, space } from '@swift/ui';
+import { color, elevation, radius, space } from '@swift/ui';
 import { EmptyState, Skeleton, T } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
 import { StepProgress } from '../../kit/step-progress';
@@ -40,9 +40,9 @@ export function CountryPickerScreen({ navigation }: any) {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']} className="bg-surface-subtle">
-      <View className="flex-1 px-lg pt-2xl">
-        <View className="flex-row items-center">
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.subtle }} edges={['top', 'bottom']}>
+      <View style={{ flex: 1, paddingHorizontal: space.lg, paddingTop: space['2xl'] }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <SwiftMark size={40} />
           <T variant="display" style={{ marginLeft: space.sm }}>Swift</T>
         </View>
@@ -50,18 +50,18 @@ export function CountryPickerScreen({ navigation }: any) {
         <T variant="body" tone="muted" style={{ marginTop: space.xs }}>
           Choose your country to get started — Swift is live across the Caribbean.
         </T>
-        <View className="mt-lg">
+        <View style={{ marginTop: space.lg }}>
           <StepProgress step={0} total={4} />
         </View>
 
         {isLoading ? (
-          <View className="mt-lg">
+          <View style={{ marginTop: space.lg }}>
             {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} style={{ marginBottom: space.sm, height: 68, borderRadius: 24 }} />)}
           </View>
         ) : isError || countries.length === 0 ? (
           // The very first screen of the app must never dead-end silently —
           // an unreachable API previously rendered an empty list with no way out.
-          <View className="mt-xl">
+          <View style={{ marginTop: space.xl }}>
             <EmptyState
               icon="wifi-off"
               title="Can't reach Swift"
@@ -72,7 +72,7 @@ export function CountryPickerScreen({ navigation }: any) {
           </View>
         ) : (
           <FlatList
-            className="mt-lg"
+            style={{ marginTop: space.lg }}
             data={countries}
             keyExtractor={(c) => c.code}
             showsVerticalScrollIndicator={false}
@@ -82,29 +82,40 @@ export function CountryPickerScreen({ navigation }: any) {
               return (
                 <PressableScale disabled={!live} onPress={() => choose(item)}>
                   <View
-                    className={
-                      live
-                        ? 'mb-sm flex-row items-center rounded-3xl bg-surface-base p-md'
-                        : 'mb-sm flex-row items-center rounded-3xl bg-surface-base p-md opacity-60'
-                    }
-                    style={elevation.card}
+                    style={[
+                      {
+                        marginBottom: space.sm,
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        // `rounded-3xl` was never a token — the theme maps no 3xl
+                        // radius, so it took Tailwind's 24px default.
+                        borderRadius: 24,
+                        backgroundColor: color.surface.base,
+                        padding: space.md,
+                      },
+                      elevation.card,
+                      // The two class strings differed ONLY here. One style plus
+                      // the thing that varies cannot drift the way two nearly
+                      // identical strings can.
+                      live ? null : { opacity: 0.6 },
+                    ]}
                   >
-                    <View className="h-12 w-12 items-center justify-center rounded-2xl bg-surface-subtle">
+                    <View style={{ width: 48, height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: radius.lg, backgroundColor: color.surface.subtle }}>
                       {/* The flag is a unicode glyph, not type — size is structural. */}
                       <T style={{ fontSize: 26, lineHeight: 32 }}>{flagEmoji(item.code)}</T>
                     </View>
-                    <View className="ml-md flex-1">
+                    <View style={{ marginLeft: space.md, flex: 1 }}>
                       <T variant="body" weight="bold" numberOfLines={1}>{item.name}</T>
                       <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
                         {item.dialCode} · {item.currencySymbol} {item.currencyCode}
                       </T>
                     </View>
                     {live ? (
-                      <View className="h-9 w-9 items-center justify-center rounded-full" style={{ backgroundColor: color.brand[50] }}>
+                      <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: radius.full, backgroundColor: color.brand[50] }}>
                         <Feather name="chevron-right" size={18} color={color.brand[500]} />
                       </View>
                     ) : (
-                      <View className="rounded-full bg-surface-subtle px-2.5 py-1">
+                      <View style={{ borderRadius: radius.full, backgroundColor: color.surface.subtle, paddingHorizontal: 10, paddingVertical: 4 }}>
                         <T variant="micro" weight="bold" tone="muted">Soon</T>
                       </View>
                     )}
