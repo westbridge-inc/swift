@@ -67,7 +67,7 @@ env_value() {
   [ -f "$HERE/.env" ] || return 0
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
 }
-for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION; do
+for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION BACKUP_HEARTBEAT_URL; do
   if [ -z "${!var:-}" ]; then export "$var=$(env_value "$var")"; fi
 done
 BACKUP_PREFIX="${BACKUP_PREFIX:-db}"
@@ -146,6 +146,17 @@ INSERT INTO platform_config (id, key, value, "updatedAt")
 VALUES (md5(random()::text || clock_timestamp()::text), 'last_backup_offsite', to_jsonb($UPLOADED = 1), now())
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "updatedAt" = now();
 SQL
+fi
+
+# ── EXTERNAL HEARTBEAT ──────────────────────────────────────────────────────
+# Everything above pages from INSIDE the box — which is useless the day the box
+# itself dies. If BACKUP_HEARTBEAT_URL is set (a healthchecks.io-style check),
+# ping it on success; the external service then alarms on SILENCE. Unset = inert.
+# Best-effort by design: a failed ping must never fail a backup that worked.
+if [ -n "${BACKUP_HEARTBEAT_URL:-}" ]; then
+  curl -fsS -m 10 --retry 3 "$BACKUP_HEARTBEAT_URL" >/dev/null 2>&1 \
+    && echo "external heartbeat pinged" \
+    || echo "note: external heartbeat ping failed (backup itself is fine)" >&2
 fi
 
 if [ "$RETAIN_DAYS" -gt 0 ]; then
