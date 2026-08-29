@@ -173,6 +173,55 @@ export class DiscoveryService {
       .filter(Boolean);
   }
 
+  /**
+   * Every PENDING suggestion across a vendor's whole catalogue, grouped by item.
+   *
+   * The per-item view above is the right shape when you are already editing one
+   * listing. It is the wrong shape for the thing the backfill actually asks for:
+   * that job notifies a vendor "review your categories — takes about 2 minutes",
+   * and with only a per-item endpoint that review means opening every listing in
+   * turn. A store with twenty items had no two-minute path, so the suggestions
+   * sat PENDING and the catalogue stayed untagged.
+   *
+   * Ordered by confidence so the safest calls are disposed of first.
+   */
+  async pendingSuggestionsForVendor(vendorId: string, limit = 200) {
+    const items = await this.prisma.item.findMany({
+      where: { vendorId },
+      select: { id: true, name: true, imageUrl: true },
+    });
+    if (items.length === 0) return [];
+    const byItem = new Map(items.map((i) => [i.id, i]));
+
+    const rows = await this.prisma.discoveryCategorySuggestion.findMany({
+      where: { itemId: { in: items.map((i) => i.id) }, status: 'PENDING' },
+      orderBy: { confidence: 'desc' },
+      take: limit,
+    });
+    if (rows.length === 0) return [];
+
+    const categories = await this.prisma.discoveryCategory.findMany({
+      where: { id: { in: [...new Set(rows.map((r) => r.categoryId))] } },
+    });
+    const catById = new Map(categories.map((c) => [c.id, c]));
+
+    // Grouped by item: a vendor reasons about "what is this thing", not about a
+    // flat list of unrelated proposals.
+    const grouped = new Map<string, { itemId: string; itemName: string; imageUrl: string | null; suggestions: Array<{ id: string; slug: string; name: string; emoji: string; confidence: number; stage: string }> }>();
+    for (const r of rows) {
+      const item = byItem.get(r.itemId);
+      const cat = catById.get(r.categoryId);
+      if (!item || !cat) continue; // a merged/retired category is not offered
+      const entry = grouped.get(item.id) ?? { itemId: item.id, itemName: item.name, imageUrl: item.imageUrl, suggestions: [] };
+      entry.suggestions.push({
+        id: r.id, slug: cat.slug, name: cat.name, emoji: cat.emoji,
+        confidence: Number(r.confidence), stage: r.stage,
+      });
+      grouped.set(item.id, entry);
+    }
+    return [...grouped.values()];
+  }
+
   async resolveSuggestion(suggestionId: string, itemId: string, action: 'accept' | 'dismiss', tenantId = 'swift-default') {
     const suggestion = await this.prisma.discoveryCategorySuggestion.findFirst({
       where: { id: suggestionId, itemId },

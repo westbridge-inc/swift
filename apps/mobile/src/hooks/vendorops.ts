@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Vibration } from 'react-native';
 import { useMutation, useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
-import { vendorApi } from '../services/api';
+import { vendorApi, vendorDiscoveryApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { useVendorPreview } from '../stores/vendorPreview';
 import { vendorPreviewDataset, previewQuery, previewMutation, type VendorPreviewDataset } from '../lib/vendorPreviewData';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 import {
+  getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
 } from '../stores/authStore';
@@ -96,6 +97,47 @@ export function useRespondReview() {
 }
 
 /** Movement R9: the store's daily-folded Standing view (RAT-G). */
+/**
+ * [MKT G3] THE CATEGORY-SUGGESTION QUEUE — the last step before a market tag.
+ *
+ * The backfill proposes categories for a store's items and notifies the owner
+ * to review them; ACCEPTING one is what actually writes the
+ * `ItemDiscoveryCategory` row the market feed filters on. Measured before this
+ * shipped: 50 suggestions PENDING, 0 tags — the notification asked vendors to
+ * review, the API could accept, and nothing in the app could call it.
+ *
+ * Machines never re-touch resolved ground, so a dismissal is as meaningful as
+ * an acceptance and both are final.
+ */
+export function useCategorySuggestions() {
+  const pv = usePreviewDataset();
+  const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
+  return useQuery({
+    queryKey: ['vendor', 'category-suggestions', selectedStoreId ?? null],
+    queryFn: () => tryUnwrap(vendorDiscoveryApi.suggestions(getAuthSessionSnapshot() ?? undefined, selectedStoreId)),
+    enabled: !pv,
+    retry: false,
+  });
+}
+
+export function useResolveCategorySuggestion() {
+  const qc = useQueryClient();
+  const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
+  // Preview-safe by law: a demo dataset must never write a real tag onto a real
+  // catalogue. Every vendor mutation goes through this helper, and a gate
+  // enforces it — calling `useMutation` here directly is how preview stops
+  // being read-only.
+  return usePreviewSafeMutation({
+    mutationFn: ({ id, action }: { id: string; action: 'accept' | 'dismiss' }) =>
+      tryUnwrap(vendorDiscoveryApi.resolve(id, action, getAuthSessionSnapshot() ?? undefined, selectedStoreId)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['vendor', 'category-suggestions'] });
+      // An accepted tag changes what the market feed returns for this store.
+      qc.invalidateQueries({ queryKey: ['market', 'items'] });
+    },
+  });
+}
+
 export function useVendorStanding<T = any>() {
   const pv = usePreviewDataset();
   const q = useQuery<T>({ queryKey: ['vendor', 'standing'], queryFn: () => unwrap<T>(vendorApi.standing()), enabled: !pv });

@@ -2675,6 +2675,16 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: await discovery.pendingSuggestions(request.params.id) };
   });
 
+  /** GET /category-suggestions — every PENDING suggestion across the store,
+   *  grouped by item. This is what the backfill's "takes about 2 minutes"
+   *  notification promises; without it that review meant opening every listing
+   *  in turn, which is why suggestions sat PENDING and catalogues stayed
+   *  untagged. */
+  app.get('/category-suggestions', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    return { success: true, data: await discovery.pendingSuggestionsForVendor(vendorId) };
+  });
+
   /** POST /items/:id/categories — add a tag ({ slug }, ≤3, curated only). */
   app.post<{ Params: IdParam }>('/items/:id/categories', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
