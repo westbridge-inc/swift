@@ -287,7 +287,14 @@ describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
   // everything, single-candidate-or-Home — proven in qr-attribution.test.ts.
   // /discovery is the guest-facing category rail (flag-gated read-only
   // aggregates — no user data; browsing needs no session by design).
-  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/attribution', '/api/v1/discovery']);
+  // /market is the same posture one step further in [MKT G1]: the catalogue a
+  // shopper browses BEFORE they have an account, which is the entire point of
+  // a marketplace tab. It is read-only, carries no user data, and every row it
+  // can return is already public — the query goes through VISIBLE_VENDOR_REL
+  // and `isAvailable`, so it can only surface goods an anonymous visitor could
+  // already see on a store page. Requiring a session here would mean asking
+  // someone to sign up before they can see what is for sale.
+  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/attribution', '/api/v1/discovery', '/api/v1/market']);
 
   it('flags a server prefix the matrix never mounts (red-first)', () => {
     // Pretend server.ts added /api/v1/loyalty but buildTestApp never enrolled it.

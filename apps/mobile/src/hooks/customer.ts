@@ -1,6 +1,6 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
-import { customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
+import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 
 /**
@@ -98,6 +98,44 @@ export function useDiscoveryCategories(lat?: number, lng?: number) {
     queryFn: () => unwrap<DiscoveryRail>(discoveryApi.categories({ lat, lng })),
     staleTime: 60_000,
     retry: false,
+  });
+}
+
+/**
+ * [MKT G1/G2] THE MARKET FEED — items across every store.
+ *
+ * The Market tab used to call `useVendors({ type: 'STORE' })` and render shop
+ * cards, so pressing one opened a store and no item ever appeared. The ask was
+ * a catalogue: things, by category, spanning stores. This is the hook for it.
+ *
+ * Infinite by cursor, not by page number — an offset scan over a growing
+ * catalogue is the classic browse-feed collapse, and the server refuses a
+ * cursor minted under a different sort rather than serving a nonsense page.
+ */
+export type MarketItem = {
+  id: string; name: string; basePrice: number; imageUrl: string | null;
+  vendorId: string; vendorName: string; categoryName: string | null;
+};
+
+export function useMarketItems(params: { category?: string; sort?: string } = {}) {
+  return useInfiniteQuery({
+    queryKey: ['market', 'items', params.category ?? 'all', params.sort ?? 'popular'],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) => {
+      const res = await marketApi.items({
+        ...(params.category ? { category: params.category } : {}),
+        ...(params.sort ? { sort: params.sort } : {}),
+        ...(pageParam ? { cursor: pageParam } : {}),
+        limit: 24,
+      });
+      const body = res?.data?.data ?? {};
+      return {
+        items: (body.items ?? []) as MarketItem[],
+        nextCursor: (body.nextCursor ?? null) as string | null,
+        total: typeof body.meta?.total === 'number' ? (body.meta.total as number) : null,
+      };
+    },
+    getNextPageParam: (last: { nextCursor: string | null }) => last.nextCursor ?? undefined,
   });
 }
 

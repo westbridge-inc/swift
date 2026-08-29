@@ -1218,6 +1218,11 @@ model Item {
   @@index([vendorId])
   @@index([vendorId, isAvailable])
   @@index([isAvailable, totalOrdered])
+  /// [MKT G1] The market feed sorts by these two across every store. `popular`
+  /// was already served by the index above; `new` — the "New arrivals" rail the
+  /// reference makes the hero of the tab — and the price sorts were full scans.
+  @@index([isAvailable, createdAt])
+  @@index([isAvailable, basePrice])
   @@map("items")
 }
 

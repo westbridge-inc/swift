@@ -44,6 +44,7 @@ import { qrResolverRoutes } from './modules/qr/qr-resolver.routes';
 import { attributionRoutes } from './modules/qr/attribution.routes';
 import { qrPublicRoutes } from './modules/qr/qr-public.routes';
 import { discoveryRoutes } from './modules/discovery/discovery.routes';
+import { marketRoutes } from './modules/market/market.routes';
 import { statementRoutes } from './modules/order/statement.routes';
 import path from 'node:path';
 import { installProcessLifecycle } from './utils/process-lifecycle';
@@ -283,6 +284,9 @@ async function buildApp() {
   await app.register(qrPublicRoutes, { prefix: '/api/v1/public' });
   // Category discovery rail data (#17) — flag-dark until the founder flips it.
   await app.register(discoveryRoutes, { prefix: '/api/v1/discovery' });
+  // [MKT G1] The market feed — items across stores. Public like search: a
+  // shopper browses the catalogue before they have an account.
+  await app.register(marketRoutes, { prefix: '/api/v1/market' });
   // HMAC-signed statement renders (the authed routes mint the links).
   await app.register(statementRoutes, { prefix: '/api/v1/statements' });
   // MMG agent-cash channels [san spec 4.1/4.2] — dark (503) until the
@@ -374,6 +378,37 @@ async function start() {
     await assertProductionData(app.prisma);
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);
+
+    // [MKT G3/G5] PLANT THE DISCOVERY TAXONOMY.
+    //
+    // `seedDiscoveryTaxonomy` shipped with 14 RETAIL categories, an alias
+    // dictionary that is the local moat, and full idempotency — and NOTHING
+    // EVER CALLED IT outside tests. So the taxonomy existed in code and in no
+    // database: every deployment had zero categories, the rail had nothing to
+    // show, and the market feed could only ever return an empty grid however
+    // correct its query was. A seeder with no caller is the same defect as an
+    // endpoint with no caller, one layer down.
+    //
+    // Runs AFTER listen, so it can never delay the port opening (the same rule
+    // the Meilisearch warm-up follows), and never in tests — they call
+    // `buildApp` directly and seed their own tenants explicitly.
+    //
+    // Idempotent by contract: name/emoji/sortWeight are create-only so a
+    // founder's admin edits win forever, and aliases UNION so shipped alias
+    // extensions reach existing tenants without trampling admin additions.
+    // Failure is logged, never fatal — a missing taxonomy degrades the rail,
+    // it must not take the API down.
+    void (async () => {
+      try {
+        const { seedDiscoveryTaxonomy } = await import('./modules/discovery/taxonomy.seed');
+        const { created, aliasUpdated } = await seedDiscoveryTaxonomy(app.prisma);
+        if (created > 0 || aliasUpdated > 0) {
+          app.log.info({ created, aliasUpdated }, 'discovery: taxonomy seeded');
+        }
+      } catch (err) {
+        app.log.warn({ err }, 'discovery: taxonomy seed failed — the category rail will be empty');
+      }
+    })();
   } catch (err) {
     console.error('Failed to start server:', err);
     process.exit(1);

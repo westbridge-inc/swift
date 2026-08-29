@@ -255,6 +255,14 @@ export const discoveryApi = {
     api.get('/discovery/categories', { params }),
 };
 
+/** [MKT G1] The market feed — items across every store, by discovery category.
+ *  The Market tab used to call the VENDORS api and render shops; this returns
+ *  things. Same `ItemHit` shape search returns, deliberately. */
+export const marketApi = {
+  items: (params?: { category?: string; sort?: string; cursor?: string; limit?: number }) =>
+    api.get('/market/items', { params }),
+};
+
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
   myRating: () => api.get('/customer/rating'),
