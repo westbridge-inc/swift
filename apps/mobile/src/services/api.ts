@@ -512,6 +512,14 @@ export const moderationApi = {
     reason: 'SPAM' | 'HARASSMENT' | 'HATE_SPEECH' | 'VIOLENCE' | 'SEXUAL_CONTENT' | 'CSAE' | 'ILLEGAL_GOODS' | 'OTHER';
     detail?: string;
   }) => api.post('/reports', input),
+
+  /** [STORE-002] Blocking — the third leg of Apple 1.2 / Google's UGC policy,
+   *  and the one that was missing entirely. Report records a complaint for a
+   *  human to read; block is the thing that takes effect immediately, in both
+   *  directions, at the chat door and in dispatch. */
+  listBlocks: () => api.get('/blocks'),
+  block: (input: { blockedUserId: string; reason?: string }) => api.post('/blocks', input),
+  unblock: (blockedUserId: string) => api.put(`/blocks/${blockedUserId}`),
 };
 
 export const rideApi = {

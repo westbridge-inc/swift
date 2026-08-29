@@ -34,6 +34,7 @@ import { GetHelpScreen } from '../modules/profile/screens/GetHelpScreen';
 import { AddressesScreen } from '../modules/profile/screens/AddressesScreen';
 import { AddAddressScreen } from '../modules/profile/screens/AddAddressScreen';
 import { EmergencyContactsScreen } from '../modules/safety/screens/EmergencyContactsScreen';
+import { BlockedUsersScreen } from '../modules/safety/screens/BlockedUsersScreen';
 import { LocationPickerScreen } from '../modules/profile/screens/LocationPickerScreen';
 
 // Surviving verticals + infra (outside this rebuild's scope, still reachable)
@@ -154,6 +155,7 @@ export function CustomerStack() {
       <Stack.Screen name="Addresses" component={AddressesScreen} />
       <Stack.Screen name="AddAddress" component={AddAddressScreen} />
       <Stack.Screen name="EmergencyContacts" component={EmergencyContactsScreen} />
+      <Stack.Screen name="BlockedUsers" component={BlockedUsersScreen} />
       <Stack.Screen name="LocationPicker" component={LocationPickerScreen} />
       {/* Surviving verticals + infra */}
       <Stack.Screen name="Taxi" component={TaxiScreen} />
