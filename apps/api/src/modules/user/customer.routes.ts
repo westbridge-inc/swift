@@ -7,7 +7,7 @@ import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/di
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
-import { tenantCacheKey } from '../../utils/tenant-cache';
+import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache } from './home-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { zMoneyMinor } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
@@ -213,36 +213,6 @@ const MAX_DELIVERY_RADIUS_KM = 25;
 // Cancel window/fee now import from the ONE policy module [UG-CRAFT-01] —
 // the "must match order.service" comment era is over: the preview and the
 // charge read the same constants by construction.
-const HOME_CACHE_TTL = 60; // 1 min
-
-/**
- * Drop every cached Home feed belonging to one customer.
- *
- * The feed is written at `t:<tenant>:home:<userId>:<lat>:<lng>` — the
- * coordinates are part of the key, so the exact key cannot be rebuilt from
- * a userId alone and a pattern is unavoidable. The pattern must therefore be
- * built by the SAME helper that builds the key: the three call sites used to
- * pass a hand-written `home:${userId}:*`, which stopped matching anything the
- * day [SWIFT-SEC-CACHE] added the tenant prefix to the writer and not to
- * them. Nothing was ever invalidated — a favourited store, and the Home feed
- * behind a just-placed order, stayed stale for the full TTL.
- *
- * SCAN rather than KEYS: now that the pattern matches, this runs for real on
- * every favourite toggle and every checkout, and KEYS blocks the whole Redis
- * instance for the length of the scan.
- */
-async function invalidateHomeCache(app: FastifyInstance, userId: string): Promise<void> {
-  const pattern = tenantCacheKey(`home:${userId}:*`);
-  const doomed: string[] = [];
-  let cursor = '0';
-  do {
-    const [next, batch] = await app.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-    cursor = next;
-    doomed.push(...batch);
-  } while (cursor !== '0');
-  if (doomed.length > 0) await app.redis.del(...doomed);
-}
-
 const MAX_ADDRESSES = 10;
 // SWIFT-163: the Home discovery scan is bounded so an ever-growing catalogue
 // can't load every ACTIVE vendor into memory per request. The feed only ever
@@ -921,7 +891,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { lat, lng } = latLngQuerySchema.parse(request.query);
 
     // Try Redis cache
-    const cacheKey = tenantCacheKey(`home:${userId ?? 'guest'}:${lat ?? 'x'}:${lng ?? 'x'}`);
+    const cacheKey = homeCacheKey(userId, lat, lng);
     const cached = await app.redis.get(cacheKey).catch(() => null);
     if (cached) {
       return { success: true, data: JSON.parse(cached) };
@@ -2479,6 +2449,12 @@ export async function customerRoutes(app: FastifyInstance) {
     const { reason } = cancelOrderSchema.parse(request.body ?? {});
 
     const result = await orderService.cancelOrder(id, userId, reason);
+
+    // The feed is cached for 60s and carries this order as `activeOrder` with
+    // its free-cancel countdown. Left alone, Home keeps showing a cancelled
+    // order's hold ring ticking down — the founder watched it happen. Same
+    // fire-and-caught shape as checkout and the favourite toggles.
+    await invalidateHomeCache(app, userId).catch(() => {});
 
     return { success: true, data: result };
   });

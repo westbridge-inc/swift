@@ -17,6 +17,10 @@ export const customerKeys = {
   profile: ['customer', 'profile'] as const,
   addresses: ['customer', 'addresses'] as const,
   home: (lat?: number, lng?: number) => ['customer', 'home', lat ?? null, lng ?? null] as const,
+  // The PREFIX of every Home feed, whatever coordinates it was fetched for.
+  // Anything that changes what Home should show — an order placed, cancelled,
+  // a store favourited — invalidates this, not one lat/lng variant.
+  homeAll: ['customer', 'home'] as const,
   vendors: (params?: Record<string, string>) => ['customer', 'vendors', params ?? {}] as const,
   search: (q: string, type?: string, lat?: number, lng?: number) => ['customer', 'search', q, type ?? null, lat ?? null, lng ?? null] as const,
   searchSuggestions: (q: string) => ['customer', 'search-suggestions', q] as const,

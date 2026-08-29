@@ -15,6 +15,7 @@ import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import type { OrderStatus } from '@prisma/client';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 import { redactLiveLocation, riderCounterpartySelect } from '../../utils/counterparty';
+import { invalidateHomeCache } from '../user/home-cache';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -324,6 +325,9 @@ export default async function courierRoutes(app: FastifyInstance) {
         .catch((error) => request.log.warn({ err: error, orderId: id }, 'courier cancellation notification failed after commit'));
     }
 
+    // Same reason as the store-order and ride cancels: Home's cached feed
+    // would otherwise keep this parcel as the live order for up to a minute.
+    await invalidateHomeCache(app, request.user.userId).catch(() => {});
     return { success: true, data: updated };
   });
 

@@ -13,7 +13,7 @@ import { Feather } from '@expo/vector-icons';
 import { useIsFocused, useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, motion, radius, space } from '@swift/ui';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useOrder, useDecideSubstitution } from '../../../hooks/customer';
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
@@ -24,6 +24,7 @@ import { toast } from '../../../kit/toast';
 import { CircleChip, DecorativeIcon, ErrorState, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
+import { customerKeys } from '../../../hooks/customer';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -341,10 +342,18 @@ export function DeliveryScreen() {
   // banner — a client-clock/preview "free" promise must never be the last word.
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
   const [cancelFee, setCancelFee] = useState<number | null>(null);
+  const qc = useQueryClient();
   const cancelOrder = useMutation<any, any, { targetOrderId: string; orderType: string }>({
     mutationFn: ({ targetOrderId, orderType }: { targetOrderId: string; orderType: string }) =>
       orderType === 'COURIER' ? courierApi.cancel(targetOrderId) : customerApi.cancelOrder(targetOrderId),
     onSuccess: (res: any, target) => {
+      // Home's live-order card is fed by a DIFFERENT query than this screen,
+      // and Home does not refetch on focus. Refetching only `order` here left
+      // that card counting down the free-cancel window of an order that no
+      // longer existed — the founder watched it happen. Invalidate the feed
+      // prefix, not one coordinate variant, and do it before the early return:
+      // the feed is wrong regardless of which order this screen is showing.
+      void qc.invalidateQueries({ queryKey: customerKeys.homeAll });
       if (target.targetOrderId !== activeOrderIdRef.current) return;
       // customerApi.cancelOrder is unwrapped at the seam; the courier endpoint
       // still returns the raw envelope — accept both shapes, never lose the
@@ -367,6 +376,9 @@ export function DeliveryScreen() {
           'We couldn’t confirm the outcome. The latest server status is being refreshed before you try again.',
         );
       }
+      // The outcome is unknown (a timeout can mean the cancel DID land), so
+      // the feed is treated as suspect too.
+      void qc.invalidateQueries({ queryKey: customerKeys.homeAll });
       void order.refetch();
     },
   });
