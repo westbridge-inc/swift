@@ -319,6 +319,11 @@ export function DeliveryScreen() {
   // Server-computed ETA for the courier's ACTIVE leg, refreshed with the
   // location stream [SWIFT-UG-RT-01]. Null until the first event lands.
   const [liveEtaMin, setLiveEtaMin] = useState<number | null>(null);
+  // [B3] Whether the live ETA is to THIS delivery directly, or the chain
+  // through another delivery the rider is finishing first. The server labels
+  // it; the screen must say so, or "arriving in 6 min" is a lie for the
+  // second customer of a stacked rider.
+  const [liveEtaBasis, setLiveEtaBasis] = useState<'direct' | 'after_current'>('direct');
   const [arrived, setArrived] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [cancelChecking, setCancelChecking] = useState(false);
@@ -498,6 +503,7 @@ export function DeliveryScreen() {
     };
     const onRider = (p: any) => {
       acceptFix(p?.lat, p?.lng, p?.ts, p?.etaMinutes);
+      setLiveEtaBasis(p?.etaBasis === 'after_current' ? 'after_current' : 'direct');
     };
     const onDriver = (p: any) => {
       if (p?.orderId !== orderId) return;
@@ -766,7 +772,11 @@ export function DeliveryScreen() {
   } else if (o.fulfillment === 'APPOINTMENT' && orderStatus === 'ACCEPTED') {
     etaCopy = 'The provider confirmed your booking';
   } else if (freshLiveEta != null) {
-    etaCopy = freshLiveEta <= 0 ? 'Rider is arriving now' : `Rider arriving in ~${Math.round(freshLiveEta)} min`;
+    etaCopy = freshLiveEta <= 0
+      ? 'Rider is arriving now'
+      : liveEtaBasis === 'after_current'
+        ? `Rider arriving in ~${Math.round(freshLiveEta)} min, after another delivery`
+        : `Rider arriving in ~${Math.round(freshLiveEta)} min`;
   }
   else if (o.fulfillment === 'PICKUP' && orderStatus === 'READY_FOR_PICKUP') {
     etaCopy = 'Ready for pickup';
