@@ -13,7 +13,7 @@ import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, type DispatchCandidate } from './scoring';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
-import { estimateLoad } from '../../utils/load';
+import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { vehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
@@ -792,7 +792,7 @@ export class DispatchService {
           totalAmount: true, subtotalCustomer: true, deliveryFee: true,
           serviceFee: true, taxAmount: true, tipAmount: true, discount: true,
           vendor: { select: { name: true, owner: { select: { userId: true } } } },
-          items: { select: { quantity: true } },
+          items: { select: { quantity: true, bulkUnits: true } },
         },
       });
       if (!order) throw new NotFoundError('Order', orderId);
@@ -822,6 +822,20 @@ export class DispatchService {
       // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
       const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
       const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize, order.customerId, order.taxiPassengerCount);
+
+      // [G1 SHADOW] What a load gate WOULD demand, and what it WOULD cost.
+      //
+      // Changes nothing. It exists to answer the one question that decides
+      // whether this may ever be enforced: how much of the rider pool would the
+      // gate remove, and would it have removed riders from jobs that completed
+      // perfectly well? Turning the filter on without that evidence trades a
+      // visible failure (a rider who cannot carry it) for an invisible one
+      // (nothing dispatches, and nobody is paged) — which is worse.
+      //
+      // Wrapped, and deliberately so: a classification bug must never stop a
+      // dispatch. A shadow that can take the cascade down is not a shadow, it
+      // is an outage.
+      this.logLoadGateShadow(order, candidates.length);
 
       const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
       // [F-014-05] Walk the ranked candidates: the FIRST who can atomically
@@ -1087,6 +1101,50 @@ export class DispatchService {
   /** §3 journal upkeep: keep ONE open SEARCHING row per subject current
    *  (wave/radius), resolving a prior EXHAUSTED row as RETRIED when a fresh
    *  search begins. Never throws — the journal is beside the machine. */
+  /**
+   * [G1 SHADOW] Record what a vehicle-capacity gate would have demanded of this
+   * order, and how much of the candidate pool it would have cost.
+   *
+   * READ BY NOBODY IN DISPATCH. The only consumer is the rollout decision.
+   *
+   * `wouldHaveExcluded: true` on a job that then completes fine is the signal
+   * that the bands are too tight — that single field is what says whether this
+   * may ever be enforced. `poolAfter` against `poolBefore` is the other half:
+   * a gate that removes most of the pool is a misconfiguration wearing the
+   * costume of a safety feature.
+   *
+   * Synchronous and total: it awaits nothing, so it cannot add latency to a
+   * dispatch round, and it swallows everything, so it cannot end one. If this
+   * ever throws into the cascade it has become the outage it was meant to
+   * prevent.
+   */
+  private logLoadGateShadow(
+    order: { id: string; orderType: string; courierPackageSize: string | null; items: { quantity: number; bulkUnits: number | null }[] },
+    poolBefore: number,
+  ): void {
+    try {
+      const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
+      // No requirement means nothing to shadow — a taxi, or a goods order with
+      // no lines. Logging those would bury the rows that carry a decision.
+      if (!requiredSize) return;
+      // COURIER is already gated in production; it is here only as the control
+      // that shows the derivation agrees with the declaration it cannot see.
+      const alreadyGated = order.orderType === 'COURIER';
+      log().info({
+        orderId: order.id,
+        orderType: order.orderType,
+        requiredSize,
+        bulkUnits: totalBulkUnits(order.items),
+        bands: DEFAULT_LOAD_BANDS,
+        alreadyGated,
+        poolBefore,
+      }, 'loadgate:shadow');
+    } catch {
+      // Deliberately silent. A shadow that reports its own failure into the
+      // dispatch path is still in the dispatch path.
+    }
+  }
+
   private async journalOpenSearch(order: { id: string; orderType: string }, round: number, radius: number) {
     try {
       const open = await this.prisma.dispatchSearch.findFirst({
