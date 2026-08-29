@@ -45,18 +45,29 @@ describe('the concurrency seam is a no-op at capacity 1 [B1]', () => {
     expect(currentLegColumn('RIDER')).toBe('currentOrderId');
   });
 
-  it('renders the EXACT candidate predicate the queries carried before the seam', () => {
-    // Byte-for-byte against the literal that was in dispatch.service.ts. If the
-    // rendered text differs, the candidate set can differ, and every dispatch
-    // decision replayed through it is no longer guaranteed identical.
+  it('renders the EXACT historical predicate at capacity 1 — and for DRIVER at ANY capacity', () => {
+    // Byte-for-byte against the literal that was in dispatch.service.ts: at
+    // capacity 1 the candidate set must replay identically. And the DRIVER
+    // pool ignores capacity entirely — a taxi carries one passenger's custody
+    // at a time as LAW; no configuration may widen it (founder, 2026-08-29:
+    // "only taxis can't").
     expect(capacityPredicateSql('DRIVER').sql.trim()).toBe('AND d."currentRideId" IS NULL');
     expect(capacityPredicateSql('RIDER').sql.trim()).toBe('AND r."currentOrderId" IS NULL');
+    expect(capacityPredicateSql('RIDER', 1).sql.trim()).toBe('AND r."currentOrderId" IS NULL');
+    expect(capacityPredicateSql('DRIVER', 3).sql.trim()).toBe('AND d."currentRideId" IS NULL');
+    expect(capacityPredicateSql('DRIVER', 3).values).toEqual([]);
   });
 
-  it('carries no bound parameters — the fragment is pure identifier text', () => {
-    // A stray placeholder here would shift every LATER parameter's position in
-    // the composed query, which is the kind of break that shows up as wrong
-    // rows rather than an error.
+  it('B5 fulfilled: above 1 the RIDER predicate COUNTS live legs — never the null check', () => {
+    const stacked = capacityPredicateSql('RIDER', 2);
+    expect(stacked.sql).toContain('SELECT COUNT(*)');
+    expect(stacked.sql).not.toContain('"currentOrderId" IS NULL');
+    // The capacity itself and the terminal statuses ride as BOUND parameters.
+    expect(stacked.values.length).toBeGreaterThan(1);
+    expect(stacked.values).toContain(2);
+  });
+
+  it('carries no bound parameters at capacity 1 — the fragment is pure identifier text', () => {
     expect(capacityPredicateSql('DRIVER').values).toEqual([]);
     expect(capacityPredicateSql('RIDER').values).toEqual([]);
   });
@@ -77,15 +88,18 @@ describe('the concurrency seam is a no-op at capacity 1 [B1]', () => {
     expect(capacityWhere('RIDER')).toEqual({ currentOrderId: null });
   });
 
-  it('refuses to render a capacity it cannot implement, instead of silently meaning 1', () => {
-    // The failure this module exists to prevent is a raised number that looks
-    // applied and behaves exactly as before. Proven by construction: the guard
-    // is the `capacity <= 1` branch, and above it the function throws rather
-    // than falling through to the null check.
+  it('the remaining tripwire still refuses what is still unimplemented', () => {
+    // B5 fulfilled the candidate-predicate branch (it counts live legs now),
+    // so ITS tripwire is gone — replaced by a real implementation, which was
+    // always the only legitimate way to remove it. capacityWhere's Prisma
+    // where-fragment cannot express a count, so every capacity-aware caller
+    // moved to riderLiveLegCount/reserveRiderLeg; its own >1 branch remains a
+    // throw so no NEW caller can lean on it and silently mean 1.
     const source = readFileSync(path.join(__dirname, '..', 'modules', 'dispatch', 'concurrency-policy.ts'), 'utf8');
     const stripped = stripComments(source);
     expect(stripped).toContain('capacity <= 1');
-    expect((stripped.match(/throw new Error\(/g) ?? []).length).toBe(2);
+    expect((stripped.match(/throw new Error\(/g) ?? []).length).toBe(1);
+    expect(() => capacityWhere('RIDER', 2)).toThrow();
   });
 });
 
@@ -117,10 +131,16 @@ describe('every capacity gate goes through the seam — no fifth one appears qui
     ).toBe(0);
   });
 
-  it('all four known gates call the seam', () => {
+  it('the gates still route through the seam — counts updated for B5', () => {
     const src = stripComments(readFileSync(SERVICE, 'utf8'));
-    // 2 SQL candidate predicates + 4 where-clause uses (offer gate ×2, accept CAS ×2).
+    // 2 SQL candidate predicates (unchanged). The RIDER offer-gate and accept
+    // CAS moved from capacityWhere (a null-check that cannot count) to
+    // riderLiveLegCount/reserveRiderLeg — still THIS module's exports, so the
+    // capacity answer still has one home. DRIVER keeps its two capacityWhere
+    // uses: the null check IS the law for taxis.
     expect((src.match(/capacityPredicateSql\(/g) ?? []).length).toBe(2);
-    expect((src.match(/capacityWhere\(/g) ?? []).length).toBe(4);
+    expect((src.match(/capacityWhere\(/g) ?? []).length).toBe(2);
+    expect((src.match(/riderLiveLegCount\(/g) ?? []).length).toBeGreaterThanOrEqual(1);
+    expect((src.match(/reserveRiderLeg\(/g) ?? []).length).toBe(1);
   });
 });

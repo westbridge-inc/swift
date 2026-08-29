@@ -5,6 +5,8 @@ import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrde
 import { estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
+import { riderStackingCapacity, riderLiveLegCount, reserveRiderLeg } from '../dispatch/concurrency-policy';
+import { stackVerdict } from '../dispatch/stack-eligibility';
 import { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus } from './order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
@@ -511,18 +513,25 @@ export class OrderService {
       throw new ConflictError('This order was just claimed by another rider, or is no longer available');
     }
 
-    const reserved = await tx.rider.updateMany({
-      where: {
-        id: input.riderId,
-        isOnline: true,
-        isAvailable: true,
-        currentOrderId: null,
-        user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'RIDER'] } },
-      },
-      data: { isAvailable: false, currentOrderId: input.orderId },
-    });
-    if (reserved.count === 0) {
-      throw new ConflictError('You must be online and free before taking another order.');
+    // Stacking [B5]: the ONE reservation both claim doors use — a guarded raw
+    // update whose count condition and write are a single statement (the
+    // FloatService.commit idiom), so concurrent claims cannot both slip under
+    // the cap. Between legs, the batching rulebook judges the pairing first;
+    // a refusal names its rule and rolls the whole claim back.
+    const stackCapacity = await riderStackingCapacity(this.prisma);
+    if (stackCapacity > 1) {
+      const verdict = await stackVerdict(tx, input.riderId, input.orderId);
+      if (!verdict.eligible && verdict.legs > 0) {
+        throw new ConflictError(
+          `This job can't be stacked with your current delivery (${verdict.rule}: ${verdict.detail})`,
+        );
+      }
+    }
+    const reserved = await reserveRiderLeg(tx, input.riderId, input.orderId, stackCapacity);
+    if (!reserved) {
+      throw new ConflictError(stackCapacity > 1
+        ? 'You are at your delivery limit — finish one before taking another.'
+        : 'You must be online and free before taking another order.');
     }
 
     await tx.orderStatusLog.create({
@@ -1473,11 +1482,24 @@ export class OrderService {
       safeToFree = newerLiveJob == null;
     }
     if (!safeToFree) return;
+    // Stacking: the finished leg may not be the only one. Re-point the primary
+    // pointer at another live leg (single-job readers keep working), and
+    // availability comes from the live count vs capacity — not from "pointer
+    // is null", which stops being the capacity answer above 1. This order's
+    // status flipped terminal earlier in this same transaction, so the count
+    // below already excludes it.
+    const nextLeg = await tx.order.findFirst({
+      where: { riderId, id: { not: orderId }, status: { notIn: TERMINAL_ORDER_STATUSES } },
+      orderBy: { acceptedAt: 'asc' },
+      select: { id: true },
+    });
+    const stackCap = await riderStackingCapacity(this.prisma);
+    const legsLeft = await riderLiveLegCount(tx, riderId);
     await tx.rider.update({
       where: { id: riderId },
       data: {
-        isAvailable: true,
-        currentOrderId: null,
+        isAvailable: legsLeft < stackCap,
+        currentOrderId: nextLeg?.id ?? null,
         ...(countDelivery ? { totalDeliveries: { increment: 1 } } : {}),
       },
     });

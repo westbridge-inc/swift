@@ -21,6 +21,7 @@ import { FloatService } from '../modules/dispatch/float.service';
 import { OrderService } from '../modules/order/order.service';
 import { AuthService } from '../modules/auth/auth.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { invalidateAlgoConfig } from '../modules/algo/algo-config';
 
 // ---------------------------------------------------------------------------
 // dispatch. Hardest paths: the no-acceptance path
@@ -175,6 +176,28 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.ready();
+
+  // STACKING PIN: this file's 69 tests were authored under the one-job-per-
+  // mover law and assert its exact semantics (rollback shapes, pool contents,
+  // cascade walks). The founder's stacking law (2026-08-29) lives behind
+  // AlgoConfig and is proven by stacking.test.ts at capacity 2; HERE we pin
+  // capacity 1 via a higher-version row so every legacy scenario keeps meaning
+  // what it says. The pin is removed in afterAll by restoring the prior value.
+  {
+    const latest = await app.prisma.algoConfig.findFirst({
+      where: { tenantId: 'swift-default', key: 'stacking.riderCapacity' },
+      orderBy: { version: 'desc' },
+    });
+    (globalThis as { __stackPinRestore?: number | null }).__stackPinRestore =
+      latest ? Number(latest.value) : null;
+    await app.prisma.algoConfig.create({
+      data: {
+        tenantId: 'swift-default', key: 'stacking.riderCapacity',
+        value: 1, version: (latest?.version ?? 0) + 1, updatedBy: 'dispatch.test:pin',
+      },
+    });
+    invalidateAlgoConfig();
+  }
 
   dispatch = new DispatchService(
     app.prisma,
@@ -597,6 +620,24 @@ describe('Rider location authority', () => {
 });
 
 afterAll(async () => {
+  // Restore the pre-pin capacity so no other suite inherits this file's era.
+  {
+    const restore = (globalThis as { __stackPinRestore?: number | null }).__stackPinRestore;
+    if (restore != null) {
+      const latest = await app.prisma.algoConfig.findFirst({
+        where: { tenantId: 'swift-default', key: 'stacking.riderCapacity' },
+        orderBy: { version: 'desc' },
+      });
+      await app.prisma.algoConfig.create({
+        data: {
+          tenantId: 'swift-default', key: 'stacking.riderCapacity',
+          value: restore, version: (latest?.version ?? 0) + 1, updatedBy: 'dispatch.test:unpin',
+        },
+      });
+    }
+    invalidateAlgoConfig();
+  }
+
   // The HTTP accept tests run authenticate -> enterTenant, whose enterWith
   // leaks a tenant into this async context; without clearing it, purge's
   // findMany is scoped to swift-default and never sees the foreign-tenant rider.

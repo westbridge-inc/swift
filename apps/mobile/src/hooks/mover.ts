@@ -729,12 +729,29 @@ type RecoveredDispatchOffer = Omit<DispatchOffer, 'offerAttemptId'> & {
 export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
   const pv = usePreview();
   const qc = useQueryClient();
-  const [offer, setOffer] = useState<DispatchOffer | null>(null);
+  // Stacking: offers QUEUE (FIFO, deduped by orderId) instead of overwriting —
+  // with capacity 2 the server may legitimately offer a second job while one
+  // card is showing. The visible card is queue[0]; the rest wait their turn,
+  // exactly the vendor takeover's shape. Each entry carries an ABSOLUTE
+  // deadline stamped at arrival, so backgrounding cannot freeze a countdown
+  // into a lie (master audit G11).
+  const [offerQueue, setOfferQueue] = useState<(DispatchOffer & { deadlineAt?: number })[]>([]);
+  const offer = offerQueue[0] ?? null;
+  const queuedBehind = Math.max(0, offerQueue.length - 1);
+  const pushOffer = (data: DispatchOffer) =>
+    setOfferQueue((q) => (q.some((o) => o.orderId === data.orderId)
+      ? q.map((o) => (o.orderId === data.orderId ? { ...o, ...data, deadlineAt: o.deadlineAt } : o))
+      : [...q, { ...data, deadlineAt: data.expiresInSeconds ? Date.now() + data.expiresInSeconds * 1000 : undefined }]));
+  const dropOffer = (orderId: string) => setOfferQueue((q) => q.filter((o) => o.orderId !== orderId));
+  const setOffer = (data: DispatchOffer | null) => {
+    if (data === null) setOfferQueue((q) => q.slice(1));
+    else pushOffer(data);
+  };
 
   useEffect(() => {
     // No live offers in preview (read-only, no socket/auth).
     if (!kind || !online || pv) {
-      setOffer(null);
+      setOfferQueue([]);
       return;
     }
     connectSocket();
@@ -779,14 +796,29 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
       s.off('dispatch:offer', onOffer);
       s.off('connect', recover);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, online, qc, pv]);
 
   // Auto-dismiss once the offer window lapses (the backend reassigns it).
+  // Keyed to the ABSOLUTE deadline stamped at arrival, and it drops THAT
+  // order, not whatever sits at the head by then — with a queue the two can
+  // differ. A timer that fires late after backgrounding still computes a
+  // non-negative remainder, so a lapsed card cannot linger (G11).
   useEffect(() => {
-    if (!offer?.expiresInSeconds) return;
-    const t = setTimeout(() => setOffer(null), offer.expiresInSeconds * 1000);
+    if (!offer) return;
+    const deadline = offer.deadlineAt ?? (offer.expiresInSeconds ? Date.now() + offer.expiresInSeconds * 1000 : null);
+    if (!deadline) return;
+    const { orderId } = offer;
+    const t = setTimeout(() => dropOffer(orderId), Math.max(0, deadline - Date.now()));
     return () => clearTimeout(t);
-  }, [offer]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offer?.orderId]);
 
-  return { offer, dismiss: () => setOffer(null) };
+  return {
+    offer,
+    // Stacking: how many more offers wait behind the visible card — the UI
+    // states queue depth honestly, like the vendor takeover does.
+    queuedBehind,
+    dismiss: () => { if (offer) dropOffer(offer.orderId); },
+  };
 }
