@@ -1102,6 +1102,20 @@ model Vendor {
   /// null = cash-only. A public pay URL, not a secret credential.
   mmgPayUrl String?
 
+  /// The number the store CHOOSES to publish so a customer can call before
+  /// ordering ("do you have this in stock", "can you do this today"). Opt-in:
+  /// null = no call button. Landline or mobile — a fixed GTT line is what many
+  /// shops actually answer, so nothing privileges a mobile prefix.
+  ///
+  /// Deliberately NOT `phone` above. That one is the operational/account
+  /// contact, collected as free text at onboarding, frequently the owner's own
+  /// line (which also receives their login OTP), and given with no expectation
+  /// of publication. Publishing it would be a disclosure the vendor never made.
+  /// Validated by utils/vendor-public-phone.ts on write AND re-validated on
+  /// read, exactly as mmgPayUrl is, because a stored row is untrusted until the
+  /// boundary that hands it to a customer's dialler.
+  publicPhone String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
