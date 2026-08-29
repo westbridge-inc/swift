@@ -52,21 +52,46 @@ const GROCERY: Array<[string, string, string, string[]]> = [
   ['baby-kids', 'Baby & Kids', '🍼', ['diapers', 'formula']],
 ];
 
+// THE ALIASES ARE THE MOAT, AND REAL STOCK IS WHAT TEACHES THEM.
+//
+// The seeded set was written before any goods existed. The first real retail
+// catalogue — a Georgetown hardware store — matched ONE item out of five:
+// `paint` caught "Emulsion Paint 4L", and nothing caught Claw Hammer,
+// Screwdriver Set, Measuring Tape or LED Bulb, because the dictionary held the
+// CATEGORY's words (`tools`, `plumbing`, `electrical`) and not the words a
+// shopkeeper actually types on a price tag.
+//
+// So these are product nouns, in the singular form item names use. The
+// matcher's own rule is the one being followed here: "if the matcher misses,
+// extend aliases — never lower the gate." The gate stays at 0.6; one alias
+// matching an item's NAME scores 0.7, so a single true word is enough.
+//
+// PRECISION OVER RECALL, deliberately. A wrong tag is worse than no tag — it
+// files a hammer under Beauty, and the customer stops trusting the whole rail.
+// Words that read differently across two retail categories are LEFT OUT on
+// purpose, and the reason is worth recording so nobody "helpfully" adds them:
+//   · `switch`  — an electrical switch, and a games console
+//   · `iron`    — a clothes iron, and iron bar stock
+//   · `filter`  — a car filter, and a water filter
+//   · `mirror`  — a wing mirror, and a bathroom mirror
+//   · `tape`    — sellotape, and a measuring tape (the PHRASE is safe, so the
+//                 phrase is what appears below)
+// Aliases UNION on re-seed, so an operator's own additions are never trampled.
 const RETAIL: Array<[string, string, string, string[]]> = [
-  ['electronics', 'Electronics', '📱', ['phone', 'laptop', 'tv', 'speaker', 'charger']],
-  ['phone-accessories', 'Phone Accessories', '🔌', ['case', 'screen protector', 'earbuds', 'cable']],
-  ['fashion', 'Fashion & Clothing', '👕', ['clothes', 'dress', 'jeans', 'shirt']],
-  ['shoes', 'Shoes', '👟', ['sneakers', 'slippers', 'sandals']],
-  ['beauty', 'Beauty & Cosmetics', '💄', ['makeup', 'skincare', 'wig', 'lashes']],
-  ['pharmacy', 'Pharmacy & Health', '💊', ['medicine', 'otc', 'vitamins', 'first aid']],
-  ['flowers-gifts', 'Flowers & Gifts', '💐', ['bouquet', 'roses', 'gift basket', 'teddy']],
-  ['home-kitchen', 'Home & Kitchen', '🍳', ['cookware', 'appliances', 'bedding']],
-  ['hardware-tools', 'Hardware & Tools', '🔧', ['tools', 'paint', 'plumbing', 'electrical']],
-  ['auto-parts', 'Auto Parts', '🚗', ['tyres', 'battery', 'oil', 'brake']],
-  ['stationery-books', 'Stationery & Books', '📚', ['school supplies', 'exercise book', 'pens']],
-  ['toys-games', 'Toys & Games', '🧸', []],
-  ['sports', 'Sports & Fitness', '⚽', []],
-  ['pets', 'Pet Supplies', '🐾', ['dog food', 'cat food']],
+  ['electronics', 'Electronics', '📱', ['phone', 'laptop', 'tv', 'speaker', 'charger', 'radio', 'headphones', 'monitor', 'printer', 'tablet', 'camera', 'powerbank']],
+  ['phone-accessories', 'Phone Accessories', '🔌', ['case', 'screen protector', 'earbuds', 'cable', 'sim', 'pouch', 'phone holder', 'otg']],
+  ['fashion', 'Fashion & Clothing', '👕', ['clothes', 'dress', 'jeans', 'shirt', 't-shirt', 'blouse', 'skirt', 'trousers', 'shorts', 'jersey', 'socks', 'cap', 'belt', 'uniform', 'underwear']],
+  ['shoes', 'Shoes', '👟', ['sneakers', 'slippers', 'sandals', 'shoes', 'boots', 'heels', 'crocs', 'slides']],
+  ['beauty', 'Beauty & Cosmetics', '💄', ['makeup', 'skincare', 'wig', 'lashes', 'lipstick', 'foundation', 'perfume', 'lotion', 'shampoo', 'conditioner', 'nail polish', 'weave', 'braids']],
+  ['pharmacy', 'Pharmacy & Health', '💊', ['medicine', 'otc', 'vitamins', 'first aid', 'syrup', 'bandage', 'plaster', 'paracetamol', 'thermometer', 'face mask']],
+  ['flowers-gifts', 'Flowers & Gifts', '💐', ['bouquet', 'roses', 'gift basket', 'teddy', 'flowers', 'balloon', 'hamper', 'greeting card']],
+  ['home-kitchen', 'Home & Kitchen', '🍳', ['cookware', 'appliances', 'bedding', 'pot', 'pan', 'plate', 'bowl', 'cup', 'mug', 'kettle', 'blender', 'microwave', 'toaster', 'cutlery', 'towel', 'pillow']],
+  ['hardware-tools', 'Hardware & Tools', '🔧', ['tools', 'paint', 'plumbing', 'electrical', 'hammer', 'screwdriver', 'wrench', 'spanner', 'drill', 'saw', 'pliers', 'nails', 'screws', 'bolt', 'hinge', 'padlock', 'sandpaper', 'trowel', 'chisel', 'cement', 'plywood', 'lumber', 'pipe', 'bulb', 'led', 'wire', 'socket', 'ladder', 'hose', 'measuring tape', 'tape measure', 'extension cord']],
+  ['auto-parts', 'Auto Parts', '🚗', ['tyres', 'battery', 'oil', 'brake', 'tyre', 'wiper', 'spark plug', 'radiator', 'clutch', 'bumper', 'headlight']],
+  ['stationery-books', 'Stationery & Books', '📚', ['school supplies', 'exercise book', 'pens', 'pen', 'pencil', 'notebook', 'ruler', 'eraser', 'stapler', 'folder', 'book', 'calculator', 'marker', 'glue']],
+  ['toys-games', 'Toys & Games', '🧸', ['toy', 'doll', 'puzzle', 'board game', 'figurine']],
+  ['sports', 'Sports & Fitness', '⚽', ['ball', 'football', 'cricket bat', 'dumbbell', 'yoga mat', 'bicycle', 'racket']],
+  ['pets', 'Pet Supplies', '🐾', ['dog food', 'cat food', 'leash', 'aquarium', 'pet litter']],
 ];
 
 export const SEED_TAXONOMY: SeedCategory[] = [
