@@ -141,6 +141,38 @@ for (const v of WATCHED) {
 }
 console.log('');
 
+// ── BACKUP READINESS ───────────────────────────────────────────────────────
+// Deliberately separate from the boot guard: a server with no offsite backup
+// still starts, and should. But "it started" is not the question anyone asks
+// after a disk fails, so this gets read before going live rather than after.
+console.log('BACKUPS');
+console.log('─'.repeat(72));
+{
+  const bucket = fileEnv['BACKUP_BUCKET'];
+  const endpoint = fileEnv['AWS_S3_ENDPOINT'];
+  const keyId = fileEnv['AWS_ACCESS_KEY_ID'];
+  if (!bucket) {
+    console.log('  ✗ BACKUP_BUCKET is not set.');
+    console.log('    Dumps will be written to the same machine they back up. One disk');
+    console.log('    failure loses the database AND every backup of it. That is a copy,');
+    console.log('    not a backup.');
+  } else if (!endpoint || !keyId) {
+    console.log(`  ✗ BACKUP_BUCKET is ${bucket} but the S3 credentials are incomplete.`);
+    console.log('    backup.sh will exit non-zero rather than pretend it succeeded.');
+  } else {
+    console.log(`  ✓ offsite target configured (${bucket})`);
+    console.log('    backup.sh verifies the upload byte-for-byte before calling a run good.');
+  }
+  console.log('');
+  console.log('  Neither this check nor backup.sh covers two things that lose documents:');
+  console.log('    - the object-storage bucket holding KYC files (version it separately)');
+  console.log('    - MASTER_KEK, without which restored documents stay ciphertext forever');
+  console.log('');
+  console.log('  And a backup is not real until restore.sh has restored from it.');
+  console.log('  Rehearse once, with a stopwatch. That number is your recovery time.');
+}
+console.log('');
+
 // ── THE VERDICT ────────────────────────────────────────────────────────────
 // Computed against the UNMODIFIED env. No stub can influence this line.
 const verdict = guardMessage(production);
