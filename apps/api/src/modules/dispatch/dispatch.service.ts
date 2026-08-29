@@ -11,6 +11,7 @@ import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-pr
 import { classesAtOrAbove } from '../rides/fare.service';
 import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, type DispatchCandidate } from './scoring';
+import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
@@ -1965,7 +1966,7 @@ export async function recoverStrandedTaxiRides(
 
   const notifications = new NotificationService(prisma, io);
   const NOT_ABOARD: OrderStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
-  const TERMINAL: OrderStatus[] = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+  const TERMINAL = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
   const recovered: string[] = [];
   const flagged: string[] = [];
 

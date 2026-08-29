@@ -1,4 +1,5 @@
 import type { OrderStatus } from '@prisma/client';
+import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
 // ---------------------------------------------------------------------------
 // FUL-008: order SLA clocks (Fulfillment Part 10B — dwell time per state).
@@ -43,7 +44,7 @@ export function defaultSlaThresholds(): SlaThresholdsMin {
   };
 }
 
-const TERMINAL: OrderStatus[] = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+const TERMINAL = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 
 /** The subset of an Order this engine reads — keeps it decoupled from the row. */
 export interface SlaOrderInput {

@@ -1605,7 +1605,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const live = await app.prisma.order.findMany({
       where: {
         fulfillment: 'DELIVERY',
-        status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'] },
+        status: { notIn: TERMINAL_ORDER_STATUSES }, // ONE definition [order/order-status.ts]
       },
       select: {
         id: true, orderNumber: true, status: true, vendorId: true,

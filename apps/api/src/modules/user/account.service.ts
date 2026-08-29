@@ -1,9 +1,10 @@
 import { recordStorageOrphan, retryStorageOrphans } from '../../lib/storage-orphans';
 import type { FastifyInstance } from 'fastify';
-import type { OrderStatus, ServiceJobStatus } from '@prisma/client';
+import type { ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
+import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — the DPA-2023 rights of access, portability and erasure,
@@ -32,7 +33,7 @@ import { disconnectUserSockets } from '../../utils/socket-revocation';
 
 // A closed order is safe to leave behind; anything else is in-flight and must
 // finish (or be cancelled) before the customer can erase themselves.
-const TERMINAL_ORDER: OrderStatus[] = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
 export class AccountService {
