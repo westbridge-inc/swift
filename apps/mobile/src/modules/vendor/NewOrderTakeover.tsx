@@ -70,7 +70,16 @@ export function NewOrderTakeover({
     );
 
   return (
-    <Modal visible animationType="fade" onRequestClose={() => onDismiss(current.orderId)}>
+    <Modal
+      visible
+      animationType="fade"
+      // Android hardware back is INERT here. Leaving this order is a decision —
+      // Accept, Reject, or the explicit "View later" below — and a reflex press
+      // must not be indistinguishable from one. The server's escalation ladder
+      // still stands behind a dismissal either way; this is about the vendor
+      // knowing which of the three they chose.
+      onRequestClose={() => {}}
+    >
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, padding: space['2xl'], paddingTop: insets.top + space['2xl'], paddingBottom: insets.bottom + space.md }}>
         <View style={{ alignItems: 'center' }}>
           <Animated.View
