@@ -21,7 +21,8 @@ import { subscriptionOperability } from '../subscription/operate-gate';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { haversineDistance } from '../../utils/distance';
-import { estimateLoad } from '../../utils/load';
+import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { log } from '../../utils/logger';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
@@ -1047,7 +1048,13 @@ export async function riderRoutes(app: FastifyInstance) {
     // (customer name/phone, pickup+delivery addresses) by id.
     const order = await app.prisma.order.findFirst({
       where: { id },
-      include: { vendor: { select: { id: true, name: true } } },
+      include: {
+        vendor: { select: { id: true, name: true } },
+        // [G1 SHADOW] The lines, so the load gate can be measured against the
+        // vehicle that ACTUALLY took the job. One join on the accept path, not
+        // the dispatch hot loop.
+        items: { select: { quantity: true, bulkUnits: true } },
+      },
     });
     if (!order) throw new NotFoundError('Order', id);
 
@@ -1072,6 +1079,36 @@ export async function riderRoutes(app: FastifyInstance) {
     // cascade already filters candidates this way in findCandidates).
     if (order.orderType === 'COURIER' && order.courierPackageSize && !vehicleCanCarry(rider.vehicleType, order.courierPackageSize)) {
       throw new AppError(400, 'VEHICLE_TOO_SMALL', `A ${order.courierPackageSize.toLowerCase().replace(/_/g, ' ')} parcel needs a bigger vehicle than your ${rider.vehicleType.toLowerCase()}.`);
+    }
+
+    // [G1 SHADOW] The gate that does NOT exist yet, measured against reality.
+    //
+    // The check above is COURIER-only — the same shape as the candidate SQL,
+    // and the same hole. Food and grocery orders reach this line with no
+    // capacity test at dispatch OR at accept, which is how a 40-item
+    // supermarket run can be taken by a bicycle.
+    //
+    // This REFUSES NOTHING. It records what a gate would have demanded and
+    // what vehicle actually took the job, because `wouldHaveExcluded: true` on
+    // a job that then completes fine is the single field that decides whether
+    // the bands are right. Enforcing first and measuring after would trade a
+    // visible failure for a silent one — an order nobody can take, and nobody
+    // is paged.
+    try {
+      const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
+      if (requiredSize && order.orderType !== 'COURIER') {
+        log().info({
+          orderId: order.id,
+          orderType: order.orderType,
+          requiredSize,
+          bulkUnits: totalBulkUnits(order.items),
+          acceptedByVehicle: rider.vehicleType,
+          wouldHaveExcluded: !vehicleCanCarry(rider.vehicleType, requiredSize),
+          bands: DEFAULT_LOAD_BANDS,
+        }, 'loadgate:accepted');
+      }
+    } catch {
+      // A shadow may never refuse an accept. Silent by design.
     }
     // [REPORT-014 F-014-08] Service authorization, mirroring the candidate SQL
     // filter: a COURIER job needs a courier-serving rider, a food/grocery
