@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, expressDeliveryFee, type DeliveryRates } from '../../utils/markup';
@@ -339,10 +340,12 @@ async function buildCartResponse(
 
   let distanceKm = 3; // sensible default
   if (addrLat && addrLng && cart.vendor) {
-    distanceKm = (await getMapsProvider().routeKm(
+    // [ALG-18] Canonical BEFORE pricing — the same number checkout will freeze
+    // and price from, so the quote and the charge cannot differ by a rounding.
+    distanceKm = canonicalBillableKm((await getMapsProvider().routeKm(
       { lat: cart.vendor.latitude, lng: cart.vendor.longitude },
       { lat: addrLat, lng: addrLng },
-    )).km;
+    )).km);
   }
 
   // Line items — zero markup: customers pay the vendor base price; platform

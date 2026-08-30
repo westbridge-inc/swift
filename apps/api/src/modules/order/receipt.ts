@@ -7,6 +7,7 @@
  * says. Money framing stays honest: the platform holds none of it — cash
  * goes to the mover at the door, MMG goes straight to the store.
  */
+import { billableDistance } from '../../utils/billable-distance';
 
 type ReceiptOrder = {
   orderNumber: string;
@@ -18,6 +19,10 @@ type ReceiptOrder = {
   paymentStatus: string;
   subtotalCustomer: unknown;
   deliveryFee: unknown;
+  /** [ALG-18] The frozen billable distance, when the order carries one. */
+  billableKm?: unknown;
+  billableKmSource?: string | null;
+  taxiDistance?: unknown;
   tipAmount: unknown;
   discount: unknown;
   totalAmount: unknown;
@@ -63,6 +68,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   const discount = Number(order.discount ?? 0);
   const tip = Number(order.tipAmount ?? 0);
   const deliveryFee = Number(order.deliveryFee ?? 0);
+  const distance = billableDistance(order);
 
   return `<!doctype html>
 <html lang="en">
@@ -99,6 +105,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
     ${rows}
     <tr class="totals"><td>Items</td><td class="num">${money(order.subtotalCustomer)}</td></tr>
     ${deliveryFee > 0 ? `<tr class="totals"><td>Delivery pay for your rider</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
+    ${distance ? `<tr class="totals"><td>Distance (${esc(distance.sourceLabel)})</td><td class="num">${esc(distance.label)}</td></tr>` : ''}
     ${discount > 0 ? `<tr class="totals"><td>Discount</td><td class="num">−${money(discount)}</td></tr>` : ''}
     ${tip > 0 ? `<tr class="totals"><td>Rider tip</td><td class="num">${money(tip)}</td></tr>` : ''}
     <tr class="grand"><td>Total</td><td class="num">${money(order.totalAmount)}</td></tr>

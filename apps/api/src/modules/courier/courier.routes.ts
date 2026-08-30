@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { estimateCourierFee, mergeCourierRates, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
@@ -101,8 +102,10 @@ async function quote(
   rates?: CourierRates,
 ) {
   // Real road km when OSRM is configured; deterministic estimate otherwise.
-  const { km: distanceKm } = await courierMaps.routeKm(pickup, dropoff);
-  return { distanceKm, estimate: estimateCourierFee(distanceKm, size, speed, rates) };
+  const { km, source } = await courierMaps.routeKm(pickup, dropoff);
+  // [ALG-18] Canonical BEFORE pricing: the fee and the frozen number are one number.
+  const distanceKm = canonicalBillableKm(km);
+  return { distanceKm, source, estimate: estimateCourierFee(distanceKm, size, speed, rates) };
 }
 
 export default async function courierRoutes(app: FastifyInstance) {
@@ -146,7 +149,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Courier is disabled on this account after repeated failed payments. Contact support.');
     }
 
-    const { distanceKm, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed, await ratesFor(userId));
+    const { distanceKm, source, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed, await ratesFor(userId));
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -188,6 +191,9 @@ export default async function courierRoutes(app: FastifyInstance) {
           subtotalCustomer: 0,
           // The whole courier fee is the rider's earning (100%).
           deliveryFee: estimate.totalFee,
+          // [ALG-18] The distance that fee was priced from, frozen with its source.
+          billableKm: distanceKm,
+          billableKmSource: source,
           totalAmount: estimate.totalFee,
           estimatedDeliveryTime: estimate.estimatedMinutes,
           paymentMethod: 'CASH',

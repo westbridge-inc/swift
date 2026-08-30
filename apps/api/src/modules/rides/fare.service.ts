@@ -1,5 +1,6 @@
 import type { PrismaClient, RideClass } from '@prisma/client';
-import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
+import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
+import { canonicalBillableKm } from '../../utils/billable-distance';
 import { pointInPolygon, type GeoPoint } from '../../utils/geo';
 import { CountryConfigService } from '../country/country-config.service';
 
@@ -81,6 +82,10 @@ export interface TieredEstimate {
   currencyCode: string;
   distanceKm: number;
   durationMin: number;
+  /** [ALG-18] The canonical kilometres the fare was priced from — frozen on the order. */
+  billableKm: number;
+  /** [ALG-18] The engine that produced it. */
+  routeSource: RouteSource;
 }
 
 export interface FareEstimate {
@@ -89,6 +94,10 @@ export interface FareEstimate {
   distanceKm: number;
   durationMin: number;
   source: 'zone_table' | 'formula';
+  /** [ALG-18] The canonical kilometres the fare was priced from — frozen on the order. */
+  billableKm: number;
+  /** [ALG-18] The engine that produced it. */
+  routeSource: RouteSource;
   fromZoneId?: string;
   toZoneId?: string;
 }
@@ -107,7 +116,8 @@ export class FareService {
     // Real road route when a routing engine (OSRM) is configured; the
     // deterministic estimate otherwise — identical to the historical numbers.
     const route = await this.maps.routeKm(pickup, dropoff);
-    const distanceKm = route.km;
+    // [ALG-18] Canonical BEFORE pricing: the fare and the frozen number are one number.
+    const distanceKm = canonicalBillableKm(route.km);
     const durationMin = Math.ceil(route.minutes ?? (distanceKm / AVG_SPEED_KMH) * 60);
 
     const config = await this.countryConfig.getByCode(countryCode);
@@ -126,6 +136,8 @@ export class FareService {
           fare: Number(zoneFare.fare),
           currencyCode: config.currencyCode,
           distanceKm: round1(distanceKm),
+          billableKm: distanceKm,
+          routeSource: route.source,
           durationMin,
           source: 'zone_table',
           fromZoneId: fromZone.id,
@@ -143,6 +155,8 @@ export class FareService {
       fare,
       currencyCode: config.currencyCode,
       distanceKm: round1(distanceKm),
+      billableKm: distanceKm,
+      routeSource: route.source,
       durationMin,
       source: 'formula',
       fromZoneId: fromZone?.id,
@@ -175,7 +189,7 @@ export class FareService {
       };
     });
 
-    return { tiers, currencyCode: base.currencyCode, distanceKm: base.distanceKm, durationMin: base.durationMin };
+    return { tiers, currencyCode: base.currencyCode, distanceKm: base.distanceKm, durationMin: base.durationMin, billableKm: base.billableKm, routeSource: base.routeSource };
   }
 }
 
