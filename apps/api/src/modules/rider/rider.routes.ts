@@ -272,6 +272,12 @@ export async function riderRoutes(app: FastifyInstance) {
           : null,
       };
     });
+    // [ALG-16] Once, at completion: match the trace to the road graph in the
+    // background. Never blocks the handover; a queue that is down is a log line.
+    if (!replayed && app.dispatchQueue) {
+      void app.dispatchQueue.add('route-match', { orderId: id }, { attempts: 3, backoff: { type: 'exponential', delay: 30_000 }, removeOnComplete: 50, removeOnFail: 20 })
+        .catch((err: unknown) => request.log.warn({ err, orderId: id }, 'route-match: enqueue failed'));
+    }
     return { success: true, data, replayed };
   });
 
@@ -1478,6 +1484,12 @@ export async function riderRoutes(app: FastifyInstance) {
         isAvailable: updated.isAvailable,
       };
     });
+    // [ALG-16] Once, at completion: match the trace to the road graph in the
+    // background. Never blocks the handover; a queue that is down is a log line.
+    if (!replayed && app.dispatchQueue) {
+      void app.dispatchQueue.add('route-match', { orderId: id }, { attempts: 3, backoff: { type: 'exponential', delay: 30_000 }, removeOnComplete: 50, removeOnFail: 20 })
+        .catch((err: unknown) => request.log.warn({ err, orderId: id }, 'route-match: enqueue failed'));
+    }
     return { success: true, data, replayed };
   });
 

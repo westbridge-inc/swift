@@ -41,10 +41,12 @@ describe('physics: what a device cannot honestly do', () => {
     expect(ALGO_DEFAULTS['ALG-15.enabled']).toBe(true);
   });
 
-  it('jitter is not a teleport: fixes under 5 s or 50 m apart are never judged on speed', () => {
+  it('jitter is not a teleport: fixes under 50 m apart are never judged on speed, whatever the clock says', () => {
     // 40 m in 1 s would be 144 km/h — but it is jitter, and it is ignored.
     expect(assessFix({ lat: GT.lat, lng: GT.lng, at: at(0) }, { lat: GT.lat + 0.00036, lng: GT.lng, at: at(1_000) }).signals).toEqual([]);
     expect(assessFix({ lat: GT.lat, lng: GT.lng, at: at(0) }, { lat: GT.lat + 0.00036, lng: GT.lng, at: at(10_000) }).speedKmh).toBeNull();
+    // ...while 30 km four seconds after the last fix is the teleport it is.
+    expect(assessFix({ lat: GT.lat, lng: GT.lng, at: at(0) }, { lat: GT.lat + 0.27, lng: GT.lng, at: at(4_000) }).signals).toEqual(['IMPLAUSIBLE_SPEED']);
   });
 
   it('no previous fix is no verdict — absence is not fraud', () => {

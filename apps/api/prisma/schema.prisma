@@ -1403,6 +1403,14 @@ model Order {
   /// utils/billable-distance.ts, never the column.
   billableKm         Decimal?  @db.Decimal(8, 2)
   billableKmSource   String?
+  /// [ALG-16] The ACTUAL path, map-matched once at completion from the
+  /// mover's cleaned trace and frozen here beside the planned distance the
+  /// customer was priced on. Null until matched; source records the engine
+  /// (`osrm`) or that nothing could be matched (`haversine:unmatched`).
+  routeMatchedKm     Decimal?  @db.Decimal(8, 2)
+  routePolyline      String?
+  routeMatchSource   String?
+  routeMatchedAt     DateTime?
 
   subtotalBase     Decimal @db.Decimal(12, 2)
   /// V1 dormant — zero-commission model: markup must stay 0.

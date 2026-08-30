@@ -46,11 +46,12 @@ export interface GpsAssessment {
 }
 
 export const DEFAULT_MAX_PLAUSIBLE_KMH = 140;
-const MIN_ELAPSED_S = 5;
+const MIN_ELAPSED_S = 1;
 const MIN_DISTANCE_M = 50;
 const PERFECT_ACCURACY_M = 1;
-const TRACE_LENGTH = 40;
-const TRACE_TTL_S = 2 * 60 * 60;
+// [ALG-16] Long enough to hold a whole delivery at one fix per 8 s (~96 min).
+const TRACE_LENGTH = 720;
+const TRACE_TTL_S = 3 * 60 * 60;
 const FLAG_COOLDOWN_S = 10 * 60;
 export const CORROBORATION_WINDOW_MS = 10 * 60 * 1000;
 export const CORROBORATION_MIN_FIXES = 2;
@@ -64,8 +65,12 @@ export function assessFix(prev: GpsFix | null, next: GpsFix, opts: { maxPlausibl
   if (prev) {
     elapsedS = (next.at.getTime() - prev.at.getTime()) / 1000;
     distanceM = Math.round(haversineDistance(prev.lat, prev.lng, next.lat, next.lng) * 1000);
-    if (elapsedS >= MIN_ELAPSED_S && distanceM >= MIN_DISTANCE_M) {
-      speedKmh = (distanceM / 1000) / (elapsedS / 3600);
+    // Jitter is a DISTANCE question, not a time one: under 50 m is receiver
+    // noise whatever the clock says. Past that, speed is judged over at least
+    // one second so a 30 km jump four seconds after the last fix is still the
+    // teleport it is.
+    if (elapsedS >= 0 && distanceM >= MIN_DISTANCE_M) {
+      speedKmh = (distanceM / 1000) / (Math.max(elapsedS, MIN_ELAPSED_S) / 3600);
       if (speedKmh > maxKmh) signals.push('IMPLAUSIBLE_SPEED');
     }
   }
