@@ -89,8 +89,9 @@ function ProviderProfileForm({
           {message ?? 'Couldn’t save your provider profile. Try again.'}
         </T>
       ) : null}
+      {/* [#947's grammar] Disabled says the ask. */}
       <PillButton
-        label={existing ? 'Save changes' : 'Create provider profile'}
+        label={!valid ? 'Name your trade first' : existing ? 'Save changes' : 'Create provider profile'}
         disabled={!valid}
         loading={save.isPending}
         onPress={submit}
