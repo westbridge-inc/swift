@@ -85,7 +85,7 @@ export function LocationPickerScreen() {
 
       {/* Header + confirm */}
       <View style={{ position: 'absolute', top: insets.top + space.sm, left: space['2xl'] }}>
-        <CircleChip icon="chevron-left" onPress={() => navigation.goBack()} />
+        <CircleChip icon="chevron-left" label="Back" onPress={() => navigation.goBack()} />
       </View>
       <View
         style={{
