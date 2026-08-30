@@ -85,7 +85,12 @@ export function MoverAccountScreen({ navigation }: any) {
       const owner = preview ? null : requireAuthSessionSnapshot();
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (owner) requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) return;
+      if (!perm.granted) {
+        // [G9 · #917's law] A denied permission explains itself — this was
+        // the last silent library denial on a mover surface.
+        toast.error('Photo library access needed', 'Allow it in Settings to add your vehicle photo.');
+        return;
+      }
       const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
       if (owner) requireAuthSessionForPrincipal(owner);
       if (res.canceled || !res.assets?.[0]) return;
