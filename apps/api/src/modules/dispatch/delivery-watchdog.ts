@@ -2,7 +2,7 @@ import type { OrderStatus, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
-import { FloatService } from './float.service';
+import { FloatService, riderFloatForOrder } from './float.service';
 import { settleRiderLegs } from './concurrency-policy';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { log } from '../../utils/logger';
@@ -55,8 +55,8 @@ export async function reopenPreCustodyLeg(
     where: { id: order.id },
     data: { status: reopenStatus, riderId: null },
   });
-  if (order.paymentMethod === 'CASH' && order.riderId) {
-    await new FloatService(tx).release(tx, order.riderId, Number(order.subtotalBase));
+  if (order.riderId) {
+    await new FloatService(tx).release(tx, order.riderId, riderFloatForOrder(order));
   }
   await tx.orderStatusLog.create({
     data: { orderId: order.id, status: reopenStatus, changedBy, note },

@@ -15,7 +15,7 @@ import { orderingRestriction, CashRulesService } from '../cash/cash-rules.servic
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
-import { FloatService } from '../dispatch/float.service';
+import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { AppError, ConflictError } from '../../utils/errors';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
@@ -1450,9 +1450,7 @@ export class OrderService {
     });
     if (opts.restock) await this.restockCancelledOrder(order.id);
     if (order.riderId) {
-      if (order.paymentMethod === 'CASH') {
-        await new FloatService(this.prisma).release(this.prisma, order.riderId, order.subtotalBase);
-      }
+      await new FloatService(this.prisma).release(this.prisma, order.riderId, riderFloatForOrder(order));
       // Through the seam, not a bare null: under stacking this rider may hold
       // another live leg, and "available" is the count against capacity.
       const riderId = order.riderId;
@@ -1665,9 +1663,7 @@ export class OrderService {
       || input.target === 'FAILED'
       || (input.target === 'REFUNDED' && operationalCancellation);
     if (releasesMover && source.riderId) {
-      if (source.paymentMethod === 'CASH') {
-        await new FloatService(tx).release(tx, source.riderId, Number(source.subtotalBase));
-      }
+      await new FloatService(tx).release(tx, source.riderId, riderFloatForOrder(source));
       await this.stageRiderRelease(
         tx,
         source.riderId,
@@ -1910,9 +1906,7 @@ export class OrderService {
           });
 
           if (order.riderId) {
-            if (order.paymentMethod === 'CASH') {
-              await new FloatService(tx).release(tx, order.riderId, Number(order.subtotalBase));
-            }
+            await new FloatService(tx).release(tx, order.riderId, riderFloatForOrder(order));
             await this.stageRiderRelease(tx, order.riderId, orderId, false, true);
           }
 
