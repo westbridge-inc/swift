@@ -1453,10 +1453,10 @@ export class OrderService {
       if (order.paymentMethod === 'CASH') {
         await new FloatService(this.prisma).release(this.prisma, order.riderId, order.subtotalBase);
       }
-      await this.prisma.rider.update({
-        where: { id: order.riderId },
-        data: { isAvailable: true, currentOrderId: null },
-      });
+      // Through the seam, not a bare null: under stacking this rider may hold
+      // another live leg, and "available" is the count against capacity.
+      const riderId = order.riderId;
+      await this.prisma.$transaction((tx) => settleRiderLegs(tx, riderId, { prisma: this.prisma, excludeOrderId: order.id }));
     }
     if (order.driverId) {
       await this.prisma.driver.updateMany({
