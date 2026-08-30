@@ -1,4 +1,4 @@
-import { Alert, Pressable, View, ActivityIndicator } from 'react-native';
+import { Alert, Linking, Pressable, View, ActivityIndicator } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useNavigation } from '@react-navigation/native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -87,12 +87,44 @@ export function DocumentUploadCard({
       authSession,
     });
 
+
+/** G9: a denied permission must never be a silent dead end. On iOS the OS
+ *  prompt appears ONCE — after that every tap returns instantly denied, the
+ *  sheet just closes, and the only fix lives in the Settings app where nothing
+ *  points. A mover who cannot upload a licence cannot verify, go online, or
+ *  earn; they conclude the app is broken and leave. So: when the system can
+ *  still ask (`canAskAgain`), stay quiet — the OS prompt is the message. When
+ *  it cannot, say so and offer BOTH ways out: Settings, and the OTHER source
+ *  (camera and library are separate permissions, so each is the other's
+ *  genuine escape hatch). */
+function explainPermissionDenied(
+  which: 'camera' | 'library',
+  canAskAgain: boolean,
+  useOther: () => void,
+): void {
+  if (canAskAgain) return; // dismissing the OS prompt is not a decision — don't nag
+  const what = which === 'camera' ? 'camera' : 'photo library';
+  const other = which === 'camera' ? 'Choose from library' : 'Take photo';
+  Alert.alert(
+    which === 'camera' ? 'Camera is turned off for Swift' : 'Photo access is turned off for Swift',
+    `Swift needs ${what} access to add your documents. Turn it on in Settings, or use the other option instead.`,
+    [
+      { text: 'Open Settings', onPress: () => { void Linking.openSettings(); } },
+      { text: other, onPress: useOther },
+      { text: 'Cancel', style: 'cancel' },
+    ],
+  );
+}
+
   const fromCamera = async () => {
     try {
       const owner = requireAuthSessionSnapshot();
       const perm = await ImagePicker.requestCameraPermissionsAsync();
       requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) return;
+      if (!perm.granted) {
+        explainPermissionDenied('camera', perm.canAskAgain, () => { void fromLibrary(); });
+        return;
+      }
       const res = await ImagePicker.launchCameraAsync({ quality: 0.8 });
       requireAuthSessionForPrincipal(owner);
       if (!res.canceled && res.assets?.[0]) send(res.assets[0], owner);
@@ -106,7 +138,10 @@ export function DocumentUploadCard({
       const owner = requireAuthSessionSnapshot();
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) return;
+      if (!perm.granted) {
+        explainPermissionDenied('library', perm.canAskAgain, () => { void fromCamera(); });
+        return;
+      }
       const res = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         quality: 0.8,
