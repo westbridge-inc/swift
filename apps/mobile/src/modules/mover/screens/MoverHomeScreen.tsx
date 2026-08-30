@@ -17,6 +17,7 @@ import {
   useAvailableJobs,
   useDispatchOffers,
   useActiveJob,
+  useActiveJobs,
   useGoOnline,
   useGoOffline,
   useAcceptJob,
@@ -437,6 +438,8 @@ export function MoverHomeScreen({ navigation }: any) {
   const stats = useMoverStats(kind);
   const vstatus = useVerificationStatus<any>('MOVER');
   const active = useActiveJob(kind);
+  // [B6] The run strip: server-computed, rendered as-is. Null unless stacked.
+  const run = useActiveJobs(kind).run;
   const online = !!profile?.isOnline;
   const available = useAvailableJobs(kind, online);
   const { offer, queuedBehind, dismiss } = useDispatchOffers(kind, online);
@@ -895,15 +898,17 @@ export function MoverHomeScreen({ navigation }: any) {
                 <DCard style={{ marginTop: space.md, borderColor: dk.accentBorder, opacity: pressed ? 0.9 : 1 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                     <T variant="caption" weight="bold" style={{ color: dk.accent, letterSpacing: 1 }}>
-                      ACTIVE JOB
+                      {run ? 'ACTIVE RUN' : 'ACTIVE JOB'}
                     </T>
                     <Feather name="chevron-right" size={18} color={dk.muted} />
                   </View>
                   <T variant="body" weight="bold" numberOfLines={1} style={{ marginTop: 4, color: dk.text }}>
-                    {activeJob.deliveryAddress ?? activeJob.dropoffAddress ?? activeJob.orderNumber ?? 'In progress'}
+                    {run
+                      ? `${run.drops} drops · ${money(run.cashToCollect)} to collect · next: ${run.next.vendorName ?? 'pickup'}`
+                      : activeJob.deliveryAddress ?? activeJob.dropoffAddress ?? activeJob.orderNumber ?? 'In progress'}
                   </T>
                   <T variant="label" style={{ color: dk.muted, marginTop: 2 }}>
-                    {jobAmount(activeJob)} · tap to manage
+                    {run ? 'tap to manage the run' : `${jobAmount(activeJob)} · tap to manage`}
                   </T>
                 </DCard>
               )}
