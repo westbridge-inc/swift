@@ -12,6 +12,7 @@ import {
   IconChip,
   LabeledInput,
   LinkText,
+  PhotoDrop,
   PillButton,
   PopupCard,
   PopupTitle,
@@ -438,34 +439,35 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
     <Screen>
       <SubHeader title={existing ? 'Edit Item' : 'New Item'} navigation={navigation} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
-        {/* Photo */}
-        <Pressable disabled={readOnly} onPress={() => setPhotoMenu(true)}>
-          {({ pressed }) => (
-            <View
-              style={{
-                height: 160,
-                borderRadius: radius.lg,
-                overflow: 'hidden',
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundColor: color.brand[50],
-                marginBottom: space.sm,
-                opacity: pressed ? 0.85 : 1,
-              }}
-            >
-              {previewUri ? (
+        {/* Photo — the kit's PhotoDrop when the slot is empty (WS-2: a dashed
+            CONTROL inviting the one person who can fix it, never a grey state);
+            the pressable preview once a photograph exists. First adoption of
+            the primitive — the hand-rolled twin retires. */}
+        {previewUri ? (
+          <Pressable disabled={readOnly} onPress={() => setPhotoMenu(true)}>
+            {({ pressed }) => (
+              <View
+                style={{
+                  height: 160,
+                  borderRadius: radius.lg,
+                  overflow: 'hidden',
+                  marginBottom: space.sm,
+                  opacity: pressed ? 0.85 : 1,
+                }}
+              >
                 <Image source={{ uri: previewUri }} style={{ width: '100%', height: 160 }} contentFit="cover" />
-              ) : (
-                <View style={{ alignItems: 'center' }}>
-                  <Feather name="camera" size={24} color={color.brand[500]} />
-                  <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-                    Add a photo
-                  </T>
-                </View>
-              )}
-            </View>
-          )}
-        </Pressable>
+              </View>
+            )}
+          </Pressable>
+        ) : (
+          <PhotoDrop
+            onPress={() => setPhotoMenu(true)}
+            disabled={readOnly}
+            uploading={uploadImage.isPending}
+            hint="Bright and straight-on — customers choose with their eyes"
+            style={{ marginBottom: space.sm }}
+          />
+        )}
         {previewUri ? (
           <View style={{ alignItems: 'center', marginBottom: space.lg }}>
             {readOnly ? (
