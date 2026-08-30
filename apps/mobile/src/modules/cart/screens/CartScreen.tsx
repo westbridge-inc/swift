@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import { InteractionManager, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
@@ -127,6 +127,22 @@ export function CartScreen() {
   const clearCart = useClearCart();
   const setTip = useSetCartTip();
   const placeOrder = usePlaceOrder<any>();
+  // P0 (founder, 08-30): navigating in the SAME tick as the ceremony Modal's
+  // dismissal wedges React Native — the Modal's native window can survive the
+  // race invisibly and eat every touch on the next screen (the whole tracking
+  // screen went dead). So the exits only STAGE the navigation: reset() drops
+  // the Modal, and the effect below navigates strictly AFTER isSuccess has
+  // flushed false, one frame later, when the window is provably gone.
+  const [pendingTrackId, setPendingTrackId] = useState<string | null>(null);
+  useEffect(() => {
+    if (placeOrder.isSuccess || !pendingTrackId) return;
+    const id = pendingTrackId;
+    setPendingTrackId(null);
+    // InteractionManager: after the dismissal's own animation/transition work
+    // has fully drained — the Modal window is gone before the stack moves.
+    const task = InteractionManager.runAfterInteractions(() => navigation.navigate('Delivery', { orderId: id }));
+    return () => task.cancel();
+  }, [placeOrder.isSuccess, pendingTrackId, navigation]);
 
   const [promo, setPromo] = useState('');
   const [promoMsg, setPromoMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -826,9 +842,9 @@ export function CartScreen() {
       <PopupCard
         visible={placeOrder.isSuccess}
         onClose={() => {
-          const id = placedOrderId;
+          // Stage, dismiss, navigate-after — never all in one tick (see above).
+          if (placedOrderId) setPendingTrackId(placedOrderId);
           placeOrder.reset();
-          if (id) navigation.navigate('Delivery', { orderId: id });
         }}
       >
         {/* THE LOCK-IN [100x pass §1c]: a confirmed success is viridian, not
@@ -866,9 +882,8 @@ export function CartScreen() {
           label={placedAppt ? 'View booking' : 'Track order'}
           size="md"
           onPress={() => {
-            const id = placedOrderId;
+            if (placedOrderId) setPendingTrackId(placedOrderId);
             placeOrder.reset();
-            if (id) navigation.navigate('Delivery', { orderId: id });
           }}
           style={{ alignSelf: 'stretch', marginTop: placedPaymentAction ? space.md : space.xl }}
         />
