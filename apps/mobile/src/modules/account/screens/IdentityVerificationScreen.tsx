@@ -47,13 +47,20 @@ export function IdentityVerificationScreen({ navigation }: any) {
   const [selfieUrl, setSelfieUrl] = useState<string | undefined>(undefined);
   const [picking, setPicking] = useState<'id' | 'selfie' | null>(null);
   const [submitted, setSubmitted] = useState(false);
+  const [permErr, setPermErr] = useState<string | null>(null);
 
   const pick = async (kind: 'id' | 'selfie') => {
     try {
       const owner = requireAuthSessionSnapshot();
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) return;
+      if (!perm.granted) {
+        // [G9 · #917's law] A denied permission explains itself — this was
+        // the LAST silent library denial in the app.
+        setPermErr('Photo access needed — allow it in Settings to upload your documents.');
+        return;
+      }
+      setPermErr(null);
       const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
       requireAuthSessionForPrincipal(owner);
       if (res.canceled || !res.assets?.[0]) return;
@@ -111,11 +118,13 @@ export function IdentityVerificationScreen({ navigation }: any) {
         {/* [WR-027] The catch above says "surfaced below" — this is that
             surface. Only the submit error rendered; a failed photo UPLOAD was
             silent and the row simply stayed empty. */}
+        {permErr ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>{permErr}</T> : null}
         {upload.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>That photo didn&apos;t upload — tap the card and try again.</T> : null}
         {submit.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>Couldn&apos;t submit. Please try again.</T> : null}
 
+        {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
-          label="Submit for verification"
+          label={!idUrl ? 'Upload your ID first' : !selfieUrl ? 'Add your selfie' : 'Submit for verification'}
           loading={submit.isPending}
           style={{ marginTop: space.lg }}
           disabled={!idUrl || !selfieUrl}

@@ -75,7 +75,7 @@ export function PinConfirmScreen({ navigation, route }: any) {
           gap: space.md,
         }}
       >
-        <CircleChip icon="chevron-left" onPress={() => navigation?.goBack?.()} />
+        <CircleChip icon="chevron-left" label="Back" onPress={() => navigation?.goBack?.()} />
         <View
           style={{
             paddingHorizontal: space.lg,
