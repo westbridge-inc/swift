@@ -319,6 +319,7 @@ function RecentEarningRow({ entry, index }: { entry: Record<string, unknown>; in
   const type = serverText(entry['type'])?.toUpperCase();
   const label = earnLabel(type);
   const createdAt = serverDate(entry['createdAt']);
+  const sentence = serverText(entry['sentence']);
   const icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'] | undefined = type === 'TIP'
     ? 'heart-outline'
     : type === 'TAXI_FARE'
@@ -348,6 +349,8 @@ function RecentEarningRow({ entry, index }: { entry: Record<string, unknown>; in
         ) : null}
         <View style={{ flex: 1, marginLeft: icon ? space.md : undefined }}>
           {label ? <T variant="label" weight="semibold">{label}</T> : null}
+          {/* [ALG-21] The server's one-sentence reason for the number — rendered, never rebuilt here. */}
+          {sentence ? <T variant="caption">{sentence}</T> : null}
           {createdAt ? <T variant="caption" tone="muted">{dateLabel(createdAt)}</T> : null}
         </View>
         <T variant="numM">{moneyOrDash(entry['amount'])}</T>

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { explainEarning } from '../../utils/explain-earning';
 import { z } from 'zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
 import { OrderService } from '../order/order.service';
@@ -1327,7 +1328,16 @@ export async function driverRoutes(app: FastifyInstance) {
     // is Decimal(10,2), so each row's amount reached the app as a STRING while
     // the total beside it was a number — the same list, two types. Map the rows
     // before the shared paginator, exactly as rider /earnings does.
-    const data = earnings.map((earning) => ({ ...earning, amount: Number(earning.amount) }));
+    // [ALG-21] One sentence per row, from the stored fields that produced the number.
+    const orderIds = [...new Set(earnings.map((e) => e.orderId))];
+    const relatedOrders = orderIds.length > 0
+      ? await app.prisma.order.findMany({
+          where: { id: { in: orderIds } },
+          select: { id: true, orderType: true, paymentMethod: true, isExpress: true, billableKm: true, billableKmSource: true, taxiDistance: true },
+        })
+      : [];
+    const orderMap = new Map(relatedOrders.map((o) => [o.id, o]));
+    const data = earnings.map((earning) => ({ ...earning, amount: Number(earning.amount), sentence: explainEarning(earning, orderMap.get(earning.orderId) ?? null) }));
 
     return {
       success: true,

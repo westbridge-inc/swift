@@ -12,6 +12,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
+import { explainEarning } from '../../utils/explain-earning';
 import { riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
@@ -1547,7 +1548,11 @@ export async function riderRoutes(app: FastifyInstance) {
     const relatedOrders = orderIds.length > 0
       ? await app.prisma.order.findMany({
           where: { id: { in: orderIds } },
-          select: { id: true, orderNumber: true, orderType: true, vendor: { select: { name: true } } },
+          select: {
+            id: true, orderNumber: true, orderType: true, vendor: { select: { name: true } },
+            // [ALG-21] The stored fields the sentence is written from.
+            paymentMethod: true, isExpress: true, billableKm: true, billableKmSource: true, taxiDistance: true,
+          },
         })
       : [];
     const orderMap = new Map(relatedOrders.map((o) => [o.id, o]));
@@ -1564,6 +1569,8 @@ export async function riderRoutes(app: FastifyInstance) {
         amount: Number(e.amount),
         status: e.status,
         createdAt: e.createdAt,
+        // [ALG-21] One sentence, from the same fields that produced the number.
+        sentence: explainEarning(e, order ?? null),
       };
     });
 
