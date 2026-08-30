@@ -9,7 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CodeInput, DecorativeIcon, EmptyState, LockIn, PillButton, PopupCard, PopupTitle, Screen, T, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
+import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../kit/toast';
@@ -19,7 +19,8 @@ import { haversineKm, streetEtaMin } from '../../../lib/geo';
 // One authority for the rider's leg: what they do next, and whether the goods
 // are still with the vendor. `showBagIsWaiting` is why the counter signal no
 // longer survives past custody — see that file.
-import { riderStep, showBagIsWaiting } from '../../../lib/riderLeg';
+import { riderStep, showBagIsWaiting, legStopLabel } from '../../../lib/riderLeg';
+import { money } from '../../../lib/money';
 import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
@@ -122,12 +123,14 @@ export function ActiveJobScreen({ navigation }: any) {
   const insets = useSafeAreaInsets();
   const { kind } = useMoverKind();
   const active = useActiveJob(kind);
+  const stackedJobs = useActiveJobs(kind);
   const driverAct = useDriverAction();
   const riderAct = useRiderAction();
   const courierProof = useCourierProof();
   const rate = useRateCustomer();
   const { latitude, longitude, status: locationStatus } = useLocationStore();
   const [pin, setPin] = useState('');
+  const [selectedLegId, setSelectedLegId] = useState<string | null>(null);
   const [ratePopup, setRatePopup] = useState<{ orderId: string; name: string; mmg: boolean } | null>(null);
   const [stars, setStars] = useState(5);
   // Driver-raised SOS on an active taxi ride — the backend authorizes the driver
@@ -140,7 +143,13 @@ export function ActiveJobScreen({ navigation }: any) {
   // nav-grade screen is fully browsable read-only. Real actions (SOS/dial) are
   // suppressed below; the step mutations already no-op in preview.
   const preview = useMoverPreview((s) => s.preview);
-  const job: any = active.data;
+  // [B6] A stacked rider works ONE screen with a stop list — never a tab per
+  // order. The detail panel below (PIN sheet, cash line, customer, actions,
+  // handback) is the selected stop's own, because every one of them reads
+  // `job`. A single leg is `active.data`, exactly as before.
+  const legs: any[] = stackedJobs.legs;
+  const stacked = legs.length > 1;
+  const job: any = stacked ? (legs.find((l) => l.id === selectedLegId) ?? legs[0]) : active.data;
 
   if (!job && !ratePopup) {
     return (
@@ -335,6 +344,32 @@ export function ActiveJobScreen({ navigation }: any) {
           handleIndicatorStyle={{ backgroundColor: dk.faint }}
         >
           <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
+            {stacked ? (
+              <View style={{ marginBottom: space.md }}>
+                <View style={{ flexDirection: 'row', gap: space.sm }}>
+                  {legs.map((leg: any, i: number) => {
+                    const selected = leg.id === job?.id;
+                    return (
+                      <Pressable key={leg.id} onPress={() => { setSelectedLegId(leg.id); setPin(''); }} style={{ flex: 1 }} hitSlop={4}>
+                        <View style={{ borderRadius: radius.md, borderWidth: 1, borderColor: selected ? dk.accentBorder : dk.line, backgroundColor: selected ? dk.card : 'transparent', padding: space.md }}>
+                          <T variant="caption" weight="bold" style={{ color: selected ? dk.accent : dk.muted, letterSpacing: 1 }}>
+                            STOP {i + 1}
+                          </T>
+                          <T variant="label" weight="semibold" numberOfLines={1} style={{ color: dk.text, marginTop: 2 }}>
+                            {legStopLabel(leg)}
+                          </T>
+                        </View>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                {stackedJobs.run ? (
+                  <T variant="label" style={{ color: dk.muted, marginTop: space.sm }}>
+                    {stackedJobs.run.drops} drops · {money(stackedJobs.run.cashToCollect)} to collect
+                  </T>
+                ) : null}
+              </View>
+            ) : null}
             {/* Route + fare + live progress */}
             <DCard style={{ marginBottom: space.md }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>

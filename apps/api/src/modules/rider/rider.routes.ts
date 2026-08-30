@@ -1003,6 +1003,36 @@ export async function riderRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /orders/active — Current delivery in progress. */
+  /** The one projection of a live leg for the device that delivers it — shared
+   *  by /orders/active (the primary) and /orders/active-legs (every leg, B6). */
+  const ACTIVE_ORDER_INCLUDE = {
+    vendor: {
+      select: {
+        id: true, name: true, logoUrl: true, phone: true,
+        latitude: true, longitude: true,
+        addressLine1: true, city: true,
+      },
+    },
+    customer: {
+      select: {
+        id: true,
+        firstName: true, lastName: true, phone: true,
+      },
+    },
+    items: { select: { name: true, quantity: true, totalCustomer: true, specialInstructions: true } },
+    statusHistory: { orderBy: { createdAt: 'desc' as const }, take: 10 },
+  };
+  const activeOrderView = <O extends { deliveryFee: unknown; tipAmount: unknown; totalAmount: unknown }>(order: O) => ({
+    ...order,
+    deliveryFee: Number(order.deliveryFee),
+    tipAmount: Number(order.tipAmount),
+    totalAmount: Number(order.totalAmount),
+    totalEarning: Number(order.deliveryFee) + Number(order.tipAmount),
+    // [F-0011] The delivery PIN is deliberately NOT returned: this rider is
+    // the party who verifies it at PUT /orders/:id/delivered. They must ask
+    // the customer for it.
+  });
+
   app.get('/orders/active', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
 
@@ -1014,23 +1044,7 @@ export async function riderRoutes(app: FastifyInstance) {
       where: { id: rider.currentOrderId },
       // [F-0011] The response spreads this row wholesale — omit at the source.
       omit: HANDOVER_SECRETS_OMIT,
-      include: {
-        vendor: {
-          select: {
-            id: true, name: true, logoUrl: true, phone: true,
-            latitude: true, longitude: true,
-            addressLine1: true, city: true,
-          },
-        },
-        customer: {
-          select: {
-            id: true,
-            firstName: true, lastName: true, phone: true,
-          },
-        },
-        items: { select: { name: true, quantity: true, totalCustomer: true, specialInstructions: true } },
-        statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 },
-      },
+      include: ACTIVE_ORDER_INCLUDE,
     });
 
     if (!order) {
@@ -1041,19 +1055,36 @@ export async function riderRoutes(app: FastifyInstance) {
       return { success: true, data: null };
     }
 
-    return {
-      success: true,
-      data: {
-        ...order,
-        deliveryFee: Number(order.deliveryFee),
-        tipAmount: Number(order.tipAmount),
-        totalAmount: Number(order.totalAmount),
-        totalEarning: Number(order.deliveryFee) + Number(order.tipAmount),
-        // [F-0011] The delivery PIN is deliberately NOT returned: this rider is
-        // the party who verifies it at PUT /orders/:id/delivered. They must ask
-        // the customer for it.
-      },
-    };
+    return { success: true, data: activeOrderView(order) };
+  });
+
+  /** GET /orders/active-legs — [B6] EVERY live leg, not only the pointer's.
+   *  Under stacking (capacity 2) a rider can hold two deliveries at once;
+   *  /orders/active shows the primary alone, so the second leg was invisible
+   *  on the one device that has to deliver it. Same projection, oldest
+   *  accepted first, plus a run summary computed HERE — the strip on the
+   *  device renders money, it never adds it. */
+  app.get('/orders/active-legs', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId);
+    const rows = await app.prisma.order.findMany({
+      where: { riderId: rider.id, orderType: { not: 'TAXI' }, status: { notIn: TERMINAL_ORDER_STATUSES } },
+      orderBy: { acceptedAt: 'asc' },
+      omit: HANDOVER_SECRETS_OMIT,
+      include: ACTIVE_ORDER_INCLUDE,
+    });
+    const legs = rows.map((o) => ({ ...activeOrderView(o), isPrimary: o.id === rider.currentOrderId }));
+    const first = legs[0];
+    const run = legs.length >= 2 && first
+      ? {
+          drops: legs.length,
+          // What the rider collects at the doors: `totalAmount` on CASH legs —
+          // the column cashMathForOffer names collectFromCustomer. An MMG leg
+          // collects nothing; the customer already paid the store.
+          cashToCollect: legs.reduce((sum, l) => sum + (l.paymentMethod === 'CASH' ? l.totalAmount : 0), 0),
+          next: { orderId: first.id, vendorName: first.vendor?.name ?? null, status: first.status },
+        }
+      : null;
+    return { success: true, data: { legs, run } };
   });
 
   // =========================================================================

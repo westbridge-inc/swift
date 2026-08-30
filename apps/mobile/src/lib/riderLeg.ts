@@ -38,6 +38,21 @@ export function riderStep(job: { status?: string | null } | null | undefined): R
  */
 const PRE_CUSTODY_ACTIONS: ReadonlySet<RiderAction> = new Set(['en-route-pickup', 'arrived-pickup', 'picked-up']);
 
+/** [B6] What a stop chip says for one leg of a run: the store while the bag is
+ *  still theirs, the customer once it is the rider's. Same custody boundary as
+ *  `awaitingPickup` — one definition of "which side of pickup are we on". */
+export function legStopLabel(leg: {
+  status?: string | null;
+  vendor?: { name?: string | null } | null;
+  customer?: { firstName?: string | null; lastName?: string | null } | null;
+  deliveryAddress?: string | null;
+} | null | undefined): string {
+  if (!leg) return '';
+  if (awaitingPickup(leg)) return `Pick up · ${leg.vendor?.name ?? 'the store'}`;
+  const who = [leg.customer?.firstName, leg.customer?.lastName].filter(Boolean).join(' ');
+  return `Drop · ${who || leg.deliveryAddress || 'customer'}`;
+}
+
 export function awaitingPickup(job: { status?: string | null } | null | undefined): boolean {
   const step = riderStep(job);
   return step != null && PRE_CUSTODY_ACTIONS.has(step.action);

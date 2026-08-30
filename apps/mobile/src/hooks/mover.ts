@@ -266,6 +266,38 @@ export function useActiveJob(kind: MoverKind | null) {
   // R3 requires be previewable) while the map still renders demand behind it.
   return pv ? PV.previewQuery(PV.PREVIEW_ACTIVE_JOB) : q;
 }
+/** [B6] The run summary the server computes for a stacked rider. Rendered,
+ *  never re-derived: the strip shows `cashToCollect`, it does not add it. */
+export type RunSummary = {
+  drops: number;
+  cashToCollect: number;
+  next: { orderId: string; vendorName: string | null; status: string };
+};
+
+/**
+ * [B6] Every live leg — the primary first — plus the run summary. The singular
+ * case is `useActiveJob` untouched: one leg, no run, the same query. Taxi is
+ * one-at-a-time by law, so a driver's list is their active ride alone, and
+ * preview keeps its single sample trip.
+ */
+export function useActiveJobs(kind: MoverKind | null) {
+  const pv = usePreview();
+  const single = useActiveJob(kind);
+  const stacked = kind === 'RIDER' && !pv;
+  const legsQ = useQuery({
+    queryKey: ['mover', 'active', kind, 'legs'],
+    queryFn: () => unwrap<{ legs: any[]; run: RunSummary | null }>(riderApi.activeLegs()),
+    enabled: stacked,
+    refetchInterval: 12000,
+  });
+  const fromSingle: any[] = single.data ? [single.data] : [];
+  if (!stacked) return { legs: fromSingle, run: null as RunSummary | null, refetch: single.refetch };
+  return {
+    legs: (legsQ.data?.legs as any[] | undefined) ?? fromSingle,
+    run: legsQ.data?.run ?? null,
+    refetch: legsQ.refetch,
+  };
+}
 export function useGoOnline(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();

@@ -712,6 +712,8 @@ export const riderApi = {
     api.put('/rider/location', { latitude, longitude }, capturedAuthConfig(session)),
   available: () => api.get('/rider/orders/available'),
   active: () => api.get('/rider/orders/active'),
+  // [B6] Every live leg, primary first, plus the server-computed run summary.
+  activeLegs: () => api.get('/rider/orders/active-legs'),
   accept: (id: string, fare?: number) => api.post(`/rider/orders/${id}/accept`, { fare }),
   // Accepting a dispatch OFFER (the offer card) vs grabbing from the open board:
   // this path acks the offer so it's never scored as a timeout [SWIFT-016].
