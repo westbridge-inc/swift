@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { z } from 'zod';
 import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
@@ -66,6 +67,9 @@ const riderLocationSchema = z.object({
   longitude: z.number().min(-180).max(180),
   heading: z.number().optional(),
   speed: z.number().optional(),
+  // [ALG-15] Reported honestly by the device when it can; older clients omit both.
+  accuracy: z.number().min(0).max(100_000).optional(),
+  mocked: z.boolean().optional(),
 });
 
 const riderGoOnlineSchema = riderLocationSchema.pick({ latitude: true, longitude: true });
@@ -664,7 +668,7 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!locationSessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
     }
-    const { latitude, longitude, heading, speed } = riderLocationSchema.parse(request.body);
+    const { latitude, longitude, heading, speed, accuracy, mocked } = riderLocationSchema.parse(request.body);
     const now = new Date();
 
     if (!rider.isOnline && !rider.currentOrderId) {
@@ -722,6 +726,26 @@ export async function riderRoutes(app: FastifyInstance) {
 
     // DB update (batched — not every ping needs to hit PG immediately).
     // We update the DB if 10+ seconds have passed since last DB write.
+    // [ALG-15] Physics before persistence: is this fix plausible after the
+    // last one? A flag is a row for a reviewer, never a refusal — the fix is
+    // accepted exactly as before. Off switch: 'ALG-15.enabled'.
+    if (await algoValue(app.prisma, 'ALG-15.enabled')) {
+      const prev = authorized.currentLat != null && authorized.currentLng != null && authorized.lastLocationUpdate
+        ? { lat: authorized.currentLat, lng: authorized.currentLng, at: authorized.lastLocationUpdate }
+        : null;
+      const fix = { lat: latitude, lng: longitude, at: now, accuracyM: accuracy ?? null, mocked: mocked ?? null };
+      const maxKmh = Math.min(300, Math.max(60, await algoValue(app.prisma, 'gps.maxPlausibleKmh')));
+      const assessment = assessFix(prev, fix, { maxPlausibleKmh: maxKmh });
+      void pushTrace(app.redis, traceKey('RIDER', rider.id), fix);
+      if (assessment.signals.length > 0) {
+        void recordGpsFlag({ prisma: app.prisma, redis: app.redis }, {
+          pool: 'RIDER', moverId: rider.id, outcome: 'FLAGGED', signals: assessment.signals,
+          inputs: { prev, fix: { lat: latitude, lng: longitude, accuracyM: accuracy ?? null, mocked: mocked ?? null }, speedKmh: assessment.speedKmh, distanceM: assessment.distanceM, elapsedS: assessment.elapsedS, maxKmh },
+          sentence: flagSentence(assessment.signals, assessment),
+        });
+      }
+    }
+
     const lastDbWrite = await app.redis
       .get(`rider:location_db_ts:${rider.id}`)
       .catch((error) => {
@@ -1348,6 +1372,21 @@ export async function riderRoutes(app: FastifyInstance) {
       // as exactly that. A distance computed from an hour-old ping would be a
       // fabricated measurement of where someone was standing.
       const evidence = arrivalEvidence(slug, order, rider);
+      // [ALG-15] Corroboration: does the trace show this rider moving in the
+      // minutes before the claim? Absence is recorded as absence (L10) — the
+      // arrival itself is not blocked, and the note never names the check.
+      if (ARRIVAL_TARGET[slug] && (await algoValue(app.prisma, 'ALG-15.enabled'))) {
+        const declaredAt = new Date();
+        const trace = await recentTrace(app.redis, traceKey('RIDER', rider.id), declaredAt.getTime() - CORROBORATION_WINDOW_MS);
+        const corroboration = arrivalCorroboration(trace, declaredAt);
+        if (!corroboration.corroborated) {
+          void recordGpsFlag({ prisma: app.prisma, redis: app.redis }, {
+            pool: 'RIDER', moverId: rider.id, outcome: 'UNCORROBORATED', signals: ['NO_MOVEMENT_HISTORY'],
+            inputs: { orderId: id, transition: slug, fixesInWindow: corroboration.fixesInWindow, windowMs: CORROBORATION_WINDOW_MS },
+            sentence: `Arrival for order ${order.orderNumber ?? id} has ${corroboration.fixesInWindow} position fixes in the ten minutes before it — nothing shows the rider travelling there.`,
+          });
+        }
+      }
 
       const updated = await orderService.updateStatus(
         id,

@@ -80,6 +80,14 @@ export const ALGO_DEFAULTS = {
    * 0.1..1.0 at the reader; 1.0 turns the nudge off.
    */
   'float.softPct': 0.7,
+  /**
+   * [ALG-15] The speed between two consecutive fixes above which a position
+   * is flagged for review — a teleport. 140 km/h: nothing on a Guyanese road
+   * moves faster honestly. Clamped 60..300 at the reader.
+   */
+  'gps.maxPlausibleKmh': 140,
+  /** [ALG-15] Kill switch. Off ⇒ no assessment, no trace, no rows — today's behaviour. */
+  'ALG-15.enabled': true,
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;

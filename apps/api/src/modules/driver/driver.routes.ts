@@ -1,4 +1,6 @@
 import type { FastifyInstance } from 'fastify';
+import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
+import { algoValue } from '../algo/algo-config';
 import { explainEarning } from '../../utils/explain-earning';
 import { z } from 'zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
@@ -64,6 +66,9 @@ const driverLocationSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
   heading: z.number().optional(),
+  // [ALG-15] Reported honestly by the device when it can; older clients omit both.
+  accuracy: z.number().min(0).max(100_000).optional(),
+  mocked: z.boolean().optional(),
 });
 
 const driverGoOnlineSchema = driverLocationSchema.pick({ latitude: true, longitude: true });
@@ -406,7 +411,7 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
     }
 
-    const { latitude, longitude, heading } = driverLocationSchema.parse(request.body);
+    const { latitude, longitude, heading, accuracy, mocked } = driverLocationSchema.parse(request.body);
 
     // A queued native callback after GO OFFLINE is a normal race. Treat it as
     // an accepted no-op so clients do not retry; active rides remain authorized
@@ -453,6 +458,24 @@ export async function driverRoutes(app: FastifyInstance) {
         OR: [{ isOnline: true }, { currentRideId: { not: null } }],
       },
     });
+    // [ALG-15] Physics before persistence — a flag, never a refusal. Off switch: 'ALG-15.enabled'.
+    if (authorized && (await algoValue(app.prisma, 'ALG-15.enabled'))) {
+      const now = new Date();
+      const prev = authorized.currentLat != null && authorized.currentLng != null && authorized.lastLocationUpdate
+        ? { lat: authorized.currentLat, lng: authorized.currentLng, at: authorized.lastLocationUpdate }
+        : null;
+      const fix = { lat: latitude, lng: longitude, at: now, accuracyM: accuracy ?? null, mocked: mocked ?? null };
+      const maxKmh = Math.min(300, Math.max(60, await algoValue(app.prisma, 'gps.maxPlausibleKmh')));
+      const assessment = assessFix(prev, fix, { maxPlausibleKmh: maxKmh });
+      void pushTrace(app.redis, traceKey('DRIVER', driver.id), fix);
+      if (assessment.signals.length > 0) {
+        void recordGpsFlag({ prisma: app.prisma, redis: app.redis }, {
+          pool: 'DRIVER', moverId: driver.id, outcome: 'FLAGGED', signals: assessment.signals,
+          inputs: { prev, fix: { lat: latitude, lng: longitude, accuracyM: accuracy ?? null, mocked: mocked ?? null }, speedKmh: assessment.speedKmh, distanceM: assessment.distanceM, elapsedS: assessment.elapsedS, maxKmh },
+          sentence: flagSentence(assessment.signals, assessment),
+        });
+      }
+    }
     if (!authorized) {
       const owner = await app.prisma.driver.findUnique({
         where: { id: driver.id },

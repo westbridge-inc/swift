@@ -21,6 +21,9 @@ import {
 export interface BackgroundLocationSample {
   latitude: number;
   longitude: number;
+  /** [ALG-15] Passed through from the platform when present, never invented. */
+  accuracy?: number | null;
+  mocked?: boolean | null;
   timestamp: number;
 }
 
@@ -49,7 +52,7 @@ export interface MoverBackgroundRuntimeDependencies {
   stopNative: () => Promise<void>;
   publish: (
     kind: MoverKind,
-    sample: Pick<BackgroundLocationSample, 'latitude' | 'longitude'>,
+    sample: Pick<BackgroundLocationSample, 'latitude' | 'longitude' | 'accuracy' | 'mocked'>,
     session: AuthSessionSnapshot,
   ) => Promise<{ accepted?: boolean } | null | undefined>;
   invalidateMoverQueries: () => void;
