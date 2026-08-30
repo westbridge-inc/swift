@@ -1,10 +1,10 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useServiceProviders, useRequestJob } from '../../../hooks';
-import { Card, DecorativeIcon, EmptyState, Header, IconChip, LinkText, LoadingBlock, Pictogram, PillButton, PopupCard, PopupTitle, RatingMeta, Screen, T, TonePill, type PictogramName } from '../../../kit';
+import { Card, Chip, DecorativeIcon, EmptyState, Header, IconChip, LinkText, LoadingBlock, Pictogram, PillButton, PopupCard, PopupTitle, RatingMeta, Screen, T, TonePill, type PictogramName } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAuthStore } from '../../../stores/authStore';
 import { enterServiceProvider } from '../serviceProviderEntry';
@@ -48,41 +48,6 @@ type ProviderBrowse = {
   riskTier?: 'HIGH' | 'LOW';
   providers?: ServiceProvider[];
 };
-
-function TradeTile({ option, selected, onPress }: { option: TradeOption; selected: boolean; onPress: () => void }) {
-  return (
-    <Pressable
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={option.label}
-      accessibilityHint="Shows available providers for this trade"
-      accessibilityState={{ selected }}
-      style={{ flexBasis: '47%', flexGrow: 1 }}
-    >
-      {({ pressed }) => (
-        <View
-          style={{
-            minHeight: space['5xl'] * 2,
-            padding: space.lg,
-            borderRadius: radius.lg,
-            borderWidth: selected ? space.xs / 2 : StyleSheet.hairlineWidth,
-            borderColor: selected ? SERVICES_TINT.ink : color.border.subtle,
-            backgroundColor: SERVICES_TINT.bg,
-            opacity: pressed ? 0.82 : 1,
-            alignItems: 'flex-start',
-            justifyContent: 'space-between',
-            flex: 1,
-          }}
-        >
-          <Pictogram name={option.pictogram} size={space['3xl']} color={SERVICES_TINT.ink} />
-          <T variant="label" weight="semibold" style={{ color: SERVICES_TINT.ink, marginTop: space.md }}>
-            {option.label}
-          </T>
-        </View>
-      )}
-    </Pressable>
-  );
-}
 
 export function ServicesScreen({ navigation }: any) {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
@@ -153,11 +118,14 @@ export function ServicesScreen({ navigation }: any) {
         <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
           Pick the work first, then compare verified providers.
         </T>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md }}>
+        {/* [Wave 3 · ref 13] The reference draws trade PILLS — the kit Chip —
+            not pictogram tiles. Tiles were an unrecorded invention; the
+            reference outranks them. */}
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
           {TRADES.map((option) => (
-            <TradeTile
+            <Chip
               key={option.key}
-              option={option}
+              label={option.label}
               selected={option.key === trade}
               onPress={() => {
                 setTrade(option.key);
@@ -256,34 +224,22 @@ export function ServicesScreen({ navigation }: any) {
                         )}
                       </View>
                     </View>
-                  </View>
-                  <View
-                    style={{
-                      marginTop: space.lg,
-                      padding: space.md,
-                      borderRadius: radius.md,
-                      backgroundColor: color.surface.sunken,
-                    }}
-                  >
-                    <T variant="label" weight="semibold">
-                      Discuss quotes in chat
-                    </T>
-                    <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-                      Cash on completion, paid directly to the provider.
-                    </T>
+                    {/* [ref 13] The button sits compact in the card's top
+                        row — "Request", or the filled "Selected" (tap again
+                        to unpick). The per-card "discuss quotes" box is gone:
+                        the page subtitle says it once for everyone. */}
+                    <PillButton
+                      label={selected ? 'Selected' : 'Request'}
+                      variant={selected ? 'primary' : 'soft'}
+                      size="sm"
+                      onPress={() => setSelectedProviderId(selected ? undefined : p.id)}
+                    />
                   </View>
                   {p.bio ? (
                     <T variant="label" tone="muted" numberOfLines={2} style={{ marginTop: space.md }}>
                       {p.bio}
                     </T>
                   ) : null}
-                  <PillButton
-                    label={selected ? 'Remove selection' : 'Request this provider'}
-                    variant="soft"
-                    size="md"
-                    style={{ marginTop: space.lg, alignSelf: 'flex-start' }}
-                    onPress={() => setSelectedProviderId(selected ? undefined : p.id)}
-                  />
                 </Card>
               );
             })}
