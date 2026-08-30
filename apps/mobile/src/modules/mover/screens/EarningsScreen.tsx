@@ -103,8 +103,10 @@ function EarningsHero({ total, facts }: { total: unknown; facts: string[] }) {
             <T variant="displayXl" style={{ marginTop: space.xs }}>{moneyOrDash(total)}</T>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs, marginTop: space.xs }}>
               <MaterialCommunityIcons name="check-decagram" size={fontSize.xs} color={color.success} />
+              {/* [Wave 3 vs reference 17] The pitch, in the pitch's own words —
+                  the same "100% yours" sentence the cockpit leads with. */}
               <T variant="caption" weight="bold" tone="success" style={{ flex: 1 }}>
-                Every fare stays yours · cash · no commission
+                100% yours · cash · 0% commission
               </T>
             </View>
             {facts.length ? (
