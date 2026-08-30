@@ -71,6 +71,10 @@ else
 fi
 
 TARGET="${DATABASE_URL%/*}/$SCRATCH"
+# [D-3] The stopwatch. "How long would we be down?" has exactly one honest
+# answer: the time this restore takes on this data. Measured, then recorded
+# below so the doctor can say it — nobody should have to remember it.
+RESTORE_STARTED=$(date +%s)
 # --no-owner: the dump's role names need not exist on the restoring server.
 pg_restore --no-owner --dbname "$TARGET" "$DUMP" 2>&1 | grep -viE '^pg_restore: (connecting|creating|processing|implied)' | tail -20 || true
 
@@ -111,7 +115,20 @@ if [ "$FAILED" != "0" ]; then
   echo "Scratch database '$SCRATCH' left in place for inspection."
   exit 1
 fi
+RESTORE_SECONDS=$(( $(date +%s) - RESTORE_STARTED ))
 echo "RESTORE OK — archive is real and the schema came back with it."
+echo "  restore took ${RESTORE_SECONDS}s on $(stat -f%z "$DUMP" 2>/dev/null || stat -c%s "$DUMP") bytes — that is the recovery time for this data."
+# [D-3] Record the rehearsal in the LIVE database's platform_config (the same
+# idiom backup.sh uses for its heartbeat) so deploy/doctor.sh reports the last
+# rehearsal and its duration, and warns when it has never happened. Best-effort.
+psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 <<SQL >/dev/null 2>&1 || echo "note: could not record the rehearsal in platform_config (restore itself is fine)" >&2
+INSERT INTO platform_config (id, key, value, "updatedAt")
+VALUES (md5(random()::text || clock_timestamp()::text), 'last_restore_rehearsal_at', to_jsonb(now()::text), now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "updatedAt" = now();
+INSERT INTO platform_config (id, key, value, "updatedAt")
+VALUES (md5(random()::text || clock_timestamp()::text), 'last_restore_rehearsal_seconds', to_jsonb($RESTORE_SECONDS), now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "updatedAt" = now();
+SQL
 echo
 echo "Drop the scratch database when you are done:"
 echo "  psql \"$SERVER\" -c 'DROP DATABASE \"$SCRATCH\";'"

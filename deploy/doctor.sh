@@ -108,6 +108,17 @@ if command -v docker >/dev/null 2>&1 && bounded docker ps >/dev/null 2>&1; then
   else
     ok "last verified backup: $HB"
   fi
+  # [D-3] A backup is a belief until it has been restored, with a stopwatch.
+  # restore.sh records each rehearsal; this is where the number gets read.
+  RH=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$DEV_DB" -tAc \
+    "SELECT value FROM platform_config WHERE key='last_restore_rehearsal_at';" 2>/dev/null | tr -d '"' || true)
+  RS=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$DEV_DB" -tAc \
+    "SELECT value FROM platform_config WHERE key='last_restore_rehearsal_seconds';" 2>/dev/null | tr -d '"' || true)
+  if [ -z "$RH" ]; then
+    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh deploy/backups/<latest>.dump"
+  else
+    ok "last restore rehearsal: $RH — took ${RS:-?}s (that is the recovery time for this data)"
+  fi
 fi
 
 # ── 5. The disk — the quietest killer on this machine's record ──────────────
