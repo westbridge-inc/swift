@@ -7,7 +7,7 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { CodeInput, DecorativeIcon, EmptyState, LockIn, PillButton, PopupCard, PopupTitle, Screen, T, cardShadow, lockInButtonStyle } from '../../../kit';
+import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, T, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
@@ -450,30 +450,30 @@ export function ActiveJobScreen({ navigation }: any) {
                 sat complete and uncalled the whole time. Drivers keep the ride
                 route (a working emergency path is not re-plumbed for
                 tidiness); everyone else now reaches the general one. */}
-            {job?.id ? (
-              <PillButton
-                label="Emergency — get help now"
-                variant="outline"
-                icon="alert-triangle"
-                style={{ marginBottom: space.md, borderColor: color.error }}
-                onPress={() => setSosConfirm(true)}
-              />
-            ) : null}
-
-            {/* Navigate */}
-            {navTarget ? (
-              <PillButton label={`Navigate to ${targetLabel}`} variant="outline" style={{ marginBottom: space.md }} onPress={openNav} />
-            ) : null}
-
+            {/* [Wave 3 vs reference 16] The stack reads action → safety →
+                navigation: the step and its button come FIRST, Emergency
+                follows, and Navigate closes as the reference's quiet text
+                link — the live nav pill at the top already owns wayfinding,
+                and a third full button made maroon compete with itself. */}
             {/* The single next step (driver) or handover/deliver (rider) */}
             {isDriver ? (
               step ? (
                 <>
                   {step.pin ? (
+                    // [Wave 3 vs reference 16] The handover is a CEREMONY with a
+                    // name on it: the eyebrow, then "Ask Devon for their code" —
+                    // it addresses a person, not a system — then the boxes, then
+                    // the one-line why. Same gate, same server truth.
                     <View style={{ marginBottom: space.md }}>
+                      <View style={{ alignItems: 'center', marginBottom: space.md }}>
+                        <Eyebrow>Handover check</Eyebrow>
+                        <T variant="body" weight="bold" center style={{ color: dk.text, marginTop: space.xs }}>
+                          Ask {custName ?? 'the passenger'} for their code
+                        </T>
+                      </View>
                       <CodeInput value={pin} onChange={setPin} length={RIDE_PIN_LENGTH} error={driverAct.isError} autoFocus={false} />
                       <T variant="caption" center style={{ color: dk.muted, marginTop: space.sm }}>
-                        The passenger has this code in their app — it proves you picked up the right person.
+                        Their code proves you picked up the right person.
                       </T>
                     </View>
                   ) : null}
@@ -545,6 +545,40 @@ export function ActiveJobScreen({ navigation }: any) {
                 {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover' }), { loading: riderAct.isPending, disabled: busy })}
               </>
             )}
+
+            {/* SOS after the action — anyone alone with a stranger on a cash
+                job needs an emergency path (driver AND rider; the general
+                /safety/sos route authorises both — see the SosCeremony split
+                below). */}
+            {job?.id ? (
+              <PillButton
+                label="Emergency — get help now"
+                variant="outline"
+                icon="alert-triangle"
+                style={{ marginTop: space.md, borderColor: color.error }}
+                onPress={() => setSosConfirm(true)}
+              />
+            ) : null}
+
+            {/* Navigate — the reference's plain text link, centred and quiet. */}
+            {navTarget ? (
+              <Pressable
+                onPress={openNav}
+                accessibilityRole="link"
+                accessibilityLabel={`Navigate to ${targetLabel}`}
+                accessibilityHint="Opens turn-by-turn directions"
+                style={{ marginTop: space.md, minHeight: space['5xl'], justifyContent: 'center', alignSelf: 'center' }}
+              >
+                {({ pressed }) => (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, opacity: pressed ? 0.7 : 1 }}>
+                    <Feather name="navigation" size={14} color={dk.accent} />
+                    <T variant="label" weight="semibold" style={{ color: dk.accent }}>
+                      Navigate to {targetLabel}
+                    </T>
+                  </View>
+                )}
+              </Pressable>
+            ) : null}
           </BottomSheetScrollView>
         </BottomSheet>
       ) : null}
