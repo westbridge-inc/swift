@@ -3,7 +3,8 @@ import type { PrismaClient, OrderStatus, FulfillmentType } from '@prisma/client'
 import type { Server } from 'socket.io';
 import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { estimateDeliveryMinutes } from '../../utils/distance';
-import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
+import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
+import { canonicalBillableKm } from '../../utils/billable-distance';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
@@ -655,6 +656,8 @@ export class OrderService {
       fulfillment: FulfillmentType;
       appointmentSlot?: Date;
       distanceKm: number;
+      /** [ALG-18] Which engine priced `distanceKm`; frozen on the order with it. */
+      distanceSource: RouteSource | null;
       deliveryFee: number;
       subtotal: number;
       orderItems: Array<{
@@ -756,6 +759,7 @@ export class OrderService {
       }
 
       let distanceKm = 0;
+      let distanceSource: RouteSource | null = null;
       let deliveryFee = 0;
       if (fulfillment === 'DELIVERY') {
         if (!address) throw new AppError(400, 'NO_ADDRESS', 'Please set a delivery address');
@@ -783,10 +787,13 @@ export class OrderService {
           }
         }
         // Real road km when OSRM is configured; deterministic estimate otherwise.
-        distanceKm = (await this.maps.routeKm(
+        const route = await this.maps.routeKm(
           { lat: vendor.latitude, lng: vendor.longitude },
           { lat: address.latitude, lng: address.longitude },
-        )).km;
+        );
+        // [ALG-18] Canonical BEFORE pricing: the fee and the frozen number are one number.
+        distanceKm = canonicalBillableKm(route.km);
+        distanceSource = route.source;
         if (distanceKm > vendor.deliveryRadius) {
           throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
         }
@@ -813,10 +820,12 @@ export class OrderService {
         const mobileVisit = requestedMode ? requestedMode === 'MOBILE' : offered === 'MOBILE' || offered === 'BOTH';
         if (mobileVisit) {
           if (!address) throw new AppError(400, 'NO_ADDRESS', `Add your address — ${vendor.name} travels to you`);
-          const travelKm = (await this.maps.routeKm(
+          const travel = await this.maps.routeKm(
             { lat: vendor.latitude, lng: vendor.longitude },
             { lat: address.latitude, lng: address.longitude },
-          )).km;
+          );
+          const travelKm = canonicalBillableKm(travel.km);
+          distanceSource = travel.source;
           const radius = Number(bcfg.serviceRadiusKm ?? 0);
           if (radius > 0 && travelKm > radius) {
             throw new AppError(400, 'OUT_OF_SERVICE_AREA', `${vendor.name} travels within ${radius} km. You are ${travelKm.toFixed(1)} km away.`);
@@ -849,7 +858,7 @@ export class OrderService {
         throw new AppError(400, 'MIN_ORDER', `Minimum order at ${vendor.name} is $${Number(vendor.minOrderAmount).toLocaleString()} GYD`);
       }
 
-      plans.push({ vendor, fulfillment, appointmentSlot, distanceKm, deliveryFee, subtotal, orderItems });
+      plans.push({ vendor, fulfillment, appointmentSlot, distanceKm, distanceSource, deliveryFee, subtotal, orderItems });
     }
 
     // [REPORT-012 F-012-01] Presence, not truthiness: an explicit
@@ -1153,6 +1162,9 @@ export class OrderService {
             subtotalMarkup: 0,
             subtotalCustomer: plan.subtotal,
             deliveryFee: plan.deliveryFee,
+            // [ALG-18] The distance the fee was priced from, frozen with its source.
+            billableKm: plan.distanceKm > 0 ? plan.distanceKm : null,
+            billableKmSource: plan.distanceKm > 0 ? plan.distanceSource : null,
             isExpress: input.express === true && plan.fulfillment === 'DELIVERY',
             // LIFECYCLE_V2: born held (hidden from the vendor, free-cancel
             // window open). Express skips the hold — the customer paid 1.5x

@@ -1396,6 +1396,13 @@ model Order {
   taxiPassengerCount Int?
   taxiDistance       Float?
   taxiDuration       Int?
+  /// [ALG-18] THE billable distance — decided once at quote time and frozen
+  /// here, with the engine that produced it. The fee path priced this number;
+  /// the receipt states it; the earnings sentence will read it. Null on
+  /// pickups and on orders placed before it existed. Read it through
+  /// utils/billable-distance.ts, never the column.
+  billableKm         Decimal?  @db.Decimal(8, 2)
+  billableKmSource   String?
 
   subtotalBase     Decimal @db.Decimal(12, 2)
   /// V1 dormant — zero-commission model: markup must stay 0.

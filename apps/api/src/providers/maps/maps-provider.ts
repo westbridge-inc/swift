@@ -21,9 +21,14 @@ export interface LatLng {
   lng: number;
 }
 
+/** [ALG-18] Which engine produced a distance — recorded on the order beside
+ *  the number it priced, so a fee can be explained a month later. */
+export type RouteSource = 'osrm' | 'haversine';
+
 export interface RouteEstimate {
   /** Driving distance in km. */
   km: number;
+  source: RouteSource;
   /** Real driving minutes when the engine knows them; null = caller applies
    *  its own deterministic speed model (keeps haversine mode bit-identical). */
   minutes: number | null;
@@ -64,7 +69,7 @@ export class HaversineMapsProvider implements MapsProvider {
 
   async routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate> {
     // Exactly the historical estimate — callers keep their own speed models.
-    return { km: estimateDrivingDistance(origin.lat, origin.lng, dest.lat, dest.lng), minutes: null };
+    return { km: estimateDrivingDistance(origin.lat, origin.lng, dest.lat, dest.lng), minutes: null, source: 'haversine' };
   }
 }
 
@@ -283,6 +288,7 @@ export class OsrmMapsProvider implements MapsProvider {
       return {
         km: route.distance / 1000,
         minutes: route.duration != null ? route.duration / 60 : null,
+        source: 'osrm',
       };
     } catch {
       return this.degraded('route', await this.fallback.routeKm(origin, dest));

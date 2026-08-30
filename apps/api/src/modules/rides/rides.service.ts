@@ -174,6 +174,8 @@ export async function createRideRequest(
     currencyCode: tiered.currencyCode,
     distanceKm: tiered.distanceKm,
     durationMin: tiered.durationMin,
+    billableKm: tiered.billableKm,
+    routeSource: tiered.routeSource,
     source: tier.source,
   };
 
@@ -208,6 +210,9 @@ export async function createRideRequest(
         taxiPassengerCount: body.passengerCount,
         rideClass: body.rideClass,
         taxiDistance: estimate.distanceKm,
+        // [ALG-18] One reader for every rail: the taxi's frozen distance, with its engine.
+        billableKm: estimate.billableKm,
+        billableKmSource: estimate.routeSource,
         taxiDuration: estimate.durationMin,
         taxiFareTotal: estimate.fare,
         subtotalBase: estimate.fare,
