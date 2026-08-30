@@ -644,6 +644,10 @@ export function useBroadcastLocation(kind: MoverKind | null, enabled: boolean) {
           (pos) => onSample({
             latitude: pos.coords.latitude,
             longitude: pos.coords.longitude,
+            // [ALG-15] What the platform reports, as it reports it — and only
+            // when it reports it: an absent field stays absent, never null.
+            ...(pos.coords.accuracy != null ? { accuracy: pos.coords.accuracy } : {}),
+            ...((pos as { mocked?: boolean }).mocked != null ? { mocked: (pos as { mocked?: boolean }).mocked } : {}),
           }),
         ),
         refreshForegroundSample: async () => {

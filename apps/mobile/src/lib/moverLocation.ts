@@ -6,6 +6,10 @@ export type MoverKind = 'DRIVER' | 'RIDER';
 export interface MoverLocationSample {
   latitude: number;
   longitude: number;
+  /** [ALG-15] Reported honestly when the platform provides them. iOS has no
+   *  mock-provider signal — `mocked` is simply absent there, never faked. */
+  accuracy?: number | null;
+  mocked?: boolean | null;
 }
 
 export interface MoverLocationSubscription {

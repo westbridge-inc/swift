@@ -80,7 +80,14 @@ const runtime = createMoverBackgroundLocationRuntime({
   stopNative: () => Location.stopLocationUpdatesAsync(MOVER_LOCATION_TASK),
   publish: async (kind, sample, session) => {
     const service = kind === 'DRIVER' ? driverApi : riderApi;
-    const response = await service.location(sample.latitude, sample.longitude, session);
+    // [ALG-15] The device's own accuracy and mock signal ride along only when
+    // the platform gave them — an old-shaped sample is sent exactly as before.
+    const fix = sample.accuracy != null || sample.mocked != null
+      ? { ...(sample.accuracy != null ? { accuracy: sample.accuracy } : {}), ...(sample.mocked != null ? { mocked: sample.mocked } : {}) }
+      : undefined;
+    const response = fix
+      ? await service.location(sample.latitude, sample.longitude, session, fix)
+      : await service.location(sample.latitude, sample.longitude, session);
     return { accepted: response?.data?.data?.accepted };
   },
   invalidateMoverQueries: () => {
@@ -95,6 +102,9 @@ TaskManager?.defineTask(MOVER_LOCATION_TASK, async ({ data, error }) => {
     locations: locations?.map((location) => ({
       latitude: location.coords.latitude,
       longitude: location.coords.longitude,
+      // [ALG-15] What the platform reports, as it reports it — only when it does.
+      ...(location.coords.accuracy != null ? { accuracy: location.coords.accuracy } : {}),
+      ...((location as { mocked?: boolean }).mocked != null ? { mocked: (location as { mocked?: boolean }).mocked } : {}),
       timestamp: location.timestamp,
     })),
   });
@@ -114,7 +124,7 @@ export function startMoverLocation(
  * distance-aware durable publication gate. */
 export function publishMoverLocation(
   kind: MoverKind,
-  sample: { latitude: number; longitude: number },
+  sample: { latitude: number; longitude: number; accuracy?: number | null; mocked?: boolean | null },
   session: AuthSessionSnapshot,
 ) {
   return runtime.publishForeground(kind, sample, session);

@@ -708,8 +708,8 @@ export const riderApi = {
   goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot) =>
     api.post('/rider/go-online', { latitude, longitude }, capturedAuthConfig(session)),
   goOffline: () => api.post('/rider/go-offline'),
-  location: (latitude: number, longitude: number, session?: AuthSessionSnapshot) =>
-    api.put('/rider/location', { latitude, longitude }, capturedAuthConfig(session)),
+  location: (latitude: number, longitude: number, session?: AuthSessionSnapshot, fix?: { accuracy?: number | null; mocked?: boolean | null }) =>
+    api.put('/rider/location', { latitude, longitude, ...(fix?.accuracy != null ? { accuracy: fix.accuracy } : {}), ...(fix?.mocked != null ? { mocked: fix.mocked } : {}) }, capturedAuthConfig(session)),
   available: () => api.get('/rider/orders/available'),
   active: () => api.get('/rider/orders/active'),
   // [B6] Every live leg, primary first, plus the server-computed run summary.
@@ -767,8 +767,8 @@ export const driverApi = {
   goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot) =>
     api.post('/driver/go-online', { latitude, longitude }, capturedAuthConfig(session)),
   goOffline: () => api.post('/driver/go-offline'),
-  location: (latitude: number, longitude: number, session?: AuthSessionSnapshot) =>
-    api.put('/driver/location', { latitude, longitude }, capturedAuthConfig(session)),
+  location: (latitude: number, longitude: number, session?: AuthSessionSnapshot, fix?: { accuracy?: number | null; mocked?: boolean | null }) =>
+    api.put('/driver/location', { latitude, longitude, ...(fix?.accuracy != null ? { accuracy: fix.accuracy } : {}), ...(fix?.mocked != null ? { mocked: fix.mocked } : {}) }, capturedAuthConfig(session)),
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
   accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
