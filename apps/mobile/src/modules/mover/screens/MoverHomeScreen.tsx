@@ -119,7 +119,7 @@ export function DispatchOfferCard({
   useEffect(() => setPrice(marketMax), [offer.orderId, marketMax]);
   // Tips are proven to be the mover's on DELIVERIES only; taxi driver earnings
   // accrue in an Earning table, so a ride tip stays unclaimed here [F-257].
-  const earnings = offerEarnings(price, offer.tipAmount, !isDriver);
+  const earnings = offerEarnings(price, offer.tipAmount, !isDriver, offer.rescueIncentiveGyd);
 
   return (
     <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 30, justifyContent: 'flex-end', backgroundColor: color.scrim }}>
@@ -174,6 +174,14 @@ export function DispatchOfferCard({
                 {earnings.showTip ? (
                   <T variant="caption" weight="semibold" tone="success" style={{ marginTop: 2 }}>
                     + {money(earnings.tip)} tip · you get {money(earnings.total)}
+                  </T>
+                ) : null}
+                {/* [ALG-06] A rescue bonus is Swift's own money on a job nobody
+                    nearby would take. It is a separate line, never folded into
+                    "you get": Swift settles it — it is not cash at the door. */}
+                {earnings.showBonus ? (
+                  <T variant="caption" weight="semibold" tone="success" style={{ marginTop: 2 }}>
+                    + {money(earnings.bonus)} rescue bonus · paid by Swift, not at the door
                   </T>
                 ) : null}
                 {/* Who you'd front cash for — decide BEFORE you ride */}

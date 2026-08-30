@@ -157,6 +157,17 @@ export const ALGO_DEFAULTS = {
   'fairness.enabled': false,
   'fairness.band': 0.05,
   'fairness.windowMinutes': 60,
+  /**
+   * [ALG-06] Rescue. `foodAgeMaxMinutes` per vertical: past it an order with
+   * no rider is too old to deliver and goes to a human instead of another
+   * cascade (a vertical not listed — COURIER — has no cutoff). The incentive
+   * is Swift's OWN money (ALG-INV-19), attached to offers from
+   * `incentiveFromCascade` on; 0 = no incentive, which is how it ships until
+   * the founder sets an amount.
+   */
+  'rescue.foodAgeMaxMinutes': { FOOD_DELIVERY: 45, GROCERY_DELIVERY: 90 } as Record<string, number>,
+  'rescue.incentiveGyd': 0,
+  'rescue.incentiveFromCascade': 2,
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;

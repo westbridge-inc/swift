@@ -237,6 +237,7 @@ const CENSUS: Case[] = [
   { k: 'agent_ops_alert', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_delivery_rider_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_dispatch_exhausted', d: O, to: DELIVERY('o1'), why: 'admins' },
+  { k: 'ops_food_too_old', d: O, to: DELIVERY('o1'), why: 'admins — [ALG-06] an order too old to deliver was cancelled by the system and needs a person' },
   { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'RATING_REMINDER', d: O, to: DELIVERY('o1'), why: 'customer — rate a finished order (the one SHOUTY kind)', scan: false },
   { k: 'ops_mover_session_ended:o1', d: O, to: DELIVERY('o1'), why: 'admins — kind is built with the orderId appended', scan: false },

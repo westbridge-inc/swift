@@ -479,6 +479,12 @@ export function EarningsScreen({ navigation }: any) {
                     <T variant="caption" tone="muted">Tips</T>
                   </View>
                 ) : null}
+                {breakdown.bonus != null ? (
+                  <View style={{ flex: 1 }}>
+                    <T variant="numM">{money(breakdown.bonus)}</T>
+                    <T variant="caption" tone="muted">Bonuses from Swift</T>
+                  </View>
+                ) : null}
               </View>
             </Card>
           ) : null}

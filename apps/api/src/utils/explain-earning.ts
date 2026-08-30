@@ -65,6 +65,9 @@ export function explainEarning(earning: EarningForSentence, order?: OrderForSent
       return `${amount} — tip from the customer. ${rail(order, 'tip')}`;
     case 'TAXI_FARE':
       return `${amount} — fare${distancePhrase(order)}. ${rail(order, 'fare')}`;
+    case 'RESCUE_INCENTIVE':
+      // [ALG-06 / ALG-INV-19] Swift's own money: a payable Swift settles, not the customer's or the store's.
+      return `${amount} — rescue bonus from Swift for taking a job nobody nearby would. Swift pays this, not the customer or the store.`;
     default:
       return `${amount} — earning. ${rail(order, 'fee')}`;
   }
