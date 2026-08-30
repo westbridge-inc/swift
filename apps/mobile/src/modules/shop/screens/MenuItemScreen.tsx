@@ -189,7 +189,7 @@ export function MenuItemScreen() {
               justifyContent: 'space-between',
             }}
           >
-            <CircleChip icon="chevron-left" onPress={() => navigation.goBack()} />
+            <CircleChip icon="chevron-left" label="Back" onPress={() => navigation.goBack()} />
           </View>
         </View>
 
@@ -206,7 +206,9 @@ export function MenuItemScreen() {
         >
           <T variant="title">{item.name}</T>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.sm }}>
-            <Money amount={basePrice} size="l" tone="brand" />
+            {/* [Wave 3 audit · law 3] Money is INK, never brand — maroon is
+                reserved for the acts (the CTA below), not the numbers. */}
+            <Money amount={basePrice} size="l" />
             {outOfStock ? (
               <View
                 style={{
@@ -438,9 +440,13 @@ export function MenuItemScreen() {
               ? 'Out of stock'
               : isBooking
                 ? slot
-                  ? `Book ${new Date(slot).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })} · ${money(total)}`
+                  ? requiredUnmet
+                    ? 'Choose required options'
+                    : `Book ${new Date(slot).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })} · ${money(total)}`
                   : 'Pick a time'
-                : `Add to cart · ${money(total)}`
+                : requiredUnmet
+                  ? 'Choose required options'
+                  : `Add to cart · ${money(total)}`
           }
           icon={isBooking ? 'calendar' : 'shopping-cart'}
           variant={outOfStock ? 'dark' : 'primary'}
