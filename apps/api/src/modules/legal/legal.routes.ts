@@ -176,6 +176,89 @@ export const PRIVACY = page(
 `,
 );
 
+/** [DCR-1] The Mover (driver/rider) agreement — the role-specific terms a
+ *  person accepts when they provision an earning profile. REQUIRED_CONSENTS
+ *  has declared it since the ledger shipped; this is the text that makes the
+ *  declaration real. Anchored at partner provisioning under LEGAL_VERSION. */
+export const DRIVER_AGREEMENT = page(
+  'Mover Agreement',
+  `
+<p>This Mover Agreement applies in addition to the Terms of Service when you operate as a delivery rider, courier or taxi driver ("<b>Mover</b>") on the Swift platform. By ticking the acceptance box when you set up your Mover profile, you accept it. If it conflicts with the Terms of Service on a Mover matter, this Agreement governs.</p>
+
+<h2>1. You are an independent operator</h2>
+<p>You provide transport services as an independent business, in your own name and at your own direction. You choose when to go online, which jobs to accept, and how to run your work. Nothing in this Agreement or the platform creates employment, agency, partnership or a joint venture between you and Swift; you are not entitled to employment benefits from Swift, and you are responsible for your own national insurance, tax and statutory obligations as an independent earner under Guyanese law.</p>
+
+<h2>2. What you pay Swift — and what you keep</h2>
+<p>You pay Swift a flat weekly subscription for the software, shown to you before you start and payable through your Swift Number at any MMG agent or by the methods shown in the app. Swift takes <b>no commission</b>: 100% of every fare, delivery fee and tip is yours, collected by you directly from the customer in cash — or, where you offer it, into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. Non-payment after the grace period shown in the app pauses your ability to take new jobs until the fee is settled.</p>
+
+<h2>3. Verification and documents</h2>
+<p>Before operating — and continuously afterwards — you must hold and keep current the documents the app lists for your vehicle class (for example: national ID, driver's licence, vehicle registration, insurance appropriate to carrying passengers where you drive passengers, and a police clearance). You upload them in the app; they are verified before you can go online and re-verified as they expire, with renewal windows shown in advance. An expired required document takes you offline automatically until it is renewed. Handling of these documents is governed by the Privacy Policy.</p>
+
+<h2>4. Your vehicle and your conduct</h2>
+<p>You must operate legally and safely: a roadworthy, insured vehicle of the class you registered; compliance with Guyana's traffic laws; no operating under the influence; carrying only what your class allows (weight and bulk limits the app shows are binding); and treating customers, businesses and Swift staff with respect. You may not send someone else to work under your account — identity checks, including in-shift selfie checks, exist to enforce this, and failing them takes you offline.</p>
+
+<h2>5. Jobs, cancellations and the strike system</h2>
+<p>Job offers show you the real facts (pickup, drop-off, fare or fee, cash to collect) before you accept. Accepting creates an obligation to complete the job with care; handing a job back is available before pickup in the app and is honest — repeated abandonment, fake completions, GPS manipulation, collusion or cherry-picking detected by our integrity systems leads to recorded strikes, restriction or removal. Every automated flag is reviewed by a human before a penalty is applied, and you can contest any decision through Help &amp; Support.</p>
+
+<h2>6. Cash, PINs and handovers</h2>
+<p>You collect payment at handover as the app instructs, hand over goods only as directed (including PIN handshakes where shown), and settle any amounts the app records you as holding for a business — for example a delivery fee a customer paid to the store's MMG that the store hands you in cash. The app's settlement records are the ledger both sides confirm against.</p>
+
+<h2>7. Safety</h2>
+<p>The SOS button, trip sharing and identity checks protect you as well as customers. Use them honestly. If you are in danger, contact the emergency services first — the platform's tools support, but do not replace, them. Swift may suspend an account immediately where safety requires it, with human review following.</p>
+
+<h2>8. Insurance and liability</h2>
+<p>You are responsible for insuring yourself, your vehicle and your carriage of passengers or goods as the law and your insurer require. Swift provides software; it does not insure your work, and liability between you, customers and businesses on a job rests where the law places it. The Terms of Service's liability provisions apply between you and Swift.</p>
+
+<h2>9. Ending this Agreement</h2>
+<p>You may stop at any time — go offline, let the subscription lapse, or close your account through Help &amp; Support (so records settle correctly). Swift may suspend or end your access for breach of this Agreement, fraud, safety risk, failed verification, or subscription non-payment, with notice where practicable and human review of any contested decision. Records are retained as the Privacy Policy describes.</p>
+
+<h2>10. General</h2>
+<p>This Agreement is governed by the laws of the Co-operative Republic of Guyana. Changes are announced in the app before they take effect, and each version is recorded with its date and integrity hash. Questions: Help &amp; Support in the app.</p>
+`,
+);
+
+/** [DCR-1] The Business (vendor) agreement — accepted when a store is created.
+ *  Same versioning law as the rest of the pack. */
+export const VENDOR_AGREEMENT = page(
+  'Business Agreement',
+  `
+<p>This Business Agreement applies in addition to the Terms of Service when you list and operate a business ("<b>Business</b>") on the Swift platform — a restaurant, supermarket, shop or service provider. By ticking the acceptance box when you create your store, you accept it on behalf of the Business you are authorised to represent. If it conflicts with the Terms of Service on a Business matter, this Agreement governs.</p>
+
+<h2>1. Independence</h2>
+<p>Your Business is an independent seller. Swift provides the software that publishes your listings, transmits orders and arranges delivery; Swift is not your employer, franchisor, agent or reseller, and the sale contract for every order is between your Business and the customer.</p>
+
+<h2>2. What you pay Swift — and what you keep</h2>
+<p>You pay Swift a flat weekly subscription for the software, shown before you start and payable through your store's Swift Number at any MMG agent or by the methods shown in the app. Swift takes <b>no commission</b>: 100% of every sale is yours, paid by the customer in cash at handover or into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. Non-payment after the grace period pauses new orders until the fee is settled; your data and listings are retained as the Privacy Policy describes.</p>
+
+<h2>3. Verification and licences</h2>
+<p>Before selling — and continuously afterwards — you must hold and keep current the documents the app lists for your business type (for example: the owner's national ID, business registration, TIN certificate, and the food-safety licences and certificates your category requires). Expired required documents suspend new orders automatically until renewed. You are responsible for operating with every licence and permit Guyanese law requires of your trade.</p>
+
+<h2>4. Listings, prices and honesty</h2>
+<p>Your listings are your representations to customers: menu items, photos, prices, stock levels and preparation times must be accurate and kept current. Prices you list are the prices customers pay — the platform adds no markup, and you may not use the platform to mislead. Items you flag as bulky are used to protect riders on small vehicles; flag them truthfully.</p>
+
+<h2>5. Fulfilment duties</h2>
+<p>Answer new orders promptly within the window the app shows (unanswered orders auto-cancel without penalty to the customer); prepare orders with proper care — for food, in sanitary conditions meeting Guyana's food-safety requirements; mark stages honestly (accepted, ready, handed over), because customers and riders act on them; and where an item is unavailable, use the substitution flow — the customer approves any swap, and a line that cannot be fulfilled is refunded, never silently changed.</p>
+
+<h2>6. Refunds you owe</h2>
+<p>Because order money flows directly to you, refunds of order money are your obligation: where a customer cancels lawfully after paying your MMG, or a claim is upheld under the guarantee process, you refund the customer directly and promptly. The app records these obligations, and leaving them unmet is grounds for suspension.</p>
+
+<h2>7. Delivery</h2>
+<p>Delivery orders are carried by independent Movers matched by the platform, or — if you enable self-delivery — by your own staff, for whom you are fully responsible. Where a customer's MMG payment to you included the delivery fee, you hand that fee to the rider as the app records; the dual-confirmation ledger in the app is the record both sides confirm against.</p>
+
+<h2>8. Your team</h2>
+<p>You may grant staff and managers access at the permission levels the app provides, and you are responsible for what your team does with that access. Security-sensitive changes (such as where your money goes) require step-up confirmation and a cool-off, and are announced to the owner — do not share the owner's phone or codes.</p>
+
+<h2>9. Reviews and conduct</h2>
+<p>Customers rate and review your Business; you may reply publicly and report abusive content, but you may not manipulate ratings, review your own store, or retaliate against reviewers. Treat customers, riders and Swift staff with respect.</p>
+
+<h2>10. Suspension and ending</h2>
+<p>You may close your store through Help &amp; Support (so listings and settlement records are handled correctly). Swift may suspend or end access for breach, fraud, food-safety or other safety risk, expired required documents, unmet refund obligations, or subscription non-payment — with notice where practicable and human review of any contested decision.</p>
+
+<h2>11. General</h2>
+<p>This Agreement is governed by the laws of the Co-operative Republic of Guyana. Changes are announced in the app before they take effect, and each version is recorded with its date and integrity hash. Questions: Help &amp; Support in the app.</p>
+`,
+);
+
 // STORE-003: published Child Safety Standards (store-compliance §5.4). Google
 // Play requires apps with user-generated content to publish a child-safety
 // standards page, provide an in-app way to report CSAE, and name a point of
@@ -231,6 +314,14 @@ export async function legalRoutes(app: FastifyInstance) {
   app.get('/marketing', async (_request, reply) => {
     reply.header('content-type', 'text/html; charset=utf-8');
     return MARKETING_CONSENT;
+  });
+  app.get('/driver-agreement', async (_request, reply) => {
+    reply.header('content-type', 'text/html; charset=utf-8');
+    return DRIVER_AGREEMENT;
+  });
+  app.get('/vendor-agreement', async (_request, reply) => {
+    reply.header('content-type', 'text/html; charset=utf-8');
+    return VENDOR_AGREEMENT;
   });
   app.get('/child-safety', async (_request, reply) => {
     reply.header('content-type', 'text/html; charset=utf-8');

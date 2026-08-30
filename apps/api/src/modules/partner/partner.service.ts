@@ -4,6 +4,8 @@ import { AppError, ValidationError } from '../../utils/errors';
 import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { publishLegalDocumentOnce, recordConsent } from '../legal/consent.service';
+import { LEGAL_VERSION, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../legal/legal.routes';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -68,11 +70,42 @@ export class PartnerService {
     userId: string,
     input: BecomePartnerInput,
     transitionAuthority: (tx: Tx, targetRole: UserRole) => Promise<TCleanup>,
+    consent?: { accepted: boolean; ip?: string | null },
   ): Promise<{ result: PartnerProvisionResult; authorityCleanup: TCleanup }> {
     this.validateInput(input);
+    // [DCR-1] Publish (hash-anchor) the role agreement BEFORE the transaction,
+    // so the consent row always anchors to the exact served words — the same
+    // law signup follows for the Terms and Privacy pack.
+    const agreement = input.role === 'VENDOR'
+      ? { documentType: 'vendor_agreement' as const, subjectType: 'vendor_user' as const, renderedText: VENDOR_AGREEMENT }
+      : { documentType: 'driver_agreement' as const, subjectType: 'driver' as const, renderedText: DRIVER_AGREEMENT };
+    if (consent?.accepted) {
+      await publishLegalDocumentOnce(this.prisma, {
+        documentType: agreement.documentType,
+        version: LEGAL_VERSION,
+        renderedText: agreement.renderedText,
+      });
+    }
     const combined = await this.prisma.$transaction(async (tx) => {
       const result = await this.provisionLocked(tx, userId, input);
       const authorityCleanup = await transitionAuthority(tx, result.targetRole);
+      // [DCR-1 INV-NR1a] The agreement consent rides the SAME transaction that
+      // creates the operating entity — a profile without its ledger row is the
+      // un-fixable gap the consent gate exists to prevent. Old app builds that
+      // don't send the checkbox simply record nothing; consent is never
+      // fabricated on a client's behalf.
+      if (consent?.accepted) {
+        await recordConsent(tx, {
+          subjectType: agreement.subjectType,
+          subjectId: userId,
+          documentType: agreement.documentType,
+          version: LEGAL_VERSION,
+          action: 'granted',
+          surface: 'mobile',
+          ip: consent.ip ?? null,
+          evidence: { control: 'agreement_checkbox', path: 'partner/become', kind: result.kind },
+        });
+      }
       return { result, authorityCleanup };
     });
     await this.afterCommit(combined.result, input);

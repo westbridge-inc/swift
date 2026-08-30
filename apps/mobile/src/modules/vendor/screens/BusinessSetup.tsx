@@ -5,6 +5,8 @@ import { color, radius, space } from '@swift/ui';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Card, LabeledInput, PillButton, Screen, T } from '../../../kit';
 import { GUTTER } from '../shared';
+import { API_URL } from '../../../services/api';
+import { openPayLink } from '../../../lib/payLink';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useBecomePartner, useVerificationStatus } from '../../../hooks/verification';
@@ -93,6 +95,9 @@ export function BusinessSetup() {
   // register a business at wherever the phone last was.
   const pinFix = grantedLocationFix(latitude, longitude, locationStatus);
   const hasPin = pinFix !== null;
+  // [DCR-1] The Business Agreement consent — recorded in the ledger with the
+  // exact version at store creation, the same way signup records the Terms.
+  const [agree, setAgree] = useState(false);
   const valid = hasPin && name.trim().length >= 2 && phone.trim().length >= 5 && addr.trim().length >= 3 && city.trim().length >= 2;
 
   const submit = () => {
@@ -108,6 +113,7 @@ export function BusinessSetup() {
         latitude: pinFix!.latitude,
         longitude: pinFix!.longitude,
       },
+      acceptAgreement: agree,
     });
   };
 
@@ -150,6 +156,25 @@ export function BusinessSetup() {
           </T>
         </Card>
 
+        <Pressable
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: agree }}
+          accessibilityLabel="I agree to the Business Agreement"
+          onPress={() => setAgree((v) => !v)}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}
+        >
+          <MaterialCommunityIcons
+            name={agree ? 'checkbox-marked' : 'checkbox-blank-outline'}
+            size={22}
+            color={agree ? color.brand[500] : color.text.muted}
+          />
+          <T variant="label" style={{ flexShrink: 1 }}>
+            I agree to the{' '}
+            <T variant="label" tone="brand" onPress={() => void openPayLink(`${API_URL}/legal/vendor-agreement`)}>
+              Business Agreement
+            </T>
+          </T>
+        </Pressable>
         {become.isError ? (
           <T variant="label" tone="error" style={{ marginTop: space.md }}>
             Couldn&apos;t create your store. Try again.
@@ -170,10 +195,12 @@ export function BusinessSetup() {
                     ? 'Add the street address'
                     : city.trim().length < 2
                       ? 'Add the city'
-                      : 'Create store'
+                      : !agree
+                        ? 'Agree to the Business Agreement first'
+                        : 'Create store'
           }
           loading={become.isPending}
-          disabled={!valid}
+          disabled={!valid || !agree}
           style={{ marginTop: space.lg }}
           onPress={submit}
         />

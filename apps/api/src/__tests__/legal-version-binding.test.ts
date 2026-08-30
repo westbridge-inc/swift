@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { LEGAL_VERSION, TERMS, PRIVACY } from '../modules/legal/legal.routes';
+import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
 
 // ---------------------------------------------------------------------------
 // [REPORT-035 F-035-08 · S1] Every served legal text is BOUND to its version.
@@ -26,7 +26,10 @@ import { LEGAL_VERSION, TERMS, PRIVACY } from '../modules/legal/legal.routes';
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
 /** Every version ever served, pinned to the exact words it served. */
-const PUBLISHED: Record<string, { terms: string; privacy: string }> = {
+const PUBLISHED: Record<
+  string,
+  { terms: string; privacy: string; driver_agreement?: string; vendor_agreement?: string }
+> = {
   // #758's wording under its own version.
   '2026-08-24': {
     terms: 'e79dede26e967583451ea2bba3fc1c482fdd20cf3137529f1d3506ab3f7d5508',
@@ -39,6 +42,11 @@ const PUBLISHED: Record<string, { terms: string; privacy: string }> = {
   '2026-08-30': {
     terms: '8828417b725e7bb499170be5d1810c2f2e1725fcac24550b0e0967d1f59eaddb',
     privacy: '89bdfbe887313d8d6934d1c7293b9b4ed9a4e14555f21fe8ca8ef4675e5eb0da',
+    // The role agreements' first published version — REQUIRED_CONSENTS had
+    // declared them since the ledger shipped; these are the words that make
+    // the declaration real, captured at partner provisioning.
+    driver_agreement: 'da8d8ef8e1bbc7afc0dbf6c4b37da9255ef6447de0b1fca93572a68aed423753',
+    vendor_agreement: '9d6454a303b4246dc928909752c2941c3c4f249fec7548c8c3c92cdd84eb16b3',
   },
 };
 
@@ -56,6 +64,8 @@ describe('legal version binding [F-035-08]', () => {
       'The served legal text changed without a version bump. Bump LEGAL_VERSION + LAST_UPDATED in legal.routes.ts, ADD a new entry to PUBLISHED (never edit an old one), and run `pnpm --filter @swift/web legal:sync`.';
     expect(sha256(TERMS), guidance).toBe(pin.terms);
     expect(sha256(PRIVACY), guidance).toBe(pin.privacy);
+    if (pin.driver_agreement) expect(sha256(DRIVER_AGREEMENT), guidance).toBe(pin.driver_agreement);
+    if (pin.vendor_agreement) expect(sha256(VENDOR_AGREEMENT), guidance).toBe(pin.vendor_agreement);
   });
 
   it('the version is a date stamp, and LAST_UPDATED must move with it (shape check)', () => {
