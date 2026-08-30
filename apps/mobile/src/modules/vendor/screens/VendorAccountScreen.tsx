@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import { useState, useEffect } from 'react';
 import { useQueryClient, useMutation } from '@tanstack/react-query';
-import { Pressable, ScrollView, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
@@ -221,27 +221,26 @@ export function VendorAccountScreen() {
                       </T>
                     ) : (
                       <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: space.sm }}>
-                        <View style={{ flex: 1, borderRadius: radius.md, borderWidth: 1, borderColor: color.border.subtle, backgroundColor: color.surface.base }}>
-                          <TextInput
-                            value={d.openTime}
-                            onChangeText={(t) => setDay(d.dayOfWeek, { openTime: t })}
-                            placeholder="08:00"
-                            placeholderTextColor={color.text.muted}
-                            style={{ fontFamily: 'Hanken', fontSize: 13, color: color.text.primary, textAlign: 'center', paddingVertical: 8 }}
-                          />
-                        </View>
+                        {/* [Wave 3] Kit inputs, not hand-rolled TextInputs with
+                            raw font values — the same InlineInput the item
+                            editor's hours already use. */}
+                        <InlineInput
+                          style={{ flex: 1 }}
+                          center
+                          value={d.openTime}
+                          onChangeText={(t: string) => setDay(d.dayOfWeek, { openTime: t })}
+                          placeholder="08:00"
+                        />
                         <T variant="label" tone="muted">
                           –
                         </T>
-                        <View style={{ flex: 1, borderRadius: radius.md, borderWidth: 1, borderColor: color.border.subtle, backgroundColor: color.surface.base }}>
-                          <TextInput
-                            value={d.closeTime}
-                            onChangeText={(t) => setDay(d.dayOfWeek, { closeTime: t })}
-                            placeholder="22:00"
-                            placeholderTextColor={color.text.muted}
-                            style={{ fontFamily: 'Hanken', fontSize: 13, color: color.text.primary, textAlign: 'center', paddingVertical: 8 }}
-                          />
-                        </View>
+                        <InlineInput
+                          style={{ flex: 1 }}
+                          center
+                          value={d.closeTime}
+                          onChangeText={(t: string) => setDay(d.dayOfWeek, { closeTime: t })}
+                          placeholder="22:00"
+                        />
                       </View>
                     )}
                     <BrandSwitch value={!d.isClosed} onChange={(val) => setDay(d.dayOfWeek, { isClosed: !val })} />
@@ -367,6 +366,10 @@ function PromosSection() {
   const [value, setValue] = useState('');
   const [minOrder, setMinOrder] = useState('');
   const [days, setDays] = useState(7);
+  // [Wave 3] Deleting a live code is destructive and was the ONLY delete on
+  // this screen without a confirm — staff removal, categories and items all
+  // ask. Same ceremony now.
+  const [removingPromo, setRemovingPromo] = useState<any | null>(null);
 
   const promos: any[] = promosQ.data ?? [];
   const errMsg =
@@ -429,7 +432,12 @@ function PromosSection() {
                   onPress={() => updatePromo.mutate({ id: p.id, data: { isActive: !p.isActive } })}
                 />
               ) : null}
-              <Pressable onPress={() => deletePromo.mutate(p.id)} hitSlop={8}>
+              <Pressable
+                onPress={() => setRemovingPromo(p)}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel={`Delete promo ${p.code}`}
+              >
                 <View style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center' }}>
                   <Feather name="trash-2" size={16} color={color.text.muted} />
                 </View>
@@ -468,8 +476,18 @@ function PromosSection() {
                 {errMsg}
               </T>
             ) : null}
+            {/* [#947's grammar] The disabled button names the first unmet
+                requirement instead of sitting mute. */}
             <PillButton
-              label="Launch promotion"
+              label={
+                !code.trim()
+                  ? 'Enter a code'
+                  : !desc.trim()
+                    ? 'Describe it for customers'
+                    : !(Number(value) > 0)
+                      ? 'Set the discount'
+                      : 'Launch promotion'
+              }
               size="md"
               loading={createPromo.isPending}
               disabled={!code.trim() || !desc.trim() || !(Number(value) > 0)}
@@ -480,6 +498,29 @@ function PromosSection() {
           <PillButton label="New promotion" variant="soft" size="md" onPress={() => setShowForm(true)} />
         )}
       </Card>
+
+      <PopupCard visible={!!removingPromo} onClose={() => setRemovingPromo(null)}>
+        <IconChip icon="trash-2" size={56} tone="error" />
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
+          Delete “{removingPromo?.code}”?
+        </PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          {removingPromo?.currentUses > 0
+            ? `Customers used it ${removingPromo.currentUses}× — it disappears from your storefront immediately.`
+            : 'It disappears from your storefront immediately.'}
+        </T>
+        <PillButton
+          label="Delete promo"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={deletePromo.isPending}
+          onPress={() => {
+            const id = removingPromo!.id;
+            setRemovingPromo(null);
+            deletePromo.mutate(id);
+          }}
+        />
+        <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setRemovingPromo(null)} />
+      </PopupCard>
     </>
   );
 }
@@ -566,7 +607,7 @@ function StaffSection() {
           </T>
         ) : null}
         <PillButton
-          label="Add to team"
+          label={phone.trim().length < 10 ? 'Enter their +592 phone' : 'Add to team'}
           variant="soft"
           size="md"
           style={{ marginTop: space.md }}
