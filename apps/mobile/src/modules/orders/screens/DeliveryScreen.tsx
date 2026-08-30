@@ -21,7 +21,7 @@ import { money } from '../../../lib/money';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
 import { toast } from '../../../kit/toast';
-import { CircleChip, DecorativeIcon, ErrorState, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
+import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
@@ -245,7 +245,9 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
 
   return (
     <View style={{ marginTop: space['2xl'] }}>
-      <T variant="micro" tone="faint" accessibilityRole="header">Where it stands</T>
+      {/* [Wave 3 vs reference 09] The section eyebrow is the Eyebrow — the
+          uppercase tracked micro label the reference draws, from the kit. */}
+      <Eyebrow accessibilityRole="header">Where it stands</Eyebrow>
       {currentIndex == null ? (
         <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
           <Feather name="info" size={18} color={color.info} />
@@ -812,19 +814,22 @@ export function DeliveryScreen() {
             ) : null}
             {dropPos ? (
               <Marker coordinate={dropPos} title="Delivery address">
+                {/* [Wave 3 vs reference 09] The destination is the INK pin —
+                    a black-filled marker against the maroon store marker, so
+                    the two ends of the journey read as different things. */}
                 <View
                   style={{
                     width: space['4xl'],
                     height: space['4xl'],
                     borderRadius: radius.full,
-                    backgroundColor: color.surface.base,
+                    backgroundColor: color.text.primary,
                     alignItems: 'center',
                     justifyContent: 'center',
                     borderWidth: space.xs / 2,
-                    borderColor: color.brand[600],
+                    borderColor: color.white,
                   }}
                 >
-                  <Feather name="map-pin" size={16} color={color.brand[600]} />
+                  <Feather name="map-pin" size={16} color={color.white} />
                 </View>
               </Marker>
             ) : null}
@@ -883,6 +888,19 @@ export function DeliveryScreen() {
           }}
         >
           <CircleChip icon="chevron-left" label="Go back" onPress={() => navigation.goBack()} />
+          {(holdActive || holdTimingUnavailable) ? (
+            // [Wave 3 vs reference 09] "Order #4193 — held" floats ON the map,
+            // pinned to the journey it describes — not a caption in the sheet.
+            <View
+              accessible
+              accessibilityLabel={`${referenceNoun[0]!.toUpperCase()}${referenceNoun.slice(1)} number ${o.orderNumber}, held`}
+              style={{ alignSelf: 'center', paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: radius.full, backgroundColor: color.surface.base, ...elevation.card }}
+            >
+              <T variant="label" weight="semibold" numberOfLines={1}>
+                {referenceNoun[0]!.toUpperCase()}{referenceNoun.slice(1)} #{o.orderNumber} — held
+              </T>
+            </View>
+          ) : null}
           {courierPos && !holdActive && !releasePending && !holdTimingUnavailable ? (
             <CircleChip
               icon="crosshair"
@@ -906,11 +924,8 @@ export function DeliveryScreen() {
         }}
       >
         <ScrollView contentContainerStyle={{ padding: GUTTER, paddingBottom: insets.bottom + space['2xl'] }}>
-          {(holdActive || holdTimingUnavailable) ? (
-            <T variant="micro" tone="faint" center>
-              {referenceNoun[0]!.toUpperCase()}{referenceNoun.slice(1)} #{o.orderNumber} · held
-            </T>
-          ) : null}
+          {/* The "#NNNN · held" caption moved onto the map as the reference's
+              floating chip — one statement of the state, where it belongs. */}
           <HoldRing
             key={`${o.id}:${o.holdExpiresAt ?? 'none'}:${isFocused ? 'focused' : 'hidden'}`}
             holdExpiresAt={o.holdExpiresAt}
@@ -943,6 +958,10 @@ export function DeliveryScreen() {
             <PillButton
               label={`Cancel ${referenceNoun}`}
               icon="x-circle"
+              // [Wave 3 vs reference 09] An OUTLINE, deliberately not maroon —
+              // the reference reserves the brand fill for the actions Swift
+              // wants taken; cancelling is offered honestly, never sold.
+              variant="outline"
               loading={cancelChecking || cancelOrder.isPending}
               onPress={() => { void openCancelConfirmation(); }}
               style={{ marginTop: space.md }}
