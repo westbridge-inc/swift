@@ -734,6 +734,8 @@ export const riderApi = {
   enRouteDelivery: (id: string) => api.put(`/rider/orders/${id}/en-route-delivery`),
   arrivedAtCustomer: (id: string) => api.put(`/rider/orders/${id}/arrived`),
   delivered: (id: string) => api.put(`/rider/orders/${id}/delivered`),
+  // G14: pre-pickup only — the server refuses with CUSTODY after pickup.
+  handback: (id: string, reason: string) => api.post(`/rider/orders/${id}/handback`, { reason }),
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/rider/earnings', { params }),

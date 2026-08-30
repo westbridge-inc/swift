@@ -410,13 +410,13 @@ export function useDriverAction() {
 }
 export type RiderAction =
   | 'en-route-pickup' | 'arrived-pickup' | 'picked-up' | 'en-route-delivery' | 'arrived'
-  | 'handover' | 'delivered';
+  | 'handover' | 'delivered' | 'handback';
 
 export function useRiderAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ id, action }: { id: string; action: RiderAction }) => {
+    mutationFn: async ({ id, action, reason }: { id: string; action: RiderAction; reason?: string }) => {
       switch (action) {
         case 'en-route-pickup': return unwrap(riderApi.enRoutePickup(id));
         case 'arrived-pickup': return unwrap(riderApi.arrivedPickup(id));
@@ -424,6 +424,7 @@ export function useRiderAction() {
         case 'en-route-delivery': return unwrap(riderApi.enRouteDelivery(id));
         case 'arrived': return unwrap(riderApi.arrivedAtCustomer(id));
         case 'delivered': return unwrap(riderApi.delivered(id));
+        case 'handback': return unwrap(riderApi.handback(id, reason ?? 'unable to continue'));
         case 'handover': {
           const owner = requireAuthSessionSnapshot();
           // The golden-rule handover NEEDS the rider's GPS (server-side mandatory —
