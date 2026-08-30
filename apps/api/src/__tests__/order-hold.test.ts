@@ -10,6 +10,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import courierRoutes from '../modules/courier/courier.routes';
 import { OrderService, holdWindowMs } from '../modules/order/order.service';
+import { vendorResponseSlaMinutes, vendorRespondBy } from '../modules/order/response-sla';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
@@ -167,6 +168,27 @@ describe('vendor blindness while held', () => {
 // worker-outage backstop (order.service.ts:1114 "board still shows the order");
 // without it a legitimately-placed order could sit invisible until the
 // no-response auto-cancel reaped it. Locks that recovery independent of the tick.
+describe('the vendor response deadline', () => {
+  it('is placement + hold + SLA while PENDING, and null once the order is no longer waiting on the vendor', () => {
+    const placedAt = new Date('2026-08-30T12:00:00Z');
+    const order = { status: 'PENDING', placedAt, createdAt: new Date('2026-08-30T11:59:59Z') };
+    expect(vendorRespondBy(order, { slaMinutes: 10, holdMs: 5 * 60_000 })?.toISOString()).toBe('2026-08-30T12:15:00.000Z');
+    expect(vendorRespondBy(order, { slaMinutes: 10, holdMs: 0 })?.toISOString()).toBe('2026-08-30T12:10:00.000Z');
+    // No placedAt (legacy row): the creation time is the placement.
+    expect(vendorRespondBy({ ...order, placedAt: null }, { slaMinutes: 10, holdMs: 0 })?.toISOString()).toBe('2026-08-30T12:09:59.000Z');
+    for (const status of ['CONFIRMED', 'PREPARING', 'READY_FOR_PICKUP', 'CANCELLED']) {
+      expect(vendorRespondBy({ ...order, status }, { slaMinutes: 10, holdMs: 0 })).toBeNull();
+    }
+  });
+
+  it('an accepted order reads null on the detail — a clock on an accepted order would be a lie', async () => {
+    const accepted = await makeHeldOrder({ holdMsFromNow: -60_000, status: 'PREPARING' });
+    const byId = await inject('GET', `/api/v1/vendor/orders/${accepted.id}`, vendorOwner.token);
+    expect(byId.statusCode).toBe(200);
+    expect(byId.json().data.respondBy).toBeNull();
+  });
+});
+
 describe('board-recovery backstop (release tick never ran)', () => {
   it('a past-due held order is visible on the board and acceptable by id even if the tick did not null it', async () => {
     const due = await makeHeldOrder({ holdMsFromNow: -60_000 }); // window closed, still flagged
@@ -178,6 +200,14 @@ describe('board-recovery backstop (release tick never ran)', () => {
 
     const byId = await inject('GET', `/api/v1/vendor/orders/${due.id}`, vendorOwner.token);
     expect(byId.statusCode).toBe(200); // and actionable by direct id, so the vendor can accept it
+
+    // The accept-clock the takeover draws is the server's deadline — placement
+    // + hold window + response SLA, exactly what auto-cancel was enqueued with —
+    // on the board row and on the detail read alike. The client invents nothing.
+    const slaMinutes = await vendorResponseSlaMinutes(app.prisma);
+    const expected = new Date(due.placedAt.getTime() + (holdWindowMs() ?? 0) + slaMinutes * 60_000).toISOString();
+    expect(board.json().data.find((o: any) => o.id === due.id).respondBy).toBe(expected);
+    expect(byId.json().data.respondBy).toBe(expected);
 
     // A still-held order (window open) stays hidden — the backstop is the clock,
     // not a blanket "show everything".

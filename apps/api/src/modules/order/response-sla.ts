@@ -36,6 +36,25 @@ export const DEFAULT_VENDOR_RESPONSE_SLA_MINUTES = 10;
  * Bounded to a sane range so a typo (0.5, or 100000) cannot either cancel
  * orders out from under a busy kitchen or disable the deadline by inflation.
  */
+/**
+ * The moment the vendor's response window closes for THIS order — the same
+ * deadline the auto-cancel job enforces (enqueued at placement with a delay of
+ * hold window + SLA), so the vendor's accept-clock drains toward the real
+ * cut-off instead of one the client invented. Null once the order is no
+ * longer awaiting the vendor: a clock on an accepted order would be a lie.
+ *
+ * `holdMs` is `holdWindowMs() ?? 0` — the auto-cancel delay includes the hold
+ * window whenever LIFECYCLE_V2 is on, held order or not, so this does too.
+ */
+export function vendorRespondBy(
+  order: { status: string; placedAt: Date | null; createdAt: Date },
+  opts: { slaMinutes: number; holdMs: number },
+): Date | null {
+  if (order.status !== 'PENDING') return null;
+  const start = order.placedAt ?? order.createdAt;
+  return new Date(start.getTime() + opts.holdMs + opts.slaMinutes * 60_000);
+}
+
 export async function vendorResponseSlaMinutes(prisma: PrismaClient): Promise<number> {
   const envFallback = Number(
     process.env['VENDOR_RESPONSE_SLA_MINUTES'] ?? DEFAULT_VENDOR_RESPONSE_SLA_MINUTES,
