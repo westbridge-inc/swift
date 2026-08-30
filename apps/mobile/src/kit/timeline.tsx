@@ -2,7 +2,7 @@
 import React from 'react';
 import { StyleSheet, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { color, radius, space } from '@swift/ui';
+import { color, radius, space, withAlpha } from '@swift/ui';
 import { T } from './text';
 
 /**
@@ -78,8 +78,19 @@ function stepLabel(step: TimelineStep, state: TimelineStepState, time: string | 
 
 const DOT = space['2xl'];
 
-/** Node colours — the one place a step's state becomes a colour. */
-function nodeStyle(state: TimelineStepState) {
+/** Node colours — the one place a step's state becomes a colour. `onDark`
+ *  keeps the same geometry and state grammar but swaps to inks that read on
+ *  the mover cockpit's dark ground (WS-2: one component, so the dark twin
+ *  can never drift from the light one). */
+function nodeStyle(state: TimelineStepState, onDark?: boolean) {
+  if (onDark) {
+    return {
+      background: state === 'current' ? color.brand[500] : state === 'done' ? withAlpha(color.white, 0.15) : withAlpha(color.white, 0.06),
+      border: state === 'upcoming' ? withAlpha(color.white, 0.25) : color.brand[500],
+      borderWidth: state === 'current' ? space.xs / 2 : StyleSheet.hairlineWidth,
+      ink: state === 'upcoming' ? withAlpha(color.white, 0.45) : color.white,
+    };
+  }
   return {
     background: state === 'current' ? color.brand[500] : state === 'done' ? color.brand[50] : color.surface.sunken,
     border: state === 'upcoming' ? color.border.strong : color.brand[500],
@@ -88,8 +99,8 @@ function nodeStyle(state: TimelineStepState) {
   };
 }
 
-function Node({ step, state }: { step: TimelineStep; state: TimelineStepState }) {
-  const s = nodeStyle(state);
+function Node({ step, state, onDark }: { step: TimelineStep; state: TimelineStepState; onDark?: boolean }) {
+  const s = nodeStyle(state, onDark);
   return (
     <View
       style={{
@@ -115,14 +126,16 @@ export type TimelineProps = {
   /** Index of the current step. Omit when each step carries its own `state`. */
   currentIndex?: number | null;
   orientation?: 'vertical' | 'horizontal';
+  /** Dark-surface inks (the mover cockpit). Same geometry, same grammar. */
+  onDark?: boolean;
   style?: ViewStyle;
 };
 
-export function Timeline({ steps, currentIndex, orientation = 'vertical', style }: TimelineProps) {
+export function Timeline({ steps, currentIndex, orientation = 'vertical', onDark, style }: TimelineProps) {
   if (steps.length === 0) return null;
   return orientation === 'horizontal'
-    ? <HorizontalRail steps={steps} currentIndex={currentIndex} style={style} />
-    : <VerticalTimeline steps={steps} currentIndex={currentIndex} style={style} />;
+    ? <HorizontalRail steps={steps} currentIndex={currentIndex} onDark={onDark} style={style} />
+    : <VerticalTimeline steps={steps} currentIndex={currentIndex} onDark={onDark} style={style} />;
 }
 
 /**
@@ -137,7 +150,10 @@ export function StatusRail(props: Omit<TimelineProps, 'orientation'>) {
   return <Timeline {...props} orientation="horizontal" />;
 }
 
-function VerticalTimeline({ steps, currentIndex, style }: Omit<TimelineProps, 'orientation'>) {
+function VerticalTimeline({ steps, currentIndex, onDark, style }: Omit<TimelineProps, 'orientation'>) {
+  const darkInk = (state: TimelineStepState) =>
+    onDark ? { color: state === 'upcoming' ? withAlpha(color.white, 0.5) : color.white } : undefined;
+  const darkMuted = onDark ? { color: withAlpha(color.white, 0.55) } : undefined;
   return (
     <View style={style}>
       {steps.map((step, i) => {
@@ -152,7 +168,7 @@ function VerticalTimeline({ steps, currentIndex, style }: Omit<TimelineProps, 'o
             style={{ flexDirection: 'row', alignItems: 'stretch' }}
           >
             <View style={{ width: space['3xl'], alignItems: 'center' }}>
-              <Node step={step} state={state} />
+              <Node step={step} state={state} onDark={onDark} />
               {last ? null : (
                 <View
                   style={{
@@ -160,19 +176,21 @@ function VerticalTimeline({ steps, currentIndex, style }: Omit<TimelineProps, 'o
                     width: StyleSheet.hairlineWidth,
                     minHeight: space['3xl'],
                     // The leg is lit only behind a step that HAPPENED.
-                    backgroundColor: state === 'done' ? color.brand[200] : color.border.subtle,
+                    backgroundColor: state === 'done'
+                      ? (onDark ? color.brand[500] : color.brand[200])
+                      : (onDark ? withAlpha(color.white, 0.18) : color.border.subtle),
                   }}
                 />
               )}
             </View>
             <View style={{ flex: 1, paddingLeft: space.sm, paddingBottom: last ? 0 : space.xl }}>
               <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: space.md }}>
-                <T variant="body" weight={state === 'current' ? 'semibold' : 'medium'} tone={state === 'upcoming' ? 'faint' : 'ink'}>
+                <T variant="body" weight={state === 'current' ? 'semibold' : 'medium'} tone={state === 'upcoming' ? 'faint' : 'ink'} style={darkInk(state)}>
                   {step.label}
                 </T>
-                {time ? <T variant="caption" tone="muted">{time}</T> : null}
+                {time ? <T variant="caption" tone="muted" style={darkMuted}>{time}</T> : null}
               </View>
-              <T variant="caption" tone={state === 'current' ? 'muted' : 'faint'} style={{ marginTop: space.xs }}>
+              <T variant="caption" tone={state === 'current' ? 'muted' : 'faint'} style={[{ marginTop: space.xs }, darkMuted ?? {}]}>
                 {describe(step, state)}
               </T>
             </View>
@@ -183,7 +201,7 @@ function VerticalTimeline({ steps, currentIndex, style }: Omit<TimelineProps, 'o
   );
 }
 
-function HorizontalRail({ steps, currentIndex, style }: Omit<TimelineProps, 'orientation'>) {
+function HorizontalRail({ steps, currentIndex, onDark, style }: Omit<TimelineProps, 'orientation'>) {
   return (
     <View style={[{ flexDirection: 'row', alignItems: 'flex-start' }, style]}>
       {steps.map((step, i) => {
@@ -197,14 +215,17 @@ function HorizontalRail({ steps, currentIndex, style }: Omit<TimelineProps, 'ori
               accessibilityLabel={stepLabel(step, state, time)}
               style={{ alignItems: 'center', width: DOT + space.lg }}
             >
-              <Node step={step} state={state} />
+              <Node step={step} state={state} onDark={onDark} />
               <T
                 variant="caption"
                 weight={state === 'current' ? 'semibold' : 'regular'}
                 tone={state === 'upcoming' ? 'faint' : 'ink'}
                 center
                 numberOfLines={2}
-                style={{ marginTop: space.xs }}
+                style={[
+                  { marginTop: space.xs },
+                  onDark ? { color: state === 'upcoming' ? withAlpha(color.white, 0.5) : color.white } : {},
+                ]}
               >
                 {step.label}
               </T>
@@ -221,7 +242,9 @@ function HorizontalRail({ steps, currentIndex, style }: Omit<TimelineProps, 'ori
                   marginTop: DOT / 2,
                   marginHorizontal: space.xs,
                   borderRadius: radius.full,
-                  backgroundColor: state === 'done' ? color.brand[200] : color.border.subtle,
+                  backgroundColor: state === 'done'
+                    ? (onDark ? color.brand[500] : color.brand[200])
+                    : (onDark ? withAlpha(color.white, 0.18) : color.border.subtle),
                 }}
               />
             )}
