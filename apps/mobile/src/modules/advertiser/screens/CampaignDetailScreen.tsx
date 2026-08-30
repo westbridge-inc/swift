@@ -238,8 +238,9 @@ export function CampaignDetailScreen() {
               <T variant="caption" tone="muted">
                 {inv.number}
               </T>
+              {/* Lower-cased, not the raw enum shouting — same fact, human case. */}
               <T variant="caption" tone="muted">
-                {inv.status}
+                {String(inv.status).toLowerCase().replaceAll('_', ' ')}
               </T>
             </View>
           ))}
