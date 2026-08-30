@@ -533,6 +533,9 @@ export const rideApi = {
   watchAvailability: (p: Point) => api.post('/rides/availability/watch', p),
   // 5.5 queue [rides spec]: honest counts + the waitlist that auto-requests.
   supply: (p: Point) => api.get(`/rides/supply?lat=${p.lat}&lng=${p.lng}`),
+  /** Coarse "map is alive" read (rides 5.1/6.2): up to 12 server-jittered free
+   *  cars near a point — no identities, no bearings, never exact positions. */
+  presence: (p: Point) => api.get(`/rides/presence?lat=${p.lat}&lng=${p.lng}`),
   queueJoin: (data: {
     pickup: Point;
     dropoff: Point;
