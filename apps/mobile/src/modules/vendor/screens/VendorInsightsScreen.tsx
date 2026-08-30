@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type ReactNode } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
@@ -62,24 +62,39 @@ function RevenueChart({ daily }: { daily: RevenueDay[] }) {
       accessibilityLabel={`Revenue trend for ${daily.length} days. Peak ${money(peak)}${today ? `. Today ${money(today.revenue)}` : ''}.`}
       style={{ marginTop: space.lg }}
     >
-      {today ? (
-        <T variant="caption" weight="semibold" tone="brand" style={{ alignSelf: 'flex-end', marginBottom: space.sm }}>
+      {today && daily.length > 7 ? (
+        // [Wave 3 · ref 21 + law 3] The number is INK — brand belongs to
+        // today's bar, never to a money caption.
+        <T variant="caption" weight="semibold" style={{ alignSelf: 'flex-end', marginBottom: space.sm }}>
           Today {money(today.revenue)}
         </T>
       ) : null}
-      <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: chartGap, height: chartHeight }} importantForAccessibility="no-hide-descendants">
+      {/* [Wave 3 · ref 21] Today is the ONLY loud bar — every other day sits
+          in a brand-50 wash (the cockpit's #933 grammar). On the 7-day lens,
+          today's value floats right above its own bar, k-formatted, exactly
+          where the reference draws it. */}
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: chartGap, height: chartHeight + (daily.length <= 7 ? space.xl : 0) }} importantForAccessibility="no-hide-descendants">
         {daily.map((day) => (
-          <View
-            key={day.date}
-            style={{
-              flex: 1,
-              borderTopLeftRadius: radius.sm,
-              borderTopRightRadius: radius.sm,
-              height: Math.max(space.xs, Math.round((day.revenue / scaleMax) * chartHeight)),
-              backgroundColor: day.revenue > 0 ? color.brand[500] : color.border.subtle,
-              opacity: day.isToday ? 1 : 0.78,
-            }}
-          />
+          <View key={day.date} style={{ flex: 1, justifyContent: 'flex-end' }}>
+            {day.isToday && daily.length <= 7 && day.revenue > 0 ? (
+              <T variant="caption" weight="semibold" center numberOfLines={1}>
+                {(Math.round(day.revenue / 100) / 10).toFixed(1).replace(/\.0$/, '')}k
+              </T>
+            ) : null}
+            <View
+              style={{
+                borderTopLeftRadius: radius.sm,
+                borderTopRightRadius: radius.sm,
+                height: Math.max(space.xs, Math.round((day.revenue / scaleMax) * chartHeight)),
+                backgroundColor:
+                  day.isToday && day.revenue > 0
+                    ? color.brand[500]
+                    : day.revenue > 0
+                      ? color.brand[50]
+                      : color.border.subtle,
+              }}
+            />
+          </View>
         ))}
       </View>
       {daily.length <= 7 ? (
@@ -133,7 +148,7 @@ function TopItemsCard({ items, sample }: { items: any[]; sample: boolean }) {
       ) : (
         ranked.map((item, i) => (
           <View key={item.id ?? `${item.name}-${i}`} style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.md }}>
-            <T variant="numM" tone="brand" style={{ width: space['2xl'] }}>
+            <T variant="numM" tone="muted" style={{ width: space['2xl'] }}>
               {i + 1}
             </T>
             {item.imageUrl ? (
@@ -478,12 +493,15 @@ function OpsCard({ ops, period, stale }: { ops: any; period: number; stale?: boo
 
 const PERIODS = [7, 30, 90] as const;
 
-function InsightMetric({ label, value, detail }: { label: string; value: string; detail: string }) {
+function InsightMetric({ label, value, detail, badge }: { label: string; value: string; detail: string; badge?: ReactNode }) {
   return (
     <View style={{ flex: 1, borderRadius: radius.md, backgroundColor: color.surface.sunken, padding: space.md }}>
-      <T variant="micro" tone="muted">
-        {label}
-      </T>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <T variant="micro" tone="muted">
+          {label}
+        </T>
+        {badge ?? null}
+      </View>
       <T variant="numM" numberOfLines={1} style={{ marginTop: space.xs }}>
         {value}
       </T>
@@ -574,7 +592,7 @@ function RepeatCustomersCard() {
             Repeat customers
           </T>
         </View>
-        <T variant="body" weight="bold" tone="brand">
+        <T variant="body" weight="bold">
           {d.repeatRate ?? 0}%
         </T>
       </View>
@@ -731,11 +749,15 @@ export function VendorInsightsScreen() {
               ) : null}
             </Card>
 
+            {/* [ref 21] The AOV delta rides IN its tile. Acceptance/Cancelled
+                stay badge-less on purpose: the server sends no previous-window
+                ops rates — registered as a server follow-up, never invented. */}
             <View style={{ flexDirection: 'row', gap: space.sm, marginBottom: space.lg }}>
               <InsightMetric
                 label="AVG ORDER"
                 value={aovCur == null ? '—' : money(aovCur)}
                 detail={aovCur == null ? 'Needs order count' : `${shownDays}d completed`}
+                badge={aovCur != null && aovPrev != null ? <DeltaBadge cur={aovCur} prev={aovPrev} /> : undefined}
               />
               <InsightMetric
                 label="ACCEPTANCE"
@@ -748,15 +770,6 @@ export function VendorInsightsScreen() {
                 detail={opsDetail}
               />
             </View>
-
-            {aovCur != null && aovPrev != null ? (
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: -space.md, marginBottom: space.lg }}>
-                <DeltaBadge cur={aovCur} prev={aovPrev} />
-                <T variant="caption" tone="muted">
-                  average order vs previous {period} days
-                </T>
-              </View>
-            ) : null}
 
             {popularQ.isLoading && !popularQ.data ? (
               <Card style={{ marginBottom: space.md }}>
@@ -813,6 +826,12 @@ export function VendorInsightsScreen() {
                 ) : null}
               </>
             ) : null}
+            {/* [ref 21] The reference's own closing line — and this screen's
+                actual law (reconciledRevenueDays + the partial-window refusal
+                above are what make it true). */}
+            <T variant="caption" tone="faint" center style={{ marginTop: space.xl }}>
+              Reconciled numbers only — a beautiful wrong number is still a lie.
+            </T>
           </>
         )}
       </ScrollView>
