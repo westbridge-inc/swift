@@ -128,7 +128,14 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
           Couldn&apos;t save. Try again.
         </T>
       ) : null}
-      <PillButton label="Save vehicle" loading={become.isPending} disabled={!valid} style={{ marginTop: space.md }} onPress={submit} />
+      {/* [#947's grammar] Disabled says the ask. */}
+      <PillButton
+        label={valid ? 'Save vehicle' : 'Fill in the vehicle details'}
+        loading={become.isPending}
+        disabled={!valid}
+        style={{ marginTop: space.md }}
+        onPress={submit}
+      />
     </Card>
   );
 }
