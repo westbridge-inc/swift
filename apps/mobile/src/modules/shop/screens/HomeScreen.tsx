@@ -229,7 +229,11 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
             </T>
           </View>
           <PillButton
-            label={hold ? 'Review' : 'Track order'}
+            // [Wave 3 vs reference 03] "Track", both states — the reference and
+            // the rendered prototype use the one word for the held card too
+            // (the tracking screen is where the hold ceremony lives), and
+            // nothing on file defended the old "Review".
+            label="Track"
             variant="dark"
             size="sm"
             onPress={() => navigation.navigate('Delivery', { orderId: order.id })}
@@ -243,12 +247,28 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
             card, so the window read as a floating maroon bar with no channel
             and "how much is left" lost its reference edge. */}
         {hold ? (
-          <View style={{ height: 4, borderRadius: 2, backgroundColor: color.surface.sunken, overflow: 'hidden' }}>
+          // [Wave 3 vs reference 03] The reference draws a DOT riding the fill's
+          // leading edge — the "where we are" marker a thin bar alone doesn't
+          // give. Overflow stays visible so the 8dp dot can sit proud of the
+          // 4dp track, exactly as drawn.
+          <View style={{ height: 4, borderRadius: 2, backgroundColor: color.surface.sunken }}>
             <View
               style={{
                 width: `${Math.round(hold.progress * 100)}%`,
                 height: '100%',
                 borderRadius: 2,
+                backgroundColor: color.warning,
+              }}
+            />
+            <View
+              style={{
+                position: 'absolute',
+                left: `${Math.round(hold.progress * 100)}%`,
+                top: -2,
+                marginLeft: -4,
+                width: 8,
+                height: 8,
+                borderRadius: 4,
                 backgroundColor: color.warning,
               }}
             />
@@ -348,6 +368,8 @@ export function HomeScreen() {
           <Pressable
             onPress={() => (isAuthenticated ? navigation.navigate('Addresses') : navigation.navigate('LocationPicker'))}
             style={{ paddingRight: space.md, flexShrink: 1 }}
+            accessibilityRole="button"
+            accessibilityLabel={locationFix ? `Delivery location: ${address ?? 'current location'}` : 'Set your location'}
           >
             {/* A PILL, not a bare label — hairline border, paper fill. It reads
                 as the control it is, which also stops "Set your location" from
@@ -386,7 +408,11 @@ export function HomeScreen() {
               >
                 <Feather name="bell" size={22} color={color.text.primary} />
               </Pressable>
-              <Pressable onPress={() => navigation.navigate('Tabs', { screen: 'Profile' })}>
+              <Pressable
+                onPress={() => navigation.navigate('Tabs', { screen: 'Profile' })}
+                accessibilityRole="button"
+                accessibilityLabel="Profile"
+              >
                 {user?.avatar && !avatarBroken ? (
                   <Image
                     source={{ uri: /^https?:\/\//.test(user.avatar) ? user.avatar : `${API_URL}${user.avatar}` }}
@@ -414,7 +440,12 @@ export function HomeScreen() {
 
         {/* Search — the front door on every super app. White field, hairline
             border: on paper it needs an edge to read as a field at all. */}
-        <Pressable onPress={() => navigation.navigate('Search')} style={{ marginTop: space.md }}>
+        <Pressable
+          onPress={() => navigation.navigate('Search')}
+          style={{ marginTop: space.md }}
+          accessibilityRole="search"
+          accessibilityLabel="Search restaurants, groceries and dishes"
+        >
           {({ pressed }) => (
             <View
               style={{
@@ -516,6 +547,9 @@ export function HomeScreen() {
               size="lg"
               title="Popular on Swift"
               eyebrow="Most ordered"
+              // [Wave 3 vs reference 03] The reference gives this rail a
+              // "See all"; Search is the app's real all-items door.
+              onSeeAll={() => navigation.navigate('Search')}
               style={{ paddingHorizontal: GUTTER, marginTop: space.xl }}
             />
             <FlatList
