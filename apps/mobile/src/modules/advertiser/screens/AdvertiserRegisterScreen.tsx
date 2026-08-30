@@ -83,8 +83,17 @@ export function AdvertiserRegisterScreen() {
               {error}
             </T>
           ) : null}
+          {/* [#947's grammar] Disabled names the first missing thing. */}
           <PillButton
-            label="Submit application"
+            label={
+              !companyName.trim()
+                ? 'Name your company'
+                : !contactName.trim()
+                  ? 'Add a contact name'
+                  : !contactEmail.trim()
+                    ? 'Add a contact email'
+                    : 'Submit application'
+            }
             loading={register.isPending}
             disabled={!companyName.trim() || !contactName.trim() || !contactEmail.trim()}
             onPress={submit}
