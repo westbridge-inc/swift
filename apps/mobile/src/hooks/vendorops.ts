@@ -360,10 +360,13 @@ export function useOrderAction() {
       id,
       action,
       code,
+      reason,
     }: {
       id: string;
       action: 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
       code?: string;
+      /** reject only — the server records it and tells the customer why. */
+      reason?: string;
     }) => {
       if (action === 'accept') return unwrap(vendorApi.acceptOrder(id));
       if (action === 'confirm-payment') return unwrap(vendorApi.confirmPayment(id));
@@ -371,7 +374,7 @@ export function useOrderAction() {
       if (action === 'ready') return unwrap(vendorApi.ready(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));
       if (action === 'complete-appointment') return unwrap(vendorApi.completeAppointment(id));
-      return unwrap(vendorApi.reject(id));
+      return unwrap(vendorApi.reject(id, reason));
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
   });
