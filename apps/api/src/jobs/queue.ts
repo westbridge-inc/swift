@@ -1231,6 +1231,16 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'algo-decision-retention') {
+        // [ALGO Band 0.3] The decision log's retention: shadow rows are
+        // evidence for a promotion decision and expire at 90 days; rows that
+        // affected a person or their money stay 400 days for appeals.
+        const { purgeAlgoDecisions } = await import('../modules/algo/decisions');
+        const purged = await purgeAlgoDecisions(ctx.prisma);
+        if (purged.shadow + purged.live > 0) ctx.log.info(purged, 'algo: decision log retention');
+        return;
+      }
+
       if (job.name === 'guardian-sweep') {
         // Trip Guardian tick [safety spec §5]. Opens a session for every taxi
         // that went RIDE_IN_PROGRESS, runs the L1 detectors off the SAME
@@ -1697,6 +1707,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // the LIVE add-on scanner, when it exists, runs on addonScanIntervalS).
   await queues.dispatchQueue.add('batching-shadow-scan', {}, {
     repeat: { every: 60_000 },
+    removeOnComplete: 5,
+    removeOnFail: 5,
+  });
+
+  // Algorithm decision log retention: daily, in the quiet hours.
+  await queues.dispatchQueue.add('algo-decision-retention', {}, {
+    repeat: { pattern: '40 3 * * *' },
     removeOnComplete: 5,
     removeOnFail: 5,
   });

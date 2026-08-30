@@ -31,6 +31,8 @@ export const TENANT_TABLES = [
   // [ALGO Band 0.2] Algorithm tunables are tenant-owned: one operator's dials
   // must never be readable through another's session.
   'algo_config',
+  // [ALGO Band 0.3] Decisions are evidence about one operator's people.
+  'algo_decisions',
   'ad_campaigns', 'ad_events', 'ad_invoices', 'ad_placements',
   'ad_refund_intents', 'ad_refund_items', 'ad_refund_outbox', 'ads_audit_log',
   'ads_settings', 'advertisers', 'attribution_claims', 'batch_evaluations',
