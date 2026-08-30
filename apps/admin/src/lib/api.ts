@@ -521,3 +521,40 @@ export const mergeDiscoveryCategory = (id: string, targetId: string) =>
  *  so in those words. */
 export const runDiscoveryBackfill = () =>
   apiFetch('/api/v1/admin/discovery/backfill', { method: 'POST' });
+
+// ── Integrity review (the algorithms' decision log) ─────────────────────────
+
+/** One row from the integrity decision log. `sentence` is the reviewer-facing
+ *  prose (≤240 chars) and is rendered VERBATIM — the `inputs` evidence Json
+ *  (signal tokens and all) rides the wire but stays OUT of the UI, so the
+ *  detection tells never leak into a screenshot. */
+export type IntegrityFlag = {
+  id: string;
+  algo: string;
+  subjectType: 'ORDER' | 'RIDER' | 'DRIVER' | 'VENDOR' | 'CUSTOMER' | 'ITEM';
+  subjectId: string;
+  outcome: string;
+  sentence: string;
+  inputs: unknown;
+  configVersion: string;
+  createdAt: string;
+};
+
+/** Newest first, shadow rows never listed, SUPER_ADMIN only — the server's
+ *  platformControlGuard decides, so a 403 here is the truth, not a bug.
+ *  Route contract: algo must match ALG-\d{1,3}, days 1..90, limit 1..200. */
+export const fetchIntegrityFlags = (params: {
+  algo?: string;
+  subjectType?: string;
+  subjectId?: string;
+  days?: number;
+  limit?: number;
+}) => {
+  const qs = new URLSearchParams();
+  if (params.algo) qs.set('algo', params.algo);
+  if (params.subjectType) qs.set('subjectType', params.subjectType);
+  if (params.subjectId) qs.set('subjectId', params.subjectId);
+  qs.set('days', String(params.days ?? 7));
+  qs.set('limit', String(params.limit ?? 50));
+  return apiFetch(`/api/v1/admin/integrity/flags?${qs.toString()}`);
+};
