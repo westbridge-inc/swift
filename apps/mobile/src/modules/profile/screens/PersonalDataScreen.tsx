@@ -175,8 +175,13 @@ export function PersonalDataScreen() {
               </T>
             </View>
           ) : null}
+          {/* [#947's grammar] Disabled says the ask. */}
           <PillButton
-            label="Save Changes"
+            label={
+              firstName.trim().length < 2 || lastName.trim().length < 2
+                ? 'Enter your first and last name'
+                : 'Save Changes'
+            }
             loading={save.isPending}
             disabled={firstName.trim().length < 2 || lastName.trim().length < 2}
             onPress={() => save.mutate()}
