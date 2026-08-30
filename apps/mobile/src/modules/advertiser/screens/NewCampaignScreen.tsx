@@ -194,7 +194,9 @@ export function NewCampaignScreen() {
                           <T variant="body" weight="semibold">
                             {p.name}
                           </T>
-                          <T variant="label" weight="semibold" style={{ color: color.brand[500] }}>
+                          {/* [law 3] Money is ink, never brand — maroon marks
+                              the selected card's border, not the price. */}
+                          <T variant="label" weight="semibold">
                             {money(p.weeklyPrice, p.currency)}/wk
                           </T>
                         </View>
@@ -207,7 +209,9 @@ export function NewCampaignScreen() {
                 })}
               </View>
             )}
-            <PillButton label="Choose weeks" disabled={!placement} style={{ marginTop: space['2xl'] }} onPress={() => setStep(2)} />
+            {/* [#947's grammar] Step 2's button already names its ask —
+                step 1's now does the same. */}
+            <PillButton label={placement ? 'Choose weeks' : 'Pick a placement first'} disabled={!placement} style={{ marginTop: space['2xl'] }} onPress={() => setStep(2)} />
           </>
         ) : null}
 
