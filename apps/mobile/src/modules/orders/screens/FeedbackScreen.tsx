@@ -4,7 +4,7 @@ import { KeyboardAvoidingView, Platform, Pressable, ScrollView, TextInput, View 
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
-import { color, radius, space } from '@swift/ui';
+import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useItemFeedback, useOrder, useRateOrder, useRatingTags } from '../../../hooks/customer';
 import { DARK_BLURHASH, vendorPhoto } from '../../../lib/images';
 import { Chip, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T } from '../../../kit';
@@ -28,8 +28,10 @@ function TextArea({ value, onChangeText, placeholder }: { value: string; onChang
         borderRadius: radius.lg,
         backgroundColor: color.surface.base,
         padding: space.lg,
-        fontFamily: 'Hanken',
-        fontSize: 16,
+        // [Wave 3] Tokens, not raw font literals — the same composer style
+        // the services job box already uses.
+        fontFamily: font.body,
+        fontSize: fontSize.base,
         color: color.text.primary,
       }}
     />
@@ -322,7 +324,14 @@ export function FeedbackScreen() {
               style={{ flex: 1 }}
             />
             <PillButton
-              label={lastStep ? 'Submit' : 'Next'}
+              // [#947's grammar] Disabled says why: the stars are the ask.
+              label={
+                (step === 0 ? vendorScore === 0 : riderScore === 0)
+                  ? 'Tap a star to rate'
+                  : lastStep
+                    ? 'Submit'
+                    : 'Next'
+              }
               disabled={step === 0 ? vendorScore === 0 : riderScore === 0}
               loading={rate.isPending}
               onPress={() => {
