@@ -407,8 +407,8 @@ export const rejectCreative = (id: string, reason: string, notes?: string) =>
     body: JSON.stringify({ reason, ...(notes ? { notes } : {}) }),
   });
 
-export const fetchVerificationQueue = (status = 'PENDING') =>
-  apiFetch(`/api/v1/admin/verification/queue?status=${status}&limit=100`);
+export const fetchVerificationQueue = (status = 'PENDING', role = 'operator') =>
+  apiFetch(`/api/v1/admin/verification/queue?status=${status}&role=${role}&limit=100`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
 export const approveDoc = (id: string, body?: { expiresAt?: string; insurance?: InsuranceCheck }) =>

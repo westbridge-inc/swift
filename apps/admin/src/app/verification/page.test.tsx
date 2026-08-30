@@ -43,6 +43,8 @@ function verificationHandler(
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/verification/queue') {
       expect(request.url.searchParams.get('status')).toBe('PENDING');
       expect(request.url.searchParams.get('limit')).toBe('100');
+      // [G6] every test in this file works the routine queue — the operator lane.
+      expect(request.url.searchParams.get('role')).toBe('operator');
       return { body: { success: true, data: documents } };
     }
     return mutation(request);
@@ -268,5 +270,29 @@ describe('verification mutations', () => {
 
     pending.resolve({ body: { success: true, data: {} } });
     await waitFor(() => expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(2));
+  });
+});
+
+describe('verification lanes [G6]', () => {
+  it('defaults to the operator lane; the customer lane is asked for by name', async () => {
+    const seen: string[] = [];
+    mockApi((request: ApiRequest) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/verification/queue') {
+        seen.push(request.url.searchParams.get('role') ?? '(none)');
+        return { body: { success: true, data: [baseDocument] } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const { user } = renderWithQuery(<VerificationPage />);
+
+    await screen.findByText('Target Applicant');
+    // The default view carries no customer identity — the wire says so.
+    expect(seen).toEqual(['operator']);
+
+    await user.click(screen.getByRole('button', { name: 'Customers' }));
+    await waitFor(() => expect(seen).toEqual(['operator', 'customer']));
+
+    await user.click(screen.getByRole('button', { name: 'Everything' }));
+    await waitFor(() => expect(seen).toEqual(['operator', 'customer', 'all']));
   });
 });
