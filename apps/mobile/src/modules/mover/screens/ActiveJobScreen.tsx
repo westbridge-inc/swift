@@ -134,6 +134,8 @@ export function ActiveJobScreen({ navigation }: any) {
   // participant on /rides/:id/sos (same route the passenger's SOS uses).
   const sos = useRideSos();
   const [sosConfirm, setSosConfirm] = useState(false);
+  // G14: pre-pickup handback — a two-step with preset reasons, never one tap.
+  const [handbackConfirm, setHandbackConfirm] = useState(false);
   // Preview (R3): useActiveJob supplies a sample in-progress trip, so this
   // nav-grade screen is fully browsable read-only. Real actions (SOS/dial) are
   // suppressed below; the step mutations already no-op in preview.
@@ -462,10 +464,23 @@ export function ActiveJobScreen({ navigation }: any) {
               // (heading to pickup → picked up → heading to customer → arrived).
               // Only once the order is ARRIVED do the handover/delivered controls
               // below take over.
-              bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
-                loading: riderAct.isPending,
-                disabled: busy,
-              })
+              <>
+                {bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
+                  loading: riderAct.isPending,
+                  disabled: busy,
+                })}
+                {/* G14: the valve exists ONLY before pickup — after custody the
+                    server refuses and support owns it, so no button is shown. */}
+                {!pickedUp ? (
+                  <PillButton
+                    label="Can't complete this delivery"
+                    variant="soft"
+                    style={{ marginTop: space.sm }}
+                    disabled={busy || riderAct.isPending}
+                    onPress={() => setHandbackConfirm(true)}
+                  />
+                ) : null}
+              </>
             ) : isMmgPaid ? (
               <>
                 {/* Customer paid the store via MMG — the door is a pure handover;
@@ -543,6 +558,34 @@ export function ActiveJobScreen({ navigation }: any) {
           <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
         </PopupCard>
       )}
+
+      {/* G14 handback — reason required, honesty first: the customer is told
+          "finding you another rider", and after pickup this popup can never
+          appear (the button above is gone and the server refuses anyway). */}
+      <PopupCard visible={handbackConfirm} onClose={() => setHandbackConfirm(false)}>
+        <PopupTitle variant="title" center>Hand this delivery back?</PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          The order goes straight back to dispatch and the nearest rider gets it. Pick what happened:
+        </T>
+        {(['Vehicle problem', 'Emergency', 'Cannot reach the pickup'] as const).map((why) => (
+          <PillButton
+            key={why}
+            label={why}
+            variant="outline"
+            style={{ alignSelf: 'stretch', marginTop: space.md }}
+            disabled={riderAct.isPending}
+            onPress={() => {
+              setHandbackConfirm(false);
+              if (preview || !job?.id) return;
+              riderAct.mutate(
+                { id: job.id, action: 'handback', reason: why },
+                { onError: (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't hand the delivery back — try again or call support.") },
+              );
+            }}
+          />
+        ))}
+        <PillButton label="Keep the delivery" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setHandbackConfirm(false)} />
+      </PopupCard>
 
       {/* Post-trip passenger rating — DRIVER_TO_CUSTOMER, once per ride */}
       <PopupCard visible={!!ratePopup} onClose={closeRating}>

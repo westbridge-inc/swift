@@ -1,4 +1,4 @@
-import type { OrderStatus, PrismaClient } from '@prisma/client';
+import type { OrderStatus, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
@@ -29,6 +29,41 @@ const STALE_LOCATION_MINUTES = 15;
  *     cue. The custody pointer stays.
  * Idempotent: a re-run finds the order already re-opened / already paged.
  */
+
+/** The single-leg PRE-CUSTODY reopen kernel — ONE body, every caller.
+ *
+ *  Lives here because the watchdog shipped it first (#902); the rider-initiated
+ *  handback (G14) is the second caller, and mover-authority's #904 rider branch
+ *  is a third body that should fold into this on its next touch. Inside the
+ *  caller's transaction: re-open to the honest kitchen stage, clear the
+ *  assignment, release the CASH float WITH the assignment (or headroom leaks
+ *  forever), and write the status-log marker. The caller settles the pointer
+ *  through the seam and owns every post-commit effect (exclusion, sockets,
+ *  notification, redispatch) — this kernel touches canonical rows only.
+ */
+export async function reopenPreCustodyLeg(
+  tx: Prisma.TransactionClient,
+  order: {
+    id: string; riderId: string | null; paymentMethod: string;
+    subtotalBase: Prisma.Decimal | number; readyAt: Date | null; preparingAt: Date | null;
+  },
+  changedBy: string,
+  note: string,
+): Promise<OrderStatus> {
+  const reopenStatus: OrderStatus = order.readyAt ? 'READY_FOR_PICKUP' : order.preparingAt ? 'PREPARING' : 'ACCEPTED';
+  await tx.order.update({
+    where: { id: order.id },
+    data: { status: reopenStatus, riderId: null },
+  });
+  if (order.paymentMethod === 'CASH' && order.riderId) {
+    await new FloatService(tx).release(tx, order.riderId, Number(order.subtotalBase));
+  }
+  await tx.orderStatusLog.create({
+    data: { orderId: order.id, status: reopenStatus, changedBy, note },
+  });
+  return reopenStatus;
+}
+
 export async function recoverStrandedDeliveries(
   prisma: PrismaClient,
   redis: Redis,
@@ -112,25 +147,16 @@ export async function recoverStrandedDeliveries(
         return { kind: 'IGNORED' as const };
       }
 
-      // Goods still at the store: controlled release + re-dispatch. Re-open to
-      // the honest kitchen stage the order had before assignment.
-      const reopenStatus: OrderStatus = order.readyAt ? 'READY_FOR_PICKUP' : order.preparingAt ? 'PREPARING' : 'ACCEPTED';
-      await tx.order.update({
-        where: { id: orderId },
-        data: { status: reopenStatus, riderId: null },
-      });
-      // The pointer and availability are NOT written here: they are settled
-      // once, after every leg, through the seam — so a dark rider and a
-      // finishing rider leave the pointer in the same shape.
-      // The rider fronted NOTHING yet (goods never left the store), but their
-      // committed CASH float was reserved at claim — release it with the
-      // assignment, atomically, or their headroom leaks forever.
-      if (order.paymentMethod === 'CASH') {
-        await new FloatService(tx).release(tx, r.id, Number(order.subtotalBase));
-      }
-      await tx.orderStatusLog.create({
-        data: { orderId, status: reopenStatus, changedBy: 'system:delivery-watchdog', note: 'Rider went GPS-dark before pickup — auto-released and re-dispatched' },
-      });
+      // Goods still at the store: controlled release + re-dispatch through the
+      // ONE reopen kernel above. The pointer and availability are NOT written
+      // here: they are settled once, after every leg, through the seam — so a
+      // dark rider and a finishing rider leave the pointer in the same shape.
+      const reopenStatus = await reopenPreCustodyLeg(
+        tx,
+        order,
+        'system:delivery-watchdog',
+        'Rider went GPS-dark before pickup — auto-released and re-dispatched',
+      );
       return { kind: 'RELEASED' as const, order, reopenStatus };
     });
 

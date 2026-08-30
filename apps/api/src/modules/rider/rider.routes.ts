@@ -13,6 +13,8 @@ import { DeliveryCashSettlementService, assertSettlementId } from '../cash/deliv
 import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
 import { FloatService } from '../dispatch/float.service';
 import { riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
+import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
+import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -1654,6 +1656,81 @@ export async function riderRoutes(app: FastifyInstance) {
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
       },
     };
+  });
+
+  /**
+   * POST /orders/:id/handback — the rider hands a claimed delivery back (G14).
+   *
+   * The delivery mirror of the driver's pre-custody cancel. CUSTODY LINE,
+   * absolute: pre-pickup ONLY — after PICKED_UP the rider holds the goods and
+   * (on CASH) has paid the vendor, so a handback is a support conversation,
+   * never a button. Reopen goes through the watchdog's ONE kernel; the pointer
+   * settles through the seam (census law: this file writes no pointers); the
+   * rider is excluded from the re-cascade so "next nearest" never means "the
+   * rider who just gave it back". Discipline is deliberately absent (F11 is
+   * founder-gated) — the "Rider handback:" status-log marker is the history a
+   * future ladder reads.
+   */
+  app.post('/orders/:id/handback', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    // Role gate BEFORE body parsing — the authz matrix's law: a wrong-role
+    // token must meet 401/403, never a 400 from schema validation.
+    const rider = await getRider(app, request.user.userId);
+    const { reason } = z.object({ reason: z.string().min(3).max(300) }).parse(request.body ?? {});
+
+    const PRE_CUSTODY: OrderStatus[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+    const IN_CUSTODY: OrderStatus[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'];
+
+    const outcome = await app.prisma.$transaction(async (tx) => {
+      await lockTaxiOrderForCustodyDecision(tx, id);
+      const order = await tx.order.findUnique({
+        where: { id },
+        select: {
+          id: true, status: true, orderType: true, customerId: true, orderNumber: true,
+          riderId: true, paymentMethod: true, subtotalBase: true,
+          preparingAt: true, readyAt: true,
+        },
+      });
+      if (!order || order.riderId !== rider.id || order.orderType === 'TAXI') {
+        throw new NotFoundError('Order', id);
+      }
+      if (IN_CUSTODY.includes(order.status)) {
+        throw new AppError(409, 'CUSTODY',
+          'You have already picked this order up — it cannot be handed back. Call support and we will sort it out together.');
+      }
+      if (!PRE_CUSTODY.includes(order.status)) {
+        throw new AppError(409, 'INVALID_STATUS', `This order can no longer be handed back (${order.status}).`);
+      }
+
+      const reopenStatus = await reopenPreCustodyLeg(tx, order, request.user.userId, `Rider handback: ${reason}`);
+
+      // Pointer + availability through the seam — under stacking this rider may
+      // hold a sibling leg, and the pointer must land on it, never on null.
+      await settleRiderLegs(tx, rider.id, { prisma: app.prisma, excludeOrderId: id });
+
+      return { reopenStatus, customerId: order.customerId };
+    });
+
+    // Post-commit garnish — none of it may turn a committed handback into an
+    // HTTP failure. Self-exclusion uses the cascade's declined key by contract
+    // (module-private there, mirrored here — same as the watchdog).
+    await app.redis.sadd(`dispatch:declined:${id}`, rider.id).catch(() => {});
+    await app.redis.expire(`dispatch:declined:${id}`, 3600).catch(() => {});
+    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: outcome.reopenStatus, reason: 'rider_handback' });
+    await new NotificationService(app.prisma, app.io).send({
+      userId: outcome.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Finding you another rider',
+      body: 'Your rider had to hand this delivery back \u2014 we\u2019re matching you with the nearest available rider now.',
+      data: { orderId: id, status: outcome.reopenStatus },
+    }).catch(() => {});
+    if (app.dispatchQueue) {
+      await app.dispatchQueue.add('dispatch-order', { orderId: id }, { priority: 5, removeOnComplete: 100, removeOnFail: 50 }).catch(() => {});
+    } else {
+      dispatch.dispatchOrder(id).catch((err) => request.log.warn({ err, orderId: id }, 'handback redispatch failed'));
+    }
+
+    return { success: true, data: { orderId: id, status: outcome.reopenStatus } };
   });
 
   /** GET /demand — unassigned deliveries near the rider, grouped by store
