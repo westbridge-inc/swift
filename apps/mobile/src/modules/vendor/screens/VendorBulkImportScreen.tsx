@@ -3,7 +3,7 @@ import { View, ScrollView, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import { Feather } from '@expo/vector-icons';
-import { color, fontSize, radius, space } from '@swift/ui';
+import { color, font, fontSize, radius, space } from '@swift/ui';
 import { Card, PillButton, T } from '../../../kit';
 import { PressableScale } from '../../../kit/pressable-scale';
 import { toast } from '../../../kit/toast';
@@ -177,12 +177,16 @@ export function VendorBulkImportScreen({ navigation }: any) {
             backgroundColor: color.surface.base,
             paddingHorizontal: space.lg,
             paddingVertical: space.md,
+            // [Wave 3] The one input in the app with NO fontFamily — it fell
+            // back to the system font. Token face now.
+            fontFamily: font.body,
             fontSize: fontSize.sm,
             color: color.text.primary,
           }}
         />
+        {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
-          label="Analyze CSV"
+          label={csv.trim().length === 0 ? 'Paste your rows first' : 'Analyze CSV'}
           variant="outline"
           loading={automap.isPending}
           disabled={!!previewType || csv.trim().length === 0 || busy}
