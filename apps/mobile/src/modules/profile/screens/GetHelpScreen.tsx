@@ -79,8 +79,15 @@ export function GetHelpScreen() {
           <LabeledInput value={message} onChangeText={setMessage} placeholder="Tell us what happened…" multiline />
         </Card>
 
+        {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
-          label="Submit"
+          label={
+            subject.trim().length < 3
+              ? 'Add a short summary'
+              : message.trim().length < 5
+                ? 'Tell us what happened'
+                : 'Submit'
+          }
           size="md"
           style={{ marginTop: space.lg }}
           disabled={!valid}
