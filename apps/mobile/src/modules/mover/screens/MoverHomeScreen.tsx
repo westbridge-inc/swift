@@ -883,7 +883,14 @@ export function MoverHomeScreen({ navigation }: any) {
                   />
                 </View>
               ) : null}
-              {online && profile.float.available <= 0 ? (
+              {/* [ALG-26] The server's sentence, rendered as-is: a nudge at the soft
+                  threshold, an explanation at the hard one. The old copy stays only
+                  for a server that does not send advice yet. */}
+              {profile.float.advice?.sentence ? (
+                <T variant="caption" style={{ color: profile.float.advice.level === 'blocked' ? dk.text : dk.muted, marginTop: space.sm }}>
+                  {profile.float.advice.sentence}
+                </T>
+              ) : online && profile.float.available <= 0 ? (
                 <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
                   Float limit reached — finish a delivery to free it up and receive new cash offers.
                 </T>
