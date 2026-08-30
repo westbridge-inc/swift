@@ -27,10 +27,18 @@ const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
 /** Every version ever served, pinned to the exact words it served. */
 const PUBLISHED: Record<string, { terms: string; privacy: string }> = {
-  // The current pack: #758's wording under its own version at last.
+  // #758's wording under its own version.
   '2026-08-24': {
     terms: 'e79dede26e967583451ea2bba3fc1c482fdd20cf3137529f1d3506ab3f7d5508',
     privacy: '99579f6f1a58bbd619f1ca7216c1bdc75cfc1b6a4de840111159c9420f76f312',
+  },
+  // The lawyer-grade pack (founder directive 2026-08-30): full clause
+  // architecture under Guyana law — DPA 2023 legal bases, automated-decision
+  // human-review guarantee, marketplace/agency structure, consumer-rights
+  // carve-outs, courts of Guyana. Every claim code-true.
+  '2026-08-30': {
+    terms: '8828417b725e7bb499170be5d1810c2f2e1725fcac24550b0e0967d1f59eaddb',
+    privacy: '89bdfbe887313d8d6934d1c7293b9b4ed9a4e14555f21fe8ca8ef4675e5eb0da',
   },
 };
 
