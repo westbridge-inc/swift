@@ -4,7 +4,7 @@ import { Dimensions, FlatList, Linking, Pressable, ScrollView, Share, TextInput,
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, elevation, font, radius, space, withAlpha } from '@swift/ui';
+import { color, elevation, font, fontSize, radius, space, withAlpha } from '@swift/ui';
 import { useAddToCart, useCart, useReportContent, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
 import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
@@ -183,7 +183,8 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
               <TonePill label={modeLabel} tone="brand" />
             </View>
             <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
-              <Money amount={item.customerPrice ?? item.basePrice} tone="brand" />
+              {/* [law 3] Money is ink — maroon stays on the acts. */}
+              <Money amount={item.customerPrice ?? item.basePrice} />
             </View>
           </View>
           <View style={{ alignItems: 'center', gap: 2 }}>
@@ -572,7 +573,7 @@ export function RestaurantScreen() {
                   onChangeText={setStoreQuery}
                   placeholder={`Search ${v.name}…`}
                   placeholderTextColor={color.text.muted}
-                  style={{ flex: 1, fontFamily: font.body, fontSize: 14, color: color.text.primary }}
+                  style={{ flex: 1, fontFamily: font.body, fontSize: fontSize.sm, color: color.text.primary }}
                 />
                 {storeQuery ? (
                   <Pressable onPress={() => setStoreQuery('')} hitSlop={8}>

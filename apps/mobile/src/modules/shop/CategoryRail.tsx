@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { FlatList, Pressable, View } from 'react-native';
-import { color, radius, space } from '@swift/ui';
+import { color, fontSize, radius, space } from '@swift/ui';
 import { T } from '../../kit';
 import type { DiscoveryRail } from '../../hooks/customer';
 
@@ -34,7 +34,8 @@ function ChipTile({ emoji, label, onPress }: { emoji: string; label: string; onP
               justifyContent: 'center',
             }}
           >
-            <T style={{ fontSize: 30, lineHeight: 38 }}>{emoji}</T>
+            {/* Emoji glyph metric, derived from the scale. */}
+            <T style={{ fontSize: fontSize.base * 2, lineHeight: fontSize.base * 2 + space.sm }}>{emoji}</T>
           </View>
           <T variant="caption" center numberOfLines={2} style={{ marginTop: space.xs }}>
             {label}

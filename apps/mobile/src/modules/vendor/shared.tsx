@@ -2,7 +2,7 @@
 import React from 'react';
 import { Pressable, TextInput, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { color, radius, space } from '@swift/ui';
+import { color, font, fontSize, radius, space } from '@swift/ui';
 import { T, TonePill, PillButton } from '../../kit';
 import { useAuthStore } from '../../stores/authStore';
 import { money } from '../../lib/money';
@@ -276,8 +276,9 @@ export function InlineInput({
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         style={{
-          fontFamily: 'Hanken',
-          fontSize: 15,
+          // [Wave 3] Tokens, not raw font literals — the last one in modules/.
+          fontFamily: font.body,
+          fontSize: fontSize.base,
           color: color.text.primary,
           paddingVertical: 0,
           textAlign: center ? 'center' : undefined,
