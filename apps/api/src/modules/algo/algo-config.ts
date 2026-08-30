@@ -89,6 +89,14 @@ export const ALGO_DEFAULTS = {
   /** [ALG-15] Kill switch. Off ⇒ no assessment, no trace, no rows — today's behaviour. */
   'ALG-15.enabled': true,
   /**
+   * [ALG-30] Accept-then-handback inside this many seconds is the
+   * cherry-picking signal (Kerb §5.3 CHERRY_WINDOW_S). Advisory: a row for
+   * the reviewer, never a penalty. Clamped 10..3600 at the reader.
+   */
+  'gaming.cherryWindowS': 90,
+  /** [ALG-30] Kill switch. Off ⇒ no assessment, no rows — today's behaviour. */
+  'ALG-30.enabled': true,
+  /**
    * [ALG-38] The generic velocity engine's per-action limits, for the
    * surfaces no dedicated limiter thought about. Each action: how many in
    * how many seconds per ACTOR, and per identity CLUSTER (the one that

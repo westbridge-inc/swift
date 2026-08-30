@@ -40,6 +40,16 @@ export const DEFAULT_CASH_RULES: CashRulesConfig = {
 };
 
 /**
+ * The country's cash rules: the code defaults under the stored overrides.
+ * Exported so a reader elsewhere (ALG-30 reuses `maxHandoverDistanceKm` as
+ * the drop radius) imports THIS merge rather than re-expressing it.
+ */
+export async function cashRulesFor(countryConfig: CountryConfigService, countryCode: string): Promise<CashRulesConfig> {
+  const config = await countryConfig.getByCode(countryCode);
+  return { ...DEFAULT_CASH_RULES, ...((config.cashRules as Partial<CashRulesConfig> | null) ?? {}) };
+}
+
+/**
  * THE evidence format: `gps:LAT,LNG` at 5 decimal places (~1 m), written into
  * the immutable status-log note.
  *
@@ -161,8 +171,7 @@ export class CashRulesService {
   }
 
   async configFor(countryCode: string): Promise<CashRulesConfig> {
-    const config = await this.countryConfig.getByCode(countryCode);
-    return { ...DEFAULT_CASH_RULES, ...((config.cashRules as Partial<CashRulesConfig> | null) ?? {}) };
+    return cashRulesFor(this.countryConfig, countryCode);
   }
 
   // -------------------------------------------------------------------------
