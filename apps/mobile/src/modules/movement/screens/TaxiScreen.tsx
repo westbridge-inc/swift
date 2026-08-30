@@ -24,7 +24,7 @@ import { mediaUrl } from '../../../lib/images';
 import { haptic } from '../../../lib/haptics';
 import { toast } from '../../../kit/toast';
 import { safetyApi, type RideClass, type TierEstimate } from '../../../services/api';
-import { CalmRadar, Card, CircleChip, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, cardShadow } from '../../../kit';
+import { CalmRadar, Card, CircleChip, Eyebrow, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, cardShadow } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 import { openExternal } from '../../../lib/openExternal';
@@ -137,7 +137,12 @@ export function RouteCard({
         {({ pressed }) => (
           <View style={{ flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 }}>
             <View style={{ width: space['2xl'], alignItems: 'center' }}>
-              <View style={{ width: space.md, height: space.md, borderRadius: radius.full, borderWidth: space.xs / 2, borderColor: color.text.muted }} />
+              {/* [Wave 3 vs reference 11] The pickup glyph is the FILLED ink
+                  square — the same ink language as the map's PickupDot — not
+                  an outlined ring that reads as an unfilled state. */}
+              <View style={{ width: space.md + space.xs, height: space.md + space.xs, borderRadius: radius.sm, backgroundColor: color.text.primary, alignItems: 'center', justifyContent: 'center' }}>
+                <View style={{ width: space.xs + 1, height: space.xs + 1, backgroundColor: color.white }} />
+              </View>
             </View>
             <View style={{ flex: 1, marginLeft: space.sm }}>
               <T variant="caption" tone="muted">
@@ -474,9 +479,12 @@ export function TaxiScreen({ navigation }: any) {
           {/* Tiers */}
           {queued ? null : dropoffPoint ? (
             <View style={{ marginTop: space.xl }}>
-              <T variant="micro" tone="faint">Choose your ride</T>
-              <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: space.md, marginTop: space.xs, marginBottom: space.md }}>
-                <T variant="title">Pick your vehicle</T>
+              {/* [Wave 3 vs reference 11] ONE heading, the Eyebrow — the
+                  reference goes straight from "CHOOSE YOUR RIDE" to the tiers;
+                  the extra "Pick your vehicle" title said the same thing twice.
+                  The honest nearest-driver ETA keeps its place on the row. */}
+              <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: space.md, marginBottom: space.md }}>
+                <Eyebrow accessibilityRole="header">Choose your ride</Eyebrow>
                 {nearestPickupEta != null ? (
                   <T variant="caption" style={{ color: TAXI_TINT.ink }}>
                     Nearest driver · ~{nearestPickupEta} min
@@ -681,11 +689,14 @@ function TierRow({
             <Pictogram name={meta.icon} size={32} color={TAXI_TINT.ink} />
           </View>
           <View style={{ flex: 1 }}>
+            {/* [Wave 3 vs reference 11] The name stands alone in bold; seats
+                join the sub-line ("4 seats · Extra legroom…"), exactly how the
+                reference sets every tier's second line. */}
             <T variant="body" weight="semibold" style={selected ? { color: TAXI_TINT.ink } : undefined}>
-              {meta.label} <T variant="label" tone="muted">· {tier.capacity} seats</T>
+              {meta.label}
             </T>
             <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-              {meta.blurb}
+              {tier.capacity} seats · {meta.blurb}
             </T>
           </View>
           <Money amount={tier.fare} style={selected ? { color: TAXI_TINT.ink } : undefined} />
