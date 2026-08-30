@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
 import { lineTotal, orderTotal, promoDiscount } from '../../utils/order-total';
 import { canonicalBillableKm } from '../../utils/billable-distance';
@@ -2605,7 +2606,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   /** POST /orders/:id/return — request a return on a delivered retail order (§4.5). */
-  app.post('/orders/:id/return', async (request: AuthRequest, reply: FastifyReply) => {
+  app.post('/orders/:id/return', { preHandler: [velocityGuard(app, 'return.request')] }, async (request: AuthRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
     const { reason } = z.object({ reason: z.string().trim().min(5).max(1000) }).parse(request.body);
@@ -2850,7 +2851,9 @@ export async function customerRoutes(app: FastifyInstance) {
   // 13. PROMO VALIDATION
   // ========================================================================
 
-  app.post('/promo/validate', async (request: AuthRequest) => {
+  // [ALG-38] A promo code is a guessable secret: the velocity engine caps tries per
+  // person (and per identity cluster, so extra accounts do not buy extra tries).
+  app.post('/promo/validate', { preHandler: [velocityGuard(app, 'promo.validate')] }, async (request: AuthRequest) => {
     const { userId } = request.user;
     const { code } = promoValidateSchema.parse(request.body);
 
