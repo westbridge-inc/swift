@@ -28,7 +28,9 @@
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { assertSafeBootConfig } from '../apps/api/src/utils/boot-config';
+import { bucketVersioningStatus, kekEscrowStatus, parseBucketVersioning } from '../apps/api/src/modules/ops/document-durability';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const envPath = process.argv[2] ?? path.join(HERE, '.env');
@@ -164,9 +166,32 @@ console.log('─'.repeat(72));
     console.log('    backup.sh verifies the upload byte-for-byte before calling a run good.');
   }
   console.log('');
-  console.log('  Neither this check nor backup.sh covers two things that lose documents:');
-  console.log('    - the object-storage bucket holding KYC files (version it separately)');
-  console.log('    - MASTER_KEK, without which restored documents stay ciphertext forever');
+  // [D-4] A database dump does not save the documents. Two controls, graded:
+  // the object bucket must be versioned, and the escrowed KEK must be THIS key.
+  console.log('  Documents (not in any database dump):');
+  const printVerdict = (v: { ok: boolean; line: string; detail?: string[] }) => {
+    console.log(`  ${v.ok ? '✓' : '✗'} ${v.line}`);
+    for (const d of v.detail ?? []) console.log(`      ${d}`);
+  };
+  const storage = fileEnv['STORAGE_PROVIDER'] ?? 'local';
+  const objectBucket = fileEnv['AWS_S3_BUCKET'];
+  if (storage === 'local') {
+    console.log('  ✗ STORAGE_PROVIDER=local — KYC documents would live on this disk, outside every backup.');
+  } else if (!objectBucket || !endpoint || !keyId) {
+    console.log(`  ✗ STORAGE_PROVIDER=${storage} but AWS_S3_BUCKET / endpoint / credentials are incomplete.`);
+  } else {
+    const probe = spawnSync('aws', ['s3api', 'get-bucket-versioning', '--bucket', objectBucket, '--endpoint-url', endpoint, '--output', 'json'], {
+      encoding: 'utf8',
+      env: { ...process.env, AWS_ACCESS_KEY_ID: keyId, AWS_SECRET_ACCESS_KEY: fileEnv['AWS_SECRET_ACCESS_KEY'] ?? '', AWS_REGION: fileEnv['AWS_REGION'] ?? 'auto' },
+    });
+    if (probe.error || probe.status !== 0) {
+      console.log(`  ✗ could not ask ${objectBucket} about versioning (${probe.error ? 'aws CLI not installed' : (probe.stderr || '').trim().split('\n')[0]}).`);
+      console.log('      Versioning is what lets a deleted or overwritten KYC document be recovered. Verify it by hand.');
+    } else {
+      printVerdict(bucketVersioningStatus(objectBucket, endpoint, parseBucketVersioning(probe.stdout)));
+    }
+  }
+  printVerdict(kekEscrowStatus(fileEnv));
   console.log('');
   console.log('  And a backup is not real until restore.sh has restored from it.');
   console.log('  Rehearse once, with a stopwatch. That number is your recovery time.');
