@@ -353,7 +353,14 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   const pickFromLibrary = async () => {
     setPhotoMenu(false);
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) return;
+    if (!perm.granted) {
+      // [G9 · #917's law] A denied permission explains itself. The camera
+      // path already did; the library path failed silent — same sentence
+      // shape now, Settings named as the way back.
+      setPhotoErr('Photo library access needed — allow it in Settings to choose a photo.');
+      return;
+    }
+    setPhotoErr(null);
     applyAsset(await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 }));
   };
 
@@ -617,8 +624,24 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
             Couldn&apos;t save. Check the details and try again.
           </T>
         ) : null}
+        {/* [#947's grammar] A disabled button says WHY — the first unmet
+            requirement, in the vendor's own order of work. */}
         <PillButton
-          label={readOnly ? 'Read-only preview' : existing ? 'Save changes' : 'Add item'}
+          label={
+            readOnly
+              ? 'Read-only preview'
+              : !name.trim()
+                ? 'Name the item first'
+                : !(Number.isFinite(priceNum) && priceNum >= 0)
+                  ? 'Set a price'
+                  : !categoryId
+                    ? 'Pick a category'
+                    : isService && days.length === 0
+                      ? 'Pick available days'
+                      : existing
+                        ? 'Save changes'
+                        : 'Add item'
+          }
           loading={busy}
           disabled={readOnly || !valid}
           onPress={submit}
