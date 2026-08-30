@@ -7,7 +7,7 @@ import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
-import { useMyRating, useProfile } from '../../../hooks/customer';
+import { useLiveOrders, useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { EmptyState, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TrustHalo } from '../../../kit';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
@@ -97,6 +97,9 @@ export function ProfileScreen() {
   const { isAuthenticated, promptLogin, logout, user, setIntent } = useAuthStore();
   const profile = useProfile<any>();
   const myRating = useMyRating();
+  // [Wave 3 · ref 05] The Orders tile's badge is the LIVE order count — a real
+  // number from the live query, never unread-notifications wearing its badge.
+  const liveOrders = useLiveOrders();
   const [confirmLogout, setConfirmLogout] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [ratingInfo, setRatingInfo] = useState(false);
@@ -183,12 +186,15 @@ export function ProfileScreen() {
   const unread = p?.unreadNotifications ?? 0;
   const memberSince = p?.createdAt ? new Date(p.createdAt).getFullYear() : null;
   // THE TRUST HALO's facts — every segment is real, unlit = the honest to-do.
-  const facts: { on: boolean; label: string }[] = [
-    { on: true, label: 'Phone verified' },
-    { on: !!p?.selfieCapturedAt, label: 'Selfie on file' },
-    { on: orders > 0, label: 'First order placed' },
+  // [ref 05] `next` speaks the reference's imperative ("place your first
+  // order"), not the fact's past-tense label read backwards.
+  const facts: { on: boolean; label: string; next: string }[] = [
+    { on: true, label: 'Phone verified', next: 'verify your phone' },
+    { on: !!p?.selfieCapturedAt, label: 'Selfie on file', next: 'add a selfie' },
+    { on: orders > 0, label: 'First order placed', next: 'place your first order' },
   ];
   const nextFact = facts.find((f) => !f.on);
+  const liveCount = liveOrders.data?.total ?? liveOrders.data?.items?.length ?? 0;
 
   return (
     <Screen bleed>
@@ -207,6 +213,8 @@ export function ProfileScreen() {
           entering={FadeInDown.duration(320).reduceMotion(ReduceMotion.System)}
           style={{ paddingTop: insets.top + space.lg, paddingHorizontal: GUTTER }}
         >
+          {/* [ref 05] The page names itself before it names the person. */}
+          <T variant="micro" tone="muted" style={{ marginBottom: space.sm }}>ACCOUNT</T>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
             {/* The camera chip is a REAL action (>=44 hit target with hitSlop)
                 — it opens Personal data. It loses its maroon fill: on paper a
@@ -247,9 +255,57 @@ export function ProfileScreen() {
               ) : null}
             </View>
           </View>
-          <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
-            {nextFact ? `${facts.filter((f) => f.on).length} of ${facts.length} — next: ${nextFact.label.toLowerCase()}` : 'Account complete'}
-          </T>
+          {/* [ref 05] "✓ Verified 2 of 3 — next: place your first order" —
+              the check is drawn, the count is real, the next step is an
+              imperative the person can act on. */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: space.md }}>
+            <Feather name="check-circle" size={12} color={color.success} />
+            <T variant="caption" tone="muted">
+              {nextFact
+                ? `Verified ${facts.filter((f) => f.on).length} of ${facts.length} — next: ${nextFact.next}`
+                : 'Verified — account complete'}
+            </T>
+          </View>
+
+          {/* [ref 05] The three quick actions the reference leads with — the
+              places a customer actually returns for. The Orders badge is the
+              LIVE order count (real data), rendered only when non-zero. */}
+          <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.xl }}>
+            {[
+              { icon: 'clipboard' as const, label: 'Orders & rides', go: 'OrdersHistory', badge: liveCount },
+              { icon: 'heart' as const, label: 'Favourites', go: 'Favorites', badge: 0 },
+              { icon: 'life-buoy' as const, label: 'Get help', go: 'ContactUs', badge: 0 },
+            ].map((t) => (
+              <Pressable
+                key={t.label}
+                accessibilityRole="button"
+                accessibilityLabel={t.badge > 0 ? `${t.label}, ${t.badge} in progress` : t.label}
+                onPress={() => navigation.navigate(t.go)}
+                style={{ flex: 1 }}
+              >
+                {({ pressed }) => (
+                  <View
+                    style={{
+                      alignItems: 'center',
+                      gap: space.sm,
+                      paddingVertical: space.lg,
+                      borderRadius: radius.lg,
+                      backgroundColor: color.surface.sunken,
+                      opacity: pressed ? 0.7 : 1,
+                    }}
+                  >
+                    {t.badge > 0 ? (
+                      <View style={{ position: 'absolute', top: space.sm, right: space.sm, minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 5, backgroundColor: color.brand[500], alignItems: 'center', justifyContent: 'center' }}>
+                        <T variant="micro" tone="onBrand">{t.badge}</T>
+                      </View>
+                    ) : null}
+                    <Feather name={t.icon} size={20} color={color.text.primary} />
+                    <T variant="caption" weight="semibold">{t.label}</T>
+                  </View>
+                )}
+              </Pressable>
+            ))}
+          </View>
         </Animated.View>
 
         <View style={{ paddingHorizontal: GUTTER }}>
@@ -263,9 +319,9 @@ export function ProfileScreen() {
           {/* YOUR ACCOUNT */}
           <T variant="micro" tone="muted" style={{ marginTop: space['2xl'], marginBottom: space.sm }}>YOUR ACCOUNT</T>
           <RowGroup>
+            {/* [ref 05] Orders & Favourites moved up into the quick tiles —
+                a row that duplicates a tile is wallpaper. */}
             <SettingsRow icon="user" label="Personal data" onPress={() => navigation.navigate('PersonalData')} />
-            <SettingsRow icon="clipboard" label="My orders" onPress={() => navigation.navigate('OrdersHistory')} />
-            <SettingsRow icon="heart" label="Favourites" onPress={() => navigation.navigate('Favorites')} />
             <SettingsRow icon="map-pin" label="My addresses" onPress={() => navigation.navigate('Addresses')} />
             <SettingsRow
               icon="users"
