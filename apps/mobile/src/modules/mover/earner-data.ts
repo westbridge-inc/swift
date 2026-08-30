@@ -3,6 +3,8 @@ import { money } from '../../lib/money';
 type WireRecord = Record<string, unknown>;
 
 const FEE_TYPES = new Set(['DELIVERY_FEE', 'COURIER_FEE', 'TAXI_FARE']);
+// [ALG-06] Swift's own money — a bonus, neither a job fee nor a tip.
+const BONUS_TYPES = new Set(['RESCUE_INCENTIVE']);
 const COMPLETED_STATUSES = new Set(['DELIVERED', 'COMPLETED']);
 
 export function serverRecord(value: unknown): WireRecord | undefined {
@@ -85,19 +87,24 @@ export function hasEarningRowsPayload(payload: unknown): boolean {
 
 export function recentEarningsBreakdown(
   rows: WireRecord[],
-): { fees?: number; tips?: number } | undefined {
+): { fees?: number; tips?: number; bonus?: number } | undefined {
   if (rows.length === 0) return undefined;
   let fees = 0;
   let tips = 0;
+  let bonus = 0;
   let sawFee = false;
   let sawTip = false;
+  let sawBonus = false;
   for (const row of rows) {
     const type = serverText(row['type'])?.toUpperCase();
     const amount = serverNumber(row['amount']);
-    if (!type || amount == null || (type !== 'TIP' && !FEE_TYPES.has(type))) return undefined;
+    if (!type || amount == null || (type !== 'TIP' && !FEE_TYPES.has(type) && !BONUS_TYPES.has(type))) return undefined;
     if (type === 'TIP') {
       sawTip = true;
       tips += amount;
+    } else if (BONUS_TYPES.has(type)) {
+      sawBonus = true;
+      bonus += amount;
     } else {
       sawFee = true;
       fees += amount;
@@ -106,6 +113,7 @@ export function recentEarningsBreakdown(
   return {
     ...(sawFee ? { fees } : {}),
     ...(sawTip ? { tips } : {}),
+    ...(sawBonus ? { bonus } : {}),
   };
 }
 
@@ -114,6 +122,7 @@ const EARNING_LABELS: Record<string, string> = {
   COURIER_FEE: 'Courier',
   TAXI_FARE: 'Taxi ride',
   TIP: 'Tip',
+  RESCUE_INCENTIVE: 'Rescue bonus from Swift',
 };
 
 export function earningLabel(value: unknown): string | undefined {

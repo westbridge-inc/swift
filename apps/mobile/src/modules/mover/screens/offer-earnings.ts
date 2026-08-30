@@ -31,6 +31,14 @@ export interface OfferEarnings {
   total: number;
   /** false ⇒ render the fare alone; there is no second number worth a line. */
   showTip: boolean;
+  /**
+   * [ALG-06] A rescue bonus from Swift's OWN money on a re-offered job. Kept
+   * OUT of `total`: the fare and tip land from the job (cash in hand on a
+   * CASH job); the bonus is a payable Swift settles later. Folding it into
+   * "you get" would promise money at the door that does not arrive there.
+   */
+  bonus: number;
+  showBonus: boolean;
 }
 
 /** Money that isn't a usable positive number is 0 — never NaN on a pay line. */
@@ -43,8 +51,10 @@ export function offerEarnings(
   fare: unknown,
   tipAmount: unknown,
   tipGoesToMover: boolean,
+  rescueBonus?: unknown,
 ): OfferEarnings {
   const f = amount(fare);
   const tip = tipGoesToMover ? amount(tipAmount) : 0;
-  return { fare: f, tip, total: f + tip, showTip: tip > 0 };
+  const bonus = amount(rescueBonus);
+  return { fare: f, tip, total: f + tip, showTip: tip > 0, bonus, showBonus: bonus > 0 };
 }

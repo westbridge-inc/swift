@@ -7,7 +7,7 @@ describe('offerEarnings', () => {
     // exact moment they chose whether to accept. rider.routes computes
     // `deliveryFee + tipAmount` in four places; the card used the fee alone.
     const e = offerEarnings(1200, 300, true);
-    expect(e).toEqual({ fare: 1200, tip: 300, total: 1500, showTip: true });
+    expect(e).toEqual({ fare: 1200, tip: 300, total: 1500, showTip: true, bonus: 0, showBonus: false });
   });
 
   it('never claims a taxi tip, because the driver formula is unverified', () => {
@@ -15,8 +15,23 @@ describe('offerEarnings', () => {
     // the order, so whether a ride tip reaches the driver is not established.
     // Promising it on the accept screen would be worse than staying silent.
     expect(offerEarnings(2500, 400, false)).toEqual({
-      fare: 2500, tip: 0, total: 2500, showTip: false,
+      fare: 2500, tip: 0, total: 2500, showTip: false, bonus: 0, showBonus: false,
     });
+  });
+
+  it('[ALG-06] shows a rescue bonus as its own line and never folds it into "you get"', () => {
+    // The fare and tip land from the job (cash in hand on a CASH job); the
+    // bonus is Swift's own money settled later. "you get 2000" at the door
+    // would be a lie by 500.
+    const e = offerEarnings(1200, 300, true, 500);
+    expect(e.bonus).toBe(500);
+    expect(e.showBonus).toBe(true);
+    expect(e.total).toBe(1500);
+    for (const none of [0, null, undefined, 'abc', -5]) {
+      const q = offerEarnings(1200, 300, true, none);
+      expect(q.showBonus).toBe(false);
+      expect(q.bonus).toBe(0);
+    }
   });
 
   it('renders no tip line when there is no tip', () => {

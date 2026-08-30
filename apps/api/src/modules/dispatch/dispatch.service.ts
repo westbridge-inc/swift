@@ -12,6 +12,7 @@ import { classesAtOrAbove } from '../rides/fare.service';
 import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
 import { algoConfig } from '../algo/algo-config';
+import { foodAgeLimitMinutes, foodAge, retireTooOldOrder, rescueIncentiveGyd, grantRescueIncentive, incentiveKey } from './rescue';
 import { recordDecision } from '../algo/decisions';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
@@ -858,7 +859,7 @@ export class DispatchService {
           id: true, status: true, riderId: true, driverId: true, orderType: true,
           fulfillment: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
           customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
-          subtotalBase: true, paymentMethod: true, tenantId: true,
+          subtotalBase: true, paymentMethod: true, tenantId: true, readyAt: true,
           // [WS-6.0] The cash-math triple. A mover deciding on a CASH job is
           // deciding how much of their OWN float to commit, and the card used
           // to show only what they earn. Every number is a stored column, not
@@ -884,11 +885,28 @@ export class DispatchService {
       }
       if (order.pickupLat == null || order.pickupLng == null) return {};
 
+      // [ALG-06 ②] Food-age cutoff: an order nobody could deliver in time is
+      // too old to deliver — a person, not another cascade. Marks nobody.
+      if (pool === 'RIDER' && order.readyAt) {
+        const limit = await foodAgeLimitMinutes(this.prisma, order.orderType);
+        const age = foodAge({ readyAt: order.readyAt }, limit);
+        if (age.tooOld && age.ageMinutes != null && limit != null) {
+          await retireTooOldOrder({ prisma: this.prisma, redis: this.redis, io: this.io, notifications: this.notifications }, order, age.ageMinutes, limit);
+          return { exhausted: true };
+        }
+      }
+
       // One live offer at a time
       const existing = await this.redis.get(offerKey(orderId));
       if (existing) return { offered: parseOfferValue(existing).id };
 
       const round = Number((await this.redis.get(roundKey(orderId))) ?? 0);
+      // [ALG-06 ①] The cascade this search is on (exhausted attempts + 1). From
+      // `rescue.incentiveFromCascade` the offer carries Swift's OWN money as an
+      // incentive (ALG-INV-19) — 0 until the founder sets an amount.
+      const cascade = Number((await this.redis.get(exhaustKey(orderId))) ?? 0) + 1;
+      const rescueGyd = pool === 'RIDER' ? await rescueIncentiveGyd(this.prisma, cascade) : 0;
+      if (rescueGyd > 0) await this.redis.set(incentiveKey(orderId), JSON.stringify({ amountGyd: rescueGyd, cascade }), 'EX', 3600).catch(() => {});
       const radius = BASE_RADIUS_KM + round * RADIUS_STEP_KM;
       // Search journal (§3): open/refresh the record BESIDE the state machine —
       // fire-and-caught, never load-bearing for the cascade itself.
@@ -991,6 +1009,8 @@ export class DispatchService {
             isExpress: order.isExpress,
             expiresInSeconds: timeoutSeconds,
             etaMinutes: Math.round(top.etaMinutes),
+            // [ALG-06 ①] Swift's own money on top of the fee, or absent.
+            rescueIncentiveGyd: rescueGyd > 0 ? rescueGyd : null,
             paymentMethod: order.paymentMethod,
             customerTrust: trust ?? null,
             itemCount: order.items.length,
@@ -1130,6 +1150,9 @@ export class DispatchService {
      *  without the exposure the live card had put beside the button. */
     etaMinutes: number | null;
     cashMath: OfferCashMath | null;
+    /** [ALG-06 ①] The incentive the live card carried, or null — a rebuilt
+     *  card that dropped Swift's bonus would show less money than the live one. */
+    rescueIncentiveGyd: number | null;
   } | null> {
     const reverse = await this.redis.get(moverOfferKey(moverId));
     if (!reverse) return null;
@@ -1203,6 +1226,7 @@ export class DispatchService {
       pickupAddress: order.pickupAddress ?? null,
       deliveryAddress: order.deliveryAddress ?? null,
       etaMinutes,
+      rescueIncentiveGyd: await this.rescueIncentiveOn(orderId),
       // The SAME function the live emit calls — one definition of the triple.
       cashMath: cashMathForOffer(order),
     };
@@ -1492,12 +1516,49 @@ export class DispatchService {
       // claimOrder does not throw after its database transaction commits. A
       // rejection here therefore means no durable winner exists and only then
       // is it safe to advance the cascade.
-      return await this.claimOrder(orderId, mover.id, pool, { requestedFare: fare });
+      const claimed = await this.claimOrder(orderId, mover.id, pool, { requestedFare: fare });
+      // [ALG-06 ①] The offer carried an incentive and this rider took it: the
+      // payable exists now — after the durable claim, never before.
+      if (pool === 'RIDER') await this.settleRescueIncentive(orderId, mover.id);
+      return claimed;
     } catch (error) {
       await this.redis.sadd(declinedKey(orderId), mover.id).catch(() => {});
       await this.redis.expire(declinedKey(orderId), 3600).catch(() => {});
       await this.dispatchOrder(orderId).catch(() => {});
       throw error;
+    }
+  }
+
+  /** [ALG-06 ①] The incentive attached to this order's current search, or null. Never throws. */
+  private async rescueIncentiveOn(orderId: string): Promise<number | null> {
+    try {
+      const raw = await this.redis.get(incentiveKey(orderId));
+      if (!raw) return null;
+      const amountGyd = Number((JSON.parse(raw) as { amountGyd?: number }).amountGyd) || 0;
+      return amountGyd > 0 ? amountGyd : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * [ALG-06 ①] Grant the rescue incentive the accepted offer carried, if any.
+   * Swift's own money (ALG-INV-19): an earning of its own type, PENDING like
+   * every payable, idempotent per order. Never load-bearing for the claim.
+   */
+  private async settleRescueIncentive(orderId: string, riderId: string): Promise<void> {
+    try {
+      const raw = await this.redis.get(incentiveKey(orderId));
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { amountGyd?: number; cascade?: number };
+      const amountGyd = Number(parsed.amountGyd) || 0;
+      if (amountGyd > 0) {
+        const order = await this.prisma.order.findUnique({ where: { id: orderId }, select: { tenantId: true } });
+        await grantRescueIncentive(this.prisma, { orderId, riderId, amountGyd, cascade: Number(parsed.cascade) || 1, ...(order?.tenantId ? { tenantId: order.tenantId } : {}) });
+      }
+      await this.redis.del(incentiveKey(orderId)).catch(() => {});
+    } catch (err) {
+      log().warn({ err, orderId, riderId }, 'dispatch: rescue incentive not granted');
     }
   }
 

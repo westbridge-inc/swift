@@ -2465,6 +2465,10 @@ enum EarningType {
   COURIER_FEE
   TAXI_FARE
   TIP
+  /// [ALG-06 / ALG-INV-19] Swift's OWN money for a rescue nobody nearby would
+  /// take — a marketing expense and a payable Swift settles, never order money
+  /// and never charged to the customer or the vendor.
+  RESCUE_INCENTIVE
 }
 
 enum EarningStatus {

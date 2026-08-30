@@ -1356,6 +1356,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const dw = await recoverStrandedDeliveries(ctx.prisma, ctx.redis, ctx.io, async (orderId) => {
           await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
         });
+        // [ALG-06 ②] Waiting, riderless orders past their vertical's food-age
+        // cutoff go to a person, cancelled by the system, marking nobody.
+        const { sweepFoodAge } = await import('../modules/dispatch/rescue');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const aged = await sweepFoodAge({ prisma: ctx.prisma, redis: ctx.redis, io: ctx.io, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (aged.retired.length > 0) ctx.log.warn({ retired: aged.retired }, 'rescue: orders too old to deliver were cancelled and handed to a person');
         if (dw.recovered.length + dw.flagged.length > 0) {
           ctx.log.error({ recovered: dw.recovered, flagged: dw.flagged }, 'Stranded-delivery watchdog: released pre-pickup orders / flagged goods-in-hand rider drops');
         }

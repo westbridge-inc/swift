@@ -734,6 +734,10 @@ export interface DispatchOffer {
   expiresInSeconds?: number;
   etaMinutes?: number;
   isExpress?: boolean;
+  // [ALG-06] A rescue bonus from Swift's OWN money on a re-offered job —
+  // server-set, absent on a normal offer. Never the customer's or the store's
+  // money and never cash in hand at the door: Swift settles it.
+  rescueIncentiveGyd?: number | null;
   // Load-bearing for the MMG fare lock: movers must never submit an MMG fare.
   paymentMethod?: 'CASH' | 'MOBILE_MONEY' | (string & {});
   customerTrust?: { trustLevel: string; completedOrders: number; strikes: number } | null;

@@ -47,6 +47,9 @@ describe('recent earnings truth', () => {
     expect(recentEarningsBreakdown([{ type: 'TIP', amount: 0 }]))
       .toEqual({ tips: 0 });
     expect(recentEarningsBreakdown([{ type: 'TIP' }])).toBeUndefined();
+    // [ALG-06] Swift's own money is a third bucket, neither a fee nor a tip.
+    expect(recentEarningsBreakdown([{ type: 'DELIVERY_FEE', amount: 1100 }, { type: 'RESCUE_INCENTIVE', amount: 500 }]))
+      .toEqual({ fees: 1100, bonus: 500 });
     expect(recentEarningsBreakdown([])).toBeUndefined();
     expect(hasEarningRowsPayload([])).toBe(true);
     expect(hasEarningRowsPayload({ data: [] })).toBe(true);
