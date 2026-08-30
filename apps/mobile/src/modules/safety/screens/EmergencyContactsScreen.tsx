@@ -232,7 +232,13 @@ export function EmergencyContactsScreen() {
           onChangeText={setRelationship}
           error={addError}
         />
-        <PillButton label="Send the code" loading={add.isPending} disabled={!canAdd} onPress={submitAdd} />
+        {/* [#947's grammar] Disabled says the ask. */}
+        <PillButton
+          label={canAdd ? 'Send the code' : 'Enter their name and full number'}
+          loading={add.isPending}
+          disabled={!canAdd}
+          onPress={submitAdd}
+        />
       </PopupCard>
 
       <PopupCard visible={verifying != null} onClose={() => { setVerifying(null); setCode(''); }}>
