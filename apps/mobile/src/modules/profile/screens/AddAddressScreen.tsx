@@ -143,8 +143,21 @@ export function AddAddressScreen() {
             </View>
           )}
 
+          {/* [#947's grammar] Disabled names the first missing thing. */}
           <PillButton
-            label={editing ? 'Save Changes' : 'Save Address'}
+            label={
+              label.trim().length < 2
+                ? 'Give it a label'
+                : line1.trim().length < 3
+                  ? 'Add the street address'
+                  : city.trim().length < 2
+                    ? 'Add the city'
+                    : !pin
+                      ? 'Drop the pin on the map'
+                      : editing
+                        ? 'Save Changes'
+                        : 'Save Address'
+            }
             loading={saving.isPending}
             disabled={!valid}
             onPress={save}
