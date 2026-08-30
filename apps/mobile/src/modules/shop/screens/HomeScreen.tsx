@@ -564,7 +564,10 @@ export function HomeScreen() {
                   image={itemPhoto(it)}
                   name={it.name}
                   priceLabel={money(it.price)}
-                  meta={it.vendorName}
+                  // [Wave 3 vs reference 03 · #941] "Vendor · 25 min" — the
+                  // vendor's own enrichVendor ETA now rides popularItems;
+                  // null (no buyer position) says nothing, never a guess.
+                  meta={[it.vendorName, it.etaMin != null ? `${it.etaMin} min` : null].filter(Boolean).join(' · ')}
                   onPress={() => navigation.navigate('MenuItem', { itemId: it.id, vendorId: it.vendorId })}
                 />
               )}

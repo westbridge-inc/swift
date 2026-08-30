@@ -29,6 +29,13 @@ export function NewOrderTakeover({
   const [rejecting, setRejecting] = useState(false);
   // A fresh order in the queue starts at the decision, never mid-reject.
   useEffect(() => setRejecting(false), [orderId]);
+  // [Wave 3 vs reference 22 · #941] The draining accept clock. `respondBy`
+  // is the SERVER's deadline — the exact arithmetic auto-cancel was enqueued
+  // with — and it is null whenever the order is not PENDING, so the clock
+  // draws only while the decision is really open. Recomputed from the wall
+  // clock every tick (the DispatchOfferCard law): a backgrounded interval
+  // that fires late lands on the true remainder, never a stale decrement.
+  const [nowTs, setNowTs] = useState(() => Date.now());
   const order = useVendorOrder(orderId);
   const act = useOrderAction();
   const insets = useSafeAreaInsets();
@@ -60,8 +67,26 @@ export function NewOrderTakeover({
 
   const bellStyle = useAnimatedStyle(() => ({ transform: [{ scale: pulse.value }] }));
 
-  if (!current) return null;
+  // Clock arithmetic ahead of the early return — the tick hook below reads
+  // it, and React hooks must run in the same order on every render.
   const o: any = order.data;
+  const respondByMs = typeof o?.respondBy === 'string' ? Date.parse(o.respondBy) : Number.NaN;
+  const createdMs = typeof o?.createdAt === 'string' ? Date.parse(o.createdAt) : Number.NaN;
+  const clockActive = Number.isFinite(respondByMs) && respondByMs > nowTs;
+
+  // Tick only while the clock is really open; flipping inactive cleans up.
+  useEffect(() => {
+    if (!clockActive) return;
+    const t = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [clockActive]);
+
+  if (!current) return null;
+  const remainSecs = clockActive ? Math.max(0, Math.ceil((respondByMs - nowTs) / 1000)) : 0;
+  const clockMmss = `${Math.floor(remainSecs / 60)}:${String(remainSecs % 60).padStart(2, '0')}`;
+  const clockFrac = clockActive && Number.isFinite(createdMs) && respondByMs > createdMs
+    ? Math.max(0, Math.min(1, (respondByMs - nowTs) / (respondByMs - createdMs)))
+    : null;
   const items: any[] = o?.items ?? [];
   const customer = o?.customer ? [o.customer.firstName, o.customer.lastName].filter(Boolean).join(' ') : '';
   const busy = act.isPending;
@@ -84,6 +109,21 @@ export function NewOrderTakeover({
       onRequestClose={() => {}}
     >
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, padding: space['2xl'], paddingTop: insets.top + space['2xl'], paddingBottom: insets.bottom + space.md }}>
+        {/* [reference 22] The maroon bar at the very top edge IS the clock —
+            it drains toward the server's deadline. Absent entirely when the
+            server sent no respondBy (the honest state before #941 deploys,
+            and for any non-PENDING order). */}
+        {clockActive && clockFrac != null ? (
+          <View
+            accessible
+            accessibilityRole="progressbar"
+            accessibilityLabel="Time left to accept this order"
+            accessibilityValue={{ min: 0, max: 100, now: Math.round(clockFrac * 100), text: `${clockMmss} left to accept` }}
+            style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, backgroundColor: color.brand[50] }}
+          >
+            <View style={{ height: 4, width: `${clockFrac * 100}%`, backgroundColor: color.brand[500] }} />
+          </View>
+        ) : null}
         <View style={{ alignItems: 'center' }}>
           <Animated.View
             style={[
@@ -153,6 +193,13 @@ export function NewOrderTakeover({
           </View>
         ) : null}
 
+        {/* [reference 22] The sentence with the number — and the reason the
+            number matters. Server clock, rendered verbatim. */}
+        {clockActive ? (
+          <T variant="caption" tone="muted" center style={{ marginBottom: space.md }}>
+            Accept within <T variant="caption" weight="bold">{clockMmss}</T> — the customer is watching this clock too.
+          </T>
+        ) : null}
         <View style={{ gap: space.md }}>
           <PillButton
             // [Wave 3 vs reference 22] "ACCEPT ORDER", sized to be read across
