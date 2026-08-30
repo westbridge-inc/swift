@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { computeRefund } from '../../utils/refund';
 import { lineTotal, orderTotal, promoDiscount } from '../../utils/order-total';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
@@ -2611,7 +2612,12 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const order = await app.prisma.order.findFirst({
       where: { id, customerId: userId },
-      select: { id: true, status: true, vendor: { select: { vendorType: true } } },
+      select: {
+        id: true, status: true, vendor: { select: { vendorType: true } },
+        // [ALG-25] The stored fields the refund is computed from.
+        paymentMethod: true, deliveryFee: true, discount: true, totalAmount: true, fulfillment: true,
+        items: { select: { totalCustomer: true, subStatus: true } },
+      },
     });
     if (!order) throw new NotFoundError('Order', id);
     if (!['DELIVERED', 'COMPLETED'].includes(order.status)) {
@@ -2624,8 +2630,17 @@ export async function customerRoutes(app: FastifyInstance) {
     if (existing) {
       throw new AppError(409, 'RETURN_EXISTS', 'A return has already been requested for this order');
     }
+    // [ALG-25] Say which of the three refunds this is and what it would be —
+    // recorded on the request for the store and the admin. A whole-order
+    // return on a delivered order: every live line, the delivery happened.
+    const refund = computeRefund({
+      paymentMethod: order.paymentMethod, status: order.status,
+      lines: order.items.map((l) => ({ totalCustomer: l.totalCustomer, subStatus: l.subStatus, affected: true })),
+      deliveryFee: order.deliveryFee, discount: order.discount, totalAmount: order.totalAmount,
+      deliveryHappened: order.fulfillment === 'DELIVERY',
+    });
     const created = await app.prisma.returnRequest.create({
-      data: { orderId: id, customerId: userId, reason },
+      data: { orderId: id, customerId: userId, reason, refundKind: refund.kind, refundAmount: refund.amount, refundSentence: refund.sentence },
     });
     reply.code(201);
     return { success: true, data: created };

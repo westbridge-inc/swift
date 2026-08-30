@@ -1848,6 +1848,13 @@ model ReturnRequest {
   resolutionNote String?
   reviewedBy     String?
   reviewedAt     DateTime?
+  /// [ALG-25] What the refund algorithm said when the return was requested:
+  /// which of the three cases it is (CASH_PRE_HANDOVER | CASH_POST_HANDOVER |
+  /// MMG_BLOCKED), the amount it computed, and the sentence. Recorded, never
+  /// moved — Swift holds no order money.
+  refundKind     String?
+  refundAmount   Decimal?     @db.Decimal(12, 2)
+  refundSentence String?
   createdAt      DateTime     @default(now())
 
   @@index([orderId])
