@@ -28,17 +28,29 @@ function statusClass(status: string) {
   return 'bg-red-500/20 text-red-400';
 }
 
+/** [G6] Review lanes. A customer's national ID (uploaded for the high-value
+ *  order gate) is not routine review work: the operator lane is the default
+ *  view, and customer identity is opened by name, on purpose. Mirrors the API
+ *  default — the two must agree or the page lies about what it shows. */
+const LANES = [
+  { value: 'operator', label: 'Operators' },
+  { value: 'customer', label: 'Customers' },
+  { value: 'all', label: 'Everything' },
+] as const;
+type Lane = (typeof LANES)[number]['value'];
+
 export default function VerificationPage() {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<Status>('PENDING');
+  const [lane, setLane] = useState<Lane>('operator');
   const [selected, setSelected] = useState<any>(null);
   const [reason, setReason] = useState('');
   const [insurance, setInsurance] = useState<InsuranceCheck>(EMPTY_INSURANCE);
   const [mutationError, setMutationError] = useState<unknown>(null);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['verification', status],
-    queryFn: () => fetchVerificationQueue(status),
+    queryKey: ['verification', status, lane],
+    queryFn: () => fetchVerificationQueue(status, lane),
   });
 
   const refresh = () => {
@@ -111,6 +123,25 @@ export default function VerificationPage() {
             {s}
           </button>
         ))}
+      </div>
+
+      <div className="flex items-center gap-2 mb-4">
+        {LANES.map((l) => (
+          <button
+            key={l.value}
+            onClick={() => { setLane(l.value); setSelected(null); }}
+            className={`px-3 py-1.5 rounded-lg text-xs ${
+              lane === l.value ? 'bg-[var(--accent)] text-white' : 'bg-[var(--panel)] text-[var(--muted)] border border-[var(--border)]'
+            }`}
+          >
+            {l.label}
+          </button>
+        ))}
+        {lane !== 'operator' && (
+          <span className="text-xs text-[var(--muted)]">
+            Customer IDs are shown here deliberately — every document view is audit-logged.
+          </span>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
