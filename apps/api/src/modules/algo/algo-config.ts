@@ -148,6 +148,15 @@ export const ALGO_DEFAULTS = {
     'promo.validate': { max: 10, perSeconds: 600, clusterMax: 30 },
     'return.request': { max: 5, perSeconds: 86_400, clusterMax: 10 },
   } as Record<string, { max: number; perSeconds: number; clusterMax?: number }>,
+  /**
+   * [ALG-01] The fairness band. Candidates whose score is within `band` of
+   * the best in their group are tied; ties break by fewest offers received
+   * in the last `windowMinutes`, then longest since the last offer. Off ⇒
+   * shadow only: the reorder is recorded, the ranking is unchanged.
+   */
+  'fairness.enabled': false,
+  'fairness.band': 0.05,
+  'fairness.windowMinutes': 60,
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;

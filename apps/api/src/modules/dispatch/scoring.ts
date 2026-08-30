@@ -51,3 +51,55 @@ export function rankCandidates<T extends DispatchCandidate>(candidates: T[], pro
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
+
+// ---------------------------------------------------------------------------
+// [ALG-01] The fairness band — the missing half. Scoring ranks correctly, but
+// a rider who is consistently second-nearest can starve. A band, not a
+// rotation: only candidates whose scores are effectively equal are reordered,
+// so a 3-minute rider still never ranks behind a 14-minute one (the scoring
+// test above stays green) and the customer never watches a farther car
+// accept. Ties break by fewest offers received in the window, then by the
+// longest wait since the last offer (never offered = longest), then by the
+// original rank. Pure: the caller supplies the counts.
+// ---------------------------------------------------------------------------
+
+export interface FairnessInput {
+  /** Score distance within which two candidates are "tied". */
+  band: number;
+  /** Offers each rider received in the fairness window. Missing = 0. */
+  offersInWindow: ReadonlyMap<string, number>;
+  /** When each rider last received an offer (ms epoch). Missing = never. */
+  lastOfferAt: ReadonlyMap<string, number>;
+}
+
+export interface FairnessResult<T> {
+  order: T[];
+  /** Whether the band moved anyone relative to the pure ranking. */
+  changed: boolean;
+  /** Which positions were tied groups of size > 1 — the evidence. */
+  groups: Array<{ from: number; size: number }>;
+}
+
+export function applyFairnessBand<T extends DispatchCandidate>(ranked: T[], profile: DispatchProfile, f: FairnessInput): FairnessResult<T> {
+  const order: T[] = [];
+  const groups: FairnessResult<T>['groups'] = [];
+  let i = 0;
+  while (i < ranked.length) {
+    const head = scoreCandidate(ranked[i]!, profile);
+    let j = i + 1;
+    while (j < ranked.length && scoreCandidate(ranked[j]!, profile) - head < f.band) j += 1;
+    const group = ranked.slice(i, j);
+    if (group.length > 1) {
+      groups.push({ from: i, size: group.length });
+      const rankOf = new Map(group.map((c, k) => [c.riderId, k]));
+      group.sort((a, b) =>
+        (f.offersInWindow.get(a.riderId) ?? 0) - (f.offersInWindow.get(b.riderId) ?? 0)
+        || (f.lastOfferAt.get(a.riderId) ?? 0) - (f.lastOfferAt.get(b.riderId) ?? 0)
+        || (rankOf.get(a.riderId) ?? 0) - (rankOf.get(b.riderId) ?? 0));
+    }
+    order.push(...group);
+    i = j;
+  }
+  const changed = order.some((c, k) => c.riderId !== ranked[k]!.riderId);
+  return { order, changed, groups };
+}

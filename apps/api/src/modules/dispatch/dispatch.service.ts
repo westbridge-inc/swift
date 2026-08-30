@@ -10,7 +10,9 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { classesAtOrAbove } from '../rides/fare.service';
 import { closeOnlineSession } from '../rider/online-hours';
-import { rankCandidates, type DispatchCandidate } from './scoring';
+import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
+import { algoConfig } from '../algo/algo-config';
+import { recordDecision } from '../algo/decisions';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
@@ -138,6 +140,10 @@ function verticalForOrder(order: { orderType: string }): string {
 }
 
 const offerKey = (orderId: string) => `dispatch:offer:${orderId}`;
+/** [ALG-01] Per-rider offer log (sorted set by ms): offers received; declines and expiries apart. */
+export const offersSentKey = (riderId: string) => `dispatch:offers-sent:${riderId}`;
+export const offerOutcomeKey = (riderId: string, outcomeLog: 'declines' | 'expiries') => `dispatch:offer-${outcomeLog}:${riderId}`;
+const OFFER_LOG_TTL_S = 24 * 3600;
 
 /** What a mover collects, hands over, and keeps on a CASH job — or null. */
 export type OfferCashMath = {
@@ -701,7 +707,59 @@ export class DispatchService {
 
     // Taxi (DRIVER pool) ranks proximity near-absolute — the rider watches the
     // car on the map; a farther-but-better car offered first reads as broken.
-    return rankCandidates(candidates, pool === 'DRIVER' ? 'PROXIMITY' : 'BALANCED');
+    const profile = pool === 'DRIVER' ? 'PROXIMITY' : 'BALANCED';
+    const ranked = rankCandidates(candidates, profile);
+    return this.fairnessBand(orderId, ranked, profile);
+  }
+
+  /**
+   * [ALG-01] The fairness band on top of the pure ranking: effectively-equal
+   * candidates are reordered by fewest offers received in the window, then
+   * longest since their last offer. SHADOW until `fairness.enabled`: the
+   * reorder is recorded as evidence and the ranking is returned unchanged.
+   * Live, a reorder that changed the order is recorded too. Never throws
+   * into dispatch — a failed read means the pure ranking, as today.
+   */
+  private async fairnessBand<T extends DispatchCandidate>(orderId: string, ranked: T[], profile: 'BALANCED' | 'PROXIMITY'): Promise<T[]> {
+    if (ranked.length < 2) return ranked;
+    try {
+      const [enabled, band, windowMin] = await Promise.all([
+        algoConfig(this.prisma, 'fairness.enabled'),
+        algoConfig(this.prisma, 'fairness.band'),
+        algoConfig(this.prisma, 'fairness.windowMinutes'),
+      ]);
+      const windowMs = Math.min(24 * 60, Math.max(5, Number(windowMin.value) || 60)) * 60_000;
+      const since = Date.now() - windowMs;
+      const offersInWindow = new Map<string, number>();
+      const lastOfferAt = new Map<string, number>();
+      for (const c of ranked) {
+        const [count, last] = await Promise.all([
+          this.redis.zcount(offersSentKey(c.riderId), since, '+inf'),
+          this.redis.zrevrange(offersSentKey(c.riderId), 0, 0, 'WITHSCORES'),
+        ]);
+        offersInWindow.set(c.riderId, count);
+        if (last[1]) lastOfferAt.set(c.riderId, Number(last[1]));
+      }
+      const r = applyFairnessBand(ranked, profile, { band: Math.min(0.5, Math.max(0, Number(band.value) || 0)), offersInWindow, lastOfferAt });
+      const live = Boolean(enabled.value);
+      if (r.changed) {
+        await recordDecision(this.prisma, {
+          algo: 'ALG-01', subjectType: 'ORDER', subjectId: orderId, outcome: live ? 'REORDERED' : 'WOULD_REORDER', shadow: !live,
+          sentence: `${live ? 'The' : 'Shadow: the'} fairness band moved ${r.order[0]!.riderId === ranked[0]!.riderId ? 'a lower position' : 'the first offer'} to the rider with fewer offers this hour (${r.groups.length} tied group${r.groups.length === 1 ? '' : 's'}).`,
+          inputs: {
+            profile, band: Number(band.value), windowMinutes: Number(windowMin.value),
+            before: ranked.slice(0, 5).map((c) => c.riderId), after: r.order.slice(0, 5).map((c) => c.riderId),
+            offersInWindow: Object.fromEntries([...offersInWindow].filter(([id]) => ranked.slice(0, 5).some((c) => c.riderId === id))),
+            groups: r.groups,
+          },
+          configVersion: Math.max(enabled.version, band.version, windowMin.version),
+        });
+      }
+      return live ? r.order : ranked;
+    } catch (err) {
+      log().warn({ err, orderId }, 'dispatch: fairness band skipped — pure ranking used');
+      return ranked;
+    }
   }
 
   /** Safety-driven pool exclusions (spec §8.5 retaliation guard + §8.3
@@ -915,6 +973,11 @@ export class DispatchService {
           return {}; // whoever retired it already owns the cascade
         }
 
+        // [ALG-01] The fairness window's source of truth: every offer this
+        // rider RECEIVED, by time. Declines and expiries are logged apart
+        // (Kerb D5: acceptance rate is information, never a gate).
+        await this.redis.zadd(offersSentKey(top.riderId), Date.now(), `${orderId}:${attemptId}`).catch(() => {});
+        await this.redis.expire(offersSentKey(top.riderId), OFFER_LOG_TTL_S).catch(() => {});
         try {
           this.io.to(`user:${top.userId}`).emit('dispatch:offer', {
             orderId,
@@ -1287,6 +1350,9 @@ export class DispatchService {
   async handleOfferTimeout(orderId: string, moverId: string, attemptId?: string): Promise<void> {
     const removed = await this.removeOfferIfOwned(orderId, moverId, attemptId);
     if (!removed) return; // answered or superseded — never delete the new offer
+    // [ALG-01] An expiry is not a decline: logged apart, counted by nobody as a gate.
+    await this.redis.zadd(offerOutcomeKey(moverId, 'expiries'), Date.now(), `${orderId}:${attemptId ?? ''}`).catch(() => {});
+    await this.redis.expire(offerOutcomeKey(moverId, 'expiries'), OFFER_LOG_TTL_S).catch(() => {});
 
     const pool = await this.poolOf(orderId);
     await this.redis.sadd(declinedKey(orderId), moverId);
@@ -1355,6 +1421,9 @@ export class DispatchService {
     await this.redis.sadd(declinedKey(orderId), mover.id);
     await this.redis.expire(declinedKey(orderId), 3600);
     await this.recordOfferOutcome(mover.id, false, pool);
+    // [ALG-01] An explicit decline is not an expiry: logged apart, counted by nobody as a gate.
+    await this.redis.zadd(offerOutcomeKey(mover.id, 'declines'), Date.now(), `${orderId}:${offerAttemptId ?? ''}`).catch(() => {});
+    await this.redis.expire(offerOutcomeKey(mover.id, 'declines'), OFFER_LOG_TTL_S).catch(() => {});
 
     await this.dispatchOrder(orderId);
   }
