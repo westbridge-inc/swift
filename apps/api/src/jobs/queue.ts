@@ -1241,6 +1241,21 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'prep-stats-nightly') {
+        // [ALG-03] The prep-time learner: recompute every vendor's acceptedAt →
+        // readyAt distribution from the trailing 30 days.
+        const { computePrepStats } = await import('../modules/prep/prep-time');
+        ctx.log.info(await computePrepStats(ctx.prisma), 'prep-time: stats recomputed');
+        return;
+      }
+      if (job.name === 'prep-shadow-grade') {
+        // [ALG-03] Grade the shadow predictions against what actually happened
+        // and record whether the promotion gate passed.
+        const { gradeShadow } = await import('../modules/prep/prep-time');
+        const r = await gradeShadow(ctx.prisma);
+        ctx.log.info({ graded: r.graded, medianAbsErrorMinutes: r.medianAbsErrorMinutes, p80Coverage: r.p80Coverage, passes: r.gate.passes }, 'prep-time: shadow graded');
+        return;
+      }
       if (job.name === 'mmg-link-apply') {
         // [ALG-34 / ALG-INV-14] Staged MMG pay link changes go live only after
         // their cool-off passed with no cancellation from the owner.
@@ -1735,6 +1750,10 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnComplete: 5,
     removeOnFail: 5,
   });
+
+  // [ALG-03] Prep-time learner: nightly stats at 03:10, the shadow grade at 03:25.
+  await queues.dispatchQueue.add('prep-stats-nightly', {}, { repeat: { pattern: '10 3 * * *' }, removeOnComplete: 5, removeOnFail: 5 });
+  await queues.dispatchQueue.add('prep-shadow-grade', {}, { repeat: { pattern: '25 3 * * *' }, removeOnComplete: 5, removeOnFail: 5 });
 
   // [ALG-34] MMG pay link cool-off: every five minutes, apply what is due.
   await queues.dispatchQueue.add('mmg-link-apply', {}, {

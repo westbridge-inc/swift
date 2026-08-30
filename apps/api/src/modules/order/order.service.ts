@@ -18,6 +18,7 @@ import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from '.
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
+import { shadowPredictAtAccept } from '../prep/prep-time';
 import { AppError, ConflictError } from '../../utils/errors';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
@@ -2040,6 +2041,9 @@ export class OrderService {
     const riderName = order.rider?.user?.firstName || 'Your rider';
     switch (status) {
       case 'ACCEPTED':
+        // [ALG-03] Shadow: what the prep-time learner WOULD predict, written beside
+        // the accept for the nightly grade. Fire-and-forget; never in the way.
+        void shadowPredictAtAccept(this.prisma, orderId);
         await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         break;
       case 'PREPARING':

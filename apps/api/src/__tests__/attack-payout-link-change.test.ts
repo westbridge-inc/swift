@@ -99,7 +99,7 @@ const smsTo = (phone: string) => devChannelLog.filter((e) => e.channel === 'sms'
  *  The one-send-a-minute account limit is real; the test lifts it so the walk can repeat. */
 async function stepUpFor(token: string, who: { userId: string; phone: string }) {
   resetDevChannelLog();
-  await app.redis.del(`otp_rate:${stepUpCodeKey(who.userId)}`);
+  await app.redis.del(`otp_rate:${stepUpCodeKey(who.userId)}`, `otp_phone_day:${new Date().toISOString().slice(0, 10)}:${who.phone}`);
   const sent = await inject('POST', '/api/v1/auth/step-up', token);
   expect(sent.statusCode).toBe(200);
   const sms = smsTo(who.phone).at(-1);
@@ -127,6 +127,10 @@ beforeAll(async () => {
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.ready();
   await purge();
+  // The fixture phones are fixed strings; a run that died before its own
+  // purge leaves their daily SMS budget behind. Clear them up front too.
+  const day = new Date().toISOString().slice(0, 10);
+  await app.redis.del(...Array.from({ length: 30 }, (_, i) => `otp_phone_day:${day}:${PHONE_PREFIX}${String(i + 1).padStart(2, '0')}`));
 });
 
 async function purge() {
@@ -144,6 +148,11 @@ async function purge() {
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
   for (const id of ids) await app.redis.del(`otp:${stepUpCodeKey(id)}`, `otp_rate:${stepUpCodeKey(id)}`, `stepup:fail:${id}`, `stepup:lock:${id}`);
+  // The paid-SMS daily budget is keyed by PHONE and UTC day (utils/sms-budget):
+  // a fixture phone reused across runs would exhaust its real cap of 8.
+  const phones = await app.prisma.user.findMany({ where: { id: { in: ids } }, select: { phone: true } });
+  const day = new Date().toISOString().slice(0, 10);
+  for (const { phone } of phones) await app.redis.del(`otp_phone_day:${day}:${phone}`);
   await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
 }
 

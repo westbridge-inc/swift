@@ -4342,6 +4342,31 @@ model AlgoConfig {
 /// algorithm not yet live WOULD have decided — the founder's ≥2-week evidence
 /// before promotion. The appeal surface, the debugging surface and the
 /// founder's evidence, in one table. Retention: 90 days shadow, 400 days live.
+/// [ALG-03 / FMC Movement 12] The prep-time learner: the learned distribution
+/// of acceptedAt → readyAt per vendor, per day-of-week and hour bucket in
+/// America/Guyana. VENDOR-scope rows carry dayOfWeek/hourBucket = -1;
+/// VERTICAL-scope rows carry vendorId = "vertical:<VendorType>". Recomputed
+/// nightly from the trailing 30 days; outliers are counted, never averaged in.
+model VendorPrepStat {
+  id             String   @id @default(cuid())
+  tenantId       String   @default("swift-default")
+  scope          String   @default("BUCKET")
+  vendorId       String
+  dayOfWeek      Int
+  hourBucket     Int
+  sampleCount    Int
+  outlierCount   Int      @default(0)
+  medianItems    Int      @default(1)
+  p50Seconds     Int
+  p80Seconds     Int
+  p95Seconds     Int
+  lastComputedAt DateTime
+
+  @@unique([tenantId, vendorId, dayOfWeek, hourBucket])
+  @@index([vendorId])
+  @@map("vendor_prep_stats")
+}
+
 model AlgoDecision {
   id            String   @id @default(cuid())
   tenantId      String   @default("swift-default")
