@@ -383,9 +383,12 @@ export function OrdersHistoryScreen() {
               brand is reserved for the live card's one CTA. */}
           <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.sm }}>
             {isRide ? (
-              // No storefront to reorder from — rebook the same trip instead.
+              // No storefront to reorder from. The button opens a FRESH taxi
+              // form — nothing prefills the old route — so it says "Book a
+              // taxi", not "Book again": a label must never promise a repeat
+              // it doesn't perform.
               <PillButton
-                label="Book again"
+                label="Book a taxi"
                 variant="outline"
                 size="md"
                 onPress={() => navigation.navigate('Taxi')}
