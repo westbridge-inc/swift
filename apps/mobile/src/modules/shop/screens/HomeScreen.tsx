@@ -25,6 +25,7 @@ import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
 import { categoryPhoto, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { orderStatusLabel, orderSubtitle } from '../../../lib/orderStatus';
+import { promiseLine } from '../../../lib/promise';
 // ONE hold authority, shared with the tracking screen — never a second
 // countdown that could disagree with it about whether the window is open.
 import { holdRingActive, holdRingWindow } from '../../../kit/hold-window';
@@ -192,6 +193,10 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
   const hold = holdRingWindow(order.holdExpiresAt, order.placedAt, now, false);
   const remaining = hold ? Math.ceil(hold.remainingMs / 1000) : 0;
   const mmss = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
+  // [ALG-12] The promise range from the server (Home is cached ~60 s, so the
+  // range is an absolute window and stays true out of the cache); a passed
+  // window is never shown as still coming.
+  const promise = promiseLine(order.promise, now);
 
   return (
     <View style={{ paddingHorizontal: GUTTER, marginTop: space.lg }}>
@@ -227,6 +232,11 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
                   `The store hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
                 : orderSubtitle(order.vendor?.name, order.orderNumber)}
             </T>
+            {promise && !hold ? (
+              <T variant="caption" style={{ marginTop: 4 }}>
+                {promise.label}
+              </T>
+            ) : null}
           </View>
           <PillButton
             // [Wave 3 vs reference 03] "Track", both states — the reference and

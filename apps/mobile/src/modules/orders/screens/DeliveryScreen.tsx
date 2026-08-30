@@ -18,6 +18,7 @@ import { useOrder, useDecideSubstitution } from '../../../hooks/customer';
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
+import { promiseLine, promiseNote } from '../../../lib/promise';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
 import { toast } from '../../../kit/toast';
@@ -534,6 +535,7 @@ export function DeliveryScreen() {
     s.on('order:status_changed', onStatus);
     s.on('order:prep_update', onStatus);
     s.on('order:substitution', onStatus);
+    s.on('order:promise_revised', onStatus);
     s.on('connect', onConnect);
     s.on('disconnect', onDisconnect);
     s.on('connect_error', onConnectError);
@@ -543,6 +545,7 @@ export function DeliveryScreen() {
       s.off('order:status_changed', onStatus);
       s.off('order:prep_update', onStatus);
       s.off('order:substitution', onStatus);
+      s.off('order:promise_revised', onStatus);
       s.off('connect', onConnect);
       s.off('disconnect', onDisconnect);
       s.off('connect_error', onConnectError);
@@ -786,6 +789,14 @@ export function DeliveryScreen() {
   } else if (o.fulfillment === 'PICKUP' && serverPrepMinutes != null) {
     etaCopy = `Estimated ready time · ~${serverPrepMinutes} min`;
   } else if (serverEstimateMinutes != null) etaCopy = `Server estimate · ~${serverEstimateMinutes} min total`;
+
+  // [ALG-12] The promise the customer was given at checkout — a RANGE on
+  // five-minute marks from the server, recomputed against this screen's
+  // ticking clock so a passed window is never shown as still coming
+  // (R-12.2.4). The live line above is labelled live; this is the commitment
+  // (L7). Delivery orders only, and only while the order is still coming.
+  const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete ? promiseLine(o.promise, nowTs) : null;
+  const promiseUpdate = promiseNote(o.promise);
 
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
@@ -1180,6 +1191,16 @@ export function DeliveryScreen() {
               <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
                 {etaCopy}
               </T>
+              {promise ? (
+                <T variant="label" style={{ marginTop: space.xs }} testID="promise-range">
+                  {promise.label}
+                </T>
+              ) : null}
+              {promise && promiseUpdate ? (
+                <T variant="caption" tone="faint" style={{ marginTop: 2 }}>
+                  {promiseUpdate}
+                </T>
+              ) : null}
               {o.fulfillment === 'PICKUP' && o.pickupAddress ? (
                 <T variant="caption" tone="faint" style={{ marginTop: space.xs }} numberOfLines={1}>
                   From: {o.pickupAddress}
