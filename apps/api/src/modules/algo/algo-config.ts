@@ -88,6 +88,18 @@ export const ALGO_DEFAULTS = {
   'gps.maxPlausibleKmh': 140,
   /** [ALG-15] Kill switch. Off ⇒ no assessment, no trace, no rows — today's behaviour. */
   'ALG-15.enabled': true,
+  /**
+   * [ALG-38] The generic velocity engine's per-action limits, for the
+   * surfaces no dedicated limiter thought about. Each action: how many in
+   * how many seconds per ACTOR, and per identity CLUSTER (the one that
+   * matters — per-account limits are defeated by making accounts). A stored
+   * override merges over these per action. Safety actions are never here
+   * and never limited.
+   */
+  'velocity.limits': {
+    'promo.validate': { max: 10, perSeconds: 600, clusterMax: 30 },
+    'return.request': { max: 5, perSeconds: 86_400, clusterMax: 10 },
+  } as Record<string, { max: number; perSeconds: number; clusterMax?: number }>,
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;
