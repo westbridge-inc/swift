@@ -69,3 +69,5 @@ export * from './hold-ring';
 export * from './hold-window';
 export * from './calm-radar';
 export * from './trust-halo';
+// [#910's law] modal exits close in their own tick; navigation goes here.
+export * from './after-dismiss';

@@ -25,6 +25,7 @@ import {
   SectionHeader,
   T,
 } from '../../../kit';
+import { afterDismiss } from '../../../kit/after-dismiss';
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
@@ -462,7 +463,7 @@ export function MenuItemScreen() {
             size="md"
             onPress={() => {
               setAdded(false);
-              navigation.navigate('Tabs', { screen: 'Cart' });
+              afterDismiss(() => navigation.navigate('Tabs', { screen: 'Cart' }));
             }}
           />
           <PillButton label="Keep browsing" variant="soft" size="md" onPress={() => setAdded(false)} />

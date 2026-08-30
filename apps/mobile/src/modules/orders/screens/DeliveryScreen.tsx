@@ -22,6 +22,7 @@ import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
 import { toast } from '../../../kit/toast';
 import { CircleChip, DecorativeIcon, ErrorState, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
+import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
@@ -1425,7 +1426,7 @@ export function DeliveryScreen() {
             size="md"
             onPress={() => {
               setArrived(false);
-              navigation.navigate('Feedback', { orderId });
+              afterDismiss(() => navigation.navigate('Feedback', { orderId }));
             }}
           />
           <PillButton label="Later" variant="soft" size="md" onPress={() => setArrived(false)} />
