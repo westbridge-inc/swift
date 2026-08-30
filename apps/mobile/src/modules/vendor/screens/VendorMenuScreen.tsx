@@ -604,9 +604,16 @@ export function VendorMenuScreen({ navigation }: any) {
             ))
           )}
 
+          {/* [Wave 3 · ref 20] The reference's fuller promise, verified true
+              before being written: proposeSubstitution (vendor) → the
+              customer approves/rejects LIVE (hooks/customer.ts §5.3), with
+              refund-line when nothing can swap. The screen may only ever
+              claim what the rails actually do. */}
           {categories.length > 0 ? (
             <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-              Switching an item off stops it being added to new orders. Existing orders are never silently changed.
+              Sold-out items hide from new orders instantly and return the moment you switch them back
+              on. A live order holding an item you just 86&apos;d asks the customer to swap — or the
+              line is refunded — never a silent removal.
             </T>
           ) : null}
         </ScrollView>
