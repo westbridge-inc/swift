@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   ShieldAlert,
   Flag,
+  Fingerprint,
   Megaphone as AdsIcon,
   RefreshCw,
   LifeBuoy,
@@ -66,6 +67,7 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
     items: [
       { label: 'Tickets', href: '/support', icon: LifeBuoy },
       { label: 'Moderation', href: '/moderation', icon: Flag },
+      { label: 'Integrity', href: '/integrity', icon: Fingerprint },
       { label: 'Discovery', href: '/discovery', icon: Compass },
       { label: 'Ads review', href: '/ads', icon: AdsIcon },
       { label: 'Returns', href: '/returns', icon: PackageOpen },
