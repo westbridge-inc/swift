@@ -456,18 +456,29 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {order.paymentMethod === 'MOBILE_MONEY'
-            ? 'The customer is told right away. If their MMG payment already reached your MMG, refund them directly — Swift never holds the money. This can’t be undone.'
-            : 'The customer is told right away. This can’t be undone.'}
+            ? 'The customer is told right away — pick what happened. If their MMG payment already reached your MMG, refund them directly; Swift never holds the money. This can’t be undone.'
+            : 'The customer is told right away — pick what happened. This can’t be undone.'}
         </T>
-        <PillButton
-          label="Reject order"
-          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-          onPress={() => {
-            setConfirmReject(false);
-            orderAction.mutate({ id: order.id, action: 'reject' });
-          }}
-        />
-        <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmReject(false)} />
+        {/* [Wave 3 · one voice with #935] A rejection always collects its
+            reason — the takeover learned this; the detail screen's same
+            reject path was still sending none, so every rejection from HERE
+            was recorded as the default "Rejected by vendor". Same presets,
+            one tap, and the reason reaches the customer's cancellation
+            record. */}
+        {(['Out of stock', 'Kitchen is too busy', 'Closing soon'] as const).map((why) => (
+          <PillButton
+            key={why}
+            label={why}
+            variant="outline"
+            style={{ alignSelf: 'stretch', marginTop: space.md }}
+            disabled={busy}
+            onPress={() => {
+              setConfirmReject(false);
+              orderAction.mutate({ id: order.id, action: 'reject', reason: why });
+            }}
+          />
+        ))}
+        <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setConfirmReject(false)} />
       </PopupCard>
     </Screen>
   );
