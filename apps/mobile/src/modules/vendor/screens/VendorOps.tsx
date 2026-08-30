@@ -16,6 +16,7 @@ import {
   T,
   TonePill,
 } from '../../../kit';
+import { afterDismiss } from '../../../kit/after-dismiss';
 import {
   BoardFirstRun,
   BoardFirstRunRow,
@@ -736,7 +737,7 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           onPress={() => {
             setShareOpen(false);
-            navigation.navigate('VendorMyQr');
+            afterDismiss(() => navigation.navigate('VendorMyQr'));
           }}
         />
         <PillButton
@@ -746,7 +747,7 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           style={{ alignSelf: 'stretch', marginTop: space.md }}
           onPress={() => {
             setShareOpen(false);
-            navigation.navigate('VendorMySwiftNumber');
+            afterDismiss(() => navigation.navigate('VendorMySwiftNumber'));
           }}
         />
       </PopupCard>

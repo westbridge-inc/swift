@@ -8,6 +8,7 @@ import { color, radius, space } from '@swift/ui';
 import { useItemFeedback, useOrder, useRateOrder, useRatingTags } from '../../../hooks/customer';
 import { DARK_BLURHASH, vendorPhoto } from '../../../lib/images';
 import { Chip, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T } from '../../../kit';
+import { afterDismiss } from '../../../kit/after-dismiss';
 
 const GUTTER = space['2xl'];
 
@@ -339,7 +340,7 @@ export function FeedbackScreen() {
         visible={done}
         onClose={() => {
           setDone(false);
-          navigation.goBack();
+          afterDismiss(() => navigation.goBack());
         }}
       >
         <IconChip icon="thumbs-up" size={64} />
@@ -354,7 +355,7 @@ export function FeedbackScreen() {
           size="md"
           onPress={() => {
             setDone(false);
-            navigation.goBack();
+            afterDismiss(() => navigation.goBack());
           }}
           style={{ alignSelf: 'stretch', marginTop: space.xl }}
         />
