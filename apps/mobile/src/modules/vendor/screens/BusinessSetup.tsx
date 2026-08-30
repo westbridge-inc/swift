@@ -155,7 +155,28 @@ export function BusinessSetup() {
             Couldn&apos;t create your store. Try again.
           </T>
         ) : null}
-        <PillButton label="Create store" loading={become.isPending} disabled={!valid} style={{ marginTop: space.lg }} onPress={submit} />
+        {/* [#947's grammar] Disabled names the first missing thing, in the
+            order the form asks for them — the pin first, because without it
+            nothing else matters. */}
+        <PillButton
+          label={
+            !hasPin
+              ? 'Turn location on first'
+              : name.trim().length < 2
+                ? 'Name your business'
+                : phone.trim().length < 5
+                  ? 'Add the business phone'
+                  : addr.trim().length < 3
+                    ? 'Add the street address'
+                    : city.trim().length < 2
+                      ? 'Add the city'
+                      : 'Create store'
+          }
+          loading={become.isPending}
+          disabled={!valid}
+          style={{ marginTop: space.lg }}
+          onPress={submit}
+        />
         {/* The model line lives BELOW the work — the queue is the job. */}
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], paddingHorizontal: space.md, paddingVertical: space.sm, marginTop: space.md }}>
           <MaterialCommunityIcons name="check-decagram" size={15} color={color.success} />
