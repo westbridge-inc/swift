@@ -59,6 +59,8 @@ export function useBecomePartner() {
       role: 'MOVER' | 'VENDOR';
       vehicleType?: VehicleKind;
       vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
+      /** [DCR-1] The role-agreement checkbox, recorded in the consent ledger. */
+      acceptAgreement?: boolean;
       business?: {
         name: string;
         vendorType: 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';

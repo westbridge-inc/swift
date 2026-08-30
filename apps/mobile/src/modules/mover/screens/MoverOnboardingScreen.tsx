@@ -8,7 +8,8 @@ import { SwiftMark } from '../../../components/SwiftLogo';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useVerificationStatus, useBecomePartner } from '../../../hooks';
-import { DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
+import { API_URL, DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
+import { openPayLink } from '../../../lib/payLink';
 import { useAuthStore } from '../../../stores/authStore';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { GUTTER } from '../shared';
@@ -87,6 +88,9 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
   const [year, setYear] = useState('');
   const [colr, setColr] = useState('');
   const [plate, setPlate] = useState('');
+  // [DCR-1] The Mover Agreement consent — recorded in the ledger with the
+  // exact version at provisioning, the same way signup records the Terms.
+  const [agree, setAgree] = useState(false);
   const needsDetails = DRIVER_VEHICLE_KINDS.includes(vt);
   const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate);
 
@@ -96,6 +100,7 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
         role: 'MOVER',
         vehicleType: vt,
         vehicle: needsDetails ? { make, model, year: Number(year) || 0, color: colr, licensePlate: plate } : undefined,
+        acceptAgreement: agree,
       },
       { onSuccess: onDone },
     );
@@ -123,6 +128,25 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
           <LabeledInput value={plate} onChangeText={setPlate} placeholder="Licence plate" autoCapitalize="characters" />
         </View>
       ) : null}
+      <Pressable
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked: agree }}
+        accessibilityLabel="I agree to the Mover Agreement"
+        onPress={() => setAgree((v) => !v)}
+        style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}
+      >
+        <MaterialCommunityIcons
+          name={agree ? 'checkbox-marked' : 'checkbox-blank-outline'}
+          size={22}
+          color={agree ? color.brand[500] : color.text.muted}
+        />
+        <T variant="label" style={{ flexShrink: 1 }}>
+          I agree to the{' '}
+          <T variant="label" tone="brand" onPress={() => void openPayLink(`${API_URL}/legal/driver-agreement`)}>
+            Mover Agreement
+          </T>
+        </T>
+      </Pressable>
       {become.isError ? (
         <T variant="label" tone="error" style={{ marginTop: space.md }}>
           Couldn&apos;t save. Try again.
@@ -130,9 +154,9 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
       ) : null}
       {/* [#947's grammar] Disabled says the ask. */}
       <PillButton
-        label={valid ? 'Save vehicle' : 'Fill in the vehicle details'}
+        label={!valid ? 'Fill in the vehicle details' : !agree ? 'Agree to the Mover Agreement first' : 'Save vehicle'}
         loading={become.isPending}
-        disabled={!valid}
+        disabled={!valid || !agree}
         style={{ marginTop: space.md }}
         onPress={submit}
       />

@@ -32,6 +32,10 @@ const becomeSchema = z.object({
   vehicleType: z.nativeEnum(VehicleType).optional(),
   vehicle: vehicleSchema.optional(),
   business: businessSchema.optional(),
+  // [DCR-1] The role-agreement checkbox. Optional so builds that predate the
+  // control keep working — consent is recorded when the checkbox rode the
+  // request, exactly as ticked. Never fabricated for old clients.
+  acceptAgreement: z.boolean().optional(),
 });
 
 export async function partnerRoutes(app: FastifyInstance) {
@@ -49,6 +53,8 @@ export async function partnerRoutes(app: FastifyInstance) {
         request.user.userId,
         targetRole,
       ),
+      // [DCR-1] Ledger context for the role-agreement consent row.
+      { accepted: body.acceptAgreement === true, ip: request.ip },
     );
     await completeUserRoleAuthorityTransition(app, authorityCleanup);
     reply.code(result.created ? 201 : 200);
