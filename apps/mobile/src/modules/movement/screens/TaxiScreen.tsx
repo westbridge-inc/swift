@@ -12,7 +12,7 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useQueryClient } from '@tanstack/react-query';
-import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useQueueStatus, useJoinQueue, useLeaveQueue } from '../../../hooks';
+import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue } from '../../../hooks';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -107,6 +107,29 @@ function PickupDot() {
 }
 function DropPin() {
   return <PinGlyph size={34} color={color.brand[600]} />;
+}
+/** [rides 5.1/6.2] A free car on the idle map — coarse presence, drawn small
+ *  and quiet in the pickup-dot's own ink-on-white language. */
+function PresenceCar() {
+  return (
+    <View
+      style={[
+        {
+          width: 22,
+          height: 22,
+          borderRadius: radius.full,
+          backgroundColor: color.surface.base,
+          borderWidth: 1,
+          borderColor: color.border.subtle,
+          alignItems: 'center',
+          justifyContent: 'center',
+        },
+        cardShadow,
+      ]}
+    >
+      <Pictogram name="taxi" size={12} color={color.text.primary} />
+    </View>
+  );
 }
 
 /** Route card: pickup dot → destination pin, two pressable rows. */
@@ -293,6 +316,8 @@ export function TaxiScreen({ navigation }: any) {
   // match creates a REAL ride server-side, so the active-ride poll flips the
   // screen; the push covers the backgrounded case.
   const supplyCounts = useRideSupply(pickupPoint);
+  // [rides 5.1/6.2] The idle map is ALIVE: coarse presence near the pickup.
+  const presenceQ = useRidePresence(pickupPoint);
   const queue = useQueueStatus();
   const joinQueue = useJoinQueue();
   const leaveQueue = useLeaveQueue();
@@ -420,6 +445,22 @@ export function TaxiScreen({ navigation }: any) {
             <DropPin />
           </Marker>
         ) : null}
+        {/* [rides 5.1/6.2] Up to 12 server-jittered free cars — the honest
+            "map is alive" read. An empty answer draws NOTHING: absence is
+            never dressed as supply, and the jitter is the server's privacy
+            design (no identities, no bearings, ~100m coarse). */}
+        {!queued
+          ? (presenceQ.data?.cars ?? []).map((c, i) => (
+              <Marker
+                key={`presence-${i}`}
+                coordinate={{ latitude: c.lat, longitude: c.lng }}
+                anchor={{ x: 0.5, y: 0.5 }}
+                tracksViewChanges={false}
+              >
+                <PresenceCar />
+              </Marker>
+            ))
+          : null}
       </MapView>
 
       <FloatingBack navigation={navigation} insets={insets} />

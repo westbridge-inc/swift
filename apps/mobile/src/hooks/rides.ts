@@ -58,6 +58,19 @@ export function useRideSupply(point?: Point) {
   });
 }
 
+/** [rides 5.1/6.2] The "map is alive" read: up to 12 COARSE, server-jittered
+ *  free cars near the pickup. The jitter is the server's privacy design —
+ *  no identities, no bearings, positions stable per 5-minute bucket. An empty
+ *  answer means the map draws nothing: absence is never dressed as supply. */
+export function useRidePresence(point?: Point) {
+  return useQuery<{ cars: { lat: number; lng: number }[] }>({
+    queryKey: ['rides', 'presence', point ? `${point.lat.toFixed(3)},${point.lng.toFixed(3)}` : null],
+    queryFn: () => unwrap(rideApi.presence(point as Point)),
+    enabled: !!point,
+    refetchInterval: 60_000,
+  });
+}
+
 export type QueueStatus = {
   id: string;
   position: number;
