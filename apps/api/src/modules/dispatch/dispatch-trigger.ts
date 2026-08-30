@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { log } from '../../utils/logger';
 
 /**
  * FUL-005 (fulfillment prompt Part 5.1): WHEN a delivery order is dispatched to
@@ -19,9 +20,35 @@ import type { FastifyInstance } from 'fastify';
  * existing behavior is unchanged until it's flipped deliberately.
  */
 export type DispatchTrigger = 'ON_ACCEPT' | 'ON_READY';
+export type RequestedDispatchTrigger = DispatchTrigger | 'PREDICTIVE';
 
+/** What the deployment ASKED for — including PREDICTIVE, which is not live yet. */
+export function requestedDispatchTrigger(): RequestedDispatchTrigger {
+  const v = process.env['DISPATCH_TRIGGER'];
+  return v === 'ON_READY' || v === 'PREDICTIVE' ? v : 'ON_ACCEPT';
+}
+
+let predictiveWarned = false;
+/** Test seam only. */
+export function _resetPredictiveWarning(): void { predictiveWarned = false; }
+
+/**
+ * What dispatch actually runs. [ALG-03 / R-2.4.2] PREDICTIVE needs a promoted
+ * prep-time learner (the nightly shadow gate: median error ≤ 4 min, p80
+ * coverage ≥ 80%). Until then it degrades to ON_ACCEPT — never earlier than
+ * ON_ACCEPT would dispatch, per the algorithm document's clamp — and says so
+ * once in the log rather than silently.
+ */
 export function dispatchTrigger(): DispatchTrigger {
-  return process.env['DISPATCH_TRIGGER'] === 'ON_READY' ? 'ON_READY' : 'ON_ACCEPT';
+  const requested = requestedDispatchTrigger();
+  if (requested === 'PREDICTIVE') {
+    if (!predictiveWarned) {
+      predictiveWarned = true;
+      log().warn({ requested }, 'dispatch-trigger: PREDICTIVE requested but the prep-time learner is unpromoted (ALG-03 shadow) — dispatching ON_ACCEPT');
+    }
+    return 'ON_ACCEPT';
+  }
+  return requested;
 }
 
 /**

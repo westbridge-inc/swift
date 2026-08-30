@@ -104,6 +104,25 @@ export const ALGO_DEFAULTS = {
    */
   'money.linkCooloffHours': 24,
   /**
+   * [ALG-03] Prep-time learner. A vendor/day/hour bucket needs this many
+   * samples before its own numbers are used; below it, the vendor's overall
+   * (min `prep.minVendorSamples`), then the vertical's, then the vendor's own
+   * declared prep time, then 30 minutes. Shadow only until the gate passes.
+   */
+  'prep.minBucketSamples': 20,
+  'prep.minVendorSamples': 8,
+  /** [ALG-03] Basket adjustment: seconds per item beyond the bucket's median basket. */
+  'prep.perItemSeconds': 60,
+  /** [ALG-03] Live-load adjustment: seconds per order already ACCEPTED/PREPARING at the vendor. */
+  'prep.queueSeconds': 90,
+  /**
+   * [ALG-03] The promotion gate for PREDICTIVE dispatch, graded nightly from
+   * shadow rows: median absolute error ≤ this many minutes AND p80 coverage
+   * ≥ this fraction, over at least 30 graded predictions.
+   */
+  'prep.gateMaeMinutes': 4,
+  'prep.gateCoverage': 0.8,
+  /**
    * [ALG-38] The generic velocity engine's per-action limits, for the
    * surfaces no dedicated limiter thought about. Each action: how many in
    * how many seconds per ACTOR, and per identity CLUSTER (the one that
