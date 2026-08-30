@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
+import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
 import { z } from 'zod';
 import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
@@ -258,7 +259,7 @@ export async function riderRoutes(app: FastifyInstance) {
    *  evidence, strikes the customer, and opens the guarantee claim. */
   app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    await getRider(app, request.user.userId); // authz before validation
+    const rider = await getRider(app, request.user.userId); // authz before validation
     const body = handoverSchema.parse(request.body);
     // Idempotent on Idempotency-Key: a network-retried handover returns the
     // original result instead of failing the (now-terminal) transition.
@@ -277,6 +278,12 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!replayed && app.dispatchQueue) {
       void app.dispatchQueue.add('route-match', { orderId: id }, { attempts: 3, backoff: { type: 'exponential', delay: 30_000 }, removeOnComplete: 50, removeOnFail: 20 })
         .catch((err: unknown) => request.log.warn({ err, orderId: id }, 'route-match: enqueue failed'));
+    }
+    // [ALG-30] Advisory: a completion with nothing near the drop behind it, or
+    // declared from far away, is a row for the reviewer — never a penalty,
+    // never a word to the rider.
+    if (!replayed && data.status === 'DELIVERED') {
+      await assessCompletion({ prisma: app.prisma, redis: app.redis }, { riderId: rider.id, orderId: id, completedAt: new Date(), declared: body.gps });
     }
     return { success: true, data, replayed };
   });
@@ -1490,6 +1497,11 @@ export async function riderRoutes(app: FastifyInstance) {
       void app.dispatchQueue.add('route-match', { orderId: id }, { attempts: 3, backoff: { type: 'exponential', delay: 30_000 }, removeOnComplete: 50, removeOnFail: 20 })
         .catch((err: unknown) => request.log.warn({ err, orderId: id }, 'route-match: enqueue failed'));
     }
+    // [ALG-30] Advisory: a completion with nothing near the drop behind it is
+    // a row for the reviewer — never a penalty, never a word to the rider.
+    if (!replayed) {
+      await assessCompletion({ prisma: app.prisma, redis: app.redis }, { riderId: rider.id, orderId: id, completedAt: new Date() });
+    }
     return { success: true, data, replayed };
   });
 
@@ -1781,6 +1793,7 @@ export async function riderRoutes(app: FastifyInstance) {
           id: true, status: true, orderType: true, customerId: true, orderNumber: true,
           riderId: true, paymentMethod: true, subtotalBase: true,
           preparingAt: true, readyAt: true,
+          acceptedAt: true, pickupLat: true, pickupLng: true, deliveryLat: true, deliveryLng: true,
         },
       });
       if (!order || order.riderId !== rider.id || order.orderType === 'TAXI') {
@@ -1800,7 +1813,18 @@ export async function riderRoutes(app: FastifyInstance) {
       // hold a sibling leg, and the pointer must land on it, never on null.
       await settleRiderLegs(tx, rider.id, { prisma: app.prisma, excludeOrderId: id });
 
-      return { reopenStatus, customerId: order.customerId };
+      return { reopenStatus, customerId: order.customerId, order };
+    });
+
+    // [ALG-30] Advisory: an accept-then-handback inside the window is the
+    // cherry-picking signal — a row for the reviewer with the evidence
+    // attached, never a penalty, never a word to the rider. The response
+    // below is exactly what it was.
+    await assessHandback({ prisma: app.prisma, redis: app.redis }, {
+      riderId: rider.id, riderUserId: request.user.userId, orderId: id, reason,
+      acceptedAt: outcome.order.acceptedAt, handedBackAt: new Date(), basket: Number(outcome.order.subtotalBase),
+      pickup: outcome.order.pickupLat != null && outcome.order.pickupLng != null ? { lat: outcome.order.pickupLat, lng: outcome.order.pickupLng } : null,
+      drop: { lat: outcome.order.deliveryLat, lng: outcome.order.deliveryLng },
     });
 
     // Post-commit garnish — none of it may turn a committed handback into an

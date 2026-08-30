@@ -2983,6 +2983,37 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Part 7/10 KPIs — every number derived from the rows money and state
    *  moved on (the DB testifies). Reading it at t0 IS the baseline capture;
    *  re-read after each friction fix lands. */
+  /**
+   * GET /integrity/flags — the review queue behind the advisory detectors
+   * (ALG-15 position, ALG-30 cherry-picking / fake completion, …): the
+   * non-shadow AlgoDecision rows, newest first, evidence attached. A flag is
+   * a row for a reviewer, never a penalty (L3) — this is where the reviewer
+   * reads it. Shadow rows are science, not cases, and stay out.
+   */
+  app.get('/integrity/flags', { preHandler: [platformControlGuard] }, async (request) => {
+    const q = z.object({
+      algo: z.string().regex(/^ALG-\d{1,3}$/).optional(),
+      subjectType: z.enum(['ORDER', 'RIDER', 'DRIVER', 'VENDOR', 'CUSTOMER', 'ITEM']).optional(),
+      subjectId: z.string().min(1).max(64).optional(),
+      days: z.coerce.number().int().min(1).max(90).default(7),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }).parse(request.query ?? {});
+    const since = new Date(Date.now() - q.days * 24 * 60 * 60 * 1000);
+    const flags = await tenantPrisma.algoDecision.findMany({
+      where: {
+        shadow: false,
+        createdAt: { gte: since },
+        ...(q.algo ? { algo: q.algo } : {}),
+        ...(q.subjectType ? { subjectType: q.subjectType } : {}),
+        ...(q.subjectId ? { subjectId: q.subjectId } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: q.limit,
+      select: { id: true, algo: true, subjectType: true, subjectId: true, outcome: true, sentence: true, inputs: true, configVersion: true, createdAt: true },
+    });
+    return { success: true, data: { flags, windowDays: q.days } };
+  });
+
   app.get('/integrity/kpis', { preHandler: [platformControlGuard] }, async (request) => {
     const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query ?? {});
     // [REPORT-021 F-021-17] signup_attempts retains 90d (retention registry):
