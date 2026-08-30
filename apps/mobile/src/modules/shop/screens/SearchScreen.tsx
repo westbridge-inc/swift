@@ -449,8 +449,12 @@ export function SearchScreen() {
               <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] }}>
                 {results.length > 0 ? (
                   <>
+                    {/* [Wave 3 vs reference 10] The header says HOW the list is
+                        ordered, not just how long it is. In engine mode the
+                        ranking is the engine's — relevance — and saying so is
+                        the honest version of the reference's "sorted by". */}
                     <T variant="caption" tone="muted" style={{ marginBottom: space.sm }}>
-                      {results.length} {results.length === 1 ? 'place' : 'places'}
+                      {results.length} {results.length === 1 ? 'place' : 'places'} · sorted by relevance
                     </T>
                     {results.map((v: any, i: number) => (
                       <React.Fragment key={v.id}>
@@ -495,8 +499,11 @@ export function SearchScreen() {
                 contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] }}
                 ItemSeparatorComponent={Divider}
                 ListHeaderComponent={
+                  // [Wave 3 vs reference 10] "4 places · sorted by recommended"
+                  // — the applied server sort, named; never a claim about an
+                  // order that wasn't applied (the distance rule above).
                   <T variant="caption" tone="muted" style={{ marginBottom: space.sm }}>
-                    {results.length} {results.length === 1 ? 'place' : 'places'}
+                    {results.length} {results.length === 1 ? 'place' : 'places'} · sorted by {sortLabel.toLowerCase()}
                   </T>
                 }
                 renderItem={({ item: v }) => (
