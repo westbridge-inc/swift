@@ -340,6 +340,12 @@ const CENSUS: Case[] = [
   { k: 'earnings_missing', to: null, why: 'admins' },
   { k: 'agent_cash_sla', to: null, why: 'admins' },
   { k: 'category_backfill_review', to: { screen: 'VendorCategoryReview' }, why: 'the STORE OWNER, not an admin — the backfill notifies `vendor.owner.userId`, and accepting a suggestion is the ONLY thing that writes the tag the Market feed reads. It was unrouted and mislabelled; 50 suggestions sat PENDING against 0 tags' },
+  // ── [ALG-34 / ALG-INV-14] The MMG pay link is a money surface: a staged change,
+  //    its apply, and its cancel all land on Account — where the pending link
+  //    and its cancel live. Vendor and mover stacks both name that screen Account.
+  { k: 'mmg_link_change_staged', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'the OLD contact point — the owner, on every device — sees the pending link and can cancel it' },
+  { k: 'mmg_link_change_applied', d: { actor: 'DRIVER' }, to: { screen: 'Account' }, why: 'the cool-off passed; the new link is live where it is managed' },
+  { k: 'mmg_link_change_cancelled', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'the owner cancelled; other devices were signed out' },
   { k: 'incident_new', d: { caseId: 'c1', caseNumber: 'INC-1' }, to: null, why: 'admins' },
   { k: 'incident_sla_breach', d: { caseId: 'c1' }, to: null, why: 'admins' },
   { k: 'incident_weekly_digest', to: null, why: 'admins' },

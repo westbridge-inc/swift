@@ -36,6 +36,8 @@ import { cachedRender, renderQrPng, renderQrSvg, renderTemplatePdf } from '../qr
 import { publicWebBase } from '../qr/qr-codes';
 import { processReviewText } from '../rating/review-scrub';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { requireStepUp } from '../auth/step-up';
+import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { riderCounterpartySelect } from '../../utils/counterparty';
@@ -648,6 +650,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  they must have signed up + done the selfie like everyone else). */
   app.post('/staff', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
+    await requireStepUp(app, request); // [ALG-34] a grant hands the store's board to a phone
     const body = addStaffSchema.parse(request.body);
 
     const target = await app.prisma.user.findUnique({
@@ -686,6 +689,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /staff/:id — change a member's role. */
   app.put<{ Params: IdParam }>('/staff/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
+    await requireStepUp(app, request); // [ALG-34]
     const body = updateStaffSchema.parse(request.body);
     const existing = await app.prisma.vendorStaff.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('StaffMember', request.params.id);
@@ -860,6 +864,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const safeVendors = vendors.map((vendor) => ({
       ...vendor,
       mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
+      mmgPayUrlPending: safeMmgPayUrl(vendor.mmgPayUrlPending),
       publicPhone: safePublicPhone(vendor.publicPhone),
     }));
     const visible = access.role === 'OWNER'
@@ -952,11 +957,20 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /profile — Update vendor profile details */
   app.put('/profile', auth, async (request) => {
-    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const access = await requireVendor(app, request, 'MANAGER');
+    const { vendorId } = access;
     const body = updateVendorProfileSchema.parse(request.body);
     const mmgPayUrl = body.mmgPayUrl === undefined
       ? undefined
       : mmgPayUrlForWrite(body.mmgPayUrl);
+    // [ALG-34 / ALG-INV-14] The MMG pay link is where the store's money goes.
+    // Owner only, step-up first; a new link is STAGED behind a cool-off with
+    // the old one still live and the owner told (integrity/money-surface.ts).
+    // Clearing it is immediate — it redirects nothing.
+    if (mmgPayUrl !== undefined) {
+      requireRole(access, 'OWNER');
+      await requireStepUp(app, request);
+    }
     // undefined = field not sent (leave as-is); null/'' = the store takes its
     // number down. publicPhoneForWrite collapses both of the latter to null.
     const publicPhone = body.publicPhone === undefined
@@ -985,16 +999,47 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(body.estimatedPrepTime !== undefined && { estimatedPrepTime: body.estimatedPrepTime }),
         ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
         ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
-        ...(mmgPayUrl !== undefined && { mmgPayUrl }),
         ...(publicPhone !== undefined && { publicPhone }),
       },
       include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
     });
 
+    if (mmgPayUrl === null) {
+      await clearMmgLink({ prisma: app.prisma, io: app.io }, { actor: 'VENDOR', entityId: vendorId });
+    } else if (mmgPayUrl !== undefined) {
+      await stageMmgLinkChange({ prisma: app.prisma, io: app.io }, {
+        actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newUrl: mmgPayUrl,
+      });
+    }
+    // The link state is read back AFTER staging so the response says what is
+    // live and what is pending — never the value the caller sent.
+    const link = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: vendorId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true },
+    });
+
     // On-write search sync [SWIFT-UG-SRCH-01]: catalog writes schedule a debounced per-vendor reindex.
     scheduleVendorSearchSync(app, vendorId);
 
-    return { success: true, data: vendor };
+    return {
+      success: true,
+      data: {
+        ...vendor,
+        ...link,
+        mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl),
+        mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending),
+      },
+    };
+  });
+
+  /** DELETE /profile/mmg-pay-url/pending — "this wasn't me": drop a staged
+   *  link change and sign out every other device. Owner only; no step-up —
+   *  cancelling is always the safe direction. */
+  app.delete('/profile/mmg-pay-url/pending', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io }, {
+      actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, keepSessionId: request.authSessionId,
+    });
+    return { success: true, data };
   });
 
   // =========================================================================

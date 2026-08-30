@@ -43,6 +43,8 @@ import {
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { requireStepUp } from '../auth/step-up';
+import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { arrivalEvidence } from '../dispatch/arrival-evidence';
 
 const updateDriverProfileSchema = z.object({
@@ -151,16 +153,20 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     return {
       success: true,
-      data: driver ? { ...driver, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl) } : driver,
+      data: driver ? { ...driver, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
     };
   });
 
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
-    await getDriver(request.user.userId); // authz before validation
+    const me = await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
     const mmgPayUrl = body.mmgPayUrl === undefined
       ? undefined
       : mmgPayUrlForWrite(body.mmgPayUrl);
+    // [ALG-34 / ALG-INV-14] The MMG pay link is where the driver's money goes:
+    // step-up first; a new link is STAGED behind a cool-off with the old one
+    // still live and the driver told. Clearing it is immediate.
+    if (mmgPayUrl !== undefined) await requireStepUp(app, request);
 
     const driver = await app.prisma.driver.update({
       where: { userId: request.user.userId },
@@ -180,7 +186,6 @@ export async function driverRoutes(app: FastifyInstance) {
         ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
         ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
         ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
-        ...(mmgPayUrl !== undefined && { mmgPayUrl }),
       },
       include: {
         user: {
@@ -197,7 +202,31 @@ export async function driverRoutes(app: FastifyInstance) {
         },
       },
     });
-    return { success: true, data: driver };
+    if (mmgPayUrl === null) {
+      await clearMmgLink({ prisma: app.prisma, io: app.io }, { actor: 'DRIVER', entityId: me.id });
+    } else if (mmgPayUrl !== undefined) {
+      await stageMmgLinkChange({ prisma: app.prisma, io: app.io }, {
+        actor: 'DRIVER', entityId: me.id, userId: request.user.userId, sessionId: request.authSessionId, newUrl: mmgPayUrl,
+      });
+    }
+    const link = mmgPayUrl === undefined
+      ? { mmgPayUrl: driver.mmgPayUrl, mmgPayUrlPending: driver.mmgPayUrlPending, mmgPayUrlApplyAt: driver.mmgPayUrlApplyAt }
+      : await app.prisma.driver.findUniqueOrThrow({ where: { id: me.id }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true } });
+    return {
+      success: true,
+      data: { ...driver, ...link, mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending) },
+    };
+  });
+
+  /** DELETE /profile/mmg-pay-url/pending — "this wasn't me": drop a staged
+   *  link change and sign out every other device. No step-up — cancelling
+   *  is always the safe direction. */
+  app.delete('/profile/mmg-pay-url/pending', { preHandler: [app.authenticate] }, async (request) => {
+    const me = await getDriver(request.user.userId);
+    const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io }, {
+      actor: 'DRIVER', entityId: me.id, userId: request.user.userId, keepSessionId: request.authSessionId,
+    });
+    return { success: true, data };
   });
 
   /** POST /vehicle-photo — the PUBLIC exterior car photo riders see on

@@ -5,6 +5,7 @@ import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { recordStorageOrphan } from '../../lib/storage-orphans';
 import { AppError } from '../../utils/errors';
+import { sendStepUpOtp, verifyStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -126,6 +127,22 @@ export async function authRoutes(app: FastifyInstance) {
     }
     await authService.logout(sessionId, request.user.userId, body.pushToken);
     return reply.send({ success: true });
+  });
+
+  /** POST /step-up — [ALG-34] text a confirmation code to the phone on this
+   *  account. A money surface (the MMG pay link, staff grants) refuses with
+   *  403 STEP_UP_REQUIRED until /step-up/verify succeeds on THIS session. */
+  app.post('/step-up', { preHandler: [app.authenticate] }, async (request) => {
+    const data = await sendStepUpOtp(app, request.user.userId);
+    return { success: true, data };
+  });
+
+  app.post('/step-up/verify', { preHandler: [app.authenticate] }, async (request) => {
+    const { code } = z.object({ code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit code') }).parse(request.body ?? {});
+    const sessionId = request.authSessionId;
+    if (!sessionId) throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
+    const data = await verifyStepUp(app, { userId: request.user.userId, sessionId }, code);
+    return { success: true, data: { ...data, validForSeconds: STEP_UP_TTL_S } };
   });
 
   /** Logout credential for a locally-cleared client. This intentionally does

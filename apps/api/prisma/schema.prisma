@@ -973,6 +973,12 @@ model Driver {
   /// The taxi driver's OWN MMG "pay me" link. Opt-in: when set, riders can pay
   /// the fare directly via MMG (money never touches Swift); null = cash-only.
   mmgPayUrl                String?
+  /// [ALG-34 / ALG-INV-14] A change to the link is staged here first and
+  /// applied by the cool-off job at `mmgPayUrlApplyAt`; the live link above
+  /// keeps paying the driver until then. Cancelling clears all three.
+  mmgPayUrlPending         String?
+  mmgPayUrlPendingAt       DateTime?
+  mmgPayUrlApplyAt         DateTime?
   createdAt                DateTime         @default(now())
   updatedAt                DateTime         @updatedAt
 
@@ -983,6 +989,7 @@ model Driver {
   @@index([isAvailable])
   @@index([locationSessionId])
   @@index([currentRideId])
+  @@index([mmgPayUrlApplyAt])
   @@map("drivers")
 }
 
@@ -1102,6 +1109,13 @@ model Vendor {
   /// null = cash-only. A public pay URL, not a secret credential.
   mmgPayUrl String?
 
+  /// [ALG-34 / ALG-INV-14] A change to the link is staged here first and
+  /// applied by the cool-off job at `mmgPayUrlApplyAt`; the live link above
+  /// keeps paying the owner until then. Cancelling clears all three.
+  mmgPayUrlPending   String?
+  mmgPayUrlPendingAt DateTime?
+  mmgPayUrlApplyAt   DateTime?
+
   /// The number the store CHOOSES to publish so a customer can call before
   /// ordering ("do you have this in stock", "can you do this today"). Opt-in:
   /// null = no call button. Landline or mobile — a fixed GTT line is what many
@@ -1123,6 +1137,7 @@ model Vendor {
   @@index([vendorType])
   @@index([latitude, longitude])
   @@index([tenantId])
+  @@index([mmgPayUrlApplyAt])
   @@map("vendors")
 }
 
