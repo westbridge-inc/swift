@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
 import { RefreshControl, ScrollView, TextInput, View } from 'react-native';
-import { color, radius, space } from '@swift/ui';
+import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot, useCompleteJob } from '../../../hooks';
 // [B3] The emergency path for BOTH people on a service job — the provider
 // working inside a stranger's home, and the customer whose home it is. Every
@@ -159,11 +159,13 @@ function ProviderActions({ job }: { job: any }) {
             placeholder="Quote (GYD)"
             placeholderTextColor={color.text.muted}
             keyboardType="number-pad"
-            style={{ fontFamily: 'Hanken', fontSize: 15, color: color.text.primary, paddingVertical: 0 }}
+            // [Wave 3] Tokens, not raw font literals.
+            style={{ fontFamily: font.body, fontSize: fontSize.base, color: color.text.primary, paddingVertical: 0 }}
           />
         </View>
         <PillButton
-          label="Send quote"
+          // [#947's grammar] Disabled says the ask.
+          label={Number(amount) > 0 ? 'Send quote' : 'Enter an amount'}
           size="md"
           loading={quote.isPending}
           disabled={!(Number(amount) > 0)}
