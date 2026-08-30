@@ -316,6 +316,10 @@ export function SearchScreen() {
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
+          // A horizontal row must HUG its chips: in this flex column an
+          // un-heighted ScrollView grows to swallow the leftover screen and
+          // the results get shoved to the bottom (founder screenshot, 08-30).
+          style={{ flexGrow: 0 }}
           contentContainerStyle={{ gap: space.md, paddingHorizontal: GUTTER }}
         >
           {TYPES.map((t) => (
@@ -338,7 +342,7 @@ export function SearchScreen() {
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
-            style={{ marginTop: space.md }}
+            style={{ marginTop: space.md, flexGrow: 0 }}
             contentContainerStyle={{ gap: space.md, paddingHorizontal: GUTTER }}
           >
             {/* [B2] In engine mode the ranking IS the sort (words · typo ·
@@ -391,7 +395,7 @@ export function SearchScreen() {
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              style={{ marginTop: space.md }}
+              style={{ marginTop: space.md, flexGrow: 0 }}
               contentContainerStyle={{ gap: space.sm, paddingHorizontal: GUTTER }}
             >
               {suggestions.map((s: any) => (
