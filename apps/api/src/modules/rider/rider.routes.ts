@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { algoValue } from '../algo/algo-config';
 import { z } from 'zod';
 import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
@@ -11,7 +12,7 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
-import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
+import { FloatService, riderFloatForOrder, floatAdvice } from '../dispatch/float.service';
 import { explainEarning } from '../../utils/explain-earning';
 import { riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
@@ -377,6 +378,8 @@ export async function riderRoutes(app: FastifyInstance) {
           limit: Number(rider.floatLimit),
           committed: Number(rider.committedFloat),
           available: Number(rider.floatLimit) - Number(rider.committedFloat),
+          // [ALG-26] The level and the sentence the cockpit renders as-is.
+          advice: floatAdvice(rider, await algoValue(app.prisma, 'float.softPct')),
         },
         stats: {
           totalDeliveries: rider.totalDeliveries,

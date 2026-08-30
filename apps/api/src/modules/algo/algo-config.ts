@@ -72,6 +72,14 @@ export const ALGO_DEFAULTS = {
    * Clamped 1..3 at the reader; 1 is the kill switch, no deploy needed.
    */
   'stacking.riderCapacity': 1,
+  /**
+   * [ALG-26] The soft threshold of a rider's cash float, as a fraction of
+   * their limit, at which the cockpit starts nudging them to finish
+   * deliveries before taking more cash work. The hard threshold is 1.0 by
+   * construction (FloatService.commit refuses past the limit). Clamped
+   * 0.1..1.0 at the reader; 1.0 turns the nudge off.
+   */
+  'float.softPct': 0.7,
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;

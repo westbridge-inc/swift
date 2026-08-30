@@ -38,6 +38,69 @@ export function riderFloatForOrder(order: {
  * the rider's `User.trustLevel`. Taxi drivers never front cash, so they are not
  * gated. Invariant: committedFloat ≥ 0; commit/release are atomic (accept a tx).
  */
+/**
+ * [ALG-26] The float, explained — a logistics aid, never an enforcement.
+ *
+ * The COD cash limit is built (floatLimit from trust level + country, the
+ * guarded commit). What was missing was the sentence: a rider whose float
+ * is spent stops receiving cash offers and, told nothing, assumes the app
+ * is broken. `floatAdvice` turns the two numbers the profile already
+ * carries into a level and one sentence the cockpit renders as-is.
+ *
+ * A correction to the algorithm document, recorded here: its "deposit
+ * scheduling" assumes riders carry Swift's cash to an agent. On this rail
+ * they never do — the float is the rider's OWN money fronted to a store
+ * and recovered at the customer's door (money matrix row 1). So the advice
+ * is about finishing deliveries, not depositing; there is nothing to drop
+ * off and no agent network to route to.
+ *
+ *   ok       below the soft threshold — nothing to say
+ *   soon     at or past the soft threshold (AlgoConfig `float.softPct`)
+ *   blocked  nothing left — the gate is refusing cash work, and says so
+ *
+ * Never confiscates, never deducts, never treats a carrying rider as suspect.
+ */
+export type FloatAdviceLevel = 'ok' | 'soon' | 'blocked';
+export interface FloatAdvice {
+  level: FloatAdviceLevel;
+  limit: number;
+  committed: number;
+  available: number;
+  /** 0..1 of the limit currently fronted; 0 when the limit is 0. */
+  usedPct: number;
+  /** One sentence a rider would accept, or null when there is nothing to say. */
+  sentence: string | null;
+}
+
+const gyd = (n: number) => `GY$${Math.round(n).toLocaleString('en-US')}`;
+
+export function floatAdvice(
+  rider: { floatLimit: Prisma.Decimal | number; committedFloat: Prisma.Decimal | number },
+  softPct = 0.7,
+): FloatAdvice {
+  const limit = Math.max(0, Number(rider.floatLimit));
+  const committed = Math.max(0, Number(rider.committedFloat));
+  const available = Math.max(0, limit - committed);
+  const usedPct = limit > 0 ? Math.min(1, committed / limit) : 0;
+  const soft = Math.min(1, Math.max(0.1, Number.isFinite(softPct) ? softPct : 0.7));
+  if (limit <= 0) {
+    return { level: 'ok', limit, committed, available, usedPct, sentence: null };
+  }
+  if (available <= 0) {
+    return {
+      level: 'blocked', limit, committed, available, usedPct,
+      sentence: `Your cash float is fully in use — ${gyd(committed)} of ${gyd(limit)} is fronted to stores right now. Cash offers pause until a delivery is paid at the door; MMG-paid jobs still come through.`,
+    };
+  }
+  if (usedPct >= soft) {
+    return {
+      level: 'soon', limit, committed, available, usedPct,
+      sentence: `You're fronting ${gyd(committed)} of your ${gyd(limit)} cash float — ${gyd(available)} left. Finish a delivery before taking more cash work, or the next cash offer will pass you by.`,
+    };
+  }
+  return { level: 'ok', limit, committed, available, usedPct, sentence: null };
+}
+
 export class FloatService {
   constructor(private prisma: Tx) {}
 
