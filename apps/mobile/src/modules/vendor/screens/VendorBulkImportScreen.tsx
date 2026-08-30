@@ -4,18 +4,18 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import { Feather } from '@expo/vector-icons';
 import { color, fontSize, radius, space } from '@swift/ui';
-import { Card, PillButton, T } from '../../kit';
-import { PressableScale } from '../../kit/pressable-scale';
-import { toast } from '../../kit/toast';
-import { useImportAutomap, useImportItems, useImportFile } from '../../hooks/vendorops';
+import { Card, PillButton, T } from '../../../kit';
+import { PressableScale } from '../../../kit/pressable-scale';
+import { toast } from '../../../kit/toast';
+import { useImportAutomap, useImportItems, useImportFile } from '../../../hooks/vendorops';
 import {
   AuthSessionBoundaryError,
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
-} from '../../stores/authStore';
-import { useStoreSwitcher } from '../../stores/storeSwitcher';
-import type { AuthSessionSnapshot } from '../../lib/authSession';
-import { useVendorPreview } from '../../stores/vendorPreview';
+} from '../../../stores/authStore';
+import { useStoreSwitcher } from '../../../stores/storeSwitcher';
+import type { AuthSessionSnapshot } from '../../../lib/authSession';
+import { useVendorPreview } from '../../../stores/vendorPreview';
 
 const RECOMMENDED = 'category, name, basePrice, sku, unit, stockQuantity, description';
 
