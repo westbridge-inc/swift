@@ -123,6 +123,20 @@ export const ALGO_DEFAULTS = {
   'prep.gateMaeMinutes': 4,
   'prep.gateCoverage': 0.8,
   /**
+   * [ALG-12] The customer promise. `eta.targetOnTime` is the realised on-time
+   * rate the weekly pad is chosen to hit; `riderToStoreSeconds` and
+   * `serviceTimeSeconds` are the two legs no order can measure at checkout
+   * (a rider is not yet assigned) — the pad absorbs their error, measured;
+   * `defaultPadSeconds` applies before any pad has been learned;
+   * `slipNotifySeconds` is how far a live ETA must run past the promise
+   * before the promise is revised out loud (FMC ETA_SLIP_NOTIFY_SECONDS).
+   */
+  'eta.targetOnTime': 0.85,
+  'eta.riderToStoreSeconds': 420,
+  'eta.serviceTimeSeconds': 180,
+  'eta.defaultPadSeconds': 300,
+  'eta.slipNotifySeconds': 300,
+  /**
    * [ALG-38] The generic velocity engine's per-action limits, for the
    * surfaces no dedicated limiter thought about. Each action: how many in
    * how many seconds per ACTOR, and per identity CLUSTER (the one that

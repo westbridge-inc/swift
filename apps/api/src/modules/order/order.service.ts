@@ -2,7 +2,6 @@ import { Prisma } from '@prisma/client';
 import type { PrismaClient, OrderStatus, FulfillmentType } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
-import { estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { lineTotal, orderTotal, promoDiscount } from '../../utils/order-total';
@@ -19,6 +18,7 @@ import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kit
 import { log } from '../../utils/logger';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
+import { promiseAtCheckout, promiseView } from '../eta/promise';
 import { AppError, ConflictError } from '../../utils/errors';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
@@ -1140,6 +1140,19 @@ export class OrderService {
         // AT_BUSINESS appointments use the store (distanceKm>0 marks a mobile service).
         const toCustomer = plan.fulfillment === 'DELIVERY' || (plan.fulfillment === 'APPOINTMENT' && plan.distanceKm > 0);
 
+        // [ALG-12] The customer's promise, written onto the order at creation:
+        // prep p80 (ALG-03 tiers) + rider-to-store + handover + travel, padded
+        // by the lateness this vertical-hour actually produced. Delivery only.
+        const placedAt = new Date();
+        const promise = plan.fulfillment === 'DELIVERY'
+          ? await promiseAtCheckout(this.prisma, {
+              tenantId: user.tenantId,
+              orderType: plan.vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
+              vendorId: plan.vendor.id, vendorType: plan.vendor.vendorType, declaredMinutes: plan.vendor.estimatedPrepTime ?? null,
+              distanceKm: plan.distanceKm, itemCount: plan.orderItems.reduce((n, it) => n + it.quantity, 0), placedAt,
+            })
+          : null;
+
         const order = await tx.order.create({
           data: {
             tenantId: user.tenantId,
@@ -1186,9 +1199,10 @@ export class OrderService {
             mmgPayUrlSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgPayUrl : null,
             mmgRecipientNameSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgRecipientName : null,
             estimatedPrepTime: plan.vendor.estimatedPrepTime,
-            estimatedDeliveryTime: plan.fulfillment === 'DELIVERY'
-              ? estimateDeliveryMinutes(plan.distanceKm) + (plan.vendor.estimatedPrepTime || 30)
-              : null,
+            // Minutes-to-promise for the legacy field; the promise itself is the truth.
+            estimatedDeliveryTime: promise ? Math.max(1, Math.round((promise.promisedAt.getTime() - placedAt.getTime()) / 60_000)) : null,
+            placedAt,
+            ...(promise ? { promisedAt: promise.promisedAt, promiseBaseSeconds: promise.baseSeconds, promisePadSeconds: promise.padSeconds } : {}),
             scheduledFor: input.scheduledFor ? new Date(input.scheduledFor) : undefined,
             // Takeaway: a collection code the customer shows the vendor at pickup.
             // 6-digit, CSPRNG (not Math.random); handover is vendor-mediated in person.
@@ -1369,6 +1383,7 @@ export class OrderService {
       paymentMethod: order.paymentMethod,
       estimatedPrepTime: order.estimatedPrepTime,
       estimatedDeliveryTime: order.estimatedDeliveryTime,
+      promise: promiseView(order),
       deliveryAddress: order.deliveryAddress,
       placedAt: order.placedAt,
       scheduledFor: order.scheduledFor,

@@ -1241,6 +1241,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'eta-pad-weekly') {
+        // [ALG-12] Relearn the lateness pads from four weeks of delivered
+        // orders and write the founder's weekly "did we keep our promises" row.
+        const { weeklyEtaCalibration } = await import('../modules/eta/promise');
+        const r = await weeklyEtaCalibration(ctx.prisma);
+        ctx.log.info({ realisedOnTimeRate: r.realisedOnTimeRate, delivered: r.delivered, learned: r.learned }, 'eta-promise: weekly calibration');
+        return;
+      }
       if (job.name === 'prep-stats-nightly') {
         // [ALG-03] The prep-time learner: recompute every vendor's acceptedAt →
         // readyAt distribution from the trailing 30 days.
@@ -1750,6 +1758,9 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnComplete: 5,
     removeOnFail: 5,
   });
+
+  // [ALG-12] ETA promise: relearn the pads and report the realised rate, Mondays 03:40.
+  await queues.dispatchQueue.add('eta-pad-weekly', {}, { repeat: { pattern: '40 3 * * 1' }, removeOnComplete: 5, removeOnFail: 5 });
 
   // [ALG-03] Prep-time learner: nightly stats at 03:10, the shadow grade at 03:25.
   await queues.dispatchQueue.add('prep-stats-nightly', {}, { repeat: { pattern: '10 3 * * *' }, removeOnComplete: 5, removeOnFail: 5 });

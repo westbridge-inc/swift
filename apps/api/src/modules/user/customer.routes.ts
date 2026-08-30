@@ -38,6 +38,7 @@ import {
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorResponseSlaMinutes } from '../order/response-sla';
+import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
@@ -971,6 +972,7 @@ export async function customerRoutes(app: FastifyInstance) {
               // timestamp is still exactly true when it comes out of the cache.
               holdExpiresAt: true,
               estimatedDeliveryTime: true, placedAt: true,
+              promisedAt: true, promiseRevisedAt: true, promiseRevisionReason: true, promiseRevisions: true,
             },
             orderBy: { placedAt: 'desc' },
           })
@@ -1079,7 +1081,7 @@ export async function customerRoutes(app: FastifyInstance) {
     }));
 
     const feed = {
-      activeOrder,
+      activeOrder: activeOrder ? { ...activeOrder, promise: promiseView(activeOrder) } : activeOrder,
       popularItems,
       featured,
       nearby,
@@ -2226,6 +2228,8 @@ export async function customerRoutes(app: FastifyInstance) {
         pickupLng: order.pickupLng,
         estimatedPrepTime: order.estimatedPrepTime,
         estimatedDeliveryTime: order.estimatedDeliveryTime,
+        // [ALG-12] The promise and its range — what a countdown reads (L7).
+        promise: promiseView(order),
         rider: order.rider ? {
           firstName: order.rider.user?.firstName,
           lastName: order.rider.user?.lastName,
