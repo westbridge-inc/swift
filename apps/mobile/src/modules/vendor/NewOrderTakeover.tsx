@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Modal, ScrollView, Vibration, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withSequence, withTiming } from 'react-native-reanimated';
@@ -26,6 +26,9 @@ export function NewOrderTakeover({
 }) {
   const current = queue[0];
   const orderId = current?.orderId;
+  const [rejecting, setRejecting] = useState(false);
+  // A fresh order in the queue starts at the decision, never mid-reject.
+  useEffect(() => setRejecting(false), [orderId]);
   const order = useVendorOrder(orderId);
   const act = useOrderAction();
   const insets = useSafeAreaInsets();
@@ -63,9 +66,9 @@ export function NewOrderTakeover({
   const customer = o?.customer ? [o.customer.firstName, o.customer.lastName].filter(Boolean).join(' ') : '';
   const busy = act.isPending;
 
-  const decide = (action: 'accept' | 'reject') =>
+  const decide = (action: 'accept' | 'reject', reason?: string) =>
     act.mutate(
-      { id: current.orderId, action },
+      { id: current.orderId, action, ...(reason ? { reason } : {}) },
       { onSuccess: () => onDismiss(current.orderId) },
     );
 
@@ -97,17 +100,25 @@ export function NewOrderTakeover({
           >
             <Feather name="bell" size={34} color={color.brand[500]} />
           </Animated.View>
+          {/* [Wave 3 vs reference 22] The eyebrow tells the vendor what the
+              sound will DO — the buzz genuinely repeats every 5s below, so
+              "chime repeats until you answer" is a promise this screen keeps. */}
           <T variant="micro" tone="brand" style={{ marginTop: space.lg }}>
-            {queue.length > 1 ? `${queue.length} new orders — first in first` : 'New order'}
+            {queue.length > 1
+              ? `● ${queue.length} new orders · chime repeats — first in, first`
+              : '● New order · chime repeats until you answer'}
           </T>
           <T variant="displayXl" center style={{ marginTop: 2 }}>
             #{o?.orderNumber ?? current.orderNumber ?? '…'}
           </T>
           <T variant="heading" tone="muted" center style={{ marginTop: 2 }}>
+            {/* [Wave 3 vs reference 22] The fulfillment says what happens
+                NEXT, not just which kind it is — "a rider comes to you" is
+                the sentence a kitchen acts on. */}
             {[
               customer || null,
               `${items.length} item${items.length === 1 ? '' : 's'}`,
-              o?.fulfillment === 'PICKUP' ? 'pickup' : 'delivery',
+              o?.fulfillment === 'PICKUP' ? 'pickup — the customer comes to you' : 'delivery — a rider comes to you',
             ]
               .filter(Boolean)
               .join(' · ')}
@@ -122,6 +133,15 @@ export function NewOrderTakeover({
               <T variant="heading" style={{ flex: 1 }} numberOfLines={2}>
                 {i.name}
               </T>
+              {/* [Wave 3 vs reference 22] "pepper on the side" · "cold" — the
+                  customer's own words, right-aligned and muted, exactly where
+                  the kitchen's eye lands after the dish. The snapshot column
+                  (OrderItem.specialInstructions) already rides the payload. */}
+              {i.specialInstructions ? (
+                <T variant="label" tone="muted" numberOfLines={2} style={{ maxWidth: '38%', textAlign: 'right' }}>
+                  {i.specialInstructions}
+                </T>
+              ) : null}
             </View>
           ))}
         </ScrollView>
@@ -135,7 +155,9 @@ export function NewOrderTakeover({
 
         <View style={{ gap: space.md }}>
           <PillButton
-            label="Accept"
+            // [Wave 3 vs reference 22] "ACCEPT ORDER", sized to be read across
+            // a kitchen — the reference sets it in caps and says the thing.
+            label="ACCEPT ORDER"
             size="xl"
             loading={busy}
             onPress={() => {
@@ -143,7 +165,26 @@ export function NewOrderTakeover({
               decide('accept');
             }}
           />
-          <PillButton label="Decline" variant="soft" disabled={busy} onPress={() => decide('reject')} />
+          {/* [Wave 3 vs reference 22] "A rejection always collects a reason."
+              The route records it and the customer is told why — so the button
+              says what it asks, and the choice is presets, never free typing
+              in a rush. */}
+          {rejecting ? (
+            <>
+              {(['Out of stock', 'Kitchen is too busy', 'Closing soon'] as const).map((why) => (
+                <PillButton
+                  key={why}
+                  label={why}
+                  variant="outline"
+                  disabled={busy}
+                  onPress={() => decide('reject', why)}
+                />
+              ))}
+              <PillButton label="Back" variant="soft" disabled={busy} onPress={() => setRejecting(false)} />
+            </>
+          ) : (
+            <PillButton label="Reject — tell us why" variant="soft" disabled={busy} onPress={() => setRejecting(true)} />
+          )}
         </View>
         {act.isError ? (
           <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
