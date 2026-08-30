@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { lineTotal, orderTotal, promoDiscount } from '../../utils/order-total';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
@@ -359,7 +360,7 @@ async function buildCartResponse(
     const base = Number(ci.item.basePrice);
     const options = resolveSelectedOptions(ci.item, ci.selectedOptions);
     const unitPrice = base + optionsUnitPrice(options);
-    const lineBase = unitPrice * ci.quantity;
+    const lineBase = lineTotal(unitPrice, ci.quantity);
     subtotalBase += lineBase;
 
     if (!ci.item.isAvailable) unavailableItemIds.push(ci.id);
@@ -400,18 +401,9 @@ async function buildCartResponse(
       code: string; discountType: string; discountValue: unknown;
       maxDiscount: unknown; description?: string;
     };
-    switch (promo.discountType) {
-      case 'PERCENTAGE':
-        discount = Math.ceil(subtotalCustomer * (Number(promo.discountValue) / 100));
-        break;
-      case 'FIXED_AMOUNT':
-        discount = Number(promo.discountValue);
-        break;
-      case 'FREE_DELIVERY':
-        discount = deliveryFee;
-        break;
-    }
-    if (promo.maxDiscount) discount = Math.min(discount, Number(promo.maxDiscount));
+    // [ALG-24] The one promo switch — the same function checkout's
+    // validatePromoCode applies, so the quote's discount is the charge's.
+    discount = promoDiscount(promo, { subtotal: subtotalCustomer, deliveryFee });
     promoInfo = {
       code: promo.code,
       discountType: promo.discountType,
@@ -420,7 +412,8 @@ async function buildCartResponse(
   }
 
   const tip = Number(cart.tipAmount) || 0;
-  const totalAmount = Math.max(0, subtotalCustomer + deliveryFee + tip - discount);
+  // [ALG-24] The one total — checkout computes each order's total through the same function.
+  const totalAmount = orderTotal({ subtotal: subtotalCustomer, deliveryFee, tip, discount });
 
   // SWIFT-070: the express premium is computed on the SERVER (same helper as
   // checkout) and handed to the client to RENDER — never re-derived on the
@@ -2895,28 +2888,18 @@ export async function customerRoutes(app: FastifyInstance) {
           `Minimum order of $${Number(promo.minOrderAmount).toLocaleString()} GYD required. Current subtotal: $${subtotal.toLocaleString()} GYD`);
       }
 
-      switch (promo.discountType) {
-        case 'PERCENTAGE':
-          estimatedDiscount = Math.ceil(subtotal * (Number(promo.discountValue) / 100));
-          break;
-        case 'FIXED_AMOUNT':
-          estimatedDiscount = Number(promo.discountValue);
-          break;
-        case 'FREE_DELIVERY':
-          // [FUL-003b completion] At least price the estimate with the buyer's
-          // OWN schedule rather than the code defaults. The 3 km is still an
-          // ASSUMPTION, deliberately left: this preview runs before a delivery
-          // address is necessarily chosen, and picking a better default
-          // distance is a product decision, not a refactor. Flagged rather than
-          // silently changed.
-          estimatedDiscount = deliveryFeeFromRates(3, await new CountryConfigService(app.prisma).getDeliveryRates(
+      // [FUL-003b completion] For FREE_DELIVERY, price the estimate with the
+      // buyer's OWN schedule rather than the code defaults. The 3 km is still
+      // an ASSUMPTION, deliberately left: this preview runs before a delivery
+      // address is necessarily chosen, and picking a better default distance
+      // is a product decision, not a refactor. Flagged rather than silently
+      // changed. [ALG-24] The discount itself comes from the one promo switch.
+      const assumedDeliveryFee = promo.discountType === 'FREE_DELIVERY'
+        ? deliveryFeeFromRates(3, await new CountryConfigService(app.prisma).getDeliveryRates(
             (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode ?? 'GY',
-          ));
-          break;
-      }
-      if (promo.maxDiscount && estimatedDiscount != null) {
-        estimatedDiscount = Math.min(estimatedDiscount, Number(promo.maxDiscount));
-      }
+          ))
+        : 0;
+      estimatedDiscount = promoDiscount(promo, { subtotal, deliveryFee: assumedDeliveryFee });
 
       // Apply promo to cart
       await app.prisma.cart.update({ where: { id: cart.id }, data: { promoCodeId: promo.id } });
