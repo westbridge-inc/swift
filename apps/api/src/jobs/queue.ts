@@ -1231,6 +1231,16 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'route-match') {
+        // [ALG-16] Map-match a completed delivery's trace ONCE and freeze the
+        // actual distance beside the planned one. Idempotent; a missing trace
+        // is recorded as no match, never as a straight line.
+        const { matchOrderRoute } = await import('../modules/dispatch/route-match');
+        const res = await matchOrderRoute({ prisma: ctx.prisma, redis: ctx.redis }, (job.data as { orderId: string }).orderId);
+        if (res.outcome === 'matched' || res.outcome === 'unmatched') ctx.log.info(res, 'route-match');
+        return;
+      }
+
       if (job.name === 'algo-decision-retention') {
         // [ALGO Band 0.3] The decision log's retention: shadow rows are
         // evidence for a promotion decision and expire at 90 days; rows that

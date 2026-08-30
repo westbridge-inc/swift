@@ -45,6 +45,24 @@ export interface MapsProvider {
   etaMinutesFrom(origins: LatLng[], dest: LatLng): Promise<number[]>;
   /** Point-to-point driving route — feeds fares, courier fees, delivery fees. */
   routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate>;
+  /** [ALG-16] Snap a recorded trace to the road graph — once, at completion,
+   *  for money purposes; never per ping. A provider that cannot match returns
+   *  the trace's own path length and says so (`matched: false`). */
+  matchTrace(points: TracePoint[]): Promise<MatchedRoute>;
+}
+
+export interface TracePoint extends LatLng {
+  /** Epoch milliseconds; OSRM uses timestamps to order and split the trace. */
+  at?: number;
+}
+
+export interface MatchedRoute {
+  /** Kilometres along the matched road path, or along the raw trace when unmatched. */
+  km: number;
+  /** Encoded polyline of the matched path; null when nothing was matched. */
+  polyline: string | null;
+  matched: boolean;
+  source: RouteSource;
 }
 
 /** Straight-line estimate at urban moped speed — deterministic for tests. */
@@ -71,6 +89,20 @@ export class HaversineMapsProvider implements MapsProvider {
     // Exactly the historical estimate — callers keep their own speed models.
     return { km: estimateDrivingDistance(origin.lat, origin.lng, dest.lat, dest.lng), minutes: null, source: 'haversine' };
   }
+
+  async matchTrace(points: TracePoint[]): Promise<MatchedRoute> {
+    // No road graph here: the honest answer is the trace's own length, unmatched.
+    return { km: traceLengthKm(points), polyline: null, matched: false, source: 'haversine' };
+  }
+}
+
+/** Straight-line length along a trace, in km — the unmatched fallback. */
+export function traceLengthKm(points: TracePoint[]): number {
+  let km = 0;
+  for (let i = 1; i < points.length; i++) {
+    km += haversineDistance(points[i - 1]!.lat, points[i - 1]!.lng, points[i]!.lat, points[i]!.lng);
+  }
+  return km;
 }
 
 // Google Distance Matrix: one origin -> many destinations -> driving durations.
@@ -122,6 +154,10 @@ export class GoogleMapsProvider implements MapsProvider {
    *  self-hosted engine for real-road routing. */
   async routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate> {
     return this.fallback.routeKm(origin, dest);
+  }
+
+  async matchTrace(points: TracePoint[]): Promise<MatchedRoute> {
+    return this.fallback.matchTrace(points);
   }
 
   private async etaFromChunk(chunk: LatLng[], dest: LatLng): Promise<number[]> {
@@ -193,6 +229,11 @@ interface OsrmTableResponse {
 interface OsrmRouteResponse {
   code?: string;
   routes?: Array<{ distance?: number; duration?: number }>;
+}
+
+interface OsrmMatchResponse {
+  code?: string;
+  matchings?: Array<{ distance?: number; geometry?: string; confidence?: number }>;
 }
 
 /**
@@ -292,6 +333,34 @@ export class OsrmMapsProvider implements MapsProvider {
       };
     } catch {
       return this.degraded('route', await this.fallback.routeKm(origin, dest));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** [ALG-16] Map matching via the OSRM `match` service. Timestamps order the
+   *  trace; `gaps=split` lets a dropped stretch become a second matching
+   *  rather than a fabricated straight line. NoMatch or any failure falls
+   *  back to the trace's own length, unmatched — never a guess. */
+  async matchTrace(points: TracePoint[]): Promise<MatchedRoute> {
+    if (points.length < 2) return this.fallback.matchTrace(points);
+    const coords = points.map((p) => `${p.lng},${p.lat}`).join(';');
+    const stamped = points.every((p) => typeof p.at === 'number');
+    const ts = stamped ? `&timestamps=${points.map((p) => Math.round((p.at as number) / 1000)).join(';')}` : '';
+    const url = `${this.baseUrl.replace(/\/$/, '')}/match/v1/driving/${coords}?overview=full&geometries=polyline&gaps=split&tidy=true${ts}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OSRM_TIMEOUT_MS * 3);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) return this.degraded('route', await this.fallback.matchTrace(points));
+      const data = (await res.json()) as OsrmMatchResponse;
+      const matchings = data.code === 'Ok' ? data.matchings ?? [] : [];
+      const metres = matchings.reduce((sum, m) => sum + (m.distance ?? 0), 0);
+      if (matchings.length === 0 || metres <= 0) return this.degraded('route', await this.fallback.matchTrace(points));
+      recordOsrm('route', 'ok');
+      return { km: metres / 1000, polyline: matchings.map((m) => m.geometry ?? '').filter(Boolean).join('|') || null, matched: true, source: 'osrm' };
+    } catch {
+      return this.degraded('route', await this.fallback.matchTrace(points));
     } finally {
       clearTimeout(timer);
     }
