@@ -200,9 +200,12 @@ export function DWeekBars({ days }: { days: Array<{ label: string; total: number
         const h = Math.max(6, Math.round((d.total / max) * 64));
         return (
           <View key={i} style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end' }}>
-            {d.total > 0 ? (
-              <T variant="micro" numberOfLines={1} style={{ color: d.isToday ? dk.text : dk.muted, marginBottom: space.xs }}>
-                {d.total >= 1000 ? `${Math.round(d.total / 1000)}k` : String(Math.round(d.total))}
+            {/* [Wave 3 vs reference 14] ONE label — today's, over the solid
+                bar. Labelling all seven made the chart a table; the reference
+                keeps six quiet bars and lets today carry the number. */}
+            {d.isToday && d.total > 0 ? (
+              <T variant="micro" numberOfLines={1} style={{ color: dk.text, marginBottom: space.xs }}>
+                {d.total >= 1000 ? `${(Math.round(d.total / 100) / 10).toFixed(1).replace(/\.0$/, '')}k` : String(Math.round(d.total))}
               </T>
             ) : null}
             <View
