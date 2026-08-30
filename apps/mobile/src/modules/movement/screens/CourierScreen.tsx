@@ -28,6 +28,12 @@ const SEND_TINT = VERTICAL_TINT.send ?? { bg: color.brand[50], ink: color.brand[
 const SIZES: { key: Size; letter: string; label: string; hint: string }[] = [
   { key: 'SMALL', letter: 'S', label: 'Fits one hand', hint: 'Keys or documents' },
   { key: 'MEDIUM', letter: 'M', label: 'A shopping bag', hint: 'Bike-friendly' },
+  // [Wave 3 vs reference 12] LARGE was simply never offered — the reference
+  // draws four tiers, the API accepts it, and dispatch has priced and proven
+  // it (a LARGE parcel is a motorcycle's ceiling; P-19/P-20 pinned exactly
+  // that). A sender with a backpack-sized box was forced to over-declare XL
+  // and lose every motorbike in town.
+  { key: 'LARGE', letter: 'L', label: 'Fits a backpack', hint: 'Motorbike or car' },
   { key: 'EXTRA_LARGE', letter: 'XL', label: 'Needs a trunk', hint: 'Car or larger' },
 ];
 const SPEEDS: { key: Speed; label: string; icon: React.ComponentProps<typeof Feather>['name']; hint: string }[] = [
@@ -285,7 +291,7 @@ export function CourierScreen({ navigation }: any) {
                       caretHidden
                       showSoftInputOnFocus={false}
                       accessible={false}
-                      right={<T variant="micro" tone="muted">PICKUP</T>}
+                      right={<T variant="micro" tone="muted">FROM</T>}
                     />
                   </View>
                 </Pressable>
@@ -305,7 +311,7 @@ export function CourierScreen({ navigation }: any) {
                       caretHidden
                       showSoftInputOnFocus={false}
                       accessible={false}
-                      right={<T variant="micro" tone="muted">DROP-OFF</T>}
+                      right={<T variant="micro" tone="muted">TO</T>}
                     />
                   </View>
                 </Pressable>
@@ -317,9 +323,13 @@ export function CourierScreen({ navigation }: any) {
           <T variant="heading" style={{ marginTop: space.xl, marginBottom: space.md }}>
             What fits?
           </T>
-          <View style={{ flexDirection: 'row', gap: space.sm }}>
+          {/* [Wave 3 vs reference 12] Four tiers sit as the reference's 2×2 —
+              four in one row would crush every label. */}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
             {SIZES.map((s) => (
-              <OptionCard key={s.key} letter={s.letter} label={s.label} hint={s.hint} active={s.key === size} onPress={() => setSize(s.key)} />
+              <View key={s.key} style={{ flexBasis: '47%', flexGrow: 1 }}>
+                <OptionCard letter={s.letter} label={s.label} hint={s.hint} active={s.key === size} onPress={() => setSize(s.key)} />
+              </View>
             ))}
           </View>
 
@@ -369,7 +379,10 @@ export function CourierScreen({ navigation }: any) {
                       <T variant="micro" tone="muted">
                         Delivery fee
                       </T>
-                      <T variant="displayXl" tone="brand" style={{ marginTop: space.xs }}>
+                      {/* [Wave 3 vs reference 12 · law 3] MONEY IS INK, never
+                          brand — red stops meaning "act" when it also means
+                          "$1,100". The reference sets the fee in ink. */}
+                      <T variant="displayXl" style={{ marginTop: space.xs }}>
                         {money(estimate.totalFee)}
                       </T>
                     </View>
@@ -399,7 +412,10 @@ export function CourierScreen({ navigation }: any) {
           ) : null}
 
           <PillButton
-            label="Send parcel"
+            // [Wave 3 vs reference 12] The price rides the button — "Send
+            // parcel · $1,100" — the same commit-with-the-number the taxi
+            // request button already makes.
+            label={estimate ? `Send parcel · ${money(estimate.totalFee)}` : 'Send parcel'}
             style={{ marginTop: space.xl }}
             loading={send.isPending}
             disabled={!valid}
@@ -452,7 +468,7 @@ export function CourierScreen({ navigation }: any) {
                           <T variant="caption" tone="muted">
                             #{o.orderNumber}
                           </T>
-                          <T variant="numM" tone="brand">
+                          <T variant="numM">
                             {money(o.totalAmount)}
                           </T>
                         </View>
