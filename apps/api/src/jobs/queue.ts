@@ -1241,6 +1241,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'mmg-link-apply') {
+        // [ALG-34 / ALG-INV-14] Staged MMG pay link changes go live only after
+        // their cool-off passed with no cancellation from the owner.
+        const { applyDueMmgLinkChanges } = await import('../modules/integrity/money-surface');
+        const r = await applyDueMmgLinkChanges({ prisma: ctx.prisma, io: ctx.io });
+        if (r.applied > 0) ctx.log.info(r, 'money-surface: MMG pay links applied after cool-off');
+        return;
+      }
       if (job.name === 'algo-decision-retention') {
         // [ALGO Band 0.3] The decision log's retention: shadow rows are
         // evidence for a promotion decision and expire at 90 days; rows that
@@ -1724,6 +1732,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Algorithm decision log retention: daily, in the quiet hours.
   await queues.dispatchQueue.add('algo-decision-retention', {}, {
     repeat: { pattern: '40 3 * * *' },
+    removeOnComplete: 5,
+    removeOnFail: 5,
+  });
+
+  // [ALG-34] MMG pay link cool-off: every five minutes, apply what is due.
+  await queues.dispatchQueue.add('mmg-link-apply', {}, {
+    repeat: { every: 5 * 60_000 },
     removeOnComplete: 5,
     removeOnFail: 5,
   });

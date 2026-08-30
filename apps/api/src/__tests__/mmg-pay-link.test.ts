@@ -9,6 +9,8 @@ import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { grantStepUp } from './helpers/step-up';
+import { applyDueMmgLinkChanges } from '../modules/integrity/money-surface';
 
 // MMG Phase 1: a vendor / taxi driver attaches their OWN MMG "pay me" link
 // (opt-in) so customers can pay them directly. Owner-scoped set/clear.
@@ -123,16 +125,28 @@ afterAll(async () => {
 describe('MMG pay link — vendor', () => {
   const LINK = 'https://pay.example.com/pay/mmg-diner';
 
-  it('an owner attaches their MMG link and it comes back', async () => {
+  it('an owner attaches their MMG link: staged behind the cool-off, live once it passes [ALG-INV-14]', async () => {
+    const cold = await inject('PUT', '/api/v1/vendor/profile', vendorOwner.token, { mmgPayUrl: LINK }, vendorId);
+    expect(cold.statusCode).toBe(403);
+    expect(cold.json().error.code).toBe('STEP_UP_REQUIRED');
+
+    await grantStepUp(app, vendorOwner.token);
     const res = await inject('PUT', '/api/v1/vendor/profile', vendorOwner.token, { mmgPayUrl: LINK }, vendorId);
     expect(res.statusCode).toBe(200);
-    expect(res.json().data.mmgPayUrl).toBe(LINK);
+    expect(res.json().data.mmgPayUrl).toBeNull(); // nothing was live before, nothing is live yet
+    expect(res.json().data.mmgPayUrlPending).toBe(LINK);
+    expect(typeof res.json().data.mmgPayUrlApplyAt).toBe('string');
+
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgPayUrlApplyAt: new Date(Date.now() - 1000) } });
+    expect((await applyDueMmgLinkChanges({ prisma: app.prisma, io: app.io })).applied).toBeGreaterThanOrEqual(1);
     const got = await inject('GET', '/api/v1/vendor/profile', vendorOwner.token, undefined, vendorId);
     const v = got.json().data.vendors.find((x: any) => x.id === vendorId);
     expect(v.mmgPayUrl).toBe(LINK);
+    expect(v.mmgPayUrlPending).toBeNull();
   });
 
-  it('clears the link with an empty string (back to cash-only)', async () => {
+  it('clears the link with an empty string (back to cash-only) — immediate, it redirects nothing', async () => {
+    await grantStepUp(app, vendorOwner.token);
     const res = await inject('PUT', '/api/v1/vendor/profile', vendorOwner.token, { mmgPayUrl: '' }, vendorId);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.mmgPayUrl).toBeNull();
@@ -168,10 +182,16 @@ describe('MMG pay link — vendor', () => {
 describe('MMG pay link — taxi driver', () => {
   const LINK = 'https://pay.example.com/pay/driver42';
 
-  it('a driver attaches + clears their MMG link', async () => {
+  it('a driver attaches (staged, then live after the cool-off) + clears their MMG link', async () => {
+    expect((await inject('PUT', '/api/v1/driver/profile', driver.token, { mmgPayUrl: LINK })).statusCode).toBe(403);
+    await grantStepUp(app, driver.token);
     const set = await inject('PUT', '/api/v1/driver/profile', driver.token, { mmgPayUrl: LINK });
     expect(set.statusCode).toBe(200);
-    expect(set.json().data.mmgPayUrl).toBe(LINK);
+    expect(set.json().data.mmgPayUrl).toBeNull();
+    expect(set.json().data.mmgPayUrlPending).toBe(LINK);
+    await app.prisma.driver.update({ where: { userId: driver.userId }, data: { mmgPayUrlApplyAt: new Date(Date.now() - 1000) } });
+    await applyDueMmgLinkChanges({ prisma: app.prisma, io: app.io });
+    expect((await inject('GET', '/api/v1/driver/profile', driver.token)).json().data.mmgPayUrl).toBe(LINK);
 
     const clear = await inject('PUT', '/api/v1/driver/profile', driver.token, { mmgPayUrl: '' });
     expect(clear.statusCode).toBe(200);

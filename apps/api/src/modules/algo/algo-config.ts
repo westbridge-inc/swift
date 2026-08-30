@@ -97,6 +97,13 @@ export const ALGO_DEFAULTS = {
   /** [ALG-30] Kill switch. Off ⇒ no assessment, no rows — today's behaviour. */
   'ALG-30.enabled': true,
   /**
+   * [ALG-34 / ALG-INV-14] Hours a staged MMG pay link change waits, with the
+   * old link still live and the owner told, before the cool-off job applies
+   * it. Clamped 1..72 at the reader. The step-up that precedes it has no
+   * dial: a switch on a security invariant is itself the attack surface.
+   */
+  'money.linkCooloffHours': 24,
+  /**
    * [ALG-38] The generic velocity engine's per-action limits, for the
    * surfaces no dedicated limiter thought about. Each action: how many in
    * how many seconds per ACTOR, and per identity CLUSTER (the one that

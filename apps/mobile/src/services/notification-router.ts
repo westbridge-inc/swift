@@ -111,6 +111,12 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // so the one action that fills the marketplace arrived as a push that opened
   // the app on whatever screen was last shown.
   if (kind === 'category_backfill_review') return { screen: 'VendorCategoryReview' };
+  // [ALG-34] The MMG pay link change notices land on Account, where the
+  // pending change (and its cancel) lives — vendor and mover stacks both
+  // name that screen Account.
+  if (kind === 'mmg_link_change_staged' || kind === 'mmg_link_change_applied' || kind === 'mmg_link_change_cancelled') {
+    return { screen: 'Account' };
+  }
 
   if (kind === 'liveness_locked') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } };

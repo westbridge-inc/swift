@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { grantStepUp } from './helpers/step-up';
 
 // ---------------------------------------------------------------------------
 // Staff & roles (master plan §4.1). Failure paths first: STAFF is refused on
@@ -83,6 +84,7 @@ beforeAll(async () => {
   await app.ready();
 
   owner = await makeUser(['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
+  await grantStepUp(app, owner.token); // [ALG-34] staff grants are a money-adjacent surface
   managerUser = await makeUser(['CUSTOMER'], 'CUSTOMER');
   staffUser = await makeUser(['CUSTOMER'], 'CUSTOMER');
 
