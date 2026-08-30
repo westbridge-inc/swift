@@ -19,6 +19,9 @@ import {
   useAuthStore,
 } from '../../../stores/authStore';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
+import { useStepUp } from '../../../hooks/useStepUp';
+import { isStepUpDismissed, serverMessage } from '../../../lib/stepUp';
+import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
@@ -36,9 +39,26 @@ export function MoverAccountScreen({ navigation }: any) {
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
   const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
   const qc = useQueryClient();
+  // [ALG-34] The MMG pay link is where the money goes: the server asks this
+  // session to confirm it holds the phone (the code sheet), then STAGES the
+  // change behind a cool-off with the old link live.
+  const stepUp = useStepUp();
+  const [mmgError, setMmgError] = React.useState<string | null>(null);
   const saveMmgLink = useMutation({
-    mutationFn: (mmgPayUrl: string | null) => driverApi.updateProfile({ mmgPayUrl }),
+    mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => driverApi.updateProfile({ mmgPayUrl })),
+    onMutate: () => setMmgError(null),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover', 'driverProfile'] }),
+    onError: (e: unknown) => {
+      if (!isStepUpDismissed(e)) setMmgError(serverMessage(e, 'That link could not be saved. Check it and try again.'));
+    },
+  });
+  const cancelPendingMmgLink = useMutation({
+    mutationFn: () => driverApi.cancelPendingMmgLink(),
+    onSuccess: () => {
+      toast.success('Change cancelled', 'Your current link stays. Other devices were signed out.');
+      void qc.invalidateQueries({ queryKey: ['mover', 'driverProfile'] });
+    },
+    onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
   });
 
   const name = [user?.firstName, user?.lastName].filter(Boolean).join(' ') || 'Your account';
@@ -162,8 +182,12 @@ export function MoverAccountScreen({ navigation }: any) {
           <MmgPayLinkCard
             who="rides"
             value={profile?.mmgPayUrl}
+            pending={profile?.mmgPayUrlPending ? { url: profile.mmgPayUrlPending, applyAt: profile.mmgPayUrlApplyAt ?? null } : null}
             saving={saveMmgLink.isPending}
+            cancelling={cancelPendingMmgLink.isPending}
+            error={mmgError}
             onSave={(u) => saveMmgLink.mutate(u)}
+            onCancelPending={() => cancelPendingMmgLink.mutate()}
           />
         ) : null}
 
@@ -214,6 +238,7 @@ export function MoverAccountScreen({ navigation }: any) {
       </ScrollView>
 
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
+      {stepUp.sheet}
     </Screen>
   );
 }

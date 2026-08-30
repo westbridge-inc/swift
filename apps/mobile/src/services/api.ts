@@ -212,6 +212,10 @@ export async function revokeAuthSession(refreshToken: string, pushToken: string 
 export const authApi = {
   sendOtp: (phone: string) => api.post('/auth/send-otp', { phone }),
   verifyOtp: (phone: string, code: string) => api.post('/auth/verify-otp', { phone, code }),
+  // [ALG-34] Step-up for an existing session — a money surface answers 403
+  // STEP_UP_REQUIRED until verify succeeds on THIS session.
+  stepUp: () => api.post('/auth/step-up'),
+  verifyStepUp: (code: string) => api.post('/auth/step-up/verify', { code }),
   countries: () => api.get('/auth/countries'),
   // Public weekly price list — the pitch partners see BEFORE committing.
   pricing: (country?: string) => api.get('/auth/pricing', { params: country ? { country } : undefined }),
@@ -764,6 +768,8 @@ export const driverApi = {
   currentOffer: () => api.get('/driver/offers/current'),
   offerSeen: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/seen', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   updateProfile: (data: { mmgPayUrl?: string | null }) => api.put('/driver/profile', data),
+  // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
+  cancelPendingMmgLink: () => api.delete('/driver/profile/mmg-pay-url/pending'),
   goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot) =>
     api.post('/driver/go-online', { latitude, longitude }, capturedAuthConfig(session)),
   goOffline: () => api.post('/driver/go-offline'),
@@ -910,6 +916,8 @@ export const vendorApi = {
     api.put('/vendor/hours', { hours }),
   updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean }) =>
     api.put('/vendor/profile', data),
+  // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
+  cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),
   importItems: (
     csv: string,
     session?: AuthSessionSnapshot,
