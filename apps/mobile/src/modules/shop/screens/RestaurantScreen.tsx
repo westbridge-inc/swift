@@ -349,7 +349,17 @@ export function RestaurantScreen() {
                     Closed right now
                   </T>
                 </View>
-              ) : null}
+              ) : (
+                // [Wave 3 vs reference 06] "● Open" — the reference states the
+                // GOOD state too, not only the bad one. Same server fact
+                // (isCurrentlyOpen) that gates ordering.
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: withAlpha(color.white, 0.92), paddingHorizontal: 9, paddingVertical: 3, borderRadius: radius.full }}>
+                  <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color.success }} />
+                  <T variant="micro" weight="bold" style={{ color: color.success }}>
+                    Open
+                  </T>
+                </View>
+              )}
               {v.displayRating != null || v.ratingBucket ? (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: withAlpha(color.white, 0.92), paddingHorizontal: 9, paddingVertical: 3, borderRadius: radius.full }}>
                   <Feather name="star" size={11} color={color.star} />
@@ -421,7 +431,9 @@ export function RestaurantScreen() {
               icon="star"
               value={
                 v.displayRating != null
-                  ? `${Number(v.displayRating).toFixed(1)} ${v.ratingBucket ?? ''}`.trim()
+                  ? // [Wave 3 vs reference 06] "4.8 (212)" — the count is the
+                    // rating's credibility and it already rides the payload.
+                    `${Number(v.displayRating).toFixed(1)}${Number(v.totalRatings ?? 0) > 0 ? ` (${v.totalRatings})` : ''}`
                   : 'New'
               }
               caption="See reviews"
@@ -442,6 +454,18 @@ export function RestaurantScreen() {
               />
             ) : null}
           </View>
+
+          {/* [Wave 3 vs reference 06] The street closes the facts line — a
+              pickup customer needs WHERE, and the payload has always carried
+              addressLine1 unrendered here. */}
+          {v.addressLine1 ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: GUTTER, marginTop: space.lg }}>
+              <Feather name="map-pin" size={13} color={color.text.muted} />
+              <T variant="caption" tone="muted" numberOfLines={1} style={{ flex: 1 }}>
+                {v.addressLine1}
+              </T>
+            </View>
+          ) : null}
 
           {/* Live promos (real active codes) */}
           {promos.length > 0 ? (
@@ -730,8 +754,13 @@ export function RestaurantScreen() {
         </View>
       </ScrollView>
 
-      {/* Mart: pinned cart bar — keep shopping, check out in one tap */}
-      {isMart && cartCount > 0 ? (
+      {/* [Wave 3 vs reference 06] The pinned cart bar belongs to EVERY store
+          type, not only marts — the reference draws it on a restaurant menu.
+          Gated on the cart actually belonging to THIS store (the cart is
+          single-vendor and carries its vendorId), so browsing another
+          storefront never shows another store's basket. Copy per the
+          reference: "View cart" left, "N items · $X" right. */}
+      {cartCount > 0 && cart.data?.vendorId === vendorId ? (
         <Pressable onPress={() => navigation.navigate('Tabs', { screen: 'Cart' })}>
           {({ pressed }) => (
             <View
@@ -752,9 +781,14 @@ export function RestaurantScreen() {
               }}
             >
               <T variant="body" weight="bold" tone="onBrand">
-                View cart · {cartCount} item{cartCount === 1 ? '' : 's'}
+                View cart
               </T>
-              <Money amount={Number(cart.data?.subtotalCustomer ?? 0)} tone="onBrand" />
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs }}>
+                <T variant="body" weight="bold" tone="onBrand">
+                  {cartCount} item{cartCount === 1 ? '' : 's'} ·
+                </T>
+                <Money amount={Number(cart.data?.subtotalCustomer ?? 0)} tone="onBrand" />
+              </View>
             </View>
           )}
         </Pressable>
