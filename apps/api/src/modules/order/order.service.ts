@@ -5,6 +5,7 @@ import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrde
 import { estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
+import { lineTotal, orderTotal, promoDiscount } from '../../utils/order-total';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
@@ -845,7 +846,7 @@ export class OrderService {
           quantity: ci.quantity,
           basePrice,
           unitPrice,
-          totalBase: unitPrice * ci.quantity,
+          totalBase: lineTotal(unitPrice, ci.quantity),
           specialInstructions: ci.specialInstructions,
           options,
           tracksStock: ci.item.stockQuantity !== null,
@@ -1132,7 +1133,8 @@ export class OrderService {
         sequence += 1;
         const planTip = planTipFor(index);
         const planDiscount = discountAlloc[index]!;
-        const totalAmount = Math.max(0, plan.subtotal + plan.deliveryFee + planTip - planDiscount);
+        // [ALG-24] The one total — the cart quote computes its total through the same function.
+        const totalAmount = orderTotal({ subtotal: plan.subtotal, deliveryFee: plan.deliveryFee, tip: planTip, discount: planDiscount });
         // DELIVERY and MOBILE appointments go to the customer's address; PICKUP and
         // AT_BUSINESS appointments use the store (distanceKm>0 marks a mobile service).
         const toCustomer = plan.fulfillment === 'DELIVERY' || (plan.fulfillment === 'APPOINTMENT' && plan.distanceKm > 0);
@@ -2401,25 +2403,8 @@ export class OrderService {
       throw new AppError(400, 'MIN_ORDER_PROMO', `Minimum order of $${Number(promo.minOrderAmount).toLocaleString()} GYD required for this promo`);
     }
 
-    let discount = 0;
-    switch (promo.discountType) {
-      case 'PERCENTAGE':
-        discount = Math.ceil(subtotal * (Number(promo.discountValue) / 100));
-        break;
-      case 'FIXED_AMOUNT':
-        discount = Number(promo.discountValue);
-        break;
-      case 'FREE_DELIVERY':
-        // Waive the delivery fee — the whole basket's, or the promo vendor's.
-        // (Previously returned 0 and was never applied → the customer was shown
-        // "Free delivery" but charged the full fee in cash at the door.)
-        discount = deliveryFeeBasis;
-        break;
-    }
-
-    if (promo.maxDiscount) {
-      discount = Math.min(discount, Number(promo.maxDiscount));
-    }
+    // [ALG-24] The one promo switch — the cart quote applies the same function.
+    const discount = promoDiscount(promo, { subtotal, deliveryFee: deliveryFeeBasis });
 
     return { id: promo.id, discount, discountType: promo.discountType, vendorId: promo.vendorId };
   }
