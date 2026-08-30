@@ -1457,6 +1457,15 @@ model Order {
 
   estimatedPrepTime     Int?
   estimatedDeliveryTime Int?
+  /// [ALG-12] The customer's promise: written at creation, never silently
+  /// revised. `promiseBaseSeconds` is the unpadded prediction the weekly pad
+  /// is learned against; `promisePadSeconds` what was added on top.
+  promisedAt            DateTime?
+  promiseBaseSeconds    Int?
+  promisePadSeconds     Int?
+  promiseRevisedAt      DateTime?
+  promiseRevisionReason String?
+  promiseRevisions      Int       @default(0)
   actualDeliveryTime    Int?
   /// Priority delivery (§4.2 parity with courier speed tiers): customer pays
   /// 1.5x the delivery fee, the order dispatches ahead of standard ones, and
@@ -4347,6 +4356,24 @@ model AlgoConfig {
 /// America/Guyana. VENDOR-scope rows carry dayOfWeek/hourBucket = -1;
 /// VERTICAL-scope rows carry vendorId = "vertical:<VendorType>". Recomputed
 /// nightly from the trailing 30 days; outliers are counted, never averaged in.
+/// [ALG-12] The lateness pad per vertical and hour (America/Guyana): the
+/// `eta.targetOnTime` percentile of (actual − unpadded prediction) over the
+/// trailing 28 days. `hourBucket` = -1 is the vertical overall. Relearned
+/// weekly; gains a zone key the day zones (ALG-14) exist.
+model EtaPadStat {
+  id             String   @id @default(cuid())
+  tenantId       String   @default("swift-default")
+  vertical       String
+  hourBucket     Int
+  sampleCount    Int
+  onTimeRate     Float
+  padSeconds     Int
+  lastComputedAt DateTime
+
+  @@unique([tenantId, vertical, hourBucket])
+  @@map("eta_pad_stats")
+}
+
 model VendorPrepStat {
   id             String   @id @default(cuid())
   tenantId       String   @default("swift-default")

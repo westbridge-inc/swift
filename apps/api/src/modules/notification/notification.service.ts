@@ -471,6 +471,22 @@ export class NotificationService {
     });
   }
 
+  /** [ALG-12 / R-12.2.3] Tell the customer BEFORE they check. No `kind`: the
+   *  router's orderId default lands on the tracking screen, where the revised
+   *  range already shows. */
+  async orderRunningLate(customerId: string, orderNumber: string, orderId: string, minutesLate: number, window: { start: Date; end: Date }, status: string): Promise<void> {
+    const late = Math.max(1, Math.round(minutesLate));
+    const fmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Guyana', hour: 'numeric', minute: '2-digit', hour12: true });
+    await this.send({
+      userId: customerId,
+      type: 'ORDER_UPDATE',
+      title: `Running about ${late} min late — sorry`,
+      body: `Your order ${orderNumber} now arrives between ${fmt.format(window.start)} and ${fmt.format(window.end)}. We’ll keep you posted.`,
+      data: { orderId, orderNumber, status, minutesLate: late, windowStart: window.start.toISOString(), windowEnd: window.end.toISOString() },
+      dedupeKey: `promise-revised:${orderId}:${window.end.toISOString()}`,
+    });
+  }
+
   async orderDelivered(customerId: string, orderNumber: string, orderId: string): Promise<void> {
     await this.send({
       userId: customerId,

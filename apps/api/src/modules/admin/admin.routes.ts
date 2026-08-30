@@ -3039,6 +3039,14 @@ export async function adminRoutes(app: FastifyInstance) {
   /** Part 8 acceptance #1: the founder's ≥2-week would-batch evidence read.
    *  Pure aggregation over SHADOW_WOULD_BATCH rows; nothing here can turn
    *  batching on. */
+  /** GET /algo/eta/report — [ALG-12] did we keep the promises we made:
+   *  realised on-time rate against the target, revisions, and the pads. */
+  app.get('/algo/eta/report', { preHandler: [adminGuard] }, async (request) => {
+    const { days } = z.object({ days: z.coerce.number().int().min(1).max(90).default(28) }).parse(request.query ?? {});
+    const { etaReport } = await import('../eta/promise');
+    return { success: true, data: await etaReport(tenantPrisma, days) };
+  });
+
   /** GET /algo/prep-time/shadow-report — [ALG-03] how the prep-time learner
    *  is doing against reality, and whether the PREDICTIVE gate has passed. */
   app.get('/algo/prep-time/shadow-report', { preHandler: [adminGuard] }, async (request) => {

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
+import { noteLiveEta } from '../eta/promise';
 import { z } from 'zod';
 import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
@@ -816,6 +817,16 @@ export async function riderRoutes(app: FastifyInstance) {
       const legEtas = shouldWriteDb
         ? await refreshLegEtas(app, liveLegs, { lat: latitude, lng: longitude })
         : await cachedLegEtas(app, liveLegs);
+      // [ALG-12] A live ETA that runs past the promise revises it — out loud,
+      // once per order per ten minutes. Never in the ping's way.
+      for (const leg of legEtas) {
+        const live = liveLegs.find((l) => l.id === leg.orderId);
+        if (!live) continue;
+        void noteLiveEta(
+          { prisma: app.prisma, io: app.io, redis: app.redis, notifications: new NotificationService(app.prisma, app.io) },
+          { orderId: leg.orderId, status: live.status, etaMinutes: leg.etaMinutes, basis: leg.basis, now },
+        );
+      }
 
       // Authorization above and the live emit cannot be one unguarded read /
       // publish pair: another device may win GO while ETA is being computed.
