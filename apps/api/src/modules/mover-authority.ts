@@ -3,7 +3,7 @@ import { freshRidePinReset } from './rides/ride-pin';
 import type { FastifyInstance } from 'fastify';
 import { AppError, ConflictError, NotFoundError } from '../utils/errors';
 import { makeDispatchService } from './dispatch/dispatch.service';
-import { FloatService } from './dispatch/float.service';
+import { FloatService, riderFloatForOrder } from './dispatch/float.service';
 import { closeOnlineSession } from './rider/online-hours';
 import { processMoverRevocationOutboxById } from './mover-revocation-outbox';
 import { TERMINAL_ORDER_STATUSES } from './order/order-status';
@@ -367,9 +367,7 @@ export async function retireMoverSessionAuthorityInTransaction(
           await tx.order.update({ where: { id: order.id }, data: { riderId: null, status: resumed } });
           // MONEY stays with the leg it belongs to: this leg's committed CASH
           // float, released with this leg's assignment, in this transaction.
-          if (order.paymentMethod === 'CASH') {
-            await new FloatService(tx).release(tx, rider.id, Number(order.subtotalBase));
-          }
+          await new FloatService(tx).release(tx, rider.id, riderFloatForOrder(order));
           await tx.orderStatusLog.create({
             data: {
               orderId: order.id,

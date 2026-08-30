@@ -15,10 +15,9 @@ import { cashMathForOffer } from '../modules/dispatch/dispatch.service';
  * Every number is a STORED COLUMN, not invented arithmetic:
  *
  *   collectFromCustomer  order.totalAmount
- *   payToVendor          order.subtotalCustomer — safe as the store's cut only
- *                        because `subtotalMarkup` is law-bound to zero ("V1
- *                        dormant — zero-commission model: markup must stay 0",
- *                        schema.prisma), so subtotalCustomer === subtotalBase.
+ *   payToVendor          riderFloatForOrder(order) — `subtotalBase` through THE
+ *                        function the float gate commits [G4], so the number on
+ *                        the card is the number the gate holds, by construction.
  *   youKeep              deliveryFee + tipAmount — the SAME expression
  *                        `createEarnings` uses for the earnings rows and the
  *                        MMG settlement debt. Not a second definition of pay.
@@ -38,7 +37,7 @@ import { cashMathForOffer } from '../modules/dispatch/dispatch.service';
 const base = {
   paymentMethod: 'CASH',
   totalAmount: 900,
-  subtotalCustomer: 400,
+  subtotalBase: 400,
   deliveryFee: 500,
   serviceFee: 0,
   taxAmount: 0,
@@ -88,6 +87,24 @@ describe('the triple, on a real reconciling order', () => {
   });
 });
 
+describe('[G4] the card and the float gate are one reader', () => {
+  it('ignores subtotalCustomer entirely — the column the gate never read', () => {
+    // If markup ever made the two columns differ, the old card told the rider
+    // the customer-price goods while the gate held the store-price goods.
+    expect(cashMathForOffer({ ...base, subtotalCustomer: 999 } as any)).toEqual({
+      collectFromCustomer: 900,
+      payToVendor: 400,
+      youKeep: 500,
+    });
+  });
+
+  it('refuses when the store price and the totals no longer agree', () => {
+    // A markup of 20 lands in totalAmount via subtotalCustomer but not in
+    // subtotalBase: 380 + 500 ≠ 900. No card, rather than a second number.
+    expect(cashMathForOffer({ ...base, subtotalBase: 380 })).toBeNull();
+  });
+});
+
 describe('it refuses rather than showing a split it cannot prove', () => {
   it('returns null when a service fee has no defined recipient', () => {
     // 400 + 500 + 50 !== 900 — someone is owed 50 and the model does not say
@@ -116,7 +133,7 @@ describe('it refuses rather than showing a split it cannot prove', () => {
     // 0.1 + 0.2 !== 0.3 in float. A naive check would reject this real order.
     const penny = {
       ...base,
-      subtotalCustomer: 0.1,
+      subtotalBase: 0.1,
       deliveryFee: 0.2,
       tipAmount: 0,
       totalAmount: 0.3,

@@ -11,7 +11,7 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
-import { FloatService } from '../dispatch/float.service';
+import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
@@ -1186,7 +1186,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // enforces — the rider fronts the vendor the CASH subtotal at pickup — and
     // commit the float it consumes, or the cap is bypassable through this
     // entrance and a later release decrements float never committed.
-    const floatAmt = order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
+    const floatAmt = riderFloatForOrder(order);
     // Fast-fail hint only — this reads a possibly-stale committedFloat. The
     // authoritative cap is the guarded commit below.
     if (floatAmt > 0) {
@@ -1233,7 +1233,7 @@ export async function riderRoutes(app: FastifyInstance) {
       // amount comes from the LOCKED-row snapshot, not the route preview — a
       // picking refund committing between preview and lock shrinks the cash
       // the rider actually fronts [REPORT-006].
-      const lockedFloatAmt = staged.paymentMethod === 'CASH' ? Number(staged.subtotalBase) : 0;
+      const lockedFloatAmt = riderFloatForOrder(staged);
       if (lockedFloatAmt > 0) {
         const floatReserved = await floatService.commit(tx, rider.id, lockedFloatAmt);
         if (!floatReserved) {

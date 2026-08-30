@@ -3,6 +3,31 @@ import { PrismaClient, Prisma, TrustLevel } from '@prisma/client';
 type Tx = Prisma.TransactionClient | PrismaClient;
 
 /**
+ * [G4] THE ONE READER of what a rider fronts for an order.
+ *
+ * The gate commits it at claim (`claimOffer` in dispatch.service, the board
+ * grab in rider.routes), every terminal transition releases it (order.service,
+ * delivery-watchdog, mover-authority), and the offer card SHOWS it as
+ * `payToVendor` (`cashMathForOffer`). Before this helper the gate read
+ * `subtotalBase` and the card read `subtotalCustomer` — equal only because
+ * `chk_orders_zero_markup` forces markup to zero. Two readers of one amount is
+ * how a rider gets told to hand over one number while being gated on another,
+ * the day markup stops being zero. One reader, imported everywhere; a census
+ * test (`float-one-reader.test.ts`) fails on any site that grows its own.
+ *
+ * `subtotalBase` is the goods at the STORE's price — what the rider actually
+ * hands over at pickup. A non-CASH order fronts nothing.
+ */
+export function riderFloatForOrder(order: {
+  paymentMethod: string;
+  subtotalBase: number | string | null | undefined | { toString(): string };
+}): number {
+  if (order.paymentMethod !== 'CASH') return 0;
+  const amount = Number(order.subtotalBase);
+  return Number.isFinite(amount) && amount > 0 ? amount : 0;
+}
+
+/**
  * D.3 rider float-limit gate.
  *
  * A rider may front at most `floatLimit` worth of vendor cash at any one time;

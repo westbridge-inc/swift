@@ -23,7 +23,7 @@ import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/obs
 import { getTenantId } from '../../plugins/tenant-context';
 import { clampDriverFare } from '../../utils/markup';
 import { assertMmgFulfilmentAllowed } from '../order/order.service';
-import { FloatService } from './float.service';
+import { FloatService, riderFloatForOrder } from './float.service';
 import {
   hasTaxiPassengerCustody,
   lockTaxiOrderForCustodyDecision,
@@ -156,11 +156,12 @@ export type OfferCashMath = {
  * Every number here is a stored column, never derived arithmetic:
  *
  *   collectFromCustomer  order.totalAmount     — what the customer owes at the door
- *   payToVendor          order.subtotalCustomer — the store's share. Safe to use
- *                        as the vendor's cut because `subtotalMarkup` is law-
- *                        bound to zero ("V1 dormant — zero-commission model:
- *                        markup must stay 0", schema.prisma), so
- *                        subtotalCustomer === subtotalBase.
+ *   payToVendor          riderFloatForOrder(order) — `subtotalBase`, the goods
+ *                        at the STORE's price, read through THE SAME function
+ *                        the float gate commits [G4]. The card can no longer
+ *                        name one number while the gate holds another: if
+ *                        markup ever made them differ, the reconciliation
+ *                        below fails and the card refuses instead.
  *   youKeep              deliveryFee + tipAmount — the SAME expression
  *                        `createEarnings` uses for the earnings rows and for the
  *                        MMG settlement debt. Not a second definition of pay.
@@ -176,7 +177,7 @@ export type OfferCashMath = {
 export function cashMathForOffer(order: {
   paymentMethod: string;
   totalAmount: unknown;
-  subtotalCustomer: unknown;
+  subtotalBase: unknown;
   deliveryFee: unknown;
   serviceFee: unknown;
   taxAmount: unknown;
@@ -187,7 +188,7 @@ export function cashMathForOffer(order: {
 
   const n = (v: unknown) => Number(v);
   const total = n(order.totalAmount);
-  const vendorShare = n(order.subtotalCustomer);
+  const vendorShare = riderFloatForOrder(order as { paymentMethod: string; subtotalBase: number });
   const fee = n(order.deliveryFee);
   const tip = n(order.tipAmount);
   const service = n(order.serviceFee);
@@ -835,7 +836,7 @@ export class DispatchService {
       // fire-and-caught, never load-bearing for the cascade itself.
       await this.journalOpenSearch(order, round, radius);
       // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
-      const floatRequired = pool === 'RIDER' && order.paymentMethod === 'CASH' ? Number(order.subtotalBase) : 0;
+      const floatRequired = pool === 'RIDER' ? riderFloatForOrder(order) : 0;
       const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize, order.customerId, order.taxiPassengerCount);
 
       // [G1 SHADOW] What a load gate WOULD demand, and what it WOULD cost.
@@ -1611,7 +1612,7 @@ export class DispatchService {
         // pushed committedFloat past the rider's hard cap. A failed guard rolls
         // the whole claim back (order CAS, reservation, log) — same one-winner
         // semantics as the board entrance.
-        const floatAmt = lockedOrder.paymentMethod === 'CASH' ? Number(lockedOrder.subtotalBase) : 0;
+        const floatAmt = riderFloatForOrder(lockedOrder);
         if (floatAmt > 0 && !(await new FloatService(tx).commit(tx, moverId, floatAmt))) {
           throw new AppError(
             400,
