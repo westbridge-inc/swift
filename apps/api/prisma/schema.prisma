@@ -4298,6 +4298,37 @@ model AlgoConfig {
   @@map("algo_config")
 }
 
+/// [ALGO Band 0.3] The decision log. Every algorithm that ranks, prices, flags
+/// or gates writes one row: the outcome, the ONE SENTENCE a Guyanese rider
+/// would accept as the reason (law L9), the exact inputs that decided it and
+/// the config version they were judged against. `shadow` rows are what an
+/// algorithm not yet live WOULD have decided — the founder's ≥2-week evidence
+/// before promotion. The appeal surface, the debugging surface and the
+/// founder's evidence, in one table. Retention: 90 days shadow, 400 days live.
+model AlgoDecision {
+  id            String   @id @default(cuid())
+  tenantId      String   @default("swift-default")
+  /// "ALG-18" — the algorithm document's id, never a local nickname
+  algo          String
+  /// ORDER | RIDER | DRIVER | VENDOR | CUSTOMER | ITEM
+  subjectType   String
+  subjectId     String
+  /// The decision, one token
+  outcome       String
+  /// The human sentence (L9)
+  sentence      String
+  /// The exact values that decided it
+  inputs        Json
+  configVersion Int      @default(0)
+  shadow        Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  @@index([tenantId, algo, createdAt])
+  @@index([subjectType, subjectId])
+  @@index([shadow, createdAt])
+  @@map("algo_decisions")
+}
+
 // ---------------------------------------------------------------------------
 // QR GROWTH ENGINE (scan-to-store) — printed QR → /s/{code} resolver → web
 // storefront. QrCode supersedes the dormant Vendor.qrSlug field (never wired).

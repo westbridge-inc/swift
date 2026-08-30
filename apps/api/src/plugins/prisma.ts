@@ -84,6 +84,8 @@ const TENANT_QUERY_EXTENSIONS = {
   // [ALGO Band 0.2] Algorithm tunables are tenant-owned: one operator's dials
   // must never be read or written through another's session.
   algoConfig: scoped,
+  // [ALGO Band 0.3] The decision log: one operator's evidence, never another's.
+  algoDecision: scoped,
   rideQueueEntry: scoped,
   // [REPORT-014 F-014-03] Supply watches are tenant rows: demand counts and
   // recovery notifications must never see another operator's watchers.
