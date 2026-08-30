@@ -4,7 +4,7 @@ import { FlatList, KeyboardAvoidingView, Platform, Pressable, TextInput, View } 
 import { Feather } from '@expo/vector-icons';
 import { useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { withAlpha, color, radius, space } from '@swift/ui';
+import { withAlpha, color, font, fontSize, radius, space } from '@swift/ui';
 import { useChatMessages, useChatRoom, useSendMessage } from '../../../hooks/chat';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBlockUser, useReportContent } from '../../../hooks/customer';
@@ -177,7 +177,8 @@ export function ConversationScreen() {
                 onChangeText={setDraft}
                 placeholder="Type a message…"
                 placeholderTextColor={color.text.muted}
-                style={{ fontFamily: 'Hanken', fontSize: 15, color: color.text.primary }}
+                // [Wave 3] Tokens, not raw font literals.
+                style={{ fontFamily: font.body, fontSize: fontSize.base, color: color.text.primary }}
                 onSubmitEditing={onSend}
                 returnKeyType="send"
               />
