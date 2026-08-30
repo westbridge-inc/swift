@@ -1061,6 +1061,12 @@ export class DispatchService {
     taxiFareTotal: number | null;
     pickupAddress: string | null;
     deliveryAddress: string | null;
+    /** [G5] The live card shows "N min away" and the cash box. A card rebuilt
+     *  after an app death must show the SAME things, or it is a different card:
+     *  a rider who force-quit and reopened would otherwise accept a CASH job
+     *  without the exposure the live card had put beside the button. */
+    etaMinutes: number | null;
+    cashMath: OfferCashMath | null;
   } | null> {
     const reverse = await this.redis.get(moverOfferKey(moverId));
     if (!reverse) return null;
@@ -1080,7 +1086,8 @@ export class DispatchService {
       select: {
         orderNumber: true, isExpress: true, paymentMethod: true, customerId: true,
         deliveryFee: true, tipAmount: true, taxiFareTotal: true,
-        pickupAddress: true, deliveryAddress: true,
+        pickupAddress: true, deliveryAddress: true, pickupLat: true, pickupLng: true,
+        totalAmount: true, subtotalBase: true, serviceFee: true, taxAmount: true, discount: true,
         status: true, riderId: true, driverId: true, fulfillment: true, orderType: true,
         vendor: { select: { name: true } },
         items: { select: { quantity: true } },
@@ -1103,6 +1110,19 @@ export class DispatchService {
     }
     const trust = (await customerTrustSummaries(this.prisma, [order.customerId])).get(order.customerId);
     const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
+    // [G5] The same journey the ranking priced — MOVER → PICKUP — from wherever
+    // the mover is NOW. A mover whose position is unknown gets null, never a
+    // stale number; the card hides the line rather than guess.
+    const mover = (await this.prisma.rider.findUnique({ where: { id: moverId }, select: { currentLat: true, currentLng: true } }))
+      ?? (await this.prisma.driver.findUnique({ where: { id: moverId }, select: { currentLat: true, currentLng: true } }));
+    let etaMinutes: number | null = null;
+    if (mover?.currentLat != null && mover.currentLng != null && order.pickupLat != null && order.pickupLng != null) {
+      const [eta] = await this.maps.etaMinutesFrom(
+        [{ lat: mover.currentLat, lng: mover.currentLng }],
+        { lat: order.pickupLat, lng: order.pickupLng },
+      );
+      etaMinutes = eta != null && Number.isFinite(eta) ? Math.round(eta) : null;
+    }
     return {
       orderId,
       offerAttemptId: attemptId ?? null,
@@ -1119,6 +1139,9 @@ export class DispatchService {
       taxiFareTotal: order.taxiFareTotal != null ? Number(order.taxiFareTotal) : null,
       pickupAddress: order.pickupAddress ?? null,
       deliveryAddress: order.deliveryAddress ?? null,
+      etaMinutes,
+      // The SAME function the live emit calls — one definition of the triple.
+      cashMath: cashMathForOffer(order),
     };
   }
 
