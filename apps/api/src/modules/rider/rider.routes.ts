@@ -1193,7 +1193,7 @@ export async function riderRoutes(app: FastifyInstance) {
       const headroom = Number(rider.floatLimit) - Number(rider.committedFloat);
       if (headroom < floatAmt) {
         throw new AppError(
-          400,
+          409,
           'FLOAT_EXCEEDED',
           `This cash order needs $${floatAmt.toLocaleString()} float headroom (you front the vendor at pickup); you have $${Math.max(0, headroom).toLocaleString()} available`,
         );
@@ -1238,7 +1238,7 @@ export async function riderRoutes(app: FastifyInstance) {
         const floatReserved = await floatService.commit(tx, rider.id, lockedFloatAmt);
         if (!floatReserved) {
           throw new AppError(
-            400,
+            409,
             'FLOAT_EXCEEDED',
             `This cash order needs $${lockedFloatAmt.toLocaleString()} float headroom (you front the vendor at pickup); your other live orders have used it up.`,
           );
