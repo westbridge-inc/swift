@@ -183,8 +183,9 @@ export function VendorScheduleScreen({ navigation }: any) {
         <View style={{ alignSelf: 'stretch', marginBottom: space.lg }}>
           <LabeledInput label="Note (only you see this)" value={blockReason} onChangeText={setBlockReason} placeholder="Optional" />
         </View>
+        {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
-          label="Block time"
+          label={blockValid ? 'Block time' : 'Times must be HH:MM, start before end'}
           disabled={!blockValid}
           loading={createBlock.isPending}
           onPress={submitBlock}
