@@ -1638,7 +1638,7 @@ export class DispatchService {
         const floatAmt = riderFloatForOrder(lockedOrder);
         if (floatAmt > 0 && !(await new FloatService(tx).commit(tx, moverId, floatAmt))) {
           throw new AppError(
-            400,
+            409,
             'FLOAT_EXCEEDED',
             `This cash order now needs $${floatAmt.toLocaleString()} float headroom (the basket changed while the offer was out) — it exceeds your available float.`,
           );

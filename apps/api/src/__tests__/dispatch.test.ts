@@ -1565,7 +1565,9 @@ describe('Atomic acceptance — the concurrency proof', () => {
       payload: {},
       headers: { 'content-type': 'application/json', authorization: `Bearer ${r.token}` },
     });
-    expect(res.statusCode).toBe(400);
+    // [B4] A float that passed at offer and fails at accept is a CONFLICT with
+    // the rider's live state — 409, explained, never a silent drop.
+    expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('FLOAT_EXCEEDED');
 
     // Nothing claimed, rider not stuck.

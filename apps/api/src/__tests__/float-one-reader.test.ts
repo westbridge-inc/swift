@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { Prisma } from '@prisma/client';
 import { riderFloatForOrder } from '../modules/dispatch/float.service';
 import { cashMathForOffer } from '../modules/dispatch/dispatch.service';
+import { settle } from '../modules/fulfillment/money-matrix';
 
 // ---------------------------------------------------------------------------
 // [G4] The float gate and the offer card read the SAME number.
@@ -84,6 +85,26 @@ describe('the card shows the number the gate holds', () => {
     // "hand over 400" while the gate held 380. Now nothing reconciles, and a
     // card that does not add up is not shown.
     expect(cashMathForOffer({ ...order, subtotalBase: 380 })).toBeNull();
+  });
+});
+
+describe('[B4] the one reader reconciles against the money matrix', () => {
+  // money-matrix.ts is the reconciliation ORACLE (FUL-001): row 1 says the
+  // rider fronts the goods to the vendor at collection. The gate must hold
+  // exactly that number — in minor units, as the matrix speaks — or the float
+  // ceiling is a ceiling on a different quantity than the one that moves.
+  it('RIDER_FRONTED on a CASH platform delivery is exactly what the gate commits', () => {
+    const order = { paymentMethod: 'CASH', subtotalBase: 4250.5 };
+    const matrix = settle({ foodTotal: 425050, deliveryFee: 50000, mode: 'PLATFORM_RIDER', payment: 'CASH' });
+    expect(matrix.riderFronts).toBe(Math.round(riderFloatForOrder(order) * 100));
+    expect(matrix.movements.find((m) => m.type === 'RIDER_FRONTED')?.amount).toBe(425050);
+    expect(matrix.reconciles).toBe(true);
+  });
+
+  it('on the MMG rail the rider fronts nothing — both say so', () => {
+    const matrix = settle({ foodTotal: 425050, deliveryFee: 50000, mode: 'PLATFORM_RIDER', payment: 'VENDOR_MMG' });
+    expect(matrix.riderFronts).toBe(0);
+    expect(riderFloatForOrder({ paymentMethod: 'MOBILE_MONEY', subtotalBase: 4250.5 })).toBe(0);
   });
 });
 
