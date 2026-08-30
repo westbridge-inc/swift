@@ -209,6 +209,12 @@ const topUpSchema = z.object({
 
 const verificationQueueQuerySchema = z.object({
   status: z.nativeEnum(VerificationDocumentStatus).default('PENDING'),
+  /** [G6] Which review lane. A customer's national ID (the L2 high-value gate)
+   *  is not routine work and must not sit interleaved with rider police
+   *  clearances and vendor registrations, where it is casually browsable by
+   *  anyone working the queue. The operator lane is the default view; the
+   *  customer lane is asked for on purpose. */
+  role: z.enum(['operator', 'customer', 'all']).default('operator'),
 });
 
 const claimsQueueQuerySchema = z.object({
@@ -3668,9 +3674,14 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/verification/queue', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const { status } = verificationQueueQuerySchema.parse(request.query);
+    const { status, role } = verificationQueueQuerySchema.parse(request.query);
 
-    const where = { status };
+    // [G6] `VerificationDocument.role` is the lane: the role the document
+    // supports, stamped at upload. Customer identity is its own lane.
+    const where = {
+      status,
+      ...(role === 'customer' ? { role: 'CUSTOMER' as const } : role === 'operator' ? { role: { not: 'CUSTOMER' as const } } : {}),
+    };
     const [documents, total] = await Promise.all([
       tenantPrisma.verificationDocument.findMany({
         where,
