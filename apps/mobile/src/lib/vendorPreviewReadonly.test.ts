@@ -10,8 +10,8 @@ import { vendorPreviewDataset } from './vendorPreviewData';
 // silently fire a real write from a "read-only" preview. This pins that shut so
 // the gap can't reopen unnoticed (mobile has no render tests to catch it).
 const src = readFileSync(join(process.cwd(), 'src/hooks/vendorops.ts'), 'utf8');
-const stack = readFileSync(join(process.cwd(), 'src/modules/vendor/VendorStack.tsx'), 'utf8');
-const bulkImport = readFileSync(join(process.cwd(), 'src/screens/vendor/VendorBulkImportScreen.tsx'), 'utf8');
+const editor = readFileSync(join(process.cwd(), 'src/modules/vendor/screens/VendorItemEditorScreen.tsx'), 'utf8');
+const bulkImport = readFileSync(join(process.cwd(), 'src/modules/vendor/screens/VendorBulkImportScreen.tsx'), 'utf8');
 
 describe('vendor mutations are preview-read-only by construction', () => {
   it('no vendor hook calls useMutation({ directly — all route through usePreviewSafeMutation', () => {
@@ -26,9 +26,9 @@ describe('vendor mutations are preview-read-only by construction', () => {
   });
 
   it('gates editor, modifier, stock and bulk-import controls in sample preview', () => {
-    expect(stack).toContain('if (readOnly || !valid || busy) return;');
-    expect(stack).toContain('disabled={readOnly || !valid || adjust.isPending}');
-    expect(stack).toContain('disabled={readOnly || addOption.isPending}');
+    expect(editor).toContain('if (readOnly || !valid || busy) return;');
+    expect(editor).toContain('disabled={readOnly || !valid || adjust.isPending}');
+    expect(editor).toContain('disabled={readOnly || addOption.isPending}');
     expect(bulkImport).toContain('disabled={!!previewType || csv.trim().length === 0 || busy}');
     expect(bulkImport).toContain('Sign in and create your store before importing a catalogue.');
   });

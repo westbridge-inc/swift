@@ -67,7 +67,7 @@ const rel = (f: string) => f.slice(SRC.length + 1);
  */
 const RAW_MEAN_ALLOWED: Array<{ file: string; why: string }> = [
   {
-    file: 'modules/vendor/VendorStack.tsx',
+    file: 'modules/vendor/screens/VendorInsightsScreen.tsx',
     why: "a vendor's OWN reviews summary on their own dashboard — their true lifetime average is theirs to see, and it is not a public star line on anyone's card",
   },
   {

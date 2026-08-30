@@ -3,7 +3,9 @@ import React from 'react';
 import { Pressable, TextInput, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { T, TonePill } from '../../kit';
+import { T, TonePill, PillButton } from '../../kit';
+import { useAuthStore } from '../../stores/authStore';
+import { money } from '../../lib/money';
 
 export const GUTTER = space['2xl'];
 
@@ -499,4 +501,259 @@ export function BoardFirstRun({
       </View>
     </View>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Shared by the vendor screens that were split out of VendorStack.tsx (R3).
+// ---------------------------------------------------------------------------
+
+export const TYPES = [
+  { key: 'RESTAURANT', label: 'Restaurant', icon: 'silverware-fork-knife' },
+  { key: 'SUPERMARKET', label: 'Grocery', icon: 'basket-outline' },
+  { key: 'STORE', label: 'Shop', icon: 'storefront-outline' },
+  { key: 'SERVICE', label: 'Services', icon: 'tools' },
+] as const;
+
+// R1 type-awareness: the catalogue surface is named for the BUSINESS, not the
+// kitchen. One map drives the tab label + icon, the menu-screen title, and the
+// category prompt, so a Services vendor never sees "Menu"/"Mains, Drinks".
+export const CATALOGUE_META: Record<string, { label: string; icon: keyof typeof Feather.glyphMap; catPlaceholder: string }> = {
+  RESTAURANT: { label: 'Menu', icon: 'book-open', catPlaceholder: 'e.g. Mains, Drinks' },
+  SUPERMARKET: { label: 'Inventory', icon: 'package', catPlaceholder: 'e.g. Produce, Dairy, Household' },
+  STORE: { label: 'Products', icon: 'tag', catPlaceholder: 'e.g. Apparel, Accessories' },
+  SERVICE: { label: 'Services', icon: 'calendar', catPlaceholder: 'e.g. Haircuts, Nails, Spa' },
+};
+
+export function catalogueMeta(vendorType?: string) {
+  return CATALOGUE_META[vendorType ?? 'RESTAURANT'] ?? CATALOGUE_META['RESTAURANT']!;
+}
+
+export type VendorMemberRole = 'OWNER' | 'MANAGER' | 'STAFF';
+
+export function safeVendorRole(value: unknown): VendorMemberRole | undefined {
+  return value === 'OWNER' || value === 'MANAGER' || value === 'STAFF' ? value : undefined;
+}
+
+export function HeaderAction({ label, tone = 'brand', onPress }: { label: string; tone?: 'brand' | 'muted'; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      style={{ minWidth: space['5xl'], minHeight: space['5xl'], alignItems: 'center', justifyContent: 'center' }}
+    >
+      {({ pressed }) => (
+        <T variant="label" tone={tone} weight="medium" style={{ opacity: pressed ? 0.6 : 1 }}>
+          {label}
+        </T>
+      )}
+    </Pressable>
+  );
+}
+
+/** Tab-root header: the board may replace the product eyebrow with a live store
+ *  state; the other tabs retain the quiet Swift Business identity. */
+export function TabHeader({
+  title,
+  onSwitch,
+  eyebrow = 'SWIFT BUSINESS',
+  avatar,
+  statusTone = 'brand',
+}: {
+  title: string;
+  onSwitch?: () => void;
+  eyebrow?: string;
+  avatar?: string;
+  statusTone?: 'brand' | 'success' | 'warning' | 'muted';
+}) {
+  const { logout } = useAuthStore();
+  const statusColor =
+    statusTone === 'success'
+      ? color.success
+      : statusTone === 'warning'
+        ? color.warning
+        : statusTone === 'muted'
+          ? color.text.secondary
+          : color.brand[500];
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingHorizontal: GUTTER,
+        paddingVertical: space.sm,
+      }}
+    >
+      <View style={{ flex: 1, paddingRight: space.md }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+          <View style={{ width: space.sm, height: space.sm, borderRadius: radius.full, backgroundColor: statusColor }} />
+          <T variant="micro" weight="bold" tone={statusTone === 'brand' ? 'brand' : 'muted'} numberOfLines={1}>
+            {eyebrow}
+          </T>
+        </View>
+        <T variant="title" numberOfLines={1}>
+          {title}
+        </T>
+      </View>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
+        {avatar ? (
+          <View
+            style={{
+              width: space['4xl'],
+              height: space['4xl'],
+              borderRadius: radius.full,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: color.brand[500],
+            }}
+            accessibilityLabel={`${title} initial ${avatar}`}
+          >
+            <T variant="heading" weight="bold" tone="onBrand">
+              {avatar}
+            </T>
+          </View>
+        ) : null}
+        {onSwitch ? <HeaderAction label="Switch app" onPress={onSwitch} /> : null}
+        <HeaderAction label="Log out" tone="muted" onPress={logout} />
+      </View>
+    </View>
+  );
+}
+
+export type RevenueDay = {
+  date: string;
+  revenue: number;
+  orders?: number;
+  isToday?: boolean;
+};
+
+export const DAY_MILLISECONDS = 24 * 60 * 60 * 1000;
+
+export const GUYANA_OFFSET_MILLISECONDS = 4 * 60 * 60 * 1000;
+
+export function numericFact(value: unknown): number | null {
+  const n = Number(value);
+  return value !== null && value !== undefined && Number.isFinite(n) ? n : null;
+}
+
+/** Guyana has no daylight-saving transition; shift once and read the UTC face. */
+export function guyanaDate(offsetDays = 0) {
+  return new Date(Date.now() - GUYANA_OFFSET_MILLISECONDS + offsetDays * DAY_MILLISECONDS);
+}
+
+export function guyanaDayKey(offsetDays = 0) {
+  const d = guyanaDate(offsetDays);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+export function hasTrailingGuyanaDays(daily: RevenueDay[], take: number) {
+  if (take <= 0) return false;
+  const keys = new Set(daily.map((day) => day.date));
+  return Array.from({ length: take }, (_, index) => guyanaDayKey(index - take + 1)).every((key) => keys.has(key));
+}
+
+export function normalizeRevenueDays(payload: any): RevenueDay[] {
+  const rows: any[] = Array.isArray(payload) ? payload : Array.isArray(payload?.daily) ? payload.daily : [];
+  return rows
+    .map((row) => {
+      const revenue = numericFact(row?.revenue ?? row?.total);
+      if (!row?.date || revenue == null) return null;
+      const orders = numericFact(row?.orders);
+      return {
+        date: String(row.date),
+        revenue,
+        ...(orders == null ? {} : { orders }),
+        ...(row.isToday === undefined ? {} : { isToday: !!row.isToday }),
+      };
+    })
+    .filter((row): row is RevenueDay => row !== null);
+}
+
+/** The revenue endpoint currently ends its dense series yesterday. Overview owns
+ *  today's completed sales, so combine the two server reads rather than drawing
+ *  a false zero or silently dropping today. Preview rows already identify today. */
+export function reconciledRevenueDays(payload: any, overview: any, requestedDays: number): RevenueDay[] {
+  const rows = normalizeRevenueDays(payload);
+  if (rows.length === 0 || rows.some((row) => !/^\d{4}-\d{2}-\d{2}$/.test(row.date))) return rows;
+  const todayRevenue = numericFact(overview?.today?.revenue ?? overview?.today?.total);
+  const key = guyanaDayKey();
+  const existingToday = rows.find((row) => row.date === key);
+  const endpointOrders = numericFact(payload?.totals?.orders);
+  const allBucketsKnown = rows.every((row) => numericFact(row.orders) != null);
+  const bucketedOrders = allBucketsKnown
+    ? rows.reduce((sum, row) => sum + Number(row.orders), 0)
+    : null;
+  // Overview.today.orders is every still-live order placed today, while this
+  // series is completed orders only. Recover the missing completed-today bucket
+  // from the revenue endpoint's own total instead of corrupting AOV with the
+  // broader overview count.
+  const inferredTodayOrders = endpointOrders != null && bucketedOrders != null
+    ? endpointOrders - bucketedOrders
+    : null;
+  const todayOrders = numericFact(existingToday?.orders) ?? (inferredTodayOrders != null && inferredTodayOrders >= 0 ? inferredTodayOrders : null);
+  if (todayRevenue == null) return rows;
+  return [
+    ...rows.filter((row) => row.date !== key),
+    { date: key, revenue: todayRevenue, ...(todayOrders == null ? {} : { orders: todayOrders }), isToday: true },
+  ]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-requestedDays);
+}
+
+export function VendorBillingNotice({ sub, onPay }: { sub: any; onPay: () => void }) {
+  if (!sub) return null;
+  const status = String(sub.status ?? '').toUpperCase();
+  const blocked = status === 'SUSPENDED' || status === 'CHURNED';
+  const behind = !blocked && (sub.isInGracePeriod || status === 'PAST_DUE');
+  if (!blocked && !behind) return null;
+  const due = numericFact(sub.amountDueGyd);
+  const deadline = sub.gracePeriodEnd ? fmtDate(sub.gracePeriodEnd) : null;
+
+  return (
+    <View
+      style={{
+        borderRadius: radius.lg,
+        backgroundColor: blocked ? color.soft.danger : color.soft.warning,
+        padding: space.lg,
+        marginBottom: space.lg,
+      }}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+        <Feather name={blocked ? 'alert-circle' : 'alert-triangle'} size={18} color={blocked ? color.error : color.warning} />
+        <T variant="body" weight="semibold" tone={blocked ? 'error' : 'warning'} style={{ flex: 1 }}>
+          {blocked ? 'Billing hold needs attention' : `Weekly fee due${deadline ? ` by ${deadline}` : ''}`}
+        </T>
+      </View>
+      <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+        {blocked
+          ? 'Pay using your Swift Number. Confirmation clears the billing hold; any separate verification hold remains.'
+          : 'Pay using your Swift Number to keep the weekly fee current.'}
+      </T>
+      {due != null && due > 0 ? (
+        <T variant="label" weight="semibold" style={{ marginTop: space.sm }}>
+          Due now: {money(due)}
+        </T>
+      ) : null}
+      <PillButton label="How to pay" icon="hash" size="md" style={{ marginTop: space.md }} onPress={onPay} />
+    </View>
+  );
+}
+
+/** Sum a window off the endpoint's own daily series (dates ascending). */
+export function windowTotals(daily: RevenueDay[], take: number) {
+  const safeTake = Math.max(0, Math.min(take, daily.length));
+  const sumRevenue = (rows: RevenueDay[]) => rows.reduce((sum, day) => sum + day.revenue, 0);
+  const sumOrders = (rows: RevenueDay[]) =>
+    rows.every((day) => numericFact(day.orders) != null)
+      ? rows.reduce((sum, day) => sum + Number(day.orders), 0)
+      : null;
+  const cur = safeTake > 0 ? daily.slice(-safeTake) : [];
+  const prevRows = daily.slice(-take * 2, -take);
+  const datedSeries = daily.every((day) => /^\d{4}-\d{2}-\d{2}$/.test(day.date));
+  const previousComplete = !datedSeries || hasTrailingGuyanaDays(daily, take * 2);
+  const prev = take > 0 && prevRows.length === take && previousComplete
+    ? { revenue: sumRevenue(prevRows), orders: sumOrders(prevRows) }
+    : null;
+  return { curDaily: cur, cur: { revenue: sumRevenue(cur), orders: sumOrders(cur) }, prev };
 }
