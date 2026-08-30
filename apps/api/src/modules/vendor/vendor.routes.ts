@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
-import { OrderService, assertMmgFulfilmentAllowed, notHeldFilter } from '../order/order.service';
+import { OrderService, assertMmgFulfilmentAllowed, notHeldFilter, holdWindowMs } from '../order/order.service';
+import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
 import { PickingService } from '../order/picking.service';
@@ -1240,9 +1241,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [S1] Decimal → number BEFORE the shared paginator sees the rows. The
     // board's order totals AND every line's snapshotted prices; the web
     // storefront's `$NaN` came from exactly these strings.
+    // The response-SLA deadline rides on the read so the board's accept-clock
+    // drains toward the auto-cancel cut-off the server actually enforces.
+    const respondOpts = { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 };
     const data = orders.map((order) => ({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
       items: order.items.map((item) => coerceMoney(item, ORDER_ITEM_MONEY_FIELDS)),
+      respondBy: vendorRespondBy(order, respondOpts),
     }));
 
     return { success: true, ...paginatedResponse(data, total, pagination) };
@@ -1251,7 +1256,10 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /orders/:id — Full order detail */
   app.get<{ Params: IdParam }>('/orders/:id', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    return { success: true, data: order };
+    // The takeover polls this read: the response-SLA deadline is computed here,
+    // from the same inputs the auto-cancel job was enqueued with.
+    const respondBy = vendorRespondBy(order, { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 });
+    return { success: true, data: { ...order, respondBy } };
   });
 
   /** PUT /orders/:id/accept — Accept an incoming order */

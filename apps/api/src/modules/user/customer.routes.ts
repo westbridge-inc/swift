@@ -1004,7 +1004,7 @@ export async function customerRoutes(app: FastifyInstance) {
           imageUrl: true,
           basePrice: true,
           vendorId: true,
-          vendor: { select: { id: true, name: true, vendorType: true } },
+          vendor: { select: { id: true, name: true, vendorType: true, latitude: true, longitude: true, estimatedPrepTime: true } },
         },
       }),
     ]);
@@ -1072,6 +1072,10 @@ export async function customerRoutes(app: FastifyInstance) {
       vendorId: it.vendorId,
       vendorName: it.vendor?.name ?? '',
       vendorType: it.vendor?.vendorType ?? null,
+      // "Vendor · N min" on the card — the vendor card's own number (prep +
+      // travel from the buyer's position), null without a position. Computed
+      // here, never on the client.
+      etaMin: it.vendor ? enrichVendor(it.vendor, lat, lng, homeDeliveryRates).etaMin : null,
     }));
 
     const feed = {

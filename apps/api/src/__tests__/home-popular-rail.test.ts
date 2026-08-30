@@ -7,6 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { estimateDrivingDistance, estimateDeliveryMinutes } from '../utils/distance';
 
 // ---------------------------------------------------------------------------
 // NEXT-UP #2 (2026-08-25): the Home "Popular right now" rail must carry the
@@ -145,5 +146,16 @@ describe('Home popular rail carries the full vendor-visibility predicate', () =>
     expect(railIds).not.toContain(unverified.itemId);
     expect(railIds).not.toContain(deadOperator.itemId);
     expect(railIds).not.toContain(suspended.itemId);
+
+    // "Vendor · N min" on the popular card is the vendor card's own number —
+    // prep + travel from the buyer's position — and honestly null without one.
+    const withoutPosition = (body.data.popularItems as { id: string; etaMin: number | null }[]).find((i) => i.id === good.itemId);
+    expect(withoutPosition?.etaMin).toBeNull();
+    const buyer = { lat: 6.82, lng: -58.17 };
+    const located = await app.inject({ method: 'GET', url: `/api/v1/customer/home?lat=${buyer.lat}&lng=${buyer.lng}` });
+    expect(located.statusCode).toBe(200);
+    const card = (located.json().data.popularItems as { id: string; etaMin: number | null }[]).find((i) => i.id === good.itemId);
+    const expectedEta = 30 + estimateDeliveryMinutes(estimateDrivingDistance(buyer.lat, buyer.lng, 6.801, -58.156));
+    expect(card?.etaMin).toBe(expectedEta);
   });
 });
