@@ -200,10 +200,16 @@ export function useVendorStaff(enabled = true) {
   return pv ? previewQuery([] as any[]) : q;
 }
 
-export function useAddStaff() {
+/** [ALG-34] A staff grant is a money-adjacent surface: the caller passes the
+ *  step-up wrapper (useStepUp().withStepUp) so a 403 STEP_UP_REQUIRED runs
+ *  the code sheet and retries once. */
+export type MutationGuard = <A extends unknown[], R>(fn: (...args: A) => Promise<R>) => (...args: A) => Promise<R>;
+const passThrough: MutationGuard = (fn) => fn;
+
+export function useAddStaff(guard: MutationGuard = passThrough) {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.addStaff(data)),
+    mutationFn: guard((data: { phone: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.addStaff(data))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
   });
 }
@@ -216,10 +222,10 @@ export function useRemoveStaff() {
   });
 }
 
-export function useUpdateStaffRole() {
+export function useUpdateStaffRole(guard: MutationGuard = passThrough) {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: ({ id, role }: { id: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.updateStaff(id, role)),
+    mutationFn: guard(({ id, role }: { id: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.updateStaff(id, role))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
   });
 }

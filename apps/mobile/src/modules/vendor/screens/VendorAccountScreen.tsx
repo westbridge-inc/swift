@@ -44,6 +44,9 @@ import {
   type DayHours,
 } from '../../../hooks/vendorops';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
+import { useStepUp } from '../../../hooks/useStepUp';
+import { isStepUpDismissed, serverMessage } from '../../../lib/stepUp';
+import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { safeVendorRole, TabHeader, VendorBillingNotice } from '../shared';
@@ -59,9 +62,27 @@ export function VendorAccountScreen() {
   const hoursQ = useVendorHours();
   const setHours = useSetHours();
   const qc = useQueryClient();
+  // [ALG-34] The MMG pay link is where the money goes: the server asks this
+  // session to confirm it holds the phone (the code sheet), then STAGES the
+  // change behind a cool-off with the old link live. The card shows exactly
+  // what the server holds; the owner can cancel it from any device.
+  const stepUp = useStepUp();
+  const [mmgError, setMmgError] = useState<string | null>(null);
   const saveMmgLink = useMutation({
-    mutationFn: (mmgPayUrl: string | null) => vendorApi.updateProfile({ mmgPayUrl }),
+    mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => vendorApi.updateProfile({ mmgPayUrl })),
+    onMutate: () => setMmgError(null),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+    onError: (e: unknown) => {
+      if (!isStepUpDismissed(e)) setMmgError(serverMessage(e, 'That link could not be saved. Check it and try again.'));
+    },
+  });
+  const cancelPendingMmgLink = useMutation({
+    mutationFn: () => vendorApi.cancelPendingMmgLink(),
+    onSuccess: () => {
+      toast.success('Change cancelled', 'Your current link stays. Other devices were signed out.');
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
   });
   // The server owns what a publishable number is (a complete +592 subscriber
   // line), so a rejection is surfaced in ITS words rather than re-guessed here —
@@ -135,8 +156,13 @@ export function VendorAccountScreen() {
           <MmgPayLinkCard
             who="store"
             value={store?.mmgPayUrl}
+            pending={store?.mmgPayUrlPending ? { url: store.mmgPayUrlPending, applyAt: store.mmgPayUrlApplyAt ?? null } : null}
             saving={saveMmgLink.isPending}
+            cancelling={cancelPendingMmgLink.isPending}
+            error={mmgError}
+            readOnly={!isOwner}
             onSave={(u) => saveMmgLink.mutate(u)}
+            onCancelPending={isOwner ? () => cancelPendingMmgLink.mutate() : undefined}
           />
         ) : null}
 
@@ -234,6 +260,7 @@ export function VendorAccountScreen() {
       </ScrollView>
 
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
+      {stepUp.sheet}
     </Screen>
   );
 }
@@ -463,15 +490,20 @@ function PromosSection() {
  */
 function StaffSection() {
   const staffQ = useVendorStaff();
-  const addStaff = useAddStaff();
+  // [ALG-34] A grant hands the store's board to a phone: the server asks this
+  // session to confirm it holds the owner's phone first.
+  const stepUp = useStepUp();
+  const addStaff = useAddStaff(stepUp.withStepUp);
   const removeStaff = useRemoveStaff();
-  const updateRole = useUpdateStaffRole();
+  const updateRole = useUpdateStaffRole(stepUp.withStepUp);
   const [phone, setPhone] = useState('');
   const [role, setRole] = useState<'MANAGER' | 'STAFF'>('STAFF');
   const [removing, setRemoving] = useState<any | null>(null);
 
   const members: any[] = staffQ.data ?? [];
-  const errMsg = (addStaff.error as any)?.response?.data?.error?.message ?? (addStaff.error as any)?.response?.data?.message;
+  const errMsg = isStepUpDismissed(addStaff.error)
+    ? null
+    : (addStaff.error as any)?.response?.data?.error?.message ?? (addStaff.error as any)?.response?.data?.message;
 
   const submit = () => {
     const p = phone.trim();
@@ -547,6 +579,7 @@ function StaffSection() {
         </T>
       </Card>
 
+      {stepUp.sheet}
       <PopupCard visible={!!removing} onClose={() => setRemoving(null)}>
         <IconChip icon="user-x" size={56} tone="error" />
         <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
