@@ -55,18 +55,18 @@
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.0",
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.4.0",
     "@types/pdfkit": "^0.17.6",
     "@types/pngjs": "^6.0.5",
     "@types/qrcode": "^1.5.6",
-    "@types/supertest": "^7.2.0",
+    "@types/supertest": "^7.2.1",
     "@vitest/coverage-v8": "4.1.0",
     "prisma": "^6.4.0",
     "socket.io-client": "^4.8.0",
     "supertest": "^7.2.2",
     "tsx": "^4.19.0",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vite": "8.0.16",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.11"
   }
 }

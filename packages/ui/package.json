@@ -20,7 +20,7 @@
     "build": "tsc"
   },
   "devDependencies": {
-    "@types/node": "^20.19.9",
-    "typescript": "^6.0.3"
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2"
   }
 }

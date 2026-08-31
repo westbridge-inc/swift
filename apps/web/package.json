@@ -22,15 +22,15 @@
     "@tailwindcss/postcss": "^4.0.0",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.4.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "eslint-config-next": "15.2.0",
+    "eslint-config-next": "16.3.3",
     "happy-dom": "^20.8.9",
     "tailwindcss": "^4.0.0",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vite": "8.0.16",
-    "vitest": "^4.1.0",
+    "vitest": "^4.1.11",
     "tsx": "^4.19.2"
   }
 }
