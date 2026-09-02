@@ -5,6 +5,8 @@ import type { UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { socketPlugin } from '../plugins/socket';
 import { OrderService, reconcileMissingEarnings } from '../modules/order/order.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { earningsMissingTuplesGauge, earningsRepairsCounter } from '../plugins/observability';
 
 // ---------------------------------------------------------------------------
 // [F-0028 / G-002] A mover must never go unpaid for a delivery they completed.
@@ -238,5 +240,87 @@ describe('[G-002] the reconciler catches a mover who would otherwise go unpaid',
     const { healed } = await reconcileMissingEarnings(app.prisma, orders, { graceMinutes: 10 });
     expect(healed).not.toContain(noMover.id);
     expect(await app.prisma.earning.count({ where: { orderId: noMover.id } })).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [M-10] The reconciler and the earnings writer work on EXACT tuples.
+// Before: any earning on an order made the sweep treat it as complete, so a
+// fee row with a missing tip row was never healed; and a partial insert made
+// the writer announce every expected row, not the rows it inserted.
+// ---------------------------------------------------------------------------
+describe('[M-10] exact tuples: only the missing row is healed, only the inserted row is announced', () => {
+  it('a delivered order with the fee row but no tip row: the sweep inserts TIP only and announces TIP only', async () => {
+    const order = await makeDeliveredOrder(); // deliveryFee 800, tip 200
+    await app.prisma.earning.create({ data: { riderId, orderId: order.id, type: 'DELIVERY_FEE', amount: 800, status: 'AVAILABLE' } });
+    const announced: Array<{ type: string; amount: number }> = [];
+    const spy = vi.spyOn(NotificationService.prototype, 'earningAvailable').mockImplementation(async (_userId: string, amount: number, type: string) => { announced.push({ type, amount }); });
+    try {
+      const { healed } = await reconcileMissingEarnings(app.prisma, orders, { graceMinutes: 10 });
+      expect(healed).toContain(order.id);
+      const rows = await app.prisma.earning.findMany({ where: { orderId: order.id }, orderBy: { type: 'asc' } });
+      expect(rows.map((r) => [r.type, Number(r.amount)])).toEqual([['DELIVERY_FEE', 800], ['TIP', 200]]);
+      expect(announced).toEqual([{ type: 'TIP', amount: 200 }]); // never a second "you earned 800"
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a complete order is not a candidate at all — paid history cannot occupy the sweep', async () => {
+    const order = await makeDeliveredOrder();
+    await app.prisma.earning.createMany({ data: [
+      { riderId, orderId: order.id, type: 'DELIVERY_FEE', amount: 800, status: 'AVAILABLE' },
+      { riderId, orderId: order.id, type: 'TIP', amount: 200, status: 'AVAILABLE' },
+    ] });
+    const { healed } = await reconcileMissingEarnings(app.prisma, orders, { graceMinutes: 10 });
+    expect(healed).not.toContain(order.id);
+    expect(await app.prisma.earning.count({ where: { orderId: order.id } })).toBe(2);
+  });
+
+  it('the writer on a partially paid order returns only the notice for the row it inserted', async () => {
+    const order = await makeDeliveredOrder();
+    await app.prisma.earning.create({ data: { riderId, orderId: order.id, type: 'DELIVERY_FEE', amount: 800, status: 'AVAILABLE' } });
+    const notices = await orders.createEarnings(order.id, app.prisma, false);
+    expect(notices.map((n) => [n.type, n.amount])).toEqual([['TIP', 200]]);
+    expect(await orders.createEarnings(order.id, app.prisma, false)).toEqual([]);
+  });
+
+  it('[operations] dry run: the sweep reports the discrepancy and writes nothing — then the live sweep heals it', async () => {
+    const order = await makeDeliveredOrder();
+    await app.prisma.earning.create({ data: { riderId, orderId: order.id, type: 'DELIVERY_FEE', amount: 800, status: 'AVAILABLE' } });
+    const dry = await reconcileMissingEarnings(app.prisma, orders, { graceMinutes: 10, dryRun: true });
+    expect(dry.dryRun).toBe(true);
+    expect(dry.scanned).toBeGreaterThanOrEqual(1);
+    expect(dry.healed).toEqual([]);
+    expect(await app.prisma.earning.count({ where: { orderId: order.id } })).toBe(1);
+    // The environment switch is the rollback lever, and it is actually wired.
+    process.env['EARNINGS_RECONCILE_DRY_RUN'] = '1';
+    try {
+      const viaEnv = await reconcileMissingEarnings(app.prisma, orders, { graceMinutes: 10 });
+      expect(viaEnv.dryRun).toBe(true);
+      expect(await app.prisma.earning.count({ where: { orderId: order.id } })).toBe(1);
+    } finally {
+      delete process.env['EARNINGS_RECONCILE_DRY_RUN'];
+    }
+    const live = await reconcileMissingEarnings(app.prisma, orders, { graceMinutes: 10 });
+    expect(live.dryRun).toBe(false);
+    expect(live.healed).toContain(order.id);
+    expect(await app.prisma.earning.count({ where: { orderId: order.id } })).toBe(2);
+  });
+
+  it('[operations] the sweep publishes what it found, what it left, and the oldest gap; repairs are counted by type', async () => {
+    const order = await makeDeliveredOrder({ deliveredMinutesAgo: 90 });
+    await app.prisma.earning.create({ data: { riderId, orderId: order.id, type: 'DELIVERY_FEE', amount: 800, status: 'AVAILABLE' } });
+    const tipRepairs = async () => (await earningsRepairsCounter.get()).values.find((v) => v.labels['type'] === 'TIP')?.value ?? 0;
+    const before = await tipRepairs();
+    const result = await reconcileMissingEarnings(app.prisma, orders, { graceMinutes: 10 });
+    expect(result.healed).toContain(order.id);
+    expect(result.oldestGapMinutes).toBeGreaterThanOrEqual(90);
+    const gauge = await earningsMissingTuplesGauge.get();
+    const measure = (m: string) => gauge.values.find((v) => v.labels['measure'] === m)?.value;
+    expect(measure('found')).toBeGreaterThanOrEqual(1);
+    expect(measure('oldest_gap_minutes')).toBeGreaterThanOrEqual(90);
+    expect(measure('unhealed')).toBe((measure('found') ?? 0) - result.healed.length);
+    expect((await tipRepairs()) - before).toBeGreaterThanOrEqual(1);
   });
 });

@@ -21,7 +21,7 @@ import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout, promiseView } from '../eta/promise';
 import { AppError, ConflictError } from '../../utils/errors';
-import { dispatchSearchesCounter } from '../../plugins/observability';
+import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
@@ -2286,27 +2286,44 @@ export class OrderService {
 
     const notices: EarningNotice[] = [];
     if (earnings.length > 0) {
-      // skipDuplicates + the @@unique([orderId, type]) index makes this
-      // idempotent: a concurrent second completion of the same order inserts
-      // nothing rather than double-paying the mover.
-      const created = await db.earning.createMany({ data: earnings, skipDuplicates: true });
-      // Explicit legacy createEarnings() calls still follow some DELIVERED
-      // routes. The canonical transition already inserted the rows, so a fully
-      // duplicate call must not send the mover a second "earning available"
-      // notification for the same money.
-      if (created.count === 0) return [];
-
-      // Resolve recipients while still on the caller's DB boundary. The actual
-      // network/push publication is optional and, for a canonical transition,
-      // runs only after its transaction commits.
-      for (const earning of earnings) {
-        const userId = earning.riderId || earning.driverId;
-        if (userId) {
+      // [M-10] The exact set difference, keyed by (order, type, beneficiary):
+      // only the tuples that do not exist are inserted, and only the rows the
+      // database actually inserted produce notices. Before, one missing row
+      // among several expected made `created.count > 0`, and notices were
+      // then built for EVERY expected row — a duplicate "you earned" for money
+      // that had already been announced.
+      const existing = await db.earning.findMany({
+        where: { orderId },
+        select: { type: true, riderId: true, driverId: true },
+      });
+      for (const row of existing) {
+        const expected = earnings.find((e) => e.type === row.type);
+        if (expected && ((expected.riderId ?? null) !== (row.riderId ?? null) || (expected.driverId ?? null) !== (row.driverId ?? null))) {
+          // A row for this (order, type) exists but belongs to a different
+          // mover than the order names: the current mover is unpaid and the
+          // unique key keeps us from paying twice. A person must look.
+          log().error({ orderId, type: row.type, rowRiderId: row.riderId, rowDriverId: row.driverId, expectedRiderId: expected.riderId ?? null, expectedDriverId: expected.driverId ?? null }, '[M-10] earning beneficiary mismatch — the order names a different mover than its earning row');
+        }
+      }
+      const have = new Set(existing.map((row) => row.type));
+      const missing = earnings.filter((e) => !have.has(e.type));
+      if (missing.length === 0) return [];
+      const inserted = await db.earning.createManyAndReturn({
+        data: missing,
+        skipDuplicates: true,
+        select: { type: true, amount: true, riderId: true, driverId: true },
+      });
+      for (const earning of inserted) {
+        // The database returns only rows it inserted from `missing`, so the
+        // expected tuple names the notice type without a cast.
+        const expected = missing.find((e) => e.type === earning.type);
+        const moverId = earning.riderId || earning.driverId;
+        if (expected && moverId) {
           const entity = earning.riderId
-            ? await db.rider.findUnique({ where: { id: userId }, select: { userId: true } })
-            : await db.driver.findUnique({ where: { id: userId }, select: { userId: true } });
+            ? await db.rider.findUnique({ where: { id: moverId }, select: { userId: true } })
+            : await db.driver.findUnique({ where: { id: moverId }, select: { userId: true } });
           if (entity) {
-            notices.push({ userId: entity.userId, amount: earning.amount, type: earning.type });
+            notices.push({ userId: entity.userId, amount: Number(earning.amount), type: expected.type });
           }
         }
       }
@@ -2487,59 +2504,62 @@ export class OrderService {
 export async function reconcileMissingEarnings(
   prisma: PrismaClient,
   orders: OrderService,
-  opts: { graceMinutes?: number; cap?: number } = {},
-): Promise<{ scanned: number; healed: string[] }> {
+  opts: { graceMinutes?: number; cap?: number; dryRun?: boolean } = {},
+): Promise<{ scanned: number; healed: string[]; dryRun: boolean; oldestGapMinutes: number }> {
   const graceMinutes = opts.graceMinutes ?? Number(process.env['EARNINGS_RECONCILE_GRACE_MIN'] ?? 10);
   const cap = opts.cap ?? 200;
+  // [M-10 · operations] Rollback pauses the WRITES, never the report: in a dry
+  // run the sweep still finds and publishes every discrepancy, and heals none.
+  const dryRun = opts.dryRun ?? process.env['EARNINGS_RECONCILE_DRY_RUN'] === '1';
   const cutoff = new Date(Date.now() - graceMinutes * 60_000);
 
-  const candidates = await prisma.order.findMany({
-    where: {
-      status: { in: ['DELIVERED', 'COMPLETED'] },
-      deliveredAt: { lte: cutoff },
-      // Only a mover earns. Pickup and appointment orders have neither and are
-      // correctly absent from this sweep.
-      OR: [{ riderId: { not: null } }, { driverId: { not: null } }],
-      // [SPS-F-0016 / REPORT-004 F-004-03] Never sweep unconfirmed MMG money
-      // into earnings: a legacy delivered-but-unpaid MMG row stays unhealed
-      // (and un-debted) until the store confirms the capture. TAXI settles
-      // driver-direct and is exempt, mirroring assertMmgFulfilmentAllowed.
-      AND: [{
-        OR: [
-          { paymentMethod: { not: 'MOBILE_MONEY' } },
-          { orderType: 'TAXI' },
-          { paymentStatus: 'CAPTURED' },
-        ],
-      }],
-    },
-    select: { id: true },
-    orderBy: { deliveredAt: 'asc' },
-    take: cap,
-  });
-  if (candidates.length === 0) return { scanned: 0, healed: [] };
-
-  // Earning.orderId carries no FK to Order, so this cannot be a relation
-  // filter — ask which of the candidates already have rows, and difference.
-  const ids = candidates.map((c) => c.id);
-  const paid = await prisma.earning.findMany({
-    where: { orderId: { in: ids } },
-    select: { orderId: true },
-    distinct: ['orderId'],
-  });
-  const paidSet = new Set(paid.map((p) => p.orderId));
-  const missing = ids.filter((id) => !paidSet.has(id));
-
+  // [M-10] The candidates are the orders whose EXPECTED tuples are not all
+  // present — the fee/fare row for the mover, plus the tip row when a tip was
+  // paid — never "orders with no earning at all". The old sweep excluded any
+  // order that had any earning, so a fee row with a missing tip row was never
+  // healed; and because complete orders are excluded here, a page of paid
+  // history can no longer occupy the sweep forever.
+  const candidates = await prisma.$queryRaw<Array<{ id: string; deliveredAt: Date }>>(Prisma.sql`
+    SELECT o."id", o."deliveredAt"
+    FROM "orders" o
+    WHERE o."status" IN ('DELIVERED', 'COMPLETED')
+      AND o."deliveredAt" <= ${cutoff}
+      AND (o."riderId" IS NOT NULL OR o."driverId" IS NOT NULL)
+      AND (o."paymentMethod" <> 'MOBILE_MONEY' OR o."orderType" = 'TAXI' OR o."paymentStatus" = 'CAPTURED')
+      AND (
+        NOT EXISTS (SELECT 1 FROM "earnings" e WHERE e."orderId" = o."id" AND e."type" IN ('DELIVERY_FEE', 'COURIER_FEE', 'TAXI_FARE'))
+        OR (o."tipAmount" > 0 AND NOT EXISTS (SELECT 1 FROM "earnings" e WHERE e."orderId" = o."id" AND e."type" = 'TIP'))
+      )
+    ORDER BY o."deliveredAt" ASC
+    LIMIT ${cap}
+  `);
+  // The sweep walks delivered-ascending, so the first row is the oldest gap.
+  const oldest = candidates[0];
+  const oldestGapMinutes = oldest ? Math.max(0, Math.round((Date.now() - oldest.deliveredAt.getTime()) / 60_000)) : 0;
+  earningsMissingTuplesGauge.labels('found').set(candidates.length);
+  earningsMissingTuplesGauge.labels('oldest_gap_minutes').set(oldestGapMinutes);
+  if (candidates.length === 0) {
+    earningsMissingTuplesGauge.labels('unhealed').set(0);
+    return { scanned: 0, healed: [], dryRun, oldestGapMinutes: 0 };
+  }
+  if (dryRun) {
+    earningsMissingTuplesGauge.labels('unhealed').set(candidates.length);
+    log().warn({ orderIds: candidates.map((c) => c.id), count: candidates.length, oldestGapMinutes }, '[M-10] earnings reconcile is in DRY RUN — discrepancies found, nothing written');
+    return { scanned: candidates.length, healed: [], dryRun, oldestGapMinutes };
+  }
   const healed: string[] = [];
-  for (const orderId of missing) {
+  for (const { id: orderId } of candidates) {
     try {
-      await orders.createEarnings(orderId);
-      healed.push(orderId);
+      // Inserts exactly the tuples that are missing and notifies only those.
+      const inserted = await orders.createEarnings(orderId);
+      if (inserted.length > 0) healed.push(orderId);
+      for (const notice of inserted) earningsRepairsCounter.labels(notice.type).inc();
     } catch (err) {
       // One bad row must not stop the sweep — the next tick retries it, and the
       // count below still reports it as unhealed.
       log().error({ err, orderId }, 'earnings reconcile: could not heal order');
     }
   }
-
-  return { scanned: candidates.length, healed };
+  earningsMissingTuplesGauge.labels('unhealed').set(candidates.length - healed.length);
+  return { scanned: candidates.length, healed, dryRun, oldestGapMinutes };
 }
