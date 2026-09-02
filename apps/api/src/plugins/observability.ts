@@ -522,6 +522,15 @@ export const sosRetriggerGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [S-04] Guardian driver confirmations: accepted, refused (and why), stale
+ *  values cleared, and every de-escalation of an unanswered passenger check. */
+export const guardianDriverConfirmCounter = new client.Counter({
+  name: 'swift_guardian_driver_confirm_total',
+  help: 'Guardian driver confirmation events (confirmed, no_hard_check_refused, stale_confirm_refused, bad_nonce_refused, nonce_reused_refused, stale_value_cleared, passenger_unanswered_deescalation, deescalation_killed)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

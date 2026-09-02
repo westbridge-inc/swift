@@ -337,8 +337,11 @@ export async function safetyRoutes(app: FastifyInstance) {
   // session's JSON and pages the ops feed). The standard limiter is generous
   // beside any honest confirm cadence, and the service now short-circuits
   // repeats besides.
+  // [S-04] A driver confirmation names the hard-check cycle it answers and
+  // carries that cycle's one-time nonce; an unscoped tap is refused.
   app.post('/guardian/driver-confirm', { preHandler: [app.authenticate] }, async (request) => {
-    return { success: true, data: await guardian.driverConfirm(request.user.userId) };
+    const body = z.object({ cycleId: z.string().min(1).max(64), nonce: z.string().min(1).max(128), deviceId: z.string().max(128).optional() }).parse(request.body ?? {});
+    return { success: true, data: await guardian.driverConfirm(request.user.userId, body) };
   });
 
   // ── Identity Assurance (§7.1) — the shift liveness check ────────────────

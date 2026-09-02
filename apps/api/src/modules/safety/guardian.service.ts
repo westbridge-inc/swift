@@ -3,7 +3,10 @@ import type { Server } from 'socket.io';
 import { haversineDistance } from '../../utils/distance';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { NotificationService } from '../notification/notification.service';
+import { createHash, randomBytes } from 'node:crypto';
+import { nanoid } from 'nanoid';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { guardianDriverConfirmCounter } from '../../plugins/observability';
 import { SosService } from './sos.service';
 
 // Trip Guardian (safety spec §5) — server-side monitoring of live taxi rides.
@@ -101,6 +104,13 @@ interface DetectorState {
   /** Driver's "trip status OK" tap (§5.3 L3) — a responsive driver blocks the
    *  auto-SOS at the deadline (flat-tire case); cleared on de-escalation. */
   driverConfirmedAtMs?: number;
+  /** [S-04] The hard-check cycle the session is in: minted at L3 with a
+   *  one-time driver nonce, replaced by the next L3, and the ONLY thing a
+   *  driver confirmation can answer. */
+  checkinCycle?: { id: string; requestedAtMs: number; driverNonceHash: string; driverNonceUsedAtMs?: number };
+  /** [S-04] The driver's confirmation, bound to a cycle, with who / which
+   *  device / when — a stale one can never absolve a later cycle. */
+  driverConfirm?: { cycleId: string; atMs: number; actorUserId: string; deviceId: string | null };
   /** Last fix the session CONSUMED while live — §5.4 completion sanity reads
    *  this, not the driver row (the driver may roll on after completing). */
   lastFix?: { lat: number; lng: number; atMs: number };
@@ -119,6 +129,15 @@ const pushEvent = (state: DetectorState, now: Date, kind: string, detail?: Recor
 /** The position-anomaly latches that arm the ladder. staleGps deliberately
  *  does NOT arm it (you can't fix a dead phone by pushing to it; the
  *  stale-mover watchdog separately pages ops when a holder freezes). */
+/** [S-04] Rollback: a driver confirmation never de-escalates an unanswered
+ *  hard check — the auto-SOS proceeds rather than accepting any driver proof. */
+const driverDeescalationKilled = () => process.env['GUARDIAN_DRIVER_DEESCALATION_KILL'] === '1';
+const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
+/** [S-04] A driver confirmation counts only for the cycle it answers,
+ *  made after that cycle asked. */
+const confirmBoundToCycle = (state: DetectorState): boolean =>
+  Boolean(state.checkinCycle && state.driverConfirm && state.driverConfirm.cycleId === state.checkinCycle.id && state.driverConfirm.atMs >= state.checkinCycle.requestedAtMs);
+
 const anomalous = (state: DetectorState): boolean =>
   Boolean(state.flags?.deviation || state.flags?.longStop || state.flags?.overdue);
 
@@ -556,6 +575,10 @@ export class GuardianService {
         data: { checkinRequestedAt: now, checkinRespondedAt: null, checkinDeadlineAt: null },
       });
       if (moved.count === 1) {
+        // [S-04] A new climb owes nothing to the last one: any driver answer
+        // still lying around belongs to a cycle that is over.
+        state.driverConfirm = undefined;
+        state.driverConfirmedAtMs = undefined;
         pushEvent(state, now, 'L2_SOFT_CHECKIN');
         if (session.passengerUserId) {
           await this.notifications.send({
@@ -591,7 +614,14 @@ export class GuardianService {
         data: { status: 'CHECKIN_PENDING', checkinDeadlineAt: deadline },
       });
       if (moved.count === 1) {
-        pushEvent(state, now, 'L3_HARD_CHECKIN', { deadline: deadline.toISOString() });
+        // [S-04] This ask IS the cycle: the driver can only answer it with the
+        // nonce it carries, once, while it is pending. The hash is the record;
+        // the nonce travels only to the driver's own device.
+        const driverNonce = randomBytes(16).toString('hex');
+        state.checkinCycle = { id: nanoid(12), requestedAtMs: now.getTime(), driverNonceHash: sha256(driverNonce) };
+        state.driverConfirm = undefined;
+        state.driverConfirmedAtMs = undefined;
+        pushEvent(state, now, 'L3_HARD_CHECKIN', { deadline: deadline.toISOString(), cycleId: state.checkinCycle.id });
         if (session.passengerUserId) {
           await this.notifications.send({
             userId: session.passengerUserId,
@@ -608,7 +638,7 @@ export class GuardianService {
           type: 'SAFETY',
           title: 'Trip status check',
           body: 'Please confirm your trip status in the app.',
-          data: { kind: 'guardian_driver_confirm', sessionId: session.id, orderId: session.orderId },
+          data: { kind: 'guardian_driver_confirm', sessionId: session.id, orderId: session.orderId, cycleId: state.checkinCycle.id, nonce: driverNonce, respondBy: deadline.toISOString() },
         });
         this.roomEmit(`order:${session.orderId}`, 'guardian:checkin', {
           level: 'HARD',
@@ -630,19 +660,39 @@ export class GuardianService {
       !session.checkinRespondedAt
     ) {
       // A responsive DRIVER blocks the auto-SOS (§5.3: "neither party
-      // responsive") — the flat-tire case. De-escalate, reset the detectors,
-      // and leave the whole exchange on the record; if the anomaly persists
-      // the ladder simply climbs again and ops sees every cycle. Existence is
-      // enough: resetAfterAllClear wipes the confirm on every de-escalation,
-      // so a confirm can never absolve a LATER cycle it wasn't part of.
-      if (state.driverConfirmedAtMs) {
+      // responsive") — the flat-tire case. [S-04] "Responsive" means a
+      // confirmation bound to THIS cycle, made after this cycle asked. A tap
+      // from ordinary MONITORING, or an answer to an earlier cycle, is a stale
+      // fact: it is cleared, recorded, counted — and it absolves nothing.
+      const bound = confirmBoundToCycle(state);
+      if (!bound && (state.driverConfirmedAtMs || state.driverConfirm)) {
+        guardianDriverConfirmCounter.labels('stale_value_cleared').inc();
+        pushEvent(state, now, 'STALE_DRIVER_CONFIRM_IGNORED', { confirmCycleId: state.driverConfirm?.cycleId ?? null, cycleId: state.checkinCycle?.id ?? null });
+        state.driverConfirm = undefined;
+        state.driverConfirmedAtMs = undefined;
+      }
+      if (bound && driverDeescalationKilled()) {
+        guardianDriverConfirmCounter.labels('deescalation_killed').inc();
+        pushEvent(state, now, 'DRIVER_DEESCALATION_KILLED', { cycleId: state.checkinCycle?.id ?? null });
+      }
+      if (bound && !driverDeescalationKilled()) {
         const moved = await this.prisma.tripSafetySession.updateMany({
           where: { id: session.id, status: 'CHECKIN_PENDING' },
           data: { status: 'MONITORING', checkinRequestedAt: null, checkinDeadlineAt: null },
         });
         if (moved.count === 1) {
+          const cycleId = state.checkinCycle?.id ?? null;
           this.resetAfterAllClear(state, now, 'DRIVER_CONFIRMED_DEESCALATE');
-          this.warRoom('guardian:driver-confirmed', { sessionId: session.id, orderId: session.orderId });
+          guardianDriverConfirmCounter.labels('passenger_unanswered_deescalation').inc();
+          this.warRoom('guardian:driver-confirmed', { sessionId: session.id, orderId: session.orderId, cycleId });
+          // [S-04 · operations] A passenger who never answered a hard check is
+          // a page, even when the driver vouched: a human looks, every time.
+          await notifyAdmins(this.prisma, this.notifications, {
+            tenantId: session.tenantId,
+            title: 'Guardian: passenger unanswered, driver de-escalated',
+            body: `The passenger on order ${session.orderId} never answered a hard safety check; the driver confirmed the trip status and the ladder stood down. Please look at the trip.`,
+            data: { kind: 'guardian_deescalation', sessionId: session.id, orderId: session.orderId, cycleId },
+          }).catch(() => 0);
         }
         return 0;
       }
@@ -783,10 +833,13 @@ export class GuardianService {
     return { escalated: false, status: 'MONITORING' };
   }
 
-  /** Driver's "trip status OK" tap. Recorded in session state — at the L3
-   *  deadline a responsive driver de-escalates instead of auto-SOS (§5.3).
-   *  Never resolves the PASSENGER's pending check-in. */
-  async driverConfirm(driverUserId: string) {
+  /** [S-04] Driver's "trip status OK" — an ANSWER to the hard check the
+   *  server asked for, never a standing tap. Accepted only while that cycle
+   *  is pending, only with that cycle's one-time nonce, once; recorded with
+   *  actor, device and time. A tap in ordinary MONITORING, an answer to an
+   *  earlier cycle, a wrong nonce or a replay is refused and put on the
+   *  record. Never resolves the PASSENGER's pending check-in. */
+  async driverConfirm(driverUserId: string, input: { cycleId: string; nonce: string; deviceId?: string | null }) {
     const session = await this.prisma.tripSafetySession.findFirst({
       where: { driverUserId, status: { in: ['MONITORING', 'CHECKIN_PENDING'] } },
       orderBy: { createdAt: 'desc' },
@@ -794,21 +847,28 @@ export class GuardianService {
     if (!session) throw new NotFoundError('SafetyCheckin', driverUserId);
     const now = new Date();
     const state: DetectorState = (session.deviationState as DetectorState | null) ?? {};
-    // [F-028-19] A repeat confirm inside the window is the SAME fact — record
-    // it once. Without this, every call rewrote the session JSON and emitted a
-    // war-room event, so a stuck retry loop (or a hostile client) was an
-    // unbounded write/socket amplifier wearing a safety label. Sixty seconds
-    // is far inside any honest confirm cadence and does not delay a FIRST
-    // confirmation by a millisecond.
-    const last = state.driverConfirmedAtMs;
-    if (typeof last === 'number' && now.getTime() - last < 60_000) {
-      return { recorded: true };
-    }
+    const refuse = async (event: string, code: string, message: string): Promise<never> => {
+      guardianDriverConfirmCounter.labels(event).inc();
+      pushEvent(state, now, 'DRIVER_CONFIRM_REFUSED', { code, cycleId: input.cycleId, currentCycleId: state.checkinCycle?.id ?? null, deviceId: input.deviceId ?? null });
+      await this.prisma.tripSafetySession.update({ where: { id: session.id }, data: { deviationState: state as never } }).catch(() => {});
+      this.warRoom('guardian:driver-confirm-refused', { sessionId: session.id, orderId: session.orderId, code, cycleId: input.cycleId });
+      throw new AppError(409, code, message);
+    };
+    const cycle = state.checkinCycle;
+    if (session.status !== 'CHECKIN_PENDING' || !cycle) return refuse('no_hard_check_refused', 'NO_HARD_CHECK_PENDING', 'There is no trip status check waiting for you. A confirmation answers a check the server asked for.');
+    if (input.cycleId !== cycle.id) return refuse('stale_confirm_refused', 'STALE_CONFIRM', 'That confirmation answers an earlier check. Please respond to the current one.');
+    if (sha256(input.nonce) !== cycle.driverNonceHash) return refuse('bad_nonce_refused', 'BAD_CONFIRM_NONCE', 'The confirmation could not be verified.');
+    if (cycle.driverNonceUsedAtMs) return refuse('nonce_reused_refused', 'CONFIRM_ALREADY_USED', 'This check was already answered.');
+    cycle.driverNonceUsedAtMs = now.getTime();
+    state.driverConfirm = { cycleId: cycle.id, atMs: now.getTime(), actorUserId: driverUserId, deviceId: input.deviceId ?? null };
+    // Mirror for readers of the old field; never consulted for de-escalation.
     state.driverConfirmedAtMs = now.getTime();
-    pushEvent(state, now, 'DRIVER_CONFIRMED');
-    await this.prisma.tripSafetySession.update({ where: { id: session.id }, data: { deviationState: state as never } });
-    this.warRoom('guardian:driver-confirmed', { sessionId: session.id, orderId: session.orderId });
-    return { recorded: true };
+    pushEvent(state, now, 'DRIVER_CONFIRMED', { cycleId: cycle.id, deviceId: input.deviceId ?? null });
+    const moved = await this.prisma.tripSafetySession.updateMany({ where: { id: session.id, status: 'CHECKIN_PENDING' }, data: { deviationState: state as never } });
+    if (moved.count !== 1) throw new AppError(409, 'NO_HARD_CHECK_PENDING', 'The check ended before your confirmation arrived.');
+    guardianDriverConfirmCounter.labels('confirmed').inc();
+    this.warRoom('guardian:driver-confirmed', { sessionId: session.id, orderId: session.orderId, cycleId: cycle.id });
+    return { recorded: true, cycleId: cycle.id };
   }
 
   /** Clear the anomaly latches and re-baseline the detectors after a human
@@ -821,6 +881,7 @@ export class GuardianService {
     state.stopAnchor = null;
     state.stopSinceMs = null;
     state.driverConfirmedAtMs = undefined;
+    state.driverConfirm = undefined;
     state.lastCheckinClearedAtMs = now.getTime();
     pushEvent(state, now, eventKind);
   }
