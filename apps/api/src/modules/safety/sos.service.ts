@@ -7,6 +7,7 @@ import { warRoomsFor } from './war-room';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { stageEscalations, drainSosEscalations } from './sos-escalation';
+import { appendRetrigger } from './sos-retrigger';
 
 // SOS engine — the life-safety state machine (safety spec §4). Server-owned,
 // exactly like the order machine: an explicit transition table, compare-and-set
@@ -73,7 +74,7 @@ export class SosService {
   /** Test seam: runs right after an ACTIVE commit and BEFORE the inline
    *  delivery — a throw here is the process dying between the two. Never set
    *  in routes. */
-  observer: { afterActive?: (sosAlertId: string) => Promise<void> } = {};
+  observer: { afterActive?: (sosAlertId: string) => Promise<void>; afterReadLive?: (sosAlertId: string) => Promise<void> } = {};
   constructor(private prisma: PrismaClient, private io: Server) {
     this.notifications = new NotificationService(prisma, io);
   }
@@ -172,9 +173,11 @@ export class SosService {
       // finding someone and not finding them. Collapsing to one incident is
       // what stops a burst burying the war room; it must cost nothing in
       // information.
-      const priorRetriggers = Array.isArray(live.retriggers) ? live.retriggers : [];
-      const thisRetrigger = {
-        at: now.toISOString(),
+      // [S-02] Test seam: the barrier between reading the live alert and
+      // appending to it — two concurrent retriggers both stand here.
+      await this.observer.afterReadLive?.(live.id);
+      const fact = {
+        at: now,
         source,
         lat: input.lat ?? null,
         lng: input.lng ?? null,
@@ -182,9 +185,12 @@ export class SosService {
         addressText: input.addressText ?? null,
         counterpartyUserId: input.counterpartyUserId ?? null,
         actorRole: input.actorRole,
-        clientCreatedAt: input.clientCreatedAt?.toISOString() ?? null,
+        clientCreatedAt: input.clientCreatedAt ?? null,
       };
       const movedTo = input.lat != null && input.lng != null;
+      // A key that is not the alert's own key names THIS request: a retried
+      // press appends once and re-pages once.
+      const requestKey = key && key !== live.clientIdempotencyKey ? key : null;
 
       // [F-028-03] STATUS-SAFE. The old code did findFirst then an
       // unconditional update({id}), so a resolve landing in between meant it
@@ -192,32 +198,46 @@ export class SosService {
       // though their emergency had been received. updateMany with the status
       // guard makes losing that race observable, and a loser FALLS THROUGH to
       // mint a real alert rather than silently attaching to a corpse.
+      // [S-02] ONE transaction: the guarded increment takes the alert's row
+      // lock, the fact becomes its own row numbered by that increment, and the
+      // bounded JSON summary is rebuilt from the rows. Two concurrent presses
+      // serialize on the lock — each lands, nothing is overwritten.
       // [TA-S1-006] The row lives in the incident's tenant; the retrigger must
       // reach it from a drifted caller too.
-      const merged = await runWithoutTenant(() => this.prisma.sosAlert.updateMany({
-        where: { id: live.id, status: { in: LIVE_STATUSES } },
-        data: {
-          retriggerCount: { increment: 1 },
-          lastRetriggerAt: now,
-          retriggers: [...priorRetriggers, thisRetrigger] as never,
-          // The latest position IS the operative one.
-          ...(movedTo ? { triggerLat: input.lat ?? null, triggerLng: input.lng ?? null, triggerAccuracyM: input.accuracyM ?? null } : {}),
-          ...(input.addressText ? { triggerAddressText: input.addressText } : {}),
-          // A stronger provenance sticks; a weaker one never downgrades the record.
-          ...(source !== 'BUTTON' && live.triggerSource === 'BUTTON' ? { triggerSource: source } : {}),
-          // A collapsed request that carried a NEW key must store it, or a lost
-          // response plus a later retry mints a SECOND incident once this one
-          // closes. Only fills an empty slot — never overwrites the original.
-          ...(key && !live.clientIdempotencyKey ? { clientIdempotencyKey: key } : {}),
-        },
+      const merged = await runWithoutTenant(() => this.prisma.$transaction(async (tx) => {
+        if (requestKey) {
+          const seen = await tx.sosRetrigger.findUnique({ where: { sosAlertId_requestKey: { sosAlertId: live.id, requestKey } }, select: { seq: true } });
+          if (seen) return { count: 1, seq: seen.seq, replay: true };
+        }
+        const guarded = await tx.sosAlert.updateMany({
+          where: { id: live.id, status: { in: LIVE_STATUSES } },
+          data: {
+            retriggerCount: { increment: 1 },
+            lastRetriggerAt: now,
+            // The latest position IS the operative one.
+            ...(movedTo ? { triggerLat: input.lat ?? null, triggerLng: input.lng ?? null, triggerAccuracyM: input.accuracyM ?? null } : {}),
+            ...(input.addressText ? { triggerAddressText: input.addressText } : {}),
+            // A stronger provenance sticks; a weaker one never downgrades the record.
+            ...(source !== 'BUTTON' && live.triggerSource === 'BUTTON' ? { triggerSource: source } : {}),
+            // A collapsed request that carried a NEW key must store it, or a lost
+            // response plus a later retry mints a SECOND incident once this one
+            // closes. Only fills an empty slot — never overwrites the original.
+            ...(key && !live.clientIdempotencyKey ? { clientIdempotencyKey: key } : {}),
+          },
+        });
+        if (guarded.count !== 1) return { count: 0, seq: 0, replay: false };
+        const appended = await appendRetrigger(tx, live.id, live.tenantId, fact, requestKey);
+        return { count: 1, seq: appended.seq, replay: false };
       }));
+      // A retried request: the fact is already on file, the page already sent.
+      if (merged.count === 1 && merged.replay) return runWithoutTenant(() => this.prisma.sosAlert.findUniqueOrThrow({ where: { id: live.id } }));
 
       if (merged.count === 1) {
         try {
           this.io.to(warRoomsFor(live.tenantId)).emit('sos:retrigger', {
             sosAlertId: live.id, actorUserId: live.actorUserId, orderId: live.orderId,
             at: now, source, lat: input.lat ?? null, lng: input.lng ?? null,
-            retriggerCount: live.retriggerCount + 1,
+            retriggerCount: merged.seq,
           });
         } catch { /* the war-room nudge is best-effort; the row is the record */ }
 
@@ -227,7 +247,7 @@ export class SosService {
         // ACKNOWLEDGED alert did nothing at all: no confirm, no fan-out, so
         // nobody was re-paged with the new position.
         if (skipGrace && live.status === 'TRIGGER_PENDING') return this.confirm(live.id);
-        if (skipGrace || movedTo) await this.escalate(live.id, { repage: live.retriggerCount + 1 });
+        if (skipGrace || movedTo) await this.escalate(live.id, { repage: merged.seq });
         return runWithoutTenant(() => this.prisma.sosAlert.findUniqueOrThrow({ where: { id: live.id } }));
       }
       // Lost the race to a terminal transition — fall through and mint.

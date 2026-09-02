@@ -1080,6 +1080,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ).catch(() => {});
           }
         }
+        // [S-02] The retrigger log: import any legacy JSON history as rows,
+        // then report lost sequences and oversized hot rows.
+        const { importLegacyRetriggers, scanSosRetriggers } = await import('../modules/safety/sos-retrigger');
+        await importLegacyRetriggers(ctx.prisma).catch((err) => ctx.log.error({ err }, '[S-02] legacy retrigger import failed'));
+        await scanSosRetriggers(ctx.prisma).catch(() => null);
         // §9.1 live trail: the same life-safety tick appends the mover's
         // newest fix to every open alert's unsealed bundle — the war room
         // replays this later. Cheap no-op when no alert is open.

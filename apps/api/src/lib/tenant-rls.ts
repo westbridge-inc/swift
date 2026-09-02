@@ -30,6 +30,7 @@ export const TENANT_TABLES = [
   'SafetyAccessLog', 'SosAlert', 'TripSafetySession', 'actor_rating_stats',
   // [S-01] The SOS escalation outbox belongs to the alert's tenant.
   'sos_escalations',
+  'sos_retriggers',
   // [ALGO Band 0.2] Algorithm tunables are tenant-owned: one operator's dials
   // must never be readable through another's session.
   'algo_config',

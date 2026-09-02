@@ -513,6 +513,15 @@ export const sosEscalationCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [S-02] The SOS retrigger log: alerts whose rows do not account for their
+ *  count (a lost sequence), oversized JSON summaries, legacy history awaiting import. */
+export const sosRetriggerGauge = new client.Gauge({
+  name: 'swift_sos_retrigger',
+  help: 'SOS retrigger log state by check (sequence_gaps, oversized_summary, legacy_pending)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {
