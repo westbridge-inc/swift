@@ -244,7 +244,8 @@ describe('courier terminal effects', () => {
     const job = await makeOrder(customer.userId, null, 'PICKED_UP', { orderType: 'COURIER', riderId: rider.riderId });
     await app.prisma.order.update({
       where: { id: job.id },
-      data: { courierProofIssuedUrl: proofIssued, courierProofIssuedRiderId: rider.riderId },
+      // [M-28] The sender paid at pickup (the collect step): a proof may close the job.
+      data: { courierProofIssuedUrl: proofIssued, courierProofIssuedRiderId: rider.riderId, paymentStatus: 'CAPTURED' },
     });
     await app.prisma.rider.update({
       where: { id: rider.riderId },

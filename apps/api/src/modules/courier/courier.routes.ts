@@ -8,6 +8,7 @@ import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { OrderService, holdWindowMs, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
+import { CashRulesService } from '../cash/cash-rules.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -54,7 +55,17 @@ const orderSchema = z.object({
 });
 
 const cancelSchema = z.object({ reason: z.string().max(500).optional() });
-const proofSchema = z.object({ proofPhotoUrl: z.string().min(5).max(2048) });
+// [M-28] A proof photo never implies money: for a cash job the recipient
+// pays for, the outcome and the rider's location travel with the proof.
+const proofSchema = z.object({
+  proofPhotoUrl: z.string().min(5).max(2048),
+  outcome: z.enum(['paid', 'no_show', 'refused']).optional(),
+  gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).optional(),
+});
+const collectSchema = z.object({
+  outcome: z.enum(['paid', 'refused']),
+  gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
+});
 
 /** Sender cancellation is safe only before the parcel enters rider custody.
  * Once picked up, a parcel needs an explicit return-to-sender/ops recovery
@@ -113,6 +124,8 @@ export default async function courierRoutes(app: FastifyInstance) {
   const dispatch = makeDispatchService(app);
   const orderService = new OrderService(app.prisma, app.io);
   const notifications = new NotificationService(app.prisma, app.io);
+  // [M-28] The cash rail — the same one the rider's door handover and the driver's fare outcome use.
+  const cashRules = new CashRulesService(app.prisma, notifications, orderService);
   const storage = getStorageProvider();
 
   // Per-country courier pricing [UG-CRAFT-03]: the caller's market decides
@@ -386,6 +399,17 @@ export default async function courierRoutes(app: FastifyInstance) {
     return { success: true, data: { url } };
   });
 
+  /** [M-28] POST /order/:id/collect — a sender-pays job: the rider collects
+   *  the fee at pickup ('paid' → captured; the proof closes the job later) or
+   *  the sender refuses ('refused' → the job ends before custody, the sender
+   *  takes a strike). */
+  app.post('/order/:id/collect', auth, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = collectSchema.parse(request.body);
+    const result = await cashRules.collectFromSender(id, request.user.userId, body);
+    return { success: true, data: { orderId: id, status: result.order.status, paymentStatus: result.order.paymentStatus, collected: result.collected } };
+  });
+
   /** POST /order/:id/proof — the assigned rider confirms handoff with proof. */
   app.post('/order/:id/proof', auth, async (request) => {
     const { id } = request.params as { id: string };
@@ -408,6 +432,35 @@ export default async function courierRoutes(app: FastifyInstance) {
         || body.proofPhotoUrl !== order.courierProofIssuedUrl) {
       throw new AppError(400, 'PROOF_NOT_ISSUED',
         'Attach the delivery photo through the photo step for this delivery first.');
+    }
+    // [M-28] The cash outcome governs completion. Sender-pays: the fee must
+    // have been collected at pickup (the collect step). Recipient-pays: the
+    // outcome is recorded WITH the proof — paid captures and completes in one
+    // commit; refused / nobody there fails the job with the photo as the
+    // claim's evidence, a strike on the customer and the rider's claim.
+    if (order.paymentMethod === 'CASH' && order.paymentStatus !== 'CAPTURED') {
+      if (order.courierPayer === 'SENDER') {
+        throw new AppError(409, 'PAYMENT_NOT_CAPTURED', 'Collect the fee from the sender first — the collect step records it; the proof then closes the job.');
+      }
+      if (!body.outcome || !body.gps) {
+        throw new AppError(400, 'OUTCOME_REQUIRED', 'Record the cash outcome with the proof: paid, refused or nobody there, with your location.');
+      }
+      const result = await cashRules.handover(id, request.user.userId, { outcome: body.outcome, gps: body.gps, photoUrl: body.proofPhotoUrl, courierProofPhotoUrl: body.proofPhotoUrl });
+      try {
+        app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: result.order.status });
+      } catch (error) {
+        request.log.warn({ err: error, orderId: id }, 'courier outcome socket publication failed after commit');
+      }
+      if (result.order.status === 'DELIVERED') {
+        await notifications.send({
+          userId: order.customerId,
+          type: 'ORDER_UPDATE',
+          title: 'Parcel delivered',
+          body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'} — proof photo captured.`,
+          data: { orderId: id, status: 'DELIVERED' },
+        }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier proof notification failed after commit'));
+      }
+      return { success: true, data: { ...result.order, claim: result.claim ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags } : null } };
     }
     // Proof metadata, DELIVERED, rider release/count, float, earnings, and the
     // immutable log commit atomically. A retry after any pre-commit failure

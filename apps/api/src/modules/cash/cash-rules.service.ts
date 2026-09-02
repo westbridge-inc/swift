@@ -72,13 +72,19 @@ export const gpsEvidence = (lat: number, lng: number): string =>
  * recorded from these states. Widening one without the other would let the
  * machine permit a transition the service can never produce.
  */
-export const HANDOVER_STATES = ['ARRIVED', 'RIDE_IN_PROGRESS'] as const;
+export const HANDOVER_STATES = ['ARRIVED', 'RIDE_IN_PROGRESS', 'PICKED_UP', 'EN_ROUTE_DELIVERY'] as const; // [M-28] a courier's recipient outcome: the parcel in custody
+
+/** [M-28] A courier job's cash outcome is recorded with the parcel in custody
+ *  — wherever the rider physically hands it over. */
+export const COURIER_CUSTODY_STATES = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'] as const;
 
 /** [M-29] The instant the fare outcome became mandatory for cash rides. A
  *  cash TAXI order delivered after it with no captured fare is a defect (the
  *  terminal authority refuses the transition); one delivered before it is
  *  legacy — the manual-review set the reconciler reports and never mints for. */
 export const TAXI_FARE_OUTCOME_ENFORCED_AT = new Date('2026-09-02T03:00:00.000Z');
+/** [M-28] The instant the cash outcome became mandatory for cash courier jobs. */
+export const COURIER_CASH_OUTCOME_ENFORCED_AT = new Date('2026-09-02T09:00:00.000Z');
 
 /** The mover a guarantee claim belongs to: exactly one of the two (the
  *  database checks it). A delivery's claim names the rider, a ride's the driver. */
@@ -212,7 +218,7 @@ export class CashRulesService {
   async handover(
     orderId: string,
     moverUserId: string,
-    input: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
+    input: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; courierProofPhotoUrl?: string },
   ) {
     // [M-29] The mover is a rider (a delivery at the door) or a driver (a ride
     // at the destination): one rail, one golden rule, one claim shape. A user
@@ -241,6 +247,10 @@ export class CashRulesService {
         : null;
     if (!mover) throw new NotFoundError('Order', orderId);
     const isRide = order.orderType === 'TAXI';
+    // [M-28] A courier job whose recipient pays: the outcome is recorded with
+    // the proof, with the parcel in custody. The proof photo is the claim's
+    // evidence when the recipient did not pay.
+    const isCourier = order.orderType === 'COURIER';
 
     // [SPS-F-0016 / REPORT-004 F-004-02] Ownership stays first (404 above).
     // This endpoint is the CASH golden-rule enforcement point and nothing
@@ -267,12 +277,15 @@ export class CashRulesService {
       return { order, claim };
     }
     // A delivery is handed over at the door (ARRIVED); a ride's fare is settled
-    // at the destination with the passenger aboard (RIDE_IN_PROGRESS).
-    const handoverState = isRide ? 'RIDE_IN_PROGRESS' : 'ARRIVED';
-    if (order.status !== handoverState) {
+    // at the destination with the passenger aboard (RIDE_IN_PROGRESS); a
+    // courier's fee is settled with the parcel in custody.
+    const handoverStates: readonly string[] = isRide ? ['RIDE_IN_PROGRESS'] : isCourier ? COURIER_CUSTODY_STATES : ['ARRIVED'];
+    if (!handoverStates.includes(order.status)) {
       throw new AppError(409, 'NOT_AT_DOOR', isRide
         ? `The fare outcome is only available at the destination with the passenger aboard (ride is ${order.status})`
-        : `Handover is only available at the delivery point (order is ${order.status})`);
+        : isCourier
+          ? `The cash outcome is only available with the parcel in custody (job is ${order.status})`
+          : `Handover is only available at the delivery point (order is ${order.status})`);
     }
 
     const gpsNote = gpsEvidence(input.gps.lat, input.gps.lng);
@@ -307,7 +320,21 @@ export class CashRulesService {
             withinTransaction,
             invalidStatus: (current) => new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${current}`),
           })).order
-        : await this.orders.updateStatus(orderId, 'DELIVERED', moverUserId, `payment collected — ${gpsNote}`, { withinTransaction });
+        : isCourier
+          // [M-28] A courier job completes with its proof AND its money: the
+          // captured fee, the proof photo, DELIVERED and the earnings, one commit.
+          ? (await this.orders.transitionOrderAtomically({
+              orderId,
+              target: 'DELIVERED',
+              allowedFrom: COURIER_CUSTODY_STATES,
+              expectedRiderId: mover.riderId ?? undefined,
+              changedBy: moverUserId,
+              note: `payment collected — ${gpsNote}`,
+              ...(input.courierProofPhotoUrl ? { terminalMetadata: { courierProofPhotoUrl: input.courierProofPhotoUrl } } : {}),
+              withinTransaction,
+              invalidStatus: (current) => new AppError(409, 'NOT_IN_TRANSIT', `Cannot close a courier job from status ${current}`),
+            })).order
+          : await this.orders.updateStatus(orderId, 'DELIVERED', moverUserId, `payment collected — ${gpsNote}`, { withinTransaction });
       for (const notice of earningNotices) {
         await this.notifications.earningAvailable(notice.userId, notice.amount, notice.type).catch(() => {});
       }
@@ -349,14 +376,68 @@ export class CashRulesService {
     await this.notifications.send({
       userId: order.customer.id,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: isRide ? 'Unpaid fare recorded' : 'Failed delivery recorded',
+      title: isRide ? 'Unpaid fare recorded' : isCourier ? 'Unpaid courier fee recorded' : 'Failed delivery recorded',
       body: isRide
         ? 'Your ride’s fare was not paid at the destination. Repeated incidents restrict your account.'
-        : 'Your order was not paid for at the door. Repeated incidents restrict your account.',
+        : isCourier
+          ? 'The courier fee was not paid at the drop-off. Repeated incidents restrict your account.'
+          : 'Your order was not paid for at the door. Repeated incidents restrict your account.',
       data: { kind: 'strike', orderId },
     }).catch(() => {});
     if (staged.riderNotice) await this.notifications.send(staged.riderNotice).catch(() => {});
     return { order: failed, claim: staged.claim };
+  }
+
+  /** [M-28] A courier job whose SENDER pays: the fee is collected before the
+   *  parcel is carried. 'paid' captures it (the status does not move — the
+   *  proof still completes the job later); 'refused' ends the job before
+   *  custody, with a strike on the sender and no guarantee claim — nothing
+   *  was carried, so nothing is owed to the rider by the guarantee. */
+  async collectFromSender(
+    orderId: string,
+    riderUserId: string,
+    input: { outcome: 'paid' | 'refused'; gps: { lat: number; lng: number } },
+  ) {
+    const rider = await this.prisma.rider.findUnique({ where: { userId: riderUserId }, select: { id: true } });
+    if (!rider) throw new NotFoundError('Rider');
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, riderId: rider.id, orderType: 'COURIER' },
+      include: { customer: { select: { id: true, phone: true } } },
+    });
+    if (!order) throw new NotFoundError('CourierOrder', orderId);
+    if (order.paymentMethod !== 'CASH') throw new AppError(409, 'CASH_HANDOVER_ONLY', 'Collecting from the sender is a cash step.');
+    if (order.courierPayer !== 'SENDER') throw new AppError(409, 'RECIPIENT_PAYS', 'The recipient pays for this job — record the outcome with the proof at the drop-off.');
+    const gpsNote = gpsEvidence(input.gps.lat, input.gps.lng);
+    if (input.outcome === 'paid') {
+      if (order.paymentStatus === 'CAPTURED') return { order, collected: true as const }; // a repeated tap answers the fact
+      const before: readonly string[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP'];
+      if (!before.includes(order.status)) throw new AppError(409, 'NOT_AT_PICKUP', `The sender's fee is collected at pickup (job is ${order.status})`);
+      const updated = await this.prisma.$transaction(async (tx) => {
+        const claimed = await tx.order.updateMany({ where: { id: orderId, riderId: rider.id, paymentStatus: { not: 'CAPTURED' } }, data: { paymentStatus: 'CAPTURED' } });
+        if (claimed.count !== 1) throw new AppError(409, 'ALREADY_COLLECTED', 'The fee was already recorded as collected.');
+        await tx.orderStatusLog.create({ data: { orderId, status: order.status, note: `cash collected from sender — ${gpsNote}` } });
+        return tx.order.findUniqueOrThrow({ where: { id: orderId } });
+      });
+      return { order: updated, collected: true as const };
+    }
+    // Refused before custody: the job ends here, the sender takes a strike.
+    if (order.status === 'CANCELLED') return { order, collected: false as const };
+    const addressKey = `geo:${order.pickupLat?.toFixed(4) ?? '0'}:${order.pickupLng?.toFixed(4) ?? '0'}`;
+    const cancelled = await this.orders.updateStatus(orderId, 'CANCELLED', riderUserId, `sender refused to pay — ${gpsNote}`, {
+      withinTransaction: async (tx) => {
+        await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'FAILED' } });
+        await tx.strike.create({ data: { userId: order.customer.id, orderId, reason: 'failed_payment_refused', phone: order.customer.phone, addressKey } });
+        await this.observer.afterTerminalFacts?.('failed');
+      },
+    });
+    await this.notifications.send({
+      userId: order.customer.id,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Courier job ended — fee not paid',
+      body: 'The courier fee was not paid at pickup, so the job was cancelled. Repeated incidents restrict your account.',
+      data: { kind: 'strike', orderId },
+    }).catch(() => {});
+    return { order: cancelled, collected: false as const };
   }
 
   // -------------------------------------------------------------------------

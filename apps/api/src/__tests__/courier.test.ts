@@ -170,7 +170,8 @@ describe('Courier — create, track, deliver', () => {
     await app.prisma.order.update({
       where: { id: created.orderId },
       // Simulate the /proof-photo upload that issued this URL to this rider.
-      data: { riderId: rider.id, status: 'PICKED_UP', courierProofIssuedUrl: issued, courierProofIssuedRiderId: rider.id },
+      // [M-28] The sender paid at pickup (the collect step): the proof may close the job.
+      data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED', courierProofIssuedUrl: issued, courierProofIssuedRiderId: rider.id },
     });
 
     const res = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: issued }, moverUser.token);
@@ -191,7 +192,7 @@ describe('Courier — create, track, deliver', () => {
     const issued = `storage://t/courier-proof/${created.orderId}/proof.jpg`;
     await app.prisma.order.update({
       where: { id: created.orderId },
-      data: { riderId: rider.id, status: 'RIDER_ASSIGNED', courierProofIssuedUrl: issued, courierProofIssuedRiderId: rider.id },
+      data: { riderId: rider.id, status: 'RIDER_ASSIGNED', paymentStatus: 'CAPTURED', courierProofIssuedUrl: issued, courierProofIssuedRiderId: rider.id },
     });
     // Pre-custody: assigned but never picked up — DELIVERED is unreachable even
     // WITH a genuine issued photo. Custody is the gate.
@@ -245,7 +246,7 @@ describe('Courier — create, track, deliver', () => {
     const atomicIssued = `storage://t/courier-proof/${created.orderId}/atomic-proof.jpg`;
     await app.prisma.order.update({
       where: { id: created.orderId },
-      data: { riderId: rider.id, status: 'PICKED_UP', courierProofIssuedUrl: atomicIssued, courierProofIssuedRiderId: rider.id },
+      data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED', courierProofIssuedUrl: atomicIssued, courierProofIssuedRiderId: rider.id },
     });
 
     const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
@@ -403,7 +404,7 @@ describe('Courier — create, track, deliver', () => {
     const moverUser = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
     const rider = await app.prisma.rider.create({ data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
     const raceIssued = `storage://t/courier-proof/${created.orderId}/p.jpg`;
-    await app.prisma.order.update({ where: { id: created.orderId }, data: { riderId: rider.id, status: 'PICKED_UP', courierProofIssuedUrl: raceIssued, courierProofIssuedRiderId: rider.id } });
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED', courierProofIssuedUrl: raceIssued, courierProofIssuedRiderId: rider.id } });
 
     // Sender cancels while the rider submits proof — same instant.
     const [a, b] = await Promise.allSettled([
