@@ -3618,6 +3618,58 @@ enum LegalHoldVaultStatus {
   FAILED
 }
 
+/// [S-19] An ops page is a durable obligation with per-recipient delivery
+/// and ACKNOWLEDGEMENT. Room membership and a server emit are not receipt: an
+/// alert nobody acknowledged by its deadline escalates (re-push, on-call SMS,
+/// platform page) until a human acknowledges it or the emergency ends.
+model OpsAlert {
+  id              String              @id @default(cuid())
+  tenantId        String?
+  kind            OpsAlertKind
+  sosAlertId      String?
+  title           String
+  body            String
+  ackDeadlineAt   DateTime
+  acknowledgedAt  DateTime?
+  acknowledgedBy  String?
+  escalationLevel Int                 @default(0)
+  lastEscalatedAt DateTime?
+  closedAt        DateTime?
+  closeReason     String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  recipients      OpsAlertRecipient[]
+
+  @@index([acknowledgedAt, closedAt, ackDeadlineAt])
+  @@index([tenantId, createdAt])
+  @@index([sosAlertId])
+  @@map("ops_alerts")
+}
+
+model OpsAlertRecipient {
+  id             String    @id @default(cuid())
+  tenantId       String?
+  opsAlertId     String
+  opsAlert       OpsAlert  @relation(fields: [opsAlertId], references: [id], onDelete: Cascade)
+  userId         String
+  notificationId String?
+  deliveredAt    DateTime?
+  seenAt         DateTime?
+  ackedAt        DateTime?
+  smsSentAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@unique([opsAlertId, userId])
+  @@index([tenantId, opsAlertId])
+  @@index([notificationId])
+  @@map("ops_alert_recipients")
+}
+
+enum OpsAlertKind {
+  SOS
+  DRILL
+}
+
 enum SosEscalationStatus {
   PENDING
   SENT

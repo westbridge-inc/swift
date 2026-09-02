@@ -1118,6 +1118,24 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ).catch(() => {});
           }
         }
+        // [S-19 · operations] Ops alerts: read receipts become "seen", an alert
+        // nobody acknowledged by its deadline escalates (re-push, on-call SMS,
+        // platform page), drills run on schedule, and zero-ACK is the gauge.
+        {
+          const { syncOpsAlertReadReceipts, escalateOverdueOpsAlerts, scanOpsAlerts, runOpsAlertDrillIfDue } = await import('../modules/safety/ops-alert');
+          const { NotificationService: OpsNS, notifyAdmins: pageOps } = await import('../modules/notification/notification.service');
+          const { getChannels } = await import('../providers/notifications/channels');
+          const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
+          await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
+          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[] }));
+          for (const id of esc.escalated) {
+            await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
+              pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: '⏰ An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
+            ).catch(() => {});
+          }
+          await scanOpsAlerts(ctx.prisma).catch(() => null);
+          await runOpsAlertDrillIfDue(ctx.prisma, opsNotifications).catch(() => null);
+        }
         // [S-16 · operations] Every legacy plaintext trip-share token is a live
         // exposure: rotate (revoke + null + tell the sharer) until none is left.
         {

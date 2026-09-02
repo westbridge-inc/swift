@@ -618,6 +618,21 @@ export const tripShareGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [S-19] Ops alerts: opened, acknowledged, escalated (zero ACK by deadline),
+ *  on-call texts, drills, and alerts nobody can acknowledge. */
+export const opsAlertCounter = new client.Counter({
+  name: 'swift_ops_alert_events_total',
+  help: 'Ops alert events (opened, acknowledged, escalated, zero_ack_by_deadline, oncall_sms, closed_unacknowledged, escalation_killed, zero_recipients, drill)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+export const opsAlertGauge = new client.Gauge({
+  name: 'swift_ops_alert',
+  help: 'Ops alert state by check (unacknowledged_overdue, oldest_overdue_seconds, zero_recipients, last_drill_ack_seconds)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

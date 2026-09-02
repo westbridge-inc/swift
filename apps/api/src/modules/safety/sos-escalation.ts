@@ -1,7 +1,8 @@
 import type { PrismaClient, SosEscalationChannel } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
-import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { NotificationService } from '../notification/notification.service';
+import { openOpsAlert } from './ops-alert';
 import { warRoomsFor } from './war-room';
 import { log } from '../../utils/logger';
 import { sosEscalationCounter, sosEscalationGauge } from '../../plugins/observability';
@@ -96,13 +97,15 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };
       // [F-026-15] The alert's own tenant decides who is paged; NULL = platform
       // operators only. [F-035-07] No coordinates in a push payload.
-      const n = await notifyAdmins(prisma, notifications, {
-        tenantId: alert.tenantId,
+      // [S-19] The page is an OpsAlert: per-recipient delivery and
+      // acknowledgement with a deadline; unacknowledged, it escalates.
+      const page = await openOpsAlert(prisma, notifications, {
+        kind: 'SOS', tenantId: alert.tenantId, sosAlertId: alert.id,
         title: '🚨 SOS ACTIVE — respond now',
         body: `${alert.actorRole} raised an SOS${alert.orderId ? ` on order ${alert.orderId}` : alert.serviceJobId ? ' on a service job (home visit)' : ''}. Open the war room now.`,
         data: { kind: 'sos_active', sosAlertId: alert.id, orderId: alert.orderId, serviceJobId: alert.serviceJobId },
       });
-      return { status: 'SENT', receipt: { opsPaged: n } };
+      return { status: 'SENT', receipt: { opsPaged: page.delivered, opsAlertId: page.opsAlertId, recipients: page.recipients } };
     }
     case 'WAR_ROOM': {
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };

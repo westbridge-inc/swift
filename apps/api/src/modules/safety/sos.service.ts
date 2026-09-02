@@ -8,6 +8,7 @@ import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { stageEscalations, drainSosEscalations } from './sos-escalation';
 import { appendRetrigger } from './sos-retrigger';
+import { acknowledgeOpsAlert } from './ops-alert';
 
 // SOS engine — the life-safety state machine (safety spec §4). Server-owned,
 // exactly like the order machine: an explicit transition table, compare-and-set
@@ -424,7 +425,10 @@ export class SosService {
 
   /** Ops acknowledges — ACTIVE → ACKNOWLEDGED. Ops-only (enforced at the route). */
   async ack(id: string, opsUserId: string) {
-    return this.transition(id, 'ACKNOWLEDGED', { acknowledgedAt: new Date(), acknowledgedBy: opsUserId });
+    const acked = await this.transition(id, 'ACKNOWLEDGED', { acknowledgedAt: new Date(), acknowledgedBy: opsUserId });
+    // [S-19] A human acknowledged the emergency: the ops page's obligation is met.
+    await runWithoutTenant(() => acknowledgeOpsAlert(this.prisma, { sosAlertId: id, userId: opsUserId })).catch(() => null);
+    return acked;
   }
 
   /** Ops resolves — requires a resolution code. ACTIVE|ACKNOWLEDGED → RESOLVED.
