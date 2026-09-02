@@ -397,6 +397,11 @@ export const customerApi = {
     api.post('/customer/checkout', data, {
       headers: { 'Idempotency-Key': idempotencyKey },
     }),
+  /** [MOB-020] What became of a checkout attempt whose answer never arrived:
+   *  placed (the receipt), in flight (the key is claimed), or nothing. Asked
+   *  BEFORE a different order is placed over an unresolved one. */
+  checkoutReceipt: (idempotencyKey: string) =>
+    api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`),
   getNotifications: () => api.get('/customer/notifications'),
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
   ratingTags: () => api.get('/customer/rating-tags'),

@@ -117,6 +117,16 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+// [MOB-020] The checkout command key, by what the server did with it: a
+// replay answered from the receipt or the cache, a key reused under another
+// body refused, a concurrent twin refused, and the client's receipt probe.
+export const checkoutIdempotencyCounter = new client.Counter({
+  name: 'swift_checkout_idempotency_total',
+  help: 'Checkout Idempotency-Key outcomes (replayed_receipt/replayed_cache/key_body_conflict/duplicate_in_flight/probe_placed/probe_in_flight/probe_none)',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 // [MOB-018] How the public emergency-policy route answered: served, no-policy,
 // invalid (a malformed stored policy is never served), unknown-market.
 export const emergencyPolicyCounter = new client.Counter({
