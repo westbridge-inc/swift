@@ -214,6 +214,20 @@ export const billingUnkeyedTopupDuplicatesGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [M-15] Grandfathered payers held past their tenant's sunset because a
+ *  T−30 / T−7 notice has no delivery proof — pinned until it does. */
+export const usdMigrationHeldGauge = new client.Gauge({
+  name: 'swift_usd_migration_held_payers',
+  help: 'Grandfathered payers past sunset held at their old rate for missing notice proof',
+  registers: [registry],
+});
+export const usdMigrationFlipsCounter = new client.Counter({
+  name: 'swift_usd_migration_flips_total',
+  help: 'Mode B payers released to the USD book at sunset, and rolled back from the snapshot',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 /** [M-14] FX change notices written but not yet delivered to the payer (the
  *  event is the obligation; `deliveredAt` is the proof). The charge gate
  *  refuses the new rate until the proof is FX_NOTICE_WINDOW_DAYS old. */

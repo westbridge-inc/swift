@@ -1097,6 +1097,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { sweepModeB } = await import('../modules/billing/usd-migration');
         const b = await sweepModeB(ctx.prisma, ctx.io);
         if (b.notices + b.flipped > 0) ctx.log.info(b, 'billing: usd migration Mode B sweep');
+        // [M-15] A payer past sunset with notice proof missing stays pinned; the tenant's operators were paged.
+        if (b.held > 0 || b.undelivered > 0) ctx.log.warn(b, '[M-15] usd migration Mode B: payers held / notices undelivered');
         return;
       }
 
