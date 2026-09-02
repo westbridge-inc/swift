@@ -68,7 +68,7 @@ describe('ORDER_TRANSITIONS — state-machine integrity (fulfillment Part 3)', (
     }
   });
 
-  it('FAILED is reachable ONLY from ARRIVED (SWIFT-096 — matches the handover guard)', () => {
-    expect(preds('FAILED')).toEqual(['ARRIVED']);
+  it('FAILED is reachable ONLY from the handover states — the door, and [M-29] the ride’s destination (SWIFT-096 — matches the handover guard)', () => {
+    expect([...preds('FAILED')].sort()).toEqual(['ARRIVED', 'RIDE_IN_PROGRESS']);
   });
 });

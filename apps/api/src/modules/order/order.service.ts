@@ -12,7 +12,7 @@ import { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus } f
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
-import { orderingRestriction, CashRulesService } from '../cash/cash-rules.service';
+import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT } from '../cash/cash-rules.service';
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
@@ -21,7 +21,7 @@ import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout, promiseView } from '../eta/promise';
 import { AppError, ConflictError } from '../../utils/errors';
-import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter } from '../../plugins/observability';
+import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
@@ -170,12 +170,13 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   ],
   REFUNDED: ['CANCELLED', 'DELIVERED', 'COMPLETED'],
   // Failed cash handover is the only path into FAILED, and it is recorded ONLY
-  // at the door (cash-rules HANDOVER_STATES = ['ARRIVED']). The old list also
-  // allowed PENDING/PICKED_UP/EN_ROUTE_DELIVERY — states the guard rejects with
+  // at the door — or, for a ride, at the destination with the passenger aboard
+  // [M-29] (cash-rules HANDOVER_STATES). The old list also allowed
+  // PENDING/PICKED_UP/EN_ROUTE_DELIVERY — states the guard rejects with
   // NOT_AT_DOOR, so no code could ever exercise them. Narrowed to match reality
   // (SWIFT-096): an unstarted/in-transit order that goes wrong is CANCELLED, not
   // FAILED. Kept in lockstep with HANDOVER_STATES by order-transition-failed.test.ts.
-  FAILED: ['ARRIVED'],
+  FAILED: ['ARRIVED', 'RIDE_IN_PROGRESS'],
 };
 
 /** States where the order is physically with the mover — no cancellation. */
@@ -1790,6 +1791,14 @@ export class OrderService {
       omit: HANDOVER_SECRETS_OMIT,
       include: CANONICAL_TRANSITION_INCLUDE,
     });
+    // [M-29] The terminal authority's own guard, on the row as it will commit:
+    // a cash ride is DELIVERED only with its fare recorded as captured.
+    // Evaluated after the caller's hook, so the fare outcome (which captures
+    // inside this transaction) passes and a bare completion — from any caller,
+    // not only the driver route — rolls back with nothing minted.
+    if (input.target === 'DELIVERED' && order.orderType === 'TAXI' && order.paymentMethod === 'CASH' && order.paymentStatus !== 'CAPTURED') {
+      throw new AppError(409, 'PAYMENT_NOT_CAPTURED', 'Record the fare outcome first — a cash ride completes when the fare is recorded as paid, refused or unpaid.');
+    }
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }
 
@@ -2216,6 +2225,11 @@ export class OrderService {
     // earnings or a vendor debt — not from a route, and not from the scheduled
     // reconciler sweeping legacy DELIVERED rows.
     assertMmgFulfilmentAllowed(order, 'DELIVERED');
+    // [M-29] A cash fare is earned when the money is recorded, never on the
+    // completion tap. The driver's fare outcome captures the payment inside
+    // the DELIVERED transaction and mints from there; without the capture this
+    // writer mints nothing — from the seam, the reconciler, or anyone else.
+    if (order.orderType === 'TAXI' && order.paymentMethod === 'CASH' && order.paymentStatus !== 'CAPTURED') return [];
 
     // MMG direct-pay: the customer paid the STORE (not the rider), and the
     // order total the store received INCLUDES the rider's tip — so the store
@@ -2505,7 +2519,7 @@ export async function reconcileMissingEarnings(
   prisma: PrismaClient,
   orders: OrderService,
   opts: { graceMinutes?: number; cap?: number; dryRun?: boolean } = {},
-): Promise<{ scanned: number; healed: string[]; dryRun: boolean; oldestGapMinutes: number }> {
+): Promise<{ scanned: number; healed: string[]; dryRun: boolean; oldestGapMinutes: number; taxiUnpaidDelivered: { total: number; sinceEnforced: number } }> {
   const graceMinutes = opts.graceMinutes ?? Number(process.env['EARNINGS_RECONCILE_GRACE_MIN'] ?? 10);
   const cap = opts.cap ?? 200;
   // [M-10 · operations] Rollback pauses the WRITES, never the report: in a dry
@@ -2526,6 +2540,7 @@ export async function reconcileMissingEarnings(
       AND o."deliveredAt" <= ${cutoff}
       AND (o."riderId" IS NOT NULL OR o."driverId" IS NOT NULL)
       AND (o."paymentMethod" <> 'MOBILE_MONEY' OR o."orderType" = 'TAXI' OR o."paymentStatus" = 'CAPTURED')
+      AND NOT (o."orderType" = 'TAXI' AND o."paymentMethod" = 'CASH' AND o."paymentStatus" <> 'CAPTURED')
       AND (
         NOT EXISTS (SELECT 1 FROM "earnings" e WHERE e."orderId" = o."id" AND e."type" IN ('DELIVERY_FEE', 'COURIER_FEE', 'TAXI_FARE'))
         OR (o."tipAmount" > 0 AND NOT EXISTS (SELECT 1 FROM "earnings" e WHERE e."orderId" = o."id" AND e."type" = 'TIP'))
@@ -2533,6 +2548,24 @@ export async function reconcileMissingEarnings(
     ORDER BY o."deliveredAt" ASC
     LIMIT ${cap}
   `);
+  // [M-29 · operations] The manual-review set: cash rides delivered with no
+  // captured fare. Never healed here — a fare is earned when the money is
+  // recorded — only reported. Rows delivered before the fare outcome was
+  // enforced are legacy; one delivered after it means a completion bypassed
+  // the terminal authority, and the queue pages on it.
+  const [taxiUnpaid] = await prisma.$queryRaw<Array<{ total: bigint; since_enforced: bigint }>>(Prisma.sql`
+    SELECT count(*)::bigint AS total,
+           count(*) FILTER (WHERE o."deliveredAt" >= ${TAXI_FARE_OUTCOME_ENFORCED_AT})::bigint AS since_enforced
+    FROM "orders" o
+    WHERE o."status" IN ('DELIVERED', 'COMPLETED')
+      AND o."orderType" = 'TAXI' AND o."paymentMethod" = 'CASH' AND o."paymentStatus" <> 'CAPTURED'
+  `);
+  const taxiUnpaidDelivered = { total: Number(taxiUnpaid?.total ?? 0), sinceEnforced: Number(taxiUnpaid?.since_enforced ?? 0) };
+  taxiDeliveredUnpaidGauge.labels('total').set(taxiUnpaidDelivered.total);
+  taxiDeliveredUnpaidGauge.labels('since_enforced').set(taxiUnpaidDelivered.sinceEnforced);
+  if (taxiUnpaidDelivered.sinceEnforced > 0) {
+    log().error(taxiUnpaidDelivered, '[M-29] cash rides delivered with no captured fare after the fare outcome was enforced — a completion path bypassed the terminal authority');
+  }
   // The sweep walks delivered-ascending, so the first row is the oldest gap.
   const oldest = candidates[0];
   const oldestGapMinutes = oldest ? Math.max(0, Math.round((Date.now() - oldest.deliveredAt.getTime()) / 60_000)) : 0;
@@ -2540,12 +2573,12 @@ export async function reconcileMissingEarnings(
   earningsMissingTuplesGauge.labels('oldest_gap_minutes').set(oldestGapMinutes);
   if (candidates.length === 0) {
     earningsMissingTuplesGauge.labels('unhealed').set(0);
-    return { scanned: 0, healed: [], dryRun, oldestGapMinutes: 0 };
+    return { scanned: 0, healed: [], dryRun, oldestGapMinutes: 0, taxiUnpaidDelivered };
   }
   if (dryRun) {
     earningsMissingTuplesGauge.labels('unhealed').set(candidates.length);
     log().warn({ orderIds: candidates.map((c) => c.id), count: candidates.length, oldestGapMinutes }, '[M-10] earnings reconcile is in DRY RUN — discrepancies found, nothing written');
-    return { scanned: candidates.length, healed: [], dryRun, oldestGapMinutes };
+    return { scanned: candidates.length, healed: [], dryRun, oldestGapMinutes, taxiUnpaidDelivered };
   }
   const healed: string[] = [];
   for (const { id: orderId } of candidates) {
@@ -2561,5 +2594,5 @@ export async function reconcileMissingEarnings(
     }
   }
   earningsMissingTuplesGauge.labels('unhealed').set(candidates.length - healed.length);
-  return { scanned: candidates.length, healed, dryRun, oldestGapMinutes };
+  return { scanned: candidates.length, healed, dryRun, oldestGapMinutes, taxiUnpaidDelivered };
 }

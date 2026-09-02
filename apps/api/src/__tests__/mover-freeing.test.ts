@@ -441,6 +441,10 @@ describe('taxi earnings', () => {
       driverId: driver.driverId,
       taxiFareTotal: 2300,
     });
+    // [M-29] A cash fare is earned when the money is recorded: the fare
+    // outcome captured it. (Without the capture the writer mints nothing —
+    // taxi-cash-outcome.test.ts grades that.)
+    await app.prisma.order.update({ where: { id: ride.id }, data: { paymentStatus: 'CAPTURED' } });
 
     await orderService.createEarnings(ride.id);
 

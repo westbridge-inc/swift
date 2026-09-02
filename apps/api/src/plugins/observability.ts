@@ -184,6 +184,18 @@ export const earningsRepairsCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [M-29] Cash rides DELIVERED with no captured fare — the manual-review set.
+ *  `total` includes the rows that predate the fare outcome (legacy);
+ *  `since_enforced` counts rows delivered after it became mandatory, which the
+ *  terminal authority refuses — so any value above zero is a bypass, and the
+ *  queue pages on it. Set by the earnings reconciler on every sweep. */
+export const taxiDeliveredUnpaidGauge = new client.Gauge({
+  name: 'swift_taxi_delivered_unpaid',
+  help: 'Cash rides delivered with no captured fare: all of them, and those delivered after the fare outcome became mandatory',
+  labelNames: ['measure'] as const,
+  registers: [registry],
+});
+
 // Security actions must remain externally uniform even when their audit sink
 // is degraded. Count the write failure separately so a successful revocation
 // can still return the required 401/200 while operations alerts on lost audit

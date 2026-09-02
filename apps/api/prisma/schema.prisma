@@ -769,7 +769,9 @@ enum CoverageClass {
 model ReimbursementClaim {
   id         String      @id @default(cuid())
   orderId    String      @unique
-  riderId    String
+  /// [M-29] Exactly one of riderId / driverId names the mover — the database checks it.
+  riderId    String?
+  driverId   String?
   customerId String
   amount     Decimal     @db.Decimal(12, 2)
   /// no_show | refused
@@ -789,6 +791,7 @@ model ReimbursementClaim {
   createdAt  DateTime    @default(now())
 
   @@index([riderId])
+  @@index([driverId])
   @@index([customerId])
   @@index([status])
   @@index([createdAt])

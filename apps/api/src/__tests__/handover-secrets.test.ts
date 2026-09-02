@@ -218,9 +218,27 @@ describe('[F-0011] the taxi driver never receives the ride PIN they verify', () 
     const ride = await makeRide(driver.driverId, customer.userId, 'RIDE_IN_PROGRESS', '555666', true);
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: ride.id } });
 
+    // [M-29] The bare tap is refused for a cash ride (the fare outcome
+    // completes it) — and the refusal carries no secret either.
     const res = await put(`/api/v1/driver/rides/${ride.id}/complete`, {}, driver.token);
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(409);
     assertNoHandoverSecrets(res.payload, 'PUT /driver/rides/:id/complete');
+  });
+
+  it('POST /rides/:id/handover — the fare outcome that completes the ride — does not carry the PIN', async () => {
+    const driver = await makeDriver();
+    const ride = await makeRide(driver.driverId, customer.userId, 'RIDE_IN_PROGRESS', '555777', true);
+    await app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: ride.id } });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/driver/rides/${ride.id}/handover`,
+      headers: { authorization: `Bearer ${driver.token}`, 'content-type': 'application/json' },
+      payload: { outcome: 'paid', gps: { lat: 6.755, lng: -58.155 } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data?.status).toBe('DELIVERED');
+    assertNoHandoverSecrets(res.payload, 'POST /driver/rides/:id/handover');
   });
 
   it('GET /rides/active — the polled endpoint — does not carry the PIN', async () => {
