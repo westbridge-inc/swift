@@ -184,6 +184,36 @@ export const earningsRepairsCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [M-08] A top-up attempted without an Idempotency-Key (refused: the client
+ *  must retry with a key) and a key reused under a different request body
+ *  (refused: a new top-up needs a new key). Both are alerts on the console. */
+export const billingTopupMissingKeyCounter = new client.Counter({
+  name: 'swift_billing_topup_missing_key_total',
+  help: 'Prepaid top-up attempts refused for lack of an Idempotency-Key',
+  registers: [registry],
+});
+export const billingTopupDuplicateFingerprintCounter = new client.Counter({
+  name: 'swift_billing_topup_duplicate_fingerprint_total',
+  help: 'Prepaid top-up attempts refused because the key was reused for a different request',
+  registers: [registry],
+});
+/** [M-08] Top-up commands whose downstream tail (payer notice, immediate
+ *  re-bill) has not completed — retried by the billing poll; alert on it
+ *  staying above zero. */
+export const billingTopupTailsPendingGauge = new client.Gauge({
+  name: 'swift_billing_topup_tails_pending',
+  help: 'Committed prepaid top-ups whose notice / re-bill tail is still pending',
+  registers: [registry],
+});
+/** [M-08 · operations] Historical unkeyed top-ups that look like the same
+ *  payment recorded twice (same subscription, amount and reference within a
+ *  day, time-based keys) — for human review against the provider reference. */
+export const billingUnkeyedTopupDuplicatesGauge = new client.Gauge({
+  name: 'swift_billing_unkeyed_topup_duplicates',
+  help: 'Groups of historical unkeyed top-ups with the same subscription, amount and reference within a day',
+  registers: [registry],
+});
+
 /** [M-29] Cash rides DELIVERED with no captured fare — the manual-review set.
  *  `total` includes the rows that predate the fare outcome (legacy);
  *  `since_enforced` counts rows delivered after it became mandatory, which the

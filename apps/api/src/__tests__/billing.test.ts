@@ -301,7 +301,7 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
       method: 'POST',
       url: `/api/v1/admin/subscriptions/${subId}/topup`,
       payload: { amount: 100000, reference: 'bank-transfer-123' },
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(res.statusCode).toBe(200);
 
@@ -351,7 +351,7 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
     createdSubIds.push(sub.id);
 
     // Admin records a real bank-transfer top-up covering the week.
-    await billing.recordTopUp(sub.id, 12000, 'admin', 'bank-xfer-123');
+    await billing.recordTopUp(sub.id, 12000, 'admin', 'bank-xfer-123', 'bank-xfer-123-key'); // [M-08] a key is required
 
     const fresh = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(fresh.status).toBe('ACTIVE'); // reinstated by the recorded cash...
@@ -658,7 +658,7 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     const resA = await app.inject({
       method: 'POST', url: `/api/v1/admin/subscriptions/${a.subId}/topup`,
       payload: { amount: 100000, reference: 'test-admin-survives' },
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(resA.statusCode).toBe(200);
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: a.subId } })).status).toBe('ACTIVE');
@@ -680,7 +680,7 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     const resB = await app.inject({
       method: 'POST', url: `/api/v1/admin/subscriptions/${b.subId}/topup`,
       payload: { amount: 100000, reference: 'test-docs-dead' },
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(resB.statusCode).toBe(200);
     const vendB = await app.prisma.vendor.findUniqueOrThrow({ where: { id: b.vendorId } });

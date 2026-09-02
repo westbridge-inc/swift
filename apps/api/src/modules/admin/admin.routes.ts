@@ -47,6 +47,9 @@ import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { computeOrderSla } from '../fulfillment/order-sla';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
+import { createHash } from 'node:crypto';
+import { billingTopupMissingKeyCounter } from '../../plugins/observability';
+import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 
@@ -2432,13 +2435,34 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!subscription) throw new NotFoundError('Subscription', id);
 
-    // SWIFT-030: an Idempotency-Key header makes a retry of the same top-up a
-    // no-op (no double-credit). The admin console sends one per top-up action.
-    const clientKey = request.headers['idempotency-key'] as string | undefined;
-    const balance = await billing.recordTopUp(id, body.amount, request.user.userId, body.reference, clientKey);
-    await audit(request.user.userId, 'PREPAID_TOPUP', 'Subscription', id, { amount: body.amount, reference: body.reference }, request);
+    // [M-08] A top-up is ONE command. The Idempotency-Key is REQUIRED — a
+    // retry after a lost response answers the same result; the same key under
+    // a different request is refused — and the credit, its receipt, the
+    // ledger posting, the audit row and the durable notice / re-bill tail are
+    // written together. Rollback is hold-only (BILLING_TOPUP_HOLD=1 refuses
+    // every top-up); there is no way back to an unkeyed mutation.
+    if (process.env['BILLING_TOPUP_HOLD'] === '1') {
+      throw new AppError(503, 'TOPUP_ON_HOLD', 'Top-ups are on hold by operations — nothing was recorded. Try again once the hold is lifted.');
+    }
+    const clientKey = request.headers['idempotency-key'];
+    if (!isUsableTopUpKey(clientKey)) {
+      billingTopupMissingKeyCounter.inc();
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+    }
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify({ subscriptionId: id, amount: body.amount, reference: body.reference ?? null }))
+      .digest('hex');
+    const { result, replayed } = await billing.recordTopUpCommand({
+      adminId: request.user.userId,
+      idempotencyKey: clientKey,
+      requestHash,
+      subscriptionId: id,
+      amount: body.amount,
+      reference: body.reference,
+      audit: { ipAddress: request.ip, userAgent: request.headers['user-agent'] },
+    });
 
-    return { success: true, data: { balance: Number(balance.balance), currencyCode: balance.currencyCode } };
+    return { success: true, replayed, data: { balance: result.balance, currencyCode: result.currencyCode } };
   });
 
   /** Billing audit trail for one subscription. */

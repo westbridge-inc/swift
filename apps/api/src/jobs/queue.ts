@@ -569,6 +569,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (repaired.repaired > 0 || repaired.stillOpen > 0) {
             ctx.log.warn(repaired, '[M-04] terminal MMG payments without a recorded outcome — reconciled');
           }
+          // [M-08] Top-up commands whose notice / re-bill tail is still owed
+          // are drained here; historical unkeyed top-ups that look doubled are
+          // reported for a person. Nothing is reversed automatically.
+          const tails = await billing.drainTopUpTails();
+          if (tails.retried > 0 || tails.pending > 0) {
+            ctx.log.warn(tails, '[M-08] top-up tails owed — drained');
+          }
+          await billing.scanUnkeyedTopUpDuplicates();
           // [M-18] The historical double credits: one provider transaction
           // credited by more than one channel before the identity existed.
           // Reported and paged for human reconciliation, never reversed here.
