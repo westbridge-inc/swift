@@ -214,6 +214,27 @@ export const billingUnkeyedTopupDuplicatesGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [M-01 / M-02] Card charge intents whose outcome the processor has not yet
+ *  proven (a timeout, a transport error, a 5xx) — count and the oldest one's
+ *  age. The reconciler retrieves each by its key every billing poll; the alert
+ *  is on the age. */
+export const cardIntentsUnknownGauge = new client.Gauge({
+  name: 'swift_card_intents_unknown',
+  help: 'Card charge intents in UNKNOWN: how many, and the oldest in minutes',
+  labelNames: ['measure'] as const,
+  registers: [registry],
+});
+/** [M-01] What the reconciler found for an UNKNOWN card intent: captured_late
+ *  (the processor took the money and we had no local payment — the defect the
+ *  register names, repaired), declined, reissued (never received; sent again
+ *  under the same key), expired. */
+export const cardChargesReconciledCounter = new client.Counter({
+  name: 'swift_card_charges_reconciled_total',
+  help: 'UNKNOWN card charge intents resolved by the reconciler, by outcome',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 /** [M-29] Cash rides DELIVERED with no captured fare — the manual-review set.
  *  `total` includes the rows that predate the fare outcome (legacy);
  *  `since_enforced` counts rows delivered after it became mandatory, which the

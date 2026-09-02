@@ -73,8 +73,13 @@ describe('getPaymentProvider', () => {
 describe('SandboxPaymentProvider', () => {
   it('declines tokens containing "fail", succeeds otherwise', async () => {
     const p: PaymentProvider = new SandboxPaymentProvider();
-    expect((await p.chargeToken({ token: 'tok_fail_x', amount: 1, currencyCode: 'GYD', idempotencyKey: 'k' })).status).toBe('failed');
-    expect((await p.chargeToken({ token: 'tok_ok', amount: 1, currencyCode: 'GYD', idempotencyKey: 'k' })).status).toBe('succeeded');
+    expect((await p.chargeToken({ token: 'tok_fail_x', amount: 1, currencyCode: 'GYD', idempotencyKey: 'k-fail' })).status).toBe('failed');
+    expect((await p.chargeToken({ token: 'tok_ok', amount: 1, currencyCode: 'GYD', idempotencyKey: 'k-ok' })).status).toBe('succeeded');
+    // [M-01] Like a real processor: the same key answers the same result, and the lookup reads it back.
+    const first = await p.chargeToken({ token: 'tok_ok', amount: 1, currencyCode: 'GYD', idempotencyKey: 'k-same' });
+    expect(await p.chargeToken({ token: 'tok_ok', amount: 1, currencyCode: 'GYD', idempotencyKey: 'k-same' })).toEqual(first);
+    expect(await p.lookupCharge({ idempotencyKey: 'k-same' })).toEqual({ status: 'succeeded', providerRef: first.providerRef, reason: undefined });
+    expect(await p.lookupCharge({ idempotencyKey: 'k-never' })).toEqual({ status: 'not_found' });
   });
 });
 
@@ -94,18 +99,20 @@ describe('PowerTranzPaymentProvider', () => {
     expect(r.reason).toBe('Insufficient funds');
   });
 
-  it('never throws on a transport error — soft failure so billing can retry', async () => {
+  it('never throws on a transport error — [M-02] UNKNOWN, not a decline: billing retrieves before it retries', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNRESET'); }));
     const r = await p.chargeToken(CHARGE);
-    expect(r.status).toBe('failed');
+    expect(r.status).toBe('unknown');
     expect(r.reason).toMatch(/unreachable/i);
   });
 
-  it('treats a non-OK HTTP status as a soft failure', async () => {
+  it('treats a 5xx as UNKNOWN (the sale may have been processed) and a 4xx as refused', async () => {
     vi.stubGlobal('fetch', mockFetch(502, 'bad gateway'));
     const r = await p.chargeToken(CHARGE);
-    expect(r.status).toBe('failed');
+    expect(r.status).toBe('unknown');
     expect(r.reason).toMatch(/HTTP 502/);
+    vi.stubGlobal('fetch', mockFetch(401, 'unauthorized'));
+    expect((await p.chargeToken(CHARGE)).status).toBe('failed');
   });
 
   it('fails an unsupported currency without calling the gateway', async () => {
@@ -161,10 +168,10 @@ describe('StripePaymentProvider', () => {
     expect(r.reason).toBe('requires_action');
   });
 
-  it('never throws on a transport error — soft failure so billing can retry', async () => {
+  it('never throws on a transport error — [M-02] UNKNOWN, not a decline: billing retrieves before it retries', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ETIMEDOUT'); }));
     const r = await p.chargeToken(CHARGE);
-    expect(r.status).toBe('failed');
+    expect(r.status).toBe('unknown');
     expect(r.reason).toMatch(/unreachable/i);
   });
 

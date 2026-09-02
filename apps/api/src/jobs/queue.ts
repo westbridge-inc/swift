@@ -577,6 +577,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ctx.log.warn(tails, '[M-08] top-up tails owed — drained');
           }
           await billing.scanUnkeyedTopUpDuplicates();
+          // [M-01 / M-02] Every UNKNOWN card intent is retrieved by its key and
+          // settled, declined, re-sent under the same key, or expired — the
+          // kill switch stops new instructions, never this.
+          const cards = await billing.reconcileUnknownCardCharges();
+          if (cards.settled + cards.declined + cards.reissued + cards.expired + cards.stillUnknown > 0) {
+            ctx.log.warn(cards, '[M-01] unknown card charge intents reconciled');
+          }
           // [M-18] The historical double credits: one provider transaction
           // credited by more than one channel before the identity existed.
           // Reported and paged for human reconciliation, never reversed here.
