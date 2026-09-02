@@ -41,16 +41,20 @@ import {
  * the golden cash rule, MMG honesty, the post-trip rating.
  */
 
-type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'complete';
+type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'handover';
+type FailedOutcome = 'refused' | 'no_show';
 
 // The ONE next step a driver takes, driven by the real backend status:
-// DRIVER_ASSIGNED → EN_ROUTE → ARRIVED → [verify PIN] → start → RIDE_IN_PROGRESS → complete.
+// DRIVER_ASSIGNED → EN_ROUTE → ARRIVED → [verify PIN] → start → RIDE_IN_PROGRESS → fare outcome.
+// [M-29] There is no bare "complete": a cash ride completes when the fare is
+// recorded — collected (the step below), or refused / left without paying
+// (the unpaid sheet). The server refuses a completion tap without it.
 function driverStep(job: any): { label: string; action: DriverAction; pin?: boolean } | null {
   const s = String(job?.status ?? '').toUpperCase();
   if (s === 'DRIVER_ASSIGNED') return { label: "I'm on the way", action: 'en-route' };
   if (s === 'DRIVER_EN_ROUTE') return { label: "I've arrived", action: 'arrived' };
   if (s === 'DRIVER_ARRIVED') return job.ridePinVerified ? { label: 'Start trip', action: 'start' } : { label: 'Verify rider PIN', action: 'verify-pin', pin: true };
-  if (s === 'RIDE_IN_PROGRESS') return { label: 'Complete trip', action: 'complete' };
+  if (s === 'RIDE_IN_PROGRESS') return { label: 'Fare collected — complete trip', action: 'handover' };
   return null;
 }
 
@@ -114,6 +118,9 @@ export function ActiveJobScreen({ navigation }: any) {
   const [sosConfirm, setSosConfirm] = useState(false);
   // G14: pre-pickup handback — a two-step with preset reasons, never one tap.
   const [handbackConfirm, setHandbackConfirm] = useState(false);
+  // [M-29] The unpaid sheet — the failed fare outcome (driver) or failed
+  // handover (rider): refused, or nobody / left without paying.
+  const [unpaidSheet, setUnpaidSheet] = useState(false);
   // Preview (R3): useActiveJob supplies a sample in-progress trip, so this
   // nav-grade screen is fully browsable read-only. Real actions (SOS/dial) are
   // suppressed below; the step mutations already no-op in preview.
@@ -216,8 +223,13 @@ export function ActiveJobScreen({ navigation }: any) {
 
   const runDriverStep = () => {
     if (!step || !job) return;
+    // [M-29] The step's own outcome is 'paid' — "Fare collected"; the failed
+    // outcomes come only from the unpaid sheet, each named explicitly.
+    const input = step.action === 'handover'
+      ? { id: job.id, action: 'handover' as const, outcome: 'paid' as const }
+      : { id: job.id, action: step.action, ...(step.pin ? { pin } : {}) };
     driverAct.mutate(
-      { id: job.id, action: step.action, ...(step.pin ? { pin } : {}) },
+      input,
       {
         onError: () => {
           if (step.pin) haptic.failure();
@@ -225,13 +237,34 @@ export function ActiveJobScreen({ navigation }: any) {
         onSuccess: () => {
           if (step.pin) haptic.success();
           // Trip done → rate the passenger while it's fresh (DRIVER_TO_CUSTOMER).
-          if (step.action === 'complete') {
+          if (step.action === 'handover') {
             setStars(5);
             setRatePopup({ orderId: job.id, name: custName ?? 'your passenger', mmg: job.paymentMethod === 'MOBILE_MONEY' });
           }
         },
       },
     );
+  };
+
+  // [M-29] The failed outcome, on either rail: the server captures this GPS
+  // as evidence, strikes the customer and opens the guarantee claim in one
+  // commit — nothing here is optimistic, and the answer names the claim.
+  const recordUnpaid = (outcome: FailedOutcome) => {
+    setUnpaidSheet(false);
+    if (preview || !job?.id) return;
+    const recorded = isDriver ? 'Unpaid fare recorded' : 'Failed delivery recorded';
+    const onSuccess = (res: any) => {
+      const claim = res?.claim?.status;
+      toast.show(
+        claim === 'AUTO_APPROVED' ? `${recorded} — the Swift guarantee covers it.`
+          : claim === 'PENDING_REVIEW' ? `${recorded} — your claim is under review.`
+            : `${recorded}.`,
+      );
+      navigation?.goBack?.();
+    };
+    const onError = (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the outcome — try again or call support.");
+    if (isDriver) driverAct.mutate({ id: job.id, action: 'handover', outcome }, { onSuccess, onError });
+    else riderAct.mutate({ id: job.id, action: 'handover', outcome }, { onSuccess, onError });
   };
 
   const closeRating = () => {
@@ -463,6 +496,18 @@ export function ActiveJobScreen({ navigation }: any) {
                     disabled: busy || (!!step.pin && pin.length < RIDE_PIN_LENGTH),
                     lockedIn: step.action === 'start',
                   })}
+                  {/* [M-29] The other outcome at the destination. Never a plain
+                      "complete" — the server refuses a cash ride without a
+                      recorded fare (PAYMENT_NOT_CAPTURED). */}
+                  {step.action === 'handover' ? (
+                    <PillButton
+                      label="Passenger didn't pay"
+                      variant="soft"
+                      style={{ marginTop: space.sm }}
+                      disabled={busy}
+                      onPress={() => setUnpaidSheet(true)}
+                    />
+                  ) : null}
                 </>
               ) : (
                 <T variant="label" center style={{ color: dk.muted, paddingVertical: space.md }}>
@@ -518,6 +563,15 @@ export function ActiveJobScreen({ navigation }: any) {
                     "mark delivered" here — the server refuses a cash order that
                     wasn't paid (PAYMENT_NOT_CAPTURED), so it must not be offered. */}
                 {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover' }), { loading: riderAct.isPending, disabled: busy })}
+                {/* [M-29] The door's other outcome — the rail existed on the
+                    server (strike + guarantee claim) with no way to reach it. */}
+                <PillButton
+                  label="Customer didn't pay"
+                  variant="soft"
+                  style={{ marginTop: space.sm }}
+                  disabled={busy}
+                  onPress={() => setUnpaidSheet(true)}
+                />
               </>
             )}
 
@@ -602,6 +656,34 @@ export function ActiveJobScreen({ navigation }: any) {
           <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
         </PopupCard>
       )}
+
+      {/* [M-29] The unpaid sheet: the failed fare outcome at the destination
+          (driver) or the failed handover at the door (rider). The choice names
+          what happened; the server records the GPS evidence, the strike and
+          the guarantee claim together. */}
+      <PopupCard visible={unpaidSheet} onClose={() => setUnpaidSheet(false)}>
+        <PopupTitle variant="title" center>{isDriver ? 'The passenger didn’t pay?' : 'The customer didn’t pay?'}</PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          {isDriver
+            ? 'Your location is recorded as evidence, the passenger’s account takes a strike, and the Swift guarantee reviews the fare. Pick what happened:'
+            : 'Your location is recorded as evidence, the customer’s account takes a strike, and the Swift guarantee reviews the amount. Pick what happened:'}
+        </T>
+        <PillButton
+          label={isDriver ? 'Refused to pay' : 'Refused to pay at the door'}
+          variant="outline"
+          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          disabled={busy}
+          onPress={() => recordUnpaid('refused')}
+        />
+        <PillButton
+          label={isDriver ? 'Left without paying' : 'Nobody at the door'}
+          variant="outline"
+          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          disabled={busy}
+          onPress={() => recordUnpaid('no_show')}
+        />
+        <PillButton label="Go back" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setUnpaidSheet(false)} />
+      </PopupCard>
 
       {/* G14 handback — reason required, honesty first: the customer is told
           "finding you another rider", and after pickup this popup can never
