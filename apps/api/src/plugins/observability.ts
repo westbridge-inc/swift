@@ -480,6 +480,23 @@ export const adRefundCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [R045-ADS-04 · 05] The ad checkout aggregate: a duplicate active invoice
+ *  refused, a provider reference reused, a payment that arrived after the
+ *  hold expired (late capture). */
+export const adCheckoutCounter = new client.Counter({
+  name: 'swift_ad_checkout_events_total',
+  help: 'Ad checkout events (duplicate_invoice_refused, provider_ref_reused, late_capture)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+/** [R045-ADS-05 · operations] Paid campaigns with no confirmed inventory, and campaigns with more than one active invoice. */
+export const adCheckoutGauge = new client.Gauge({
+  name: 'swift_ad_checkout_state',
+  help: 'Ad checkout state by check (paid_without_inventory, duplicate_active_invoices)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

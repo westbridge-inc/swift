@@ -24,13 +24,10 @@ const MON = new Date('2026-08-03T00:00:00Z');
 beforeAll(async () => { await prisma.$connect(); });
 
 afterAll(async () => {
-  await prisma.adInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
-  await prisma.adBooking.deleteMany({ where: { campaignId: { in: campaignIds } } });
-  await prisma.adInventoryWeek.deleteMany({ where: { placementId: { in: placementIds } } });
+  // [R045-ADS] a late capture leaves a durable refund intent that references the invoice
+  // The refund outbox, intents and items are IMMUTABLE by trigger (deletes are refused) and they RESTRICT
+  // their invoice, booking and campaign — so the ads-money fixtures stay in place; every id is unique per run.
   await prisma.adsAuditLog.deleteMany({ where: { entityId: { in: invoiceIds } } });
-  await prisma.adCampaign.deleteMany({ where: { id: { in: campaignIds } } });
-  await prisma.advertiser.deleteMany({ where: { id: { in: advertiserIds } } });
-  await prisma.adPlacement.deleteMany({ where: { id: { in: placementIds } } });
   await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await prisma.$disconnect();
@@ -170,7 +167,13 @@ describe('§6.1 reservation_expired', () => {
     expect((await prisma.adCampaign.findUniqueOrThrow({ where: { id: c.id } })).status).toBe('DRAFT');
     expect((await prisma.adInvoice.findUniqueOrThrow({ where: { id: invoice.id } })).status).toBe('VOID');
     expect((await prisma.adInventoryWeek.findUniqueOrThrow({ where: { placementId_city_weekStart: { placementId: p.id, city: '*', weekStart: MON } } })).booked).toBe(0);
-    // A VOID invoice cannot then be marked paid.
-    await expect(checkout.markPaid(invoice.id, { providerRef: 'late' })).rejects.toThrow(/cannot be marked paid/i);
+    // [R045-ADS-05] Money that arrives for the VOID invoice is a late capture:
+    // recorded as paid, the campaign stays in DRAFT with no inventory confirmed,
+    // and the full amount becomes a refund obligation — never a hybrid.
+    const late = await checkout.markPaid(invoice.id, { providerRef: `late-${nanoid(6)}` });
+    expect(late.status).toBe('PAID');
+    expect((await prisma.adCampaign.findUniqueOrThrow({ where: { id: c.id } })).status).toBe('DRAFT');
+    expect(await prisma.adBooking.count({ where: { campaignId: c.id, status: 'CONFIRMED' } })).toBe(0);
+    expect(await prisma.adRefundIntent.count({ where: { campaignId: c.id, reason: 'LATE_CAPTURE' } })).toBe(1);
   });
 });
