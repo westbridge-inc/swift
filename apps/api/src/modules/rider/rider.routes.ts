@@ -1200,7 +1200,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // decides what happens to it, not the next rider to tap. The seam's CAS
     // refuses it too; this is the honest message instead of a generic conflict.
     if (order.foodAgeHeldAt) {
-      throw new AppError(409, 'ORDER_HELD_FOR_REVIEW', 'This order is held for review by Swift — it was ready too long and the customer has already paid. It cannot be picked up until a person releases it.');
+      throw new AppError(409, 'ORDER_HELD_FOR_REVIEW', 'This order is held for review by Swift and cannot be picked up right now.');
     }
 
     // RIDER_ASSIGNED is only reachable from these states — NOT PENDING (the vendor

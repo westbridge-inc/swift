@@ -35,6 +35,7 @@ import { SubscriptionService } from '../subscription/subscription.service';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { AgentService } from '../agent/agent.service';
 import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
+import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
@@ -1539,12 +1540,66 @@ export async function adminRoutes(app: FastifyInstance) {
    *  audited because an admin is acting on someone else's order. */
   app.post('/orders/:id/retry-dispatch', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const order = await app.prisma.order.findUnique({ where: { id }, select: { id: true, orderNumber: true } });
+    const order = await app.prisma.order.findUnique({ where: { id }, select: { id: true, orderNumber: true, foodAgeHeldAt: true } });
     if (!order) throw new NotFoundError('Order', id);
+    // [hold v3 · N-01] A held row would answer "retried" while dispatch did
+    // nothing. The honest answer names the door that exists.
+    if (order.foodAgeHeldAt) {
+      throw new AppError(409, 'ORDER_HELD_FOR_REVIEW', 'This order is held for review (paid by MMG, ready too long). Release it with POST /orders/:id/food-age-hold/release to deliver it anyway.');
+    }
     const { makeDispatchService } = await import('../dispatch/dispatch.service');
     const result = await makeDispatchService(app).retryDispatch(id);
     await audit(request.user.userId, 'RETRY_DISPATCH', 'Order', id, { result }, request);
     return { success: true, data: result };
+  });
+
+  /** [hold v3 · N-01] The held-for-review queue: paid MMG orders the food-age
+   *  cutoff would have cancelled, held for a person instead. Tenant-scoped by
+   *  the request like every admin read. */
+  app.get('/orders/held', { preHandler: [adminGuard] }, async () => {
+    const rows = await app.prisma.order.findMany({
+      where: { foodAgeHeldAt: { not: null }, riderId: null, status: { in: [...FOOD_AGE_WAITING] } },
+      orderBy: { foodAgeHeldAt: 'asc' },
+      take: 200,
+      select: {
+        id: true, orderNumber: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true,
+        totalAmount: true, readyAt: true, foodAgeHeldAt: true, placedAt: true,
+        vendor: { select: { id: true, name: true, phone: true } },
+        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+      },
+    });
+    const now = Date.now();
+    return {
+      success: true,
+      data: rows.map((o) => ({
+        ...o,
+        totalAmount: Number(o.totalAmount),
+        heldMinutes: o.foodAgeHeldAt ? Math.round((now - o.foodAgeHeldAt.getTime()) / 60_000) : null,
+        readyMinutes: o.readyAt ? Math.round((now - o.readyAt.getTime()) / 60_000) : null,
+      })),
+    };
+  });
+
+  /** [hold v3 · N-01] The operator's decision on a held order: deliver it
+   *  anyway. Durable (the cutoff is waived for this order), audited, and it
+   *  sends the order straight back to dispatch. The other exit — the store
+   *  refunds the customer and the order closes — waits on the refund-
+   *  obligation rail and is refused here rather than faked. */
+  app.post('/orders/:id/food-age-hold/release', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ decision: z.enum(['DELIVER_ANYWAY', 'CLOSE_STORE_REFUNDED']).default('DELIVER_ANYWAY') }).parse(request.body ?? {});
+    if (body.decision === 'CLOSE_STORE_REFUNDED') {
+      throw new AppError(409, 'NOT_AVAILABLE_YET', 'Closing a paid order after a store refund needs the refund-obligation ledger, which is not built yet. Deliver it anyway, or wait for that rail.');
+    }
+    const order = await app.prisma.order.findUnique({ where: { id }, select: { id: true, orderNumber: true, tenantId: true } });
+    if (!order) throw new NotFoundError('Order', id);
+    const outcome = await releaseFoodAgeHold({ prisma: app.prisma, redis: app.redis }, { orderId: id, tenantId: order.tenantId, byUserId: request.user.userId });
+    if (outcome === 'NOT_HELD') throw new AppError(409, 'ORDER_NOT_HELD', 'This order is not held for review.');
+    if (outcome === 'NOT_RELEASABLE') throw new AppError(409, 'ORDER_NOT_RELEASABLE', 'This order already has a rider or has left the waiting states; there is nothing to release.');
+    const { makeDispatchService } = await import('../dispatch/dispatch.service');
+    const dispatch = await makeDispatchService(app).retryDispatch(id).catch((err: unknown) => ({ error: err instanceof Error ? err.message : String(err) }));
+    await audit(request.user.userId, 'RELEASE_FOOD_AGE_HOLD', 'Order', id, { decision: body.decision, dispatch }, request);
+    return { success: true, data: { released: true, decision: body.decision, dispatch } };
   });
 
   /** The 13 Caribbean markets — CountryConfig read-only (editing arrives with
