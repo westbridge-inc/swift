@@ -859,7 +859,7 @@ export class DispatchService {
           id: true, status: true, riderId: true, driverId: true, orderType: true,
           fulfillment: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
           customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
-          subtotalBase: true, paymentMethod: true, tenantId: true, readyAt: true,
+          subtotalBase: true, paymentMethod: true, paymentStatus: true, tenantId: true, readyAt: true,
           // [WS-6.0] The cash-math triple. A mover deciding on a CASH job is
           // deciding how much of their OWN float to commit, and the card used
           // to show only what they earn. Every number is a stored column, not
