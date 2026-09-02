@@ -10,6 +10,7 @@ import { getChannels } from '../../providers/notifications/channels';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { NotFoundError, ForbiddenError, AppError } from '../../utils/errors';
+import { runWithoutTenant } from '../../plugins/tenant-context';
 
 // SOS endpoints (safety spec §4.5). The engine (state machine, grace, fan-out)
 // lives in SosService; these are thin, authed wrappers. Owner actions require
@@ -44,6 +45,17 @@ export async function safetyRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const sos = new SosService(app.prisma, app.io);
   const isOps = (role: string) => role === 'ADMIN' || role === 'SUPER_ADMIN';
+  // [TA-S0-004] A platform responder (SUPER_ADMIN) is paged for EVERY tenant's
+  // alert and for the null-tenant ones — the page deliberately escapes tenant
+  // scope. Until now the read, the acknowledgement and the resolution did not:
+  // authentication binds every request, SUPER_ADMIN included, to the caller's
+  // own tenant, so the responder who was just paged opened the alert and got an
+  // empty board or a 404, and could neither acknowledge nor resolve it. The
+  // privilege that pages them is the privilege that lets them act: the ops
+  // handlers run unscoped for a platform responder. A tenant ADMIN stays inside
+  // their tenant — scoping is the rule, this is the one sanctioned exception.
+  const isPlatformResponder = (role: string) => role === 'SUPER_ADMIN';
+  const asResponder = <T>(role: string, fn: () => Promise<T>): Promise<T> => (isPlatformResponder(role) ? runWithoutTenant(fn) : fn());
 
   async function ownedAlert(id: string, userId: string) {
     const a = await app.prisma.sosAlert.findUnique({ where: { id } });
@@ -178,7 +190,7 @@ export async function safetyRoutes(app: FastifyInstance) {
   });
 
   app.get<{ Params: { id: string } }>('/sos/:id', auth, async (request) => {
-    const a = await app.prisma.sosAlert.findUnique({ where: { id: request.params.id } });
+    const a = await asResponder(request.user.role, () => app.prisma.sosAlert.findUnique({ where: { id: request.params.id } }));
     if (!a) throw new NotFoundError('SosAlert', request.params.id);
     if (a.actorUserId !== request.user.userId && !isOps(request.user.role)) throw new ForbiddenError('This is not your alert.');
     return { success: true, data: a };
@@ -186,14 +198,14 @@ export async function safetyRoutes(app: FastifyInstance) {
 
   app.post<{ Params: { id: string } }>('/sos/:id/ack', auth, async (request) => {
     if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can acknowledge an alert.');
-    const a = await sos.ack(request.params.id, request.user.userId);
+    const a = await asResponder(request.user.role, () => sos.ack(request.params.id, request.user.userId));
     return { success: true, data: { id: a.id, status: a.status, acknowledgedAt: a.acknowledgedAt } };
   });
 
   app.post<{ Params: { id: string } }>('/sos/:id/resolve', auth, async (request) => {
     if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can resolve an alert.');
     const body = resolveSchema.parse(request.body ?? {});
-    const a = await sos.resolve(request.params.id, request.user.userId, body.resolutionCode, body.notes);
+    const a = await asResponder(request.user.role, () => sos.resolve(request.params.id, request.user.userId, body.resolutionCode, body.notes));
     return { success: true, data: { id: a.id, status: a.status, resolutionCode: a.resolutionCode } };
   });
 
@@ -208,7 +220,7 @@ export async function safetyRoutes(app: FastifyInstance) {
       q.status === 'active' ? { status: 'ACTIVE' as const }
       : q.status === 'all' ? {}
       : { status: { in: [...OPEN_STATUSES] } };
-    const alerts = await app.prisma.sosAlert.findMany({ where, orderBy: { triggeredAt: 'desc' }, take: q.limit });
+    const alerts = await asResponder(request.user.role, () => app.prisma.sosAlert.findMany({ where, orderBy: { triggeredAt: 'desc' }, take: q.limit }));
     return { success: true, data: alerts };
   });
 
