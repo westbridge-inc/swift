@@ -14,7 +14,8 @@ import { toast } from '../kit/toast';
 // the cold-start initial URL work everywhere today.
 
 export { destinationForUrl, type LinkDestination } from '../lib/deepLinkParse';
-import { destinationForUrl, type LinkDestination } from '../lib/deepLinkParse';
+import { destinationForUrl, setLinkDecisionObserver, type LinkDestination } from '../lib/deepLinkParse';
+import { track } from '../lib/analytics';
 
 /** Fire-and-forget APP_OPEN report (spec 8.2) — the OS intercepted the link,
  *  the web resolver never ran, so the app files the funnel event instead. */
@@ -124,6 +125,13 @@ export function flushPendingDeepLink(): void {
 export function installDeepLinkHandler(): () => void {
   if (installed) return () => undefined;
   installed = true;
+  // [MOB-002] Every origin decision is counted: accepted by origin, rejected by
+  // reason (deep_link_accepted / deep_link_rejected). analytics.track is the
+  // one seam events leave through, and today it is a no-op by design.
+  setLinkDecisionObserver((d) => {
+    if (d.kind === 'accepted') track('deep_link_accepted', { origin: d.origin });
+    else track('deep_link_rejected', { reason: d.reason });
+  });
   const sub = Linking.addEventListener('url', ({ url }) => {
     try { handleUrl(url); } catch { /* never crash on a link */ }
   });
@@ -132,6 +140,7 @@ export function installDeepLinkHandler(): () => void {
     .catch(() => undefined);
   return () => {
     installed = false;
+    setLinkDecisionObserver(null);
     sub.remove();
   };
 }
