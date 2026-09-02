@@ -2209,6 +2209,8 @@ model MmgAgentPayment {
   externalId     String
   /// Normalized MMG transaction id — cross-CHANNEL dedupe (webhook + file = one credit)
   mmgTxnId       String?
+  /// [M-18] The provider transaction this record observes — one identity, one lifecycle, one credit.
+  providerPaymentId String?
   sanRaw         String
   sanNormalized  String?   @db.Char(10)
   tenantId       String    @default("swift-default")
@@ -2231,7 +2233,35 @@ model MmgAgentPayment {
   @@unique([channel, externalId])
   @@index([status, createdAt])
   @@index([sanNormalized])
+  @@index([providerPaymentId])
   @@map("mmg_agent_payments")
+}
+
+/// [M-18] One real-world provider transaction, whatever channel observed it.
+/// The observations (MmgAgentPayment rows) are immutable records of it; the
+/// credit is a single compare-and-set on this row: OPEN → CREDITED exactly
+/// once, naming the observation that won.
+model ProviderPayment {
+  id                String    @id @default(cuid())
+  tenantId          String    @default("swift-default")
+  /// MMG — the manual channel's verified receipt reference is the same id
+  provider          String
+  /// The provider's transaction id, normalized (trimmed, upper-cased)
+  providerTxnId     String
+  /// OPEN | CREDITED
+  status            String    @default("OPEN")
+  creditedPaymentId String?
+  subscriptionId    String?
+  creditedAt        DateTime?
+  amount            Decimal   @db.Decimal(12, 2)
+  currencyCode      String    @db.Char(3)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([provider, providerTxnId])
+  @@index([tenantId])
+  @@index([status])
+  @@map("provider_payments")
 }
 
 /// Bank-truth reconciliation [san spec PART 25]: ledger truth vs what MMG
