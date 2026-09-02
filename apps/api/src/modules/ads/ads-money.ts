@@ -1,3 +1,4 @@
+import { currencyInfo } from '../../utils/currency-amount';
 /**
  * Exact money primitives for the ads domain.
  *
@@ -25,8 +26,14 @@ function currencyScale(currency: string): number {
   if (!Object.prototype.hasOwnProperty.call(ADS_CURRENCY_MINOR_SCALE, currency)) {
     throw new RangeError(`Unsupported ads currency: ${currency}`);
   }
-
-  return ADS_CURRENCY_MINOR_SCALE[currency as AdsCurrency];
+  // [M-36] ONE exponent registry: the ads table names which currencies ads
+  // may bill in; the exponent itself comes from the platform registry, so
+  // the two can never disagree about how many minor units make a major one.
+  const exponent = currencyInfo(currency).exponent;
+  if (exponent !== ADS_CURRENCY_MINOR_SCALE[currency as AdsCurrency]) {
+    throw new RangeError(`Ads scale for ${currency} disagrees with the currency registry (${exponent})`);
+  }
+  return exponent;
 }
 
 function decimalText(value: string | DecimalStringLike): string {

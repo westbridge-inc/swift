@@ -948,6 +948,9 @@ export class OrderService {
     // The ID-gate (locked model): at or above the country's USD-equivalent
     // threshold, an L1 account must verify identity first. L2/L3 flow through.
     const gateLocal = await this.countryConfig.getIdGateThresholdLocal(user.countryCode);
+    // [M-36] The order's currency is the buyer's market's — stamped once here
+    // so every money column on the row names its unit.
+    const orderCurrency = (await this.countryConfig.getByCode(user.countryCode).catch(() => null))?.currencyCode ?? 'GYD';
     if (user.trustLevel === 'L1' && grandTotal >= gateLocal) {
       throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
         `Orders of $${Math.round(gateLocal).toLocaleString()} GYD or more need ID verification. Verify once in the app and this limit is gone.`,
@@ -1189,6 +1192,7 @@ export class OrderService {
           data: {
             tenantId: user.tenantId,
             orderNumber: generateOrderNumber(sequence),
+            currencyCode: orderCurrency,
             orderType: plan.vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
             customerId: input.userId,
             vendorId: plan.vendor.id,

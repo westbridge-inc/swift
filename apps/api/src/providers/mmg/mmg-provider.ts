@@ -1,3 +1,4 @@
+import { fromMajor, fromMinor, toMajorString as majorStringOf } from '../../utils/currency-amount';
 import { nanoid } from 'nanoid';
 import { isProduction } from '../../utils/runtime-mode';
 
@@ -188,13 +189,19 @@ function mapMmgStatus(s: string | undefined): MmgTxStatus {
   return 'pending';
 }
 
-/** MMG sends amounts as MAJOR-unit strings ("500.00") — we hold minor ints. */
+/** MMG sends amounts as MAJOR-unit strings ("500.00") — we hold minor ints.
+ *  [M-36] Both directions go through the currency registry (MMG bills in
+ *  GYD, declared once here), never a bare × 100. */
+const MMG_CURRENCY = 'GYD';
 function toMajorString(amountMinor: number): string {
-  return (amountMinor / 100).toFixed(2);
+  return majorStringOf(fromMinor(Math.round(amountMinor), MMG_CURRENCY));
 }
 function toMinor(major: string | undefined): number {
-  const n = Number.parseFloat(String(major ?? '0'));
-  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+  try {
+    return Number(fromMajor(String(major ?? '0'), MMG_CURRENCY).minor);
+  } catch {
+    return 0;
+  }
 }
 
 /**

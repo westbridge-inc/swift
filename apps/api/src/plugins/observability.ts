@@ -438,6 +438,16 @@ export const pricingConfigCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [M-36] Money crossing a unit boundary: an unregistered currency answered
+ *  with the counted fallback, or a major amount that already looked
+ *  minor-scaled refused at a provider adapter (a 100× error caught). */
+export const moneyBoundaryCounter = new client.Counter({
+  name: 'swift_money_boundary_events_total',
+  help: 'Money boundary events (unknown_currency, scale_anomaly) by currency or boundary',
+  labelNames: ['event', 'boundary'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

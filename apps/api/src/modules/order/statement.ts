@@ -1,3 +1,4 @@
+import { formatMoney } from '../../utils/currency-amount';
 /**
  * Earnings / sales statements (marketplace-mechanics spec §12, the receipt's
  * sibling) — the artifact an earner shows a bank and a store shows their
@@ -22,14 +23,17 @@ export type StatementInput = {
   totalLabel: string;
   totalAmount: unknown;
   footNote: string;
+  /** [M-36] The currency every line and the total are in. */
+  currencyCode: string;
 };
 
-const money = (n: unknown) => `$${Math.round(Number(n ?? 0)).toLocaleString()} GYD`;
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const day = (d: Date) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
 export function renderStatementHtml(input: StatementInput): string {
+  // [M-36] Rendered through the registry in the statement's own currency.
+  const money = (n: unknown) => formatMoney(n, input.currencyCode, { code: true, whole: true }); // statement lines are MAJOR_WHOLE
   const rows = input.lines
     .map(
       (l) => `<tr>
@@ -124,14 +128,18 @@ async function earnerStatement(
   const capped = earnings.length === LINE_CAP;
   const orders = (await prisma.order.findMany({
     where: { id: { in: earnings.map((e) => e.orderId) } },
-    select: { id: true, orderNumber: true },
-  })) as Array<{ id: string; orderNumber: string }>;
+    select: { id: true, orderNumber: true, currencyCode: true },
+  })) as Array<{ id: string; orderNumber: string; currencyCode: string }>;
+  // [M-36] The statement's currency is its orders' (one market per holder); a
+  // statement with no lines has no money to label and names the platform default.
+  const currencyCode = orders[0]?.currencyCode ?? 'GYD';
   const numberOf = new Map(orders.map((o) => [o.id, o.orderNumber]));
   const user = await prisma.user.findUniqueOrThrow({
     where: { id: opts.userId },
     select: { firstName: true, lastName: true, phone: true },
   });
   return renderStatementHtml({
+    currencyCode,
     title: opts.title,
     holder: `${[user.firstName, user.lastName].filter(Boolean).join(' ')} · ${user.phone}`,
     periodLabel: period.label,
@@ -189,16 +197,18 @@ export async function buildVendorStatement(prisma: unknown, vendorId: string, pe
     p.order.aggregate({ where: periodWhere, _sum: { subtotalCustomer: true, discount: true } }),
     p.order.findMany({
       where: periodWhere,
-      select: { orderNumber: true, placedAt: true, fulfillment: true, subtotalCustomer: true, discount: true },
+      select: { orderNumber: true, placedAt: true, fulfillment: true, subtotalCustomer: true, discount: true, currencyCode: true },
       orderBy: { placedAt: 'asc' },
       take: LINE_CAP,
-    }) as Promise<Array<{ orderNumber: string; placedAt: Date; fulfillment: string | null; subtotalCustomer: unknown; discount: unknown }>>,
+    }) as Promise<Array<{ orderNumber: string; placedAt: Date; fulfillment: string | null; subtotalCustomer: unknown; discount: unknown; currencyCode: string }>>,
   ]);
   const takeOf = (o: { subtotalCustomer: unknown; discount: unknown }) =>
     Number(o.subtotalCustomer ?? 0) - Number(o.discount ?? 0);
   const total = Number(totalAgg._sum.subtotalCustomer ?? 0) - Number(totalAgg._sum.discount ?? 0);
   const capped = orders.length === LINE_CAP;
   return renderStatementHtml({
+    // [M-36] The vendor's orders name the currency; none → the platform default.
+    currencyCode: orders[0]?.currencyCode ?? 'GYD',
     title: 'Sales statement',
     holder: `${vendorRecord.name} — ${vendorRecord.addressLine1}, ${vendorRecord.city}`,
     periodLabel: period.label,

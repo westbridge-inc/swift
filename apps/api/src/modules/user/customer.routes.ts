@@ -14,7 +14,7 @@ import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache } from './home-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
-import { zMoneyMinor } from '../../utils/money-schema';
+import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
 import { seedRatingTags, tagsForRole } from '../rating/tag-taxonomy.seed';
@@ -115,7 +115,7 @@ const cartAddressSchema = z.object({
 });
 
 const cartTipSchema = z.object({
-  amount: zMoneyMinor,
+  amount: zMoneyWhole,
 });
 
 // [REPORT-013 F-013-02] The tip ceiling binds at EVERY tip entrance: the
@@ -126,7 +126,7 @@ const MAX_TIP_GYD = 50_000;
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
   deliveryInstructions: z.string().max(500).optional(),
-  tipAmount: zMoneyMinor.max(MAX_TIP_GYD).optional(),
+  tipAmount: zMoneyWhole.max(MAX_TIP_GYD).optional(),
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
   // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts
@@ -2640,7 +2640,7 @@ export async function customerRoutes(app: FastifyInstance) {
       select: {
         id: true, status: true, vendor: { select: { vendorType: true } },
         // [ALG-25] The stored fields the refund is computed from.
-        paymentMethod: true, deliveryFee: true, discount: true, totalAmount: true, fulfillment: true,
+        paymentMethod: true, deliveryFee: true, discount: true, totalAmount: true, fulfillment: true, currencyCode: true,
         items: { select: { id: true, totalCustomer: true, subStatus: true } },
         // [M-33] The immutable component/line allocation and its funder.
         promoRedemption: { select: { goodsDiscount: true, deliveryDiscount: true, funder: true, discountType: true, lineAllocations: true } },
@@ -2680,6 +2680,7 @@ export async function customerRoutes(app: FastifyInstance) {
       deliveryFee: order.deliveryFee, discount: order.discount, totalAmount: order.totalAmount,
       deliveryHappened: order.fulfillment === 'DELIVERY',
       snapshot,
+      currencyCode: order.currencyCode,
     });
     const promoType = snapshot?.discountType ?? (Number(order.discount) > 0 ? 'UNKNOWN' : 'NONE');
     refundBasisCounter.labels(refund.basis, promoType).inc();

@@ -1543,6 +1543,11 @@ model Order {
   tipAmount        Decimal @default(0) @db.Decimal(12, 2)
   discount         Decimal @default(0) @db.Decimal(12, 2)
   totalAmount      Decimal @db.Decimal(12, 2)
+  /// [M-36] The currency every money column on this row is in (ISO 4217).
+  /// Stamped from the buyer's market at checkout and from the fare estimate at
+  /// a ride request; the receipt, statement and refund read it — never a
+  /// hard-coded "GYD".
+  currencyCode     String  @default("GYD")
 
   taxiFareBase   Decimal?   @db.Decimal(10, 2)
   taxiFarePerKm  Decimal?   @db.Decimal(10, 2)

@@ -1,11 +1,11 @@
-import { zMoneyMinor } from '../../utils/money-schema';
+import { zMoneyWhole } from '../../utils/money-schema';
 
 /**
  * FUL-001 — THE MONEY MATRIX (fulfillment prompt Part 6.1).
  *
  * Swift never touches order money — it moves between customer, vendor, and
  * rider. This computes, for a given fulfillment × payment combination, EXACTLY
- * how it moves, as integer minor units (reusing SWIFT-103's `zMoneyMinor` so the
+ * how it moves, as integer minor units (reusing SWIFT-103's `zMoneyWhole` so the
  * money-input invariant has one source). It is the reconciliation ORACLE: the
  * real settlement (`cash-rules` handover, `Earning`, `DeliveryCashSettlement`,
  * float) must reconcile against these movements — this does NOT move money
@@ -69,8 +69,8 @@ export interface MatrixInput {
 /** Compute the settlement for one order. Throws on non-integer/negative money
  *  or a pickup that carries a delivery fee (both are invariant violations). */
 export function settle(input: MatrixInput): Settlement {
-  const foodTotal = zMoneyMinor.parse(input.foodTotal);
-  const deliveryFee = zMoneyMinor.parse(input.deliveryFee);
+  const foodTotal = zMoneyWhole.parse(input.foodTotal);
+  const deliveryFee = zMoneyWhole.parse(input.deliveryFee);
   const { mode, payment } = input;
 
   if (mode === 'PICKUP' && deliveryFee !== 0) {

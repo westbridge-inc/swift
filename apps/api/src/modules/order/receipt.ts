@@ -1,3 +1,4 @@
+import { formatMoney } from '../../utils/currency-amount';
 /**
  * Order receipt (marketplace-mechanics spec §12) — the artifact people keep.
  *
@@ -30,13 +31,18 @@ type ReceiptOrder = {
   vendor: { name: string; addressLine1: string; city: string; phone: string } | null;
   customer: { firstName: string | null; lastName: string | null } | null;
   items: Array<{ name: string; quantity: number; totalCustomer: unknown }>;
+  /** [M-36] The currency every amount on the order is in; stamped at checkout. */
+  currencyCode?: string | null;
 };
 
-const money = (n: unknown) => `$${Math.round(Number(n ?? 0)).toLocaleString()} GYD`;
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 export function renderReceiptHtml(order: ReceiptOrder): string {
+  // [M-36] The order names its currency; the receipt renders it through the
+  // registry (symbol, exponent, ISO code) — never a hard-coded "GYD".
+  const currency = order.currencyCode ?? 'GYD';
+  const money = (n: unknown) => formatMoney(n, currency, { code: true, whole: true }); // order money is MAJOR_WHOLE
   const customerName = [order.customer?.firstName, order.customer?.lastName].filter(Boolean).join(' ');
   // [SPS-F-0016] Never receipt money as PAID unless its capture is confirmed.
   // The fulfilment gate makes new DELIVERED/COMPLETED MMG orders CAPTURED by
