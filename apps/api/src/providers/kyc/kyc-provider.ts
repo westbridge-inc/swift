@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid';
 import { IdAnalyzerKycProvider } from './id-analyzer-provider';
 import { DiditKycProvider } from './didit-provider';
+import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // KycProvider — hard rule 4: every external service sits behind a swappable
@@ -71,7 +72,7 @@ export class SandboxKycProvider implements KycProvider {
 /** Provider selection is config, not code. */
 export function getKycProvider(): KycProvider {
   const provider = process.env['KYC_PROVIDER'] ?? 'sandbox';
-  if (process.env['NODE_ENV'] === 'production' && provider === 'sandbox') {
+  if (isProduction() && provider === 'sandbox') {
     throw new Error('KYC_PROVIDER=sandbox is forbidden in production');
   }
   switch (provider) {

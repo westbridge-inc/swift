@@ -5,6 +5,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { log } from '../../utils/logger';
 import { BookingService } from './booking.service';
+import { isProduction } from '../../utils/runtime-mode';
 
 // Ad checkout & payment (ads-platform spec §8.1/§8.2). Ad money is PLATFORM
 // revenue paid UPFRONT — it reuses the subscription rails' discipline
@@ -32,7 +33,7 @@ export class AdCheckoutService {
     // The hosted MMG/PowerTranz checkout adapters are not implemented here yet;
     // MANUAL is the honest production invoice path. Fail before reading or
     // reserving inventory so a synthetic provider cannot mutate production.
-    if (process.env['NODE_ENV'] === 'production' && provider !== 'MANUAL') {
+    if (isProduction() && provider !== 'MANUAL') {
       throw new AppError(
         503,
         'ADS_PAYMENT_PROVIDER_UNAVAILABLE',

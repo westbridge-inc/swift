@@ -1,5 +1,6 @@
 import { nanoid } from 'nanoid';
 import { randomUUID } from 'node:crypto';
+import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // PaymentProvider — hard rule 4: swappable interface. Nothing outside this
@@ -289,7 +290,7 @@ export class StripePaymentProvider implements PaymentProvider {
 /** Provider selection is config, not code. */
 export function getPaymentProvider(): PaymentProvider {
   const provider = process.env['PAYMENT_PROVIDER'] ?? 'sandbox';
-  if (process.env['NODE_ENV'] === 'production' && provider === 'sandbox') {
+  if (isProduction() && provider === 'sandbox') {
     throw new Error('PAYMENT_PROVIDER=sandbox is forbidden in production');
   }
   switch (provider) {
@@ -300,7 +301,7 @@ export function getPaymentProvider(): PaymentProvider {
       if (!key) {
         throw new Error('STRIPE_SECRET_KEY is required when PAYMENT_PROVIDER=stripe');
       }
-      if (process.env['NODE_ENV'] === 'production' && !key.startsWith('sk_live_')) {
+      if (isProduction() && !key.startsWith('sk_live_')) {
         throw new Error('A live STRIPE_SECRET_KEY is required in production');
       }
       return new StripePaymentProvider(key);
@@ -313,7 +314,7 @@ export function getPaymentProvider(): PaymentProvider {
           'PAYMENT_GATEWAY_KEY and PAYMENT_GATEWAY_SECRET are required when PAYMENT_PROVIDER=powertranz',
         );
       }
-      if (process.env['NODE_ENV'] === 'production') {
+      if (isProduction()) {
         const url = process.env['POWERTRANZ_API_URL'];
         if (!url || !/^https:\/\//i.test(url) || /staging|sandbox|test/i.test(url)) {
           throw new Error('An explicit non-staging HTTPS POWERTRANZ_API_URL is required in production');

@@ -1,3 +1,5 @@
+import { runtimeMode } from './runtime-mode';
+
 /**
  * Fail-closed boot configuration guard. Called before the server accepts
  * traffic; a misconfiguration that would silently weaken security must refuse
@@ -10,7 +12,10 @@
  * decrypted ID. Neither failure is visible at runtime, so we assert them here.
  */
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
-  if (env['NODE_ENV'] !== 'production') return;
+  // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
+  // NODE_ENV throws here and the process never starts — it is not "not
+  // production", it is a misconfiguration nobody may guess their way past.
+  if (runtimeMode(env) !== 'production') return;
 
   if (env['DEV_OTP_BYPASS'] === '1') {
     throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
@@ -146,7 +151,7 @@ export async function assertProductionData(
   prisma: { countryConfig: { count: () => Promise<number> } },
   env: Record<string, string | undefined> = process.env,
 ): Promise<void> {
-  if (env['NODE_ENV'] !== 'production') return;
+  if (runtimeMode(env) !== 'production') return;
 
   const countries = await prisma.countryConfig.count();
   if (countries === 0) {

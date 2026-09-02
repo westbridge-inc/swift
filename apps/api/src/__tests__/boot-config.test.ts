@@ -124,8 +124,18 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'r2' })).not.toThrow();
   });
 
-  it('does NOT enforce any of this outside production (dev/test boot freely)', () => {
+  it('[TA-S1-007] refuses to boot on an UNSET or misspelled NODE_ENV — never a quiet development posture', () => {
+    expect(() => assertSafeBootConfig({})).toThrow(/NODE_ENV must be exactly one of/);
+    for (const bad of ['', 'prod', 'Production', 'productio', 'staging']) {
+      expect(() => assertSafeBootConfig({ ...good, NODE_ENV: bad }), bad).toThrow(/NODE_ENV must be exactly one of/);
+    }
+    // And the guard cannot be waved through by mislabelling a live host.
+    expect(() => assertSafeBootConfig({ ...good, NODE_ENV: 'prod', MASTER_KEK: undefined })).toThrow(/NODE_ENV/);
+  });
+
+  it('does NOT enforce any of this outside production (dev/test/loadtest boot freely)', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'test', DEV_OTP_BYPASS: '1' })).not.toThrow();
   });
 });
@@ -143,6 +153,14 @@ describe('assertProductionData — fail-closed empty-market guard', () => {
 
   it('boots in production once at least one CountryConfig (market) is seeded', async () => {
     await expect(assertProductionData(prismaWith(1), { NODE_ENV: 'production' })).resolves.toBeUndefined();
+  });
+
+  it('[TA-S1-007] refuses an unknown NODE_ENV before it ever queries', async () => {
+    // A client that would betray any query: the refusal must come from the
+    // mode parse, never from (or after) a database round-trip.
+    const never = { countryConfig: { count: async () => { throw new Error('QUERIED'); } } } as never;
+    await expect(assertProductionData(never, {})).rejects.toThrow(/NODE_ENV must be exactly one of/);
+    await expect(assertProductionData(never, { NODE_ENV: 'prod' })).rejects.toThrow(/NODE_ENV must be exactly one of/);
   });
 
   it('does not query or block outside production, even on an empty DB', async () => {

@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyError, FastifyRequest, FastifyReply } from 'fastify';
 import { AppError } from '../utils/errors';
 import { ZodError } from 'zod';
+import { isDevelopment } from '../utils/runtime-mode';
 
 export function registerErrorHandler(app: FastifyInstance) {
   app.setErrorHandler((error: FastifyError | AppError | ZodError, request: FastifyRequest, reply: FastifyReply) => {
@@ -105,7 +106,7 @@ export function registerErrorHandler(app: FastifyInstance) {
       success: false,
       error: {
         code: 'INTERNAL_ERROR',
-        message: process.env['NODE_ENV'] === 'development' ? error.message : 'An unexpected error occurred',
+        message: isDevelopment() ? error.message : 'An unexpected error occurred',
       },
     });
   });

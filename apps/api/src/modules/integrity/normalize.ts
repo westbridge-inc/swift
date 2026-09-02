@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import { isProduction } from '../../utils/runtime-mode';
 
 // Identity-signal normalization + hashing (trial-integrity spec §2.1).
 // PURE functions, table-driven-tested. The hashing law: every value is stored
@@ -9,7 +10,7 @@ import { createHmac } from 'node:crypto';
 export function identitySalt(): string {
   const salt = process.env['IDENTITY_SALT'];
   if (!salt) {
-    if (process.env['NODE_ENV'] === 'production') throw new Error('IDENTITY_SALT is required in production');
+    if (isProduction()) throw new Error('IDENTITY_SALT is required in production');
     return 'dev-identity-salt';
   }
   return salt;

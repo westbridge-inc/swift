@@ -91,7 +91,8 @@ describe('the guard is on the SEND, not the constructor', () => {
 
   it('the throw sits inside sendEmail', () => {
     const sendBlock = devEmailBlock.split('sendEmail')[1] ?? '';
-    expect(sendBlock).toMatch(/NODE_ENV.*production/);
+    // [TA-S1-007] posture comes from the one parser, never the raw string.
+    expect(sendBlock).toMatch(/isProduction\(\)/);
     expect(sendBlock).toMatch(/throw new Error/);
   });
 

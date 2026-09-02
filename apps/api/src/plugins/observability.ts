@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import client from 'prom-client';
 import * as Sentry from '@sentry/node';
 import { AppError } from '../utils/errors';
+import { runtimeMode } from '../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // Observability — both halves are env-gated and cost nothing when unset:
@@ -69,7 +70,7 @@ export function initSentry() {
   if (!dsn || sentryReady) return sentryReady;
   Sentry.init({
     dsn,
-    environment: process.env['NODE_ENV'] ?? 'development',
+    environment: runtimeMode(), // [TA-S1-007] the parsed mode — never a quiet 'development' label on a live host
     // Errors only for V1 — tracing multiplies cost without a consumer yet.
     tracesSampleRate: 0,
     beforeSend: (event) => scrubSentryEvent(event),

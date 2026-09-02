@@ -1,4 +1,5 @@
 import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
+import { isProduction } from '../../utils/runtime-mode';
 
 // Impression token (ads-platform spec §11.3) — what makes a stat billable. The
 // serve endpoint signs one per rendered creative; the events endpoint verifies
@@ -19,7 +20,7 @@ export interface AdTokenPayload {
 function secret(): string {
   const s = process.env['ADS_EVENT_SECRET'];
   if (s && s.length >= 16) return s;
-  if (process.env['NODE_ENV'] === 'production') {
+  if (isProduction()) {
     throw new Error('ADS_EVENT_SECRET missing or too short in production');
   }
   return 'dev-ads-event-secret-not-for-production';
