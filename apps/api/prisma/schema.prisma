@@ -396,6 +396,13 @@ model CountryConfig {
   ///   l3MinPaidOrders, l3MinAccountAgeDays, outlierMultiplier }
   cashRules Json?
 
+  /// [MOB-018] The market emergency policy: per service (police/fire/ambulance)
+  /// a dialable number and whether ops has VERIFIED it for this market (drill +
+  /// sign-off). The app auto-dials only a verified number; served signed by
+  /// GET /public/emergency-policy. Null = no policy (the app falls back to its
+  /// bundled table, unverified candidates offered with a confirm).
+  emergency Json?
+
   /// DPA §3.5 — region documents are stored in (cross-border transfer rule)
   storageRegion     String?
   /// Days to retain verification documents after a participant leaves

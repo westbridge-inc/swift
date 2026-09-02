@@ -157,6 +157,15 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
     l3MinAccountAgeDays: 30,
     outlierMultiplier: 3,
   };
+  // [MOB-018] The launch market's emergency numbers. Police 911 is what the app
+  // has always dialed and is the one VERIFIED entry; fire and ambulance are
+  // Guyana's published numbers, offered with a confirm until ops verifies them
+  // on a device (a market fact, never a code fact).
+  const guyanaEmergency = {
+    police: { number: '911', verified: true, verifiedAt: '2026-09-02T00:00:00.000Z', verifiedBy: 'launch-market' },
+    fire: { number: '912', verified: false },
+    ambulance: { number: '913', verified: false },
+  };
   const guyanaRegion = {
     taxiCredentialName: 'Hire Car Licence',
     insuranceClassName: 'Hire',
@@ -178,6 +187,7 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
       taxiRates: guyanaTaxiRates,
       taxiClassRates,
       cashRules: guyanaCashRules,
+      emergency: guyanaEmergency,
       ...guyanaRegion,
     },
     create: {
@@ -195,6 +205,7 @@ export async function seedPlatformSpine(prisma: PrismaClient): Promise<void> {
       taxiRates: guyanaTaxiRates,
       taxiClassRates,
       cashRules: guyanaCashRules,
+      emergency: guyanaEmergency,
       ...guyanaRegion,
       isActive: true,
     },

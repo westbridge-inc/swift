@@ -2,6 +2,8 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { NotFoundError, AppError } from '../../utils/errors';
 import { ratingSurfaces } from '../rating/rating-surface';
+import { serveEmergencyPolicy } from '../country/emergency-policy';
+import { emergencyPolicyCounter } from '../../plugins/observability';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -131,6 +133,25 @@ async function resolvePublicTenantId(app: FastifyInstance): Promise<string> {
 
 export async function publicRoutes(app: FastifyInstance) {
   /** GET /storefronts — the public directory. */
+  /**
+   * [MOB-018] The market emergency policy — verified local emergency numbers,
+   * per service, signed by the API's keyring and cacheable. The phone dials
+   * only a VERIFIED number automatically; an unverified candidate is offered
+   * with a confirm; a market with no policy answers `numbers: null` and the
+   * app falls back to its bundled table. A malformed stored policy is never
+   * served as a policy. Unauthenticated: an emergency has no login step.
+   */
+  app.get('/emergency-policy', async (request, reply) => {
+    const { country } = z.object({ country: z.string().trim().length(2) }).parse(request.query ?? {});
+    const served = await serveEmergencyPolicy(app.prisma, country.toUpperCase());
+    emergencyPolicyCounter.labels(served.status).inc();
+    if (served.status === 'unknown-market') throw new NotFoundError('CountryConfig', country.toUpperCase());
+    reply.header('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
+    if (served.status === 'served') return { success: true, data: served.signed };
+    if (served.status === 'invalid') request.log.error({ country: served.country, problem: served.problem }, '[MOB-018] stored emergency policy is malformed — not served');
+    return { success: true, data: { version: 1, country: served.country, numbers: null, reason: served.status === 'invalid' ? 'INVALID_POLICY' : 'NO_POLICY' } };
+  });
+
   app.get('/storefronts', async (request) => {
     const query = listQuerySchema.parse(request.query);
     // Empty stores stay out of the public directory (a direct /storefronts/:slug link still resolves).
