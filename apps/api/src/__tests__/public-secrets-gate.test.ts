@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync, chmodSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 
@@ -266,5 +266,60 @@ describe('the real repository allowlist', () => {
     // shape of the answer, so it holds either way.
     const { output } = runGate(resolve(process.cwd(), '../..'));
     expect(output).toMatch(/public-secrets-gate|Public-prefixed|used nowhere/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [TA-S0-006] The third naming seam, and a bundle that cannot excuse itself.
+// ---------------------------------------------------------------------------
+describe('[TA-S0-006] the Vite seam and the bundle mode', () => {
+  it('knows the Vite seam: an unlisted VITE_ name fails in source mode, like the other two prefixes', () => {
+    const root = makeFixture('vite', 'const u = import.meta.env.VITE_ANALYTICS_KEY;\n', ''); // public-secrets-gate:fixture
+    const r = runGate(root);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('VITE_ANALYTICS_KEY'); // public-secrets-gate:fixture
+    expect(r.output).toContain('reads like a SECRET');
+  });
+
+  it('accepts a justified VITE_ name', () => {
+    const root = makeFixture('vite-ok', 'const u = import.meta.env.VITE_API_URL;\n', `VITE_API_URL # ${JUSTIFIED}\n`); // public-secrets-gate:fixture
+    expect(runGate(root).code).toBe(0);
+  });
+
+  it('bundle mode IGNORES the fixture marker — a built file cannot excuse itself with a comment', () => {
+    const root = makeFixture('bundle-marker', 'export {};\n', '');
+    mkdirSync(join(root, 'dist'), { recursive: true });
+    writeFileSync(join(root, 'dist', 'chunk.test.js'), 'var x = process.env.NEXT_PUBLIC_MMG_SECRET; // public-secrets-gate:fixture\n');
+    const r = run(join(root, 'scripts', 'public-secrets-gate.js'), ['--bundle', join(root, 'dist')]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('NEXT_PUBLIC_MMG_SECRET'); // public-secrets-gate:fixture
+  });
+
+  it('bundle mode scans EVERY directory under the bundle — ios/, android/ and dist/ are build outputs here, not skip-listed source folders', () => {
+    const root = makeFixture('bundle-nested', 'export {};\n', '');
+    mkdirSync(join(root, 'dist', 'ios', '_expo'), { recursive: true });
+    mkdirSync(join(root, 'dist', 'android'), { recursive: true });
+    writeFileSync(join(root, 'dist', 'ios', '_expo', 'index.js'), 'var x = process.env.NEXT_PUBLIC_MMG_SECRET;\n'); // public-secrets-gate:fixture
+    writeFileSync(join(root, 'dist', 'android', 'metadata.json'), '{}\n');
+    const r = run(join(root, 'scripts', 'public-secrets-gate.js'), ['--bundle', join(root, 'dist')]);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('NEXT_PUBLIC_MMG_SECRET'); // public-secrets-gate:fixture
+    expect(r.output).toContain('scanned 2 file(s)');
+  });
+
+  it('bundle mode fails when a file could not be read — a partial scan is not a scan', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) return; // root reads everything
+    const root = makeFixture('bundle-unreadable', 'export {};\n', '');
+    mkdirSync(join(root, 'dist'), { recursive: true });
+    writeFileSync(join(root, 'dist', 'ok.js'), 'var y = 1;\n');
+    writeFileSync(join(root, 'dist', 'locked.js'), 'var z = 2;\n');
+    chmodSync(join(root, 'dist', 'locked.js'), 0o000);
+    try {
+      const r = run(join(root, 'scripts', 'public-secrets-gate.js'), ['--bundle', join(root, 'dist')]);
+      expect(r.code).toBe(1);
+      expect(r.output).toContain('could not be read');
+    } finally {
+      chmodSync(join(root, 'dist', 'locked.js'), 0o644);
+    }
   });
 });

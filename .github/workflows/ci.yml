@@ -190,6 +190,10 @@ jobs:
       # is dropped with nothing lost.
       - run: corepack enable && corepack prepare --activate
       - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
+      # [TA-S0-006] Arm every server-only secret with a canary BEFORE the build,
+      # so the artifact scan after it can prove no server secret was inlined.
+      - name: Arm the secret canaries
+        run: node scripts/secret-canary.js --emit >> "$GITHUB_ENV"
       - run: pnpm --filter @swift/admin build
       # [GRD-1 §2 / WS-15] NEXT_PUBLIC_* is inlined at build time, so the built
       # bundle is where a mis-prefixed secret actually becomes public. Scanning
@@ -197,6 +201,15 @@ jobs:
       # generated file introducing one.
       - name: No unlisted public variable reached the built admin bundle
         run: node scripts/public-secrets-gate.js --bundle apps/admin/.next
+      # [TA-S0-006] The name gate above reasons about identifiers; a bundler
+      # inlines VALUES and drops the names. These two certify the artifact:
+      # no armed canary anywhere in the build output (server chunks and
+      # prerendered pages included), and no secret-shaped value in what a
+      # browser actually downloads.
+      - name: No server secret reached the built admin artifacts
+        run: node scripts/secret-canary.js --scan apps/admin/.next
+      - name: No secret-shaped value in what the admin ships to browsers
+        run: bash scripts/fetch-gitleaks.sh && ./gitleaks detect --no-git --source apps/admin/.next/static --redact --exit-code 1
 
   web-build:
     name: Web Build
@@ -227,6 +240,10 @@ jobs:
       # company details are legitimately still unfilled. The real gate — refusing
       # to ship a site that says "{{LEGAL_ENTITY_NAME}}" to a reviewer — lives in
       # the build itself and in deploy-web.yml. [SITE-1.1 Part 3 / AC-9]
+      # [TA-S0-006] Arm every server-only secret with a canary BEFORE the build,
+      # so the artifact scan after it can prove no server secret was inlined.
+      - name: Arm the secret canaries
+        run: node scripts/secret-canary.js --emit >> "$GITHUB_ENV"
       - run: pnpm --filter @swift/web build
         env:
           NEXT_PUBLIC_ALLOW_SITE_TOKENS: '1'
@@ -234,6 +251,10 @@ jobs:
       # time, so the artefact is the only place the leak is real.
       - name: No unlisted public variable reached the built web bundle
         run: node scripts/public-secrets-gate.js --bundle apps/web/.next
+      - name: No server secret reached the built web artifacts
+        run: node scripts/secret-canary.js --scan apps/web/.next
+      - name: No secret-shaped value in what the site ships to browsers
+        run: bash scripts/fetch-gitleaks.sh && ./gitleaks detect --no-git --source apps/web/.next/static --redact --exit-code 1
 
   desktop-build:
     # TS/Vite half only — the Rust/Tauri binary is built + smoke-run locally
@@ -255,7 +276,20 @@ jobs:
       # is dropped with nothing lost.
       - run: corepack enable && corepack prepare --activate
       - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
+      # [TA-S0-006] Arm every server-only secret with a canary BEFORE the build,
+      # so the artifact scan after it can prove no server secret was inlined.
+      - name: Arm the secret canaries
+        run: node scripts/secret-canary.js --emit >> "$GITHUB_ENV"
       - run: pnpm --filter @swift/desktop build
+      # [TA-S0-006] The desktop app was outside every artifact gate: Vite
+      # inlines VITE_* through import.meta.env, and dist/ is exactly what the
+      # packaged app carries.
+      - name: No unlisted public variable reached the desktop bundle
+        run: node scripts/public-secrets-gate.js --bundle apps/desktop/dist
+      - name: No server secret reached the desktop bundle
+        run: node scripts/secret-canary.js --scan apps/desktop/dist
+      - name: No secret-shaped value in the desktop bundle
+        run: bash scripts/fetch-gitleaks.sh && ./gitleaks detect --no-git --source apps/desktop/dist --redact --exit-code 1
       # [V11] Mission Control approves identity documents and enforces the
       # liability gate — it must not sit outside the lint net. (18 real errors
       # once sat on main unnoticed because CI only type-built this package.)
@@ -423,6 +457,40 @@ jobs:
       - name: Old UI cannot touch new UI
         run: bash scripts/ui-barrier.sh
 
+  # [TA-S0-006] The JS half of every APK/IPA is exactly what `expo export`
+  # writes — the bundles, the assets, the manifest — and until this job it was
+  # outside every artifact gate. Native binaries add nothing the JS did not
+  # carry, bar the Android maps key that lives in the manifest BY DESIGN (see
+  # scripts/secret-canary.js). The app config refuses a CI export without that
+  # key, so this gate hands it a placeholder that is visibly not a key: this
+  # export is a gate, never a distributable.
+  mobile-bundle-gate:
+    name: Mobile Bundle Gate
+    runs-on: ubuntu-latest
+    needs: lint-and-type-check
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - run: corepack enable && corepack prepare --activate
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
+      - name: Arm the secret canaries
+        run: node scripts/secret-canary.js --emit >> "$GITHUB_ENV"
+      - name: Export the mobile JS bundles
+        working-directory: apps/mobile
+        env:
+          ANDROID_GOOGLE_MAPS_API_KEY: ci-gate-placeholder-not-a-key
+        run: |
+          npx expo export --platform ios --output-dir dist/ios
+          npx expo export --platform android --output-dir dist/android
+      - name: No unlisted public variable reached the mobile bundles
+        run: node scripts/public-secrets-gate.js --bundle apps/mobile/dist
+      - name: No server secret reached the mobile bundles
+        run: node scripts/secret-canary.js --scan apps/mobile/dist
+      - name: No secret-shaped value in the mobile bundles
+        run: bash scripts/fetch-gitleaks.sh && ./gitleaks detect --no-git --source apps/mobile/dist --redact --exit-code 1
+
   public-env-gate:
     name: Public Env Gate
     runs-on: ubuntu-latest
@@ -449,9 +517,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # [TA-S0-006 / Q.2] The scanner is fetched by one script that pins the
+      # version AND its checksum — a replaced release asset fails loudly
+      # instead of running as the tool that decides whether main is clean.
       - name: Run gitleaks over full history
         run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz | tar -xz gitleaks
+          bash scripts/fetch-gitleaks.sh
           ./gitleaks detect --source . --redact --exit-code 1
 
   security:
