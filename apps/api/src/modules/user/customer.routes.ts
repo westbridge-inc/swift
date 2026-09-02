@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
-import { refundBasisCounter, refundInferenceDeltaCounter } from '../../plugins/observability';
+import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter } from '../../plugins/observability';
 import { lineTotal, orderTotal, promoDiscount, promoCapacity } from '../../utils/order-total';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
@@ -1924,16 +1924,20 @@ export async function customerRoutes(app: FastifyInstance) {
       const receipt = await findCheckoutReceipt(app.prisma, userId, idemKey as string);
       if (receipt) {
         if (receipt.requestHash !== requestHash) {
+          checkoutIdempotencyCounter.labels('key_body_conflict').inc();
           throw new AppError(422, 'IDEMPOTENCY_KEY_REUSED', 'This Idempotency-Key was already used for a different order request. Use a new key for a new order.');
         }
+        checkoutIdempotencyCounter.labels('replayed_receipt').inc();
         return { success: true, data: receipt.result, replayed: true };
       }
       const claimed = await app.redis.set(redisKey, 'IN_FLIGHT', 'EX', 86_400, 'NX');
       if (!claimed) {
         const existing = await app.redis.get(redisKey);
         if (existing && existing !== 'IN_FLIGHT') {
+          checkoutIdempotencyCounter.labels('replayed_cache').inc();
           return { success: true, data: JSON.parse(existing), replayed: true };
         }
+        checkoutIdempotencyCounter.labels('duplicate_in_flight').inc();
         throw new AppError(409, 'DUPLICATE_REQUEST', 'This order is already being placed — hold on.');
       }
     }
@@ -1989,6 +1993,31 @@ export async function customerRoutes(app: FastifyInstance) {
   // ========================================================================
   // 8. ORDERS
   // ========================================================================
+
+  /**
+   * [MOB-020] What became of a checkout attempt whose answer never arrived.
+   * The client asks BEFORE placing a DIFFERENT order over an unresolved one
+   * (a timeout, an app killed mid-request): the receipt says it was placed
+   * (the orders it made), a claimed key says it is still in flight, and
+   * nothing at all says nothing was placed. The caller's own keys only.
+   */
+  app.get('/checkout/receipts/:key', async (request: AuthRequest) => {
+    const { key } = z.object({ key: z.string().min(8).max(128) }).parse(request.params ?? {});
+    const { userId } = request.user;
+    const receipt = await findCheckoutReceipt(app.prisma, userId, key);
+    if (receipt) {
+      checkoutIdempotencyCounter.labels('probe_placed').inc();
+      return { success: true, data: { status: 'placed', orderIds: receipt.orderIds } };
+    }
+    const claimed = await app.redis.get(`checkout:idem:${userId}:${key}`);
+    if (claimed) {
+      // A cached result without a receipt row cannot happen (the receipt is written in the order's transaction); a claim is in flight.
+      checkoutIdempotencyCounter.labels('probe_in_flight').inc();
+      return { success: true, data: { status: 'in_flight' } };
+    }
+    checkoutIdempotencyCounter.labels('probe_none').inc();
+    return { success: true, data: { status: 'none' } };
+  });
 
   app.get('/orders', async (request: AuthRequest) => {
     const { userId } = request.user;

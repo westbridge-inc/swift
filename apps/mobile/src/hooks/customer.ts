@@ -1,7 +1,10 @@
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
+import { recordCheckoutOutcome, stableBodyHash, type CheckoutPrincipal } from '../lib/checkoutAttempt';
+import { getAuthSessionSnapshot } from '../stores/authStore';
+import { isAxiosError } from 'axios';
 import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 
@@ -419,17 +422,115 @@ export function useNotifications<T = any>() {
   });
 }
 
+/** [MOB-020] The server already holds an order for this intent (a replayed
+ *  receipt under a changed body, or a probe that found one): nothing more is
+ *  placed; the screen shows the order that exists. */
+export class CheckoutAlreadyPlacedError extends Error {
+  constructor(readonly orderIds: string[]) {
+    super('This order was already placed.');
+    this.name = 'CheckoutAlreadyPlacedError';
+  }
+}
+
+/** [MOB-020] The same intent is still being placed (a concurrent twin, or a
+ *  probe that found the key claimed): hold on, do not place again. */
+export class CheckoutInFlightError extends Error {
+  constructor() {
+    super('This order is already being placed — hold on.');
+    this.name = 'CheckoutInFlightError';
+  }
+}
+
+/** The signed-in principal a checkout intent belongs to. */
+function checkoutPrincipal(): CheckoutPrincipal {
+  const session = getAuthSessionSnapshot();
+  if (!session) throw new Error('Sign in to place an order.');
+  return { userId: session.userId, generation: session.generation };
+}
+
+type ReceiptProbe = { status: 'placed'; orderIds: string[] } | { status: 'in_flight' } | { status: 'none' };
+
+/** Ask the server what became of an unresolved intent. A probe that cannot be answered is treated as in flight — never as "nothing". */
+async function probeReceipt(key: string): Promise<ReceiptProbe> {
+  try {
+    const res = await customerApi.checkoutReceipt(key);
+    const data = res.data?.data as ReceiptProbe | undefined;
+    if (data?.status === 'placed' && Array.isArray(data.orderIds)) return { status: 'placed', orderIds: data.orderIds };
+    if (data?.status === 'none') return { status: 'none' };
+    return { status: 'in_flight' };
+  } catch {
+    return { status: 'in_flight' };
+  }
+}
+
+/** The intent this request is: the key the server sees, reused, superseded or resolved first. */
+async function beginCheckoutIntent(payload: unknown): Promise<string> {
+  const principal = checkoutPrincipal();
+  const bodyHash = stableBodyHash(payload);
+  const begun = checkoutAttempt.begin({ principal, bodyHash });
+  if (begun.kind !== 'ambiguous') return begun.key;
+  // A previous intent is on the wire with the outcome unknown, and this body
+  // differs. Never place a second order over an unresolved first one: ask.
+  const probe = await probeReceipt(begun.pending.key);
+  recordCheckoutOutcome('ambiguous_recovery', probe.status);
+  track('checkout_ambiguous_recovery', { outcome: probe.status });
+  if (probe.status === 'placed') {
+    checkoutAttempt.end();
+    throw new CheckoutAlreadyPlacedError(probe.orderIds);
+  }
+  if (probe.status === 'in_flight') throw new CheckoutInFlightError();
+  checkoutAttempt.end();
+  const fresh = checkoutAttempt.begin({ principal, bodyHash });
+  if (fresh.kind === 'ambiguous') throw new CheckoutInFlightError();
+  return fresh.key;
+}
+
 export function usePlaceOrder<T = any>() {
   const qc = useQueryClient();
   // [TA-S1-001] A second tap while the first request is in flight is the SAME
   // attempt, not a second order. The button disables once it renders as
-  // loading; this ref closes the window before that render. The key is the
-  // attempt's (see lib/checkoutAttempt): begun on the first tap, reused by
-  // every retry, ended only when the order is placed or the cart changes —
-  // so the server replays ONE order instead of placing two.
+  // loading; this ref closes the window before that render.
+  // [MOB-020] The key is the INTENT's (lib/checkoutAttempt): bound to the
+  // principal and the body, reused by every retry of the same body, superseded
+  // by a changed body only when nothing is unresolved, and resolved against
+  // the server's receipt before a different order may be placed. The server
+  // replays a finished intent (`replayed: true`), refuses a concurrent twin
+  // (409) and refuses the same key under a different body (422) — each is
+  // read for what it is, never as a generic failure.
   const inFlight = useRef(false);
   const m = useMutation<T, unknown, any>({
-    mutationFn: (payload: any) => unwrap<T>(customerApi.placeOrder(payload, checkoutAttempt.begin())),
+    mutationFn: async (payload: any) => {
+      const key = await beginCheckoutIntent(payload);
+      checkoutAttempt.markSent(key);
+      try {
+        const res = await customerApi.placeOrder(payload, key);
+        if ((res.data as { replayed?: boolean } | undefined)?.replayed) {
+          recordCheckoutOutcome('checkout_dedupe_replay');
+          track('checkout_dedupe_replay', {});
+        }
+        return unwrap<T>(Promise.resolve(res));
+      } catch (err) {
+        const status = isAxiosError(err) ? err.response?.status : undefined;
+        const code = isAxiosError(err) ? (err.response?.data as { error?: { code?: string } } | undefined)?.error?.code : undefined;
+        if (status === 422 && code === 'IDEMPOTENCY_KEY_REUSED') {
+          // The key already produced an order for another body: that order exists.
+          recordCheckoutOutcome('key_body_conflict');
+          track('checkout_key_body_conflict', {});
+          checkoutAttempt.end();
+          throw new CheckoutAlreadyPlacedError([]);
+        }
+        if (status === 409 && code === 'DUPLICATE_REQUEST') {
+          recordCheckoutOutcome('in_flight_refused');
+          throw new CheckoutInFlightError();
+        }
+        // No answer at all (offline, timeout): the outcome is UNKNOWN — the
+        // intent stays SENT so the next tap replays it, and a changed body
+        // must ask the server first. A definitive answer (validation, no
+        // riders, min order) re-opens it: the same key may retry.
+        if (isAxiosError(err) && err.response) checkoutAttempt.markOpen(key);
+        throw err;
+      }
+    },
     // Checkout shows its own inline error (orderErr) — no global toast on top.
     meta: { silent: true },
     onSuccess: (data: any) => {
@@ -437,6 +538,12 @@ export function usePlaceOrder<T = any>() {
       qc.invalidateQueries({ queryKey: customerKeys.orders });
       qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
       track('order_placed', { orders: data?.orders?.length ?? 1 });
+    },
+    onError: (err) => {
+      if (err instanceof CheckoutAlreadyPlacedError) {
+        qc.invalidateQueries({ queryKey: customerKeys.orders });
+        qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
+      }
     },
     onSettled: () => {
       inFlight.current = false;
@@ -448,6 +555,41 @@ export function usePlaceOrder<T = any>() {
     m.mutate(variables, options);
   };
   return { ...m, mutate };
+}
+
+/** [MOB-020] On the cart screen's mount: an intent this principal sent and
+ *  never heard back about (the app died mid-request) is resolved against the
+ *  server before "Place order" is enabled — placed: the order exists and the
+ *  intent ends; in flight: keep waiting; none: the intent may be retried. */
+export function useCheckoutRecovery(): { recovering: boolean; placedOrderIds: string[] | null } {
+  const qc = useQueryClient();
+  const [recovering, setRecovering] = useState(false);
+  const [placedOrderIds, setPlacedOrderIds] = useState<string[] | null>(null);
+  useEffect(() => {
+    const session = getAuthSessionSnapshot();
+    if (!session) return;
+    const pending = checkoutAttempt.currentFor({ userId: session.userId, generation: session.generation });
+    if (!pending || pending.state !== 'sent') return;
+    let cancelled = false;
+    setRecovering(true);
+    void probeReceipt(pending.key).then((probe) => {
+      if (cancelled) return;
+      recordCheckoutOutcome('ambiguous_recovery', `restart:${probe.status}`);
+      track('checkout_ambiguous_recovery', { outcome: probe.status, restart: true });
+      if (probe.status === 'placed') {
+        checkoutAttempt.end();
+        setPlacedOrderIds(probe.orderIds);
+        qc.invalidateQueries({ queryKey: customerKeys.orders });
+        qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
+      } else if (probe.status === 'none') {
+        checkoutAttempt.markOpen(pending.key);
+      }
+      // in_flight: the intent stays sent; the next tap replays the same key
+      setRecovering(false);
+    });
+    return () => { cancelled = true; };
+  }, [qc]);
+  return { recovering, placedOrderIds };
 }
 
 // --- Cart ---------------------------------------------------------------------

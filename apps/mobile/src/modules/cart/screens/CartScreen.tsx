@@ -10,6 +10,9 @@ import {
   useCart,
   useClearCart,
   usePlaceOrder,
+  useCheckoutRecovery,
+  CheckoutAlreadyPlacedError,
+  CheckoutInFlightError,
   useRemoveCartItem,
   useSetCartTip,
   useUpdateCartItem,
@@ -127,6 +130,10 @@ export function CartScreen() {
   const clearCart = useClearCart();
   const setTip = useSetCartTip();
   const placeOrder = usePlaceOrder<any>();
+  // [MOB-020] An intent this account sent and never heard back about (the app
+  // died mid-request) is resolved against the server before the button is
+  // live: placed → that order exists; in flight → wait; none → retry allowed.
+  const recovery = useCheckoutRecovery();
   // P0 (founder, 08-30): navigating in the SAME tick as the ceremony Modal's
   // dismissal wedges React Native — the Modal's native window can survive the
   // race invisibly and eat every touch on the next screen (the whole tracking
@@ -333,9 +340,18 @@ export function CartScreen() {
     );
   };
 
-  const orderErr = placeOrder.isError
-    ? ((placeOrder.error as any)?.response?.data?.error?.message ?? 'Could not place the order. Try again.')
-    : undefined;
+  // [MOB-020] The two answers that are NOT failures: the order already exists
+  // (a replayed key under a changed body, or a resolved earlier intent) and
+  // the order is still being placed (a concurrent twin). Neither is retried.
+  const alreadyPlaced = placeOrder.error instanceof CheckoutAlreadyPlacedError || recovery.placedOrderIds !== null;
+  const stillPlacing = placeOrder.error instanceof CheckoutInFlightError;
+  const orderErr = alreadyPlaced
+    ? 'This order was already placed — it is in your orders.'
+    : stillPlacing
+      ? 'This order is already being placed — hold on a moment.'
+      : placeOrder.isError
+        ? ((placeOrder.error as any)?.response?.data?.error?.message ?? 'Could not place the order. Try again.')
+        : undefined;
   // Availability spec §2: zero riders online → the server refuses delivery
   // honestly; pickup is the same food without the wait for a rider.
   const noRiders = (placeOrder.error as any)?.response?.data?.error?.code === 'DELIVERY_NO_RIDERS';
@@ -774,7 +790,8 @@ export function CartScreen() {
               variant="outline"
               size="md"
               style={{ marginTop: space.md }}
-              loading={placeOrder.isPending}
+              loading={placeOrder.isPending || recovery.recovering}
+              disabled={recovery.recovering || alreadyPlaced || stillPlacing}
               onPress={retryAsPickup}
             />
           ) : null}
@@ -790,8 +807,8 @@ export function CartScreen() {
             // (certification catch: "cyclical structure in JSON object").
             onPress={() => onOrder()}
             size="xl"
-            loading={placeOrder.isPending}
-            disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0}
+            loading={placeOrder.isPending || recovery.recovering}
+            disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0 || recovery.recovering || alreadyPlaced || stillPlacing}
             style={{ marginTop: space.xl }}
           />
           {needsAddress && !c.deliveryAddress ? (
