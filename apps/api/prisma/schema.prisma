@@ -3449,6 +3449,50 @@ model AgentAuditEvent {
 // snapshots the user's activeRole at trigger. Evidence/incident foreign keys are
 // added when those milestones (M6/M7) land — additive, never up front.
 
+/// [S-01] The SOS escalation outbox. Every ACTIVE alert owns one row per
+/// required delivery — the ops page, the war-room emit, each verified contact's
+/// SMS, the evidence bundle — written in the SAME transaction as the ACTIVE
+/// commit. A leased worker delivers each row once and retries it
+/// independently; a process that dies after ACTIVE leaves rows, not silence.
+/// The unique (alert, channel, target) makes staging idempotent.
+model SosEscalation {
+  id             String               @id @default(cuid())
+  tenantId       String?
+  sosAlertId     String
+  sosAlert       SosAlert             @relation(fields: [sosAlertId], references: [id], onDelete: Cascade)
+  channel        SosEscalationChannel
+  targetKey      String
+  status         SosEscalationStatus  @default(PENDING)
+  attempts       Int                  @default(0)
+  maxAttempts    Int                  @default(20)
+  availableAt    DateTime             @default(now())
+  leaseExpiresAt DateTime?
+  lastError      String?
+  deliveredAt    DateTime?
+  receipt        Json?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  @@unique([sosAlertId, channel, targetKey])
+  @@index([status, availableAt])
+  @@index([tenantId, status])
+  @@map("sos_escalations")
+}
+
+enum SosEscalationChannel {
+  OPS_PAGE
+  WAR_ROOM
+  CONTACT_SMS
+  EVIDENCE
+}
+
+enum SosEscalationStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
 enum SosStatus {
   TRIGGER_PENDING // client fired, grace window running (slide-to-cancel)
   ACTIVE // grace elapsed or user confirmed — server fan-out fired
@@ -3532,6 +3576,8 @@ model SosAlert {
   /// counter meant ops kept seeing where the person WAS, not where they are.
   retriggers           Json?
   deliveryReceipts     Json? // per-channel fan-out receipts {opsPage, contactSms:[...], socket}
+  /// [S-01] The durable escalation commands this alert owns — one per required delivery.
+  escalations          SosEscalation[]
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
 
