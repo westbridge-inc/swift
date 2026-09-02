@@ -283,17 +283,24 @@ describe('Taxi ride completion — single-winner under concurrency [SWIFT-AUD-D2
     // free + totalRides increment key off currentRideId.
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: ride.id, totalRides: 0 } });
 
+    // [M-29] A cash ride completes through its fare outcome; the bare tap is
+    // refused before any transition, so two of them race nothing.
+    expect((await inject('PUT', `/api/v1/driver/rides/${ride.id}/complete`, {}, driver.token)).statusCode).toBe(409);
+    const paid = { outcome: 'paid', gps: { lat: 6.755, lng: -58.155 } };
     const results = await Promise.allSettled([
-      inject('PUT', `/api/v1/driver/rides/${ride.id}/complete`, {}, driver.token),
-      inject('PUT', `/api/v1/driver/rides/${ride.id}/complete`, {}, driver.token),
+      inject('POST', `/api/v1/driver/rides/${ride.id}/handover`, paid, driver.token),
+      inject('POST', `/api/v1/driver/rides/${ride.id}/handover`, paid, driver.token),
     ]);
     const codes = results.map((r) => (r.status === 'fulfilled' ? r.value.statusCode : 0));
-    // Exactly one winner; the loser is rejected (409 from the CAS, or 400 from
-    // the pre-check if it serialized) — never a second success.
-    expect(codes.filter((c) => c === 200)).toHaveLength(1);
-    expect(codes.filter((c) => c >= 400)).toHaveLength(1);
+    // Exactly one commit. The loser is rejected by the CAS (409) if it read the
+    // ride before the winner committed, or answered the winner's own facts
+    // (200, a terminal replay [M-24]) if after — never a second commit.
+    expect(codes.filter((c) => c === 200).length).toBeGreaterThanOrEqual(1);
+    expect(codes.every((c) => c === 200 || c === 409)).toBe(true);
 
     const d = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
     expect(d.totalRides).toBe(1); // incremented once, not twice
+    expect(await app.prisma.earning.count({ where: { orderId: ride.id, type: 'TAXI_FARE' } })).toBe(1);
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: ride.id, status: 'DELIVERED' } })).toBe(1);
   });
 });

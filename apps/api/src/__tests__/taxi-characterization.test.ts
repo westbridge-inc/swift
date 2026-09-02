@@ -226,7 +226,15 @@ describe('the current taxi contract (characterization — must stay green all en
     expect(verified.statusCode).toBe(200);
     const started = await driverPut(driver.token, ride.id, 'start');
     expect(started.statusCode).toBe(200);
-    const done = await driverPut(driver.token, ride.id, 'complete');
+    // [M-29] The completion tap alone is refused for a cash ride; the fare
+    // outcome at the destination is what completes it.
+    expect((await driverPut(driver.token, ride.id, 'complete')).statusCode).toBe(409);
+    const done = await app.inject({
+      method: 'POST',
+      url: `/api/v1/driver/rides/${ride.id}/handover`,
+      headers: { authorization: `Bearer ${driver.token}`, 'content-type': 'application/json' },
+      payload: { outcome: 'paid', gps: { lat: 6.755, lng: -58.155 } },
+    });
     expect(done.statusCode).toBe(200);
 
     const finalOrder = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });

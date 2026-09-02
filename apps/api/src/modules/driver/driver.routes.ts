@@ -24,6 +24,8 @@ import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { CashRulesService } from '../cash/cash-rules.service';
+import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -94,6 +96,8 @@ const driverEarningsQuerySchema = z.object({
 export async function driverRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io);
   const notifications = new NotificationService(app.prisma, app.io);
+  // [M-29] The cash rail — the same one the rider's handover at the door uses.
+  const cashRules = new CashRulesService(app.prisma, notifications, orderService);
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const dispatch = makeDispatchService(app);
 
@@ -1229,7 +1233,66 @@ export async function driverRoutes(app: FastifyInstance) {
     return { success: true, data: updatedOrder };
   });
 
-  // 6. Complete ride
+  // 6. The fare outcome at the destination — the golden rule for rides [M-29].
+  //    'paid' completes the ride with the fare captured and the driver's fare
+  //    earned, in one commit; 'refused' / 'no_show' (the passenger left without
+  //    paying) fail it with GPS evidence, strike the passenger and open the
+  //    driver's guarantee claim. The same rail as the rider's handover at the
+  //    door — never a second one.
+  const fareOutcomeSchema = z.object({
+    outcome: z.enum(['paid', 'no_show', 'refused']),
+    gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
+    photoUrl: z.string().max(2048).optional(),
+  });
+  app.post('/rides/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const driver = await getDriver(request.user.userId);
+    const order = await getDriverRide(driver.id, id); // ownership before validation
+    const body = fareOutcomeSchema.parse(request.body);
+    // Idempotent on Idempotency-Key: a network-retried outcome returns the
+    // original result instead of failing the (now-terminal) transition.
+    const { data, replayed } = await withIdempotency(app, request, 'handover', id, async () => {
+      const result = await cashRules.handover(id, request.user.userId, body);
+      return {
+        orderId: id,
+        status: result.order.status,
+        actualDuration: result.order.actualDeliveryTime ?? null,
+        claim: result.claim
+          ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags }
+          : null,
+      };
+    });
+    if (!replayed) {
+      try {
+        app.io.to(`order:${id}`).emit('order:status_changed', {
+          orderId: id,
+          status: data.status,
+          fare: {
+            base: order.taxiFareBase,
+            perKm: order.taxiFarePerKm,
+            perMin: order.taxiFarePerMin,
+            surge: order.taxiFareSurge,
+            total: order.taxiFareTotal,
+          },
+          actualDuration: data.actualDuration,
+        });
+      } catch (error) {
+        request.log.warn({ err: error, orderId: id }, 'taxi fare outcome socket publication failed after commit');
+      }
+      if (data.status === 'DELIVERED') {
+        await notifications.send({
+          userId: order.customerId,
+          type: 'ORDER_UPDATE',
+          title: 'Ride Complete',
+          body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
+          data: { orderId: id, status: 'DELIVERED' },
+        }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
+      }
+    }
+    return { success: true, data, replayed };
+  });
+
+  // 7. Complete ride
   app.put('/rides/:id/complete', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
@@ -1237,6 +1300,13 @@ export async function driverRoutes(app: FastifyInstance) {
 
     if (order.status !== 'RIDE_IN_PROGRESS') {
       throw new AppError(400, 'INVALID_STATUS', `Cannot complete ride from status ${order.status}`);
+    }
+    // [M-29] A cash fare is earned when the money is recorded, never on this
+    // tap: the fare outcome (paid / refused / left without paying) is the step
+    // that completes a cash ride. The terminal authority refuses the bare
+    // transition too; this answer just says so before it is attempted.
+    if (order.paymentMethod === 'CASH' && order.paymentStatus !== 'CAPTURED') {
+      throw new AppError(409, 'PAYMENT_NOT_CAPTURED', 'Record the fare first — “Fare collected” completes the trip; “Refused” or “Left without paying” records the outcome.');
     }
 
     // Calculate actual duration

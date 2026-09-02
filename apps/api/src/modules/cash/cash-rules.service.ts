@@ -65,13 +65,30 @@ export const gpsEvidence = (lat: number, lng: number): string =>
   `gps:${lat.toFixed(5)},${lng.toFixed(5)}`;
 
 /**
- * Handover is only legal at the door. Exported so the order state machine's
- * FAILED predecessor list stays in lockstep with this guard (SWIFT-096): a
- * failed cash handover is the ONLY way an order reaches FAILED, and it can only
- * be recorded from these states. Widening one without the other would let the
+ * Handover is only legal at the door — or, for a ride, at the destination with
+ * the passenger aboard [M-29]. Exported so the order state machine's FAILED
+ * predecessor list stays in lockstep with this guard (SWIFT-096): a failed
+ * cash handover is the ONLY way an order reaches FAILED, and it can only be
+ * recorded from these states. Widening one without the other would let the
  * machine permit a transition the service can never produce.
  */
-export const HANDOVER_STATES = ['ARRIVED'] as const;
+export const HANDOVER_STATES = ['ARRIVED', 'RIDE_IN_PROGRESS'] as const;
+
+/** [M-29] The instant the fare outcome became mandatory for cash rides. A
+ *  cash TAXI order delivered after it with no captured fare is a defect (the
+ *  terminal authority refuses the transition); one delivered before it is
+ *  legacy — the manual-review set the reconciler reports and never mints for. */
+export const TAXI_FARE_OUTCOME_ENFORCED_AT = new Date('2026-09-02T03:00:00.000Z');
+
+/** The mover a guarantee claim belongs to: exactly one of the two (the
+ *  database checks it). A delivery's claim names the rider, a ride's the driver. */
+export type ClaimMover = { riderId: string; driverId: null } | { riderId: null; driverId: string };
+
+/** A ride's duration in minutes for the completion record, as the completion
+ *  tap always computed it. */
+function rideDurationMinutes(order: { pickedUpAt: Date | null; taxiDuration: number | null }): number | null {
+  return order.pickedUpAt ? Math.round((Date.now() - order.pickedUpAt.getTime()) / 60_000) : order.taxiDuration;
+}
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -194,21 +211,40 @@ export class CashRulesService {
 
   async handover(
     orderId: string,
-    riderUserId: string,
+    moverUserId: string,
     input: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
   ) {
-    const rider = await this.prisma.rider.findUnique({ where: { userId: riderUserId }, select: { id: true } });
-    if (!rider) throw new NotFoundError('Rider');
+    // [M-29] The mover is a rider (a delivery at the door) or a driver (a ride
+    // at the destination): one rail, one golden rule, one claim shape. A user
+    // may hold both profiles, so the order decides which one is acting.
+    const [rider, driver] = await Promise.all([
+      this.prisma.rider.findUnique({ where: { userId: moverUserId }, select: { id: true } }),
+      this.prisma.driver.findUnique({ where: { userId: moverUserId }, select: { id: true } }),
+    ]);
+    if (!rider && !driver) throw new NotFoundError('Rider');
 
     const order = await this.prisma.order.findFirst({
-      where: { id: orderId, riderId: rider.id },
+      where: {
+        id: orderId,
+        OR: [
+          ...(rider ? [{ riderId: rider.id }] : []),
+          ...(driver ? [{ driverId: driver.id }] : []),
+        ],
+      },
       include: { customer: { select: { id: true, phone: true, countryCode: true, trustLevel: true, createdAt: true } } },
     });
     if (!order) throw new NotFoundError('Order', orderId);
+    const mover: ClaimMover | null = rider && order.riderId === rider.id
+      ? { riderId: rider.id, driverId: null }
+      : driver && order.driverId === driver.id
+        ? { riderId: null, driverId: driver.id }
+        : null;
+    if (!mover) throw new NotFoundError('Order', orderId);
+    const isRide = order.orderType === 'TAXI';
 
     // [SPS-F-0016 / REPORT-004 F-004-02] Ownership stays first (404 above).
     // This endpoint is the CASH golden-rule enforcement point and nothing
-    // else: a rider must never self-attest an MMG payment (only the store's
+    // else: a mover must never self-attest an MMG payment (only the store's
     // confirm-payment may capture MMG), and the failure branch must never
     // strike a customer or mint a company-guarantee ReimbursementClaim for a
     // rail this endpoint does not govern. Pending MMG paid-at-door gets the
@@ -219,7 +255,7 @@ export class CashRulesService {
       throw new AppError(409, 'CASH_HANDOVER_ONLY', 'Customer cash handover is available only for cash orders.');
     }
 
-    // [M-24] A terminal retry of the rider's own finished handover (a lost
+    // [M-24] A terminal retry of the mover's own finished handover (a lost
     // response, a double tap) answers the coherent facts it already wrote
     // instead of refusing — every fact committed together, so there is no
     // partial state to complete.
@@ -227,11 +263,16 @@ export class CashRulesService {
       return { order, claim: null };
     }
     if (order.status === 'FAILED' && input.outcome !== 'paid') {
-      const claim = await this.prisma.reimbursementClaim.findFirst({ where: { orderId, riderId: rider.id } });
+      const claim = await this.prisma.reimbursementClaim.findFirst({ where: { orderId } });
       return { order, claim };
     }
-    if (!HANDOVER_STATES.includes(order.status as (typeof HANDOVER_STATES)[number])) {
-      throw new AppError(409, 'NOT_AT_DOOR', `Handover is only available at the delivery point (order is ${order.status})`);
+    // A delivery is handed over at the door (ARRIVED); a ride's fare is settled
+    // at the destination with the passenger aboard (RIDE_IN_PROGRESS).
+    const handoverState = isRide ? 'RIDE_IN_PROGRESS' : 'ARRIVED';
+    if (order.status !== handoverState) {
+      throw new AppError(409, 'NOT_AT_DOOR', isRide
+        ? `The fare outcome is only available at the destination with the passenger aboard (ride is ${order.status})`
+        : `Handover is only available at the delivery point (order is ${order.status})`);
     }
 
     const gpsNote = gpsEvidence(input.gps.lat, input.gps.lng);
@@ -242,16 +283,31 @@ export class CashRulesService {
       // earnings followed as separate statements, so a failure between them
       // left "captured but not delivered" or "delivered but never paid out".
       let earningNotices: EarningNotices = [];
-      const updated = await this.orders.updateStatus(orderId, 'DELIVERED', riderUserId, `payment collected — ${gpsNote}`, {
-        withinTransaction: async (tx) => {
-          await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
-          // The seam mints a delivery's earnings itself; this call is a no-op
-          // when it already did and the minting call when the capture above
-          // was what the earnings were waiting for. Either way: inside the tx.
-          earningNotices = await this.orders.createEarnings(orderId, tx, false);
-          await this.observer.afterTerminalFacts?.('paid');
-        },
-      });
+      const withinTransaction = async (tx: Prisma.TransactionClient) => {
+        await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
+        // The seam mints a delivery's earnings itself; this call is a no-op
+        // when it already did and the minting call when the capture above
+        // was what the earnings were waiting for (every cash ride). Either
+        // way: inside the tx.
+        earningNotices = await this.orders.createEarnings(orderId, tx, false);
+        await this.observer.afterTerminalFacts?.('paid');
+      };
+      const updated = isRide
+        // [M-29] A ride's completion IS its fare outcome: the terminal facts
+        // the completion tap used to write alone (actual duration, driver
+        // release and rate rehabilitation) now commit with the captured fare.
+        ? (await this.orders.transitionOrderAtomically({
+            orderId,
+            target: 'DELIVERED',
+            allowedFrom: ['RIDE_IN_PROGRESS'],
+            changedBy: moverUserId,
+            note: `fare collected — ${gpsNote}`,
+            terminalMetadata: { actualDeliveryTime: rideDurationMinutes(order) },
+            decayDriverCancellationRate: true,
+            withinTransaction,
+            invalidStatus: (current) => new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${current}`),
+          })).order
+        : await this.orders.updateStatus(orderId, 'DELIVERED', moverUserId, `payment collected — ${gpsNote}`, { withinTransaction });
       for (const notice of earningNotices) {
         await this.notifications.earningAvailable(notice.userId, notice.amount, notice.type).catch(() => {});
       }
@@ -259,17 +315,17 @@ export class CashRulesService {
       return { order: updated, claim: null };
     }
     // [M-24] ONE terminal generation for a failed handover: FAILED, the
-    // payment status, the customer's strike and the rider's guarantee claim
+    // payment status, the customer's strike and the mover's guarantee claim
     // commit together on the seam's transaction. Before, they were four
     // separate statements with a notification in the middle — a failure at
     // the notification left the order FAILED and the customer struck with no
-    // claim for the rider, and the terminal retry was refused.
+    // claim for the mover, and the terminal retry was refused.
     const addressKey = `geo:${order.deliveryLat.toFixed(4)}:${order.deliveryLng.toFixed(4)}`;
     let staged: StagedClaim = { claim: null, riderNotice: null };
     const failed = await this.orders.updateStatus(
       orderId,
       'FAILED',
-      riderUserId,
+      moverUserId,
       `${input.outcome} — ${gpsNote}${input.photoUrl ? ' photo:yes' : ''}`,
       {
         withinTransaction: async (tx) => {
@@ -283,7 +339,7 @@ export class CashRulesService {
               addressKey,
             },
           });
-          staged = await this.stageClaim(tx, order, rider.id, input, addressKey);
+          staged = await this.stageClaim(tx, order, mover, input, addressKey);
           await this.observer.afterTerminalFacts?.('failed');
         },
       },
@@ -293,8 +349,10 @@ export class CashRulesService {
     await this.notifications.send({
       userId: order.customer.id,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Failed delivery recorded',
-      body: 'Your order was not paid for at the door. Repeated incidents restrict your account.',
+      title: isRide ? 'Unpaid fare recorded' : 'Failed delivery recorded',
+      body: isRide
+        ? 'Your ride’s fare was not paid at the destination. Repeated incidents restrict your account.'
+        : 'Your order was not paid for at the door. Repeated incidents restrict your account.',
       data: { kind: 'strike', orderId },
     }).catch(() => {});
     if (staged.riderNotice) await this.notifications.send(staged.riderNotice).catch(() => {});
@@ -317,18 +375,18 @@ export class CashRulesService {
       deliveryLng: number | null;
       customer: { id: string; phone: string; countryCode: string };
     },
-    riderId: string,
+    mover: ClaimMover,
     input: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
     addressKey: string,
   ): Promise<StagedClaim> {
     const amount = Number(order.totalAmount);
-    const riderUserId = (await this.riderUser(riderId)).userId;
+    const moverUserId = (await this.moverUser(mover)).userId;
     const gateLocal = await this.countryConfig.getIdGateThresholdLocal(order.customer.countryCode);
     if (amount >= gateLocal) {
       return {
         claim: null,
         riderNotice: {
-          userId: riderUserId,
+          userId: moverUserId,
           type: 'SYSTEM_ANNOUNCEMENT',
           title: 'Not covered by the guarantee',
           body: `Orders of $${Math.round(gateLocal).toLocaleString()} or more are outside the automatic guarantee. Support will follow up.`,
@@ -337,7 +395,7 @@ export class CashRulesService {
       };
     }
     const rules = await this.configFor(order.customer.countryCode);
-    const flags = await this.guardrailFlags(riderId, order.customer.id, order.customer.phone, addressKey, rules, tx);
+    const flags = await this.guardrailFlags(mover, order.customer.id, order.customer.phone, addressKey, rules, tx);
     if (order.deliveryLat != null && order.deliveryLng != null) {
       const km = haversineDistance(input.gps.lat, input.gps.lng, order.deliveryLat, order.deliveryLng);
       if (km > rules.maxHandoverDistanceKm) flags.push('gps_far');
@@ -345,7 +403,8 @@ export class CashRulesService {
     const claim = await tx.reimbursementClaim.create({
       data: {
         orderId: order.id,
-        riderId,
+        riderId: mover.riderId,
+        driverId: mover.driverId,
         customerId: order.customer.id,
         amount,
         reason: input.outcome,
@@ -359,7 +418,7 @@ export class CashRulesService {
     return {
       claim,
       riderNotice: {
-        userId: riderUserId,
+        userId: moverUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: claim.status === 'AUTO_APPROVED' ? 'Guarantee approved' : 'Claim under review',
         body: claim.status === 'AUTO_APPROVED'
@@ -371,7 +430,7 @@ export class CashRulesService {
   }
 
   private async guardrailFlags(
-    riderId: string,
+    mover: ClaimMover,
     customerId: string,
     phone: string,
     addressKey: string,
@@ -379,46 +438,56 @@ export class CashRulesService {
     db: PrismaClient | Prisma.TransactionClient = this.prisma,
   ): Promise<string[]> {
     const flags: string[] = [];
+    // [M-29] Every guardrail is keyed on the acting mover — rider or driver —
+    // and a mover's peers are movers of the same kind.
+    const mine = mover.riderId ? { riderId: mover.riderId } : { driverId: mover.driverId };
+    const moverKey = (c: { riderId: string | null; driverId: string | null }) => (c.riderId ? `r:${c.riderId}` : `d:${c.driverId}`);
     const monthStart = new Date();
     monthStart.setDate(1);
     monthStart.setHours(0, 0, 0, 0);
     const window90 = new Date(Date.now() - 90 * DAY_MS);
     const window30 = new Date(Date.now() - 30 * DAY_MS);
 
-    // Per-rider monthly cap
+    // Per-mover monthly cap
     const monthClaims = await db.reimbursementClaim.count({
-      where: { riderId, createdAt: { gte: monthStart } },
+      where: { ...mine, createdAt: { gte: monthStart } },
     });
     if (monthClaims >= rules.maxClaimsPerRiderPerMonth) flags.push('over_cap');
 
-    // Claim-rate outlier vs peer average (riders with any claim in 30d)
+    // Claim-rate outlier vs peer average (movers of the same kind with any claim in 30d)
     const mine30 = await db.reimbursementClaim.count({
-      where: { riderId, createdAt: { gte: window30 } },
+      where: { ...mine, createdAt: { gte: window30 } },
     });
     if (mine30 > 0) {
-      const grouped = await db.reimbursementClaim.groupBy({
-        by: ['riderId'],
-        where: { createdAt: { gte: window30 }, riderId: { not: riderId } },
-        _count: true,
-      });
+      const grouped = mover.riderId
+        ? await db.reimbursementClaim.groupBy({
+          by: ['riderId'],
+          where: { createdAt: { gte: window30 }, riderId: { not: mover.riderId } },
+          _count: true,
+        })
+        : await db.reimbursementClaim.groupBy({
+          by: ['driverId'],
+          where: { createdAt: { gte: window30 }, driverId: { not: mover.driverId } },
+          _count: true,
+        });
       const peerAvg = grouped.length
         ? grouped.reduce((s, g) => s + g._count, 0) / grouped.length
         : 0;
       if (mine30 + 1 > rules.outlierMultiplier * Math.max(1, peerAvg)) flags.push('outlier');
     }
 
-    // Collusion: the same customer showing up across riders' claims
+    // Collusion: the same customer showing up across movers' claims
     const sameTarget = await db.reimbursementClaim.findMany({
       where: { createdAt: { gte: window90 }, customerId },
-      select: { riderId: true },
+      select: { riderId: true, driverId: true },
     });
-    const distinctRiders = new Set(sameTarget.map((c) => c.riderId));
-    distinctRiders.add(riderId);
-    if (sameTarget.length > 0 && distinctRiders.size >= 2) flags.push('collusion_customer');
+    const distinctMovers = new Set(sameTarget.map(moverKey));
+    distinctMovers.add(moverKey(mover));
+    if (sameTarget.length > 0 && distinctMovers.size >= 2) flags.push('collusion_customer');
 
-    // One rider repeatedly against one customer
+    // One mover repeatedly against one customer
     const pairCount = await db.reimbursementClaim.count({
-      where: { riderId, customerId, createdAt: { gte: window90 } },
+      where: { ...mine, customerId, createdAt: { gte: window90 } },
     });
     if (pairCount >= 1) flags.push('collusion_pair');
 
@@ -447,7 +516,7 @@ export class CashRulesService {
     const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW'], {
       status: 'APPROVED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
     });
-    await this.notifyClaim(updated.riderId, 'Claim approved', `Your $${Number(updated.amount).toLocaleString()} claim was approved and will be paid out.`, claimId);
+    await this.notifyClaim(updated, 'Claim approved', `Your $${Number(updated.amount).toLocaleString()} claim was approved and will be paid out.`, claimId);
     return updated;
   }
 
@@ -455,7 +524,7 @@ export class CashRulesService {
     const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW'], {
       status: 'REJECTED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
     });
-    await this.notifyClaim(updated.riderId, 'Claim rejected', `Your claim was rejected: ${note}`, claimId);
+    await this.notifyClaim(updated, 'Claim rejected', `Your claim was rejected: ${note}`, claimId);
     return updated;
   }
 
@@ -471,7 +540,7 @@ export class CashRulesService {
     const updated = await this.transitionClaim(claimId, ['AUTO_APPROVED', 'APPROVED'], {
       status: 'PAID', paidAt: new Date(), paymentRef, reviewedBy: existing?.reviewedBy ?? adminId,
     });
-    await this.notifyClaim(updated.riderId, 'Guarantee paid', `$${Number(updated.amount).toLocaleString()} has been paid out to you.`, claimId);
+    await this.notifyClaim(updated, 'Guarantee paid', `$${Number(updated.amount).toLocaleString()} has been paid out to you.`, claimId);
     return updated;
   }
 
@@ -495,10 +564,10 @@ export class CashRulesService {
     return this.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } });
   }
 
-  private async notifyClaim(riderId: string, title: string, body: string, claimId: string) {
-    const rider = await this.riderUser(riderId);
+  private async notifyClaim(claim: { riderId: string | null; driverId: string | null }, title: string, body: string, claimId: string) {
+    const mover = await this.moverUser(claim);
     await this.notifications.send({
-      userId: rider.userId,
+      userId: mover.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title,
       body,
@@ -550,7 +619,7 @@ export class CashRulesService {
   async founderMetrics() {
     const window30 = new Date(Date.now() - 30 * DAY_MS);
 
-    const [failed, completed, payoutAgg, byRider] = await Promise.all([
+    const [failed, completed, payoutAgg, byRider, byDriver] = await Promise.all([
       this.prisma.order.count({ where: { status: 'FAILED', placedAt: { gte: window30 } } }),
       this.prisma.order.count({ where: { status: { in: ['DELIVERED', 'COMPLETED'] }, placedAt: { gte: window30 } } }),
       this.prisma.reimbursementClaim.aggregate({
@@ -560,10 +629,19 @@ export class CashRulesService {
       }),
       this.prisma.reimbursementClaim.groupBy({
         by: ['riderId'],
-        where: { createdAt: { gte: window30 } },
+        where: { createdAt: { gte: window30 }, riderId: { not: null } },
         _count: true,
         _sum: { amount: true },
         orderBy: { _count: { riderId: 'desc' } },
+        take: 20,
+      }),
+      // [M-29] A ride's guarantee claim names the driver.
+      this.prisma.reimbursementClaim.groupBy({
+        by: ['driverId'],
+        where: { createdAt: { gte: window30 }, driverId: { not: null } },
+        _count: true,
+        _sum: { amount: true },
+        orderBy: { _count: { driverId: 'desc' } },
         take: 20,
       }),
     ]);
@@ -580,11 +658,19 @@ export class CashRulesService {
         claims: r._count,
         amount: Number(r._sum.amount ?? 0),
       })),
+      claimsByDriver: byDriver.map((d) => ({
+        driverId: d.driverId,
+        claims: d._count,
+        amount: Number(d._sum.amount ?? 0),
+      })),
     };
   }
 
-  private async riderUser(riderId: string) {
-    return this.prisma.rider.findUniqueOrThrow({ where: { id: riderId }, select: { userId: true } });
+  /** The user behind a claim's mover — the rider, or [M-29] the driver. */
+  private async moverUser(mover: { riderId: string | null; driverId: string | null }) {
+    if (mover.riderId) return this.prisma.rider.findUniqueOrThrow({ where: { id: mover.riderId }, select: { userId: true } });
+    if (mover.driverId) return this.prisma.driver.findUniqueOrThrow({ where: { id: mover.driverId }, select: { userId: true } });
+    throw new AppError(500, 'CLAIM_WITHOUT_MOVER', 'A guarantee claim must name a rider or a driver.');
   }
 }
 
@@ -630,7 +716,7 @@ export async function scanVendorRiderClaimAffinity(
   const counts = new Map<string, VendorRiderAffinity>();
   for (const c of claims) {
     const vendorId = vendorByOrder.get(c.orderId);
-    if (!vendorId) continue; // courier/taxi claim — no vendor node
+    if (!vendorId || !c.riderId) continue; // courier/taxi claim — no vendor node, or no rider [M-29]
     const key = `${vendorId}::${c.riderId}`;
     const cur = counts.get(key) ?? { vendorId, riderId: c.riderId, claims: 0 };
     cur.claims += 1;

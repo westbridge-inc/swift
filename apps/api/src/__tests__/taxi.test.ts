@@ -1352,7 +1352,9 @@ describe('Driver cancellationRate accountability (was a dead 0.0 field)', () => 
     await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
     // Fast-forward to a passenger aboard, then complete through the real route.
     await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date() } });
-    const done = await inject('PUT', `/api/v1/driver/rides/${ride.id}/complete`, {}, driver.token);
+    // [M-29] A cash ride completes through its fare outcome, never a bare tap.
+    expect((await inject('PUT', `/api/v1/driver/rides/${ride.id}/complete`, {}, driver.token)).statusCode).toBe(409);
+    const done = await inject('POST', `/api/v1/driver/rides/${ride.id}/handover`, { outcome: 'paid', gps: SOUTH }, driver.token);
     expect(done.statusCode).toBe(200);
 
     const after = (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } })).cancellationRate;
@@ -1385,7 +1387,8 @@ describe('Driver cancellationRate accountability (was a dead 0.0 field)', () => 
         throw new Error('forced taxi-complete pre-commit abort');
       });
     try {
-      const failed = await inject('PUT', `/api/v1/driver/rides/${rideId}/complete`, {}, driver.token);
+      // [M-29] The fare outcome is the completion; the fault lands inside its transaction.
+      const failed = await inject('POST', `/api/v1/driver/rides/${rideId}/handover`, { outcome: 'paid', gps: SOUTH }, driver.token);
       expect(failed.statusCode).toBe(500);
     } finally {
       stageSpy.mockRestore();
@@ -1397,17 +1400,19 @@ describe('Driver cancellationRate accountability (was a dead 0.0 field)', () => 
       app.prisma.earning.count({ where: { orderId: rideId } }),
       app.prisma.orderStatusLog.count({ where: { orderId: rideId, status: 'DELIVERED' } }),
     ]);
-    expect({ status: failedOrder.status, deliveredAt: failedOrder.deliveredAt, duration: failedOrder.actualDeliveryTime })
-      .toEqual({ status: 'RIDE_IN_PROGRESS', deliveredAt: null, duration: null });
+    expect({ status: failedOrder.status, deliveredAt: failedOrder.deliveredAt, duration: failedOrder.actualDeliveryTime, payment: failedOrder.paymentStatus })
+      .toEqual({ status: 'RIDE_IN_PROGRESS', deliveredAt: null, duration: null, payment: 'PENDING' });
     expect({ available: failedDriver.isAvailable, pointer: failedDriver.currentRideId, rides: failedDriver.totalRides, rate: failedDriver.cancellationRate })
       .toEqual({ available: false, pointer: rideId, rides: before.totalRides, rate: before.cancellationRate });
     expect(failedEarnings).toBe(0);
     expect(failedLogs).toBe(0);
 
-    const retry = await inject('PUT', `/api/v1/driver/rides/${rideId}/complete`, {}, driver.token);
+    const retry = await inject('POST', `/api/v1/driver/rides/${rideId}/handover`, { outcome: 'paid', gps: SOUTH }, driver.token);
     expect(retry.statusCode).toBe(200);
-    const duplicate = await inject('PUT', `/api/v1/driver/rides/${rideId}/complete`, {}, driver.token);
-    expect(duplicate.statusCode).toBe(400);
+    // A repeated outcome answers the same facts [M-24]; the bare tap on a finished ride is still refused.
+    const duplicate = await inject('POST', `/api/v1/driver/rides/${rideId}/handover`, { outcome: 'paid', gps: SOUTH }, driver.token);
+    expect(duplicate.statusCode).toBe(200);
+    expect((await inject('PUT', `/api/v1/driver/rides/${rideId}/complete`, {}, driver.token)).statusCode).toBe(400);
     const [completedOrder, completedDriver, earnings, logs] = await Promise.all([
       app.prisma.order.findUniqueOrThrow({ where: { id: rideId } }),
       app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
@@ -1415,6 +1420,7 @@ describe('Driver cancellationRate accountability (was a dead 0.0 field)', () => 
       app.prisma.orderStatusLog.count({ where: { orderId: rideId, status: 'DELIVERED' } }),
     ]);
     expect(completedOrder.status).toBe('DELIVERED');
+    expect(completedOrder.paymentStatus).toBe('CAPTURED');
     expect(completedOrder.actualDeliveryTime).toBeGreaterThanOrEqual(5);
     expect({ available: completedDriver.isAvailable, pointer: completedDriver.currentRideId, rides: completedDriver.totalRides })
       .toEqual({ available: true, pointer: null, rides: before.totalRides + 1 });
