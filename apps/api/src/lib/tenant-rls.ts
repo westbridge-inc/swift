@@ -32,6 +32,7 @@ export const TENANT_TABLES = [
   'sos_escalations',
   'sos_retriggers',
   'guardian_checkin_deliveries',
+  'legal_holds',
   // [ALGO Band 0.2] Algorithm tunables are tenant-owned: one operator's dials
   // must never be readable through another's session.
   'algo_config',

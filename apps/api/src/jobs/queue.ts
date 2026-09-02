@@ -814,8 +814,28 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // §9.4 — unsealed, case-less bundles past the retention window are
         // deleted; sealed bundles and legal holds are never touched (the DB
         // triggers refuse even if code tried).
+        // [S-09 · operations] Held cases versus their evidence, first: repair
+        // (extend, never release), perform the vault operations from the
+        // outbox, and page any partial hold — the sweep below freezes itself
+        // while one exists.
+        const { repairLegalHolds, drainLegalHoldVault, scanLegalHolds } = await import('../modules/safety/legal-hold');
+        await repairLegalHolds(ctx.prisma).catch((err) => ctx.log.error({ err }, '[S-09] legal hold repair failed'));
+        await drainLegalHoldVault(ctx.prisma, { limit: 50 }).catch((err) => ctx.log.error({ err }, '[S-09] legal hold vault drain failed'));
+        const holds = await scanLegalHolds(ctx.prisma).catch(() => null);
+        if (holds && (holds.partial.length > 0 || holds.failedVault > 0)) {
+          const { notifyAdmins: pageHold, NotificationService: HoldNS } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'legal-hold-partial', 3600, () =>
+            pageHold(ctx.prisma, new HoldNS(ctx.prisma, ctx.io), {
+              tenantId: null,
+              title: `Legal hold: ${holds.partial.length} partial hold(s), ${holds.failedVault} vault failure(s) — evidence deletion frozen`,
+              body: 'A held case and its evidence disagree, or a vault manifest could not be written. Deletion stays frozen until every hold is whole.',
+              data: { kind: 'legal_hold_partial', partial: holds.partial.slice(0, 10), failedVault: holds.failedVault },
+            }),
+          ).catch(() => {});
+        }
         const { EvidenceService } = await import('../modules/safety/evidence.service');
         const swept = await new EvidenceService(ctx.prisma, ctx.io).retentionSweep();
+        if (swept.frozen) ctx.log.error(swept, '[S-09] evidence retention frozen this tick');
         if (swept.deleted > 0) ctx.log.info(swept, 'evidence retention sweep');
       }
 

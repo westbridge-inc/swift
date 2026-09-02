@@ -126,6 +126,7 @@ afterAll(async () => {
   await app.prisma.$executeRawUnsafe(`ALTER TABLE "EvidenceItem" ENABLE TRIGGER evidence_item_no_mutation`).catch(() => {});
   await app.prisma.$executeRawUnsafe(`ALTER TABLE "EvidenceBundle" ENABLE TRIGGER evidence_bundle_no_delete_sealed`).catch(() => {});
   await app.prisma.safetyAccessLog.deleteMany({ where: { bundleId: { in: bundleIds } } });
+  await app.prisma.legalHold.deleteMany({ where: { case: { subjectUserId: { in: userIds } } } }).catch(() => {}); // [S-09] a held case's hold row RESTRICTs its case
   await app.prisma.incidentCase.deleteMany({ where: { subjectUserId: { in: userIds } } });
   await app.prisma.sosAlert.deleteMany({ where: { actorUserId: { in: userIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });

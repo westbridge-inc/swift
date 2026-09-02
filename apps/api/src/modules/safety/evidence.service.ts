@@ -5,6 +5,8 @@ import { nanoid } from 'nanoid';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { sweepPage } from '../../lib/sweep-cursor';
+import { placeLegalHold, scanLegalHolds, legalHoldDeletionFrozenByEnv } from './legal-hold';
+import { legalHoldCounter } from '../../plugins/observability';
 
 // Evidence Vault (safety spec §9) — tamper-evident capture of what the
 // platform knew, when it knew it. A bundle opens automatically on SOS ACTIVE
@@ -204,9 +206,18 @@ export class EvidenceService {
     const bundle = await this.prisma.evidenceBundle.findUnique({ where: { id: bundleId } });
     if (!bundle) throw new NotFoundError('EvidenceBundle', bundleId);
     if (bundle.legalHold) return bundle;
-    const updated = await this.prisma.evidenceBundle.update({ where: { id: bundleId }, data: { legalHold: true } });
-    await this.prisma.safetyAccessLog.create({ data: { bundleId, accessorUserId: opsUserId, action: 'LEGAL_HOLD', reason } });
-    return updated;
+    // [S-09] One commit: the bundle, its custody entry — and, when the bundle
+    // belongs to a case, the whole aggregate (case + every linked bundle + hold row).
+    return this.prisma.$transaction(async (tx) => {
+      if (bundle.caseId) {
+        await placeLegalHold(tx, { caseId: bundle.caseId, placedBy: opsUserId, reason });
+        return tx.evidenceBundle.findUniqueOrThrow({ where: { id: bundleId } });
+      }
+      await tx.$queryRaw`SELECT "id" FROM "EvidenceBundle" WHERE "id" = ${bundleId} FOR UPDATE`;
+      const updated = await tx.evidenceBundle.update({ where: { id: bundleId }, data: { legalHold: true } });
+      await tx.safetyAccessLog.create({ data: { tenantId: bundle.tenantId, bundleId, accessorUserId: opsUserId, action: 'LEGAL_HOLD', reason } });
+      return updated;
+    });
   }
 
   // ── Live location trail (§9.1, post-trigger) ─────────────────────────────
@@ -328,10 +339,20 @@ export class EvidenceService {
    *  (or absent), older than the window → deleted. Sealed bundles and legal
    *  holds are never touched (the DB triggers would refuse anyway — the
    *  service filter and the trigger agree by construction). */
-  async retentionSweep(now = new Date()): Promise<{ deleted: number }> {
+  async retentionSweep(now = new Date()): Promise<{ deleted: number; frozen: boolean }> {
+    // [S-09] Retention FAILS CLOSED: while any legal hold is partial — or the
+    // rollback switch is on — nothing is deleted anywhere.
+    const holds = await scanLegalHolds(this.prisma);
+    if (holds.deletionFrozen) {
+      legalHoldCounter.labels('retention_frozen').inc();
+      log().error({ partial: holds.partial.slice(0, 20), byEnv: legalHoldDeletionFrozenByEnv() }, '[S-09] evidence retention frozen — a legal hold is partial or the freeze is on; nothing deleted');
+      return { deleted: 0, frozen: true };
+    }
     const cutoff = new Date(now.getTime() - unattachedRetentionDays() * 86_400_000);
+    // An orphan bundle whose SOS produced a HELD case is that case's evidence, whatever its caseId says.
+    const heldSos = (await this.prisma.incidentCase.findMany({ where: { legalHold: true, sosAlertId: { not: null } }, select: { sosAlertId: true } })).map((c) => c.sosAlertId!);
     const candidates = await this.prisma.evidenceBundle.findMany({
-      where: { sealedAt: null, legalHold: false, caseId: null, openedAt: { lt: cutoff } },
+      where: { sealedAt: null, legalHold: false, caseId: null, openedAt: { lt: cutoff }, ...(heldSos.length > 0 ? { OR: [{ sosAlertId: null }, { sosAlertId: { notIn: heldSos } }] } : {}) },
       select: { id: true, sosAlertId: true },
       take: 200,
     });
@@ -342,13 +363,16 @@ export class EvidenceService {
         if (alert && alert.status !== 'RESOLVED' && alert.status !== 'CANCELLED') continue; // still live — keep
       }
       try {
-        await this.prisma.evidenceBundle.delete({ where: { id: b.id } }); // items cascade
-        deleted += 1;
+        // Conditional on the row's LIVE state: a hold that commits while this
+        // sweep runs wins — the delete waits on the row lock, re-reads, and
+        // finds the bundle held (or adopted by a case) and touches nothing.
+        const res = await this.prisma.evidenceBundle.deleteMany({ where: { id: b.id, legalHold: false, sealedAt: null, caseId: null } }); // items cascade
+        deleted += res.count;
       } catch (err) {
         log().error({ err, bundleId: b.id }, 'evidence retention: delete refused — skipping');
       }
     }
     if (deleted > 0) log().info({ deleted }, 'evidence retention sweep');
-    return { deleted };
+    return { deleted, frozen: false };
   }
 }

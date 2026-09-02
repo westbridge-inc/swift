@@ -118,6 +118,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await app.prisma.legalHold.deleteMany({ where: { case: { OR: [{ id: { in: caseIds } }, { subjectUserId: { in: userIds } }] } } }).catch(() => {}); // [S-09] a held case's hold row RESTRICTs its case
   await app.prisma.incidentCase.deleteMany({ where: { OR: [{ id: { in: caseIds } }, { subjectUserId: { in: userIds } }] } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });

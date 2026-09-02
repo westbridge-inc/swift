@@ -3584,6 +3584,40 @@ enum GuardianDeliveryStatus {
   SKIPPED
 }
 
+/// [S-09] A legal hold is ONE aggregate: the case, every linked evidence
+/// bundle, the chain-of-custody log entry and this row commit together or
+/// not at all. Retention fails closed while any hold is partial. The vault
+/// operation (the immutable manifest of what was held) is performed by a
+/// leased worker from this row — the outbox.
+model LegalHold {
+  id               String               @id @default(cuid())
+  tenantId         String               @default("swift-default")
+  caseId           String               @unique
+  case             IncidentCase         @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  bundleId         String?
+  placedBy         String
+  reason           String
+  placedAt         DateTime             @default(now())
+  vaultStatus      LegalHoldVaultStatus @default(PENDING)
+  vaultAttempts    Int                  @default(0)
+  vaultAvailableAt DateTime             @default(now())
+  vaultLastError   String?
+  vaultedAt        DateTime?
+  manifest         Json?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  @@index([vaultStatus, vaultAvailableAt])
+  @@index([tenantId, caseId])
+  @@map("legal_holds")
+}
+
+enum LegalHoldVaultStatus {
+  PENDING
+  DONE
+  FAILED
+}
+
 enum SosEscalationStatus {
   PENDING
   SENT
@@ -3932,6 +3966,8 @@ model IncidentCase {
   sourceId          String?
   sourceFingerprint String? @unique
   replayCount       Int     @default(0)
+  /// [S-09] The one transactional authority behind this case's legal hold.
+  legalHoldRecord   LegalHold?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
