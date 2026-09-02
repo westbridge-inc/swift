@@ -554,6 +554,22 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               }),
             ).catch(() => {});
           }
+          // [M-32] Promo funding invariants: active promos with invalid terms,
+          // a discount with no named funder, a tip that was discounted.
+          // Reported and paged; the money is never rewritten here.
+          const { scanPromoFunding } = await import('../modules/promo/promo-terms');
+          const promoScan = await scanPromoFunding(ctx.prisma);
+          if (promoScan.invalidTerms > 0 || promoScan.discountWithoutFunder.sinceEnforced > 0 || promoScan.tipFundingGap.sinceEnforced > 0) {
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'promo-funding-invariants', 24 * 3600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: '🏷️ Promo funding invariants broken',
+                body: `${promoScan.invalidTerms} active promo(s) with invalid terms; ${promoScan.discountWithoutFunder.sinceEnforced} discounted order(s) since enforcement with no named funder; ${promoScan.tipFundingGap.sinceEnforced} order(s) since enforcement whose tip was discounted. Freeze the promo, then reconcile the orders.`,
+                data: { kind: 'billing_invariants', alert: 'promo-funding-invariants', invalidTerms: promoScan.invalidTerms, discountWithoutFunder: promoScan.discountWithoutFunder.sinceEnforced, tipFundingGap: promoScan.tipFundingGap.sinceEnforced },
+              }),
+            ).catch(() => {});
+          }
           break;
         }
       }

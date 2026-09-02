@@ -1593,6 +1593,8 @@ model Order {
 
   promoCodeId String?
   promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])
+  /// [M-32] The redemption snapshot, when a promo discounted this order.
+  promoRedemption PromoRedemption?
 
   /// QR growth engine: which client placed the order (null = pre-feature
   /// mobile). Stamped WEB by the web checkout; mobile stays null until the
@@ -2805,9 +2807,75 @@ model PromoCode {
   isActive       Boolean      @default(true)
   orders         Order[]
   createdAt      DateTime     @default(now())
+  /// [M-32] Who pays for this discount: VENDOR for a store's own code (it may
+  /// only discount goods), PLATFORM for an admin code (goods, then the
+  /// delivery fee). The tip is never discountable — nobody funds it.
+  funder         PromoFunder  @default(PLATFORM)
+  /// [M-32] The live terms version. Every create and update writes an
+  /// immutable PromoTerms row and moves this pointer; rollback pins a prior
+  /// version by writing a new one that names what it restored.
+  termsVersion   Int          @default(1)
+  terms          PromoTerms[]
+  redemptions    PromoRedemption[]
 
   @@index([vendorId])
   @@map("promo_codes")
+}
+
+/// [M-32] Who funds a discount. Named at creation, snapshotted at redemption.
+enum PromoFunder {
+  PLATFORM
+  VENDOR
+}
+
+/// [M-32] One immutable version of a promo's terms. Never updated, never
+/// deleted while the promo lives; the promo row's termsVersion names the live
+/// one, and an order's redemption names the version it was priced under.
+model PromoTerms {
+  id             String       @id @default(cuid())
+  promoCodeId    String
+  promoCode      PromoCode    @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+  version        Int
+  discountType   DiscountType
+  discountValue  Decimal      @db.Decimal(10, 2)
+  minOrderAmount Decimal?     @db.Decimal(10, 2)
+  maxDiscount    Decimal?     @db.Decimal(10, 2)
+  applicableTo   OrderType[]
+  validFrom      DateTime
+  validUntil     DateTime
+  maxUses        Int?
+  maxUsesPerUser Int
+  funder         PromoFunder
+  /// The version this one restored (a rollback); null for an edit or the first.
+  restoredFrom   Int?
+  createdBy      String?
+  createdAt      DateTime     @default(now())
+
+  @@unique([promoCodeId, version])
+  @@map("promo_terms")
+}
+
+/// [M-32] The redemption snapshot: what was discounted on this order, from
+/// which terms version, funded by whom — per component, immutable. The tip
+/// column is a check, not a slot: it is always 0 until a sponsor rail exists.
+model PromoRedemption {
+  id               String       @id @default(cuid())
+  orderId          String       @unique
+  order            Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  promoCodeId      String
+  promoCode        PromoCode    @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+  termsVersion     Int
+  discountType     DiscountType
+  discountValue    Decimal      @db.Decimal(10, 2)
+  maxDiscount      Decimal?     @db.Decimal(10, 2)
+  funder           PromoFunder
+  goodsDiscount    Decimal      @db.Decimal(12, 2)
+  deliveryDiscount Decimal      @db.Decimal(12, 2)
+  tipDiscount      Decimal      @default(0) @db.Decimal(12, 2)
+  createdAt        DateTime     @default(now())
+
+  @@index([promoCodeId])
+  @@map("promo_redemptions")
 }
 
 enum DiscountType {

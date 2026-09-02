@@ -27,10 +27,26 @@ export interface TotalLine {
   quantity: number;
 }
 
+/** [M-32] Who funds a discount. PLATFORM = an admin-issued code (Swift pays
+ *  for it); VENDOR = the store's own promotion (the store pays for it). */
+export type PromoFunder = 'PLATFORM' | 'VENDOR' | (string & {});
+
 export interface PromoTerms {
   discountType: 'PERCENTAGE' | 'FIXED_AMOUNT' | 'FREE_DELIVERY' | (string & {});
   discountValue: unknown;
   maxDiscount?: unknown;
+  funder?: PromoFunder | null;
+}
+
+/** [M-32] The components a discount may be taken from, by funder. Goods
+ *  first; the delivery fee only when the PLATFORM funds the code — a store's
+ *  promotion is not the rider's fee to give away; the tip NEVER — a promised
+ *  tip is the mover's, and no sponsor rail exists to fund it. */
+export interface PromoAllocation {
+  goods: number;
+  delivery: number;
+  tip: 0;
+  total: number;
 }
 
 export interface OrderTotal {
@@ -72,8 +88,44 @@ export function promoDiscount(promo: PromoTerms, basis: { subtotal: number; deli
       discount = basis.deliveryFee;
       break;
   }
-  if (promo.maxDiscount) discount = Math.min(discount, Number(promo.maxDiscount));
+  // [M-32] An explicit zero cap is a cap of zero, not an absent cap: a promo
+  // an operator has capped at 0 discounts nothing. Only null/undefined means
+  // "uncapped". (Before, `if (promo.maxDiscount)` read 0 as absent.)
+  if (promo.maxDiscount != null) discount = Math.min(discount, Number(promo.maxDiscount));
   return discount;
+}
+
+/** [M-32] How much of a basis a promo funded by `funder` is able to absorb:
+ *  the goods, plus the delivery fee when the platform funds it. The tip is
+ *  never part of the capacity. */
+export function promoCapacity(funder: PromoFunder | null | undefined, basis: { subtotal: number; deliveryFee: number }, discountType?: string | null): number {
+  const feeRoom = funder === 'VENDOR' ? 0 : Math.max(0, basis.deliveryFee);
+  // A free-delivery code is a discount on the FEE component and nothing else.
+  if (discountType === 'FREE_DELIVERY') return feeRoom;
+  return Math.max(0, basis.subtotal) + feeRoom;
+}
+
+/** [M-32] Split a discount across the components it may touch, in order:
+ *  goods, then (platform-funded only) the delivery fee. Whatever the basis
+ *  cannot absorb is not taken — the tip is never discounted. The parts always
+ *  sum to `total`, and `total <= discount`. */
+export function allocatePromo(
+  funder: PromoFunder | null | undefined,
+  discount: number,
+  basis: { subtotal: number; deliveryFee: number },
+  discountType?: string | null,
+): PromoAllocation {
+  const wanted = Math.max(0, discount);
+  const feeRoom = funder === 'VENDOR' ? 0 : Math.max(0, basis.deliveryFee);
+  if (discountType === 'FREE_DELIVERY') {
+    // The fee component and nothing else: booked against goods, a free
+    // delivery would later be refunded as goods on a return.
+    const delivery = Math.min(wanted, feeRoom);
+    return { goods: 0, delivery, tip: 0, total: delivery };
+  }
+  const goods = Math.min(wanted, Math.max(0, basis.subtotal));
+  const delivery = Math.min(wanted - goods, feeRoom);
+  return { goods, delivery, tip: 0, total: goods + delivery };
 }
 
 /** The total, never below zero: a discount larger than the order is the order. */

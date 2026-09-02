@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import { OrderService, assertMmgFulfilmentAllowed, notHeldFilter, holdWindowMs } from '../order/order.service';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
@@ -902,21 +903,35 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_DATES', 'The end date must be in the future');
     }
 
-    const promo = await app.prisma.promoCode.create({
-      data: {
-        code,
-        description: body.description,
-        vendorId,
-        discountType: body.discountType,
-        discountValue: body.discountValue,
-        minOrderAmount: body.minOrderAmount,
-        maxDiscount: body.maxDiscount,
-        applicableTo: [],
-        validFrom: new Date(),
-        validUntil: body.validUntil,
-        maxUses: body.maxUses,
-        maxUsesPerUser: body.maxUsesPerUser,
-      },
+    // [M-32] The store funds its own code, and it may only discount goods.
+    // The whole record is validated, and version 1 of its terms is written
+    // with the row in one transaction.
+    const validFrom = new Date();
+    assertPromoTerms({
+      discountType: body.discountType, discountValue: body.discountValue, minOrderAmount: body.minOrderAmount ?? null, maxDiscount: body.maxDiscount ?? null,
+      validFrom, validUntil: body.validUntil, maxUses: body.maxUses ?? null, maxUsesPerUser: body.maxUsesPerUser,
+    });
+    const promo = await app.prisma.$transaction(async (tx) => {
+      const row = await tx.promoCode.create({
+        data: {
+          code,
+          description: body.description,
+          vendorId,
+          discountType: body.discountType,
+          discountValue: body.discountValue,
+          minOrderAmount: body.minOrderAmount,
+          maxDiscount: body.maxDiscount,
+          applicableTo: [],
+          validFrom,
+          validUntil: body.validUntil,
+          maxUses: body.maxUses,
+          maxUsesPerUser: body.maxUsesPerUser,
+          funder: 'VENDOR',
+          termsVersion: 1,
+        },
+      });
+      await recordPromoTermsVersion(tx, row.id, { createdBy: request.user.userId });
+      return row;
     });
     return { success: true, data: promo };
   });
@@ -928,15 +943,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('PromoCode', request.params.id);
 
     const body = updatePromoSchema.parse(request.body);
-    const promo = await app.prisma.promoCode.update({
-      where: { id: request.params.id },
-      data: {
-        ...(body.description !== undefined && { description: body.description }),
-        ...(body.isActive !== undefined && { isActive: body.isActive }),
-        ...(body.validUntil !== undefined && { validUntil: body.validUntil }),
-        ...(body.maxUses !== undefined && { maxUses: body.maxUses }),
-      },
-    });
+    // [M-32] The MERGED record is validated (an end date before the stored
+    // start is refused), and a change of terms writes an immutable new version.
+    const promo = await updatePromoTerms(app.prisma, request.params.id, body, request.user.userId);
     return { success: true, data: promo };
   });
 

@@ -1,10 +1,10 @@
 import { Prisma } from '@prisma/client';
-import type { PrismaClient, OrderStatus, FulfillmentType } from '@prisma/client';
+import type { PrismaClient, OrderStatus, FulfillmentType, DiscountType, PromoFunder } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
-import { lineTotal, orderTotal, promoDiscount } from '../../utils/order-total';
+import { lineTotal, orderTotal, promoDiscount, promoCapacity, allocatePromo, type PromoAllocation } from '../../utils/order-total';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
@@ -895,6 +895,8 @@ export class OrderService {
     let discount = 0;
     let promoCodeId: string | null = null;
     let promoVendorId: string | null = null;
+    // [M-32] The terms the order is priced under, snapshotted on its redemption.
+    let promoTerms: RedeemedPromoTerms | null = null;
     if (input.promoCode) {
       const promo = await this.validatePromoCode(
         input.promoCode,
@@ -904,7 +906,9 @@ export class OrderService {
       discount = promo.discount;
       promoCodeId = promo.id;
       promoVendorId = promo.vendorId;
+      promoTerms = promo.terms;
     }
+    const promoFunder = promoTerms?.funder ?? null;
 
     // [REPORT-034 S1] A discount can never exceed what the basket it targets is
     // able to absorb. A FIXED_AMOUNT promo takes its value verbatim (see
@@ -921,9 +925,14 @@ export class OrderService {
     // only be absorbed by ITS vendor's plan; a platform code by the whole
     // basket. Tip rides whichever plan carries it.
     const promoPlanIdxForCap = promoVendorId ? plans.findIndex((p) => p.vendor.id === promoVendorId) : -1;
-    const tipForPlan = (i: number) => (i === tipPlanIndex ? effectiveTip : 0);
+    // [M-32] The capacity is what the promo's FUNDER may discount: the goods,
+    // plus the delivery fee only for a platform code (a store's promotion is
+    // not the rider's fee to give away). The tip is never in it — a promised
+    // tip is the mover's, and no sponsor rail exists to fund it. Before, the
+    // tip sat inside the capacity, so a code larger than goods + fee ate the
+    // rider's tip while the tip earning was still minted in full.
     const discountCapacity = (promoPlanIdxForCap >= 0 ? [promoPlanIdxForCap] : plans.map((_, i) => i)).reduce(
-      (sum, i) => sum + plans[i]!.subtotal + plans[i]!.deliveryFee + tipForPlan(i),
+      (sum, i) => sum + promoCapacity(promoFunder, { subtotal: plans[i]!.subtotal, deliveryFee: plans[i]!.deliveryFee }, promoTerms?.discountType ?? null),
       0,
     );
     discount = Math.min(discount, Math.max(0, discountCapacity));
@@ -1138,14 +1147,19 @@ export class OrderService {
       // A vendor code hits only its plan; a platform code fills each plan up to its
       // own total until the discount is exhausted.
       const discountAlloc = new Array<number>(plans.length).fill(0);
+      // [M-32] Per component, by funder: goods first, then (platform code
+      // only) the delivery fee; never the tip. The parts are snapshotted on
+      // the order's redemption below, so every discounted dollar names who
+      // funds it.
+      const discountParts = new Array<PromoAllocation | null>(plans.length).fill(null);
       let remainingDiscount = discount;
       const discountTargets = promoPlanIndex >= 0 ? [promoPlanIndex] : plans.map((_, i) => i);
       for (const i of discountTargets) {
         if (remainingDiscount <= 0) break;
-        const cap = plans[i]!.subtotal + plans[i]!.deliveryFee + planTipFor(i);
-        const take = Math.min(remainingDiscount, cap);
-        discountAlloc[i] = take;
-        remainingDiscount -= take;
+        const parts = allocatePromo(promoFunder, remainingDiscount, { subtotal: plans[i]!.subtotal, deliveryFee: plans[i]!.deliveryFee }, promoTerms?.discountType ?? null);
+        discountAlloc[i] = parts.total;
+        discountParts[i] = parts;
+        remainingDiscount -= parts.total;
       }
 
       for (const [index, plan] of plans.entries()) {
@@ -1314,6 +1328,27 @@ export class OrderService {
           if (events.length > 0) stockEventsByVendor.set(plan.vendor.id, events);
         }
 
+        // [M-32] The redemption snapshot: the terms version this order was
+        // priced under, the funder, and the discount per component. Written
+        // on the order that carries the code (a zero-dollar redemption is
+        // still a redemption) and on any other order the discount reached.
+        const parts = discountParts[index];
+        if (promoCodeId && promoTerms && (parts || index === (promoPlanIndex >= 0 ? promoPlanIndex : 0))) {
+          await tx.promoRedemption.create({
+            data: {
+              orderId: order.id,
+              promoCodeId,
+              termsVersion: promoTerms.termsVersion,
+              discountType: promoTerms.discountType,
+              discountValue: promoTerms.discountValue,
+              maxDiscount: promoTerms.maxDiscount,
+              funder: promoTerms.funder,
+              goodsDiscount: parts?.goods ?? 0,
+              deliveryDiscount: parts?.delivery ?? 0,
+              tipDiscount: 0,
+            },
+          });
+        }
         created.push(order);
       }
 
@@ -2488,9 +2523,25 @@ export class OrderService {
     // [ALG-24] The one promo switch — the cart quote applies the same function.
     const discount = promoDiscount(promo, { subtotal, deliveryFee: deliveryFeeBasis });
 
-    return { id: promo.id, discount, discountType: promo.discountType, vendorId: promo.vendorId };
+    return {
+      id: promo.id,
+      discount,
+      discountType: promo.discountType,
+      vendorId: promo.vendorId,
+      // [M-32] What the order will be priced under — snapshotted at redemption.
+      terms: { termsVersion: promo.termsVersion, discountType: promo.discountType, discountValue: promo.discountValue, maxDiscount: promo.maxDiscount, funder: promo.funder },
+    };
   }
 }
+
+/** [M-32] The promo terms an order is priced under, as they stood at redemption. */
+type RedeemedPromoTerms = {
+  termsVersion: number;
+  discountType: DiscountType;
+  discountValue: Prisma.Decimal;
+  maxDiscount: Prisma.Decimal | null;
+  funder: PromoFunder;
+};
 
 // ---------------------------------------------------------------------------
 // [F-0028 / G-002] The earnings reconciler — the last line of defence between
