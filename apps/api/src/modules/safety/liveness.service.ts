@@ -9,6 +9,8 @@ import {
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
 import { freshRidePinReset } from '../rides/ride-pin';
+import { persistDispatchCommandInTransaction } from '../order/checkout-outbox';
+import { notMyDriverCounter, notMyDriverGauge } from '../../plugins/observability';
 
 // Identity Assurance (safety spec §7) — "is the person driving the account's
 // approved human?" A fresh shift selfie is face-matched against the signup
@@ -86,6 +88,10 @@ export interface LivenessCheckResult {
   /** Remaining attempts before lock — only present after a FAIL. */
   attemptsLeft?: number;
 }
+
+/** [S-13 · rollback] Automatic authority mutation (release + lock + dispatch)
+ *  is disabled: a report still opens the durable case, which pages a human. */
+export const notMyDriverAuthorityKilled = (env: Record<string, string | undefined> = process.env) => env['NOT_MY_DRIVER_AUTHORITY_KILL'] === '1';
 
 export class LivenessService {
   private notifications: NotificationService;
@@ -321,11 +327,14 @@ export class LivenessService {
    *  paged at S1 grade. The formal IncidentCase lands with M6; until then the
    *  war-room page + lock + audit trail carry the weight. Aboard-the-vehicle
    *  is SOS territory, not this. */
+  /** [S-13] Test seam: runs INSIDE the decision transaction after every write. A throw is the process dying there. Never set in routes. */
+  observer: { beforeCommit?: (orderId: string) => Promise<void> } = {};
+
   async reportNotMyDriver(
     customerUserId: string,
     orderId: string,
-    enqueueDispatch?: (orderId: string) => Promise<void>,
-  ): Promise<{ reDispatched: boolean; alreadyHandled?: boolean; sosAvailable: true }> {
+    enqueueDispatch?: (orderId: string, jobId: string) => Promise<void>,
+  ): Promise<{ reDispatched: boolean; alreadyHandled?: boolean; manualReview?: boolean; sosAvailable: true }> {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, customerId: customerUserId, orderType: 'TAXI' },
       select: {
@@ -356,6 +365,7 @@ export class LivenessService {
         where: { id: order.id, customerId: customerUserId, orderType: 'TAXI' },
         select: {
           id: true,
+          tenantId: true,
           status: true,
           orderNumber: true,
           driverId: true,
@@ -375,6 +385,32 @@ export class LivenessService {
       if (!NOT_ABOARD.includes(current.status as typeof NOT_ABOARD[number])) {
         throw new AppError(409, 'RIDE_STATE_CHANGED', 'The ride changed underneath this report — check its current status.');
       }
+      // [S-13] The report is a SAFETY CASE and a DISPATCH COMMAND in the same
+      // authority generation as the release and the lock: all four commit
+      // together or none does. Notifications come after, and cannot block.
+      const { IncidentService } = await import('./incident.service');
+      const incidents = new IncidentService(this.prisma, this.io);
+      const intake = {
+        category: 'IDENTITY_MISMATCH',
+        intake: 'SYSTEM_AUTO' as const,
+        source: { type: 'LIVENESS_NOT_MY_DRIVER', id: current.id },
+        subjectUserId: current.driver.userId,
+        reporterUserId: customerUserId,
+        orderId: current.id,
+        summary: notMyDriverAuthorityKilled()
+          ? `Passenger reported "this isn't my driver" on order ${current.orderNumber} before boarding. AUTOMATIC AUTHORITY MUTATION IS DISABLED (rollback): the ride was NOT released and the driver NOT locked — handle this ride manually now.`
+          : `Passenger reported "this isn't my driver" on order ${current.orderNumber} before boarding. Driver account liveness-locked and ride re-dispatched.`,
+      };
+      const staged = await incidents.stageIncidentIntake(tx, intake, incidents.initialSeverityFor(intake), now);
+      if (notMyDriverAuthorityKilled()) {
+        // Rollback: no automatic release, no lock, no dispatch — the durable
+        // case stub pages a human who handles the ride by hand.
+        await tx.orderStatusLog.create({
+          data: { orderId: current.id, status: current.status, changedBy: 'system:not-my-driver', note: 'Passenger reported "this isn\'t my driver" — automatic authority mutation disabled (rollback); case opened for manual handling' },
+        });
+        await this.observer.beforeCommit?.(current.id);
+        return { kind: 'MANUAL' as const, order: { id: current.id, orderNumber: current.orderNumber }, driverUserId: current.driver.userId, staged, intake, dispatchJobId: null };
+      }
       await tx.order.update({
         where: { id: current.id },
         // [REPORT-014 F-014-12] Fresh PIN + zeroed attempt budget: the flagged
@@ -388,44 +424,98 @@ export class LivenessService {
       await tx.orderStatusLog.create({
         data: { orderId: current.id, status: 'PENDING', changedBy: 'system:not-my-driver', note: 'Passenger reported "this isn\'t my driver" — ride released and re-dispatched; driver locked pending identity review' },
       });
+      const command = await persistDispatchCommandInTransaction(tx, { orderId: current.id, tenantId: current.tenantId, reason: 'not-my-driver', now });
+      await this.observer.beforeCommit?.(current.id);
       return {
         kind: 'RELEASED' as const,
         order: { id: current.id, orderNumber: current.orderNumber },
         driverUserId: current.driver.userId,
+        staged,
+        intake,
+        dispatchJobId: command.id,
       };
     });
     if (release.kind === 'ALREADY_HANDLED') {
       return { reDispatched: true, alreadyHandled: true, sosAvailable: true };
     }
     const releasedOrder = release.order;
-
+    notMyDriverCounter.labels(release.kind === 'MANUAL' ? 'manual_review' : 'released').inc();
+    // Everything from here is best-effort and independent: the case exists,
+    // the ride is released (or the manual case is open), the command is durable.
+    const { IncidentService } = await import('./incident.service');
+    await new IncidentService(this.prisma, this.io).afterIntakeCommitted(release.staged, release.intake)
+      .catch((err) => log().error({ err, orderId: releasedOrder.id }, 'not-my-driver: post-commit incident effects failed — the case already exists'));
+    if (release.kind === 'MANUAL') {
+      return { reDispatched: false, manualReview: true, sosAvailable: true };
+    }
     try {
       this.io.to(`order:${releasedOrder.id}`).emit('order:status_changed', { orderId: releasedOrder.id, status: 'PENDING', reason: 'not_my_driver' });
       this.io.to('ops:war-room').emit('safety:not-my-driver', { orderId: releasedOrder.id, driverUserId: release.driverUserId, at: now.toISOString() });
     } catch { /* advisory only */ }
-    // §7.3 → §8: the report IS an S1 incident. The case machine owns the ops
-    // page, the SLA clock, the subject's due-process notice (category only,
-    // never the reporter), and the review that eventually clears the lock.
-    const { IncidentService } = await import('./incident.service');
-    await new IncidentService(this.prisma, this.io)
-      .intake({
-        category: 'IDENTITY_MISMATCH',
-        intake: 'SYSTEM_AUTO',
-        source: { type: 'LIVENESS_NOT_MY_DRIVER', id: releasedOrder.id },
-        subjectUserId: release.driverUserId,
-        reporterUserId: customerUserId,
-        orderId: releasedOrder.id,
-        summary: `Passenger reported "this isn't my driver" on order ${releasedOrder.orderNumber} before boarding. Driver account liveness-locked and ride re-dispatched.`,
-      })
-      .catch((err) => log().error({ err, orderId: releasedOrder.id }, 'not-my-driver: incident intake failed — lock and release still hold'));
     await this.notifications.send({
       userId: customerUserId,
       type: 'ORDER_UPDATE',
       title: 'Finding you another driver',
       body: 'Do not enter the vehicle. We are matching you with the nearest available driver now.',
       data: { orderId: releasedOrder.id, status: 'PENDING' },
-    });
-    if (enqueueDispatch) await enqueueDispatch(releasedOrder.id).catch(() => {});
+    }).catch((err) => log().error({ err, orderId: releasedOrder.id }, 'not-my-driver: passenger notification failed — redispatch is durable regardless'));
+    // The inline fast path publishes the SAME job the outbox drainer would
+    // (deterministic jobId); on success the command is marked done so the
+    // drainer does not publish it twice. If this dies, the drainer does it.
+    if (enqueueDispatch && release.dispatchJobId) {
+      try {
+        await enqueueDispatch(releasedOrder.id, release.dispatchJobId);
+        await this.prisma.orderOutbox.updateMany({ where: { id: release.dispatchJobId, processedAt: null }, data: { processedAt: new Date() } });
+      } catch (err) {
+        log().warn({ err, orderId: releasedOrder.id }, 'not-my-driver: inline dispatch enqueue failed — the outbox drainer will publish it');
+      }
+    }
     return { reDispatched: true, sosAvailable: true };
   }
+}
+
+/** [S-13 · operations] Every not-my-driver decision must own its case and its
+ *  dispatch command. Decisions lacking either are named, repaired (the missing
+ *  artifact is staged — never a second release), and paged. */
+export async function scanNotMyDriverDecisions(prisma: PrismaClient, now = new Date()): Promise<{ missingCase: string[]; missingDispatch: string[] }> {
+  const { intakeFingerprint } = await import('./incident.service');
+  const { dispatchCommandDedupeKey } = await import('../order/checkout-outbox');
+  const since = new Date(now.getTime() - 7 * 86_400_000);
+  const decisions = await prisma.orderStatusLog.findMany({ where: { changedBy: 'system:not-my-driver', status: 'PENDING', createdAt: { gte: since } }, select: { orderId: true }, distinct: ['orderId'], take: 500 });
+  const missingCase: string[] = []; const missingDispatch: string[] = [];
+  for (const d of decisions) {
+    const kase = await prisma.incidentCase.findUnique({ where: { sourceFingerprint: intakeFingerprint({ type: 'LIVENESS_NOT_MY_DRIVER', id: d.orderId }) }, select: { id: true } });
+    if (!kase) missingCase.push(d.orderId);
+    const cmd = await prisma.orderOutbox.findUnique({ where: { dedupeKey: dispatchCommandDedupeKey(d.orderId, 'not-my-driver') }, select: { id: true } });
+    if (!cmd) missingDispatch.push(d.orderId);
+  }
+  notMyDriverGauge.labels('missing_case').set(missingCase.length);
+  notMyDriverGauge.labels('missing_dispatch').set(missingDispatch.length);
+  return { missingCase, missingDispatch };
+}
+
+export async function repairNotMyDriverDecisions(prisma: PrismaClient, io: Server, now = new Date()): Promise<{ repaired: string[] }> {
+  const scan = await scanNotMyDriverDecisions(prisma, now);
+  const { IncidentService } = await import('./incident.service');
+  const { persistDispatchCommandInTransaction } = await import('../order/checkout-outbox');
+  const repaired: string[] = [];
+  for (const orderId of new Set([...scan.missingCase, ...scan.missingDispatch])) {
+    const order = await prisma.order.findUnique({ where: { id: orderId }, select: { id: true, tenantId: true, orderNumber: true, status: true, customerId: true } });
+    if (!order) continue;
+    const log = await prisma.orderStatusLog.findFirst({ where: { orderId, changedBy: 'system:not-my-driver' }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } });
+    // the driver the decision removed is not on the order any more: the case names the order; ops attribute the subject from the log
+    const incidents = new IncidentService(prisma, io);
+    await prisma.$transaction(async (tx) => {
+      if (scan.missingCase.includes(orderId)) {
+        const intake = { category: 'IDENTITY_MISMATCH', intake: 'SYSTEM_AUTO' as const, source: { type: 'LIVENESS_NOT_MY_DRIVER', id: orderId }, subjectUserId: order.customerId, reporterUserId: order.customerId, orderId, summary: `REPAIRED (S-13 scan): a not-my-driver decision on order ${order.orderNumber} at ${log?.createdAt.toISOString() ?? 'unknown'} had no case. Subject must be attributed by ops from the status log.` };
+        const staged = await incidents.stageIncidentIntake(tx, intake, 'S1', now);
+        await incidents.afterIntakeCommitted(staged, intake).catch(() => null);
+      }
+      if (scan.missingDispatch.includes(orderId) && order.status === 'PENDING') {
+        await persistDispatchCommandInTransaction(tx, { orderId, tenantId: order.tenantId, reason: 'not-my-driver', now });
+      }
+    });
+    repaired.push(orderId); notMyDriverCounter.labels('repaired').inc();
+  }
+  return { repaired };
 }

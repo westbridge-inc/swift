@@ -229,6 +229,19 @@ export class IncidentService {
       initialSeverity,
       now,
     ));
+    return this.afterIntakeCommitted(staged, input);
+  }
+
+  /** The severity an intake starts from (the ops override, else the category's). */
+  initialSeverityFor(input: IncidentIntakeInput): IncidentSeverity {
+    return input.severity ?? CATEGORY_SEVERITY[input.category] ?? 'S3';
+  }
+
+  /** [S-13] The non-authoritative half of intake — pages, emits, the evidence
+   *  bundle — after the case is COMMITTED. A caller that staged the case in
+   *  its own transaction (the not-my-driver decision) calls this afterwards;
+   *  a failure here never touches the case, which already exists. */
+  async afterIntakeCommitted(staged: Awaited<ReturnType<IncidentService['stageIncidentIntake']>>, input: IncidentIntakeInput): Promise<IncidentCase> {
     const kase = staged.kase;
     if (staged.replayed) {
       // [S-08] The same source again: the first result IS the result. Nothing

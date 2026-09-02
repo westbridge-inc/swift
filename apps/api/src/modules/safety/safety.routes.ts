@@ -375,9 +375,12 @@ export async function safetyRoutes(app: FastifyInstance) {
    *  the ride to re-dispatch, locks + offlines the driver account, pages ops.
    *  Caller must be the ride's passenger; aboard-the-vehicle is SOS territory. */
   app.post<{ Params: { id: string } }>('/rides/:id/not-my-driver', auth, async (request) => {
-    const result = await liveness.reportNotMyDriver(request.user.userId, request.params.id, async (orderId) => {
+    const result = await liveness.reportNotMyDriver(request.user.userId, request.params.id, async (orderId, jobId) => {
+      // [S-13] The same job the outbox drainer publishes (jobId): one dispatch, whoever gets there first.
       if (app.dispatchQueue) {
-        await app.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+        await app.dispatchQueue.add('dispatch-order', { orderId }, { jobId, removeOnComplete: 100, removeOnFail: 50 });
+      } else {
+        throw new Error('no dispatch queue in this process');
       }
     });
     return { success: true, data: result };
