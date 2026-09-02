@@ -42,6 +42,8 @@ export const TENANT_TABLES = [
   // [M-11] The checkout command's durable result and tail.
   'checkout_receipts',
   'delivery_runs',
+  // [M-22] Immutable bank deposit confirmations and their adjustments.
+  'deposit_confirmations',
   'discovery_categories', 'discovery_category_requests',
   'discovery_category_suggestions', 'fee_receipts', 'house_ads',
   'identity_keys', 'item_discovery_categories', 'item_feedbacks',

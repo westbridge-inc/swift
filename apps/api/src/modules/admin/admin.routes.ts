@@ -3633,8 +3633,9 @@ export async function adminRoutes(app: FastifyInstance) {
    *  per period. Batches build weekly (job) once the cadence config is set. */
   app.get('/billing/settlement-batches', { preHandler: [adminGuard] }, async () => {
     const { buildExpectedBatches, reconConfig } = await import('../billing/bank-recon');
-    const created = await buildExpectedBatches(tenantPrisma); // idempotent; inert without config
-    const batches = await app.prisma.settlementBatch.findMany({ orderBy: { periodStart: 'desc' }, take: 60 });
+    // [M-22] This tenant's batches, built from this tenant's payments — never the platform's.
+    const created = await buildExpectedBatches(tenantPrisma, new Date(), requireTenantId()); // idempotent; inert without config
+    const batches = await tenantPrisma.settlementBatch.findMany({ orderBy: { periodStart: 'desc' }, take: 60 });
     return {
       success: true,
       data: {
@@ -3655,17 +3656,20 @@ export async function adminRoutes(app: FastifyInstance) {
    *  MISMATCH and pages. */
   app.post('/billing/settlement-batches/:id/confirm-deposit', { preHandler: [adminGuard] }, async (request) => {
     const { id } = z.object({ id: z.string() }).parse(request.params);
+    // [M-22] The bank reference is mandatory (it is the evidence) and unique;
+    // the confirmation is immutable and this tenant's; the audit row commits
+    // with it.
     const body = z.object({
       depositedGyd: z.number().positive(),
       depositedAt: z.string().datetime(),
-      bankRef: z.string().trim().max(120).optional(),
+      bankRef: z.string().trim().min(3).max(120),
     }).parse(request.body ?? {});
     const { confirmDeposit } = await import('../billing/bank-recon');
-    const result = await confirmDeposit(app.prisma, id, {
+    const result = await confirmDeposit(tenantPrisma, id, {
       depositedGyd: body.depositedGyd,
       depositedAt: new Date(body.depositedAt),
       bankRef: body.bankRef,
-    });
+    }, { userId: request.user.userId, tenantId: requireTenantId(), ipAddress: request.ip, userAgent: request.headers['user-agent'] });
     if (result.status === 'MISMATCH') {
       const { notifyAdmins } = await import('../notification/notification.service');
       await notifyAdmins(app.prisma, notifications, {
@@ -3676,6 +3680,26 @@ export async function adminRoutes(app: FastifyInstance) {
         data: { kind: 'settlement_deposit_mismatch', batchId: id, deltaGyd: result.deltaGyd },
       });
     }
+    return { success: true, data: result };
+  });
+
+  /** [M-22] A correction to a confirmed deposit: a separate adjustment record
+   *  that names the one it supersedes — the original is never edited. */
+  app.post('/billing/settlement-batches/:id/adjust-deposit', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = z.object({
+      depositedGyd: z.number().positive(),
+      depositedAt: z.string().datetime(),
+      bankRef: z.string().trim().min(3).max(120),
+      reason: z.string().trim().min(3).max(500),
+    }).parse(request.body ?? {});
+    const { adjustDeposit } = await import('../billing/bank-recon');
+    const result = await adjustDeposit(tenantPrisma, id, {
+      depositedGyd: body.depositedGyd,
+      depositedAt: new Date(body.depositedAt),
+      bankRef: body.bankRef,
+      reason: body.reason,
+    }, { userId: request.user.userId, tenantId: requireTenantId(), ipAddress: request.ip, userAgent: request.headers['user-agent'] });
     return { success: true, data: result };
   });
 
