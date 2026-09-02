@@ -859,7 +859,7 @@ export class DispatchService {
           id: true, status: true, riderId: true, driverId: true, orderType: true,
           fulfillment: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
           customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
-          subtotalBase: true, paymentMethod: true, paymentStatus: true, tenantId: true, readyAt: true,
+          subtotalBase: true, paymentMethod: true, paymentStatus: true, tenantId: true, readyAt: true, foodAgeHeldAt: true,
           // [WS-6.0] The cash-math triple. A mover deciding on a CASH job is
           // deciding how much of their OWN float to commit, and the card used
           // to show only what they earn. Every number is a stored column, not
@@ -879,6 +879,9 @@ export class DispatchService {
       if (pool === 'RIDER') {
         if (order.riderId || order.fulfillment !== 'DELIVERY') return {};
         if (!['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)) return {};
+        // [TA-S0-001 hold] Held for a person: too old to deliver and already
+        // paid by MMG. Not ours to offer until an operator decides.
+        if (order.foodAgeHeldAt) return {};
       } else {
         if (order.driverId) return {};
         if (order.status !== 'PENDING') return {};
@@ -888,7 +891,7 @@ export class DispatchService {
       // [ALG-06 ②] Food-age cutoff: an order nobody could deliver in time is
       // too old to deliver — a person, not another cascade. Marks nobody.
       if (pool === 'RIDER' && order.readyAt) {
-        const limit = await foodAgeLimitMinutes(this.prisma, order.orderType);
+        const limit = await foodAgeLimitMinutes(this.prisma, order.orderType, order.tenantId);
         const age = foodAge({ readyAt: order.readyAt }, limit);
         if (age.tooOld && age.ageMinutes != null && limit != null) {
           await retireTooOldOrder({ prisma: this.prisma, redis: this.redis, io: this.io, notifications: this.notifications }, order, age.ageMinutes, limit);
@@ -1710,6 +1713,8 @@ export class DispatchService {
               // customer converted to pickup must not assign a rider to the
               // converted row — the CAS binds DELIVERY like the board seam.
               fulfillment: 'DELIVERY',
+              // [TA-S0-001 hold] Nor to a row held for a person.
+              foodAgeHeldAt: null,
             },
             data: { riderId: moverId, status: 'RIDER_ASSIGNED', ...(riderRepricing ?? {}) },
           });

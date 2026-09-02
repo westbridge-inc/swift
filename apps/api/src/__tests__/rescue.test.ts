@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
+
+// [REPORT-070 F-02] notifyAdmins is spied through a partial module mock so one
+// case can make the ops page reach NOBODY; everything else in the module is real.
+vi.mock('../modules/notification/notification.service', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../modules/notification/notification.service')>();
+  return { ...mod, notifyAdmins: vi.fn(mod.notifyAdmins) };
+});
 import { nanoid } from 'nanoid';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -11,9 +18,11 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
-import { NotificationService } from '../modules/notification/notification.service';
+import { NotificationService, notifyAdmins } from '../modules/notification/notification.service';
+import { OrderService } from '../modules/order/order.service';
+import { ConflictError } from '../utils/errors';
 import {
-  foodAge, retireTooOldOrder, settleTooOldOrder, sweepFoodAge, grantRescueIncentive, rescueIncentiveGyd, incentiveKey, isCapturedMmg,
+  foodAge, foodAgeLimitMinutes, retireTooOldOrder, settleTooOldOrder, sweepFoodAge, releaseFoodAgeHold, grantRescueIncentive, rescueIncentiveGyd, incentiveKey, isCapturedMmg,
   FOOD_TOO_OLD_REASON, FOOD_TOO_OLD_PAID_HELD_OUTCOME,
 } from '../modules/dispatch/rescue';
 import { ALGO_DEFAULTS, invalidateAlgoConfig } from '../modules/algo/algo-config';
@@ -95,11 +104,13 @@ async function makeRider() {
   return { riderId: rider.id, userId: user.id };
 }
 
-async function makeOrder(opts: { orderType?: OrderType; status?: OrderStatus; readyAgoMin?: number | null; paymentMethod?: 'CASH' | 'MOBILE_MONEY'; paymentStatus?: 'PENDING' | 'CAPTURED'; riderId?: string } = {}) {
+async function makeOrder(opts: { orderType?: OrderType; status?: OrderStatus; readyAgoMin?: number | null; paymentMethod?: 'CASH' | 'MOBILE_MONEY'; paymentStatus?: 'PENDING' | 'CAPTURED'; riderId?: string; fulfillment?: 'DELIVERY' | 'PICKUP'; fulfillmentMode?: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY'; heldAgoMin?: number } = {}) {
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `RSC-${nanoid(8)}`, orderType: opts.orderType ?? 'FOOD_DELIVERY', customerId, vendorId,
-      status: opts.status ?? 'READY_FOR_PICKUP', fulfillment: 'DELIVERY',
+      status: opts.status ?? 'READY_FOR_PICKUP', fulfillment: opts.fulfillment ?? 'DELIVERY',
+      ...(opts.fulfillmentMode ? { fulfillmentMode: opts.fulfillmentMode } : {}),
+      ...(opts.heldAgoMin != null ? { foodAgeHeldAt: new Date(Date.now() - opts.heldAgoMin * MIN) } : {}),
       ...(opts.readyAgoMin == null ? {} : { readyAt: new Date(Date.now() - opts.readyAgoMin * MIN) }),
       ...(opts.riderId ? { riderId: opts.riderId } : {}),
       pickupAddress: 'Store', pickupLat: PICKUP.lat, pickupLng: PICKUP.lng, deliveryAddress: 'Home', deliveryLat: PICKUP.lat + 0.01, deliveryLng: PICKUP.lng + 0.01,
@@ -118,6 +129,14 @@ async function setAlgo(key: string, value: unknown) {
 }
 
 const deps = () => ({ prisma: app.prisma, redis: app.redis, io: app.io, notifications: new NotificationService(app.prisma, app.io) });
+const orderService = () => new OrderService(app.prisma, app.io);
+const TENANT_X = 'tenant-rescue-x';
+
+async function setAlgoFor(tenantId: string, key: string, value: unknown) {
+  const latest = await app.prisma.algoConfig.findFirst({ where: { tenantId, key }, orderBy: { version: 'desc' } });
+  await app.prisma.algoConfig.create({ data: { tenantId, key, value: value as never, version: (latest?.version ?? 0) + 1, updatedBy: UPDATED_BY } });
+  invalidateAlgoConfig();
+}
 
 /** Every `io.to(room).emit(event, payload)` the code under test makes, in order. */
 function captureEmits() {
@@ -170,6 +189,7 @@ afterAll(async () => {
   await app.prisma.algoConfig.deleteMany({ where: { updatedBy: UPDATED_BY } });
   invalidateAlgoConfig();
   await purge();
+  await app.prisma.tenant.deleteMany({ where: { id: TENANT_X } }).catch(() => {});
   await app.close();
 });
 
@@ -337,7 +357,8 @@ describe('[TA-S0-001] paid MMG money is never cancelled by the system', () => {
     const logRow = await app.prisma.orderStatusLog.findFirst({ where: { orderId: order.id }, orderBy: { createdAt: 'desc' } });
     expect(logRow?.changedBy).toBe('system');
     expect(logRow?.note).toContain('already paid by MMG');
-    expect(logRow?.note).toContain('HELD for a person, not cancelled');
+    expect(logRow?.note).toContain('HELD for review, not cancelled');
+    expect(logRow?.status).toBe('READY_FOR_PICKUP'); // the true state, never a guess
 
     // The decision row names the held outcome — never the cancel outcome.
     const rows = await app.prisma.algoDecision.findMany({ where: { algo: 'ALG-06', subjectType: 'ORDER', subjectId: order.id } });
@@ -349,14 +370,20 @@ describe('[TA-S0-001] paid MMG money is never cancelled by the system', () => {
     // Customer: already paid, a person is on it, the store refunds directly — never "cancelled", never "Swift refunds".
     const toCustomer = await app.prisma.notification.findFirst({ where: { userId: customerId, dedupeKey: `food-too-old-paid:customer:${order.id}` } });
     expect(toCustomer?.body).toContain('already paid the store by MMG');
+    expect(toCustomer?.body).toContain('NOT cancelled automatically');
+    expect(toCustomer?.body).toContain('sent to Swift for review');
     expect(toCustomer?.body).toContain('the store refunds you directly');
-    expect(toCustomer?.body).not.toMatch(/cancel/i);
-    expect(toCustomer?.body).not.toMatch(/Swift (will )?refund/i);
+    // [REPORT-070 F-13] Nobody has acknowledged anything: no claim of a person already on it, no Swift refund.
+    expect(toCustomer?.body).not.toMatch(/sorting|handling|a person at Swift is|Swift (will )?refund/i);
     expect(await app.prisma.notification.count({ where: { userId: customerId, dedupeKey: `food-too-old:customer:${order.id}` } })).toBe(0);
     // Store: not cancelled, keep it, a person is handling it.
     const toVendor = await app.prisma.notification.findFirst({ where: { userId: vendorOwnerUserId, dedupeKey: `food-too-old-paid:vendor:${order.id}` } });
     expect(toVendor?.title).toBe('No rider found — the customer has already paid');
     expect(toVendor?.body).toContain('NOT cancelled');
+    expect(toVendor?.body).toContain('sent to Swift for review');
+    expect(toVendor?.body).not.toMatch(/sorting|handling|a person at Swift is/i);
+    // The hold is a COLUMN, and it is set.
+    expect(after.foodAgeHeldAt).not.toBeNull();
     // Ops: paged once on the paid-hold key, never on the cancel key.
     expect(await app.redis.get(`ops_page:food_too_old_paid:${order.id}`)).toBe('1');
     expect(await app.redis.exists(`ops_page:food_too_old:${order.id}`)).toBe(0);
@@ -409,6 +436,112 @@ describe('[TA-S0-001] paid MMG money is never cancelled by the system', () => {
     expect(await settleTooOldOrder(deps(), full, 120, 45)).toBe('UNTOUCHED');
     expect(await app.prisma.algoDecision.count({ where: { algo: 'ALG-06', subjectId: order.id } })).toBe(0);
     expect(await app.prisma.notification.count({ where: { userId: customerId, dedupeKey: `food-too-old-paid:customer:${order.id}` } })).toBe(0);
+  });
+});
+
+describe('[TA-S0-001 hold v2 — REPORT-070] the hold is durable, enforceable and honest', () => {
+  const vendorInclude = { vendor: { select: { name: true, owner: { select: { userId: true } } } } } as const;
+  const full = (id: string) => app.prisma.order.findUniqueOrThrow({ where: { id }, include: vendorInclude });
+  const customerNotices = (id: string) => app.prisma.notification.count({ where: { userId: customerId, dedupeKey: { in: [`food-too-old:customer:${id}`, `food-too-old-paid:customer:${id}`] } } });
+
+  it('[F-06] a pickup order and a store-delivered order are never "no rider found": the sweep and the CAS leave them alone', async () => {
+    const pickup = await makeOrder({ readyAgoMin: 120, fulfillment: 'PICKUP' });
+    const selfDelivered = await makeOrder({ readyAgoMin: 120, fulfillmentMode: 'VENDOR_DELIVERY' });
+    const paidPickup = await makeOrder({ readyAgoMin: 120, fulfillment: 'PICKUP', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    const r = await sweepFoodAge(deps());
+    for (const o of [pickup, selfDelivered, paidPickup]) {
+      expect(r.retired).not.toContain(o.id);
+      expect(r.held).not.toContain(o.id);
+      expect(await settleTooOldOrder(deps(), await full(o.id), 120, 45)).toBe('UNTOUCHED');
+      const after = await app.prisma.order.findUniqueOrThrow({ where: { id: o.id } });
+      expect({ status: after.status, held: after.foodAgeHeldAt }).toEqual({ status: 'READY_FOR_PICKUP', held: null });
+      expect(await customerNotices(o.id)).toBe(0);
+    }
+  });
+
+  it('[F-03] a held order is fenced everywhere: the offer keys are cleared, the dispatch loop leaves it, the assignment seam refuses it', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    await app.redis.set(`dispatch:offer:${order.id}`, 'a-card-still-on-a-phone');
+    expect(await settleTooOldOrder(deps(), await full(order.id), 60, 45)).toBe('HELD_PAID');
+    expect(await app.redis.exists(`dispatch:offer:${order.id}`)).toBe(0);
+
+    const rider = await makeRider();
+    try {
+      expect(await dispatch.dispatchOrder(order.id)).toEqual({});
+      await expect(
+        app.prisma.$transaction((tx) => orderService().stageDirectRiderAssignment(tx, {
+          orderId: order.id, riderId: rider.riderId, changedBy: rider.userId, moverUserId: rider.userId, note: 'hold fence test',
+        })),
+      ).rejects.toBeInstanceOf(ConflictError);
+    } finally {
+      await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false, isAvailable: false } });
+    }
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ riderId: after.riderId, status: after.status }).toEqual({ riderId: null, status: 'READY_FOR_PICKUP' });
+    expect(after.foodAgeHeldAt).not.toBeNull();
+  });
+
+  it('[F-01] overlapping hold attempts have ONE winner: one decision row, one log note, one notice each', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    const row = await full(order.id);
+    const outcomes = await Promise.all([settleTooOldOrder(deps(), row, 60, 45), settleTooOldOrder(deps(), row, 60, 45), settleTooOldOrder(deps(), row, 60, 45)]);
+    expect(outcomes).toEqual(['HELD_PAID', 'HELD_PAID', 'HELD_PAID']);
+    expect(await app.prisma.algoDecision.count({ where: { algo: 'ALG-06', subjectId: order.id } })).toBe(1);
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, changedBy: 'system' } })).toBe(1);
+    expect(await customerNotices(order.id)).toBe(1);
+    expect(await app.prisma.notification.count({ where: { userId: vendorOwnerUserId, dedupeKey: `food-too-old-paid:vendor:${order.id}` } })).toBe(1);
+  });
+
+  it('[F-02] an ops page that reaches NOBODY is a failed page: the claim is released, and the next tick pages again', async () => {
+    vi.mocked(notifyAdmins).mockResolvedValueOnce(0);
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    expect(await settleTooOldOrder(deps(), await full(order.id), 60, 45)).toBe('HELD_PAID');
+    expect(await app.redis.exists(`ops_page:food_too_old_paid:${order.id}`)).toBe(0); // released, not "done"
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).foodAgeHeldAt).not.toBeNull(); // the hold itself stands
+
+    const again = await sweepFoodAge(deps());
+    expect(again.held).toContain(order.id);
+    expect(await app.redis.get(`ops_page:food_too_old_paid:${order.id}`)).toBe('1');
+    const pagesForOrder = vi.mocked(notifyAdmins).mock.calls.filter((c) => (c[2]?.data as Record<string, unknown> | undefined)?.['orderId'] === order.id);
+    expect(pagesForOrder.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('[F-01] a crash after the claim is repaired on the next tick: the notices and the page are delivered then', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED', heldAgoMin: 5 }); // claimed, nothing delivered
+    expect(await customerNotices(order.id)).toBe(0);
+    const r = await sweepFoodAge(deps());
+    expect(r.held).toContain(order.id);
+    expect(r.retired).not.toContain(order.id);
+    expect(await customerNotices(order.id)).toBe(1);
+    expect(await app.redis.get(`ops_page:food_too_old_paid:${order.id}`)).toBe('1');
+    // And a second tick adds nothing.
+    await sweepFoodAge(deps());
+    expect(await customerNotices(order.id)).toBe(1);
+  });
+
+  it('[F-04] held rows do not occupy the retire page: an unpaid too-old order behind three holds is still retired this tick', async () => {
+    for (let i = 0; i < 3; i += 1) await makeOrder({ readyAgoMin: 300, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED', heldAgoMin: 1 });
+    const unpaid = await makeOrder({ readyAgoMin: 200 });
+    const r = await sweepFoodAge(deps());
+    expect(r.retired).toContain(unpaid.id);
+  });
+
+  it('[F-05] the cutoff is the ORDER tenant’s own dial', async () => {
+    await app.prisma.tenant.upsert({ where: { id: TENANT_X }, create: { id: TENANT_X, name: 'Rescue Tenant X', slug: TENANT_X }, update: {} });
+    await setAlgoFor(TENANT_X, 'rescue.foodAgeMaxMinutes', { FOOD_DELIVERY: 9999, GROCERY_DELIVERY: 9999 });
+    expect(await foodAgeLimitMinutes(app.prisma, 'FOOD_DELIVERY', TENANT_X)).toBe(9999);
+    expect(await foodAgeLimitMinutes(app.prisma, 'FOOD_DELIVERY', 'swift-default')).toBe(45);
+  });
+
+  it('[F-03] releaseFoodAgeHold is an operator’s decision: it clears the hold once, logs who, and reopens the page', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    await settleTooOldOrder(deps(), await full(order.id), 60, 45);
+    expect(await releaseFoodAgeHold(deps(), order.id, 'ops-user-1')).toBe(true);
+    expect(await releaseFoodAgeHold(deps(), order.id, 'ops-user-1')).toBe(false);
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.foodAgeHeldAt).toBeNull();
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, changedBy: 'ops-user-1' } })).toBe(1);
+    expect(await app.redis.exists(`ops_page:food_too_old_paid:${order.id}`)).toBe(0);
   });
 });
 

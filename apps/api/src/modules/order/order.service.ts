@@ -505,6 +505,9 @@ export class OrderService {
         // [REPORT-006 F-006-03] Riders are assigned to DELIVERY work only —
         // a converted (PICKUP) or appointment order matches nothing here.
         fulfillment: 'DELIVERY',
+        // [TA-S0-001 hold] An order held for a person (too old, already paid
+        // by MMG) is not claimable by anyone but an operator's decision.
+        foodAgeHeldAt: null,
       },
       data: {
         riderId: input.riderId,

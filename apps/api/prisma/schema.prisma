@@ -1478,6 +1478,12 @@ model Order {
   holdExpiresAt         DateTime?
   /// Set exactly once when the hold releases (vendor notified + dispatchable).
   releasedToVendorAt    DateTime?
+  /// [TA-S0-001 hold] Set exactly once by the food-age cutoff when an order too
+  /// old to deliver is ALREADY PAID by MMG: the system may not cancel it, so it
+  /// is held for a person. While set, no rider may claim it (board, direct
+  /// accept and offer accept all exclude it) and the dispatch loop leaves it
+  /// alone. Cleared only by an operator's decision (releaseFoodAgeHold).
+  foodAgeHeldAt         DateTime?
   placedAt              DateTime  @default(now())
   acceptedAt            DateTime?
   /// [Band F] When the mover REPORTED arriving at the pickup point. The
