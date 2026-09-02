@@ -214,6 +214,22 @@ export const billingUnkeyedTopupDuplicatesGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [M-20] Settlement files rejected before any row could publish, by the first
+ *  reason; and published batches whose credited money disagrees with the
+ *  file's own total (a page for a person). */
+export const settlementImportsRejectedCounter = new client.Counter({
+  name: 'swift_settlement_imports_rejected_total',
+  help: 'Settlement files staged and rejected before publication, by reason',
+  labelNames: ['reason'] as const,
+  registers: [registry],
+});
+export const settlementBatchesUnbalancedGauge = new client.Gauge({
+  name: 'swift_settlement_batches_unbalanced',
+  help: 'Published settlement imports whose credited total disagrees with the validated file total, or rejected imports with a credited row',
+  labelNames: ['kind'] as const,
+  registers: [registry],
+});
+
 /** [M-15] Grandfathered payers held past their tenant's sunset because a
  *  T−30 / T−7 notice has no delivery proof — pinned until it does. */
 export const usdMigrationHeldGauge = new client.Gauge({

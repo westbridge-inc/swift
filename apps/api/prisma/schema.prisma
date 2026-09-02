@@ -2298,6 +2298,35 @@ model ProviderPayment {
 /// Bank-truth reconciliation [san spec PART 25]: ledger truth vs what MMG
 /// actually deposited, minus their fees. INERT until the settlement cadence
 /// config is set (MMG question 10) — built now, activated by an answer.
+/// [M-20] A settlement file is ONE staged import: hashed, strictly parsed and
+/// validated in full — schema, quoting, row count, dates, in-file duplicates,
+/// control total — before a single row may publish money. Publication is a
+/// compare-and-set (one batch winner) and every row's outcome is recorded
+/// back on the batch. A rejected batch never touches the ledger.
+model SettlementImport {
+  id             String    @id @default(cuid())
+  tenantId       String    @default("swift-default")
+  source         String
+  /// sha256 of the file text — the same file imported twice is one batch
+  fileHash       String
+  rowCount       Int
+  computedTotal  Decimal   @db.Decimal(14, 2)
+  controlTotal   Decimal?  @db.Decimal(14, 2)
+  /// STAGED | REJECTED | PUBLISHING | PUBLISHED
+  status         String    @default("STAGED")
+  rejectReasons  Json?
+  rows           Json
+  results        Json?
+  credited       Int       @default(0)
+  publishedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([tenantId, fileHash])
+  @@index([status, createdAt])
+  @@map("settlement_imports")
+}
+
 model SettlementBatch {
   id             String    @id @default(cuid())
   tenantId       String    @default("swift-default")
