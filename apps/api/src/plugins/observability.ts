@@ -531,6 +531,16 @@ export const guardianDriverConfirmCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [S-05] Every safety sweep walks its population in keyset pages from a
+ *  persisted cursor: the pass ages, the unvisited population and the poison
+ *  rows are the SLO — maximum due age, not processed counts. */
+export const sweepGauge = new client.Gauge({
+  name: 'swift_sweep',
+  help: 'Sweep state by work type and check (population, unvisited_in_pass, poison_rows, pass_age_seconds, current_pass_seconds, stalled)',
+  labelNames: ['work', 'check'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

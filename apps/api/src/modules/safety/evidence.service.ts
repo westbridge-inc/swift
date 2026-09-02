@@ -4,6 +4,7 @@ import type { Server } from 'socket.io';
 import { nanoid } from 'nanoid';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
+import { sweepPage } from '../../lib/sweep-cursor';
 
 // Evidence Vault (safety spec §9) — tamper-evident capture of what the
 // platform knew, when it knew it. A bundle opens automatically on SOS ACTIVE
@@ -53,6 +54,10 @@ interface CapturedItem {
 }
 
 export class EvidenceService {
+  /** [S-05] Test seams: a throw before an alert's fix is a poison row; `cursorKey` isolates a test's cursor. */
+  observer: { beforeAppend?: (sosAlertId: string) => Promise<void> } = {};
+  private sweepOpts: { pageSize?: number; cursorKey?: string; maxPages?: number } = {};
+  withSweep(opts: { pageSize?: number; cursorKey?: string; maxPages?: number }): this { this.sweepOpts = opts; return this; }
   constructor(private prisma: PrismaClient, private io: Server) {}
 
   // ── Opening (auto — SOS ACTIVE / S0-S1 intake; idempotent) ───────────────
@@ -213,49 +218,52 @@ export class EvidenceService {
    *  and is skipped. (The PRE-trigger trail would need a location ring buffer
    *  the platform doesn't keep — deferred, documented.) */
   async appendLiveFixes(now = new Date()): Promise<{ appended: number }> {
-    const open = await this.prisma.sosAlert.findMany({
-      where: { status: { in: ['ACTIVE', 'ACKNOWLEDGED'] }, orderId: { not: null } },
-      select: { id: true, orderId: true },
-      take: 100,
-    });
     let appended = 0;
-    for (const alert of open) {
-      try {
-        const bundle = await this.prisma.evidenceBundle.findUnique({
-          where: { sosAlertId: alert.id },
-          select: { id: true, sealedAt: true },
-        });
-        if (!bundle || bundle.sealedAt) continue;
-        const order = await this.prisma.order.findUnique({
-          where: { id: alert.orderId! },
-          select: {
-            driver: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true } },
-            rider: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true } },
-          },
-        });
-        const mover = order?.driver ?? order?.rider;
-        if (!mover?.lastLocationUpdate || mover.currentLat == null || mover.currentLng == null) continue;
+    const where = { status: { in: ['ACTIVE' as const, 'ACKNOWLEDGED' as const] }, orderId: { not: null } };
+    // [S-05] Keyset pages from a persisted cursor: every open alert's trail is
+    // appended within one pass whatever the population; an alert whose append
+    // throws is poison for this pass and the cursor moves past it.
+    await sweepPage(this.prisma, `evidence.live-fixes${this.sweepOpts.cursorKey ? `:${this.sweepOpts.cursorKey}` : ''}`, {
+      pageSize: this.sweepOpts.pageSize ?? Number(process.env['EVIDENCE_LIVE_FIX_PAGE_SIZE'] ?? 100),
+      maxPages: this.sweepOpts.maxPages ?? Number(process.env['SWEEP_MAX_PAGES_PER_TICK'] ?? 10),
+      now,
+      count: (afterId) => this.prisma.sosAlert.count({ where: { ...where, ...(afterId ? { id: { gt: afterId } } : {}) } }),
+      fetch: (afterId, limit) => this.prisma.sosAlert.findMany({ where: { ...where, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: 'asc' }, select: { id: true, orderId: true }, take: limit }),
+      handle: async (alert) => {
+        await this.observer.beforeAppend?.(alert.id);
+      const bundle = await this.prisma.evidenceBundle.findUnique({
+        where: { sosAlertId: alert.id },
+        select: { id: true, sealedAt: true },
+      });
+      if (!bundle || bundle.sealedAt) return;
+      const order = await this.prisma.order.findUnique({
+        where: { id: alert.orderId! },
+        select: {
+          driver: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true } },
+          rider: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true } },
+        },
+      });
+      const mover = order?.driver ?? order?.rider;
+      if (!mover?.lastLocationUpdate || mover.currentLat == null || mover.currentLng == null) return;
 
-        const last = await this.prisma.evidenceItem.findFirst({
-          where: { bundleId: bundle.id, kind: 'LOCATION_FIX' },
-          orderBy: { createdAt: 'desc' },
-          select: { content: true },
-        });
-        const lastAt = (last?.content as { at?: string } | null)?.at;
-        if (lastAt && new Date(lastAt).getTime() >= mover.lastLocationUpdate.getTime()) continue; // no new fix
-        const count = await this.prisma.evidenceItem.count({ where: { bundleId: bundle.id, kind: 'LOCATION_FIX' } });
-        if (count >= 720) continue; // ~2h at the fastest fix cadence — the trail is bounded
+      const last = await this.prisma.evidenceItem.findFirst({
+        where: { bundleId: bundle.id, kind: 'LOCATION_FIX' },
+        orderBy: { createdAt: 'desc' },
+        select: { content: true },
+      });
+      const lastAt = (last?.content as { at?: string } | null)?.at;
+      if (lastAt && new Date(lastAt).getTime() >= mover.lastLocationUpdate.getTime()) return; // no new fix
+      const count = await this.prisma.evidenceItem.count({ where: { bundleId: bundle.id, kind: 'LOCATION_FIX' } });
+      if (count >= 720) return; // ~2h at the fastest fix cadence — the trail is bounded
 
-        const content = { lat: mover.currentLat, lng: mover.currentLng, at: mover.lastLocationUpdate.toISOString() };
-        const canonical = canonicalJson(content);
-        await this.prisma.evidenceItem.create({
-          data: { bundleId: bundle.id, kind: 'LOCATION_FIX', label: `Live fix ${content.at}`, content: content as never, contentHash: sha256(canonical) },
-        });
-        appended += 1;
-      } catch (err) {
-        log().error({ err, sosAlertId: alert.id }, 'evidence live-fix append failed — continuing');
-      }
-    }
+      const content = { lat: mover.currentLat, lng: mover.currentLng, at: mover.lastLocationUpdate.toISOString() };
+      const canonical = canonicalJson(content);
+      await this.prisma.evidenceItem.create({
+        data: { bundleId: bundle.id, kind: 'LOCATION_FIX', label: `Live fix ${content.at}`, content: content as never, contentHash: sha256(canonical) },
+      });
+      appended += 1;
+      },
+    });
     if (appended > 0) log().info({ appended, at: now.toISOString() }, 'evidence live fixes appended');
     return { appended };
   }

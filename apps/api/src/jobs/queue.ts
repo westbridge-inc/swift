@@ -1429,6 +1429,27 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (res.opened + res.closed + res.flagged + res.escalated > 0) {
           ctx.log.info(res, 'Trip Guardian sweep');
         }
+        // [S-05 · operations] Page maximum due age and the poison population,
+        // not processed counts: a sweep whose pass has stalled past the SLO,
+        // or a row that keeps failing, is a human's problem now.
+        const { scanSweeps } = await import('../lib/sweep-cursor');
+        const sweeps = await scanSweeps(ctx.prisma).catch(() => []);
+        const trouble = sweeps.filter((w) => w.stalled || w.repeatPoison.length > 0);
+        if (trouble.length > 0) {
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+          for (const w of trouble) {
+            await opsPageOnce(ctx, `sweep-slo:${w.workType}`, 1800, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: `Safety sweep behind: ${w.workType}`,
+                body: w.stalled
+                  ? `The ${w.workType} sweep has not completed a pass for ${w.passAgeSeconds}s (current pass ${w.currentPassSeconds}s). Rows past the cursor are waiting.`
+                  : `The ${w.workType} sweep has ${w.repeatPoison.length} row(s) failing on every pass — the first: ${w.repeatPoison[0]?.id} (${w.repeatPoison[0]?.lastError}).`,
+                data: { kind: 'safety_sweep_slo', workType: w.workType, stalled: w.stalled, passAgeSeconds: w.passAgeSeconds, repeatPoison: w.repeatPoison.slice(0, 5).map((r) => r.id) },
+              }),
+            ).catch(() => {});
+          }
+        }
         return;
       }
 

@@ -11,6 +11,7 @@ import { nanoid } from 'nanoid';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { log } from '../../utils/logger';
+import { sweepPage } from '../../lib/sweep-cursor';
 
 // Incident Management (safety spec §8) — the case machine. Server-owned like
 // the order and SOS machines: explicit transition table, CAS updates, illegal
@@ -529,24 +530,40 @@ export class IncidentService {
   /** Every live case whose ack or decide clock has blown. Pure read — the
    *  queue handler pages ops (opsPageOnce keeps it one page per case per
    *  window, re-paging while the breach persists). */
-  async slaWatch(now = new Date()): Promise<Array<{ id: string; caseNumber: string; severity: IncidentSeverity; kind: 'ACK' | 'DECIDE' }>> {
-    const live = await this.prisma.incidentCase.findMany({
-      where: {
-        status: { not: 'CLOSED' },
-        OR: [
-          { ackedAt: null, slaAckBy: { lt: now } },
-          { decidedAt: null, slaDecideBy: { lt: now } },
-        ],
-      },
-      select: { id: true, caseNumber: true, severity: true, ackedAt: true, slaAckBy: true, decidedAt: true, slaDecideBy: true },
-      take: 200,
-    });
+  /** [S-05] The breach population is walked in keyset pages from a persisted
+   *  cursor — every blown clock is reported within one pass whatever the
+   *  backlog, never only the first 200. */
+  async slaWatch(now = new Date(), opts: { pageSize?: number; cursorKey?: string; maxPages?: number } = {}): Promise<Array<{ id: string; caseNumber: string; severity: IncidentSeverity; kind: 'ACK' | 'DECIDE' }>> {
+    const where = {
+      status: { not: 'CLOSED' as const },
+      OR: [
+        { ackedAt: null, slaAckBy: { lt: now } },
+        { decidedAt: null, slaDecideBy: { lt: now } },
+      ],
+    };
     const breaches: Array<{ id: string; caseNumber: string; severity: IncidentSeverity; kind: 'ACK' | 'DECIDE' }> = [];
-    for (const k of live) {
-      if (!k.ackedAt && k.slaAckBy < now) breaches.push({ id: k.id, caseNumber: k.caseNumber, severity: k.severity, kind: 'ACK' });
-      if (!k.decidedAt && k.slaDecideBy < now) breaches.push({ id: k.id, caseNumber: k.caseNumber, severity: k.severity, kind: 'DECIDE' });
-    }
+    await sweepPage(this.prisma, `incident.sla${opts.cursorKey ? `:${opts.cursorKey}` : ''}`, {
+      pageSize: opts.pageSize ?? Number(process.env['INCIDENT_SLA_PAGE_SIZE'] ?? 200),
+      maxPages: opts.maxPages ?? Number(process.env['SWEEP_MAX_PAGES_PER_TICK'] ?? 25),
+      now,
+      count: (afterId) => this.prisma.incidentCase.count({ where: { ...where, ...(afterId ? { id: { gt: afterId } } : {}) } }),
+      fetch: (afterId, limit) => this.prisma.incidentCase.findMany({
+        where: { ...where, ...(afterId ? { id: { gt: afterId } } : {}) },
+        orderBy: { id: 'asc' },
+        select: { id: true, caseNumber: true, severity: true, ackedAt: true, slaAckBy: true, decidedAt: true, slaDecideBy: true },
+        take: limit,
+      }),
+      handle: async (k) => {
+        if (!k.ackedAt && k.slaAckBy < now) breaches.push({ id: k.id, caseNumber: k.caseNumber, severity: k.severity, kind: 'ACK' });
+        if (!k.decidedAt && k.slaDecideBy < now) breaches.push({ id: k.id, caseNumber: k.caseNumber, severity: k.severity, kind: 'DECIDE' });
+      },
+    });
     return breaches;
+  }
+
+  /** The breach count right now — a COUNT, never a capped page. */
+  async slaBreachCount(now = new Date()): Promise<number> {
+    return this.prisma.incidentCase.count({ where: { status: { not: 'CLOSED' }, OR: [{ ackedAt: null, slaAckBy: { lt: now } }, { decidedAt: null, slaDecideBy: { lt: now } }] } });
   }
 
   /** §8.4 rule 2 (nightly): ≥3 reports from DIFFERENT reporters in 365 days,
@@ -554,20 +571,17 @@ export class IncidentService {
    *  different women is a signal with zero convictions. Stamps the subject's
    *  newest unstamped case; idempotent across runs. */
   async crossReporterScan(now = new Date()): Promise<Array<{ subjectUserId: string; distinctReporters: number; caseNumber: string }>> {
-    const rows = await this.prisma.incidentCase.findMany({
-      where: { createdAt: { gte: new Date(now.getTime() - 365 * 86_400_000) }, reporterUserId: { not: null } },
-      select: { subjectUserId: true, reporterUserId: true },
-      take: 5000,
-    });
-    const bySubject = new Map<string, Set<string>>();
-    for (const r of rows) {
-      const set = bySubject.get(r.subjectUserId) ?? new Set<string>();
-      set.add(r.reporterUserId!);
-      bySubject.set(r.subjectUserId, set);
-    }
+    // [S-05] The database groups the whole year — never the first 5000 rows.
+    const since = new Date(now.getTime() - 365 * 86_400_000);
+    const subjects = await this.prisma.$queryRaw<Array<{ subjectUserId: string; distinctReporters: number }>>`
+      SELECT "subjectUserId", count(DISTINCT "reporterUserId")::int AS "distinctReporters"
+      FROM "IncidentCase"
+      WHERE "createdAt" >= ${since} AND "reporterUserId" IS NOT NULL
+      GROUP BY "subjectUserId"
+      HAVING count(DISTINCT "reporterUserId") >= 3`;
     const flagged: Array<{ subjectUserId: string; distinctReporters: number; caseNumber: string }> = [];
-    for (const [subjectUserId, reporters] of bySubject) {
-      if (reporters.size < 3) continue;
+    for (const { subjectUserId, distinctReporters } of subjects) {
+      const reporters = { size: distinctReporters };
       // Already a known pattern subject → nothing new to say (idempotent
       // across nights; a FRESH flag only when the subject wasn't flagged yet).
       const alreadyFlagged = await this.prisma.incidentCase.count({
@@ -591,14 +605,11 @@ export class IncidentService {
   /** §8.4 weekly digest — the founder's Monday read: open load by severity,
    *  blown SLA clocks, fresh pattern flags, top repeat subjects. */
   async weeklyDigest(now = new Date()): Promise<{ lines: string[]; open: number; breaches: number; patternsThisWeek: number }> {
-    const openCases = await this.prisma.incidentCase.findMany({
-      where: { status: { not: 'CLOSED' } },
-      select: { severity: true, subjectUserId: true },
-      take: 2000,
-    });
-    const bySeverity = new Map<string, number>();
-    for (const k of openCases) bySeverity.set(k.severity, (bySeverity.get(k.severity) ?? 0) + 1);
-    const breaches = (await this.slaWatch(now)).length;
+    // [S-05] Counts from the database — never a capped page of rows.
+    const openBySeverity = await this.prisma.incidentCase.groupBy({ by: ['severity'], where: { status: { not: 'CLOSED' } }, _count: { _all: true } });
+    const bySeverity = new Map<string, number>(openBySeverity.map((r) => [r.severity as string, r._count._all]));
+    const openCases = { length: openBySeverity.reduce((n, r) => n + r._count._all, 0) };
+    const breaches = await this.slaBreachCount(now);
     const patternsThisWeek = await this.prisma.incidentCase.count({
       where: { patternFlaggedAt: { gte: new Date(now.getTime() - 7 * 86_400_000) } },
     });

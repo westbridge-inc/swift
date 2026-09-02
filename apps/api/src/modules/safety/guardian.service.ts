@@ -1,4 +1,4 @@
-import type { PrismaClient, TripSafetySession, GuardianCloseReason } from '@prisma/client';
+import type { PrismaClient, TripSafetySession, GuardianCloseReason, Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { haversineDistance } from '../../utils/distance';
 import { log } from '../../utils/logger';
@@ -7,6 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { guardianDriverConfirmCounter } from '../../plugins/observability';
+import { sweepPage } from '../../lib/sweep-cursor';
 import { SosService } from './sos.service';
 
 // Trip Guardian (safety spec §5) — server-side monitoring of live taxi rides.
@@ -74,6 +75,12 @@ const softWaitSeconds = () => num('GUARDIAN_SOFT_WAIT_SECONDS', 180);
 const checkinDeadlineSeconds = () => num('GUARDIAN_CHECKIN_DEADLINE_SECONDS', 120);
 /** After an all-good response, how long before the ladder may re-prompt. */
 const checkinCooldownSeconds = () => num('GUARDIAN_CHECKIN_COOLDOWN_SECONDS', 600);
+/** [S-05] Page sizes for the two Guardian sweeps — the population is walked
+ *  in keyset pages from a persisted cursor, never a fixed take. */
+const openPageSize = () => num('GUARDIAN_SWEEP_PAGE_SIZE', 200);
+const reconcilePageSize = () => num('GUARDIAN_RECONCILE_PAGE_SIZE', 500);
+/** [S-05] Pages a tick may drain: a bounded budget, never the whole table in one query. */
+const sweepMaxPages = () => num('SWEEP_MAX_PAGES_PER_TICK', 10);
 /** Tenant-local clock offset for the NIGHT factor; Guyana is UTC-4 all year. */
 const tzOffsetMinutes = (): number => {
   const v = Number(process.env['GUARDIAN_TZ_OFFSET_MINUTES']);
@@ -170,9 +177,14 @@ export class GuardianService {
   private notifications: NotificationService;
   private sos: SosService;
 
-  constructor(private prisma: PrismaClient, private io: Server) {
+  /** [S-05] Test seams: run before a row is handled by a sweep — a throw is a
+   *  poison row. `cursorKey` isolates a test's cursors. Never set in routes. */
+  observer: { beforeOpen?: (orderId: string) => Promise<void>; beforeReconcile?: (sessionId: string) => Promise<void> } = {};
+  private sweepOpts: { openPageSize?: number; reconcilePageSize?: number; cursorKey?: string; maxPages?: number };
+  constructor(private prisma: PrismaClient, private io: Server, sweepOpts: { openPageSize?: number; reconcilePageSize?: number; cursorKey?: string; maxPages?: number } = {}) {
     this.notifications = new NotificationService(prisma, io);
     this.sos = new SosService(prisma, io);
+    this.sweepOpts = sweepOpts;
   }
 
   /** One tick: open sessions for newly-in-progress rides, run detectors and
@@ -187,77 +199,88 @@ export class GuardianService {
   // ── Open: RIDE_IN_PROGRESS taxi rides without a session ─────────────────
 
   private async openNewSessions(now: Date): Promise<number> {
-    const live = await this.prisma.order.findMany({
-      where: { orderType: 'TAXI', status: MONITORED_ORDER_STATUS, driverId: { not: null } },
-      select: {
-        id: true,
-        // [F-028-05] The sweep runs from a WORKER — no request context, so the
-        // tenant-scope extension stamps nothing. The order's own tenant is in
-        // hand and authoritative; fetch it or the session silently takes the
-        // schema default, `swift-default`.
-        tenantId: true,
-        customerId: true,
-        pickedUpAt: true,
-        taxiDuration: true,
-        driver: { select: { userId: true, createdAt: true, totalRides: true } },
-      },
-      take: 200,
-    });
-    if (live.length === 0) return 0;
-
-    const existing = await this.prisma.tripSafetySession.findMany({
-      where: { orderId: { in: live.map((o) => o.id) } },
-      select: { orderId: true },
-    });
-    const known = new Set(existing.map((s) => s.orderId));
-
     let opened = 0;
-    for (const order of live) {
-      if (known.has(order.id) || !order.driver) continue;
-      const { score, factors } = await this.scoreRisk(order, now);
-      const plannedEtaAt =
-        order.pickedUpAt && order.taxiDuration
-          ? new Date(order.pickedUpAt.getTime() + order.taxiDuration * 60_000)
-          : null;
-      try {
-        const session = await this.prisma.tripSafetySession.create({
-          data: {
-            // [F-028-05] Stamped explicitly, because this create happens in a
-            // background sweep with no tenant ALS. Omitting it made every
-            // guardian session `swift-default` — and TripSafetySession is
-            // tenant-scoped on the READ side, so a tenant-B passenger's
-            // authenticated check-in could not find their own ride's session:
-            // NEED_HELP threw NotFound instead of raising the promised
-            // immediate SOS. A safety net that cannot be reached by the person
-            // it is protecting is not a safety net.
-            tenantId: order.tenantId,
-            orderId: order.id,
-            orderType: 'TAXI',
-            passengerUserId: order.customerId,
-            driverUserId: order.driver.userId,
-            riskScore: score,
-            riskFactors: factors,
-            plannedEtaAt,
-            deviationState: { events: [{ t: now.toISOString(), kind: 'SESSION_OPENED', detail: { score, factors } }] },
+    const where = { orderType: 'TAXI', status: MONITORED_ORDER_STATUS, driverId: { not: null } } satisfies Prisma.OrderWhereInput;
+    // [S-05] One keyset page per tick from the persisted cursor: every live
+    // ride is visited within one pass whatever the population; a ride whose
+    // open fails is poison for this pass and the cursor moves past it.
+    await sweepPage(this.prisma, `guardian.open${this.sweepOpts.cursorKey ? `:${this.sweepOpts.cursorKey}` : ''}`, {
+      pageSize: this.sweepOpts.openPageSize ?? openPageSize(),
+      maxPages: this.sweepOpts.maxPages ?? sweepMaxPages(),
+      now,
+      count: (afterId) => this.prisma.order.count({ where: { ...where, ...(afterId ? { id: { gt: afterId } } : {}) } }),
+      fetch: async (afterId, limit) => {
+        const live = await this.prisma.order.findMany({
+          where: { ...where, ...(afterId ? { id: { gt: afterId } } : {}) },
+          orderBy: { id: 'asc' },
+          select: {
+            id: true,
+            // [F-028-05] The sweep runs from a WORKER — no request context, so the
+            // tenant-scope extension stamps nothing. The order's own tenant is in
+            // hand and authoritative; fetch it or the session silently takes the
+            // schema default, `swift-default`.
+            tenantId: true,
+            customerId: true,
+            pickedUpAt: true,
+            taxiDuration: true,
+            driver: { select: { userId: true, createdAt: true, totalRides: true } },
           },
+          take: limit,
         });
-        opened += 1;
-        // HIGH-band trips are proactively visible to ops (§5.1) — advisory
-        // only, never auto-deciding.
-        if (riskBand(score) === 2) {
-          this.warRoom('guardian:high-risk', {
-            sessionId: session.id,
-            orderId: order.id,
-            riskScore: score,
-            riskFactors: factors,
-            openedAt: now.toISOString(),
+        if (live.length === 0) return [];
+        const existing = await this.prisma.tripSafetySession.findMany({ where: { orderId: { in: live.map((o) => o.id) } }, select: { orderId: true } });
+        const known = new Set(existing.map((s) => s.orderId));
+        return live.map((order) => ({ ...order, known: known.has(order.id) }));
+      },
+      handle: async (order) => {
+        await this.observer.beforeOpen?.(order.id);
+        if (order.known || !order.driver) return;
+        const { score, factors } = await this.scoreRisk(order, now);
+        const plannedEtaAt =
+          order.pickedUpAt && order.taxiDuration
+            ? new Date(order.pickedUpAt.getTime() + order.taxiDuration * 60_000)
+            : null;
+        try {
+          const session = await this.prisma.tripSafetySession.create({
+            data: {
+              // [F-028-05] Stamped explicitly, because this create happens in a
+              // background sweep with no tenant ALS. Omitting it made every
+              // guardian session `swift-default` — and TripSafetySession is
+              // tenant-scoped on the READ side, so a tenant-B passenger's
+              // authenticated check-in could not find their own ride's session:
+              // NEED_HELP threw NotFound instead of raising the promised
+              // immediate SOS. A safety net that cannot be reached by the person
+              // it is protecting is not a safety net.
+              tenantId: order.tenantId,
+              orderId: order.id,
+              orderType: 'TAXI',
+              passengerUserId: order.customerId,
+              driverUserId: order.driver.userId,
+              riskScore: score,
+              riskFactors: factors,
+              plannedEtaAt,
+              deviationState: { events: [{ t: now.toISOString(), kind: 'SESSION_OPENED', detail: { score, factors } }] },
+            },
           });
+
+          opened += 1;
+          // HIGH-band trips are proactively visible to ops (§5.1) — advisory
+          // only, never auto-deciding.
+          if (riskBand(score) === 2) {
+            this.warRoom('guardian:high-risk', {
+              sessionId: session.id,
+              orderId: order.id,
+              riskScore: score,
+              riskFactors: factors,
+              openedAt: now.toISOString(),
+            });
+          }
+        } catch {
+          // unique(orderId) violation = a racing tick opened it first — exactly
+          // the invariant the constraint exists to hold. Nothing to do.
         }
-      } catch {
-        // unique(orderId) violation = a racing tick opened it first — exactly
-        // the invariant the constraint exists to hold. Nothing to do.
-      }
-    }
+      },
+    });
     return opened;
   }
 
@@ -317,15 +340,23 @@ export class GuardianService {
   // ── Reconcile: detectors + ladder on live sessions, close finished ones ──
 
   private async reconcileOpenSessions(now: Date): Promise<{ closed: number; flagged: number; escalated: number }> {
-    const sessions = await this.prisma.tripSafetySession.findMany({
-      where: { status: { in: [...OPEN_SESSION_STATUSES] } },
-      take: 500,
-    });
-    if (sessions.length === 0) return { closed: 0, flagged: 0, escalated: 0 };
-
-    const orders = await this.prisma.order.findMany({
-      where: { id: { in: sessions.map((s) => s.orderId) } },
-      select: {
+    let closed = 0;
+    let flagged = 0;
+    let escalated = 0;
+    const where = { status: { in: [...OPEN_SESSION_STATUSES] } } satisfies Prisma.TripSafetySessionWhereInput;
+    // [S-05] Keyset pages from the persisted cursor; a session whose tick
+    // throws is poison for this pass — the rest of the page still runs.
+    await sweepPage(this.prisma, `guardian.reconcile${this.sweepOpts.cursorKey ? `:${this.sweepOpts.cursorKey}` : ''}`, {
+      pageSize: this.sweepOpts.reconcilePageSize ?? reconcilePageSize(),
+      maxPages: this.sweepOpts.maxPages ?? sweepMaxPages(),
+      now,
+      count: (afterId) => this.prisma.tripSafetySession.count({ where: { ...where, ...(afterId ? { id: { gt: afterId } } : {}) } }),
+      fetch: async (afterId, limit) => {
+        const sessions = await this.prisma.tripSafetySession.findMany({ where: { ...where, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: 'asc' }, take: limit });
+        if (sessions.length === 0) return [];
+        const orders = await this.prisma.order.findMany({
+          where: { id: { in: sessions.map((s) => s.orderId) } },
+    select: {
         id: true,
         status: true,
         pickedUpAt: true,
@@ -336,49 +367,52 @@ export class GuardianService {
         deliveryLng: true,
         driver: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true } },
       },
+        });
+        const byId = new Map(orders.map((o) => [o.id, o]));
+        return sessions.map((session) => ({ ...session, order: byId.get(session.orderId) ?? null }));
+      },
+      handle: async ({ order, ...session }) => {
+        await this.observer.beforeReconcile?.(session.id);
+        const r = await this.reconcileOne(session as TripSafetySession, order, now);
+        closed += r.closed; flagged += r.flagged; escalated += r.escalated;
+      },
     });
-    const byId = new Map(orders.map((o) => [o.id, o]));
-
-    let closed = 0;
-    let flagged = 0;
-    let escalated = 0;
-    for (const session of sessions) {
-      const order = byId.get(session.orderId) ?? null;
-
-      // A session mid-escalation finishes its SOS hand-off BEFORE anything
-      // else — even if the ride "completed" underneath it. A timed-out
-      // check-in must not be silenced by whoever taps "complete ride"
-      // (that could be the attacker); ops closes it, not the trip state.
-      if (session.status === 'ESCALATING') {
-        escalated += await this.finishEscalation(session, order, now);
-        continue;
-      }
-
-      if (!order) {
-        // Order hard-deleted underneath the session (test fixtures, purges) —
-        // close rather than monitor a ghost forever.
-        closed += await this.close(session, 'TRIP_CANCELLED', now, null);
-        continue;
-      }
-      if (order.status !== MONITORED_ORDER_STATUS) {
-        const reason: GuardianCloseReason = order.status === 'CANCELLED' ? 'TRIP_CANCELLED' : 'TRIP_COMPLETED';
-        closed += await this.close(session, reason, now, order);
-        continue;
-      }
-
-      const state: DetectorState = (session.deviationState as DetectorState | null) ?? {};
-      state.flags = state.flags ?? {};
-      const { newFlags, freshFixAt } = this.runDetectors(session, order, state, now);
-      flagged += newFlags;
-      escalated += await this.evaluateLadder(session, order, state, now);
-      await this.prisma.tripSafetySession
-        .update({
-          where: { id: session.id },
-          data: { deviationState: state as never, ...(freshFixAt ? { lastLocationAt: freshFixAt } : {}) },
-        })
-        .catch(() => {}); // scratch-state write must never fail the tick
-    }
     return { closed, flagged, escalated };
+  }
+
+  /** One session's tick: finish an escalation, close a finished ride, or run
+   *  the detectors and the ladder. */
+  private async reconcileOne(session: TripSafetySession, order: OrderSnapshot | null, now: Date): Promise<{ closed: number; flagged: number; escalated: number }> {
+
+    // A session mid-escalation finishes its SOS hand-off BEFORE anything
+    // else — even if the ride "completed" underneath it. A timed-out
+    // check-in must not be silenced by whoever taps "complete ride"
+    // (that could be the attacker); ops closes it, not the trip state.
+    if (session.status === 'ESCALATING') {
+      return { closed: 0, flagged: 0, escalated: await this.finishEscalation(session, order, now) };
+    }
+
+    if (!order) {
+      // Order hard-deleted underneath the session (test fixtures, purges) —
+      // close rather than monitor a ghost forever.
+      return { closed: await this.close(session, 'TRIP_CANCELLED', now, null), flagged: 0, escalated: 0 };
+    }
+    if (order.status !== MONITORED_ORDER_STATUS) {
+      const reason: GuardianCloseReason = order.status === 'CANCELLED' ? 'TRIP_CANCELLED' : 'TRIP_COMPLETED';
+      return { closed: await this.close(session, reason, now, order), flagged: 0, escalated: 0 };
+    }
+
+    const state: DetectorState = (session.deviationState as DetectorState | null) ?? {};
+    state.flags = state.flags ?? {};
+    const { newFlags, freshFixAt } = this.runDetectors(session, order, state, now);
+    const escalated = await this.evaluateLadder(session, order, state, now);
+    await this.prisma.tripSafetySession
+      .update({
+        where: { id: session.id },
+        data: { deviationState: state as never, ...(freshFixAt ? { lastLocationAt: freshFixAt } : {}) },
+      })
+      .catch(() => {}); // scratch-state write must never fail the tick
+    return { closed: 0, flagged: newFlags, escalated };
   }
 
   private async close(session: TripSafetySession, reason: GuardianCloseReason, now: Date, order: OrderSnapshot | null): Promise<number> {
