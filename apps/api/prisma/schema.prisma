@@ -416,6 +416,31 @@ model CountryConfig {
   @@map("country_configs")
 }
 
+/// [M-35] One immutable version of a country's pricing config of one kind
+/// (TAXI_RATES | TAXI_CLASS_RATES | DELIVERY_RATES | COURIER_RATES): the
+/// validated, fully merged payload, its schema version and declared units.
+/// Written on every valid write and on the first valid read of a payload the
+/// ledger has not seen; a reader that finds the live column invalid falls
+/// closed to the newest version here, never to a guess. Rollback points the
+/// column back at a version and records a new one naming what it restored.
+model PricingConfigVersion {
+  id            String   @id @default(cuid())
+  countryCode   String
+  kind          String
+  version       Int
+  schemaVersion Int
+  units         String
+  payload       Json
+  payloadHash   String
+  restoredFrom  Int?
+  createdBy     String?
+  createdAt     DateTime @default(now())
+
+  @@unique([countryCode, kind, version])
+  @@index([countryCode, kind, payloadHash])
+  @@map("pricing_config_versions")
+}
+
 // ==========================================
 // TRUST & VERIFICATION (L1/L2/L3 + strikes)
 // ==========================================

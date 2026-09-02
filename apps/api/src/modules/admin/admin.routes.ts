@@ -49,6 +49,7 @@ import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import { assertNoZoneOverlap } from '../rides/fare-zones';
+import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { createHash } from 'node:crypto';
 import { billingTopupMissingKeyCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
@@ -1634,6 +1635,46 @@ export async function adminRoutes(app: FastifyInstance) {
         floatL3: Number(c.floatL3),
       })),
     };
+  });
+
+  /** [M-35] GET /countries/:code/pricing — every pricing kind for a market:
+   *  the live column's verdict (VALID / INVALID with every problem named /
+   *  ABSENT), what the readers actually price from and where it came from,
+   *  and the recorded versions. */
+  app.get('/countries/:code/pricing', { preHandler: [platformControlGuard] }, async (request) => {
+    const { code } = request.params as { code: string };
+    const row = await app.prisma.countryConfig.findUnique({ where: { code }, select: { code: true, taxiRates: true, taxiClassRates: true, deliveryRates: true, courierRates: true } });
+    if (!row) throw new NotFoundError('CountryConfig', code);
+    const raw: Record<PricingKind, unknown> = { TAXI_RATES: row.taxiRates, TAXI_CLASS_RATES: row.taxiClassRates, DELIVERY_RATES: row.deliveryRates, COURIER_RATES: row.courierRates };
+    const kinds = await Promise.all(PRICING_KINDS.map(async (kind) => {
+      const verdict = validatePricingConfig(kind, raw[kind]);
+      const read = await readPricingConfig(app.prisma, code, kind);
+      const versions = await app.prisma.pricingConfigVersion.findMany({ where: { countryCode: code, kind }, orderBy: { version: 'desc' }, take: 20 });
+      return { kind, units: PRICING_UNITS[kind], live: { status: verdict.status, problems: verdict.problems }, effective: { payload: read.payload, source: read.source, version: read.version }, versions };
+    }));
+    return { success: true, data: { countryCode: code, schemaVersion: PRICING_SCHEMA_VERSION, kinds } };
+  });
+
+  /** [M-35] PUT /countries/:code/pricing/:kind — write under the law: the
+   *  partial is merged over the defaults, the whole payload must satisfy the
+   *  strict schema, the column and a new version land in one transaction. */
+  app.put('/countries/:code/pricing/:kind', { preHandler: [platformControlGuard] }, async (request) => {
+    const { code, kind } = request.params as { code: string; kind: string };
+    if (!(PRICING_KINDS as readonly string[]).includes(kind)) throw new AppError(400, 'INVALID_PRICING_KIND', `Unknown pricing kind ${kind}`);
+    const result = await writePricingConfig(app.prisma, code, kind as PricingKind, request.body, request.user.userId);
+    await audit(request.user.userId, 'UPDATE_PRICING_CONFIG', 'CountryConfig', code, { kind, version: result.version }, request);
+    return { success: true, data: { countryCode: code, kind, ...result } };
+  });
+
+  /** [M-35] POST /countries/:code/pricing/:kind/rollback — point the column
+   *  at a recorded version; a NEW version names what it restored. */
+  app.post('/countries/:code/pricing/:kind/rollback', { preHandler: [platformControlGuard] }, async (request) => {
+    const { code, kind } = request.params as { code: string; kind: string };
+    if (!(PRICING_KINDS as readonly string[]).includes(kind)) throw new AppError(400, 'INVALID_PRICING_KIND', `Unknown pricing kind ${kind}`);
+    const body = z.object({ version: z.number().int().min(1).optional() }).parse(request.body ?? {});
+    const result = await rollbackPricingConfig(app.prisma, code, kind as PricingKind, body.version, request.user.userId);
+    await audit(request.user.userId, 'UPDATE_PRICING_CONFIG', 'CountryConfig', code, { kind, rollback: true, restoredFrom: result.restoredFrom, version: result.version }, request);
+    return { success: true, data: { countryCode: code, kind, ...result } };
   });
 
   /** Global ⌘K search — one query fans out across orders (number), users

@@ -2,8 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
-import { estimateCourierFee, mergeCourierRates, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
-import { CountryConfigService } from '../country/country-config.service';
+import { estimateCourierFee, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
+import { readCourierRates } from '../country/pricing-config';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { OrderService, holdWindowMs, TERMINAL_ORDER_STATUSES } from '../order/order.service';
@@ -130,15 +130,11 @@ export default async function courierRoutes(app: FastifyInstance) {
 
   // Per-country courier pricing [UG-CRAFT-03]: the caller's market decides
   // the rates; null config = the code defaults (byte-identical to before).
-  const countryConfig = new CountryConfigService(app.prisma);
+  // [M-35] Validated and versioned — an invalid column fails closed to the
+  // last known good version, never to raw JSON; the reader never throws.
   async function ratesFor(userId: string): Promise<CourierRates> {
-    try {
-      const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
-      const cfg = await countryConfig.getByCode(user?.countryCode ?? 'GY');
-      return mergeCourierRates(cfg.courierRates);
-    } catch {
-      return mergeCourierRates(null); // config lookup must never break a quote
-    }
+    const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }).catch(() => null);
+    return (await readCourierRates(app.prisma, user?.countryCode ?? 'GY')).payload;
   }
 
   /** POST /estimate — price quote (size + distance + speed) before requesting. */

@@ -4,6 +4,7 @@ import { canonicalBillableKm } from '../../utils/billable-distance';
 import { type GeoPoint } from '../../utils/geo';
 import { resolveFareZones, DEFAULT_TENANT_ID } from './fare-zones';
 import { CountryConfigService } from '../country/country-config.service';
+import { readTaxiRates, readClassRates, assertSaneFare } from '../country/pricing-config';
 
 // ---------------------------------------------------------------------------
 // Fare engine — deterministic, computed and shown BEFORE
@@ -11,24 +12,14 @@ import { CountryConfigService } from '../country/country-config.service';
 // the CountryConfig formula. Never an AI call, never a post-hoc surprise.
 // ---------------------------------------------------------------------------
 
-export interface TaxiRates {
-  base: number;
-  perKm: number;
-  perMin: number;
-  minimum: number;
-}
-
-const DEFAULT_RATES: TaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
+// [M-35] The rates and their defaults live with the pricing-config law: one
+// strict schema per kind, validated at write and at read, versioned, in
+// declared units. The fare engine never reads raw JSON again.
+export type { TaxiRates, ClassRates } from '../country/pricing-config';
+export { DEFAULT_CLASS_RATES } from '../country/pricing-config';
 const AVG_SPEED_KMH = 25;
 
 // --- Ride tiers (deterministic, never AI — hard rule 1) --------------------
-
-export type ClassRates = Record<RideClass, number>;
-
-/** Multipliers on the base (Economy) fare. Code default when CountryConfig is null.
- *  GROUP = a minibus (9–15 seater) for group / tour / airport runs — a bigger
- *  vehicle and a premium service, so it sits above XL. */
-export const DEFAULT_CLASS_RATES: ClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 };
 
 /** Seat capacity per tier — a code rule, not stored on the driver. GROUP covers
  *  up to a 15-seater minibus (14 passengers + driver). */
@@ -125,6 +116,8 @@ export class FareService {
     const durationMin = Math.ceil(route.minutes ?? (distanceKm / AVG_SPEED_KMH) * 60);
 
     const config = await this.countryConfig.getByCode(countryCode);
+    // [M-35] Validated, versioned rates — or the last known good, never raw JSON.
+    const rates = (await readTaxiRates(this.prisma, countryCode)).payload;
 
     // Zone table first — both ends must resolve. [M-34] Only THIS tenant's
     // active zones in THIS country are candidates, with deterministic
@@ -140,7 +133,7 @@ export class FareService {
       });
       if (zoneFare) {
         return {
-          fare: Number(zoneFare.fare),
+          fare: assertSaneFare(Number(zoneFare.fare), 'zone_table'),
           currencyCode: config.currencyCode,
           distanceKm: round1(distanceKm),
           billableKm: distanceKm,
@@ -155,10 +148,9 @@ export class FareService {
       }
     }
 
-    // Formula fallback — rates from config, cash-friendly rounding
-    const rates = { ...DEFAULT_RATES, ...((config.taxiRates as Partial<TaxiRates> | null) ?? {}) };
+    // Formula fallback — validated rates, cash-friendly rounding
     const raw = rates.base + rates.perKm * distanceKm + rates.perMin * durationMin;
-    const fare = Math.max(rates.minimum, Math.round(raw / 100) * 100);
+    const fare = assertSaneFare(Math.max(rates.minimum, Math.round(raw / 100) * 100), 'formula');
 
     return {
       fare,
@@ -180,19 +172,16 @@ export class FareService {
    */
   async estimateTiers(pickup: GeoPoint, dropoff: GeoPoint, countryCode: string, tenantId: string = DEFAULT_TENANT_ID): Promise<TieredEstimate> {
     const base = await this.estimate(pickup, dropoff, countryCode, tenantId);
-    const config = await this.countryConfig.getByCode(countryCode);
-    const rates = { ...DEFAULT_RATES, ...((config.taxiRates as Partial<TaxiRates> | null) ?? {}) };
-    const classRates: ClassRates = {
-      ...DEFAULT_CLASS_RATES,
-      ...((config.taxiClassRates as Partial<ClassRates> | null) ?? {}),
-    };
+    // [M-35] Validated, versioned rates and multipliers (Economy is exactly 1 by schema).
+    const rates = (await readTaxiRates(this.prisma, countryCode)).payload;
+    const classRates = (await readClassRates(this.prisma, countryCode)).payload;
 
     const tiers: TierEstimate[] = RIDE_CLASS_ORDER.map((rideClass) => {
-      const multiplier = classRates[rideClass] ?? DEFAULT_CLASS_RATES[rideClass];
+      const multiplier = classRates[rideClass];
       return {
         rideClass,
         multiplier,
-        fare: applyClassMultiplier(base.fare, multiplier, rates.minimum),
+        fare: assertSaneFare(applyClassMultiplier(base.fare, multiplier, rates.minimum), `tier_${rideClass}`),
         capacity: CLASS_CAPACITY[rideClass],
         source: base.source,
       };
