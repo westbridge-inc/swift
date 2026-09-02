@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { normalizeShortCode, sanitizeTemplate } from './qr-codes';
+import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // Install attribution — pure pieces. Android is deterministic (the Play URL
@@ -15,7 +16,7 @@ export const ATTRIB_MAX_OPEN_PER_FP = Math.max(1, Number(process.env['ATTRIB_MAX
 export function attribSalt(): string {
   const salt = process.env['ATTRIB_SALT'];
   if (!salt) {
-    if (process.env['NODE_ENV'] === 'production') throw new Error('ATTRIB_SALT is required in production');
+    if (isProduction()) throw new Error('ATTRIB_SALT is required in production');
     return 'dev-attrib-salt';
   }
   return salt;

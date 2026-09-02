@@ -1,4 +1,5 @@
 import { nanoid } from 'nanoid';
+import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // MMG (Mobile Money Guyana) — Merchant-Initiated Payments.
@@ -400,7 +401,7 @@ export class LiveMmgProvider implements MmgMerchantProvider {
 /** Driver selection is config, not code. Defaults to the sandbox. */
 export function getMmgProvider(): MmgMerchantProvider {
   const driver = process.env['MMG_DRIVER'] ?? 'sandbox';
-  if (process.env['NODE_ENV'] === 'production' && driver === 'sandbox') {
+  if (isProduction() && driver === 'sandbox') {
     throw new Error('MMG_DRIVER=sandbox is forbidden in production');
   }
   switch (driver) {
@@ -422,7 +423,7 @@ export function getMmgProvider(): MmgMerchantProvider {
             `(missing: ${missing.join(', ')})`,
         );
       }
-      if (process.env['NODE_ENV'] === 'production' && /mmgtest|\buat\b|sandbox/i.test(cfg.baseUrl)) {
+      if (isProduction() && /mmgtest|\buat\b|sandbox/i.test(cfg.baseUrl)) {
         throw new Error('A non-UAT MMG_API_URL is required in production');
       }
       return new LiveMmgProvider(cfg);

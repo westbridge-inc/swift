@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type Redis from 'ioredis';
+import { isProduction } from './runtime-mode';
 
 const OTP_PREFIX = 'otp:';
 const OTP_TTL = 300; // 5 minutes
@@ -18,7 +19,7 @@ export function generateOtp(): string {
 function otpHashSecret(): string {
   const secret = process.env['OTP_HASH_SECRET'] ?? process.env['JWT_SECRET'];
   if (secret) return secret;
-  if (process.env['NODE_ENV'] === 'production') {
+  if (isProduction()) {
     throw new Error('OTP_HASH_SECRET or JWT_SECRET is required in production');
   }
   // Unit/local development only. Production is rejected above and by the boot

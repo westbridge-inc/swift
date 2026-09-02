@@ -49,6 +49,7 @@ import { statementRoutes } from './modules/order/statement.routes';
 import path from 'node:path';
 import { installProcessLifecycle } from './utils/process-lifecycle';
 import { resolveCorsOrigins } from './utils/cors-origin';
+import { isDevelopment, isProduction } from './utils/runtime-mode';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
@@ -80,7 +81,7 @@ async function buildApp() {
       // secrets and credentials never reach log output
       redact: loggerRedactConfig,
       transport:
-        process.env['NODE_ENV'] === 'development'
+        isDevelopment()
           ? { target: 'pino-pretty', options: { colorize: true } }
           : undefined,
     },
@@ -122,7 +123,7 @@ async function buildApp() {
   // Dev/test keep the in-memory store (a shared Redis counter across vitest's
   // per-file workers would cross-contaminate the whole suite's rate-limit state).
   const rateLimitRedis =
-    process.env['NODE_ENV'] === 'production'
+    isProduction()
       ? new Redis(process.env['REDIS_URL'] || 'redis://localhost:6379', {
           connectionName: 'swift-rate-limit',
           // A rate-limit store must fail OPEN, never queue or crash a request if
@@ -235,7 +236,7 @@ async function buildApp() {
 
     const detailToken = process.env['HEALTH_DETAIL_TOKEN'];
     const showDetail =
-      process.env['NODE_ENV'] === 'development' ||
+      isDevelopment() ||
       (!!detailToken && request.headers['x-health-detail'] === detailToken);
     if (!showDetail) {
       return { status, timestamp: new Date().toISOString() };
@@ -339,7 +340,7 @@ async function buildApp() {
     app.decorate('queues', queues);
     app.decorate('dispatchQueue', queues.dispatchQueue);
   } catch (err) {
-    if (process.env['NODE_ENV'] === 'production') {
+    if (isProduction()) {
       app.log.fatal({ err }, 'Background jobs failed to initialize — refusing production boot');
       await app.close().catch((closeError) => {
         app.log.error({ err: closeError }, 'Failed to close app after queue initialization failure');

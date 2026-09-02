@@ -5,6 +5,8 @@
 // inspectable buffer so tests can assert exactly what would have been sent.
 // ---------------------------------------------------------------------------
 
+import { isProduction } from '../../utils/runtime-mode';
+
 export interface SmsProvider {
   sendSms(to: string, body: string): Promise<{ ref: string }>;
 }
@@ -96,7 +98,7 @@ class DevEmail implements EmailProvider {
     //
     // The failure this converts is the one the proof standard calls the silent
     // no-op: a complete code path that returns early, successfully, forever.
-    if (process.env['NODE_ENV'] === 'production') {
+    if (isProduction()) {
       throw new Error(
         'FATAL: email has no production provider — DevEmail discards every message while reporting success. ' +
           'Nothing that depends on email (receipts, expiry warnings, help@) would arrive, and nothing would say so. ' +
@@ -232,7 +234,7 @@ export function getPushProvider(): PushProvider {
       // every notification on the floor while reporting success, which is the
       // worst possible production behaviour for dispatch offers and safety
       // pings. No construction path can reach it in production, now or later.
-      if (process.env['NODE_ENV'] === 'production') {
+      if (isProduction()) {
         throw new Error('FATAL: PUSH_PROVIDER is dev (in-memory) in production — every push would be silently swallowed while reporting success. Set PUSH_PROVIDER=expo.');
       }
       return new DevPush();

@@ -26,6 +26,7 @@ import {
   disconnectSessionSockets as disconnectAuthorizationSessionSockets,
   disconnectUserSockets as disconnectAuthorizationUserSockets,
 } from '../../utils/socket-revocation';
+import { isDevelopment, isProduction } from '../../utils/runtime-mode';
 
 interface DeviceInfo {
   deviceId: string;
@@ -107,7 +108,7 @@ export class AuthService {
     // Store in Redis with 5-min TTL
     await storeOtp(this.app.redis, phone, otp);
 
-    if (process.env['NODE_ENV'] === 'development') {
+    if (isDevelopment()) {
       this.app.log.info(`[DEV] OTP for ${phone}: ${otp}`);
     }
 
@@ -132,7 +133,7 @@ export class AuthService {
     // (DEV_OTP_BYPASS=1) AND non-production NODE_ENV, so it is inert in tests, CI,
     // staging and prod — only active when a developer deliberately enables it locally.
     const devBypass =
-      process.env['NODE_ENV'] !== 'production' &&
+      !isProduction() &&
       process.env['DEV_OTP_BYPASS'] === '1' &&
       code === '000000';
     if (!devBypass) {

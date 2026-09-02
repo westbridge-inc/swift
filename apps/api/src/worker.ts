@@ -24,6 +24,7 @@ import { initSentry } from './plugins/observability';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs, withTimeout } from './utils/async-lifecycle';
 import { resolveDatabaseUrl } from './utils/db-pool';
 import { installProcessLifecycle } from './utils/process-lifecycle';
+import { isProduction } from './utils/runtime-mode';
 
 async function main() {
   assertSafeBootConfig();
@@ -118,7 +119,7 @@ async function main() {
   try {
     const startupTimeoutMs = positiveDurationMs(process.env['QUEUE_STARTUP_TIMEOUT_MS'], 15_000);
     await withTimeout(redis.ping(), startupTimeoutMs, 'Worker Redis startup');
-    if (process.env['NODE_ENV'] === 'production') {
+    if (isProduction()) {
       const { createAdapter } = await import('@socket.io/redis-adapter');
       const pub = redis.duplicate();
       const sub = redis.duplicate();

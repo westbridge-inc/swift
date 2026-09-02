@@ -3,6 +3,7 @@ import type { FastifyRequest } from 'fastify';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type { QrLookup, ScanVerdict } from './qr-codes';
 import { sanitizeSrc, sanitizeTemplate } from './qr-codes';
+import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // Scan logging — the analytics spine, fire-and-forget by construction. A scan
@@ -22,7 +23,7 @@ const FLUSH_BATCH = 500;
 function scanIpSalt(): string {
   const salt = process.env['SCAN_IP_SALT'];
   if (!salt) {
-    if (process.env['NODE_ENV'] === 'production') throw new Error('SCAN_IP_SALT is required in production');
+    if (isProduction()) throw new Error('SCAN_IP_SALT is required in production');
     return 'dev-scan-ip-salt';
   }
   return salt;

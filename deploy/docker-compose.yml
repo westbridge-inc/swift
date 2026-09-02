@@ -87,7 +87,7 @@ services:
       # app's production guard (correctly) REFUSES mock KYC/MMG/card rails when
       # NODE_ENV=production (SPS-F-0011). Flip to production ONLY once every
       # provider in .env is a real credential (that's the LB-010 boundary).
-      NODE_ENV: ${NODE_ENV:-development}
+      NODE_ENV: ${NODE_ENV:?set NODE_ENV explicitly (production|development|test|loadtest) — the API refuses to guess its posture}
       HOST: 0.0.0.0
       PORT: "3000"
       DATABASE_URL: postgresql://${POSTGRES_USER:-swift}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swift}
@@ -111,7 +111,7 @@ services:
     env_file: .env
     command: ["node", "dist/worker.js"]
     environment:
-      NODE_ENV: ${NODE_ENV:-development}
+      NODE_ENV: ${NODE_ENV:?set NODE_ENV explicitly (production|development|test|loadtest) — the API refuses to guess its posture}
       # [P1] The worker sizes its own Prisma pool for its declared job
       # concurrency (src/utils/db-pool.ts; override with DB_POOL_SIZE_WORKER in
       # .env). Do NOT append ?connection_limit here — a limit written into the

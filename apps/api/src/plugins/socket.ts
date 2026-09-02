@@ -22,6 +22,7 @@ import {
 } from '../utils/socket-revocation';
 import { guardRedisCommandPromises } from '../utils/redis-command-guard';
 import { warRoomsForSocket } from '../modules/safety/war-room';
+import { isProduction } from '../utils/runtime-mode';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -77,9 +78,9 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   });
   const authService = new AuthService(app);
   const adapterClients: Redis[] = [];
-  let socketAdapterHealthy = process.env['NODE_ENV'] !== 'production';
+  let socketAdapterHealthy = !isProduction();
   app.decorate('checkSocketAdapterReady', () => (
-    process.env['NODE_ENV'] !== 'production'
+    !isProduction()
     || (
       socketAdapterHealthy
       && adapterClients.length === 2
@@ -311,7 +312,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   // test run a single process (the default in-memory adapter is correct there);
   // gating on production also keeps vitest's per-file socket servers from
   // cross-talking through a shared Redis pub/sub channel.
-  if (process.env['NODE_ENV'] === 'production') {
+  if (isProduction()) {
     const { createAdapter } = await import('@socket.io/redis-adapter');
     const pubClient = app.redis.duplicate();
     const subClient = app.redis.duplicate();
