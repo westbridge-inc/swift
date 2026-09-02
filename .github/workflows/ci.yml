@@ -53,6 +53,16 @@ jobs:
       - run: pnpm type-check
       - name: Mobile unit tests
         run: pnpm --filter @swift/mobile test
+      # [CI-01] The admin console and the public site have had unit suites all
+      # along — session, dashboard-honesty, route-authority, browser-origin,
+      # legal-document — and nothing ran them, so a red test in either app
+      # never blocked a merge. Both are jobs' worth of seconds; a suite that
+      # does not run is not a gate. apps/api/src/__tests__/ci-gates.test.ts
+      # asserts every package with a `test` script is invoked here.
+      - name: Admin unit tests
+        run: pnpm --filter @swift/admin test
+      - name: Web unit tests
+        run: pnpm --filter @swift/web test
 
   api-test:
     name: API Tests
