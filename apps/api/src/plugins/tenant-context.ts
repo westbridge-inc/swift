@@ -13,6 +13,24 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  */
 export interface TenantStore {
   tenantId: string | null;
+  /** [TEN-01] How this async flow reached the database: a REQUEST (tenant
+   *  bound by authentication, or not yet), a SYSTEM capability (audited
+   *  cross-tenant work that names itself), or nothing at all. */
+  mode?: 'request' | 'system';
+  capability?: string;
+}
+
+export type TenantMode = 'request' | 'system' | 'unbound';
+export interface TenantContextView { tenantId: string | null; mode: TenantMode; capability: string | null }
+
+/** [TEN-01] The whole context, never just the id: an absent store is
+ *  UNBOUND — a composition root that never began a context — and is told
+ *  apart from a request that has not bound a tenant yet and from audited
+ *  system work. */
+export function getTenantContext(): TenantContextView {
+  const store = tenantContext.getStore();
+  if (!store) return { tenantId: null, mode: 'unbound', capability: null };
+  return { tenantId: store.tenantId, mode: store.mode ?? (store.tenantId ? 'request' : 'unbound'), capability: store.capability ?? null };
 }
 
 // Pin the ALS to the global symbol registry so there is EXACTLY ONE instance
@@ -36,7 +54,7 @@ export function getTenantId(): string | null {
  * `enterTenant` mutation can't leak into another request's async context.
  */
 export function beginRequestTenantContext(): void {
-  tenantContext.enterWith({ tenantId: null });
+  tenantContext.enterWith({ tenantId: null, mode: 'request' });
 }
 
 /**
@@ -47,7 +65,7 @@ export function beginRequestTenantContext(): void {
 export function enterTenant(tenantId: string | null): void {
   const store = tenantContext.getStore();
   if (store) store.tenantId = tenantId;
-  else tenantContext.enterWith({ tenantId });
+  else tenantContext.enterWith({ tenantId, mode: 'request' });
 }
 
 /** Run a function with tenant scoping explicitly OFF (cross-tenant admin/system
@@ -55,11 +73,20 @@ export function enterTenant(tenantId: string | null): void {
  *  the context alive across the callee's deferred continuations (e.g. Prisma
  *  runs its query extensions in a later microtask) — without it, a callback
  *  that merely RETURNS a promise loses the context the moment run() unwinds. */
-export async function runWithoutTenant<T>(fn: () => Promise<T>): Promise<T> {
-  return tenantContext.run({ tenantId: null }, async () => await fn());
+/** [TEN-01] Audited cross-tenant SYSTEM work. Every caller is a capability;
+ *  the legacy name stays callable and is counted under `legacy-unscoped` so
+ *  the remaining unnamed callers can be found and named (TEN-05). */
+export async function runWithoutTenant<T>(fn: () => Promise<T>, capability = 'legacy-unscoped'): Promise<T> {
+  return tenantContext.run({ tenantId: null, mode: 'system', capability }, async () => await fn());
+}
+
+/** The typed, audited system capability: cross-tenant work that names itself. */
+export async function runAsSystem<T>(capability: string, fn: () => Promise<T>): Promise<T> {
+  if (!capability || capability.length < 3) throw new Error('runAsSystem needs a capability name');
+  return tenantContext.run({ tenantId: null, mode: 'system', capability }, async () => await fn());
 }
 
 /** Run a function scoped to a specific tenant (tests, targeted system tasks). */
 export async function runWithTenant<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
-  return tenantContext.run({ tenantId }, async () => await fn());
+  return tenantContext.run({ tenantId, mode: 'request' }, async () => await fn());
 }

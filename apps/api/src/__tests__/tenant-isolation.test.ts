@@ -100,7 +100,7 @@ describe('tenant isolation (stage 2)', () => {
     expect(created.tenantId).toBe(TENANT_B);
   });
 
-  it('no context = unscoped (background jobs see every tenant)', async () => {
+  it('an audited SYSTEM capability is unscoped (background jobs see every tenant) — [TEN-01] an UNBOUND composition is not (see tenant-wall-binds-app)', async () => {
     const all = await runWithoutTenant(() => prisma.user.findMany({ where: { id: { in: userIds } } }));
     expect(all.length).toBe(userIds.length); // every tenant's rows visible
   });
