@@ -2910,7 +2910,12 @@ export async function adminRoutes(app: FastifyInstance) {
       effectiveFrom: z.string().datetime().optional(),
       confirmQuote: z.string().optional(),
     }).parse(request.body ?? {});
-    const { validateNewRate, convertUsdToLocal, formatMoney } = await import('../billing/fx');
+    const { validateNewRate, convertUsdToLocal, formatMoney, FX_NOTICE_WINDOW_DAYS } = await import('../billing/fx');
+    // [M-14] New rates can be held by operations while the notice proof lags;
+    // the rate in force keeps billing.
+    if (process.env['FX_RATE_ACTIVATION_KILL'] === '1') {
+      throw new AppError(503, 'FX_RATE_ACTIVATION_KILLED', 'New FX rates are on hold by operations — the current rate keeps billing.');
+    }
     const previous = await app.prisma.fxRate.findFirst({ where: { quote: body.quote }, orderBy: { effectiveFrom: 'desc' } });
     const check = validateNewRate(body.rate, previous ? Number(previous.rate) : null);
     if (!check.ok) throw new AppError(400, 'INVALID_RATE', check.error!);
@@ -2926,11 +2931,24 @@ export async function adminRoutes(app: FastifyInstance) {
         `This rate moves ${Math.round((check.deltaPct ?? 0) * 100)}% — a US$25.00 plan changes from ${before !== null ? formatMoney(before, body.quote) : 'n/a'} to ${formatMoney(after, body.quote)} per week. Re-send with confirmQuote="${body.quote}" to apply.`,
       );
     }
+    // [M-14] A rate that moves payers' amounts by more than the notice rule's
+    // 2% may not take effect sooner than the notice window: the notice job
+    // announces it ahead, and the charge gate refuses it for any invoice whose
+    // notice was not delivered in time. A first rate, or a move within 2%,
+    // may be immediate. (Checked after the typed confirmation so a fat-finger
+    // is caught as a fat-finger first.)
+    const effectiveFrom = body.effectiveFrom ? new Date(body.effectiveFrom) : new Date();
+    if (previous && (check.deltaPct ?? 0) > 0.02) {
+      const earliest = new Date(Date.now() + FX_NOTICE_WINDOW_DAYS * 86_400_000);
+      if (effectiveFrom.getTime() < earliest.getTime()) {
+        throw new AppError(400, 'FX_NOTICE_WINDOW', `This rate moves payers' amounts by more than 2% — it can take effect no sooner than ${earliest.toISOString().slice(0, 10)} (${FX_NOTICE_WINDOW_DAYS} days' notice). Set effectiveFrom on or after that date.`);
+      }
+    }
     const row = await app.prisma.fxRate.create({
       data: {
         quote: body.quote, rate: body.rate, source: body.source,
         setByUserId: request.user.userId,
-        effectiveFrom: body.effectiveFrom ? new Date(body.effectiveFrom) : new Date(),
+        effectiveFrom,
       },
     });
     return { success: true, data: { ...row, rate: Number(row.rate) } };

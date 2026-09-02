@@ -63,6 +63,21 @@ export async function resolveRateForRun(prisma: PrismaClient, quote: string) {
   });
 }
 
+/** [M-14] The notice window the >2% rule promises: a materially changed local
+ *  amount is charged only after the notice was DELIVERED at least this many
+ *  days before the invoice it applies to. */
+export const FX_NOTICE_WINDOW_DAYS = 7;
+
+/** [M-14] The next rate to take effect after `now` — a future-effective rate
+ *  the admin has already set — so the notice job can announce it ahead of
+ *  its first invoice instead of after. */
+export async function resolveUpcomingRate(prisma: PrismaClient, quote: string, now = new Date()) {
+  return prisma.fxRate.findFirst({
+    where: { quote, effectiveFrom: { gt: now } },
+    orderBy: [{ effectiveFrom: 'asc' }, { createdAt: 'asc' }],
+  });
+}
+
 export type RateStaleness = 'FRESH' | 'STALE_30D' | 'STALE_90D';
 
 /** Part 12 staleness guard — the system nags, it never blocks billing. */

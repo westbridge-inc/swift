@@ -125,18 +125,22 @@ describe('the conversion law (Part 11/20 — one pure function)', () => {
 describe('rate governance over HTTP (Part 12/20)', () => {
   it('append-only rates; the fat-finger guard demands the typed quote and spells the change in words', async () => {
     const admin = await makeAdmin();
-    const first = await post('/api/v1/admin/billing/fx-rates', { quote: 'GYD', rate: 208.72 }, admin.token);
+    // [M-14] A rate that moves payers' amounts by more than 2% takes effect no
+    // sooner than the notice window; these carry it so the guard (proven in
+    // fx-notice-gate.test.ts) never decides this test.
+    const effectiveFrom = new Date(Date.now() + 9 * 86_400_000).toISOString();
+    const first = await post('/api/v1/admin/billing/fx-rates', { quote: 'GYD', rate: 208.72, effectiveFrom }, admin.token);
     expect(first.statusCode).toBe(200);
     expect(first.json().data.staleness ?? 'FRESH').toBeTruthy();
 
     // 10× fat finger — refused with the delta in words (acceptance #15).
-    const fat = await post('/api/v1/admin/billing/fx-rates', { quote: 'GYD', rate: 2087.2 }, admin.token);
+    const fat = await post('/api/v1/admin/billing/fx-rates', { quote: 'GYD', rate: 2087.2, effectiveFrom }, admin.token);
     expect(fat.statusCode).toBe(409);
     expect(fat.json().error.message).toContain('changes from');
     expect(fat.json().error.message).toContain('confirmQuote');
 
     // Typed confirmation applies it — append-only: both rows exist.
-    const confirmed = await post('/api/v1/admin/billing/fx-rates', { quote: 'GYD', rate: 2087.2, confirmQuote: 'GYD' }, admin.token);
+    const confirmed = await post('/api/v1/admin/billing/fx-rates', { quote: 'GYD', rate: 2087.2, confirmQuote: 'GYD', effectiveFrom }, admin.token);
     expect(confirmed.statusCode).toBe(200);
     const rows = await get('/api/v1/admin/billing/fx-rates?quote=GYD', admin.token);
     expect((rows.json().data as unknown[]).length).toBeGreaterThanOrEqual(2);
