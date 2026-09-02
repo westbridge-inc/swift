@@ -9,7 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
+import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useRideSos } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../kit/toast';
@@ -106,6 +106,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const driverAct = useDriverAction();
   const riderAct = useRiderAction();
   const courierProof = useCourierProof();
+  const courierCollect = useCourierCollect();
   const rate = useRateCustomer();
   const { latitude, longitude, status: locationStatus } = useLocationStore();
   const [pin, setPin] = useState('');
@@ -121,6 +122,9 @@ export function ActiveJobScreen({ navigation }: any) {
   // [M-29] The unpaid sheet — the failed fare outcome (driver) or failed
   // handover (rider): refused, or nobody / left without paying.
   const [unpaidSheet, setUnpaidSheet] = useState(false);
+  // [M-28] The sender-pays courier job that ends at pickup: the fee was not
+  // paid, so the parcel is never taken.
+  const [senderRefusedSheet, setSenderRefusedSheet] = useState(false);
   // Preview (R3): useActiveJob supplies a sample in-progress trip, so this
   // nav-grade screen is fully browsable read-only. Real actions (SOS/dial) are
   // suppressed below; the step mutations already no-op in preview.
@@ -158,13 +162,19 @@ export function ActiveJobScreen({ navigation }: any) {
         ? { ...pickup, latitudeDelta: 0.02, longitudeDelta: 0.02 }
         : undefined;
 
-  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending;
+  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending;
   const isDriver = kind === 'DRIVER';
   // Courier deliveries close with a proof-of-delivery photo (D8-02): capture →
   // upload → the handoff transition (which pays the rider). Everything else uses
   // the plain "Mark delivered" action.
   const isCourier = String(job?.orderType ?? '').toUpperCase() === 'COURIER';
-  const captureCourierProof = async () => {
+  // [M-28] The courier's cash outcome travels WITH the proof photo when the
+  // recipient pays: 'paid' captures the fee and delivers in one commit;
+  // 'refused' / 'no_show' fail the job with the photo and the rider's location
+  // as the claim's evidence. A job already paid (MMG, or the sender's fee
+  // collected at pickup) sends the photo alone. The outcome is never defaulted
+  // here — the server refuses a bare proof on an unpaid cash job.
+  const captureCourierProof = async (outcome?: 'paid' | FailedOutcome) => {
     try {
       const owner = preview ? null : requireAuthSessionSnapshot();
       const perm = await ImagePicker.requestCameraPermissionsAsync();
@@ -177,12 +187,24 @@ export function ActiveJobScreen({ navigation }: any) {
       if (owner) requireAuthSessionForPrincipal(owner);
       if (shot.canceled || !shot.assets?.[0]) return;
       courierProof.mutate(
-        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        { orderId: job.id, uri: shot.assets[0].uri, outcome, authSession: owner ?? undefined },
         {
-          onSuccess: () => active.refetch?.(),
-          onError: (proofError: unknown) => {
+          onSuccess: (res: any) => {
+            if (outcome && outcome !== 'paid') {
+              const claim = res?.claim?.status;
+              toast.show(
+                claim === 'AUTO_APPROVED' ? 'Failed delivery recorded — the Swift guarantee covers it.'
+                  : claim === 'PENDING_REVIEW' ? 'Failed delivery recorded — your claim is under review.'
+                    : 'Failed delivery recorded.',
+              );
+              navigation?.goBack?.();
+              return;
+            }
+            active.refetch?.();
+          },
+          onError: (proofError: any) => {
             if (!(proofError instanceof AuthSessionBoundaryError)) {
-              toast.error('Couldn’t save the proof. Try again.');
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the proof. Try again.');
             }
           },
         },
@@ -197,6 +219,21 @@ export function ActiveJobScreen({ navigation }: any) {
   // MMG direct-pay: the customer already paid the STORE — the rider collects
   // NOTHING at the door; their delivery fee comes from the store in cash.
   const isMmgPaid = job?.paymentMethod === 'MOBILE_MONEY';
+  // [M-28] Courier cash: WHO pays decides WHEN the money is recorded, and the
+  // server refuses a proof that would imply money it never saw. Sender pays →
+  // the fee is collected at pickup, before custody (the collect step below);
+  // recipient pays → at the door, with the proof photo. `paymentStatus` is
+  // server truth: once the fee is CAPTURED the door is proof-and-deliver only.
+  const courierCash = isCourier && job?.paymentMethod === 'CASH';
+  const feeCaptured = job?.paymentStatus === 'CAPTURED';
+  const senderFeeDue = courierCash && job?.courierPayer === 'SENDER' && !feeCaptured;
+  const recipientFeeDue = courierCash && job?.courierPayer !== 'SENDER' && !feeCaptured;
+  const jobStatus = String(job?.status ?? '').toUpperCase();
+  // The sender is in front of the rider at these two; PICKED_UP still records
+  // (the server allows it) so a rider who took the parcel first is not stuck.
+  const atSender = jobStatus === 'RIDER_ARRIVED_PICKUP' || jobStatus === 'READY_FOR_PICKUP';
+  const canStillCollect = atSender || jobStatus === 'PICKED_UP';
+  const courierFee = jobAmount(job);
   const pickedUp = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(String(job?.status ?? '').toUpperCase());
   // The store owes the rider fee PLUS any prepaid tip on MMG — the settlement
   // ledger records fee + tip, so the door copy must claim the same number
@@ -264,7 +301,34 @@ export function ActiveJobScreen({ navigation }: any) {
     };
     const onError = (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the outcome — try again or call support.");
     if (isDriver) driverAct.mutate({ id: job.id, action: 'handover', outcome }, { onSuccess, onError });
+    // [M-28] A courier's failed outcome is recorded WITH the proof photo —
+    // the camera opens next, and the photo is the claim's evidence.
+    else if (isCourier) void captureCourierProof(outcome);
     else riderAct.mutate({ id: job.id, action: 'handover', outcome }, { onSuccess, onError });
+  };
+
+  // [M-28] The sender's fee, recorded at pickup. 'paid' captures it (the door's
+  // proof then closes the job); 'refused' ends the job here — no custody, a
+  // strike on the sender — and the answer names what the server did.
+  const collectFromSender = (outcome: 'paid' | 'refused') => {
+    setSenderRefusedSheet(false);
+    if (preview || !job?.id) return;
+    courierCollect.mutate(
+      { orderId: job.id, outcome },
+      {
+        onSuccess: (res: any) => {
+          if (outcome === 'paid') {
+            haptic.success();
+            toast.show(`${courierFee} recorded as collected from the sender.`);
+            active.refetch?.();
+            return;
+          }
+          toast.show(res?.status === 'CANCELLED' ? 'Job ended — the sender didn’t pay. Their account takes a strike.' : 'Recorded.');
+          navigation?.goBack?.();
+        },
+        onError: (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the sender's payment — try again or call support."),
+      },
+    );
   };
 
   const closeRating = () => {
@@ -391,7 +455,11 @@ export function ActiveJobScreen({ navigation }: any) {
               <T variant="title" style={{ marginTop: space.sm, color: dk.text }}>
                 {jobAmount(job)}{' '}
                 <T variant="label" style={{ color: dk.muted }}>
-                  {isMmgPaid ? '· MMG — already paid' : '· cash'}
+                  {isMmgPaid ? '· MMG — already paid'
+                    : senderFeeDue ? '· cash — sender pays at pickup'
+                      : recipientFeeDue ? '· cash — recipient pays at the door'
+                        : courierCash ? '· cash — fee collected'
+                          : '· cash'}
                 </T>
               </T>
               {/* Kitchen signal (readyAt rides outside the status lane once a
@@ -520,10 +588,43 @@ export function ActiveJobScreen({ navigation }: any) {
               // Only once the order is ARRIVED do the handover/delivered controls
               // below take over.
               <>
-                {bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
-                  loading: riderAct.isPending,
-                  disabled: busy,
-                })}
+                {senderFeeDue && canStillCollect ? (
+                  // [M-28] Sender pays → the fee is collected HERE, before the
+                  // parcel changes hands. The server records it with this
+                  // location and refuses the door's proof until it has.
+                  <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.14), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginBottom: space.md }}>
+                    <Feather name="alert-circle" size={15} color={dk.accent} style={{ marginTop: 1 }} />
+                    <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
+                      {atSender
+                        ? `The sender pays: collect ${courierFee} BEFORE taking the parcel.`
+                        : `The sender's ${courierFee} wasn't recorded at pickup — record it now, or the drop-off can't close.`}
+                    </T>
+                  </View>
+                ) : null}
+                {senderFeeDue && atSender
+                  ? bigButton(`Collected ${courierFee} from the sender`, () => collectFromSender('paid'), { loading: courierCollect.isPending, disabled: busy })
+                  : bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
+                    loading: riderAct.isPending,
+                    disabled: busy,
+                  })}
+                {senderFeeDue && atSender ? (
+                  <PillButton
+                    label="Sender didn't pay"
+                    variant="soft"
+                    style={{ marginTop: space.sm }}
+                    disabled={busy}
+                    onPress={() => setSenderRefusedSheet(true)}
+                  />
+                ) : null}
+                {senderFeeDue && !atSender && canStillCollect ? (
+                  <PillButton
+                    label={`Record ${courierFee} collected from the sender`}
+                    variant="soft"
+                    style={{ marginTop: space.sm }}
+                    disabled={busy}
+                    onPress={() => collectFromSender('paid')}
+                  />
+                ) : null}
                 {/* G14: the valve exists ONLY before pickup — after custody the
                     server refuses and support owns it, so no button is shown. */}
                 {!pickedUp ? (
@@ -535,6 +636,54 @@ export function ActiveJobScreen({ navigation }: any) {
                     onPress={() => setHandbackConfirm(true)}
                   />
                 ) : null}
+              </>
+            ) : isCourier ? (
+              // [M-28] The courier's door. The proof photo ALWAYS closes the
+              // job; whether money is recorded with it depends on who pays and
+              // whether it was already captured — never on a default.
+              <>
+                {recipientFeeDue ? (
+                  <>
+                    <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.14), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginBottom: space.md }}>
+                      <Feather name="alert-circle" size={15} color={dk.accent} style={{ marginTop: 1 }} />
+                      <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
+                        Golden rule: collect {courierFee} from the recipient BEFORE handing over the parcel.
+                      </T>
+                    </View>
+                    {bigButton(`Collected ${courierFee} — capture proof & deliver`, () => captureCourierProof('paid'), { loading: courierProof.isPending, disabled: busy })}
+                    <PillButton
+                      label="Recipient didn't pay"
+                      variant="soft"
+                      style={{ marginTop: space.sm }}
+                      disabled={busy}
+                      onPress={() => setUnpaidSheet(true)}
+                    />
+                  </>
+                ) : senderFeeDue ? (
+                  // A sender-pays job that reached the door with no fee recorded
+                  // cannot close from here — the server refuses the proof, and
+                  // the collect step is a pickup step. Honesty over a dead tap.
+                  <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.14), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginBottom: space.md }}>
+                    <Feather name="alert-circle" size={15} color={dk.accent} style={{ marginTop: 1 }} />
+                    <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
+                      The sender's {courierFee} was never recorded at pickup, so this job can't be closed from here. Call support.
+                    </T>
+                  </View>
+                ) : (
+                  <>
+                    <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.success, 0.12), borderWidth: 1, borderColor: withAlpha(color.success, 0.4), padding: space.md, marginBottom: space.md }}>
+                      <Feather name="check-circle" size={15} color={dk.success} style={{ marginTop: 1 }} />
+                      <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
+                        {isMmgPaid
+                          ? 'Paid via MMG — collect NOTHING at the door.'
+                          : courierCash
+                            ? `${courierFee} already collected from the sender — collect NOTHING at the door.`
+                            : 'Already paid — collect NOTHING at the door.'}
+                      </T>
+                    </View>
+                    {bigButton('Capture proof & deliver', () => captureCourierProof(), { loading: courierProof.isPending, disabled: busy })}
+                  </>
+                )}
               </>
             ) : isMmgPaid ? (
               <>
@@ -662,27 +811,47 @@ export function ActiveJobScreen({ navigation }: any) {
           what happened; the server records the GPS evidence, the strike and
           the guarantee claim together. */}
       <PopupCard visible={unpaidSheet} onClose={() => setUnpaidSheet(false)}>
-        <PopupTitle variant="title" center>{isDriver ? 'The passenger didn’t pay?' : 'The customer didn’t pay?'}</PopupTitle>
+        <PopupTitle variant="title" center>{isDriver ? 'The passenger didn’t pay?' : isCourier ? 'The recipient didn’t pay?' : 'The customer didn’t pay?'}</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {isDriver
             ? 'Your location is recorded as evidence, the passenger’s account takes a strike, and the Swift guarantee reviews the fare. Pick what happened:'
-            : 'Your location is recorded as evidence, the customer’s account takes a strike, and the Swift guarantee reviews the amount. Pick what happened:'}
+            : isCourier
+              ? 'Next you’ll photograph the parcel at the door as evidence. Your location is recorded, the sender’s account takes a strike, and the Swift guarantee reviews the fee. Pick what happened:'
+              : 'Your location is recorded as evidence, the customer’s account takes a strike, and the Swift guarantee reviews the amount. Pick what happened:'}
         </T>
         <PillButton
-          label={isDriver ? 'Refused to pay' : 'Refused to pay at the door'}
+          label={isDriver || isCourier ? 'Refused to pay' : 'Refused to pay at the door'}
           variant="outline"
           style={{ alignSelf: 'stretch', marginTop: space.md }}
           disabled={busy}
           onPress={() => recordUnpaid('refused')}
         />
         <PillButton
-          label={isDriver ? 'Left without paying' : 'Nobody at the door'}
+          label={isDriver ? 'Left without paying' : isCourier ? 'Nobody there' : 'Nobody at the door'}
           variant="outline"
           style={{ alignSelf: 'stretch', marginTop: space.md }}
           disabled={busy}
           onPress={() => recordUnpaid('no_show')}
         />
         <PillButton label="Go back" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setUnpaidSheet(false)} />
+      </PopupCard>
+
+      {/* [M-28] The sender-pays job that ends at pickup: the fee wasn't paid,
+          so the parcel is never taken. One confirmation, then the server
+          records the location, cancels the job and strikes the sender. */}
+      <PopupCard visible={senderRefusedSheet} onClose={() => setSenderRefusedSheet(false)}>
+        <PopupTitle variant="title" center>The sender didn’t pay?</PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          Don’t take the parcel. The job ends here — your location is recorded and the sender’s account takes a strike.
+        </T>
+        <PillButton
+          label="Sender refused to pay"
+          variant="outline"
+          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          disabled={busy}
+          onPress={() => collectFromSender('refused')}
+        />
+        <PillButton label="Go back" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setSenderRefusedSheet(false)} />
       </PopupCard>
 
       {/* G14 handback — reason required, honesty first: the customer is told
