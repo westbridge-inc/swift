@@ -25,10 +25,13 @@ import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
 import { openExternal } from '../../../lib/openExternal';
+import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
+import { telUrl } from '../../../lib/emergencyPolicy';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
 const RIDE_PIN_LENGTH = 6;
 import {
+  useAuthStore,
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
@@ -116,6 +119,8 @@ export function ActiveJobScreen({ navigation }: any) {
   // Driver-raised SOS on an active taxi ride — the backend authorizes the driver
   // participant on /rides/:id/sos (same route the passenger's SOS uses).
   const sos = useRideSos();
+  // [MOB-018] The signed-in market decides the emergency number the popup names and dials.
+  const sosCountry = useAuthStore((st) => st.countryCode);
   const [sosConfirm, setSosConfirm] = useState(false);
   // G14: pre-pickup handback — a two-step with preset reasons, never one tap.
   const [handbackConfirm, setHandbackConfirm] = useState(false);
@@ -783,7 +788,7 @@ export function ActiveJobScreen({ navigation }: any) {
             Get emergency help?
           </PopupTitle>
           <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-            This dials 911 — local emergency services — right away. Swift also saves the alert and your live location on this trip’s record. Use only in a real emergency.
+            {emergencyDialCopy(previewEmergencyDial(sosCountry))} Swift also saves the alert and your live location on this trip’s record. Use only in a real emergency.
           </T>
           <PillButton
             label="Yes — get help now"
@@ -795,8 +800,11 @@ export function ActiveJobScreen({ navigation }: any) {
               // 911 is THE action — dial first, never behind anything else. Swift
               // records evidence; it is not an emergency responder and the copy
               // must never imply a staffed safety desk [liability shield].
-              // Guyana launch emergency number; move to CountryConfig for other markets.
-              void openExternal('tel:911', "Couldn't start the call — dial 911 directly.");
+              // [MOB-018] The market's emergency number, not a hard-coded 911: a
+              // verified number dials at once, an unverified candidate dials on this
+              // explicit tap (the popup named it), no number means the manual sheet.
+              const emergency = currentMarketDial('police');
+              if (emergency.kind !== 'manual') void openExternal(telUrl(emergency.number), `Couldn't start the call — dial ${emergency.number} directly.`);
               const coords = me ? { lat: me.latitude, lng: me.longitude } : undefined;
               if (!job?.id) return;
               sos.mutate({ id: job.id, coords });

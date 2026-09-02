@@ -117,6 +117,15 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+// [MOB-018] How the public emergency-policy route answered: served, no-policy,
+// invalid (a malformed stored policy is never served), unknown-market.
+export const emergencyPolicyCounter = new client.Counter({
+  name: 'swift_emergency_policy_total',
+  help: 'GET /public/emergency-policy answers by outcome (served/no-policy/invalid/unknown-market)',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 // [MOB-010] A vendor store header (x-vendor-id) received outside the vendor
 // endpoint family is a client leak: counted per family, ignored or rejected.
 export const unexpectedTenantHeaderCounter = new client.Counter({
