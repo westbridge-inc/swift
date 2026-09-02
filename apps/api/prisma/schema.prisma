@@ -3486,6 +3486,35 @@ enum SosEscalationChannel {
   EVIDENCE
 }
 
+/// [S-02] A repeat trigger on a live alert: one immutable row per fact,
+/// numbered under the alert's row lock (`seq` = the alert's retriggerCount
+/// after the increment), idempotent per request key. The alert's JSON
+/// `retriggers` is a bounded summary derived from these rows, never the
+/// record: two people pressing at once each land their own row.
+model SosRetrigger {
+  id                 String           @id @default(cuid())
+  tenantId           String?
+  sosAlertId         String
+  sosAlert           SosAlert         @relation(fields: [sosAlertId], references: [id], onDelete: Cascade)
+  seq                Int
+  requestKey         String?
+  at                 DateTime
+  source             SosTriggerSource
+  lat                Float?
+  lng                Float?
+  accuracyM          Float?
+  addressText        String?
+  counterpartyUserId String?
+  actorRole          String
+  clientCreatedAt    DateTime?
+  createdAt          DateTime         @default(now())
+
+  @@unique([sosAlertId, seq])
+  @@unique([sosAlertId, requestKey])
+  @@index([tenantId, sosAlertId])
+  @@map("sos_retriggers")
+}
+
 enum SosEscalationStatus {
   PENDING
   SENT
@@ -3578,6 +3607,9 @@ model SosAlert {
   deliveryReceipts     Json? // per-channel fan-out receipts {opsPage, contactSms:[...], socket}
   /// [S-01] The durable escalation commands this alert owns — one per required delivery.
   escalations          SosEscalation[]
+  /// [S-02] Every repeat trigger is its OWN row, sequenced and immutable;
+  /// `retriggers` above is a bounded derived summary of the newest ones.
+  retriggerLog         SosRetrigger[]
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
 
