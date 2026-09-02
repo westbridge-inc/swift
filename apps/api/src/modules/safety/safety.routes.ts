@@ -396,6 +396,8 @@ export async function safetyRoutes(app: FastifyInstance) {
    *  other party. Reporter identity is stored but never subject-visible. */
   app.post('/incidents', auth, async (request) => {
     const body = z.object({
+      // [S-08] A retried report is the same report: the client's key, else reporter × order × category.
+      idempotencyKey: z.string().trim().min(1).max(80).optional(),
       orderId: z.string().min(1),
       category: z.enum(USER_CATEGORIES),
       summary: z.string().trim().min(5).max(2000),
@@ -430,6 +432,7 @@ export async function safetyRoutes(app: FastifyInstance) {
       reporterUserId: request.user.userId,
       orderId: order.id,
       summary: body.summary,
+      source: { type: 'REPORT', id: body.idempotencyKey ? `key:${request.user.userId}:${body.idempotencyKey}` : `${request.user.userId}:${order.id}:${body.category}` },
     });
     // The reporter sees their case handle — never the machinery around the subject.
     return { success: true, data: { caseNumber: kase.caseNumber, status: kase.status } };
@@ -439,6 +442,8 @@ export async function safetyRoutes(app: FastifyInstance) {
   app.post('/incidents/ops', auth, async (request) => {
     if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can log a case directly.');
     const body = z.object({
+      // [S-08] An ops-logged report retried with the same key is one case.
+      idempotencyKey: z.string().trim().min(1).max(80).optional(),
       subjectUserId: z.string().min(1),
       category: z.string().trim().min(2).max(60),
       severity: z.enum(['S0', 'S1', 'S2', 'S3', 'S4']).optional(),
@@ -446,12 +451,20 @@ export async function safetyRoutes(app: FastifyInstance) {
       sosAlertId: z.string().optional(),
       summary: z.string().trim().min(5).max(2000),
     }).parse(request.body ?? {});
-    const kase = await incidents.intake({ ...body, intake: 'OPS_CREATED', reporterUserId: null });
+    const { idempotencyKey, ...intakeBody } = body;
+    const kase = await incidents.intake({ ...intakeBody, intake: 'OPS_CREATED', reporterUserId: null, source: idempotencyKey ? { type: 'OPS', id: `${request.user.userId}:${idempotencyKey}` } : null });
     return { success: true, data: kase };
   });
 
   /** The ops case queue. `open` = everything not CLOSED, severity-first;
    *  `breached` = SLA clocks already blown (indexed reads, §8.2). */
+  /** [S-08] Merge is an explicit analyst action — never automatic. */
+  app.post('/incidents/:id/merge', auth, async (request) => {
+    const { id } = request.params as { id: string };
+    const { intoCaseId } = z.object({ intoCaseId: z.string().min(1) }).parse(request.body ?? {});
+    return { success: true, data: await incidents.mergeDuplicate(id, intoCaseId, request.user.userId) };
+  });
+
   app.get('/incidents', auth, async (request) => {
     if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can list cases.');
     const q = z.object({

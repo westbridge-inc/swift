@@ -458,6 +458,7 @@ export class GuardianService {
       .intake({
         category: 'COMPLETION_ANOMALY',
         intake: 'SYSTEM_AUTO',
+        source: { type: 'GUARDIAN_COMPLETION', id: session.orderId },
         subjectUserId: session.driverUserId,
         reporterUserId: null,
         orderId: session.orderId,

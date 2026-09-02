@@ -12,6 +12,8 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { log } from '../../utils/logger';
 import { sweepPage } from '../../lib/sweep-cursor';
+import { createHash } from 'node:crypto';
+import { incidentIntakeCounter, incidentIntakeGauge } from '../../plugins/observability';
 
 // Incident Management (safety spec §8) — the case machine. Server-owned like
 // the order and SOS machines: explicit transition table, CAS updates, illegal
@@ -82,7 +84,21 @@ export interface IncidentIntakeInput {
   sosAlertId?: string | null;
   summary: string;
   details?: Record<string, unknown> | null;
+  /** [S-08] The source this intake comes from — one source, one case. A
+   *  retried intake with the same source returns the existing case and
+   *  changes nothing: no second case, no pattern contribution, no enforcement. */
+  source?: { type: string; id: string } | null;
 }
+
+/** [S-08] The fingerprint the database refuses to see twice. */
+export function intakeFingerprint(source: { type: string; id: string }): string {
+  return createHash('sha256').update(`${source.type}:${source.id}`).digest('hex');
+}
+
+/** [S-08 · rollback] Intake to the review queue: cases are created but no
+ *  automatic enforcement (no interim suspension, no pattern escalation) is
+ *  derived from them until a human reviews. */
+export const intakeReviewOnly = (env: Record<string, string | undefined> = process.env) => env['INCIDENT_INTAKE_REVIEW_ONLY'] === '1';
 
 /**
  * Durable, transaction-safe intake for the objective event where a mover's
@@ -211,6 +227,14 @@ export class IncidentService {
       now,
     ));
     const kase = staged.kase;
+    if (staged.replayed) {
+      // [S-08] The same source again: the first result IS the result. Nothing
+      // is paged, emitted or opened a second time.
+      incidentIntakeCounter.labels('replayed').inc();
+      log().info({ caseId: kase.id, source: input.source }, '[S-08] incident intake replayed — existing case returned');
+      return kase;
+    }
+    incidentIntakeCounter.labels(input.source ? 'created' : 'created_unfingerprinted').inc();
 
     if (staged.patternFrom) {
       log().warn(
@@ -279,14 +303,27 @@ export class IncidentService {
     kase: IncidentCase;
     patternFrom: IncidentSeverity | null;
     suspensionNotificationId: string | null;
+    replayed: boolean;
   }> {
     // Subject-level serialization keeps concurrent intake/lift decisions in a
     // total order. The case, final severity/SLA, dispatch exclusion, interim
     // action, and due-process inbox evidence all commit or all roll back.
     await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${input.subjectUserId} FOR UPDATE`;
+    // [S-08] Under the subject lock, the same source is the same case: a
+    // concurrent or later retry finds the first intake's committed row here
+    // (and the unique fingerprint is the floor below this read).
+    const fingerprint = input.source ? intakeFingerprint(input.source) : null;
+    if (fingerprint) {
+      const existing = await tx.incidentCase.findUnique({ where: { sourceFingerprint: fingerprint } });
+      if (existing) {
+        const replayed = await tx.incidentCase.update({ where: { id: existing.id }, data: { replayCount: { increment: 1 } } });
+        return { kase: replayed, patternFrom: null, suspensionNotificationId: null, replayed: true };
+      }
+    }
+    const reviewOnly = intakeReviewOnly();
     let severity = initialSeverity;
     let patternFrom: IncidentSeverity | null = null;
-    if (['S0', 'S1', 'S2'].includes(initialSeverity)) {
+    if (!reviewOnly && ['S0', 'S1', 'S2'].includes(initialSeverity)) {
       const priors = await tx.incidentCase.count({
         where: {
           subjectUserId: input.subjectUserId,
@@ -311,7 +348,10 @@ export class IncidentService {
         orderId: input.orderId ?? null,
         sosAlertId: input.sosAlertId ?? null,
         summary: input.summary,
-        details: (input.details ?? undefined) as never,
+        details: ({ ...(input.details ?? {}), ...(reviewOnly ? { reviewQueue: true } : {}) }) as never,
+        sourceType: input.source?.type ?? null,
+        sourceId: input.source?.id ?? null,
+        sourceFingerprint: fingerprint,
         slaAckBy: new Date(now.getTime() + ackMin * 60_000),
         slaDecideBy: new Date(now.getTime() + decideMin * 60_000),
         patternFlaggedAt: patternFrom ? now : null,
@@ -320,7 +360,7 @@ export class IncidentService {
     });
 
     let suspensionNotificationId: string | null = null;
-    if ((severity === 'S0' || severity === 'S1') && autoSuspendEnabled()) {
+    if (!reviewOnly && (severity === 'S0' || severity === 'S1') && autoSuspendEnabled()) {
       // Movers vanish from dispatch instantly; active custody pointers remain
       // intact for an explicit recovery/completion workflow.
       const d = await tx.driver.updateMany({
@@ -357,7 +397,57 @@ export class IncidentService {
         suspensionNotificationId = notice.id;
       }
     }
-    return { kase, patternFrom, suspensionNotificationId };
+    return { kase, patternFrom, suspensionNotificationId, replayed: false };
+  }
+
+  /** [S-08 · operations] Likely duplicates among cases with NO fingerprint
+   *  (pre-S-08 intakes): the same subject, reporter, order and category within
+   *  ten minutes. Enforcement derived from a duplicate is named, never
+   *  reversed automatically — a human reviews and merges. */
+  async scanDuplicateIntakes(now = new Date()): Promise<{ clusters: Array<{ survivorId: string; duplicateIds: string[]; enforcementFromDuplicate: boolean }> }> {
+    const rows = await this.prisma.$queryRaw<Array<{ ids: string[]; enforced: boolean }>>`
+      SELECT array_agg(c."id" ORDER BY c."createdAt") AS ids,
+             bool_or(c."interimAction" <> 'NONE' OR c."patternFlaggedAt" IS NOT NULL) AS enforced
+      FROM "IncidentCase" c
+      WHERE c."sourceFingerprint" IS NULL AND c."status" <> 'CLOSED' AND c."createdAt" >= ${new Date(now.getTime() - 90 * 86_400_000)}
+      GROUP BY c."subjectUserId", coalesce(c."reporterUserId", ''), coalesce(c."orderId", ''), c."category", date_trunc('hour', c."createdAt")
+      HAVING count(*) > 1 AND max(c."createdAt") - min(c."createdAt") <= INTERVAL '10 minutes'
+      LIMIT 200`;
+    const clusters = rows.map((r) => {
+      const [survivorId, ...duplicateIds] = r.ids;
+      return { survivorId: survivorId!, duplicateIds, enforcementFromDuplicate: r.enforced };
+    });
+    incidentIntakeGauge.labels('duplicate_clusters').set(clusters.length);
+    incidentIntakeGauge.labels('enforcement_from_duplicates').set(clusters.filter((c) => c.enforcementFromDuplicate).length);
+    return { clusters };
+  }
+
+  /** [S-08] Merge is an explicit analyst action: the duplicate closes as a
+   *  duplicate of the survivor, and enforcement derived from it is reversed
+   *  when the survivor carries none. Never automatic. */
+  async mergeDuplicate(duplicateId: string, survivorId: string, opsUserId: string): Promise<IncidentCase> {
+    if (duplicateId === survivorId) throw new AppError(400, 'MERGE_SELF', 'A case cannot be merged into itself.');
+    const [dup, survivor] = await Promise.all([this.prisma.incidentCase.findUnique({ where: { id: duplicateId } }), this.prisma.incidentCase.findUnique({ where: { id: survivorId } })]);
+    if (!dup) throw new NotFoundError('IncidentCase', duplicateId);
+    if (!survivor) throw new NotFoundError('IncidentCase', survivorId);
+    if (dup.subjectUserId !== survivor.subjectUserId) throw new AppError(409, 'MERGE_SUBJECT_MISMATCH', 'Only cases about the same person can be merged.');
+    if (dup.status === 'CLOSED') return dup;
+    const now = new Date();
+    if (dup.interimAction !== 'NONE' && survivor.interimAction === 'NONE') {
+      await this.liftInterim(dup.id, opsUserId);
+    }
+    const merged = await this.prisma.incidentCase.update({
+      where: { id: dup.id },
+      data: {
+        status: 'CLOSED', closedAt: now, closedBy: opsUserId, decidedAt: dup.decidedAt ?? now, decidedBy: dup.decidedBy ?? opsUserId,
+        decisionCode: dup.decisionCode ?? 'DISMISSED', decisionNotes: `Duplicate of ${survivor.caseNumber} — merged by analyst`,
+        patternFlaggedAt: null,
+        details: ({ ...((dup.details as Record<string, unknown> | null) ?? {}), mergedInto: survivor.id, mergedAt: now.toISOString(), mergedBy: opsUserId }) as never,
+      },
+    });
+    incidentIntakeCounter.labels('merged').inc();
+    try { this.io.to('ops:war-room').emit('incident:merged', { caseNumber: dup.caseNumber, into: survivor.caseNumber }); } catch { /* advisory only */ }
+    return merged;
   }
 
   /** Explicit, audited lift — also runs automatically on a DISMISSED decision.

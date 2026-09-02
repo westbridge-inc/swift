@@ -1475,6 +1475,25 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
 
       if (job.name === 'incident-sla-watch') {
+        // [S-08 · operations] Likely duplicate intakes (pre-fingerprint cases)
+        // are named for a human; enforcement they drove is paged, never
+        // reversed automatically.
+        {
+          const { IncidentService: DupScan } = await import('../modules/safety/incident.service');
+          const dup = await new DupScan(ctx.prisma, ctx.io).scanDuplicateIntakes().catch(() => ({ clusters: [] }));
+          const enforced = dup.clusters.filter((c) => c.enforcementFromDuplicate);
+          if (enforced.length > 0) {
+            const { notifyAdmins: pageDup, NotificationService: DupNS } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'incident-duplicate-intake', 6 * 3600, () =>
+              pageDup(ctx.prisma, new DupNS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: `Incident intake: ${enforced.length} likely duplicate cluster(s) drove enforcement`,
+                body: 'Cases born from the same report within minutes carry an interim suspension or a pattern flag. Review and merge the duplicates; enforcement is reversed only by that review.',
+                data: { kind: 'incident_duplicate_intake', clusters: enforced.slice(0, 10).map((c) => ({ survivor: c.survivorId, duplicates: c.duplicateIds })) },
+              }),
+            ).catch(() => {});
+          }
+        }
         // §8.2 — a blown SLA clock pages ops, and keeps re-paging every
         // window while the breach persists (an SLA that only whispers once
         // is a lie to the reporter). opsPageOnce is the dedup.
