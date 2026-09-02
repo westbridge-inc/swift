@@ -85,7 +85,10 @@ export function RootNavigator() {
   // Mandatory signup selfie (master plan §3): every signed-in account must
   // carry a camera-captured profile photo before using the app. Guests browse
   // untouched; the API enforces the same rule on orders/rides/go-online.
-  const needsSelfie = isAuthenticated && !!user && !user.selfieCapturedAt;
+  // [MOB-007] Not conditional on a user being present: the store's hydration
+  // law guarantees an authenticated state carries a user, and if it ever did
+  // not, the gate holds (selfie/recovery) rather than opening the stack.
+  const needsSelfie = isAuthenticated && !user?.selfieCapturedAt;
   const Main = mainForIntent(intent);
   const entryGate = rootEntryGate({ isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie });
 

@@ -42,6 +42,8 @@ import {
 } from './authStore';
 import { AuthRefreshCoordinator } from '../lib/authSession';
 import { rootEntryGate } from '../navigation/rootEntryGate';
+import { hydrationCounters, resetHydrationCountersForTests } from '../lib/authHydration';
+import { readFileSync } from 'node:fs';
 import { logoutAndSwitchExperience } from '../modules/advertiser/advertiserExit';
 import { useBookingStore } from './bookingStore';
 
@@ -430,5 +432,89 @@ describe('authStore session boundaries', () => {
 
     expect(() => requireAuthSessionForPrincipal(staleA)).toThrow(AuthSessionBoundaryError);
     expect(getAuthSessionSnapshot()).toMatchObject({ userId: 'b' });
+  });
+});
+
+describe('[MOB-007 / TST-008] corrupt persisted auth normalizes SIGNED OUT before the first privileged render', () => {
+  const persisted = (state: Record<string, unknown>, version = 2) => storageData.set('swift-auth', JSON.stringify({ version, state }));
+  const base = () => ({
+    user: user('a'), accessToken: 'access-a', refreshToken: 'refresh-a', isAuthenticated: true, intent: 'customer', moverPreset: null,
+    countryCode: 'GY', dialCode: '+592', currencyCode: 'GYD', currencySymbol: 'GY$', sessionGeneration: 3, adEventScopeId: 'scope-a',
+  });
+  const freshProcess = () => {
+    resetHydrationCountersForTests();
+    clearQueryClient.mockClear();
+    setSelectedStore.mockClear();
+    useAuthStore.setState({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false, intent: null, moverPreset: null, sessionGeneration: 0, adEventScopeId: 'process-default' });
+  };
+
+  const cases: Array<[string, Record<string, unknown>, string, number?]> = [
+    ['authenticated with a null user', { ...base(), user: null }, 'authenticated_without_user'],
+    ['a user without an id', { ...base(), user: { ...user('a'), id: '' } }, 'user_without_id'],
+    ['no access token', { ...base(), accessToken: null }, 'missing_access_token'],
+    ['an empty refresh token', { ...base(), refreshToken: '' }, 'missing_refresh_token'],
+    ['credentials without the authenticated flag', { ...base(), isAuthenticated: false }, 'credentials_without_authentication'],
+    ['an invalid generation', { ...base(), sessionGeneration: 1.5 }, 'invalid_generation'],
+    ['an empty scope', { ...base(), adEventScopeId: '' }, 'invalid_scope'],
+    ['malformed roles', { ...base(), user: { ...user('a'), roles: 'CUSTOMER' } }, 'invalid_roles'],
+    ['an active role outside the roles', { ...base(), user: { ...user('a'), activeRole: 'VENDOR' } }, 'invalid_active_role'],
+    ['a tuple from a future schema version', base(), 'unknown_version', 3],
+    ['a legacy v1 tuple missing its refresh token', (() => { const v1: Record<string, unknown> = { ...base(), refreshToken: null }; delete v1['sessionGeneration']; delete v1['adEventScopeId']; return v1; })(), 'missing_refresh_token', 1],
+  ];
+  for (const [label, state, reason, version] of cases) {
+    it(`${label} → signed out, caches cleared, boundary advanced, reason ${reason}`, async () => {
+      freshProcess();
+      persisted(state, version);
+      await useAuthStore.persist.rehydrate();
+      const s = useAuthStore.getState();
+      expect(s.isAuthenticated).toBe(false);
+      expect(getAuthSessionSnapshot()).toBeNull();
+      expect(s.user).toBeNull();
+      expect(s.accessToken).toBeNull();
+      expect(s.refreshToken).toBeNull();
+      expect(s.intent).toBeNull();
+      expect(s.countryCode).toBe('GY'); // device context is not session context
+      // the boundary advances past a VALID persisted generation; an unreadable one restarts at 1
+      const g = state['sessionGeneration'];
+      expect(s.sessionGeneration).toBe(typeof g === 'number' && Number.isSafeInteger(g) && g >= 0 ? g + 1 : 1);
+      expect(s.adEventScopeId).not.toBe('scope-a');
+      expect(clearQueryClient).toHaveBeenCalled();
+      expect(setSelectedStore).toHaveBeenCalledWith(null);
+      expect(hydrationCounters()).toEqual({ [reason]: 1 });
+      // the root gate for this state can never be the main stack
+      expect(rootEntryGate({ isAuthenticated: s.isAuthenticated, wantsAuth: false, intent: s.intent, countryCode: s.countryCode, anyPreview: false, needsSelfie: false })).toBe('role-picker');
+      // durable: storage now holds the normalized tuple, so the next boot is a plain signed-out hydration
+      expect(JSON.parse(storageData.get('swift-auth')!)).toMatchObject({ version: 2, state: { isAuthenticated: false, user: null, accessToken: null, refreshToken: null } });
+      clearQueryClient.mockClear();
+      await useAuthStore.persist.rehydrate();
+      expect(hydrationCounters()).toEqual({ [reason]: 1, signed_out: 1 });
+      expect(clearQueryClient).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a fully consistent v2 tuple hydrates authenticated, unchanged, reason ok, nothing cleared', async () => {
+    freshProcess();
+    persisted(base());
+    await useAuthStore.persist.rehydrate();
+    expect(getAuthSessionSnapshot()).toMatchObject({ userId: 'a', generation: 3, accessToken: 'access-a', refreshToken: 'refresh-a', adEventScopeId: 'scope-a' });
+    expect(hydrationCounters()).toEqual({ ok: 1 });
+    expect(clearQueryClient).not.toHaveBeenCalled();
+  });
+
+  it('unreadable storage hydrates nothing and is counted', async () => {
+    freshProcess();
+    storageData.set('swift-auth', '{not json');
+    await useAuthStore.persist.rehydrate();
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    expect(getAuthSessionSnapshot()).toBeNull();
+    expect(hydrationCounters()).toEqual({ unreadable: 1 });
+  });
+
+  it('the root navigator no longer makes the selfie gate conditional on a user being present', () => {
+    const src = readFileSync(new URL('../navigation/RootNavigator.tsx', import.meta.url), 'utf8');
+    expect(src).toContain('const needsSelfie = isAuthenticated && !user?.selfieCapturedAt;');
+    expect(src).not.toContain('isAuthenticated && !!user && !user.selfieCapturedAt');
+    // an authenticated state with no user can only reach 'selfie', never 'main'
+    expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent: 'customer', countryCode: 'GY', anyPreview: false, needsSelfie: true })).toBe('selfie');
   });
 });
