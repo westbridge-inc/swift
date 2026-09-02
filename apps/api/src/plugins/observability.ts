@@ -573,6 +573,21 @@ export const incidentIntakeGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [S-09] Legal holds: partial aggregates (deletion frozen while any exist),
+ *  vault manifests pending / failed, and the freeze itself. */
+export const legalHoldGauge = new client.Gauge({
+  name: 'swift_legal_hold',
+  help: 'Legal hold state by check (partial, pending_vault, failed_vault, deletion_frozen)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+export const legalHoldCounter = new client.Counter({
+  name: 'swift_legal_hold_events_total',
+  help: 'Legal hold events (placed, extended, repaired, vaulted, vault_failed, vault_dead_letter, retention_frozen)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

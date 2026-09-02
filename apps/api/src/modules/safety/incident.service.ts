@@ -14,6 +14,7 @@ import { log } from '../../utils/logger';
 import { sweepPage } from '../../lib/sweep-cursor';
 import { createHash } from 'node:crypto';
 import { incidentIntakeCounter, incidentIntakeGauge } from '../../plugins/observability';
+import { placeLegalHold, drainLegalHoldVault, type LegalHoldObserver } from './legal-hold';
 
 // Incident Management (safety spec §8) — the case machine. Server-owned like
 // the order and SOS machines: explicit transition table, CAS updates, illegal
@@ -211,6 +212,8 @@ export async function persistMoverCustodyLossIncidentInTransaction(
 export class IncidentService {
   private notifications: NotificationService;
 
+  /** [S-09] Test seam for the hold transaction. Never set in routes. */
+  holdObserver: LegalHoldObserver = {};
   constructor(private prisma: PrismaClient, private io: Server) {
     this.notifications = new NotificationService(prisma, io);
   }
@@ -594,6 +597,9 @@ export class IncidentService {
   }
 
   /** §8.2 parallel flag — any live case; sets legalHold. Idempotent. */
+  /** [S-09] Police escalation IS a legal hold: the case, every linked
+   *  evidence bundle, the custody log entry and the hold row commit together
+   *  or not at all; the vault manifest follows from the outbox. */
   async escalatePolice(id: string, opsUserId: string): Promise<IncidentCase> {
     const kase = await this.prisma.incidentCase.findUnique({ where: { id } });
     if (!kase) throw new NotFoundError('IncidentCase', id);
@@ -601,17 +607,16 @@ export class IncidentService {
       throw new AppError(409, 'CASE_CLOSED', 'Reopen handling happens with ops — a closed case cannot newly escalate.');
     }
     if (kase.escalatedPoliceAt) return kase;
-    const updated = await this.prisma.incidentCase.update({
-      where: { id },
-      data: { escalatedPoliceAt: new Date(), legalHold: true, details: { ...((kase.details as Record<string, unknown> | null) ?? {}), policeEscalatedBy: opsUserId } as never },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await placeLegalHold(tx, { caseId: id, placedBy: opsUserId, reason: `Case ${kase.caseNumber} escalated to police`, observer: this.holdObserver });
+      return tx.incidentCase.update({
+        where: { id },
+        data: { escalatedPoliceAt: new Date(), details: { ...((kase.details as Record<string, unknown> | null) ?? {}), policeEscalatedBy: opsUserId } as never },
+      });
     });
-    // §9.2 — police escalation puts the linked evidence bundle under legal
-    // hold too (retention must never delete what a prosecution may need).
-    const { EvidenceService } = await import('./evidence.service');
-    const evidence = new EvidenceService(this.prisma, this.io);
-    const bundle = await this.prisma.evidenceBundle.findUnique({ where: { caseId: id }, select: { id: true } });
-    if (bundle) await evidence.setLegalHold(bundle.id, opsUserId, `Case ${kase.caseNumber} escalated to police`).catch(() => {});
-    log().warn({ caseId: id, opsUserId }, 'incident escalated to police — legal hold set');
+    // The vault operation runs from the outbox — inline now, and from the tick if this dies.
+    await drainLegalHoldVault(this.prisma, { caseIds: [id] }).catch((err) => log().error({ err, caseId: id }, '[S-09] vault operation deferred to the worker'));
+    log().warn({ caseId: id, opsUserId }, 'incident escalated to police — legal hold placed (case + evidence + custody log, one commit)');
     return updated;
   }
 
