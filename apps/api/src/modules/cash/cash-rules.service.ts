@@ -1,4 +1,4 @@
-import type { PrismaClient, ReimbursementClaim } from '@prisma/client';
+import type { Prisma, PrismaClient, ReimbursementClaim } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
@@ -159,6 +159,18 @@ export async function customerTrustSummaries(
   );
 }
 
+/** [M-24] A seam for the atomicity proofs: called INSIDE the handover's
+ *  transaction after every terminal fact is staged and before the commit, so
+ *  a thrown error rolls the whole generation back exactly as a crash would. */
+export interface CashHandoverObserver {
+  afterTerminalFacts?: (stage: 'paid' | 'failed') => Promise<void>;
+}
+type EarningNotices = Awaited<ReturnType<OrderService['createEarnings']>>;
+type StagedClaim = {
+  claim: ReimbursementClaim | null;
+  riderNotice: { userId: string; type: 'SYSTEM_ANNOUNCEMENT'; title: string; body: string; data: Record<string, unknown> } | null;
+};
+
 export class CashRulesService {
   private countryConfig: CountryConfigService;
 
@@ -166,6 +178,8 @@ export class CashRulesService {
     private prisma: PrismaClient,
     private notifications: NotificationService,
     private orders: OrderService,
+    /** [M-24] Test seam only — see CashHandoverObserver. Production passes nothing. */
+    private readonly observer: CashHandoverObserver = {},
   ) {
     this.countryConfig = new CountryConfigService(prisma);
   }
@@ -205,65 +219,97 @@ export class CashRulesService {
       throw new AppError(409, 'CASH_HANDOVER_ONLY', 'Customer cash handover is available only for cash orders.');
     }
 
+    // [M-24] A terminal retry of the rider's own finished handover (a lost
+    // response, a double tap) answers the coherent facts it already wrote
+    // instead of refusing — every fact committed together, so there is no
+    // partial state to complete.
+    if (order.status === 'DELIVERED' && input.outcome === 'paid' && order.paymentStatus === 'CAPTURED') {
+      return { order, claim: null };
+    }
+    if (order.status === 'FAILED' && input.outcome !== 'paid') {
+      const claim = await this.prisma.reimbursementClaim.findFirst({ where: { orderId, riderId: rider.id } });
+      return { order, claim };
+    }
     if (!HANDOVER_STATES.includes(order.status as (typeof HANDOVER_STATES)[number])) {
       throw new AppError(409, 'NOT_AT_DOOR', `Handover is only available at the delivery point (order is ${order.status})`);
     }
 
     const gpsNote = gpsEvidence(input.gps.lat, input.gps.lng);
-
     if (input.outcome === 'paid') {
-      // Golden rule satisfied: payment collected, THEN handover completes
-      await this.prisma.order.update({
-        where: { id: orderId },
-        data: { paymentStatus: 'CAPTURED' },
+      // [M-24] ONE terminal generation: the captured payment, the DELIVERED
+      // transition and the earnings commit together on the canonical seam's
+      // transaction. Before, CAPTURED was written first and DELIVERED and the
+      // earnings followed as separate statements, so a failure between them
+      // left "captured but not delivered" or "delivered but never paid out".
+      let earningNotices: EarningNotices = [];
+      const updated = await this.orders.updateStatus(orderId, 'DELIVERED', riderUserId, `payment collected — ${gpsNote}`, {
+        withinTransaction: async (tx) => {
+          await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
+          // The seam mints a delivery's earnings itself; this call is a no-op
+          // when it already did and the minting call when the capture above
+          // was what the earnings were waiting for. Either way: inside the tx.
+          earningNotices = await this.orders.createEarnings(orderId, tx, false);
+          await this.observer.afterTerminalFacts?.('paid');
+        },
       });
-      const updated = await this.orders.updateStatus(orderId, 'DELIVERED', riderUserId, `payment collected — ${gpsNote}`);
-      await this.orders.createEarnings(orderId);
-      await this.maybePromoteToL3(order.customer.id, order.customer.countryCode);
+      for (const notice of earningNotices) {
+        await this.notifications.earningAvailable(notice.userId, notice.amount, notice.type).catch(() => {});
+      }
+      await this.maybePromoteToL3(order.customer.id, order.customer.countryCode).catch(() => {});
       return { order: updated, claim: null };
     }
-
-    // Failed handover: order fails through the state machine, evidence intact
+    // [M-24] ONE terminal generation for a failed handover: FAILED, the
+    // payment status, the customer's strike and the rider's guarantee claim
+    // commit together on the seam's transaction. Before, they were four
+    // separate statements with a notification in the middle — a failure at
+    // the notification left the order FAILED and the customer struck with no
+    // claim for the rider, and the terminal retry was refused.
+    const addressKey = `geo:${order.deliveryLat.toFixed(4)}:${order.deliveryLng.toFixed(4)}`;
+    let staged: StagedClaim = { claim: null, riderNotice: null };
     const failed = await this.orders.updateStatus(
       orderId,
       'FAILED',
       riderUserId,
       `${input.outcome} — ${gpsNote}${input.photoUrl ? ' photo:yes' : ''}`,
-    );
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: { paymentStatus: 'FAILED' },
-    });
-
-    // Strike the customer — phone + address fingerprint feed collusion checks
-    const addressKey = `geo:${order.deliveryLat.toFixed(4)}:${order.deliveryLng.toFixed(4)}`;
-    await this.prisma.strike.create({
-      data: {
-        userId: order.customer.id,
-        orderId,
-        reason: `failed_payment_${input.outcome}`,
-        phone: order.customer.phone,
-        addressKey,
+      {
+        withinTransaction: async (tx) => {
+          await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'FAILED' } });
+          await tx.strike.create({
+            data: {
+              userId: order.customer.id,
+              orderId,
+              reason: `failed_payment_${input.outcome}`,
+              phone: order.customer.phone,
+              addressKey,
+            },
+          });
+          staged = await this.stageClaim(tx, order, rider.id, input, addressKey);
+          await this.observer.afterTerminalFacts?.('failed');
+        },
       },
-    });
+    );
+    // Notices leave AFTER the money committed — never inside it, never before
+    // the claim. A lost notice is a lost notice, not a lost claim.
     await this.notifications.send({
       userId: order.customer.id,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Failed delivery recorded',
       body: 'Your order was not paid for at the door. Repeated incidents restrict your account.',
       data: { kind: 'strike', orderId },
-    });
-
-    const claim = await this.createClaim(order, rider.id, input, addressKey);
-
-    return { order: failed, claim };
+    }).catch(() => {});
+    if (staged.riderNotice) await this.notifications.send(staged.riderNotice).catch(() => {});
+    return { order: failed, claim: staged.claim };
   }
 
   // -------------------------------------------------------------------------
   // Claims + guardrails
   // -------------------------------------------------------------------------
 
-  private async createClaim(
+  /** [M-24] The guarantee claim, staged on the handover's transaction. The
+   *  rider's notice is returned, not sent — the caller sends it after the
+   *  commit. */
+  private async stageClaim(
+    tx: Prisma.TransactionClient,
     order: {
       id: string;
       totalAmount: unknown;
@@ -274,38 +320,29 @@ export class CashRulesService {
     riderId: string,
     input: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
     addressKey: string,
-  ): Promise<ReimbursementClaim | null> {
+  ): Promise<StagedClaim> {
     const amount = Number(order.totalAmount);
+    const riderUserId = (await this.riderUser(riderId)).userId;
     const gateLocal = await this.countryConfig.getIdGateThresholdLocal(order.customer.countryCode);
-
-    // The company guarantee covers sub-gate orders only (>= gate required L2
-    // at checkout anyway — those are review territory, not auto-money)
     if (amount >= gateLocal) {
-      await this.notifications.send({
-        userId: (await this.riderUser(riderId)).userId,
-        type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Not covered by the guarantee',
-        body: `Orders of $${Math.round(gateLocal).toLocaleString()} or more are outside the automatic guarantee. Support will follow up.`,
-        data: { kind: 'claim_over_gate', orderId: order.id },
-      });
-      return null;
+      return {
+        claim: null,
+        riderNotice: {
+          userId: riderUserId,
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'Not covered by the guarantee',
+          body: `Orders of $${Math.round(gateLocal).toLocaleString()} or more are outside the automatic guarantee. Support will follow up.`,
+          data: { kind: 'claim_over_gate', orderId: order.id },
+        },
+      };
     }
-
     const rules = await this.configFor(order.customer.countryCode);
-    const flags = await this.guardrailFlags(riderId, order.customer.id, order.customer.phone, addressKey, rules);
-
-    // SWIFT-076: the handover GPS is the claim's evidence — validate it, don't
-    // just record it. Server-side proximity assertion (rule 3: never trust a
-    // client coordinate for a money outcome). A claim reported implausibly far
-    // from the order's delivery point routes to manual review instead of
-    // auto-paying — the same "flag → PENDING_REVIEW" path as the other
-    // guardrails, so a legitimate claim is unaffected.
+    const flags = await this.guardrailFlags(riderId, order.customer.id, order.customer.phone, addressKey, rules, tx);
     if (order.deliveryLat != null && order.deliveryLng != null) {
       const km = haversineDistance(input.gps.lat, input.gps.lng, order.deliveryLat, order.deliveryLng);
       if (km > rules.maxHandoverDistanceKm) flags.push('gps_far');
     }
-
-    const claim = await this.prisma.reimbursementClaim.create({
+    const claim = await tx.reimbursementClaim.create({
       data: {
         orderId: order.id,
         riderId,
@@ -319,27 +356,27 @@ export class CashRulesService {
         status: flags.length === 0 ? 'AUTO_APPROVED' : 'PENDING_REVIEW',
       },
     });
-
-    await this.notifications.send({
-      userId: (await this.riderUser(riderId)).userId,
-      type: 'SYSTEM_ANNOUNCEMENT',
-      title: claim.status === 'AUTO_APPROVED' ? 'Guarantee approved' : 'Claim under review',
-      body: claim.status === 'AUTO_APPROVED'
-        ? `$${amount.toLocaleString()} is covered by the Swift guarantee and will be paid out.`
-        : 'Your claim needs a quick manual review — we will get back to you.',
-      data: { kind: 'claim', claimId: claim.id },
-    });
-
-    return claim;
+    return {
+      claim,
+      riderNotice: {
+        userId: riderUserId,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: claim.status === 'AUTO_APPROVED' ? 'Guarantee approved' : 'Claim under review',
+        body: claim.status === 'AUTO_APPROVED'
+          ? `$${amount.toLocaleString()} is covered by the Swift guarantee and will be paid out.`
+          : 'Your claim needs a quick manual review — we will get back to you.',
+        data: { kind: 'claim', claimId: claim.id },
+      },
+    };
   }
 
-  /** Deterministic, explainable flags — synthetic patterns prove each one. */
   private async guardrailFlags(
     riderId: string,
     customerId: string,
     phone: string,
     addressKey: string,
     rules: CashRulesConfig,
+    db: PrismaClient | Prisma.TransactionClient = this.prisma,
   ): Promise<string[]> {
     const flags: string[] = [];
     const monthStart = new Date();
@@ -349,17 +386,17 @@ export class CashRulesService {
     const window30 = new Date(Date.now() - 30 * DAY_MS);
 
     // Per-rider monthly cap
-    const monthClaims = await this.prisma.reimbursementClaim.count({
+    const monthClaims = await db.reimbursementClaim.count({
       where: { riderId, createdAt: { gte: monthStart } },
     });
     if (monthClaims >= rules.maxClaimsPerRiderPerMonth) flags.push('over_cap');
 
     // Claim-rate outlier vs peer average (riders with any claim in 30d)
-    const mine30 = await this.prisma.reimbursementClaim.count({
+    const mine30 = await db.reimbursementClaim.count({
       where: { riderId, createdAt: { gte: window30 } },
     });
     if (mine30 > 0) {
-      const grouped = await this.prisma.reimbursementClaim.groupBy({
+      const grouped = await db.reimbursementClaim.groupBy({
         by: ['riderId'],
         where: { createdAt: { gte: window30 }, riderId: { not: riderId } },
         _count: true,
@@ -371,7 +408,7 @@ export class CashRulesService {
     }
 
     // Collusion: the same customer showing up across riders' claims
-    const sameTarget = await this.prisma.reimbursementClaim.findMany({
+    const sameTarget = await db.reimbursementClaim.findMany({
       where: { createdAt: { gte: window90 }, customerId },
       select: { riderId: true },
     });
@@ -380,7 +417,7 @@ export class CashRulesService {
     if (sameTarget.length > 0 && distinctRiders.size >= 2) flags.push('collusion_customer');
 
     // One rider repeatedly against one customer
-    const pairCount = await this.prisma.reimbursementClaim.count({
+    const pairCount = await db.reimbursementClaim.count({
       where: { riderId, customerId, createdAt: { gte: window90 } },
     });
     if (pairCount >= 1) flags.push('collusion_pair');
