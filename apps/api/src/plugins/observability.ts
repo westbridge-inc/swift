@@ -148,6 +148,23 @@ export const notificationFailuresCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [M-04] Terminal MMG payments (FAILED/EXPIRED) whose subscription carries no
+ *  recorded outcome for that period — the state a crash between the terminal
+ *  CAS and the dunning application used to leave behind. Set by the repair
+ *  pass on every poll tick; the alert is on it staying above zero. */
+export const billingTerminalWithoutOutcomeGauge = new client.Gauge({
+  name: 'swift_billing_terminal_without_outcome',
+  help: 'Terminal MMG weekly-fee payments with no recorded dunning outcome (count) and the oldest such gap in minutes',
+  labelNames: ['measure'] as const,
+  registers: [registry],
+});
+
+export const billingOutcomeRepairsCounter = new client.Counter({
+  name: 'swift_billing_outcome_repairs_total',
+  help: 'Dunning outcomes applied by the M-04 repair pass to terminal payments that had none',
+  registers: [registry],
+});
+
 // Security actions must remain externally uniform even when their audit sink
 // is degraded. Count the write failure separately so a successful revocation
 // can still return the required 401/200 while operations alerts on lost audit

@@ -563,6 +563,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (polled.settled + polled.failed > 0) {
             ctx.log.info(polled, 'MMG billing poll settled pending charges');
           }
+          // [M-04] The repair pass runs with every poll: a terminal payment
+          // whose outcome never landed is applied now and counted.
+          const repaired = await billing.reconcileTerminalWithoutOutcome();
+          if (repaired.repaired > 0 || repaired.stillOpen > 0) {
+            ctx.log.warn(repaired, '[M-04] terminal MMG payments without a recorded outcome — reconciled');
+          }
           break;
         }
       }

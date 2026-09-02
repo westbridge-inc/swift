@@ -10,6 +10,7 @@ import { convertUsdToLocal } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
 import { mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
+import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter } from '../../plugins/observability';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -1010,6 +1011,71 @@ export class BillingService {
       }
     }
     return updated;
+  }
+
+  /**
+   * [M-04 · operations clause] The repair pass the spec asks for: "find
+   * terminal payments lacking matching failure events/counters and repair
+   * idempotently; observe terminal-without-outcome count and age."
+   *
+   * Since #994 the terminal status and the outcome commit together, so this
+   * finds only what the pre-transactional code left behind (a FAILED/EXPIRED
+   * row whose period has neither a CHARGE_FAILED nor a success event) — and
+   * anything a future regression leaves, which is why it runs on every poll
+   * tick and reports through the gauge. A subscription that has since left
+   * the live states is not re-dunned.
+   */
+  async reconcileTerminalWithoutOutcome(now = new Date(), windowDays = 30): Promise<{ scanned: number; repaired: number; stillOpen: number; oldestMinutes: number | null }> {
+    const since = new Date(now.getTime() - windowDays * 86_400_000);
+    const terminal = await this.prisma.subscriptionPayment.findMany({
+      where: { paymentMethod: 'MOBILE_MONEY', status: { in: ['FAILED', 'EXPIRED'] }, createdAt: { gte: since } },
+      select: { id: true, subscriptionId: true, amount: true, periodStart: true, createdAt: true, lastPolledAt: true },
+      orderBy: { createdAt: 'asc' },
+      take: 500,
+    });
+    let repaired = 0;
+    let stillOpen = 0;
+    let oldestMinutes: number | null = null;
+    for (const p of terminal) {
+      const periodKey = p.periodStart.toISOString().slice(0, 10);
+      const [failure, success] = await Promise.all([
+        this.prisma.billingEvent.findFirst({
+          where: { subscriptionId: p.subscriptionId, type: 'CHARGE_FAILED', idempotencyKey: { startsWith: `failed:${p.subscriptionId}:${periodKey}:` } },
+          select: { id: true },
+        }),
+        this.prisma.billingEvent.findUnique({ where: { idempotencyKey: `success:${p.subscriptionId}:${periodKey}` }, select: { id: true } }),
+      ]);
+      if (failure || success) continue;
+      // The row records no terminalization time; the last poll (or creation) bounds the gap's age from below.
+      const ageMinutes = Math.round((now.getTime() - (p.lastPolledAt ?? p.createdAt).getTime()) / 60_000);
+      oldestMinutes = oldestMinutes == null ? ageMinutes : Math.max(oldestMinutes, ageMinutes);
+      const sub = await this.prisma.subscription.findUnique({
+        where: { id: p.subscriptionId },
+        include: {
+          rider: { select: { userId: true } },
+          driver: { select: { userId: true } },
+          vendor: { select: { id: true, owner: { select: { userId: true } } } },
+        },
+      });
+      if (!sub || !['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(sub.status)) {
+        stillOpen += 1; // a gap on a closed subscription is recorded, never re-dunned
+        continue;
+      }
+      try {
+        await this.applyFailedCharge(sub as SubWithRelations, Number(p.amount), 'Terminal MMG payment without a recorded outcome — repaired by reconciliation', now, periodKey);
+        repaired += 1;
+        billingOutcomeRepairsCounter.inc();
+      } catch (err) {
+        stillOpen += 1;
+        log().error({ err, paymentId: p.id, subscriptionId: p.subscriptionId }, '[M-04] repair of a terminal payment without outcome failed — continuing');
+      }
+    }
+    billingTerminalWithoutOutcomeGauge.set({ measure: 'count' }, stillOpen);
+    billingTerminalWithoutOutcomeGauge.set({ measure: 'oldest_minutes' }, stillOpen > 0 ? (oldestMinutes ?? 0) : 0);
+    if (repaired > 0 || stillOpen > 0) {
+      log().warn({ scanned: terminal.length, repaired, stillOpen, oldestMinutes }, '[M-04] terminal MMG payments without a recorded outcome');
+    }
+    return { scanned: terminal.length, repaired, stillOpen, oldestMinutes };
   }
 
   /**
