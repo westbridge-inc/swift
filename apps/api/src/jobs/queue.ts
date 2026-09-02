@@ -569,6 +569,22 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (repaired.repaired > 0 || repaired.stillOpen > 0) {
             ctx.log.warn(repaired, '[M-04] terminal MMG payments without a recorded outcome — reconciled');
           }
+          // [M-18] The historical double credits: one provider transaction
+          // credited by more than one channel before the identity existed.
+          // Reported and paged for human reconciliation, never reversed here.
+          const { scanDuplicateCredits } = await import('../modules/billing/agent-cash.service');
+          const duplicates = await scanDuplicateCredits(ctx.prisma);
+          if (duplicates.length > 0) {
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'agent-cash-duplicate-credits', 24 * 3600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: '💵 MMG transactions credited more than once',
+                body: `${duplicates.length} MMG transaction(s) hold more than one credited agent-cash record. Freeze them, reconcile against the MMG statement, and reverse only by hand — nothing is reversed automatically.`,
+                data: { kind: 'billing_invariants', alert: 'agent-cash-duplicate-credits', count: duplicates.length },
+              }),
+            ).catch(() => {});
+          }
           break;
         }
       }

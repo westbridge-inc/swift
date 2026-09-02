@@ -189,6 +189,35 @@ export const earningsRepairsCounter = new client.Counter({
  *  `since_enforced` counts rows delivered after it became mandatory, which the
  *  terminal authority refuses — so any value above zero is a bypass, and the
  *  queue pages on it. Set by the earnings reconciler on every sweep. */
+/** [M-18] Agent cash: a credit refused because the provider transaction was
+ *  already credited (stage=credit: the race loser or a later attach of the
+ *  unmatched original) or an observation that arrived after the credit
+ *  (stage=observed: the normal second channel). The alert is on stage=credit. */
+export const agentCashDuplicateCreditsCounter = new client.Counter({
+  name: 'swift_agent_cash_duplicate_credit_attempts_total',
+  help: 'Agent-cash observations of an already-credited provider transaction, by channel and stage',
+  labelNames: ['channel', 'stage'] as const,
+  registers: [registry],
+});
+
+/** [M-18] The same provider transaction id observed with a different amount or
+ *  currency — never credited, suspensed for a person. */
+export const agentCashProviderIdConflictsCounter = new client.Counter({
+  name: 'swift_agent_cash_provider_id_conflicts_total',
+  help: 'Agent-cash observations whose provider transaction id already exists with a different amount or currency',
+  labelNames: ['channel'] as const,
+  registers: [registry],
+});
+
+/** [M-18] Provider transactions that hold MORE than one credited observation —
+ *  the historical double credits the backfill could not resolve. Set by the
+ *  billing poll; reversed only after provider / human reconciliation. */
+export const agentCashDuplicateCreditsGauge = new client.Gauge({
+  name: 'swift_agent_cash_duplicate_credits',
+  help: 'Provider transactions with more than one credited agent-cash observation (legacy double credits awaiting reconciliation)',
+  registers: [registry],
+});
+
 export const taxiDeliveredUnpaidGauge = new client.Gauge({
   name: 'swift_taxi_delivered_unpaid',
   help: 'Cash rides delivered with no captured fare: all of them, and those delivered after the fare outcome became mandatory',

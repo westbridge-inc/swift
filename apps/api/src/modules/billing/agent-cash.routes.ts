@@ -62,7 +62,7 @@ export async function agentCashRoutes(app: FastifyInstance) {
 
   const notifications = new NotificationService(app.prisma, app.io);
   const billing = new BillingService(app.prisma, notifications, getPaymentProvider());
-  const svc = new AgentCashService(app.prisma, billing);
+  const svc = new AgentCashService(app.prisma, billing, notifications);
 
   /** Channel A — real-time agent-payment notification. */
   app.post('/agent-notification', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {

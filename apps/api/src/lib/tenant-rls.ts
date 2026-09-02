@@ -45,7 +45,9 @@ export const TENANT_TABLES = [
   'discovery_categories', 'discovery_category_requests',
   'discovery_category_suggestions', 'fee_receipts', 'house_ads',
   'identity_keys', 'item_discovery_categories', 'item_feedbacks',
-  'mmg_agent_payments', 'order_outbox', 'orders', 'pending_attributions', 'qr_codes',
+  'mmg_agent_payments', 'order_outbox', 'orders', 'pending_attributions',
+  // [M-18] One provider transaction, one identity, one credit.
+  'provider_payments', 'qr_codes',
   'rating_reports', 'rating_tag_defs', 'receipt_counters',
   'ride_queue_entries', 'san_tombstones', 'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
