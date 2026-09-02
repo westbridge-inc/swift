@@ -115,12 +115,9 @@ export async function adsRoutes(app: FastifyInstance) {
       throw new AppError(403, 'ADVERTISER_NOT_APPROVED', 'Your advertiser account must be approved before you can book inventory.');
     }
     const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId } });
-    const result = await booking.reserve(campaign.id, { reservationMinutes: settings?.reservationMinutes ?? 20 });
-    // Move the draft to PENDING_PAYMENT and stamp the locked total.
-    await app.prisma.adCampaign.updateMany({
-      where: { id: campaign.id, status: { in: ['DRAFT', 'PENDING_PAYMENT'] } },
-      data: { status: 'PENDING_PAYMENT', totalAmount: result.total },
-    });
+    // [R045-ADS-06] The reservation and the campaign's status commit together
+    // under the campaign lock — never RESERVED inventory on a DRAFT campaign.
+    const result = await booking.reserveAndHold(campaign.id, { reservationMinutes: settings?.reservationMinutes ?? 20 });
     return { success: true, data: result };
   });
 

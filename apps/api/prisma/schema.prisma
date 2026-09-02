@@ -3951,6 +3951,9 @@ enum AdRefundReason {
   ADMIN_KILL
   LATE_APPROVAL
   PLACEMENT_DOWN
+  /// [R045-ADS-05] Money arrived after the reservation hold had expired and
+  /// the inventory was released: the full amount is owed back (suspense).
+  LATE_CAPTURE
 }
 
 enum AdRefundIntentStatus {

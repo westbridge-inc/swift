@@ -639,6 +639,21 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               }),
             ).catch(() => {});
           }
+          // [R045-ADS-04 · 05] The checkout aggregate's invariants: a paid
+          // campaign with no confirmed inventory, or more than one active invoice.
+          const { scanAdCheckout } = await import('../modules/ads/checkout-scan');
+          const adCheckout = await scanAdCheckout(ctx.prisma);
+          if (adCheckout.paidWithoutInventory.length > 0 || adCheckout.duplicateActiveInvoices.length > 0) {
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'ad-checkout-invariants', 6 * 3600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: '📣 Ad checkout invariants broken',
+                body: `${adCheckout.paidWithoutInventory.length} paid campaign(s) have no confirmed inventory (stop serving and refund or re-book) and ${adCheckout.duplicateActiveInvoices.length} campaign(s) hold more than one active invoice (freeze and reconcile).`,
+                data: { kind: 'billing_invariants', alert: 'ad-checkout-invariants', paidWithoutInventory: adCheckout.paidWithoutInventory.slice(0, 10), duplicateActiveInvoices: adCheckout.duplicateActiveInvoices.slice(0, 10) },
+              }),
+            ).catch(() => {});
+          }
           break;
         }
       }

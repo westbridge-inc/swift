@@ -168,6 +168,10 @@ export class AdsRefundService {
             // Counted only when THIS execution flipped the booking: a forced
             // replay (an operator re-queuing an executed intent) moves nothing twice.
             refundedMinor += item.amountMinor;
+          } else if (!executedBefore && intent.reason === 'LATE_CAPTURE') {
+            // [R045-ADS-05] A late-capture item's booking was RELEASED by the
+            // expiry — nothing to flip, but the money is owed back in full, once.
+            refundedMinor += item.amountMinor;
           }
         } else if (!executedBefore) {
           // [R045-ADS-02] The credit is a persisted liability: the balance moves once.
@@ -198,6 +202,34 @@ export class AdsRefundService {
       if (creditedMinor > 0n) adRefundCounter.labels('credited').inc();
       return { executed: true, refundedMinor, creditedMinor, releasedSlots };
     });
+  }
+
+  /** [R045-ADS-05] Money that arrived after the hold expired: the full invoice
+   *  amount becomes a refund obligation in the caller's transaction — one
+   *  REFUND item per booking the expiry released (nothing to flip; the amount
+   *  is owed) — keyed to the invoice so a replayed capture is the same intent. */
+  async stageLateCapture(tx: Prisma.TransactionClient, campaignId: string, invoiceId: string, actor: string | null): Promise<StagedRefund> {
+    const campaign = await tx.adCampaign.findUniqueOrThrow({ where: { id: campaignId }, select: { tenantId: true } });
+    const invoice = await tx.adInvoice.findUniqueOrThrow({ where: { id: invoiceId }, select: { amount: true, currency: true } });
+    const idempotencyKey = `ad-refund:${campaignId}:LATE_CAPTURE:${invoiceId}`;
+    const existing = await tx.adRefundIntent.findUnique({ where: { idempotencyKey }, select: { id: true, amountMinor: true } });
+    if (existing) return { intentId: existing.id, staged: false, totalMinor: existing.amountMinor };
+    const currency = invoice.currency || CURRENCY_FALLBACK;
+    const bookings = await tx.adBooking.findMany({ where: { campaignId }, select: { id: true, amount: true } });
+    const totalMinor = majorDecimalToMinor(String(invoice.amount), currency);
+    const intent = await tx.adRefundIntent.create({
+      data: {
+        tenantId: campaign.tenantId, invoiceId, campaignId, idempotencyKey, reason: 'LATE_CAPTURE',
+        status: 'PENDING', amountMinor: totalMinor, currency, payoutRail: 'MANUAL', correlationId: idempotencyKey, requestedByUserId: actor,
+      },
+      select: { id: true },
+    });
+    if (bookings.length > 0) {
+      await tx.adRefundItem.createMany({ data: bookings.map((b) => ({ tenantId: campaign.tenantId, refundIntentId: intent.id, campaignId, bookingId: b.id, kind: 'REFUND' as const, amountMinor: majorDecimalToMinor(String(b.amount), currency) })) });
+    }
+    await tx.adRefundOutbox.create({ data: { tenantId: campaign.tenantId, refundIntentId: intent.id, dedupeKey: idempotencyKey, payload: { campaignId, reason: 'LATE_CAPTURE', invoiceId }, correlationId: idempotencyKey } });
+    adRefundCounter.labels('staged').inc();
+    return { intentId: intent.id, staged: true, totalMinor };
   }
 
   /** The human's payout reference is the evidence that settles an executed intent. */

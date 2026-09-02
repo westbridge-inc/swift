@@ -311,6 +311,7 @@ const CENSUS: Case[] = [
   { k: 'ad_creative_rejected', d: { creativeId: 'c1', reason: 'POLICY' }, to: null, why: 'GAP: advertiser must re-upload' },
   { k: 'ad_invoice_receipt', d: { campaignId: 'c1', invoiceNumber: 'INV-1' }, to: null, why: 'GAP: advertiser receipt' },
   { k: 'ad_reservation_expiring', d: { campaignId: 'c1' }, to: null, why: 'GAP: a 5-minute money deadline' },
+  { k: 'ad_late_capture', d: { campaignId: 'c1', invoiceId: 'i1' }, to: null, why: 'GAP: advertiser — a payment captured after the hold expired became a refund obligation (R045-ADS-05); no advertiser surface routes it yet' },
   { k: 'ad_weekly_report', d: { campaignId: 'c1', weekStart: '2026-01-05' }, to: null, why: 'GAP: advertiser report' },
 
   // ── Admin / ops pages. null is CORRECT: there is no mobile admin app.
