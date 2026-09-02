@@ -7,6 +7,8 @@ import { retireAdEventScope } from '../lib/adsQueue';
 import { queryClient } from '../lib/queryClient';
 import { zustandStorage } from '../lib/storage';
 import { landingIntent } from '../lib/roleLanding';
+import { normalizePersistedAuth, recordHydration, type HydrationReason } from '../lib/authHydration';
+import { track } from '../lib/analytics';
 import { useBookingStore } from './bookingStore';
 import { useStoreSwitcher } from './storeSwitcher';
 import {
@@ -154,6 +156,9 @@ function finishLocalLogout(session: AuthSessionSnapshot | null): void {
 // country) instead of re-prompting for country/login. The API + socket layers
 // read accessToken/refreshToken via getState(), so a restored token is used
 // immediately; a stale one is handled by the 401 -> refresh -> logout flow.
+/** What the last hydration decided — read by onRehydrateStorage to persist a normalization. */
+let lastHydration: { reason: HydrationReason; normalized: boolean } | null = null;
+
 export const useAuthStore = create<AuthState>()(
   persist(
     (set, get) => ({
@@ -277,19 +282,40 @@ export const useAuthStore = create<AuthState>()(
       name: 'swift-auth',
       storage: createJSONStorage(() => zustandStorage),
       version: 2,
-      migrate: (persistedState, persistedVersion) => {
-        const persisted = persistedState as Partial<AuthState>;
-        if (persistedVersion >= 2) return persisted as AuthState;
-        return {
-          ...persisted,
-          sessionGeneration: Number.isSafeInteger(persisted.sessionGeneration)
-            ? persisted.sessionGeneration!
-            : 0,
-          adEventScopeId: typeof persisted.adEventScopeId === 'string'
-            && persisted.adEventScopeId.length > 0
-            ? persisted.adEventScopeId
-            : createAdEventScopeId(),
-        } as AuthState;
+      // [MOB-007] `migrate` runs only on a version change, so it cannot be the
+      // gate: it tags the raw tuple with its version and `merge` — which runs
+      // on EVERY hydration — normalizes. One law for v1, v2 and whatever else
+      // storage returns: a full consistent tuple, or signed out.
+      migrate: (persistedState, persistedVersion) => ({ __version: persistedVersion, __state: persistedState }) as never,
+      merge: (persisted, current) => {
+        if (persisted === undefined || persisted === null) return current; // nothing stored: a fresh install
+        const tagged = persisted as { __version?: number; __state?: unknown };
+        const [raw, version] = typeof tagged === 'object' && '__version' in tagged ? [tagged.__state, tagged.__version ?? 0] : [persisted, 2];
+        const { state, reason, normalized } = normalizePersistedAuth(raw, version, createAdEventScopeId);
+        recordHydration(reason);
+        lastHydration = { reason, normalized };
+        if (normalized) {
+          // An inconsistent tuple never reaches a privileged render: signed out
+          // atomically, and everything session-scoped goes with it. The
+          // principal generation has advanced, so persisted background work
+          // keyed to the old boundary is stale (moverBackgroundRuntime treats a
+          // signed-out rehydration as cleanup-pending).
+          queryClient.clear();
+          useBookingStore.getState().clear();
+          useStoreSwitcher.getState().setSelectedStore(null);
+          track('auth_hydration_normalized', { reason });
+        }
+        return { ...current, ...state } as AuthState;
+      },
+      onRehydrateStorage: () => (_state, error) => {
+        if (error) {
+          // Unreadable storage hydrates nothing: the initial (signed-out) state stands.
+          recordHydration('unreadable');
+          track('auth_hydration_normalized', { reason: 'unreadable' });
+          return;
+        }
+        // Write the normalized tuple back so the next boot reads a consistent one.
+        if (lastHydration?.normalized) useAuthStore.setState({});
       },
       // The encryption key is read from the Keychain asynchronously, so MMKV
       // isn't ready at module load. App boots the key then calls
