@@ -19,6 +19,9 @@ import { log } from '../../utils/logger';
 // ---------------------------------------------------------------------------
 
 const MAX_FAILED_ATTEMPTS = 3;
+
+/** [M-04] What a recorded failure decided — computed and applied inside one transaction. */
+type FailureOutcome = { attempts: number; willSuspend: boolean; nextRetryAt: Date; finalWarning: boolean };
 const RETRY_HOURS = 24;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -77,6 +80,16 @@ export interface BillingCycleResult {
   pending: number;
 }
 
+/**
+ * [M-04] A seam for the atomicity proofs: called INSIDE the terminalization
+ * transaction, after the payment's terminal compare-and-set and before the
+ * failure outcome is written, so a thrown error rolls the whole transition
+ * back exactly as a crash would. Never consulted for anything else.
+ */
+export interface BillingObserver {
+  afterPaymentTerminalized?: (payment: { id: string; status: 'FAILED' | 'EXPIRED' }) => Promise<void>;
+}
+
 export class BillingService {
   private countryConfig: CountryConfigService;
 
@@ -84,6 +97,8 @@ export class BillingService {
     private prisma: PrismaClient,
     private notifications: NotificationService,
     private payments: PaymentProvider,
+    /** [M-04] Test seam only — see BillingObserver. Production passes nothing. */
+    private readonly observer: BillingObserver = {},
   ) {
     this.countryConfig = new CountryConfigService(prisma);
   }
@@ -180,11 +195,13 @@ export class BillingService {
         const failedKey = `failed:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
         const recordedFailure = await this.prisma.billingEvent.findUnique({
           where: { idempotencyKey: failedKey },
-          select: { note: true },
+          select: { note: true, amount: true },
         });
         if (recordedFailure) {
-          return this.applyRecordedFailureOutcome(
-            sub, recordedFailure.note ?? 'Charge failed (outcome resumed after interruption)', now, periodKey,
+          // [M-04] The event exists but its outcome never landed (a crash of the
+          // pre-transactional code): apply it now, in ONE transaction.
+          return this.applyFailedCharge(
+            sub, Number(recordedFailure.amount ?? 0), recordedFailure.note ?? 'Charge failed (outcome resumed after interruption)', now, periodKey,
           );
         }
         // [TA-S0-002] A run that reserved this attempt's MMG intent and died
@@ -297,6 +314,16 @@ export class BillingService {
       return 'pending';
     }
 
+    if (charged.intentId) {
+      // [M-04] The intent row, the CHARGE_FAILED event and the dunning state
+      // are ONE transition; a lost claim means another run already applied it.
+      const outcome = await this.terminalizeFailedPayment(
+        sub, { id: charged.intentId, amount },
+        { status: 'FAILED', failureCode: charged.failureCode ?? 'PROVIDER_ERROR', from: ['UNKNOWN'], requireNoExternalRef: true, ...(charged.failureRaw ? { failureRaw: charged.failureRaw } : {}) },
+        charged.reason, now, periodKey,
+      );
+      return outcome ?? 'skipped';
+    }
     return this.applyFailedCharge(sub, amount, charged.reason, now, periodKey);
   }
 
@@ -408,7 +435,7 @@ export class BillingService {
     /** `spendPrepaid` = debit this much from the prepaid balance INSIDE the
      *  advance transaction, so the money and the week it buys commit together. */
     | { ok: true; ref: string; settlePaymentId?: string; spendPrepaid?: number }
-    | { ok: false; reason: string; failureCode?: NormalizedFailure }
+    | { ok: false; reason: string; failureCode?: NormalizedFailure; intentId?: string; failureRaw?: string }
     | { ok: false; pendingTx: string; clientKey: string; expiresAt: Date; intentId: string }
     | { ok: false; unknown: true; clientKey: string; failureRaw?: string; intentId: string }
     | { ok: false; deferred: true; reopenPaymentId?: string }
@@ -528,11 +555,11 @@ export class BillingService {
       // MMG answered "no" (declined / reversed / expired at initiate): the
       // intent closes as FAILED on the same row, with the normalized code.
       const failureCode = mapMmgFailure(result.status, result.reason);
-      await this.prisma.subscriptionPayment.updateMany({
-        where: { id: intent.id, status: 'UNKNOWN', externalRef: null },
-        data: { status: 'FAILED', failureCode, ...(result.reason ? { failureRaw: { reason: result.reason } } : {}) },
-      });
-      return { ok: false, reason: result.reason ?? 'MMG request failed', failureCode };
+      // [M-04] The intent is NOT flipped here. billSubscription terminalizes
+      // it together with the CHARGE_FAILED event and the dunning state in one
+      // transaction; a flip here followed by a crash left a FAILED row whose
+      // outcome never landed.
+      return { ok: false, reason: result.reason ?? 'MMG request failed', failureCode, intentId: intent.id, ...(result.reason ? { failureRaw: result.reason } : {}) };
     }
 
     // Prepaid already tried and came up short above; no usable external rail
@@ -796,13 +823,19 @@ export class BillingService {
         if (now >= ttlAt) {
           // 6.6(c): the create itself had timed out AND the provider has no
           // record by our reference after the TTL — safe to close and dun.
-          const claimed = await this.prisma.subscriptionPayment.updateMany({
-            where: { id: payment.id, status: 'UNKNOWN' },
-            data: { status: 'EXPIRED', failureCode: 'REQUEST_EXPIRED' },
-          });
-          if (claimed.count === 0) continue;
-          await this.applyFailedCharge(sub as SubWithRelations, Number(payment.amount), 'MMG request lost in transit — never confirmed at MMG', now, periodKey);
-          out.failed += 1;
+          // [M-04] Terminal status and dunning outcome land in ONE transaction,
+          // behind the same per-row boundary the lookup branch has: one row's
+          // failure must never abort the sweep for every other payer.
+          try {
+            const outcome = await this.terminalizeFailedPayment(
+              sub as SubWithRelations, payment, { status: 'EXPIRED', failureCode: 'REQUEST_EXPIRED', from: ['UNKNOWN'] },
+              'MMG request lost in transit — never confirmed at MMG', now, periodKey,
+            );
+            if (!outcome) continue;
+            out.failed += 1;
+          } catch (err) {
+            log().error({ err, paymentId: payment.id, subscriptionId: sub.id }, 'MMG poll expiry failed for one payment — continuing');
+          }
         } else {
           out.stillPending += 1;
         }
@@ -911,12 +944,13 @@ export class BillingService {
           await this.afterSuccessfulCharge(sub as SubWithRelations, Number(payment.amount), periodKey);
           out.settled += 1;
         } else if (status === 'declined' || status === 'reversed' || expired) {
-          const claimed = await this.prisma.subscriptionPayment.updateMany({
-            where: { id: payment.id, status: { in: ['PENDING', 'UNKNOWN'] } },
-            data: { status: expired ? 'EXPIRED' : 'FAILED', failureCode: expired ? 'REQUEST_EXPIRED' : mapMmgFailure(status) },
-          });
-          if (claimed.count === 0) continue;
-          await this.applyFailedCharge(sub as SubWithRelations, Number(payment.amount), `MMG request ${expired ? 'expired unapproved' : status}`, now, periodKey);
+          // [M-04] Terminal status and dunning outcome land in ONE transaction.
+          const outcome = await this.terminalizeFailedPayment(
+            sub as SubWithRelations, payment,
+            { status: expired ? 'EXPIRED' : 'FAILED', failureCode: expired ? 'REQUEST_EXPIRED' : mapMmgFailure(status), from: ['PENDING', 'UNKNOWN'] },
+            `MMG request ${expired ? 'expired unapproved' : status}`, now, periodKey,
+          );
+          if (!outcome) continue;
           out.failed += 1;
         } else {
           out.stillPending += 1;
@@ -978,73 +1012,64 @@ export class BillingService {
     return updated;
   }
 
-  private async applyFailedCharge(
+  /**
+   * [M-04] A failed charge is ONE durable transition: the CHARGE_FAILED event
+   * (created if absent — the F-013-09 repair path arrives with it already
+   * recorded), the dunning counter, the subscription's PAST_DUE or SUSPENDED
+   * state and, on suspension, the access rows and the SUSPENDED event — all
+   * on the caller's transaction. Idempotent for a given subscription
+   * snapshot: every value written is absolute (`failedAttempts + 1` from the
+   * snapshot), so a repeat with the same snapshot lands the same row.
+   */
+  private async recordFailureInTx(
+    tx: Prisma.TransactionClient,
     sub: SubWithRelations,
     amount: number,
     reason: string,
     now: Date,
     periodKey: string,
-  ): Promise<'failed' | 'suspended'> {
-    await this.prisma.billingEvent.create({
-      data: {
-        subscriptionId: sub.id,
-        type: 'CHARGE_FAILED',
-        amount,
-        currencyCode: sub.currencyCode,
-        idempotencyKey: `failed:${sub.id}:${periodKey}:a${sub.failedAttempts}`,
-        note: reason,
-      },
-    });
-    return this.applyRecordedFailureOutcome(sub, reason, now, periodKey);
-  }
-
-  /** [REPORT-013 F-013-09] The APPLICATION half of a failed charge —
-   *  subscription state, access revocation, and dunning notices — separated
-   *  from the durable CHARGE_FAILED record so a crash between the two is
-   *  RESUMABLE: billSubscription's duplicate-attempt path re-enters here
-   *  when it finds a recorded failure whose outcome never landed
-   *  (failedAttempts still at the recorded level). */
-  private async applyRecordedFailureOutcome(
-    sub: SubWithRelations,
-    reason: string,
-    now: Date,
-    periodKey: string,
-  ): Promise<'failed' | 'suspended'> {
+  ): Promise<FailureOutcome> {
+    const failedKey = `failed:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
+    const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: failedKey }, select: { id: true } });
+    if (!recorded) {
+      await tx.billingEvent.create({
+        data: {
+          subscriptionId: sub.id,
+          type: 'CHARGE_FAILED',
+          amount,
+          currencyCode: sub.currencyCode,
+          idempotencyKey: failedKey,
+          note: reason,
+        },
+      });
+    }
     const attempts = sub.failedAttempts + 1;
     const willSuspend = attempts >= MAX_FAILED_ATTEMPTS && sub.autoSuspendEnabled;
-
     const nextRetryAt = new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000);
-    const subscriptionData = {
-      status: (willSuspend ? 'SUSPENDED' : 'PAST_DUE') as SubscriptionStatus,
-      failedAttempts: attempts,
-      nextRetryAt,
-      isInGracePeriod: !willSuspend,
-      gracePeriodEnd: willSuspend ? null : nextRetryAt,
-      ...(willSuspend ? { suspendedAt: now } : {}),
-    };
+    await tx.subscription.update({
+      where: { id: sub.id },
+      data: {
+        status: (willSuspend ? 'SUSPENDED' : 'PAST_DUE') as SubscriptionStatus,
+        failedAttempts: attempts,
+        nextRetryAt,
+        isInGracePeriod: !willSuspend,
+        gracePeriodEnd: willSuspend ? null : nextRetryAt,
+        ...(willSuspend ? { suspendedAt: now } : {}),
+      },
+    });
+    if (willSuspend) await this.suspendAccessRows(tx, sub, periodKey);
+    return { attempts, willSuspend, nextRetryAt, finalWarning: attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled };
+  }
 
-    if (willSuspend) {
-      // [REPORT-012 F-012-05] Suspension is ONE authority generation: the
-      // subscription status and every derived operating row (vendor
-      // lifecycle/ordering, mover availability) commit together or not at
-      // all. The old shape committed the subscription first and the derived
-      // rows in later writes — a crash between them left a SUSPENDED
-      // subscription behind a still-ACTIVE, still-accepting store.
-      await this.prisma.$transaction(async (tx) => {
-        await tx.subscription.update({ where: { id: sub.id }, data: subscriptionData });
-        await this.suspendAccessRows(tx, sub, periodKey);
-      });
+  /** [M-04] Post-commit notices for a failure outcome — best effort, never
+   *  part of the transaction. (An outbox for these is the registered
+   *  follow-up; today a lost notice is a lost notice, not a lost state.) */
+  private async afterFailureNotices(sub: SubWithRelations, outcome: FailureOutcome, reason: string): Promise<void> {
+    if (outcome.willSuspend) {
       await this.suspendAccessNotices(sub);
-      return 'suspended';
+      return;
     }
-
-    await this.prisma.subscription.update({ where: { id: sub.id }, data: subscriptionData });
-
-    // §11 dunning depth: the LAST retry before suspension escalates —
-    // final-warning copy that NAMES the suspension moment, an SMS (the
-    // scarce resource is attention; push may be muted or the app gone), and
-    // an ops task so a human reaches out before access is cut (stage 4).
-    const finalWarning = attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled;
+    const { attempts, nextRetryAt, finalWarning } = outcome;
     if (finalWarning) {
       const when = nextRetryAt.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
       await this.notifications.send({
@@ -1054,33 +1079,74 @@ export class BillingService {
         body: `${reason}. Your subscription will be SUSPENDED at ${when} unless the weekly fee is paid. Pay now to keep operating.`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_final_warning', subscriptionId: sub.id, suspendsAt: nextRetryAt.toISOString() },
-      });
+      }).catch(() => {});
       await this
         .smsPayer(sub, `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. Open the app to pay now.`)
         .catch(() => {});
       await notifyAdmins(this.prisma, this.notifications, {
-        // Scoped to the subscriber [NOC-A F45].
         tenantId: await tenantOfUser(this.prisma, sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId ?? null),
         title: 'Dunning — final warning issued',
         body: `Subscription ${sub.id} suspends at ${when} (attempt ${attempts}/${MAX_FAILED_ATTEMPTS}). Contact the payer directly before access is cut.`,
         data: { kind: 'billing_dunning_ops_task', subscriptionId: sub.id, suspendsAt: nextRetryAt.toISOString() },
       }).catch(() => {});
-    } else {
-      await this.notifications.send({
-        userId: this.payerUserId(sub),
-        type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Subscription payment failed',
-        body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). Top up or update your card to stay active.`,
-        audience: this.payerAudience(sub),
-        data: { kind: 'billing_failed', subscriptionId: sub.id },
-      });
+      return;
     }
-    return 'failed';
+    await this.notifications.send({
+      userId: this.payerUserId(sub),
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Subscription payment failed',
+      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). Top up or update your card to stay active.`,
+      audience: this.payerAudience(sub),
+      data: { kind: 'billing_failed', subscriptionId: sub.id },
+    }).catch(() => {});
   }
 
-  // -------------------------------------------------------------------------
-  // Suspend / reinstate
-  // -------------------------------------------------------------------------
+  /**
+   * [M-04] A payment row's terminal failure AND its consequences, atomically:
+   * the compare-and-set to FAILED/EXPIRED claims the row for exactly one
+   * caller, and the event, the counter, the subscription state and (on
+   * suspension) the access rows commit with it or not at all. Before this,
+   * the row was flipped in one statement and the rest applied afterwards, so
+   * a crash in between left a payment nobody polled and a subscription
+   * nobody retried or suspended. Returns null when another settler already
+   * claimed the row.
+   */
+  private async terminalizeFailedPayment(
+    sub: SubWithRelations,
+    payment: { id: string; amount: Prisma.Decimal | number },
+    terminal: { status: 'FAILED' | 'EXPIRED'; failureCode: string; from: Array<'PENDING' | 'UNKNOWN'>; requireNoExternalRef?: boolean; failureRaw?: string },
+    reason: string,
+    now: Date,
+    periodKey: string,
+  ): Promise<'failed' | 'suspended' | null> {
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.subscriptionPayment.updateMany({
+        where: { id: payment.id, status: { in: terminal.from }, ...(terminal.requireNoExternalRef ? { externalRef: null } : {}) },
+        data: { status: terminal.status, failureCode: terminal.failureCode, ...(terminal.failureRaw ? { failureRaw: { reason: terminal.failureRaw } } : {}) },
+      });
+      if (claimed.count === 0) return null;
+      await this.observer.afterPaymentTerminalized?.({ id: payment.id, status: terminal.status });
+      return this.recordFailureInTx(tx, sub, Number(payment.amount), reason, now, periodKey);
+    });
+    if (!outcome) return null;
+    await this.afterFailureNotices(sub, outcome, reason);
+    return outcome.willSuspend ? 'suspended' : 'failed';
+  }
+
+  /** A failed charge with no payment row of its own (the card and prepaid
+   *  rails, and the F-013-09 repair of an already-recorded failure): the same
+   *  one transition, on its own transaction. */
+  private async applyFailedCharge(
+    sub: SubWithRelations,
+    amount: number,
+    reason: string,
+    now: Date,
+    periodKey: string,
+  ): Promise<'failed' | 'suspended'> {
+    const outcome = await this.prisma.$transaction((tx) => this.recordFailureInTx(tx, sub, amount, reason, now, periodKey));
+    await this.afterFailureNotices(sub, outcome, reason);
+    return outcome.willSuspend ? 'suspended' : 'failed';
+  }
 
   /** Suspension row writes — MUST run on the same transaction that flips the
    *  subscription status, so the authority is one generation [REPORT-012
