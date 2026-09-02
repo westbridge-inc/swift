@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import Redis from 'ioredis';
 import { nanoid } from 'nanoid';
-import { TripShareService } from '../modules/safety/trip-share.service';
+import { TripShareService, tripShareDigest } from '../modules/safety/trip-share.service';
 import type { NotificationChannels } from '../../src/providers/notifications/channels';
 
 // Trip Share (safety spec §6). The laws under test: the token is unguessable
@@ -88,7 +88,7 @@ describe('§6 mint', () => {
   it('the passenger mints an unguessable token; strangers get 404-by-absence', async () => {
     const { customer, order } = await mkTrip();
     const share = await svc.mint(customer.id, order.id);
-    expect(share.token.length).toBeGreaterThanOrEqual(21); // 16 bytes base64url
+    expect(share.token.length).toBeGreaterThanOrEqual(43); // [S-16] 32 bytes base64url
     expect(share.url).toContain(`/trip/${share.token}`);
 
     const stranger = await mkUser('Nosy');
@@ -140,7 +140,7 @@ describe('§6 public payload law', () => {
     // Best-effort increments settle async — poll briefly.
     let count = 0;
     for (let i = 0; i < 20; i += 1) {
-      count = (await prisma.tripShareToken.findUnique({ where: { token } }))!.viewCount;
+      count = (await prisma.tripShareToken.findUnique({ where: { tokenDigest: tripShareDigest(token) } }))!.viewCount;
       if (count >= 2) break;
       await new Promise((r) => setTimeout(r, 50));
     }

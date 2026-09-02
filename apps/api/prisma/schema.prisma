@@ -3756,7 +3756,14 @@ model TripShareToken {
   tenantId        String    @default("swift-default")
   orderId         String
   createdByUserId String
-  token           String    @unique // 128-bit URL-safe random, CSPRNG
+  /// [S-16] LEGACY plaintext — never written any more; rotated (revoked +
+  /// nulled) by the tick until the column can be dropped by an approved migration.
+  token           String?   @unique
+  /// [S-16] sha-256 of the bearer secret. The secret itself is returned once
+  /// at mint and never stored; a database row cannot be used as the token.
+  tokenDigest     String?   @unique
+  tokenPrefix     String?
+  rotatedAt       DateTime?
   sharedToPhone   String? // if sent by SMS from the server
   expiresAt       DateTime // hard ceiling; public read also enforces trip-end + grace
   revokedAt       DateTime?
