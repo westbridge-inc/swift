@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync, chmodSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, cpSync, chmodSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 
@@ -20,6 +20,7 @@ import { join, resolve } from 'path';
  */
 
 const SCRIPT = resolve(process.cwd(), '../../scripts/public-secrets-gate.js');
+const MANIFEST_SCRIPT = resolve(process.cwd(), '../../scripts/artifact-manifest.js');
 
 let fixtureRoot: string;
 
@@ -55,6 +56,31 @@ function makeFixture(name: string, sourceLine: string, allowlist: string, fileNa
   mkdirSync(join(root, 'scripts'), { recursive: true });
   cpSync(SCRIPT, join(root, 'scripts', 'public-secrets-gate.js'));
   return root;
+}
+
+/** The first regular file under `dir` (depth-first, sorted), as a bundle-relative posix path — the entrypoint a fixture's manifest declares. */
+function firstRegularFile(dir: string, rel = ''): string | null {
+  const fs = require('fs') as typeof import('fs');
+  let names: string[];
+  try { names = fs.readdirSync(dir).sort(); } catch { return null; }
+  for (const name of names) {
+    const abs = join(dir, name);
+    const here = rel ? `${rel}/${name}` : name;
+    let st: import('fs').Stats;
+    try { st = fs.statSync(abs); } catch { continue; }
+    if (st.isFile()) return here;
+    if (st.isDirectory()) { const nested = firstRegularFile(abs, here); if (nested) return nested; }
+  }
+  return null;
+}
+
+/** Bind a fixture-copy gate run the way CI does: the manifest of root/dist, then the copied gate against it. */
+function gateBoundCopy(root: string): { code: number; output: string } {
+  const dist = join(root, 'dist');
+  const m = join(root, 'dist.manifest.json');
+  const first = firstRegularFile(dist) ?? 'index.js';
+  run(MANIFEST_SCRIPT, [dist, '--app', 'web', '--commit', 'sha-1', '--entry', first, '--out', m]);
+  return run(join(root, 'scripts', 'public-secrets-gate.js'), ['--bundle', dist, '--manifest', m, '--app', 'web', '--commit', 'sha-1']);
 }
 
 const JUSTIFIED = 'a public hostname every request already announces, not a credential';
@@ -214,7 +240,7 @@ describe('bundle mode cannot pass by scanning nothing [R037-23]', () => {
   it('fails when the build output is empty', () => {
     const empty = join(fixtureRoot, 'empty-build');
     mkdirSync(empty, { recursive: true });
-    const { code, output } = run(SCRIPT, ['--bundle', empty]);
+    const { code, output } = gateBound(empty);
     expect(code).toBe(1);
     expect(output).toMatch(/cannot prove anything|0 file/);
   });
@@ -223,7 +249,7 @@ describe('bundle mode cannot pass by scanning nothing [R037-23]', () => {
     const built = join(fixtureRoot, 'built');
     mkdirSync(built, { recursive: true });
     writeFileSync(join(built, 'chunk.js'), 'const api="https://api.example";\n'.repeat(50));
-    const { code, output } = run(SCRIPT, ['--bundle', built]);
+    const { code, output } = gateBound(built);
     expect(code).toBe(0);
     expect(output).toMatch(/scanned 1 file/);
   });
@@ -232,7 +258,7 @@ describe('bundle mode cannot pass by scanning nothing [R037-23]', () => {
     const built = join(fixtureRoot, 'built-leak');
     mkdirSync(built, { recursive: true });
     writeFileSync(join(built, 'chunk.js'), 'process.env.NEXT_PUBLIC_LEAKED_THING'); // public-secrets-gate:fixture
-    const { code, output } = run(SCRIPT, ['--bundle', built]);
+    const { code, output } = gateBound(built);
     expect(code).toBe(1);
     expect(output).toMatch(/NEXT_PUBLIC_LEAKED_THING/); // public-secrets-gate:fixture
   });
@@ -290,7 +316,7 @@ describe('[TA-S0-006] the Vite seam and the bundle mode', () => {
     const root = makeFixture('bundle-marker', 'export {};\n', '');
     mkdirSync(join(root, 'dist'), { recursive: true });
     writeFileSync(join(root, 'dist', 'chunk.test.js'), 'var x = process.env.NEXT_PUBLIC_MMG_SECRET; // public-secrets-gate:fixture\n');
-    const r = run(join(root, 'scripts', 'public-secrets-gate.js'), ['--bundle', join(root, 'dist')]);
+    const r = gateBoundCopy(root);
     expect(r.code).toBe(1);
     expect(r.output).toContain('NEXT_PUBLIC_MMG_SECRET'); // public-secrets-gate:fixture
   });
@@ -301,7 +327,7 @@ describe('[TA-S0-006] the Vite seam and the bundle mode', () => {
     mkdirSync(join(root, 'dist', 'android'), { recursive: true });
     writeFileSync(join(root, 'dist', 'ios', '_expo', 'index.js'), 'var x = process.env.NEXT_PUBLIC_MMG_SECRET;\n'); // public-secrets-gate:fixture
     writeFileSync(join(root, 'dist', 'android', 'metadata.json'), '{}\n');
-    const r = run(join(root, 'scripts', 'public-secrets-gate.js'), ['--bundle', join(root, 'dist')]);
+    const r = gateBoundCopy(root);
     expect(r.code).toBe(1);
     expect(r.output).toContain('NEXT_PUBLIC_MMG_SECRET'); // public-secrets-gate:fixture
     expect(r.output).toContain('scanned 2 file(s)');
@@ -315,11 +341,157 @@ describe('[TA-S0-006] the Vite seam and the bundle mode', () => {
     writeFileSync(join(root, 'dist', 'locked.js'), 'var z = 2;\n');
     chmodSync(join(root, 'dist', 'locked.js'), 0o000);
     try {
-      const r = run(join(root, 'scripts', 'public-secrets-gate.js'), ['--bundle', join(root, 'dist')]);
+      const r = gateBoundCopy(root);
       expect(r.code).toBe(1);
       expect(r.output).toContain('could not be read');
     } finally {
       chmodSync(join(root, 'dist', 'locked.js'), 0o644);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [SCR-005 / SCR-006 / SCR-007] The gate certifies THIS artifact, by value.
+// ---------------------------------------------------------------------------
+
+function makeBundle(name: string, files: Record<string, string>): { dir: string; root: string } {
+  const root = join(fixtureRoot, name);
+  const dir = join(root, 'build');
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(root, 'security'), { recursive: true });
+  writeFileSync(join(root, 'security', 'public-env-allowlist.txt'), '');
+  for (const [rel, content] of Object.entries(files)) { mkdirSync(join(dir, rel, '..'), { recursive: true }); writeFileSync(join(dir, rel), content); }
+  return { dir, root };
+}
+function manifestFor(dir: string, out: string, opts: { app?: string; commit?: string; entry?: string } = {}) {
+  return run(MANIFEST_SCRIPT, [dir, '--app', opts.app ?? 'web', '--commit', opts.commit ?? 'sha-1', '--entry', opts.entry ?? 'BUILD_ID', '--out', out]);
+}
+const bundleGate = (dir: string, root: string, extra: string[]) => run(SCRIPT, ['--bundle', dir, ...extra, root]);
+/** Bind a bundle fixture the way CI does: generate its manifest, then gate against it. */
+function gateBound(dir: string): { code: number; output: string } {
+  const m = join(dir, '..', `${require('path').basename(dir)}.manifest.json`);
+  const first = firstRegularFile(dir) ?? 'BUILD_ID';
+  run(MANIFEST_SCRIPT, [dir, '--app', 'web', '--commit', 'sha-1', '--entry', first, '--out', m]);
+  return run(SCRIPT, ['--bundle', dir, '--manifest', m, '--app', 'web', '--commit', 'sha-1']);
+}
+
+describe('bundle mode is bound to its artifact manifest [SCR-006]', () => {
+  it('a bundle without a manifest is not an artifact; the right manifest passes', () => {
+    const { dir, root } = makeBundle('m-none', { BUILD_ID: 'abc', 'static/app.js': 'console.log(1)' });
+    expect(bundleGate(dir, root, []).code).toBe(1);
+    const m = join(root, 'm.json'); expect(manifestFor(dir, m).code).toBe(0);
+    const ok = bundleGate(dir, root, ['--manifest', m, '--app', 'web', '--commit', 'sha-1']);
+    expect(ok.code).toBe(0); expect(ok.output).toContain('manifest ok');
+  });
+  it('the wrong app, a stale commit, a tampered file, a missing or zero-byte entrypoint, an undeclared file, an escaping symlink and an unreadable file all fail', () => {
+    const { dir, root } = makeBundle('m-bad', { BUILD_ID: 'abc', 'static/app.js': 'console.log(1)' });
+    const m = join(root, 'm.json'); manifestFor(dir, m);
+    expect(bundleGate(dir, root, ['--manifest', m, '--app', 'admin', '--commit', 'sha-1']).output).toContain('not "admin"');
+    expect(bundleGate(dir, root, ['--manifest', m, '--app', 'web', '--commit', 'sha-2']).output).toContain('stale or foreign');
+    writeFileSync(join(dir, 'static/app.js'), 'console.log(2)');
+    // the per-file digest AND the recomputed tree digest each name the tamper — two independent findings, both asserted
+    const tampered = bundleGate(dir, root, ['--manifest', m, '--app', 'web', '--commit', 'sha-1']).output;
+    expect(tampered).toContain('static/app.js: digest');
+    expect(tampered).toContain('tree digest');
+    writeFileSync(join(dir, 'static/app.js'), 'console.log(1)');
+    writeFileSync(join(dir, 'extra.js'), 'x');
+    expect(bundleGate(dir, root, ['--manifest', m, '--app', 'web', '--commit', 'sha-1']).output).toContain('not in the manifest');
+    rmSync(join(dir, 'extra.js'));
+    writeFileSync(join(dir, 'BUILD_ID'), '');
+    expect(bundleGate(dir, root, ['--manifest', m, '--app', 'web', '--commit', 'sha-1']).output).toContain('zero bytes');
+    rmSync(join(dir, 'BUILD_ID'));
+    expect(bundleGate(dir, root, ['--manifest', m, '--app', 'web', '--commit', 'sha-1']).output).toContain('missing');
+    writeFileSync(join(dir, 'BUILD_ID'), 'abc');
+    // an escaping symlink declared in a fresh manifest
+    const { dir: d2, root: r2 } = makeBundle('m-link', { BUILD_ID: 'abc' });
+    writeFileSync(join(r2, 'outside.txt'), 'secret-outside');
+    symlinkSync(join(r2, 'outside.txt'), join(d2, 'link.txt'));
+    const m2 = join(r2, 'm.json'); manifestFor(d2, m2);
+    expect(bundleGate(d2, r2, ['--manifest', m2, '--app', 'web', '--commit', 'sha-1']).output).toContain('escapes the bundle');
+    // an unreadable declared file (skipped when running as root, where nothing is unreadable)
+    if (process.getuid && process.getuid() !== 0) {
+      const { dir: d3, root: r3 } = makeBundle('m-unreadable', { BUILD_ID: 'abc', 'chunk.js': 'x' });
+      const m3 = join(r3, 'm.json'); manifestFor(d3, m3);
+      chmodSync(join(d3, 'chunk.js'), 0o000);
+      const res = bundleGate(d3, r3, ['--manifest', m3, '--app', 'web', '--commit', 'sha-1']);
+      chmodSync(join(d3, 'chunk.js'), 0o644);
+      expect(res.code).toBe(1); expect(res.output).toContain('unreadable');
+    }
+  });
+});
+
+describe('bundle mode scans the whole artifact tree [SCR-005]', () => {
+  it('a nested ios/ or build/ directory is scanned like any other — the source skip list never applies below a bundle root (the Expo export layout)', () => {
+    // `expo export --output-dir dist/ios` writes the JS bundle to dist/ios/_expo/static/js/ios/<entry>-<hash>.js — four levels down, under a directory named ios/
+    const { dir, root } = makeBundle('nested-ios', {
+      'ios/metadata.json': '{}',
+      'ios/_expo/static/js/ios/entry-1.js': 'var u=process.env.EXPO_PUBLIC_MMG_SECRET;', // public-secrets-gate:fixture
+      'android/metadata.json': '{}',
+      'android/_expo/static/js/android/entry-1.js': 'var x=1;',
+    });
+    const m = join(root, 'm.json'); manifestFor(dir, m, { app: 'mobile', entry: 'ios/metadata.json' });
+    const r = bundleGate(dir, root, ['--manifest', m, '--app', 'mobile', '--commit', 'sha-1']);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('EXPO_PUBLIC_MMG_SECRET'); // public-secrets-gate:fixture
+    expect(r.output).toContain('ios/_expo/static/js/ios/entry-1.js');
+  });
+  it('a file under a nested build/ directory that the manifest does not declare is still "not in the manifest"', () => {
+    const { dir, root } = makeBundle('nested-undeclared', { BUILD_ID: 'abc', 'server/app.js': 'x' });
+    const m = join(root, 'm.json'); manifestFor(dir, m);
+    mkdirSync(join(dir, 'server', 'build'), { recursive: true });
+    writeFileSync(join(dir, 'server', 'build', 'late.js'), 'y');
+    const r = bundleGate(dir, root, ['--manifest', m, '--app', 'web', '--commit', 'sha-1']);
+    expect(r.code).toBe(1);
+    expect(r.output).toContain('server/build/late.js: present in the bundle but not in the manifest');
+  });
+});
+
+describe('a scan receipt exists only for a certified artifact [SCR-006]', () => {
+  it('a pass writes the receipt with the recomputed tree digest and the commit; a failure writes none; a manifest whose tree digest lies fails', () => {
+    const { dir, root } = makeBundle('receipt', { BUILD_ID: 'abc', 'static/app.js': 'console.log(1)' });
+    const m = join(root, 'm.json'); manifestFor(dir, m);
+    const receipt = join(root, 'receipt.json');
+    const ok = bundleGate(dir, root, ['--manifest', m, '--app', 'web', '--commit', 'sha-1', '--receipt', receipt]);
+    expect(ok.code).toBe(0);
+    const r = JSON.parse(readFileSync(receipt, 'utf8'));
+    const man = JSON.parse(readFileSync(m, 'utf8'));
+    expect(r.result).toBe('pass'); expect(r.app).toBe('web'); expect(r.commit).toBe('sha-1');
+    expect(r.treeDigest).toHaveLength(64); expect(r.treeDigest).toBe(man.treeDigest);
+    // a failing gate writes no receipt
+    rmSync(receipt);
+    writeFileSync(join(dir, 'static/app.js'), 'console.log(2)');
+    expect(bundleGate(dir, root, ['--manifest', m, '--app', 'web', '--commit', 'sha-1', '--receipt', receipt]).code).toBe(1);
+    expect(existsSync(receipt)).toBe(false);
+    writeFileSync(join(dir, 'static/app.js'), 'console.log(1)');
+    // the tree digest is recomputed from the bytes, never copied from the manifest
+    man.treeDigest = 'f'.repeat(64);
+    writeFileSync(m, JSON.stringify(man));
+    const lie = bundleGate(dir, root, ['--manifest', m, '--app', 'web', '--commit', 'sha-1', '--receipt', receipt]);
+    expect(lie.code).toBe(1); expect(lie.output).toContain('tree digest'); expect(existsSync(receipt)).toBe(false);
+  });
+});
+
+describe('a workflow file is a seam: values are scanned, comments are prose', () => {
+  it('an unlisted public name in a workflow VALUE fails; the same name in a workflow comment does not', () => {
+    const root = makeFixture('yml-value', 'export const ok = 1;\n', '');
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    const wf = join(root, '.github', 'workflows', 'ci.yml');
+    writeFileSync(wf, 'jobs:\n  b:\n    steps:\n      - run: pnpm build\n        env:\n          NEXT_PUBLIC_MMG_SECRET: ${{ secrets.X }}\n'); // public-secrets-gate:fixture
+    const bad = runGate(root);
+    expect(bad.code).toBe(1); expect(bad.output).toContain('NEXT_PUBLIC_MMG_SECRET'); // public-secrets-gate:fixture
+    writeFileSync(wf, 'jobs:\n  b:\n    steps:\n      # NEXT_PUBLIC_MMG_SECRET here would be a leak; this line is prose\n      - run: pnpm build\n'); // public-secrets-gate:fixture
+    expect(runGate(root).code).toBe(0);
+  });
+});
+
+describe('a fixture exemption production can reach is a leak [SCR-007]', () => {
+  it('a marked test file imported by ordinary source fails; the same file left alone passes', () => {
+    const marked = `const url = process.env.NEXT_PUBLIC_LEAK_PROBE; // public-secrets-gate:fixture\nexport const probe = url;\n`;
+    const root = makeFixture('x-reach', marked, '', 'probe.test.ts');
+    writeFileSync(join(root, 'apps', 'web', 'src', 'page.ts'), "import { probe } from './probe.test';\nexport const p = probe;\n");
+    const res = runGate(root);
+    expect(res.code).toBe(1); expect(res.output).toContain('imported by production source');
+    const root2 = makeFixture('x-alone', marked, '', 'probe.test.ts');
+    expect(runGate(root2).code).toBe(0);
   });
 });
