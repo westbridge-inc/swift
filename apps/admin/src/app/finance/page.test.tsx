@@ -133,7 +133,7 @@ describe('daily revenue renders the GUYANA day, not the browser day [DASH-06]', 
 });
 
 describe('finance settlement mutation', () => {
-  it('collects a reference, confirms, and marks paid through the exact endpoint and payload', async () => {
+  it('collects a note, confirms, and acknowledges the digest through the exact endpoint and payload — never a payout', async () => {
     const prompt = vi.fn().mockReturnValue('BANK-TEST-1');
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal('prompt', prompt);
@@ -150,14 +150,14 @@ describe('finance settlement mutation', () => {
       }),
     );
     const { user } = renderWithQuery(<FinancePage />);
-    const paidButton = await screen.findByRole('button', { name: 'Mark paid' });
+    const paidButton = await screen.findByRole('button', { name: 'Acknowledge' });
 
     await user.click(paidButton);
     expect(prompt).toHaveBeenNthCalledWith(
       1,
-      'Bank/transfer reference for Test Vendor (optional):',
+      'Note for Test Vendor (optional):',
     );
-    expect(confirm).toHaveBeenNthCalledWith(1, 'Mark this settlement PAID?');
+    expect(confirm).toHaveBeenNthCalledWith(1, 'Acknowledge this sales digest? Swift moves no money — this records that you reviewed it.');
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
     await user.click(paidButton);
@@ -165,9 +165,9 @@ describe('finance settlement mutation', () => {
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
     expect(prompt).toHaveBeenNthCalledWith(
       2,
-      'Bank/transfer reference for Test Vendor (optional):',
+      'Note for Test Vendor (optional):',
     );
-    expect(confirm).toHaveBeenNthCalledWith(2, 'Mark this settlement PAID?');
+    expect(confirm).toHaveBeenNthCalledWith(2, 'Acknowledge this sales digest? Swift moves no money — this records that you reviewed it.');
     expect(url).toBe(
       `${API_ORIGIN}/api/v1/admin/finance/settlements/settlement-1/process`,
     );
@@ -188,7 +188,7 @@ describe('finance settlement mutation', () => {
             status: 400,
             body: {
               success: false,
-              error: { code: 'ALREADY_PAID', message: 'Settlement has already been processed' },
+              error: { code: 'ALREADY_ACKNOWLEDGED', message: 'This sales digest has already been acknowledged' },
             },
           };
         }
@@ -196,12 +196,12 @@ describe('finance settlement mutation', () => {
       }),
     );
     const { user } = renderWithQuery(<FinancePage />);
-    const paidButton = await screen.findByRole('button', { name: 'Mark paid' });
+    const paidButton = await screen.findByRole('button', { name: 'Acknowledge' });
 
     await user.click(paidButton);
 
     expect((await screen.findByRole('alert')).textContent).toContain(
-      'Settlement update failed: Settlement has already been processed',
+      'Settlement update failed: This sales digest has already been acknowledged',
     );
     expect(screen.getByText('Test Vendor')).toBeTruthy();
     expect((paidButton as HTMLButtonElement).disabled).toBe(false);

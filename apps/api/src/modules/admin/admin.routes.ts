@@ -2008,23 +2008,24 @@ export async function adminRoutes(app: FastifyInstance) {
       include: { vendor: { include: { owner: true } } },
     });
     if (!settlement) throw new NotFoundError('Settlement', id);
-    if (settlement.status === 'PAID') throw new AppError(400, 'ALREADY_PAID', 'Settlement has already been processed');
-
-    // Compare-and-set: this is a real payout instruction. Two admins (or a
-    // double-click / retry) both passing the in-memory check would otherwise both
-    // mark PAID and both fire the payout notification — a duplicate payout.
+    // [M-27] The digest is ACKNOWLEDGED, never paid: Swift moves no vendor
+    // money, so no payout claim can be made against this record. The
+    // compare-and-set keeps a double-click from acknowledging twice.
+    if (settlement.status === 'ACKNOWLEDGED' || settlement.status === 'PAID') {
+      throw new AppError(400, 'ALREADY_ACKNOWLEDGED', 'This sales digest has already been acknowledged');
+    }
     const claimed = await app.prisma.settlement.updateManyAndReturn({
-      where: { id, status: { not: 'PAID' }, vendor: { tenantId } },
-      data: { status: 'PAID', paidAt: new Date(), reference: reference || null },
+      where: { id, status: { notIn: ['ACKNOWLEDGED', 'PAID'] }, vendor: { tenantId } },
+      data: { status: 'ACKNOWLEDGED', paidAt: null, reference: reference || null },
     });
     if (claimed.length === 0) {
       const stillLocal = await app.prisma.settlement.findFirst({ where: { id, vendor: { tenantId } }, select: { id: true } });
       if (!stillLocal) throw new NotFoundError('Settlement', id);
-      throw new AppError(409, 'ALREADY_PAID', 'Settlement has already been processed');
+      throw new AppError(409, 'ALREADY_ACKNOWLEDGED', 'This sales digest has already been acknowledged');
     }
     const updated = claimed[0]!;
 
-    await audit(request.user.userId, 'PROCESS_SETTLEMENT', 'Settlement', id, { amount: settlement.totalBase, reference }, request);
+    await audit(request.user.userId, 'ACKNOWLEDGE_SALES_DIGEST', 'Settlement', id, { netSales: settlement.netSales, totalBase: settlement.totalBase, reference }, request);
 
     // SWIFT-031: this is a weekly SALES DIGEST, not a payout. Swift takes no
     // commission and never holds vendor money (cash is customer→vendor direct),
@@ -2039,6 +2040,21 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, data: updated };
+  });
+
+  /** [M-27] A correction to a digest is a new immutable ADJUSTMENT row
+   *  recomputed from the ledger, naming the row it supersedes. */
+  app.post('/finance/settlements/:id/adjust', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const { reason } = z.object({ reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
+    const settlement = await app.prisma.settlement.findFirst({ where: { id, vendor: { tenantId } }, select: { id: true } });
+    if (!settlement) throw new NotFoundError('Settlement', id);
+    const { adjustSalesDigest } = await import('../billing/sales-digest');
+    const result = await adjustSalesDigest(app.prisma, id, reason);
+    await audit(request.user.userId, 'ADJUST_SALES_DIGEST', 'Settlement', result.id, { supersedesId: result.supersedesId, sequence: result.sequence, reason, ...result.totals }, request);
+    return { success: true, data: result };
   });
 
   /** MMG direct-pay ledger (visibility ONLY — Swift moves no money): the

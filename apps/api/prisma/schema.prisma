@@ -2666,28 +2666,48 @@ enum EarningStatus {
   PAID_OUT
 }
 
+/// [M-27] The weekly SALES DIGEST — a vendor's own completed sales for one
+/// canonical calendar week (Guyana Monday 00:00 → next Monday). Swift takes no
+/// cut and holds no vendor money, so this is a record, never a payout: it is
+/// ACKNOWLEDGED, not paid. One DIGEST row per (vendor, period) — sequence 0 —
+/// and every correction is a later, immutable ADJUSTMENT row (sequence 1, 2 …)
+/// recomputed from the ledger and naming the row it supersedes.
 model Settlement {
-  id          String           @id @default(cuid())
-  vendorId    String
-  vendor      Vendor           @relation(fields: [vendorId], references: [id])
-  periodStart DateTime
-  periodEnd   DateTime
-  totalOrders Int
-  totalBase   Decimal          @db.Decimal(12, 2)
-  totalMarkup Decimal          @db.Decimal(12, 2)
-  status      SettlementStatus @default(PENDING)
-  paidAt      DateTime?
-  reference   String?
-  createdAt   DateTime         @default(now())
+  id            String           @id @default(cuid())
+  vendorId      String
+  vendor        Vendor           @relation(fields: [vendorId], references: [id])
+  periodStart   DateTime
+  periodEnd     DateTime
+  /// DIGEST | ADJUSTMENT
+  kind          String           @default("DIGEST")
+  sequence      Int              @default(0)
+  supersedesId  String?
+  reason        String?
+  totalOrders   Int
+  totalBase     Decimal          @db.Decimal(12, 2)
+  totalMarkup   Decimal          @db.Decimal(12, 2)
+  /// Σ Order.discount over the period — the customer-facing discounts
+  totalDiscount Decimal          @default(0) @db.Decimal(12, 2)
+  /// totalBase − totalDiscount: what the vendor actually sold for
+  netSales      Decimal          @default(0) @db.Decimal(12, 2)
+  status        SettlementStatus @default(PENDING)
+  paidAt        DateTime?
+  reference     String?
+  createdAt     DateTime         @default(now())
 
+  @@unique([vendorId, periodStart, sequence])
+  @@index([vendorId, periodStart])
   @@map("settlements")
 }
 
 enum SettlementStatus {
   PENDING
   PROCESSING
+  /// legacy — the digest was never a payout; nothing writes PAID any more
   PAID
   FAILED
+  /// [M-27] an operator reviewed the digest; Swift moved no money
+  ACKNOWLEDGED
 }
 
 /// MMG direct-pay: for an MMG-paid DELIVERY the customer paid the STORE (not
