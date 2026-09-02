@@ -7,7 +7,7 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, T, cardShadow, lockInButtonStyle } from '../../../kit';
+import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useRideSos } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
@@ -60,63 +60,38 @@ function driverStep(job: any): { label: string; action: DriverAction; pin?: bool
 
 const DRIVER_STEPS = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'];
 const RIDER_STEPS = ['RIDER_ASSIGNED', 'PICKED_UP', 'DELIVERED'];
-const DRIVER_STEP_LABELS = ['Assigned', 'En route', 'Arrived', 'Riding'];
-const RIDER_STEP_LABELS = ['Assigned', 'Picked up', 'Delivered'];
 
-/** Where this job stands — the same statuses the state machine enforces. */
 /**
- * TOMBSTONE [WS-2.1 → WS-3.2 item 6]. This is the horizontal twin of the kit's
- * `StatusRail`: the same idea — where a job stands in its sequence — drawn a
- * second time, in bare 12pt dots instead of the kit's icon nodes.
- *
- * `StatusRail` exists and is the replacement. It is NOT swapped in here yet on
- * purpose: adopting it changes this screen's appearance, and ActiveJobScreen is
- * item 6 on Wave 3's rebuild list, where the change belongs beside its
- * reference PNG rather than smuggled in ahead of it. DeliveryScreen's vertical
- * timeline WAS swapped, because the primitive was generalized from it and the
- * result is pixel-identical.
- *
- * When this screen is rebuilt: delete this and pass the rider's leg as
- * `TimelineStep[]`. The state rule below (mid-leg states collapse onto the
- * "Picked up" dot) becomes a per-step `state` override, which is what that prop
- * is for.
+ * [WS-2.1 → WS-3.2 item 6 — RESOLVED] The tombstoned 12pt-dot stepper is
+ * retired: the kit's `StatusRail` (the horizontal Timeline) draws this now,
+ * using the dark-cockpit inks the kit gained for exactly this swap — one
+ * component, one state grammar, one screen-reader sentence, both surfaces.
+ * The collapse rule survives as index math: rider mid-leg states (en route to
+ * the customer / arrived) sit on the "Picked up" node; terminal states on the
+ * last; unknown states claim nothing past "Assigned".
  */
-function StatusStepper({ status, isDriver }: { status?: string; isDriver: boolean }) {
-  const steps = isDriver ? DRIVER_STEPS : RIDER_STEPS;
-  const labels = isDriver ? DRIVER_STEP_LABELS : RIDER_STEP_LABELS;
+function railFor(status: string | undefined, isDriver: boolean): { steps: TimelineStep[]; currentIndex: number } {
   const s = String(status ?? '').toUpperCase();
-  let idx = steps.indexOf(s);
-  if (idx < 0) {
-    if (s === 'COMPLETED' || s === 'DELIVERED') idx = steps.length - 1;
-    // Rider mid-leg states aren't in the 3-dot stepper: past pickup (en route to
-    // customer / arrived) sits on the "Picked up" dot; pre-pickup on "Assigned".
-    else if (!isDriver && (s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED')) idx = 1;
-    else idx = 0;
+  const keys = isDriver ? DRIVER_STEPS : RIDER_STEPS;
+  let currentIndex = keys.indexOf(s);
+  if (currentIndex < 0) {
+    if (s === 'COMPLETED' || s === 'DELIVERED') currentIndex = keys.length - 1;
+    else if (!isDriver && (s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED')) currentIndex = 1;
+    else currentIndex = 0;
   }
-  return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: space.md }}>
-      {steps.map((_, i) => (
-        <React.Fragment key={i}>
-          <View style={{ alignItems: 'center' }}>
-            <View
-              style={{
-                width: 12,
-                height: 12,
-                borderRadius: 6,
-                backgroundColor: i <= idx ? dk.accent : dk.cardSoft,
-              }}
-            />
-            <T variant="caption" weight={i === idx ? 'semibold' : 'regular'} style={{ marginTop: 3, color: i <= idx ? dk.text : dk.faint }}>
-              {labels[i]}
-            </T>
-          </View>
-          {i < steps.length - 1 ? (
-            <View style={{ flex: 1, height: 2, marginHorizontal: 4, marginBottom: 16, borderRadius: 1, backgroundColor: i < idx ? dk.accent : dk.cardSoft }} />
-          ) : null}
-        </React.Fragment>
-      ))}
-    </View>
-  );
+  const steps: TimelineStep[] = isDriver
+    ? [
+        { key: 'assigned', label: 'Assigned', icon: 'user-check', description: 'The trip is yours.' },
+        { key: 'enroute', label: 'En route', icon: 'navigation', description: 'Heading to the pickup.' },
+        { key: 'arrived', label: 'Arrived', icon: 'map-pin', description: 'At the pickup point.' },
+        { key: 'riding', label: 'Riding', icon: 'compass', description: 'Passenger on board.' },
+      ]
+    : [
+        { key: 'assigned', label: 'Assigned', icon: 'user-check', description: 'The job is yours.' },
+        { key: 'picked', label: 'Picked up', icon: 'package', description: 'Order collected from the store.' },
+        { key: 'delivered', label: 'Delivered', icon: 'flag', description: 'Handed to the customer.' },
+      ];
+  return { steps, currentIndex };
 }
 
 export function ActiveJobScreen({ navigation }: any) {
@@ -398,7 +373,7 @@ export function ActiveJobScreen({ navigation }: any) {
                   </T>
                 </View>
               ) : null}
-              <StatusStepper status={job.status} isDriver={isDriver} />
+              <StatusRail onDark {...railFor(job.status, isDriver)} style={{ marginTop: space.md }} />
               <View style={{ marginTop: space.md }}>
                 <RoutePair pickup={job.pickupAddress ?? 'Pickup'} dropoff={job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'} />
               </View>
