@@ -20,8 +20,11 @@ describe('ORDER_TRANSITIONS.FAILED matches the handover guard (SWIFT-096)', () =
 
   it('an unstarted or in-transit order can no longer jump straight to FAILED', () => {
     // These are the states the old table permitted but the NOT_AT_DOOR guard
-    // always rejected — such an order is CANCELLED, never FAILED.
-    for (const impossible of ['PENDING', 'PICKED_UP', 'EN_ROUTE_DELIVERY'] as const) {
+    // always rejected — such an order is CANCELLED, never FAILED. [M-28]
+    // PICKED_UP / EN_ROUTE_DELIVERY left this list: a courier's recipient
+    // outcome is recorded with the parcel in custody, and the service's
+    // per-type check (not the table) keeps a food delivery at the door.
+    for (const impossible of ['PENDING', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'] as const) {
       expect(ORDER_TRANSITIONS.FAILED).not.toContain(impossible);
     }
   });

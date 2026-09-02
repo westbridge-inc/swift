@@ -1392,21 +1392,21 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // shorted me". Heal it, and page, because a non-zero count means an
         // upstream path lost an earnings write.
         const { OrderService, reconcileMissingEarnings } = await import('../modules/order/order.service');
-        const { scanned, healed, taxiUnpaidDelivered } = await reconcileMissingEarnings(
+        const { scanned, healed, taxiUnpaidDelivered, courierUnpaidDelivered } = await reconcileMissingEarnings(
           ctx.prisma,
           new OrderService(ctx.prisma, ctx.io),
         );
         // [M-29] A cash ride delivered with no captured fare after the fare
         // outcome became mandatory means a completion bypassed the terminal
         // authority — page, and keep paging while it persists.
-        if (taxiUnpaidDelivered.sinceEnforced > 0) {
+        if (taxiUnpaidDelivered.sinceEnforced + courierUnpaidDelivered.sinceEnforced > 0) {
           const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'taxi-unpaid-earning', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
               tenantId: null,
-              title: '🚕 Cash rides completed without a recorded fare',
-              body: `${taxiUnpaidDelivered.sinceEnforced} ride(s) are delivered with no captured fare since the fare outcome became mandatory. A completion path is bypassing the fare step — review before a driver is paid for money nobody recorded.`,
-              data: { kind: 'earnings_missing', variant: 'taxi_unpaid_fare', count: taxiUnpaidDelivered.sinceEnforced },
+              title: '🚕 Cash jobs completed without a recorded payment',
+              body: `${taxiUnpaidDelivered.sinceEnforced} ride(s) and ${courierUnpaidDelivered.sinceEnforced} courier job(s) are delivered with no collected cash since the cash outcome became mandatory. A completion path is bypassing the cash step — review before a mover is paid for money nobody recorded.`,
+              data: { kind: 'earnings_missing', variant: 'cash_unpaid_completion', taxi: taxiUnpaidDelivered.sinceEnforced, courier: courierUnpaidDelivered.sinceEnforced },
             }),
           ).catch(() => {});
         }

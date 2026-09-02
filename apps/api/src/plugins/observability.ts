@@ -341,6 +341,15 @@ export const agentCashDuplicateCreditsGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [M-28] Cash courier jobs DELIVERED with no collected fee — the same census
+ *  as the rides', the same page. */
+export const courierDeliveredUnpaidGauge = new client.Gauge({
+  name: 'swift_courier_delivered_unpaid',
+  help: 'Cash courier jobs delivered with no collected fee: all of them, and those delivered after the cash outcome became mandatory',
+  labelNames: ['measure'] as const,
+  registers: [registry],
+});
+
 export const taxiDeliveredUnpaidGauge = new client.Gauge({
   name: 'swift_taxi_delivered_unpaid',
   help: 'Cash rides delivered with no captured fare: all of them, and those delivered after the fare outcome became mandatory',
