@@ -6,6 +6,7 @@
  */
 
 import crypto from 'node:crypto';
+import { storageSigningKeys, signingKeyFor, type SigningKey } from '../../utils/signing-keys';
 
 export type StatementLine = {
   date: Date;
@@ -222,7 +223,10 @@ export async function buildVendorStatement(prisma: unknown, vendorId: string, pe
 // short-lived HMAC link (the document render-token model) and the public
 // render route verifies it — sharing/printing rides the browser sheet.
 
-const statementSecret = () => process.env['STORAGE_SIGNING_SECRET'] ?? 'dev-signing-secret';
+// [M-37] The keyring never falls open in production; see utils/signing-keys.
+const statementKeys = (env?: Record<string, string | undefined>) => storageSigningKeys(env);
+/** Statement links are short-lived by design; no caller may mint a longer one. */
+export const MAX_STATEMENT_TTL_SECONDS = 3600;
 
 export type StatementKind = 'rider' | 'driver' | 'vendor';
 
@@ -250,20 +254,64 @@ const field = (s: string) => `${Buffer.byteLength(s, 'utf8')}:${s}`;
  *  after every instance signs v2 — the format's delimiter weakness is exactly
  *  why v2 exists, and verification-only is the largest surface it may keep.
  */
-export function signStatementTokenV1(kind: StatementKind, actorId: string, from: string, to: string, expires: number): string {
+export function signStatementTokenV1(kind: StatementKind, actorId: string, from: string, to: string, expires: number, secret = statementKeys().current.secret): string {
   return crypto
-    .createHmac('sha256', statementSecret())
+    .createHmac('sha256', secret)
     .update(`statement:${kind}:${actorId}:${from}:${to}:${expires}`)
     .digest('hex')
     .slice(0, 32);
 }
 
-export function signStatementToken(kind: StatementKind, actorId: string, from: string, to: string, expires: number): string {
+export function signStatementToken(kind: StatementKind, actorId: string, from: string, to: string, expires: number, secret = statementKeys().current.secret): string {
   return crypto
-    .createHmac('sha256', statementSecret())
+    .createHmac('sha256', secret)
     .update(`statement:v2:${field(kind)}${field(actorId)}${field(from)}${field(to)}${field(String(expires))}`)
     .digest('hex')
     .slice(0, 32);
+}
+
+/** [M-37] v3: the signed material names the KEY that signed it (its id), so a
+ *  verifier can only accept a token under a key it actually holds — the
+ *  current one, or the previous one during a rotation — and never a key
+ *  nobody holds, least of all the repository default. */
+export function signStatementTokenV3(kind: StatementKind, actorId: string, from: string, to: string, expires: number, key: SigningKey): string {
+  return crypto
+    .createHmac('sha256', key.secret)
+    .update(`statement:v3:${field(kind)}${field(actorId)}${field(from)}${field(to)}${field(String(expires))}${field(key.kid)}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+export interface StatementLinkQuery {
+  v?: '1' | '2' | '3' | undefined;
+  k?: string | undefined;
+  kind: StatementKind;
+  actor: string;
+  from: string;
+  to: string;
+  expires: number;
+  sig: string;
+}
+
+/** [M-37] ONE verifier for every protocol version, constant-time, keyring-bound.
+ *  v3 verifies under the key the token names (current or previous); v2 and
+ *  versionless v1 links — minted before key ids existed — verify under the
+ *  current key only, for the rolling deployment that carries them out. */
+export function verifyStatementSignature(q: StatementLinkQuery, env?: Record<string, string | undefined>): boolean {
+  const keyring = statementKeys(env);
+  let expected: string;
+  if (q.v === '3') {
+    const key = signingKeyFor(q.k, keyring);
+    if (!key) return false;
+    expected = signStatementTokenV3(q.kind, q.actor, q.from, q.to, q.expires, key);
+  } else if (q.v === '2') {
+    expected = signStatementToken(q.kind, q.actor, q.from, q.to, q.expires, keyring.current.secret);
+  } else {
+    expected = signStatementTokenV1(q.kind, q.actor, q.from, q.to, q.expires, keyring.current.secret);
+  }
+  const provided = Buffer.from(q.sig, 'utf8');
+  const wanted = Buffer.from(expected, 'utf8');
+  return provided.length === wanted.length && crypto.timingSafeEqual(provided, wanted);
 }
 
 /** Path (relative to the API origin) for a time-limited statement render. */
@@ -272,11 +320,15 @@ export function mintStatementPath(
   actorId: string,
   period: { from: Date; to: Date },
   ttlSeconds = 600,
+  env?: Record<string, string | undefined>,
 ): { path: string; expiresInSeconds: number } {
   const from = period.from.toISOString();
   const to = period.to.toISOString();
-  const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
-  const sig = signStatementToken(kind, actorId, from, to, expires);
-  const q = new URLSearchParams({ v: '2', kind, actor: actorId, from, to, expires: String(expires), sig });
-  return { path: `/api/v1/statements/render?${q.toString()}`, expiresInSeconds: ttlSeconds };
+  // [M-37] Short-lived by design: a caller asking for longer gets the cap.
+  const ttl = Math.max(1, Math.min(ttlSeconds, MAX_STATEMENT_TTL_SECONDS));
+  const expires = Math.floor(Date.now() / 1000) + ttl;
+  const key = statementKeys(env).current;
+  const sig = signStatementTokenV3(kind, actorId, from, to, expires, key);
+  const q = new URLSearchParams({ v: '3', k: key.kid, kind, actor: actorId, from, to, expires: String(expires), sig });
+  return { path: `/api/v1/statements/render?${q.toString()}`, expiresInSeconds: ttl };
 }

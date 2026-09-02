@@ -1,4 +1,3 @@
-import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AppError } from '../../utils/errors';
@@ -6,8 +5,7 @@ import {
   buildDriverStatement,
   buildRiderStatement,
   buildVendorStatement,
-  signStatementToken,
-  signStatementTokenV1,
+  verifyStatementSignature,
   type StatementKind,
 } from './statement';
 
@@ -27,7 +25,8 @@ export async function statementRoutes(app: FastifyInstance) {
         // accepts both. Old instances still reject v2 links (their zod strips
         // the unknown param and v1-verifies); unfixable from this side, and
         // the TTL bounds the exposure.
-        v: z.enum(['1', '2']).optional(),
+        v: z.enum(['1', '2', '3']).optional(),
+        k: z.string().regex(/^[0-9a-f]{8}$/).optional(),
         kind: z.enum(['rider', 'driver', 'vendor']),
         actor: z.string().min(1),
         from: z.string().min(1),
@@ -57,14 +56,10 @@ export async function statementRoutes(app: FastifyInstance) {
     // attacker can steer into.
     // [F-028-15] Both formats emit 32 hex chars, so the schema, the length
     // guard, and the constant-time compare are identical either way.
-    const expected = Buffer.from(
-      q.v === '2'
-        ? signStatementToken(q.kind as StatementKind, q.actor, q.from, q.to, q.expires)
-        : signStatementTokenV1(q.kind as StatementKind, q.actor, q.from, q.to, q.expires),
-      'utf8',
-    );
-    const provided = Buffer.from(q.sig, 'utf8');
-    if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+    // [M-37] One keyring-bound, constant-time verifier for every protocol
+    // version: a v3 link verifies under the key it names (current, or the
+    // previous key during a rotation); a key nobody holds verifies nothing.
+    if (!verifyStatementSignature({ ...q, kind: q.kind as StatementKind }, undefined)) {
       throw new AppError(403, 'BAD_SIGNATURE', 'This statement link is not valid.');
     }
 

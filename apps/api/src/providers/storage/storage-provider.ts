@@ -10,6 +10,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl as presignS3 } from '@aws-sdk/s3-request-presigner';
 import { stripImageMetadata } from '../../utils/images';
+import { storageSigningKeys } from '../../utils/signing-keys';
 
 // ---------------------------------------------------------------------------
 // StorageProvider — hard rule 4: swappable interface. Raw documents live in
@@ -51,7 +52,8 @@ const DEFAULT_TTL_SECONDS = 300;
 /** Local-disk adapter for dev/test. Files land under UPLOAD_DIR (gitignored). */
 export class LocalStorageProvider implements StorageProvider {
   private baseDir = process.env['UPLOAD_DIR'] ?? path.join(process.cwd(), 'uploads');
-  private signingSecret = process.env['STORAGE_SIGNING_SECRET'] ?? 'dev-signing-secret';
+  // [M-37] Resolved through the keyring: production never falls open to the repository default.
+  private get signingSecret(): string { return storageSigningKeys().current.secret; }
   private publicBase = process.env['API_PUBLIC_URL'] ?? '';
 
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { storageSigningKeys } from '../../utils/signing-keys';
 
 /**
  * Envelope encryption for verification documents (onboarding spec §5).
@@ -88,7 +89,8 @@ export function resetKeyProviderForTests() {
 // Instead the AUDITED admin document-url route mints a short-lived HMAC token;
 // the render route verifies it. Same signing model as the dev signed URLs.
 
-const renderSecret = () => process.env['STORAGE_SIGNING_SECRET'] ?? 'dev-signing-secret';
+// [M-37] The keyring never falls open in production; see utils/signing-keys.
+const renderSecret = () => storageSigningKeys().current.secret;
 
 export function signRenderToken(docId: string, expires: number): string {
   return crypto

@@ -115,6 +115,10 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (!signing || signing === 'dev-signing-secret') {
     throw new Error('FATAL: STORAGE_SIGNING_SECRET must be set to a non-default value in production — the document render/signed-URL HMAC depends on it. Refusing to start.');
   }
+  // [M-37] Non-default is not enough: a short secret is a guessable one.
+  if (signing.length < 32) {
+    throw new Error('FATAL: STORAGE_SIGNING_SECRET must be at least 32 characters in production — the document and statement links are signed with it. Refusing to start.');
+  }
 
   // SWIFT-AUD-D6-06: the default 'local' storage provider writes uploads and
   // KYC documents to this instance's disk. On a multi-instance or

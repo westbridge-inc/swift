@@ -9,7 +9,7 @@ const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
 const good: Record<string, string | undefined> = {
   NODE_ENV: 'production',
   MASTER_KEK: KEK,
-  STORAGE_SIGNING_SECRET: 'a-real-secret',
+  STORAGE_SIGNING_SECRET: 'a-managed-signing-secret-of-at-least-32-chars',
   STORAGE_PROVIDER: 's3',
   NOTIFICATION_PROVIDER: 'twilio',
   PUSH_PROVIDER: 'expo',
@@ -46,6 +46,8 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
 
   it('refuses the published default STORAGE_SIGNING_SECRET in production', () => {
     expect(() => assertSafeBootConfig({ ...good, STORAGE_SIGNING_SECRET: 'dev-signing-secret' })).toThrow(/STORAGE_SIGNING_SECRET/);
+    // [M-37] Non-default is not enough: a short secret is a guessable one.
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_SIGNING_SECRET: 'short-but-not-default' })).toThrow(/32 characters/);
   });
 
   it('still refuses DEV_OTP_BYPASS=1 in production', () => {
