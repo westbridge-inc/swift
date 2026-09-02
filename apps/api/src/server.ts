@@ -272,6 +272,14 @@ async function buildApp() {
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.register(searchRoutes, { prefix: '/api/v1' });
+  // [SCR-003] Test-control exists only in isolated load builds; production never registers it.
+  {
+    const { testControlEnabled } = await import('./modules/ops/test-control');
+    if (testControlEnabled()) {
+      const { testControlRoutes } = await import('./modules/ops/test-control.routes');
+      await app.register(testControlRoutes, { prefix: '/api/v1' });
+    }
+  }
   await app.register(chatRoutes, { prefix: '/api/v1/chat' });
   await app.register(moderationRoutes, { prefix: '/api/v1' });
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });

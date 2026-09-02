@@ -13,12 +13,32 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Rate, Trend } from 'k6/metrics';
+import exec from 'k6/execution';
+import { replayVerdict, changedBodyVerdict, cardinalityVerdict, manifestVerdict } from './oracle.js';
 
 export const BASE = __ENV.BASE_URL || 'http://localhost:3000';
 export const API = `${BASE}/api/v1`;
 export const TOKENS = (__ENV.ORDER_TOKENS || '').split(',').map((t) => t.trim()).filter(Boolean);
 export const VENDOR = __ENV.ORDER_VENDOR_ID || '';
 export const ITEM = __ENV.ORDER_ITEM_ID || '';
+// [SCR-003] A mutating run needs a signed run manifest: what the target MUST say about itself.
+export const RUN_MANIFEST = __ENV.LOAD_RUN_MANIFEST ? JSON.parse(__ENV.LOAD_RUN_MANIFEST) : null;
+export const RUN_ID = __ENV.LOAD_RUN_ID || `k6-${Date.now()}`;
+let lease = null;
+
+// [SCR-003] The identity gate: the target must answer /test-control/identity (production never does)
+// and every manifest field must match exactly; otherwise the run aborts before its first write.
+export function identityGate(token) {
+  if (lease) return lease;
+  if (!RUN_MANIFEST) exec.test.abort('LOAD_RUN_MANIFEST is required for a mutating run');
+  const res = http.get(`${API}/test-control/identity`, { headers: { authorization: `Bearer ${token}` }, tags: { name: 'test_control_identity' } });
+  if (res.status !== 200) exec.test.abort(`target has no test-control identity (${res.status}) — not an isolated load environment`);
+  const identity = res.json('data');
+  const verdict = manifestVerdict(identity, RUN_MANIFEST);
+  if (!verdict.ok) exec.test.abort(`target does not match the run manifest: ${verdict.reason}`);
+  lease = identity.lease;
+  return lease;
+}
 
 // Health / correctness metrics — read by the thresholds in each profile.
 export const browseErrors = new Rate('browse_errors');
@@ -77,7 +97,8 @@ export function browse() {
 export function order() {
   if (!TOKENS.length || !VENDOR || !ITEM) return;
   const token = TOKENS[Math.floor(Math.random() * TOKENS.length)];
-  const H = { headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } };
+  const l = identityGate(token);
+  const H = { headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-load-run-id': RUN_ID, 'x-load-lease': `${l.nonce}.${l.signature}` } };
 
   http.del(`${API}/customer/cart`, null, H);
   const add = http.post(`${API}/customer/cart/items`, JSON.stringify({ vendorId: VENDOR, itemId: ITEM, quantity: 1 }), H);
@@ -93,9 +114,21 @@ export function order() {
   orderErrors.add(!([200, 201].includes(co.status) || honest));
 
   const replay = http.post(`${API}/customer/checkout`, JSON.stringify({ paymentMethod: 'CASH' }), { ...HK, tags: { name: 'checkout_replay' } });
-  // The replay MUST mirror the first response. A different status = a second
-  // order slipped through = a correctness violation.
-  idempotencyViolations.add(replay.status !== co.status);
-  check(replay, { 'idempotent replay: same status, no dup': () => replay.status === co.status });
+  // [SCR-004] The replay must be the SAME COMMAND RESULT — the receipt's answer with the same order ids —
+  // not merely the same status. A changed body under the same key must conflict. The read-only verifier
+  // must hold exactly the orders the first response named. Status alone is only a latency/error signal.
+  const v = replayVerdict(co, replay);
+  idempotencyViolations.add(!v.ok);
+  check(replay, { [`idempotent replay: ${v.reason}`]: () => v.ok });
+  if ([200, 201].includes(co.status)) {
+    const changed = http.post(`${API}/customer/checkout`, JSON.stringify({ paymentMethod: 'CASH', note: 'changed' }), { ...HK, tags: { name: 'checkout_changed_body' } });
+    const cv = changedBodyVerdict(changed);
+    idempotencyViolations.add(!cv.ok);
+    check(changed, { [`changed body conflicts: ${cv.reason}`]: () => cv.ok });
+    const receipt = http.get(`${API}/test-control/checkout/${idemKey}`, { headers: H.headers, tags: { name: 'checkout_verify' } });
+    const rv = cardinalityVerdict(receipt, co);
+    idempotencyViolations.add(!rv.ok);
+    check(receipt, { [`verifier cardinality: ${rv.reason}`]: () => rv.ok });
+  }
   sleep(1);
 }
