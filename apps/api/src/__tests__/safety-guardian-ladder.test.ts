@@ -268,7 +268,10 @@ describe('check-in responses (§5.3)', () => {
     await sweep(new Date(t0 + 120_000 + 181_000)); // L3
     expect((await session(ride.id)).status).toBe('CHECKIN_PENDING');
 
-    const confirm = await post('/api/v1/safety/guardian/driver-confirm', {}, driverUser.token);
+    // [S-04] The confirmation answers THIS cycle with the nonce the ask carried.
+    const ask = await app.prisma.notification.findFirstOrThrow({ where: { userId: driverUser.userId, data: { path: ['kind'], equals: 'guardian_driver_confirm' } }, orderBy: { createdAt: 'desc' } });
+    const { cycleId, nonce } = ask.data as { cycleId: string; nonce: string };
+    const confirm = await post('/api/v1/safety/guardian/driver-confirm', { cycleId, nonce, deviceId: 'flat-tire-phone' }, driverUser.token);
     expect(confirm.statusCode).toBe(200);
 
     await sweep(new Date(t0 + 120_000 + 181_000 + 121_000)); // deadline tick
