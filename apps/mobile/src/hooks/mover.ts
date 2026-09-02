@@ -436,7 +436,7 @@ export type DriverActionInput =
  *  mover's GPS (it is what a guarantee claim stands on). Last-known is
  *  instant; fall back to a fresh fix. The auth principal is re-checked around
  *  the wait so a session that changed underneath cannot sign the outcome. */
-async function evidenceFix(owner: AuthSessionSnapshot) {
+export async function evidenceFix(owner: AuthSessionSnapshot) {
   let pos = await Location.getLastKnownPositionAsync().catch(() => null);
   let current = requireAuthSessionForPrincipal(owner);
   if (!pos) {

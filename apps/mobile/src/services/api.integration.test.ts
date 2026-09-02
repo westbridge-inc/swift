@@ -539,7 +539,8 @@ describe('Axios auth interceptor integration', () => {
       }, accountA),
       partnerApi.become({ role: 'MOVER' }, accountA),
       courierApi.uploadProof('order-a', form, accountA),
-      courierApi.proof('order-a', '/a-proof.jpg', accountA),
+      courierApi.proof('order-a', { proofPhotoUrl: '/a-proof.jpg', outcome: 'paid', gps: { lat: 6.8, lng: -58.1 } }, accountA),
+      courierApi.collect('order-a', { outcome: 'paid', gps: { lat: 6.8, lng: -58.1 } }, accountA),
       riderApi.goOnline(6.8, -58.1, accountA),
       riderApi.location(6.8, -58.1, accountA),
       riderApi.handover('order-a', {
@@ -579,7 +580,8 @@ describe('Axios auth interceptor integration', () => {
       adsApi.cancel('campaign-a', accountA),
     ]);
 
-    expect(seen).toHaveLength(40);
+    // [M-28] +1: the courier collect step joined the captured-session matrix.
+    expect(seen).toHaveLength(41);
     expect(seen.every((request) => request.authorization === 'Bearer access-a-1')).toBe(true);
     expect(seen.every((request) => !request.keys.includes('_swiftAuthBindingId'))).toBe(true);
     expect(auth.current).toEqual(accountB);

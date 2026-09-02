@@ -626,8 +626,22 @@ export const courierApi = {
     api.post(`/courier/order/${id}/proof-photo`, form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })),
-  proof: (id: string, proofPhotoUrl: string, session?: AuthSessionSnapshot) =>
-    api.post(`/courier/order/${id}/proof`, { proofPhotoUrl }, capturedAuthConfig(session)),
+  // [M-28] The proof carries the cash outcome when the RECIPIENT pays: the
+  // server refuses a bare proof on an unpaid cash job (a proof never implies
+  // money). The GPS is the claim's evidence when the recipient did not pay.
+  proof: (
+    id: string,
+    body: { proofPhotoUrl: string; outcome?: 'paid' | 'no_show' | 'refused'; gps?: { lat: number; lng: number } },
+    session?: AuthSessionSnapshot,
+  ) => api.post(`/courier/order/${id}/proof`, body, capturedAuthConfig(session)),
+  // [M-28] The SENDER pays → the fee is collected at pickup, before custody:
+  // 'paid' captures it (the proof still closes the job later); 'refused' ends
+  // the job there. GPS is mandatory server-side, as at every cash step.
+  collect: (
+    id: string,
+    body: { outcome: 'paid' | 'refused'; gps: { lat: number; lng: number } },
+    session?: AuthSessionSnapshot,
+  ) => api.post(`/courier/order/${id}/collect`, body, capturedAuthConfig(session)),
 };
 
 // Services (mounted at /api/v1/services)
