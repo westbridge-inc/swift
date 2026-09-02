@@ -1,5 +1,7 @@
+import { useRef } from 'react';
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
+import { checkoutAttempt } from '../lib/checkoutAttemptStore';
 import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 
@@ -419,16 +421,33 @@ export function useNotifications<T = any>() {
 
 export function usePlaceOrder<T = any>() {
   const qc = useQueryClient();
-  return useMutation<T, unknown, any>({
-    mutationFn: (payload: any) => unwrap<T>(customerApi.placeOrder(payload)),
+  // [TA-S1-001] A second tap while the first request is in flight is the SAME
+  // attempt, not a second order. The button disables once it renders as
+  // loading; this ref closes the window before that render. The key is the
+  // attempt's (see lib/checkoutAttempt): begun on the first tap, reused by
+  // every retry, ended only when the order is placed or the cart changes —
+  // so the server replays ONE order instead of placing two.
+  const inFlight = useRef(false);
+  const m = useMutation<T, unknown, any>({
+    mutationFn: (payload: any) => unwrap<T>(customerApi.placeOrder(payload, checkoutAttempt.begin())),
     // Checkout shows its own inline error (orderErr) — no global toast on top.
     meta: { silent: true },
     onSuccess: (data: any) => {
+      checkoutAttempt.end();
       qc.invalidateQueries({ queryKey: customerKeys.orders });
       qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
       track('order_placed', { orders: data?.orders?.length ?? 1 });
     },
+    onSettled: () => {
+      inFlight.current = false;
+    },
   });
+  const mutate: typeof m.mutate = (variables, options) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    m.mutate(variables, options);
+  };
+  return { ...m, mutate };
 }
 
 // --- Cart ---------------------------------------------------------------------
@@ -439,6 +458,9 @@ export function useCart<T = any>(lat?: number, lng?: number) {
 
 function invalidateCart(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
+  // [TA-S1-001] The cart changed, so the next "Place order" is a NEW intent —
+  // never a replay of the last attempt's order.
+  checkoutAttempt.end();
 }
 
 export function useAddToCart() {

@@ -382,11 +382,14 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
-  }) =>
-    // Idempotency-Key: transport-level duplicates of ONE tap can't double-
-    // order (the server refuses a concurrent twin and replays a finished one).
+  }, idempotencyKey: string) =>
+    // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
+    // the checkout hook (lib/checkoutAttempt), reused by every retry, ended
+    // only when the order is placed or the cart changes. The server refuses
+    // a concurrent twin and replays a finished one — so a double tap, a
+    // timed-out response and a reopened app all resolve to ONE order.
     api.post('/customer/checkout', data, {
-      headers: { 'Idempotency-Key': `chk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}` },
+      headers: { 'Idempotency-Key': idempotencyKey },
     }),
   getNotifications: () => api.get('/customer/notifications'),
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
