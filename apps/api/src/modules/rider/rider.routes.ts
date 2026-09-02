@@ -962,6 +962,9 @@ export async function riderRoutes(app: FastifyInstance) {
         // never appear on the board — the claim CAS refuses it anyway, but
         // advertising it sends riders to collect work that doesn't exist.
         fulfillment: 'DELIVERY',
+        // [TA-S0-001 hold] Held for a person (too old, already paid by MMG):
+        // not open work until an operator decides.
+        foodAgeHeldAt: null,
         // LIFECYCLE_V2: a held courier job isn't offerable yet.
         ...notHeldFilter(),
         // [F-0026] A self-delivering vendor fulfils this one itself — it is not
@@ -1192,6 +1195,12 @@ export async function riderRoutes(app: FastifyInstance) {
 
     if (order.riderId) {
       throw new ConflictError('This order has already been claimed by another rider');
+    }
+    // [TA-S0-001 hold] Too old to deliver and already paid by MMG: a person
+    // decides what happens to it, not the next rider to tap. The seam's CAS
+    // refuses it too; this is the honest message instead of a generic conflict.
+    if (order.foodAgeHeldAt) {
+      throw new AppError(409, 'ORDER_HELD_FOR_REVIEW', 'This order is held for review by Swift — it was ready too long and the customer has already paid. It cannot be picked up until a person releases it.');
     }
 
     // RIDER_ASSIGNED is only reachable from these states — NOT PENDING (the vendor

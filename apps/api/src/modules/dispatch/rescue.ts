@@ -4,6 +4,7 @@ import type { Server } from 'socket.io';
 import { algoConfig } from '../algo/algo-config';
 import { recordDecision } from '../algo/decisions';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { log } from '../../utils/logger';
 
 /**
@@ -36,6 +37,18 @@ import { log } from '../../utils/logger';
  * store and the customer told the truth, a decision row that says so. The
  * guard sits inside the CAS itself, so a capture that lands between a
  * caller's read and the write is respected.
+ *
+ * [REPORT-070] The hold is DURABLE and ENFORCEABLE, not a log line:
+ * `Order.foodAgeHeldAt` is the claim (one UPDATE wins it; no decision row
+ * or notice is ever the gate), every rider-claim predicate excludes a held
+ * row (board, direct accept, offer accept, the dispatch loop), the notices
+ * are re-delivered idempotently on later ticks so a crash after the claim
+ * cannot lose them, an ops page that reaches nobody is a FAILED page (the
+ * claim is released and the next tick tries again), thresholds are read
+ * per tenant, the sweep only ever touches platform-rider delivery orders,
+ * walks oldest-first past already-held rows, and copy never claims a person
+ * is already handling what nobody has acknowledged. An operator releases the
+ * hold through `releaseFoodAgeHold`.
  *
  * Conflict registered, not decided here: the algorithm document widens the
  * rescue radius by 500 m per cascade capped at 4 km; the shipped ladder
@@ -77,8 +90,10 @@ export interface RescueDeps {
 // ② Food age
 // ---------------------------------------------------------------------------
 
-export async function foodAgeLimitMinutes(prisma: PrismaClient, orderType: string): Promise<number | null> {
-  const cfg = await algoConfig(prisma, 'rescue.foodAgeMaxMinutes');
+/** [REPORT-070 F-05] The tenant is mandatory: sweeps carry no request
+ *  context, and one operator's cutoff must never retire another's orders. */
+export async function foodAgeLimitMinutes(prisma: PrismaClient, orderType: string, tenantId: string): Promise<number | null> {
+  const cfg = await algoConfig(prisma, 'rescue.foodAgeMaxMinutes', tenantId);
   const map = (cfg.value ?? {}) as Record<string, unknown>;
   const v = Number(map[orderType]);
   return Number.isFinite(v) && v > 0 ? v : null;
@@ -96,6 +111,8 @@ export interface RetireableOrder {
   customerId: string;
   tenantId: string;
   orderType: string;
+  /** The status at read time — the hold's log note records the true state, never a guess. */
+  status: string;
   paymentMethod: string;
   /** [TA-S0-001] Required, not optional: a caller that forgets to SELECT it
    *  fails to compile instead of silently cancelling paid money. */
@@ -121,7 +138,13 @@ export async function retireTooOldOrder(deps: RescueDeps, order: RetireableOrder
 export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder, ageMinutes: number, limitMinutes: number, now = new Date()): Promise<RetireOutcome> {
   const r = await deps.prisma.order.updateMany({
     where: {
-      id: order.id, riderId: null, status: { in: [...WAITING_STATUSES] },
+      id: order.id, tenantId: order.tenantId, riderId: null, status: { in: [...WAITING_STATUSES] },
+      // [REPORT-070 F-06] "No rider found" is only a fact about work that
+      // NEEDS a platform rider: a pickup order or a store's own delivery is
+      // riderless by design and must never be retired for it.
+      fulfillment: 'DELIVERY',
+      foodAgeHeldAt: null,
+      AND: [notSelfDeliveredFilter()],
       // [TA-S0-001] The guard lives in the CAS, not only in the caller's
       // snapshot: money captured between the caller's read and this write is
       // respected by the database, not by luck.
@@ -129,7 +152,7 @@ export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder
     },
     data: { status: 'CANCELLED', cancelledAt: now, cancelledBy: 'system', cancellationReason: FOOD_TOO_OLD_REASON },
   });
-  if (r.count === 0) return holdIfPaidTooOld(deps, order, ageMinutes, limitMinutes);
+  if (r.count === 0) return holdPaidTooOldOrder(deps, order, ageMinutes, limitMinutes, now);
 
   await deps.prisma.orderStatusLog.create({
     data: {
@@ -173,7 +196,7 @@ export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder
   // Dynamic like dispatch.service does it: jobs/queue imports this module's neighbours.
   const { opsPageOnce } = await import('../../jobs/queue');
   await opsPageOnce({ redis: deps.redis }, `food_too_old:${order.id}`, 6 * 3600, () =>
-    notifyAdmins(deps.prisma, deps.notifications, {
+    pageOperators(deps, {
       title: 'Food too old to deliver — cancelled, needs a person',
       body: `Order ${order.orderNumber} (${order.vendor?.name ?? 'store'}) was ready ${ageMinutes} min with no rider. Check supply in that area and whether the store should be paid.`,
       data: { kind: 'ops_food_too_old', orderId: order.id },
@@ -184,46 +207,95 @@ export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder
 }
 
 /**
- * [TA-S0-001] The CAS refused. Either the order moved on (a rider claimed
- * it, or it left the waiting states) — nothing to do — or it is still waiting
- * AND its money is captured MMG: too old to deliver, and NOT ours to cancel.
- * That order goes to a person, un-cancelled: a decision row, an honest note
- * in the log, the customer and the store told the truth, ops paged once.
- * Idempotent per order — the sweep runs every tick; one held order is one
- * row, one page, one notice each.
+ * [REPORT-070 F-02] "Ops paged" must mean a person can see it. notifyAdmins
+ * returns how many operator inboxes took the row; zero is a FAILED page, and
+ * throwing here makes opsPageOnce release its claim so the next tick tries
+ * again instead of recording success for six hours over an empty room.
  */
-async function holdIfPaidTooOld(deps: RescueDeps, order: RetireableOrder, ageMinutes: number, limitMinutes: number): Promise<RetireOutcome> {
-  const row = await deps.prisma.order.findUnique({
-    where: { id: order.id },
-    select: { status: true, riderId: true, paymentMethod: true, paymentStatus: true },
-  });
-  if (!row || row.riderId || !(WAITING_STATUSES as readonly string[]).includes(row.status) || !isCapturedMmg(row)) return 'UNTOUCHED';
+async function pageOperators(deps: RescueDeps, page: Parameters<typeof notifyAdmins>[2]): Promise<number> {
+  const reached = await notifyAdmins(deps.prisma, deps.notifications, page);
+  if (reached === 0) {
+    log().error({ orderId: page.data?.['orderId'], tenantId: page.tenantId }, 'rescue: ops page reached NOBODY — no operator inbox took it; the claim is released and the next tick retries');
+    throw new Error('ops page reached no operator');
+  }
+  return reached;
+}
 
-  const already = await deps.prisma.algoDecision.findFirst({
-    where: { algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, outcome: FOOD_TOO_OLD_PAID_HELD_OUTCOME },
-    select: { id: true },
-  });
-  if (already) return 'HELD_PAID';
-
-  await recordDecision(deps.prisma, {
-    algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId, outcome: FOOD_TOO_OLD_PAID_HELD_OUTCOME,
-    sentence: `Ready ${ageMinutes} min ago against a ${limitMinutes}-min limit with no rider found, but the store already holds the MMG payment: held for a person, not cancelled — nobody is marked.`,
-    inputs: { ageMinutes, limitMinutes, orderType: order.orderType, paymentMethod: row.paymentMethod, paymentStatus: row.paymentStatus, readyAt: order.readyAt?.toISOString() ?? null },
-  });
-  await deps.prisma.orderStatusLog.create({
-    data: {
-      orderId: order.id, status: row.status as never, changedBy: 'system',
-      note: `Food-age cutoff: ready ${ageMinutes} min ago, limit ${limitMinutes} min, no rider found — but the customer already paid by MMG, so it is HELD for a person, not cancelled. Nobody is marked.`,
+/**
+ * [TA-S0-001] The CAS refused. Either the order moved on (a rider claimed
+ * it, it left the waiting states, it is not platform-rider delivery work)
+ * — nothing to do — or it is still waiting AND its money is captured MMG:
+ * too old to deliver, and NOT ours to cancel. That order is HELD for a
+ * person, un-cancelled.
+ *
+ * [REPORT-070 F-01/F-03] The claim is the ROW: one UPDATE sets
+ * `foodAgeHeldAt` for exactly one caller (overlapping dispatch and sweep
+ * ticks cannot both win), and while it is set no rider-claim predicate in
+ * the product accepts the order. The notices, the decision row and the ops
+ * page are EFFECTS of the claim, delivered idempotently — a crash between
+ * the claim and the notices is repaired on the next tick, never lost.
+ */
+async function holdPaidTooOldOrder(deps: RescueDeps, order: RetireableOrder, ageMinutes: number, limitMinutes: number, now: Date): Promise<RetireOutcome> {
+  const claimed = await deps.prisma.order.updateMany({
+    where: {
+      id: order.id, tenantId: order.tenantId, riderId: null, status: { in: [...WAITING_STATUSES] },
+      fulfillment: 'DELIVERY', AND: [notSelfDeliveredFilter()],
+      paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED',
+      foodAgeHeldAt: null,
     },
-  }).catch(() => {});
+    data: { foodAgeHeldAt: now },
+  });
+  if (claimed.count === 0) {
+    // Not ours — unless it is ALREADY held, in which case the effects may
+    // still owe delivery (a crash after the claim, a page nobody took).
+    const row = await deps.prisma.order.findUnique({
+      where: { id: order.id }, select: { foodAgeHeldAt: true, riderId: true, status: true },
+    });
+    if (!row?.foodAgeHeldAt || row.riderId || !(WAITING_STATUSES as readonly string[]).includes(row.status)) return 'UNTOUCHED';
+    await deliverHoldEffects(deps, order, ageMinutes, limitMinutes, { winner: false });
+    return 'HELD_PAID';
+  }
+  // A live offer card for this order must not survive the hold: the accept
+  // CAS refuses it anyway, but the card should vanish, not fail on tap.
+  await deps.redis.del(...dispatchKeys(order.id)).catch(() => {});
+  await deliverHoldEffects(deps, order, ageMinutes, limitMinutes, { winner: true });
+  return 'HELD_PAID';
+}
 
+/**
+ * The effects of a hold. The decision row and the log note are written by
+ * the claim WINNER only — the one caller whose UPDATE set the column — so
+ * overlapping callers can never duplicate them (neither table has a unique
+ * key to lean on). The two notices ride dedupe keys and the ops page its
+ * once-key, so the repair path (a later tick over an existing hold) may
+ * re-run them freely: a crash after the claim loses no notice and no page.
+ */
+async function deliverHoldEffects(deps: RescueDeps, order: RetireableOrder, ageMinutes: number, limitMinutes: number, opts: { winner: boolean }): Promise<void> {
+  if (opts.winner) {
+    const decisionId = await recordDecision(deps.prisma, {
+      algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId, outcome: FOOD_TOO_OLD_PAID_HELD_OUTCOME,
+      sentence: `Ready ${ageMinutes} min ago against a ${limitMinutes}-min limit with no rider found, but the store already holds the MMG payment: held for review, not cancelled — nobody is marked.`,
+      inputs: { ageMinutes, limitMinutes, orderType: order.orderType, paymentMethod: order.paymentMethod, paymentStatus: order.paymentStatus, readyAt: order.readyAt?.toISOString() ?? null },
+    });
+    if (decisionId) {
+      await deps.prisma.orderStatusLog.create({
+        data: {
+          orderId: order.id, status: order.status as never, changedBy: 'system',
+          note: `Food-age cutoff: ready ${ageMinutes} min ago, limit ${limitMinutes} min, no rider found — but the customer already paid by MMG, so it is HELD for review, not cancelled. Nobody is marked.`,
+        },
+      }).catch((err: unknown) => log().warn({ err, orderId: order.id }, 'rescue: hold log note failed (the decision row stands; retried next tick)'));
+    }
+  }
+
+  // [REPORT-070 F-13] Nobody has acknowledged anything yet: say "sent for
+  // review", never that a person is already sorting it out.
   await deps.notifications.send({
     userId: order.customerId,
     type: 'ORDER_UPDATE',
     title: 'We couldn’t find a rider in time',
-    body: `Order ${order.orderNumber} was ready but no rider could be found. You’ve already paid the store by MMG, so a person at Swift is sorting it out with the store now — nothing more is charged. If it can’t be delivered, the store refunds you directly.`,
+    body: `Order ${order.orderNumber} was ready but no rider could be found. You’ve already paid the store by MMG, so it was NOT cancelled automatically — it has been sent to Swift for review, and nothing more is charged. If it can’t be delivered, the store refunds you directly.`,
     audience: 'customer',
-    data: { orderId: order.id, orderNumber: order.orderNumber, status: row.status, reason: FOOD_TOO_OLD_REASON, held: true },
+    data: { orderId: order.id, orderNumber: order.orderNumber, reason: FOOD_TOO_OLD_REASON, held: true },
     dedupeKey: `food-too-old-paid:customer:${order.id}`,
   });
   if (order.vendor?.owner.userId) {
@@ -231,51 +303,83 @@ async function holdIfPaidTooOld(deps: RescueDeps, order: RetireableOrder, ageMin
       userId: order.vendor.owner.userId,
       type: 'ORDER_UPDATE',
       title: 'No rider found — the customer has already paid',
-      body: `${order.orderNumber} was ready ${ageMinutes} min ago and no rider could be found. The customer paid by MMG, so it is NOT cancelled: a person at Swift is handling it with you. Keep the order until you hear from us.`,
+      body: `${order.orderNumber} was ready ${ageMinutes} min ago and no rider could be found. The customer paid by MMG, so it is NOT cancelled: it has been sent to Swift for review. Keep the order until you hear from us.`,
       audience: 'business',
-      data: { orderId: order.id, orderNumber: order.orderNumber, status: row.status, reason: FOOD_TOO_OLD_REASON, held: true },
+      data: { orderId: order.id, orderNumber: order.orderNumber, reason: FOOD_TOO_OLD_REASON, held: true },
       dedupeKey: `food-too-old-paid:vendor:${order.id}`,
     });
   }
   const { opsPageOnce } = await import('../../jobs/queue');
   await opsPageOnce({ redis: deps.redis }, `food_too_old_paid:${order.id}`, 6 * 3600, () =>
-    notifyAdmins(deps.prisma, deps.notifications, {
-      title: 'Paid MMG order too old to deliver — needs a person, NOT cancelled',
-      body: `Order ${order.orderNumber} (${order.vendor?.name ?? 'store'}) was ready ${ageMinutes} min with no rider and the customer already paid by MMG. The system did not cancel it. Decide with the store: deliver it now, or the store refunds the customer directly.`,
+    pageOperators(deps, {
+      title: 'Paid MMG order too old to deliver — held for review, NOT cancelled',
+      body: `Order ${order.orderNumber} (${order.vendor?.name ?? 'store'}) was ready ${ageMinutes} min with no rider and the customer already paid by MMG. The system did not cancel it; it is held. Decide with the store: deliver it now (release the hold), or the store refunds the customer directly.`,
       data: { kind: 'ops_food_too_old', orderId: order.id, held: true },
       tenantId: order.tenantId,
     }),
   ).catch((err: unknown) => log().warn({ err, orderId: order.id }, 'rescue: paid-hold ops page failed'));
-  return 'HELD_PAID';
 }
 
-/** The watchdog tick: retire every waiting, riderless order past its
- *  vertical's cutoff — and HOLD, un-cancelled, the ones whose money the store
- *  already holds ([TA-S0-001]). */
+/** [REPORT-070 F-03] An operator's decision: the hold comes off and the order
+ *  is dispatchable again. The only writer that clears `foodAgeHeldAt`. */
+export async function releaseFoodAgeHold(deps: Pick<RescueDeps, 'prisma' | 'redis'>, orderId: string, byUserId: string): Promise<boolean> {
+  const r = await deps.prisma.order.updateMany({ where: { id: orderId, foodAgeHeldAt: { not: null } }, data: { foodAgeHeldAt: null } });
+  if (r.count === 0) return false;
+  const row = await deps.prisma.order.findUnique({ where: { id: orderId }, select: { status: true } });
+  await deps.prisma.orderStatusLog.create({
+    data: { orderId, status: (row?.status ?? 'READY_FOR_PICKUP') as never, changedBy: byUserId, note: 'Food-age hold released by an operator — back to dispatch.' },
+  }).catch(() => {});
+  await deps.redis.del(`ops_page:food_too_old_paid:${orderId}`).catch(() => {});
+  return true;
+}
+
+/** The watchdog tick: retire every waiting, riderless platform-delivery
+ *  order past its tenant's cutoff — HOLD, un-cancelled, the ones whose money
+ *  the store already holds ([TA-S0-001]) — and re-deliver the effects of
+ *  every existing hold whose notices may still be owed. */
 export async function sweepFoodAge(deps: RescueDeps, now = new Date()): Promise<{ retired: string[]; held: string[] }> {
   const retired: string[] = [];
   const held: string[] = [];
-  const cfg = await algoConfig(deps.prisma, 'rescue.foodAgeMaxMinutes');
-  const limits = (cfg.value ?? {}) as Record<string, unknown>;
-  for (const [orderType, raw] of Object.entries(limits)) {
-    const limit = Number(raw);
-    if (!Number.isFinite(limit) || limit <= 0) continue;
-    const cutoff = new Date(now.getTime() - limit * 60_000);
-    const waiting = await deps.prisma.order.findMany({
-      where: { orderType: orderType as never, riderId: null, status: { in: [...WAITING_STATUSES] }, readyAt: { lt: cutoff } },
-      select: {
-        id: true, orderNumber: true, customerId: true, tenantId: true, orderType: true, paymentMethod: true, paymentStatus: true, readyAt: true,
-        vendor: { select: { name: true, owner: { select: { userId: true } } } },
-      },
-      take: 100,
-    });
-    for (const o of waiting) {
-      const age = foodAge(o, limit, now);
-      if (!age.tooOld || age.ageMinutes == null) continue;
-      const outcome = await settleTooOldOrder(deps, o, age.ageMinutes, limit, now);
-      if (outcome === 'RETIRED') retired.push(o.id);
-      else if (outcome === 'HELD_PAID') held.push(o.id);
-    }
+  const select = {
+    id: true, orderNumber: true, customerId: true, tenantId: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true, readyAt: true,
+    vendor: { select: { name: true, owner: { select: { userId: true } } } },
+  } as const;
+  // [REPORT-070 F-04/F-06] Oldest first, a bounded page, held rows excluded,
+  // and only work that needs a platform rider — so a shelf of held paid
+  // orders can never occupy the page, and a pickup order is never "no rider".
+  const waiting = await deps.prisma.order.findMany({
+    where: {
+      riderId: null, status: { in: [...WAITING_STATUSES] }, readyAt: { not: null },
+      fulfillment: 'DELIVERY', foodAgeHeldAt: null,
+      AND: [notSelfDeliveredFilter()],
+    },
+    select,
+    orderBy: { readyAt: 'asc' },
+    take: 200,
+  });
+  for (const o of waiting) {
+    // [REPORT-070 F-05] The order's own tenant decides its cutoff.
+    const limit = await foodAgeLimitMinutes(deps.prisma, o.orderType, o.tenantId);
+    if (limit == null) continue;
+    const age = foodAge(o, limit, now);
+    if (!age.tooOld || age.ageMinutes == null) continue;
+    const outcome = await settleTooOldOrder(deps, o, age.ageMinutes, limit, now);
+    if (outcome === 'RETIRED') retired.push(o.id);
+    else if (outcome === 'HELD_PAID') held.push(o.id);
+  }
+  // [REPORT-070 F-01/F-02] Existing holds: every effect is idempotent, so
+  // re-running them repairs a crash after the claim or a page nobody took.
+  const holds = await deps.prisma.order.findMany({
+    where: { foodAgeHeldAt: { not: null }, riderId: null, status: { in: [...WAITING_STATUSES] } },
+    select,
+    orderBy: { foodAgeHeldAt: 'asc' },
+    take: 50,
+  });
+  for (const h of holds) {
+    const limit = (await foodAgeLimitMinutes(deps.prisma, h.orderType, h.tenantId)) ?? 0;
+    const age = foodAge(h, limit, now);
+    await deliverHoldEffects(deps, h, age.ageMinutes ?? 0, limit, { winner: false });
+    if (!held.includes(h.id)) held.push(h.id);
   }
   return { retired, held };
 }
