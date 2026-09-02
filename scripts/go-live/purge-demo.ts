@@ -1,97 +1,78 @@
 /**
  * Go-Live demo-data purge + pre-launch cleanliness check [LIVE-001, engagement #4].
  *
- * TWO jobs:
- *   1. VERIFY a production-bound DB is demo-free before launch (the common case:
- *      a fresh prod DB seeded only by seed-production.ts has zero demo → this
- *      exits "clean, safe to launch").
- *   2. PURGE the demo layer if it leaked in (guarded, backup-required, FK-safe).
+ * [SCR-001 / SCR-002] This file is a thin CLI over `apps/api/src/modules/ops/purge-plan.ts`,
+ * which holds the workflow and its tests. Nothing here deletes on its own:
  *
- * SAFETY (this deletes irreversibly — it is DRY-RUN unless forced):
- *   - Dry-run by default: classifies + reports, deletes NOTHING.
- *   - Classifies every user into DEMO / ADMIN(keep) / SPINE(keep) / UNCLASSIFIED.
- *     UNCLASSIFIED = neither a demo marker nor an admin (e.g. leftover test
- *     accounts). It is NEVER deleted automatically — it's surfaced for a human,
- *     because "everything that isn't spine" is too blunt a hammer for a purge.
- *   - Admins (ADMIN/SUPER_ADMIN) and the platform spine (CountryConfig, Zone)
- *     are always preserved.
- *   - Executing requires ALL of: PURGE_EXECUTE=1, PURGE_CONFIRM_BACKUP=YES
- *     (you asserting a backup exists), and a real (non-local) DATABASE_URL is
- *     the caller's responsibility to point at. Even then it only removes the
- *     DEMO set unless PURGE_INCLUDE_UNCLASSIFIED=1 is ALSO set.
+ *   verify (default)   classify + report; refuses to say "clean" without a deployment identity.
+ *   plan               write a signed, target-bound plan file (expires in 1 hour).
+ *   execute            run an approved plan: same target, two distinct approvers, a backup manifest
+ *                      with tested-restore evidence, unchanged counts, production only under a
+ *                      time-bound break-glass approval. Deletion goes through the canonical
+ *                      account-deletion path; partner accounts are reported for the partner
+ *                      closure workflow, never hard-deleted; held accounts are quarantined.
  *
  * Run (from apps/api, where @prisma/client resolves):
- *   cd apps/api
- *   DATABASE_URL=... npx tsx ../../scripts/go-live/purge-demo.ts               # dry-run report
- *   DATABASE_URL=... PURGE_EXECUTE=1 PURGE_CONFIRM_BACKUP=YES \
- *     npx tsx ../../scripts/go-live/purge-demo.ts                             # purge the DEMO set
+ *   DATABASE_URL=... npx tsx ../../scripts/go-live/purge-demo.ts verify
+ *   DATABASE_URL=... npx tsx ../../scripts/go-live/purge-demo.ts plan --out purge-plan.json
+ *   DATABASE_URL=... PURGE_APPROVAL_SECRET=... npx tsx ../../scripts/go-live/purge-demo.ts approve --plan purge-plan.json --as alice
+ *   DATABASE_URL=... PURGE_APPROVAL_SECRET=... npx tsx ../../scripts/go-live/purge-demo.ts execute \
+ *     --plan purge-plan.json --approvals approvals.json --backup backup-manifest.json [--break-glass break-glass.json]
  */
+import { readFileSync, writeFileSync } from 'node:fs';
 import { PrismaClient } from '@prisma/client';
+import { buildPlan, classify, executePlan, signApproval, syntheticMarkersPresent, targetFingerprint, type Approval, type BackupManifest, type BreakGlass, type PurgePlan } from '../../apps/api/src/modules/ops/purge-plan';
+import { AccountService } from '../../apps/api/src/modules/user/account.service';
 
-// seed.ts creates every demo account in the +592600XXXX range (see prisma/seed.ts).
-const DEMO_PHONE_PREFIX = '+592600';
-
+const argv = process.argv.slice(2);
+const mode = argv[0] ?? 'verify';
+const arg = (name: string): string | undefined => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
+const readJson = <T,>(path: string | undefined, what: string): T => { if (!path) throw new Error(`--${what} is required`); return JSON.parse(readFileSync(path, 'utf8')) as T; };
+const databaseUrl = process.env['DATABASE_URL'] ?? '';
+if (!databaseUrl) throw new Error('DATABASE_URL is required');
 const prisma = new PrismaClient();
 
 async function main() {
-  const execute = process.env['PURGE_EXECUTE'] === '1' && process.env['PURGE_CONFIRM_BACKUP'] === 'YES';
-  const includeUnclassified = process.env['PURGE_INCLUDE_UNCLASSIFIED'] === '1';
-
-  const [total, admins, demoUsers, spine] = await Promise.all([
-    prisma.user.count(),
-    prisma.user.findMany({ where: { roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] } }, select: { id: true } }),
-    prisma.user.findMany({ where: { phone: { startsWith: DEMO_PHONE_PREFIX } }, select: { id: true, roles: true } }),
-    Promise.all([prisma.countryConfig.count(), prisma.zone.count().catch(() => 0)]),
-  ]);
-
-  const adminIds = new Set(admins.map((a) => a.id));
-  // A demo account that is ALSO an admin (e.g. SEED_ADMIN_PHONE set inside the
-  // demo range) is KEPT — never delete an admin.
-  const demoDeletable = demoUsers.filter((u) => !adminIds.has(u.id));
-  const demoIds = demoDeletable.map((u) => u.id);
-  const unclassified = total - adminIds.size - demoUsers.length;
-
-  // What the demo users own (headline cascade — the rest cascades on delete).
-  const [demoVendors, demoOrders] = await Promise.all([
-    prisma.vendor.count({ where: { owner: { userId: { in: demoIds } } } }),
-    prisma.order.count({ where: { customerId: { in: demoIds } } }),
-  ]);
-
-  console.log('\n=== Swift Go-Live · demo-data classification ===');
-  console.log(`DATABASE: ${(process.env['DATABASE_URL'] || '').replace(/:[^:@]*@/, ':****@')}`);
-  console.log(`\nusers total: ${total}`);
-  console.log(`  KEEP  admins (ADMIN/SUPER_ADMIN):        ${adminIds.size}`);
-  console.log(`  DELETE demo (${DEMO_PHONE_PREFIX}XXXX, non-admin): ${demoDeletable.length}  → ${demoVendors} vendor(s), ${demoOrders} order(s) cascade`);
-  console.log(`  REVIEW unclassified (neither demo nor admin): ${unclassified}  ← NEVER auto-deleted`);
-  console.log(`\nKEEP platform spine: ${spine[0]} CountryConfig · ${spine[1]} Zone`);
-
-  if (demoDeletable.length === 0 && unclassified === 0) {
-    console.log('\n✅ CLEAN: only the platform spine and admin(s) remain — safe to launch.');
-  } else if (unclassified > 0) {
-    console.log(`\n⚠️  ${unclassified} unclassified account(s) exist (likely leftover test data). A production DB seeded only by seed-production.ts would show 0 here. Review before launch; this tool will not delete them unless PURGE_INCLUDE_UNCLASSIFIED=1.`);
-  }
-
-  if (!execute) {
-    console.log('\nDRY-RUN — nothing was deleted. To purge the DEMO set:');
-    console.log('  PURGE_EXECUTE=1 PURGE_CONFIRM_BACKUP=YES npx tsx scripts/go-live/purge-demo.ts');
+  const target = await targetFingerprint(prisma, databaseUrl);
+  console.log(`\n=== Swift Go-Live · demo-data purge (${mode}) ===`);
+  console.log(`TARGET: ${target.database} on ${target.host} · deployment ${target.deploymentId} · environment ${target.environment}`);
+  if (mode === 'verify') {
+    const c = await classify(prisma);
+    console.log(`users total: ${c.total} · admins kept: ${c.adminIds.length} · demo customers: ${c.demoCustomerIds.length} · demo partners (partner closure workflow): ${c.demoPartnerIds.length} · quarantined (legal hold): ${c.quarantinedIds.length} · unclassified (reviewed, never selected): ${c.unclassified}`);
+    if (target.environment === 'unknown') { console.log('⚠️  no deployment identity — this database cannot be certified clean'); process.exitCode = 2; return; }
+    if (target.environment === 'production' && (await syntheticMarkersPresent(prisma)) > 0) { console.log('❌ synthetic markers present in PRODUCTION'); process.exitCode = 1; return; }
+    console.log(c.demoCustomerIds.length + c.demoPartnerIds.length + c.unclassified === 0 ? '✅ CLEAN: only admins and the platform spine remain' : 'ℹ️  not clean — plan a purge for the synthetic set; review the unclassified by hand');
     return;
   }
-
-  // --- execute path (guarded) ---------------------------------------------
-  const toDelete = includeUnclassified
-    ? (await prisma.user.findMany({ where: { NOT: { roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] } } }, select: { id: true } })).map((u) => u.id)
-    : demoIds;
-  console.log(`\n🗑  EXECUTING: deleting ${toDelete.length} account(s) and their owned data (backup asserted)…`);
-  // FK-safe: delete owned vendors (cascades their catalog/orders) then the users
-  // (cascades sessions/carts/ratings). Relies on the schema's onDelete rules;
-  // run inside a transaction so a failure rolls back wholly.
-  await prisma.$transaction(async (tx) => {
-    await tx.vendor.deleteMany({ where: { owner: { userId: { in: toDelete } } } });
-    await tx.user.deleteMany({ where: { id: { in: toDelete } } });
-  });
-  console.log('✅ Purge complete. Re-run the dry-run to confirm a clean spine.');
+  if (mode === 'plan') {
+    const plan = await buildPlan(prisma, databaseUrl);
+    const out = arg('out') ?? 'purge-plan.json';
+    writeFileSync(out, JSON.stringify(plan, null, 2));
+    console.log(`plan ${plan.digest} written to ${out} (expires ${plan.expiresAt}): ${plan.counts.demoCustomers} demo customers to delete, ${plan.counts.demoPartners} partners reported, ${plan.counts.quarantined} quarantined, ${plan.counts.unclassified} unclassified untouched`);
+    return;
+  }
+  if (mode === 'approve') {
+    const secret = process.env['PURGE_APPROVAL_SECRET']; if (!secret) throw new Error('PURGE_APPROVAL_SECRET is required');
+    const plan = readJson<PurgePlan>(arg('plan'), 'plan'); const who = arg('as'); if (!who) throw new Error('--as <approver> is required');
+    console.log(JSON.stringify(signApproval(secret, who, plan.digest)));
+    return;
+  }
+  if (mode === 'execute') {
+    const secret = process.env['PURGE_APPROVAL_SECRET']; if (!secret) throw new Error('PURGE_APPROVAL_SECRET is required');
+    const plan = readJson<PurgePlan>(arg('plan'), 'plan');
+    const approvals = readJson<Approval[]>(arg('approvals'), 'approvals');
+    const backup = readJson<BackupManifest>(arg('backup'), 'backup');
+    const breakGlass = arg('break-glass') ? readJson<BreakGlass>(arg('break-glass'), 'break-glass') : null;
+    // the canonical deletion path, on the minimal app surface it uses (prisma, log, io): the same erasure a person's own request runs
+    const app = { prisma, log: { info: console.log, warn: console.warn, error: console.error, debug: () => {} }, io: { to: () => ({ emit: () => {} }), sockets: { sockets: new Map() } } };
+    const accounts = new AccountService(app as never);
+    const res = await executePlan(prisma, databaseUrl, plan, { secret, approvals, backup, breakGlass, deleteUser: async (id) => { await accounts.deleteAccount(id); } });
+    console.log(`✅ executed plan ${plan.digest}: deleted ${res.deleted.length}, skipped ${res.skippedAlreadyGone.length} already gone, ${res.partnersReported.length} partner account(s) reported for closure, ${res.quarantined.length} quarantined`);
+    return;
+  }
+  throw new Error(`unknown mode ${mode}`);
 }
 
 main()
-  .catch((e) => { console.error('purge failed:', e.message); process.exitCode = 1; })
+  .catch((e) => { console.error('purge refused:', e.message); process.exitCode = 1; })
   .finally(() => prisma.$disconnect());

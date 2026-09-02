@@ -84,6 +84,9 @@ model User {
   strikes               Strike[]
 
   deviceTokens DeviceToken[]
+  /// [SCR-002] Synthetic (seeded / test-run) accounts carry an immutable run id; a purge selects
+  /// ONLY marked rows, never a negative classification. Forbidden in production (boot + purge verify).
+  syntheticRunId String?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   lastActiveAt DateTime?
@@ -3668,6 +3671,38 @@ model OpsAlertRecipient {
 enum OpsAlertKind {
   SOS
   DRILL
+}
+
+/// [SCR-001] The database says WHICH deployment it is. Destructive tooling binds
+/// its plan to this identity and refuses an unknown or mismatched target before
+/// the first data query. One row, written by operations, never by the app.
+model DeploymentIdentity {
+  id           String   @id @default("singleton")
+  deploymentId String
+  environment  String
+  note         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("deployment_identity")
+}
+
+/// [SCR-001] Append-only audit of privileged, destructive change: every event
+/// of a purge plan (planned, approved, started, each deletion, completed,
+/// failed) is its own immutable row written BEFORE the mutation it describes.
+model PrivilegedChangeAudit {
+  id         String   @id @default(cuid())
+  action     String
+  planDigest String
+  event      String
+  target     Json
+  detail     Json?
+  actor      String?
+  createdAt  DateTime @default(now())
+
+  @@index([planDigest, createdAt])
+  @@index([action, createdAt])
+  @@map("privileged_change_audit")
 }
 
 enum SosEscalationStatus {
