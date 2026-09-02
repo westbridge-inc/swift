@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useState } from 'react';
+import { Fragment, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, fetchBillingEvents } from '@/lib/api';
@@ -46,8 +46,20 @@ export default function SubscriptionsPage() {
   });
   const invalidate = () => qc.invalidateQueries({ queryKey: ['subscriptions'] });
   const waive = useMutation({ mutationFn: (id: string) => waiveSubscriptionFee(id, 'Waived by admin'), onSuccess: invalidate });
+  // [M-08] The idempotency key belongs to the ATTEMPT: minted when the admin
+  // confirms an amount, reused if that same top-up is retried after an error
+  // or a lost response, and released only once the server has answered. A
+  // different amount for the same subscription is a new attempt.
+  const attempts = useRef(new Map<string, string>());
   const topup = useMutation({
-    mutationFn: ({ id, amount }: { id: string; amount: number }) => topUpSubscription(id, amount),
+    mutationFn: async ({ id, amount }: { id: string; amount: number }) => {
+      const attempt = `${id}:${amount}`;
+      const key = attempts.current.get(attempt) ?? crypto.randomUUID();
+      attempts.current.set(attempt, key);
+      const res = await topUpSubscription(id, amount, undefined, key);
+      attempts.current.delete(attempt);
+      return res;
+    },
     onSuccess: invalidate,
   });
 

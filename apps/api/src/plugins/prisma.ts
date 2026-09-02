@@ -73,6 +73,8 @@ const TENANT_QUERY_EXTENSIONS = {
   // [M-18] The provider-transaction identity behind every agent-cash observation.
   providerPayment: scoped,
   tenantBillingCurrency: scoped, trialGrant: scoped,
+  // [M-08] The prepaid top-up as one persisted command.
+  topUpCommand: scoped,
   // Ads platform.
   advertiser: scoped, adPlacement: scoped, adCampaign: scoped, adInvoice: scoped,
   adRefundIntent: scoped, adRefundItem: scoped, adRefundOutbox: scoped,

@@ -10,7 +10,7 @@ import { convertUsdToLocal } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
 import { mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
-import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter } from '../../plugins/observability';
+import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge } from '../../plugins/observability';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -89,6 +89,23 @@ export interface BillingCycleResult {
  */
 export interface BillingObserver {
   afterPaymentTerminalized?: (payment: { id: string; status: 'FAILED' | 'EXPIRED' }) => Promise<void>;
+  /** [M-08] Called INSIDE the top-up command's transaction after every fact
+   *  is staged (credit, receipt, ledger, audit, command row) and before the
+   *  commit — a thrown error rolls the whole command back as a crash would. */
+  afterTopUpCommandStaged?: () => Promise<void>;
+}
+
+/** [M-08] What a top-up command answers — stored with the command, replayed verbatim. */
+export interface TopUpCommandResult {
+  balance: number;
+  currencyCode: string;
+  billingEventId: string;
+}
+
+export const TOPUP_KEY_MIN = 8;
+export const TOPUP_KEY_MAX = 128;
+export function isUsableTopUpKey(key: unknown): key is string {
+  return typeof key === 'string' && key.length >= TOPUP_KEY_MIN && key.length <= TOPUP_KEY_MAX;
 }
 
 export class BillingService {
@@ -1493,18 +1510,20 @@ export class BillingService {
     }
   }
 
-  async recordTopUp(subscriptionId: string, amount: number, recordedBy: string, reference?: string, clientKey?: string) {
+  async recordTopUp(subscriptionId: string, amount: number, recordedBy: string, reference: string | undefined, clientKey: string) {
     if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
 
     // Idempotency [SWIFT-030]: this is the only live collection path, so a retry
-    // (network retry, admin double-tap) MUST NOT credit twice. A client-supplied
-    // Idempotency-Key makes the retry a no-op; without one we fall back to a
-    // time-based key (the caller opted out of dedup). The BillingEvent's unique
+    // (network retry, admin double-tap) MUST NOT credit twice. The caller's
+    // key makes the retry a no-op. [M-08] There is no longer a time-based
+    // fallback: a top-up without a key was a top-up that could double on a
+    // lost response, so the key is REQUIRED. The BillingEvent's unique
     // idempotencyKey is the DB-level guard — created FIRST inside the transaction,
     // so a replay rolls the whole thing back before the balance is ever touched.
-    const eventKey = clientKey
-      ? `topup:${subscriptionId}:${clientKey}`
-      : `topup:${subscriptionId}:${Date.now()}:${recordedBy}`;
+    if (!isUsableTopUpKey(clientKey)) {
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an idempotency key of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+    }
+    const eventKey = `topup:${subscriptionId}:${clientKey}`;
 
     let balance;
     try {
@@ -1529,6 +1548,151 @@ export class BillingService {
     await this.afterTopUpCommitted(subscriptionId, amount);
 
     return balance;
+  }
+
+  /** [M-08] The prepaid top-up as ONE command. The admin's key and the
+   *  request's fingerprint own the result: the same key with the same request
+   *  replays the stored answer; the same key with a different request is
+   *  refused. The credit, its receipt, the balanced ledger posting, the audit
+   *  row and the command itself commit together; the downstream tail (payer
+   *  notice + immediate re-bill) is recorded as owed on the command and run
+   *  after the commit — a failure there leaves it owed, and the billing poll
+   *  drains it. One inbound payment, one converged command. */
+  async recordTopUpCommand(input: {
+    adminId: string;
+    idempotencyKey: string;
+    requestHash: string;
+    subscriptionId: string;
+    amount: number;
+    reference?: string;
+    audit?: { ipAddress?: string; userAgent?: string };
+  }): Promise<{ replayed: boolean; commandId: string; result: TopUpCommandResult }> {
+    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+    if (!isUsableTopUpKey(input.idempotencyKey)) {
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+    }
+    const where = { adminId_idempotencyKey: { adminId: input.adminId, idempotencyKey: input.idempotencyKey } };
+    const replay = (row: { id: string; requestHash: string; result: unknown }) => {
+      if (row.requestHash !== input.requestHash) {
+        billingTopupDuplicateFingerprintCounter.inc();
+        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'This key was already used for a different top-up — a new top-up needs a new key.');
+      }
+      return { replayed: true, commandId: row.id, result: row.result as TopUpCommandResult };
+    };
+    const existing = await this.prisma.topUpCommand.findUnique({ where, select: { id: true, requestHash: true, result: true } });
+    if (existing) return replay(existing);
+
+    const eventKey = `topup:${input.subscriptionId}:${input.idempotencyKey}`;
+    let command: { id: string; result: unknown };
+    try {
+      command = await this.prisma.$transaction(async (tx) => {
+        const balance = await this.recordTopUpInTransaction(tx, {
+          subscriptionId: input.subscriptionId,
+          amount: input.amount,
+          recordedBy: input.adminId,
+          reference: input.reference,
+          eventKey,
+        });
+        const event = await tx.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: eventKey }, select: { id: true } });
+        // The operational evidence is part of the command, not a hope after it.
+        await tx.auditLog.create({
+          data: {
+            userId: input.adminId,
+            action: 'PREPAID_TOPUP',
+            entity: 'Subscription',
+            entityId: input.subscriptionId,
+            changes: { amount: input.amount, reference: input.reference ?? null, idempotencyKey: input.idempotencyKey, billingEventId: event.id } as never,
+            ipAddress: input.audit?.ipAddress,
+            userAgent: input.audit?.userAgent,
+          },
+        });
+        const result: TopUpCommandResult = { balance: Number(balance.balance), currencyCode: balance.currencyCode, billingEventId: event.id };
+        const row = await tx.topUpCommand.create({
+          data: {
+            adminId: input.adminId,
+            idempotencyKey: input.idempotencyKey,
+            requestHash: input.requestHash,
+            subscriptionId: input.subscriptionId,
+            amount: input.amount,
+            reference: input.reference ?? null,
+            billingEventId: event.id,
+            result: result as never,
+          },
+          select: { id: true, result: true },
+        });
+        await this.observer.afterTopUpCommandStaged?.();
+        return row;
+      });
+    } catch (error) {
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+        // A concurrent request with the same key won the race: answer its result.
+        const winner = await this.prisma.topUpCommand.findUnique({ where, select: { id: true, requestHash: true, result: true } });
+        if (winner) return replay(winner);
+      }
+      throw error;
+    }
+    await this.runTopUpTail(command.id);
+    return { replayed: false, commandId: command.id, result: command.result as TopUpCommandResult };
+  }
+
+  /** The command's downstream tail: the payer's notice and, while behind, an
+   *  immediate re-bill. Never throws to the caller — the credit stands; an
+   *  incomplete tail stays owed on the command and the poll retries it. */
+  async runTopUpTail(commandId: string): Promise<boolean> {
+    const command = await this.prisma.topUpCommand.findUniqueOrThrow({ where: { id: commandId } });
+    if (command.tailDoneAt) return true;
+    try {
+      await this.afterTopUpCommitted(command.subscriptionId, Number(command.amount));
+      await this.prisma.topUpCommand.update({ where: { id: commandId }, data: { tailDoneAt: new Date(), lastError: null } });
+      return true;
+    } catch (err) {
+      await this.prisma.topUpCommand.update({
+        where: { id: commandId },
+        data: { tailAttempts: { increment: 1 }, lastError: err instanceof Error ? err.message.slice(0, 500) : String(err) },
+      }).catch(() => {});
+      log().error({ err, commandId, subscriptionId: command.subscriptionId }, '[M-08] top-up committed; its notice / re-bill tail is owed and will be retried');
+      return false;
+    }
+  }
+
+  /** [M-08 · operations] Drain owed tails older than a minute (bounded
+   *  attempts), and publish how many remain. Run with every billing poll. */
+  async drainTopUpTails(opts: { olderThanMs?: number; limit?: number; maxAttempts?: number } = {}): Promise<{ retried: number; done: number; pending: number }> {
+    const olderThan = new Date(Date.now() - (opts.olderThanMs ?? 60_000));
+    const owed = await this.prisma.topUpCommand.findMany({
+      where: { tailDoneAt: null, createdAt: { lte: olderThan }, tailAttempts: { lt: opts.maxAttempts ?? 10 } },
+      orderBy: { createdAt: 'asc' },
+      take: opts.limit ?? 50,
+      select: { id: true },
+    });
+    let done = 0;
+    for (const row of owed) if (await this.runTopUpTail(row.id)) done += 1;
+    const pending = await this.prisma.topUpCommand.count({ where: { tailDoneAt: null } });
+    billingTopupTailsPendingGauge.set(pending);
+    return { retried: owed.length, done, pending };
+  }
+
+  /** [M-08 · operations] Historical unkeyed top-ups (time-based keys from
+   *  before the key was required) that look like one payment recorded twice:
+   *  the same subscription, amount and reference within a day. Reported for
+   *  human review against the provider reference — never reversed here. */
+  async scanUnkeyedTopUpDuplicates(): Promise<Array<{ subscriptionId: string; amount: number; note: string | null; count: number }>> {
+    const rows = await this.prisma.$queryRaw<Array<{ subscriptionId: string; amount: Prisma.Decimal; note: string | null; count: bigint }>>`
+      SELECT "subscriptionId", "amount", "note", count(*)::bigint AS "count"
+      FROM "billing_events"
+      WHERE "type" = 'PREPAID_TOPUP'
+        AND "idempotencyKey" ~ '^topup:[^:]+:[0-9]{13}:'
+      GROUP BY "subscriptionId", "amount", "note", date_trunc('day', "createdAt")
+      HAVING count(*) > 1
+      ORDER BY count(*) DESC
+      LIMIT 200
+    `;
+    const found = rows.map((r) => ({ subscriptionId: r.subscriptionId, amount: Number(r.amount), note: r.note, count: Number(r.count) }));
+    billingUnkeyedTopupDuplicatesGauge.set(found.length);
+    if (found.length > 0) {
+      log().warn({ count: found.length, sample: found.slice(0, 10) }, '[M-08] historical unkeyed top-ups that may be one payment recorded twice — review against the provider reference');
+    }
+    return found;
   }
 
   // -------------------------------------------------------------------------

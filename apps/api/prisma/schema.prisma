@@ -224,6 +224,32 @@ model OrderOutbox {
 /// the request's fingerprint. A crash after the commit can no longer lose
 /// the replay, and a same-key request with a different body is refused
 /// instead of being answered with an order it did not ask for.
+/// [M-08] One inbound manual payment is ONE command: the admin's key and the
+/// request's fingerprint, the credit's evidence, and the durable downstream
+/// tail (payer notice + immediate re-bill) — written with the credit itself.
+model TopUpCommand {
+  id             String    @id @default(cuid())
+  tenantId       String    @default("swift-default")
+  adminId        String
+  idempotencyKey String
+  requestHash    String
+  subscriptionId String
+  amount         Decimal   @db.Decimal(12, 2)
+  reference      String?
+  billingEventId String    @unique
+  result         Json
+  tailAttempts   Int       @default(0)
+  tailDoneAt     DateTime?
+  lastError      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([adminId, idempotencyKey])
+  @@index([tenantId])
+  @@index([tailDoneAt, createdAt])
+  @@map("topup_commands")
+}
+
 model CheckoutReceipt {
   id             String   @id @default(cuid())
   tenantId       String   @default("swift-default")
