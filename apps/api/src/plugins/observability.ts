@@ -603,6 +603,21 @@ export const notMyDriverGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [S-16] Trip-share tokens: mints, views, misses, throttled and blocked
+ *  callers, enumeration events, legacy rotations; plaintext rows remaining. */
+export const tripShareCounter = new client.Counter({
+  name: 'swift_trip_share_events_total',
+  help: 'Trip-share events (minted, viewed, miss, rate_limited, blocked, enumeration, lookup_killed, legacy_rotated)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+export const tripShareGauge = new client.Gauge({
+  name: 'swift_trip_share',
+  help: 'Trip-share state by check (legacy_plaintext_remaining)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

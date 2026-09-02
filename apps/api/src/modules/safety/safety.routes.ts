@@ -291,7 +291,7 @@ export async function safetyRoutes(app: FastifyInstance) {
   });
 
   app.get<{ Params: { token: string } }>('/public/trip/:token', async (request, reply) => {
-    const view = await tripShare.publicView(request.params.token);
+    const view = await tripShare.publicView(request.params.token, new Date(), request.ip);
     if (!view) {
       reply.code(404);
       return { success: false, error: { code: 'SHARE_NOT_AVAILABLE', message: 'This trip share is no longer available.' } };

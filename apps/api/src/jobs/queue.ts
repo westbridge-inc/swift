@@ -1118,6 +1118,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ).catch(() => {});
           }
         }
+        // [S-16 · operations] Every legacy plaintext trip-share token is a live
+        // exposure: rotate (revoke + null + tell the sharer) until none is left.
+        {
+          const { rotateLegacyTripShareTokens } = await import('../modules/safety/trip-share.service');
+          const { NotificationService: ShareNS } = await import('../modules/notification/notification.service');
+          const rot = await rotateLegacyTripShareTokens(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch(() => null);
+          if (rot && rot.rotated > 0) ctx.log.warn(rot, '[S-16] legacy plaintext trip-share tokens rotated');
+        }
         // [S-02] The retrigger log: import any legacy JSON history as rows,
         // then report lost sequences and oversized hot rows.
         const { importLegacyRetriggers, scanSosRetriggers } = await import('../modules/safety/sos-retrigger');
