@@ -8,6 +8,10 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { beginRequestTenantContext, runWithoutTenant } from '../plugins/tenant-context';
+import { warRoomsFor, tenantWarRoom } from '../modules/safety/war-room';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // [B3] SOS from a SERVICE JOB — the last two uncovered surfaces. A ServiceJob
@@ -29,17 +33,20 @@ let jobId: string;
 const alertIds: string[] = [];
 
 let seq = 0;
-async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
+async function makeUserWithSession(roles: UserRole[], activeRole: UserRole, tenantId?: string) {
   seq += 1;
-  const user = await app.prisma.user.create({
+  // Under runWithoutTenant: a request's tenant binding leaks into the test's
+  // async context and would otherwise stamp ITS tenant over the fixture's.
+  const user = await runWithoutTenant(() => app.prisma.user.create({
     data: {
       phone: `+59200797${String(seq).padStart(2, '0')}`,
       firstName: 'SvcSos', lastName: `User${seq}`,
       roles, activeRole,
+      ...(tenantId ? { tenantId } : {}),
       isPhoneVerified: true, selfieCapturedAt: new Date(),
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
     },
-  });
+  }));
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
   await app.prisma.session.create({
@@ -64,6 +71,10 @@ function raise(token: string, body: Record<string, unknown>) {
 beforeAll(async () => {
   app = Fastify({ logger: false });
   registerErrorHandler(app);
+  // [TA-S1-006] The request tenant store, exactly as server.ts opens it —
+  // without it every query in this host runs unscoped and the tenant cases
+  // below would prove nothing about the request-scope stamp.
+  app.addHook('onRequest', async () => { beginRequestTenantContext(); });
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.register(authPlugin);
@@ -117,6 +128,7 @@ afterAll(async () => {
     await app.prisma.customer.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   }
+  await app.prisma.tenant.deleteMany({ where: { id: 'tenant-svc-sos-x' } });
   await app.close();
 });
 
@@ -268,5 +280,87 @@ describe('SOS on a service job [B3]', () => {
     expect(row.deliveryReceipts).not.toBeNull();
     const receipts = row.deliveryReceipts as Record<string, unknown>;
     expect(receipts['opsPaged']).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [TA-S1-006] The job's tenant is its OWN durable column, and an SOS raised on
+// the job routes by it — never by whichever participant pressed the button.
+// The drift state below (job in tenant X, both participants still in
+// swift-default) is what creation forbids and what a legacy or corrupt row
+// can still be; the finding was that one incident then routed to two
+// different operators depending on the caller.
+// ---------------------------------------------------------------------------
+describe('[TA-S1-006] an SOS on a service job routes by the JOB’s durable tenant', () => {
+  const TENANT_X = 'tenant-svc-sos-x';
+  let driftedJobId: string;
+  const extraJobIds: string[] = [];
+  const alertRow = (id: string) => runWithoutTenant(() => app.prisma.sosAlert.findUniqueOrThrow({ where: { id } }));
+
+  beforeAll(async () => {
+    // INACTIVE on purpose: without an explicit PUBLIC_TENANT_ID the public
+    // storefront resolver requires exactly ONE active tenant, and a second
+    // active row would 503 every public-surface test sharing this database.
+    // Routing an SOS by tenant needs the row for the users' FK, not activity.
+    await app.prisma.tenant.upsert({ where: { id: TENANT_X }, create: { id: TENANT_X, name: 'Service SOS Tenant X', slug: TENANT_X, isActive: false }, update: { isActive: false } });
+    // Built OUTSIDE any leaked request binding, which would stamp its own
+    // tenant over TENANT_X and quietly erase the drift this block exists to prove.
+    const job = await runWithoutTenant(() => app.prisma.serviceJob.create({
+      data: { tenantId: TENANT_X, customerId: customer.userId, providerId, description: 'Rewire the garage', status: 'IN_PROGRESS' },
+    }));
+    driftedJobId = job.id;
+    expect((await runWithoutTenant(() => app.prisma.serviceJob.findUniqueOrThrow({ where: { id: job.id } }))).tenantId).toBe(TENANT_X);
+  });
+
+  afterAll(async () => {
+    await runWithoutTenant(async () => {
+      await app.prisma.sosAlert.deleteMany({ where: { serviceJobId: { in: [driftedJobId, ...extraJobIds] } } });
+      await app.prisma.serviceJob.deleteMany({ where: { id: { in: [driftedJobId, ...extraJobIds] } } });
+    });
+    // The tenant row itself goes in the file-level afterAll, AFTER the users
+    // that reference it — a delete refused by the FK would leave a stray row.
+  });
+
+  it('whichever participant presses the button, the alert lands in the job’s tenant with the job attached', async () => {
+    const byProvider = await raise(provider.token, { serviceJobId: driftedJobId, lat: 6.8, lng: -58.16, clientIdempotencyKey: `drift-p-${nanoid(8)}` });
+    expect(byProvider.statusCode).toBe(200);
+    const a1 = await alertRow((byProvider.json() as { data: { id: string } }).data.id);
+    alertIds.push(a1.id);
+    expect({ tenant: a1.tenantId, job: a1.serviceJobId, counterparty: a1.counterpartyUserId })
+      .toEqual({ tenant: TENANT_X, job: driftedJobId, counterparty: customer.userId });
+    expect(warRoomsFor(a1.tenantId)).toContain(tenantWarRoom(TENANT_X));
+
+    const byCustomer = await raise(customer.token, { serviceJobId: driftedJobId, lat: 6.8, lng: -58.16, clientIdempotencyKey: `drift-c-${nanoid(8)}` });
+    expect(byCustomer.statusCode).toBe(200);
+    const a2 = await alertRow((byCustomer.json() as { data: { id: string } }).data.id);
+    alertIds.push(a2.id);
+    expect({ tenant: a2.tenantId, job: a2.serviceJobId }).toEqual({ tenant: TENANT_X, job: driftedJobId });
+    expect(a2.id).not.toBe(a1.id); // two people, two alerts — the collapse is per actor
+  });
+
+  it('a repeat press under drift still COLLAPSES onto the live alert instead of minting a row in the caller’s tenant', async () => {
+    const first = await raise(provider.token, { serviceJobId: driftedJobId, lat: 6.81, lng: -58.17, clientIdempotencyKey: `drift-r-${nanoid(8)}` });
+    const again = await raise(provider.token, { serviceJobId: driftedJobId, lat: 6.82, lng: -58.18, clientIdempotencyKey: `drift-r-${nanoid(8)}` });
+    expect(again.statusCode).toBe(200);
+    expect((again.json() as { data: { id: string } }).data.id).toBe((first.json() as { data: { id: string } }).data.id);
+    const rows = await runWithoutTenant(() => app.prisma.sosAlert.count({ where: { actorUserId: provider.userId, serviceJobId: driftedJobId } }));
+    expect(rows).toBe(1);
+  });
+
+  it('the migration’s backfill gives a legacy job the tenant of the customer who hired', async () => {
+    const xCustomer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER', TENANT_X);
+    const legacy = await runWithoutTenant(() => app.prisma.serviceJob.create({
+      data: { customerId: xCustomer.userId, providerId, description: 'A row from before the column existed', status: 'REQUESTED' },
+    }));
+    extraJobIds.push(legacy.id);
+    expect(legacy.tenantId).toBe('swift-default'); // the schema default a legacy row would carry
+    const sql = readFileSync(join(__dirname, '../../prisma/migrations/20260901234000_service_job_tenant/migration.sql'), 'utf8');
+    const backfill = sql.match(/UPDATE "service_jobs"[\s\S]*?;/)?.[0];
+    expect(backfill).toBeTruthy();
+    await runWithoutTenant(() => app.prisma.$executeRawUnsafe(backfill as string));
+    const repaired = await runWithoutTenant(() => app.prisma.serviceJob.findUniqueOrThrow({ where: { id: legacy.id } }));
+    expect(repaired.tenantId).toBe(TENANT_X);
+    // A job whose customer already matches is untouched.
+    expect((await app.prisma.serviceJob.findUniqueOrThrow({ where: { id: jobId } })).tenantId).toBe('swift-default');
   });
 });

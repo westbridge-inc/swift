@@ -62,6 +62,8 @@ const TENANT_QUERY_EXTENSIONS = {
   discoveryCategory: scoped, vendorDiscoveryCategory: scoped, itemDiscoveryCategory: scoped,
   discoveryCategorySuggestion: scoped, discoveryCategoryRequest: scoped,
   // Safety spine — SOS, guardian sessions, incidents and their evidence.
+  // [TA-S1-006] A hired-professional job is one operator's incident scope.
+  serviceJob: scoped,
   sosAlert: scoped, emergencyContact: scoped, tripShareToken: scoped, tripSafetySession: scoped,
   livenessCheck: scoped, incidentCase: scoped, evidenceBundle: scoped, safetyAccessLog: scoped,
   // Money: settlement, receipts, the agent-cash rail, trials.
