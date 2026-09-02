@@ -3515,6 +3515,27 @@ model SosRetrigger {
   @@map("sos_retriggers")
 }
 
+/// [S-05] A persisted keyset cursor per sweep work type: where the last page
+/// ended, when the current pass started, when the last full pass completed,
+/// and the rows that keep failing (poison) so one bad row never blocks the
+/// rest of the population from being visited.
+model SweepCursor {
+  workType         String    @id
+  cursorId         String?
+  passStartedAt    DateTime?
+  passCompletedAt  DateTime?
+  passesCompleted  Int       @default(0)
+  lastPassVisited  Int       @default(0)
+  lastPassFailed   Int       @default(0)
+  lastPageAt       DateTime?
+  lastPageSize     Int       @default(0)
+  poison           Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@map("sweep_cursors")
+}
+
 enum SosEscalationStatus {
   PENDING
   SENT
