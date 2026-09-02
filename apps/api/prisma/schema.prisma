@@ -2201,10 +2201,15 @@ model BillingEvent {
   amountUsd      Decimal?         @db.Decimal(10, 2)
   fxRateId       String?
   fxRateUsed     Decimal?         @db.Decimal(12, 6)
+  /// [M-14] For a notice event: when the payer's notification was actually
+  /// delivered. Null = the evidence exists but the payer has not been told;
+  /// the notice job re-attempts it, and the charge gate does not count it.
+  deliveredAt    DateTime?
   createdAt      DateTime         @default(now())
 
   @@index([subscriptionId])
   @@index([type])
+  @@index([type, deliveredAt])
   @@map("billing_events")
 }
 

@@ -1084,9 +1084,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // USD pricing Part 12: the >2% FX-change notice, ≥7 days before the
         // affected invoice, deduped per (subscription, rate) at the DB. A
         // no-op until usdPricingEnabled. Same conversion the charge will use.
-        const { runFxChangeNotices } = await import('../modules/billing/fx-notices');
+        const { runFxChangeNotices, scanChargesWithoutDeliveredNotice } = await import('../modules/billing/fx-notices');
         const res = await runFxChangeNotices(ctx.prisma, ctx.io);
-        if (res.notified > 0) ctx.log.info(res, 'billing: fx change notices');
+        if (res.notified > 0 || res.retried > 0) ctx.log.info(res, 'billing: fx change notices');
+        // [M-14] The notice is a charge gate: an undelivered notice holds the
+        // previous rate, and a charge that slipped through at a rate the payer
+        // was not told about in time is found for a remediation review.
+        if (res.undelivered > 0) ctx.log.warn(res, '[M-14] fx change notices undelivered — the charge gate holds the previous rate for these payers');
+        await scanChargesWithoutDeliveredNotice(ctx.prisma);
         // Part 13 Mode B: sunset notices (T−30/T−7, data-guaranteed) + the
         // past-sunset flip with the missing-notice alert. No-op unless Mode B.
         const { sweepModeB } = await import('../modules/billing/usd-migration');

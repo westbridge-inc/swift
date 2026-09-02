@@ -6,11 +6,11 @@ import { CountryConfigService, moverRateFor, vendorRateFor } from '../country/co
 import { feeBandFor } from '../../config/vehicle-classes';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
-import { convertUsdToLocal } from './fx';
+import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
 import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
-import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge } from '../../plugins/observability';
+import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -190,7 +190,7 @@ export class BillingService {
     const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
     const attemptKey = `charge:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const usd = usdCtx === undefined ? await this.loadUsdPricing() : usdCtx;
-    const priced = this.priceFor(sub, usd);
+    const priced = await this.priceEligibleFor(sub, usd);
 
     try {
       await this.prisma.billingEvent.create({
@@ -561,6 +561,46 @@ export class BillingService {
       log().warn({ subscriptionId: sub.id, amountUsd }, 'usd pricing: MIN_CLAMPED — local amount clamped to one increment');
     }
     return { amount: converted.amountLocal, usdTrio: { amountUsd, fxRateId: usd.rateId, fxRateUsed: usd.rate } };
+  }
+
+  /** [M-14] The notice is a charge gate. A materially changed local amount
+   *  (the >2% rule) is charged only if the notice for THAT rate was DELIVERED
+   *  at least FX_NOTICE_WINDOW_DAYS before this invoice. Otherwise the payer
+   *  is charged what they were told last time — their previous rate, pinned
+   *  from their last successful charge (the prior price version) — and the
+   *  charge is counted ineligible for a person to see. Before, the run's
+   *  latest effective rate was charged unconditionally while a swallowed send
+   *  left the database saying "noticed". */
+  private async priceEligibleFor(sub: Subscription, usd: UsdPricingCtx | null): Promise<ReturnType<BillingService['priceFor']>> {
+    const priced = this.priceFor(sub, usd);
+    if (!usd || !priced.usdTrio) return priced;
+    const last = await this.prisma.billingEvent.findFirst({
+      where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      select: { amount: true, currencyCode: true, fxRateId: true, fxRateUsed: true },
+    });
+    if (!last?.amount) return priced; // a first charge: nothing was announced before, nothing changed
+    if (!noticeRequired(Number(last.amount), Number(priced.amount))) return priced;
+    if (last.fxRateId === usd.rateId) return priced; // the payer already paid at this very rate
+    const notice = await this.prisma.billingEvent.findUnique({
+      where: { idempotencyKey: `fxnotice:${sub.id}:${usd.rateId}` },
+      select: { deliveredAt: true },
+    });
+    const deadline = sub.nextBillingDate.getTime() - FX_NOTICE_WINDOW_DAYS * 86_400_000;
+    if (notice?.deliveredAt && notice.deliveredAt.getTime() <= deadline) return priced; // told, in time
+    fxChargesIneligibleCounter.inc();
+    if (last.fxRateId && last.fxRateUsed && last.currencyCode === usd.currency) {
+      const previous = convertUsdToLocal(priced.usdTrio.amountUsd, Number(last.fxRateUsed), usd.increment);
+      log().warn(
+        { subscriptionId: sub.id, newRateId: usd.rateId, previousRateId: last.fxRateId, delivered: notice?.deliveredAt ?? null, nextBillingDate: sub.nextBillingDate },
+        '[M-14] FX notice not delivered in time — charging the previously announced rate',
+      );
+      return { amount: previous.amountLocal, usdTrio: { amountUsd: priced.usdTrio.amountUsd, fxRateId: last.fxRateId, fxRateUsed: Number(last.fxRateUsed) } };
+    }
+    // No pinned previous rate (a legacy charge): the exact amount they were
+    // charged last time is the prior price version.
+    log().warn({ subscriptionId: sub.id, newRateId: usd.rateId }, '[M-14] FX notice not delivered in time and no pinned previous rate — charging the last charged amount');
+    return { amount: Number(last.amount) };
   }
 
   /** Prepaid balance settles FIRST (money already in hand); otherwise CARD

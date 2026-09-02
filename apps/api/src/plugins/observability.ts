@@ -214,6 +214,30 @@ export const billingUnkeyedTopupDuplicatesGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [M-14] FX change notices written but not yet delivered to the payer (the
+ *  event is the obligation; `deliveredAt` is the proof). The charge gate
+ *  refuses the new rate until the proof is FX_NOTICE_WINDOW_DAYS old. */
+export const fxNoticesUndeliveredGauge = new client.Gauge({
+  name: 'swift_fx_notices_undelivered',
+  help: 'FX change notices not yet delivered: how many, and the oldest in hours',
+  labelNames: ['measure'] as const,
+  registers: [registry],
+});
+/** [M-14] Charges priced at the PREVIOUS rate because the new rate's notice
+ *  had not been delivered in time — the payer was charged what they were told. */
+export const fxChargesIneligibleCounter = new client.Counter({
+  name: 'swift_fx_charges_ineligible_total',
+  help: 'Charges held at the previously announced rate because the new rate had no delivered notice in time',
+  registers: [registry],
+});
+/** [M-14 · operations] Historical charges that used a rate the payer was not
+ *  told about in time — for a remediation review. */
+export const fxChargesWithoutNoticeGauge = new client.Gauge({
+  name: 'swift_fx_charges_without_notice',
+  help: 'Successful charges in the last 30 days at a materially changed rate with no delivered notice in time',
+  registers: [registry],
+});
+
 /** [M-01 / M-02] Card charge intents whose outcome the processor has not yet
  *  proven (a timeout, a transport error, a 5xx) — count and the oldest one's
  *  age. The reconciler retrieves each by its key every billing poll; the alert
