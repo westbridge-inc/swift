@@ -2731,8 +2731,23 @@ model Settlement {
   totalMarkup   Decimal          @db.Decimal(12, 2)
   /// Σ Order.discount over the period — the customer-facing discounts
   totalDiscount Decimal          @default(0) @db.Decimal(12, 2)
-  /// totalBase − totalDiscount: what the vendor actually sold for
+  /// What the vendor keeps from goods: goodsSales − vendorPromoDiscount
+  /// (= customerCollection + sponsorReceivable). [M-38] Before, every promo
+  /// — the platform's included — was subtracted from the vendor's sales.
   netSales      Decimal          @default(0) @db.Decimal(12, 2)
+  /// [M-38] The separated columns, from each order's redemption snapshot.
+  /// NULL on rows written before M-38 (componentsVersion 0): estimated, not
+  /// settled, until recomputed as an ADJUSTMENT.
+  goodsSales          Decimal? @db.Decimal(12, 2)
+  vendorPromoDiscount Decimal? @db.Decimal(12, 2)
+  sponsorReceivable   Decimal? @db.Decimal(12, 2)
+  customerCollection  Decimal? @db.Decimal(12, 2)
+  feeFunding          Decimal? @db.Decimal(12, 2)
+  moverPayable        Decimal? @db.Decimal(12, 2)
+  /// Orders in the period with a discount but no redemption snapshot (placed
+  /// before M-32): their split is the conservative estimate, and says so.
+  estimatedOrders     Int      @default(0)
+  componentsVersion   Int      @default(0)
   status        SettlementStatus @default(PENDING)
   paidAt        DateTime?
   reference     String?

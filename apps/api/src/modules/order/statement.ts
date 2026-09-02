@@ -1,4 +1,5 @@
 import { formatMoney } from '../../utils/currency-amount';
+import { aggregateSalesComponents, orderComponents } from '../billing/sales-components';
 /**
  * Earnings / sales statements (marketplace-mechanics spec §12, the receipt's
  * sibling) — the artifact an earner shows a bank and a store shows their
@@ -25,6 +26,10 @@ export type StatementInput = {
   footNote: string;
   /** [M-36] The currency every line and the total are in. */
   currencyCode: string;
+  /** [M-38] Separated columns rendered before the total (a vendor statement). */
+  breakdown?: Array<{ label: string; amount: unknown; negative?: boolean }>;
+  /** [M-38] Present when any figure is an estimate (legacy orders without a snapshot). */
+  estimatedNote?: string;
 };
 
 const esc = (s: string) =>
@@ -76,8 +81,10 @@ export function renderStatementHtml(input: StatementInput): string {
   </div>
   <table>
     ${rows || '<tr><td class="empty" colspan="3">Nothing in this period.</td></tr>'}
+    ${(input.breakdown ?? []).map((b) => `<tr class="totals"><td colspan="2">${esc(b.label)}</td><td class="num">${b.negative ? '−' : ''}${money(b.amount)}</td></tr>`).join('\n')}
     <tr class="grand"><td colspan="2">${esc(input.totalLabel)}</td><td class="num">${money(input.totalAmount)}</td></tr>
   </table>
+  ${input.estimatedNote ? `<div class="foot"><b>Estimated, not settled:</b> ${esc(input.estimatedNote)}</div>` : ''}
   <div class="foot">${esc(input.footNote)}</div>
 </div>
 </body>
@@ -193,19 +200,38 @@ export async function buildVendorStatement(prisma: unknown, vendorId: string, pe
     status: { in: ['DELIVERED', 'COMPLETED'] },
     placedAt: { gte: period.from, lte: period.to },
   };
-  const [totalAgg, orders] = await Promise.all([
-    p.order.aggregate({ where: periodWhere, _sum: { subtotalCustomer: true, discount: true } }),
+  // [M-38] The separated columns from each order's redemption snapshot — the
+  // vendor's own promotions are the only discount that reduces its sales; a
+  // platform-funded discount is money Swift owes the vendor; fees and tips
+  // are the rider's. In SQL over the whole period, so the total never
+  // understates past the line cap.
+  const [components, orders] = await Promise.all([
+    aggregateSalesComponents(p as unknown as Parameters<typeof aggregateSalesComponents>[0], { vendorId, from: period.from, to: period.to }),
     p.order.findMany({
       where: periodWhere,
-      select: { orderNumber: true, placedAt: true, fulfillment: true, subtotalCustomer: true, discount: true, currencyCode: true },
+      select: { orderNumber: true, placedAt: true, fulfillment: true, subtotalCustomer: true, discount: true, deliveryFee: true, tipAmount: true, currencyCode: true, promoRedemption: { select: { goodsDiscount: true, deliveryDiscount: true, funder: true } } },
       orderBy: { placedAt: 'asc' },
       take: LINE_CAP,
-    }) as Promise<Array<{ orderNumber: string; placedAt: Date; fulfillment: string | null; subtotalCustomer: unknown; discount: unknown; currencyCode: string }>>,
+    }) as Promise<Array<{ orderNumber: string; placedAt: Date; fulfillment: string | null; subtotalCustomer: unknown; discount: unknown; deliveryFee: unknown; tipAmount: unknown; currencyCode: string; promoRedemption: { goodsDiscount: unknown; deliveryDiscount: unknown; funder: string } | null }>>,
   ]);
-  const takeOf = (o: { subtotalCustomer: unknown; discount: unknown }) =>
-    Number(o.subtotalCustomer ?? 0) - Number(o.discount ?? 0);
-  const total = Number(totalAgg._sum.subtotalCustomer ?? 0) - Number(totalAgg._sum.discount ?? 0);
+  // A line is what the vendor KEEPS from that order's goods: sales less its own promotion.
+  const takeOf = (o: Parameters<typeof orderComponents>[0]) => {
+    const c = orderComponents(o);
+    return c.goodsSales - c.vendorPromoDiscount;
+  };
+  const total = components.netSales;
   const capped = orders.length === LINE_CAP;
+  const breakdown: StatementInput['breakdown'] = [
+    { label: 'Goods sales', amount: components.goodsSales },
+    ...(components.vendorPromoDiscount > 0 ? [{ label: 'Your promotions', amount: components.vendorPromoDiscount, negative: true }] : []),
+    ...(components.sponsorReceivable > 0 ? [{ label: 'Platform promotions — owed to you by Swift', amount: components.sponsorReceivable }] : []),
+    { label: 'Collected from customers for goods', amount: components.customerCollection },
+    { label: 'Delivery fees and tips (the rider’s, not part of your sales)', amount: components.moverPayable },
+    ...(components.feeFunding > 0 ? [{ label: 'Delivery-fee promotions funded by Swift (the rider’s)', amount: components.feeFunding }] : []),
+  ];
+  const estimatedNote = components.estimatedOrders > 0
+    ? `${components.estimatedOrders} order${components.estimatedOrders === 1 ? '' : 's'} in this period carry a discount with no funding record (placed before the record existed); their discount is counted as your own, which may understate your sales.`
+    : undefined;
   return renderStatementHtml({
     // [M-36] The vendor's orders name the currency; none → the platform default.
     currencyCode: orders[0]?.currencyCode ?? 'GYD',
@@ -217,9 +243,11 @@ export async function buildVendorStatement(prisma: unknown, vendorId: string, pe
       label: `${o.orderNumber} · ${String(o.fulfillment ?? 'DELIVERY').toLowerCase()}`,
       amount: takeOf(o),
     })),
+    breakdown,
+    estimatedNote,
     totalLabel: capped
-      ? `Total sales (full period; showing the first ${LINE_CAP} orders)`
-      : `Total sales (${orders.length} order${orders.length === 1 ? '' : 's'})`,
+      ? `Your sales, net of your own promotions (full period; showing the first ${LINE_CAP} orders)`
+      : `Your sales, net of your own promotions (${components.orders} order${components.orders === 1 ? '' : 's'})`,
     totalAmount: total,
     footNote:
       'You keep 100% of every sale — Swift charges a flat weekly subscription, never commission. '

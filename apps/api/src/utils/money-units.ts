@@ -26,7 +26,7 @@ export interface MoneyColumn {
 }
 
 /** The regex the census applies to a Decimal field's name to call it money-ish. */
-export const MONEY_FIELD_PATTERN = /amount|fee|total|price|fare|discount|tip|balance|gyd|usd|cost|spend|subtotal|deposit|credit|debit|value|rate|float|minimum|markup|budget|cap|revenue|earning|payout|refund|charge|pay|money|cash|gross|net|share|surcharge|changefor|roundingincrement|perkm/i;
+export const MONEY_FIELD_PATTERN = /amount|fee|total|price|fare|discount|tip|balance|gyd|usd|cost|spend|subtotal|deposit|credit|debit|value|rate|float|minimum|markup|budget|cap|revenue|earning|payout|refund|charge|pay|money|cash|gross|net|share|surcharge|changefor|roundingincrement|perkm|sales|collection|receivable|payable|funding/i;
 
 export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'AdBooking', field: 'amount', unit: 'MAJOR_2DP' },
@@ -107,6 +107,12 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'RunStop', field: 'changeFor', unit: 'MAJOR_WHOLE' },
   { model: 'ServiceJob', field: 'quoteAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Settlement', field: 'netSales', unit: 'MAJOR_2DP' },
+  { model: 'Settlement', field: 'goodsSales', unit: 'MAJOR_2DP' },
+  { model: 'Settlement', field: 'vendorPromoDiscount', unit: 'MAJOR_2DP' },
+  { model: 'Settlement', field: 'sponsorReceivable', unit: 'MAJOR_2DP' },
+  { model: 'Settlement', field: 'customerCollection', unit: 'MAJOR_2DP' },
+  { model: 'Settlement', field: 'feeFunding', unit: 'MAJOR_2DP' },
+  { model: 'Settlement', field: 'moverPayable', unit: 'MAJOR_2DP' },
   { model: 'Settlement', field: 'totalBase', unit: 'MAJOR_2DP' },
   { model: 'Settlement', field: 'totalDiscount', unit: 'MAJOR_2DP' },
   { model: 'Settlement', field: 'totalMarkup', unit: 'MAJOR_2DP' },
