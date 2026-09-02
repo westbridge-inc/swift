@@ -9,6 +9,7 @@ import { rateLimitKey } from './utils/rate-limit-key';
 import { authRoutes } from './modules/auth/auth.routes';
 import { customerRoutes } from './modules/user/customer.routes';
 import { vendorRoutes } from './modules/vendor/vendor.routes';
+import { registerTenantHeaderScope } from './plugins/tenant-header-scope';
 import { riderRoutes } from './modules/rider/rider.routes';
 import { driverRoutes } from './modules/driver/driver.routes';
 import { adminRoutes } from './modules/admin/admin.routes';
@@ -159,6 +160,10 @@ async function buildApp() {
   app.addHook('onRequest', async () => {
     beginRequestTenantContext();
   });
+  // [MOB-010] The vendor store header (x-vendor-id) belongs to the vendor
+  // endpoint family only. Outside it the server ignores it (default) or rejects
+  // it (TENANT_HEADER_OUTSIDE_VENDOR=reject) and counts the leak per family.
+  registerTenantHeaderScope(app);
   // Sentry (SENTRY_DSN) + Prometheus /metrics (METRICS_TOKEN) — both env-gated,
   // free when unset.
   await app.register(observabilityPlugin);

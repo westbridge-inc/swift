@@ -7,6 +7,7 @@ import {
   useAuthStore,
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
+import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
 import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
 import {
   getReactNativeBundleScriptUrl,
@@ -109,7 +110,7 @@ function capturedVendorAuthConfig(
     ...config,
     headers: {
       ...config?.headers,
-      'x-vendor-id': storeId,
+      [VENDOR_STORE_HEADER]: storeId,
     },
   } : config);
 }
@@ -133,12 +134,17 @@ api.interceptors.request.use((config) => {
     // refresh only while that exact session is still current.
     requestAuthBindings.set(config, { session, refreshRetry: false });
   }
-  // Multi-store switch — scope vendor requests to the selected store.
+  // Multi-store switch — scope VENDOR requests to the selected store.
+  // [MOB-010] The store header is vendor-scoped, never global: exactly the
+  // vendor endpoint family carries it (the API reads it nowhere else), and a
+  // caller cannot smuggle it onto another family. A refresh retry carries the
+  // tenant selected when the operation began; a switch meanwhile never
+  // retargets that replay.
   const storeId = useStoreSwitcher.getState().selectedStoreId;
-  // A refresh retry carries the tenant selected when the operation began.
-  // Never retarget that replay if the manager switched stores meanwhile.
-  if (storeId && !config.headers.get('x-vendor-id')) {
-    config.headers.set('x-vendor-id', storeId);
+  if (isVendorScopedUrl(config.url)) {
+    if (storeId && !config.headers.get(VENDOR_STORE_HEADER)) config.headers.set(VENDOR_STORE_HEADER, storeId);
+  } else if (config.headers.has(VENDOR_STORE_HEADER)) {
+    config.headers.delete(VENDOR_STORE_HEADER);
   }
   return config;
 }, undefined, { synchronous: true });
