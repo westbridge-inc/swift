@@ -206,6 +206,7 @@ export class RatingService {
     await new IncidentService(this.prisma, this.io).intake({
       category: SAFETY_TAG_CATEGORY[hit]!,
       intake: 'RATING_FLAG',
+      source: { type: 'RATING_FLAG', id: `${input.orderId}:${input.raterId}` },
       subjectUserId: input.rateeId,
       reporterUserId: input.raterId,
       orderId: input.orderId,

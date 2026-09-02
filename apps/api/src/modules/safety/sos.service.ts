@@ -444,6 +444,7 @@ export class SosService {
         .intake({
           category: resolutionCode === 'POLICE_INVOLVED' ? 'SAFETY_ASSAULT' : 'SAFETY_THREAT',
           intake: 'SOS_RESOLUTION',
+          source: { type: 'SOS_RESOLUTION', id: resolved.id },
           subjectUserId: resolved.counterpartyUserId,
           reporterUserId: resolved.actorUserId,
           orderId: resolved.orderId,

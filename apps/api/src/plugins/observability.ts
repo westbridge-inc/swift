@@ -557,6 +557,22 @@ export const guardianDeliveryCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [S-08] Incident intake: created, replayed (the same source again), merged;
+ *  and the legacy duplicate clusters the scan names, with the ones that drove
+ *  enforcement. */
+export const incidentIntakeCounter = new client.Counter({
+  name: 'swift_incident_intake_events_total',
+  help: 'Incident intake events (created, created_unfingerprinted, replayed, merged)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+export const incidentIntakeGauge = new client.Gauge({
+  name: 'swift_incident_intake',
+  help: 'Incident intake state by check (duplicate_clusters, enforcement_from_duplicates)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

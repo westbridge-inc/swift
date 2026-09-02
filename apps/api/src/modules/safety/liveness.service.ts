@@ -411,6 +411,7 @@ export class LivenessService {
       .intake({
         category: 'IDENTITY_MISMATCH',
         intake: 'SYSTEM_AUTO',
+        source: { type: 'LIVENESS_NOT_MY_DRIVER', id: releasedOrder.id },
         subjectUserId: release.driverUserId,
         reporterUserId: customerUserId,
         orderId: releasedOrder.id,

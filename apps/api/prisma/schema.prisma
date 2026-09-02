@@ -3925,12 +3925,21 @@ model IncidentCase {
   /// §8.4 pattern intelligence stamp — set by the on-intake hook / nightly job.
   patternFlaggedAt DateTime?
 
+  /// [S-08] The source this case was born from: one source incident / report /
+  /// SOS resolution creates one case. The fingerprint is the database's floor
+  /// against a retried intake; a replay returns THIS case and changes nothing.
+  sourceType        String?
+  sourceId          String?
+  sourceFingerprint String? @unique
+  replayCount       Int     @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([tenantId, status, severity])
   @@index([subjectUserId, createdAt])
   @@index([tenantId, slaAckBy])
+  @@index([subjectUserId, orderId, category, createdAt])
 }
 
 // ─── Evidence Vault (safety spec §9): tamper-evident case evidence ──────────
