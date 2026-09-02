@@ -128,6 +128,27 @@ export function allocatePromo(
   return { goods, delivery, tip: 0, total: goods + delivery };
 }
 
+/** [M-33] Split an amount across lines in proportion to their value so the
+ *  shares sum EXACTLY to the amount (largest-remainder rounding): the goods
+ *  discount a promo took is owned line by line from the moment the order is
+ *  placed, and a return refunds each line's own share. Lines with no value,
+ *  or an amount of zero, allocate zero. */
+export function allocateAcrossLines(amount: number, lines: ReadonlyArray<{ id: string; amount: number }>): Array<{ id: string; share: number }> {
+  const total = Math.max(0, Math.round(amount));
+  const weight = lines.reduce((s, l) => s + Math.max(0, l.amount), 0);
+  if (total === 0 || weight <= 0) return lines.map((l) => ({ id: l.id, share: 0 }));
+  const exact = lines.map((l) => (total * Math.max(0, l.amount)) / weight);
+  const floors = exact.map((x) => Math.floor(x));
+  let remainder = total - floors.reduce((s, f) => s + f, 0);
+  const order = exact.map((x, i) => ({ i, frac: x - floors[i]! })).sort((a, b) => b.frac - a.frac || a.i - b.i);
+  for (const { i } of order) {
+    if (remainder <= 0) break;
+    floors[i] = floors[i]! + 1;
+    remainder -= 1;
+  }
+  return lines.map((l, i) => ({ id: l.id, share: floors[i]! }));
+}
+
 /** The total, never below zero: a discount larger than the order is the order. */
 export function orderTotal(parts: { subtotal: number; deliveryFee: number; tip: number; discount: number; serviceFee?: number; tax?: number }): number {
   return Math.max(0, parts.subtotal - parts.discount + parts.deliveryFee + (parts.serviceFee ?? 0) + (parts.tax ?? 0) + parts.tip);

@@ -379,6 +379,30 @@ export const promoFundingGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [M-33] Return requests by where their discount share came from (SNAPSHOT,
+ *  INFERRED, NONE) and the promo type — an INFERRED count is the review
+ *  queue. */
+export const refundBasisCounter = new client.Counter({
+  name: 'swift_refund_basis_total',
+  help: 'Return requests by refund basis (SNAPSHOT | INFERRED | NONE) and promo type',
+  labelNames: ['basis', 'promo_type'] as const,
+  registers: [registry],
+});
+/** [M-33] The dual calculation: |snapshot amount − inferred amount| in GYD,
+ *  accumulated by promo type — the refund delta the old inference produced. */
+export const refundInferenceDeltaCounter = new client.Counter({
+  name: 'swift_refund_inference_delta_gyd_total',
+  help: 'Absolute GYD delta between the snapshot refund and the aggregate inference, by promo type',
+  labelNames: ['promo_type'] as const,
+  registers: [registry],
+});
+/** [M-33] Open returns whose refund was inferred (no snapshot) — routed to review. */
+export const refundsAwaitingReviewGauge = new client.Gauge({
+  name: 'swift_refunds_awaiting_review',
+  help: 'Open return requests whose discount share was inferred rather than read from the order snapshot',
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {
