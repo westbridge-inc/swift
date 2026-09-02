@@ -260,13 +260,14 @@ describe('signed statement links (share/print)', () => {
   // material without versioning the URL, so mid-deploy a mixed fleet rejected
   // each other's fresh 10-minute links.
   // -------------------------------------------------------------------------
-  it('fresh links declare their protocol: the minted URL carries v=2 and verifies', async () => {
+  it('fresh links declare their protocol: the minted URL carries v=3, names its key, and verifies', async () => {
     const mint = await app.inject({
       method: 'GET', url: '/api/v1/rider/earnings/statement?link=1',
       headers: { authorization: `Bearer ${riderToken}` },
     });
     const path: string = mint.json().data.path;
-    expect(path).toContain('v=2');
+    expect(path).toContain('v=3');
+    expect(path).toMatch(/[?&]k=[0-9a-f]{8}(&|$)/); // [M-37] the link names the key that signed it
     expect((await app.inject({ method: 'GET', url: path })).statusCode).toBe(200);
   });
 
