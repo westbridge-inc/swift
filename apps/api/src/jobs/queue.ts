@@ -1432,6 +1432,27 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // [S-05 · operations] Page maximum due age and the poison population,
         // not processed counts: a sweep whose pass has stalled past the SLO,
         // or a row that keeps failing, is a human's problem now.
+        // [S-06] The check-in delivery worker: drain what every ask owns,
+        // backfill asks with no rows, and page per deadline that must not run.
+        const { drainCheckinDeliveries, backfillCheckinDeliveries, scanCheckinDeliveries, checkinDeliveryKilled } = await import('../modules/safety/guardian-delivery');
+        const { NotificationService: GuardianNS, notifyAdmins: pageAdmins } = await import('../modules/notification/notification.service');
+        if (!checkinDeliveryKilled()) {
+          const back = await backfillCheckinDeliveries(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
+          if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-06] check-in asks had no delivery rows — staged now');
+          const drained = await drainCheckinDeliveries(ctx.prisma, new GuardianNS(ctx.prisma, ctx.io), { limit: 200 }).catch(() => null);
+          if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-06] check-in deliveries failed this tick');
+        }
+        const deliveries = await scanCheckinDeliveries(ctx.prisma).catch(() => null);
+        for (const held of (deliveries?.deadlineWithoutDelivery ?? []).slice(0, 20)) {
+          await opsPageOnce(ctx, `guardian-undelivered:${held.sessionId}`, 600, () =>
+            pageAdmins(ctx.prisma, new GuardianNS(ctx.prisma, ctx.io), {
+              tenantId: held.tenantId,
+              title: 'Guardian: hard check-in not delivered',
+              body: `Session ${held.sessionId} has waited ${held.ageSeconds}s with its hard check-in ${held.state.toLowerCase()}. The deadline is held; please look at the trip.`,
+              data: { kind: 'guardian_checkin_undelivered', sessionId: held.sessionId, delivery: held.state, watchdog: true },
+            }),
+          ).catch(() => {});
+        }
         const { scanSweeps } = await import('../lib/sweep-cursor');
         const sweeps = await scanSweeps(ctx.prisma).catch(() => []);
         const trouble = sweeps.filter((w) => w.stalled || w.repeatPoison.length > 0);

@@ -72,6 +72,7 @@ const TENANT_QUERY_EXTENSIONS = {
   // [S-01] The escalation outbox rides with the alert.
   sosEscalation: scoped,
   sosRetrigger: scoped,
+  guardianCheckinDelivery: scoped,
   livenessCheck: scoped, incidentCase: scoped, evidenceBundle: scoped, safetyAccessLog: scoped,
   // Money: settlement, receipts, the agent-cash rail, trials.
   mmgAgentPayment: scoped, settlementBatch: scoped, feeReceipt: scoped, receiptCounter: scoped,

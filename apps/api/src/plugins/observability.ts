@@ -541,6 +541,22 @@ export const sweepGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [S-06] Guardian check-in deliveries: the outbox's pending / failed rows,
+ *  the oldest pending age, and every CHECKIN_PENDING session whose hard
+ *  prompt has not been delivered — a deadline that must not run. */
+export const guardianDeliveryGauge = new client.Gauge({
+  name: 'swift_guardian_checkin_delivery',
+  help: 'Guardian check-in delivery state by check (pending, failed, oldest_pending_seconds, deadline_without_delivery, asked_without_rows)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+export const guardianDeliveryCounter = new client.Counter({
+  name: 'swift_guardian_checkin_delivery_events_total',
+  help: 'Guardian check-in delivery events (staged, sent, skipped, failed, dead_letter, backfilled, deadline_held, deadline_without_delivery_escalated)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

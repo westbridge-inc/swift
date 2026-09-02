@@ -8,6 +8,8 @@ import { nanoid } from 'nanoid';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { guardianDriverConfirmCounter } from '../../plugins/observability';
 import { sweepPage } from '../../lib/sweep-cursor';
+import { stageCheckinDeliveries, drainCheckinDeliveries, hardPromptState, checkinDeliveryKilled, passengerAsk, driverAsk, type CheckinDeliveryObserver } from './guardian-delivery';
+import { guardianDeliveryCounter } from '../../plugins/observability';
 import { SosService } from './sos.service';
 
 // Trip Guardian (safety spec §5) — server-side monitoring of live taxi rides.
@@ -114,7 +116,7 @@ interface DetectorState {
   /** [S-04] The hard-check cycle the session is in: minted at L3 with a
    *  one-time driver nonce, replaced by the next L3, and the ONLY thing a
    *  driver confirmation can answer. */
-  checkinCycle?: { id: string; requestedAtMs: number; driverNonceHash: string; driverNonceUsedAtMs?: number };
+  checkinCycle?: { id: string; requestedAtMs: number; level?: 'SOFT' | 'HARD'; hardRequestedAtMs?: number; driverNonceHash?: string; driverNonceUsedAtMs?: number; undeliveredPagedAtMs?: number };
   /** [S-04] The driver's confirmation, bound to a cycle, with who / which
    *  device / when — a stale one can never absolve a later cycle. */
   driverConfirm?: { cycleId: string; atMs: number; actorUserId: string; deviceId: string | null };
@@ -143,7 +145,7 @@ const sha256 = (value: string) => createHash('sha256').update(value).digest('hex
 /** [S-04] A driver confirmation counts only for the cycle it answers,
  *  made after that cycle asked. */
 const confirmBoundToCycle = (state: DetectorState): boolean =>
-  Boolean(state.checkinCycle && state.driverConfirm && state.driverConfirm.cycleId === state.checkinCycle.id && state.driverConfirm.atMs >= state.checkinCycle.requestedAtMs);
+  Boolean(state.checkinCycle && state.driverConfirm && state.driverConfirm.cycleId === state.checkinCycle.id && state.driverConfirm.atMs >= (state.checkinCycle.hardRequestedAtMs ?? state.checkinCycle.requestedAtMs));
 
 const anomalous = (state: DetectorState): boolean =>
   Boolean(state.flags?.deviation || state.flags?.longStop || state.flags?.overdue);
@@ -179,7 +181,7 @@ export class GuardianService {
 
   /** [S-05] Test seams: run before a row is handled by a sweep — a throw is a
    *  poison row. `cursorKey` isolates a test's cursors. Never set in routes. */
-  observer: { beforeOpen?: (orderId: string) => Promise<void>; beforeReconcile?: (sessionId: string) => Promise<void> } = {};
+  observer: { beforeOpen?: (orderId: string) => Promise<void>; beforeReconcile?: (sessionId: string) => Promise<void>; /** [S-06] runs after an ask's commit and BEFORE its inline delivery — a throw is the process dying between the two */ afterAsk?: (sessionId: string) => Promise<void>; beforeDeliver?: CheckinDeliveryObserver['beforeDeliver'] } = {};
   private sweepOpts: { openPageSize?: number; reconcilePageSize?: number; cursorKey?: string; maxPages?: number };
   constructor(private prisma: PrismaClient, private io: Server, sweepOpts: { openPageSize?: number; reconcilePageSize?: number; cursorKey?: string; maxPages?: number } = {}) {
     this.notifications = new NotificationService(prisma, io);
@@ -602,27 +604,30 @@ export class GuardianService {
     if (session.status === 'MONITORING' && anomalous(state) && !session.checkinRequestedAt) {
       const cleared = state.lastCheckinClearedAtMs ?? 0;
       if (now.getTime() - cleared < checkinCooldownSeconds() * 1000) return 0;
-      const moved = await this.prisma.tripSafetySession.updateMany({
-        where: { id: session.id, status: 'MONITORING', checkinRequestedAt: null },
-        // A fresh ask wipes any answer from a PREVIOUS ladder cycle — else a
-        // stale respondedAt would block L3 forever on the second climb.
-        data: { checkinRequestedAt: now, checkinRespondedAt: null, checkinDeadlineAt: null },
+      // [S-06] The ask IS a cycle, and the ask is a durable delivery
+      // obligation: the cycle, the status change and the delivery rows commit
+      // together. [S-04] A new climb owes nothing to the last one.
+      const cycleId = nanoid(12);
+      const committed: DetectorState = { ...state, checkinCycle: { id: cycleId, requestedAtMs: now.getTime(), level: 'SOFT' }, driverConfirm: undefined, driverConfirmedAtMs: undefined };
+      const moved = await this.prisma.$transaction(async (tx) => {
+        const m = await tx.tripSafetySession.updateMany({
+          where: { id: session.id, status: 'MONITORING', checkinRequestedAt: null },
+          // A fresh ask wipes any answer from a PREVIOUS ladder cycle — else a
+          // stale respondedAt would block L3 forever on the second climb.
+          data: { checkinRequestedAt: now, checkinRespondedAt: null, checkinDeadlineAt: null, deviationState: committed as never },
+        });
+        if (m.count !== 1) return 0;
+        if (session.passengerUserId) {
+          await stageCheckinDeliveries(tx, session, [{ cycleId, level: 'SOFT', recipient: 'PASSENGER', userId: session.passengerUserId, payload: passengerAsk(session, cycleId, 'SOFT', null) }]);
+        }
+        return 1;
       });
-      if (moved.count === 1) {
-        // [S-04] A new climb owes nothing to the last one: any driver answer
-        // still lying around belongs to a cycle that is over.
+      if (moved === 1) {
+        state.checkinCycle = committed.checkinCycle;
         state.driverConfirm = undefined;
         state.driverConfirmedAtMs = undefined;
-        pushEvent(state, now, 'L2_SOFT_CHECKIN');
-        if (session.passengerUserId) {
-          await this.notifications.send({
-            userId: session.passengerUserId,
-            type: 'SAFETY',
-            title: 'Safety check-in',
-            body: 'Everything OK on your trip? Open Swift to respond.',
-            data: { kind: 'guardian_checkin', level: 'SOFT', sessionId: session.id, orderId: session.orderId },
-          });
-        }
+        pushEvent(state, now, 'L2_SOFT_CHECKIN', { cycleId });
+        await this.deliverAsks(session.id, now);
         this.roomEmit(`order:${session.orderId}`, 'guardian:checkin', {
           level: 'SOFT',
           sessionId: session.id,
@@ -643,37 +648,34 @@ export class GuardianService {
       now.getTime() - session.checkinRequestedAt.getTime() >= softWaitSeconds() * 1000
     ) {
       const deadline = new Date(now.getTime() + checkinDeadlineSeconds() * 1000);
-      const moved = await this.prisma.tripSafetySession.updateMany({
-        where: { id: session.id, status: 'MONITORING', checkinRespondedAt: null },
-        data: { status: 'CHECKIN_PENDING', checkinDeadlineAt: deadline },
-      });
-      if (moved.count === 1) {
-        // [S-04] This ask IS the cycle: the driver can only answer it with the
-        // nonce it carries, once, while it is pending. The hash is the record;
-        // the nonce travels only to the driver's own device.
-        const driverNonce = randomBytes(16).toString('hex');
-        state.checkinCycle = { id: nanoid(12), requestedAtMs: now.getTime(), driverNonceHash: sha256(driverNonce) };
-        state.driverConfirm = undefined;
-        state.driverConfirmedAtMs = undefined;
-        pushEvent(state, now, 'L3_HARD_CHECKIN', { deadline: deadline.toISOString(), cycleId: state.checkinCycle.id });
-        if (session.passengerUserId) {
-          await this.notifications.send({
-            userId: session.passengerUserId,
-            type: 'SAFETY',
-            title: 'Safety check-in — please respond',
-            body: 'Please confirm you are OK in the app.',
-            data: { kind: 'guardian_checkin', level: 'HARD', sessionId: session.id, orderId: session.orderId, respondBy: deadline.toISOString() },
-          });
-        }
+      // [S-04] This ask IS the cycle's hard half: the driver can only answer
+      // it with the nonce it carries, once, while it is pending. The hash is
+      // the record; the nonce travels only to the driver's own device.
+      // [S-06] The status change and both delivery rows commit together.
+      const driverNonce = randomBytes(16).toString('hex');
+      const base = state.checkinCycle ?? { id: nanoid(12), requestedAtMs: now.getTime(), level: 'SOFT' as const };
+      const hardCycle = { ...base, level: 'HARD' as const, hardRequestedAtMs: now.getTime(), driverNonceHash: sha256(driverNonce), driverNonceUsedAtMs: undefined, undeliveredPagedAtMs: undefined };
+      const committed: DetectorState = { ...state, checkinCycle: hardCycle, driverConfirm: undefined, driverConfirmedAtMs: undefined };
+      const moved = await this.prisma.$transaction(async (tx) => {
+        const m = await tx.tripSafetySession.updateMany({
+          where: { id: session.id, status: 'MONITORING', checkinRespondedAt: null },
+          data: { status: 'CHECKIN_PENDING', checkinDeadlineAt: deadline, deviationState: committed as never },
+        });
+        if (m.count !== 1) return 0;
+        const asks = [];
+        if (session.passengerUserId) asks.push({ cycleId: hardCycle.id, level: 'HARD' as const, recipient: 'PASSENGER' as const, userId: session.passengerUserId, payload: passengerAsk(session, hardCycle.id, 'HARD', deadline) });
         // Low-key driver-side prompt (§5.3): a stopped driver with a flat
         // tire will answer — and that answer is a record.
-        await this.notifications.send({
-          userId: session.driverUserId,
-          type: 'SAFETY',
-          title: 'Trip status check',
-          body: 'Please confirm your trip status in the app.',
-          data: { kind: 'guardian_driver_confirm', sessionId: session.id, orderId: session.orderId, cycleId: state.checkinCycle.id, nonce: driverNonce, respondBy: deadline.toISOString() },
-        });
+        asks.push({ cycleId: hardCycle.id, level: 'HARD' as const, recipient: 'DRIVER' as const, userId: session.driverUserId, payload: driverAsk(session, hardCycle.id, driverNonce, deadline) });
+        await stageCheckinDeliveries(tx, session, asks);
+        return 1;
+      });
+      if (moved === 1) {
+        state.checkinCycle = hardCycle;
+        state.driverConfirm = undefined;
+        state.driverConfirmedAtMs = undefined;
+        pushEvent(state, now, 'L3_HARD_CHECKIN', { deadline: deadline.toISOString(), cycleId: hardCycle.id });
+        await this.deliverAsks(session.id, now);
         this.roomEmit(`order:${session.orderId}`, 'guardian:checkin', {
           level: 'HARD',
           sessionId: session.id,
@@ -693,6 +695,34 @@ export class GuardianService {
       now.getTime() >= session.checkinDeadlineAt.getTime() &&
       !session.checkinRespondedAt
     ) {
+      // [S-06] A deadline runs only against a DELIVERED prompt. SENT runs the
+      // policy below. PENDING / UNKNOWN (still owed, retrying, or the
+      // rollback) HOLDS the deadline and pages a human once per cycle — an
+      // undelivered prompt is never treated as an answered opportunity.
+      // FAILED (every attempt exhausted) is the explicit no-delivery policy:
+      // the person could not be reached at all and the anomaly stands, so the
+      // ladder escalates and says why.
+      if (session.passengerUserId) {
+        const cycleId = state.checkinCycle?.id ?? null;
+        const prompt = cycleId ? await hardPromptState(this.prisma, session.id, cycleId) : { state: 'UNKNOWN' as const, deliveredAt: null };
+        if (prompt.state === 'FAILED' && !checkinDeliveryKilled()) {
+          guardianDeliveryCounter.labels('deadline_without_delivery_escalated').inc();
+          pushEvent(state, now, 'DEADLINE_WITHOUT_DELIVERY', { cycleId, delivery: prompt.state });
+        } else if (prompt.state !== 'SENT' && prompt.state !== 'SKIPPED') {
+          if (state.checkinCycle && !state.checkinCycle.undeliveredPagedAtMs) {
+            state.checkinCycle.undeliveredPagedAtMs = now.getTime();
+            pushEvent(state, now, 'DEADLINE_HELD_UNDELIVERED', { cycleId, delivery: prompt.state, killed: checkinDeliveryKilled() });
+            guardianDeliveryCounter.labels('deadline_held').inc();
+            await notifyAdmins(this.prisma, this.notifications, {
+              tenantId: session.tenantId,
+              title: 'Guardian: hard check-in not delivered — deadline held',
+              body: `The hard safety check for order ${session.orderId} has not reached the passenger (delivery ${prompt.state.toLowerCase()}). The deadline is held and the worker keeps trying; please look at the trip now.`,
+              data: { kind: 'guardian_checkin_undelivered', sessionId: session.id, orderId: session.orderId, cycleId, delivery: prompt.state },
+            }).catch(() => 0);
+          }
+          return 0;
+        }
+      }
       // A responsive DRIVER blocks the auto-SOS (§5.3: "neither party
       // responsive") — the flat-tire case. [S-04] "Responsive" means a
       // confirmation bound to THIS cycle, made after this cycle asked. A tap
@@ -867,6 +897,13 @@ export class GuardianService {
     return { escalated: false, status: 'MONITORING' };
   }
 
+  /** [S-06] Deliver what the session's asks own — inline, right now (the
+   *  fail-safe path); anything that fails or is left over is the worker's. */
+  private async deliverAsks(sessionId: string, now: Date): Promise<void> {
+    await this.observer.afterAsk?.(sessionId);
+    await drainCheckinDeliveries(this.prisma, this.notifications, { sessionIds: [sessionId], now, observer: { beforeDeliver: this.observer.beforeDeliver } });
+  }
+
   /** [S-04] Driver's "trip status OK" — an ANSWER to the hard check the
    *  server asked for, never a standing tap. Accepted only while that cycle
    *  is pending, only with that cycle's one-time nonce, once; recorded with
@@ -889,7 +926,7 @@ export class GuardianService {
       throw new AppError(409, code, message);
     };
     const cycle = state.checkinCycle;
-    if (session.status !== 'CHECKIN_PENDING' || !cycle) return refuse('no_hard_check_refused', 'NO_HARD_CHECK_PENDING', 'There is no trip status check waiting for you. A confirmation answers a check the server asked for.');
+    if (session.status !== 'CHECKIN_PENDING' || !cycle || !cycle.driverNonceHash) return refuse('no_hard_check_refused', 'NO_HARD_CHECK_PENDING', 'There is no trip status check waiting for you. A confirmation answers a check the server asked for.');
     if (input.cycleId !== cycle.id) return refuse('stale_confirm_refused', 'STALE_CONFIRM', 'That confirmation answers an earlier check. Please respond to the current one.');
     if (sha256(input.nonce) !== cycle.driverNonceHash) return refuse('bad_nonce_refused', 'BAD_CONFIRM_NONCE', 'The confirmation could not be verified.');
     if (cycle.driverNonceUsedAtMs) return refuse('nonce_reused_refused', 'CONFIRM_ALREADY_USED', 'This check was already answered.');
@@ -916,6 +953,7 @@ export class GuardianService {
     state.stopSinceMs = null;
     state.driverConfirmedAtMs = undefined;
     state.driverConfirm = undefined;
+    state.checkinCycle = undefined;
     state.lastCheckinClearedAtMs = now.getTime();
     pushEvent(state, now, eventKind);
   }

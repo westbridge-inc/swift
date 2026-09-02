@@ -3536,6 +3536,54 @@ model SweepCursor {
   @@map("sweep_cursors")
 }
 
+/// [S-06] A Guardian check-in ask is a durable delivery obligation: one row
+/// per (cycle, level, recipient), staged in the SAME transaction as the
+/// ladder's status change, delivered by a leased worker, retried with
+/// backoff, and read by the ladder before a deadline may run.
+model GuardianCheckinDelivery {
+  id             String                   @id @default(cuid())
+  tenantId       String
+  sessionId      String
+  session        TripSafetySession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  cycleId        String
+  level          GuardianCheckinLevel
+  recipient      GuardianCheckinRecipient
+  userId         String
+  status         GuardianDeliveryStatus   @default(PENDING)
+  attempts       Int                      @default(0)
+  maxAttempts    Int                      @default(20)
+  availableAt    DateTime                 @default(now())
+  leaseExpiresAt DateTime?
+  lastError      String?
+  deliveredAt    DateTime?
+  payload        Json
+  receipt        Json?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  @@unique([sessionId, cycleId, level, recipient])
+  @@index([status, availableAt])
+  @@index([tenantId, sessionId])
+  @@map("guardian_checkin_deliveries")
+}
+
+enum GuardianCheckinLevel {
+  SOFT
+  HARD
+}
+
+enum GuardianCheckinRecipient {
+  PASSENGER
+  DRIVER
+}
+
+enum GuardianDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
 enum SosEscalationStatus {
   PENDING
   SENT
@@ -3746,6 +3794,8 @@ model TripSafetySession {
   escalatedToSosId String?
   closedAt         DateTime?
   closeReason      GuardianCloseReason?
+  /// [S-06] The durable delivery obligations of this session's check-in asks.
+  checkinDeliveries GuardianCheckinDelivery[]
   createdAt        DateTime             @default(now())
   updatedAt        DateTime             @updatedAt
 
