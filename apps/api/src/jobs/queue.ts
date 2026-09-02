@@ -602,6 +602,22 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               }),
             ).catch(() => {});
           }
+          // [M-35] Validate every country's pricing config; an invalid column
+          // is already quarantined by the readers (last known good) — this
+          // names it so a person fixes the column.
+          const { scanPricingConfigs } = await import('../modules/country/pricing-config');
+          const pricingScan = await scanPricingConfigs(ctx.prisma);
+          if (pricingScan.invalid.length > 0) {
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'pricing-config-invalid', 24 * 3600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: '💲 Pricing config is invalid',
+                body: `${pricingScan.invalid.length} pricing column(s) fail the schema: ${pricingScan.invalid.map((i) => `${i.countryCode} ${i.kind}`).join(', ')}. Quotes there price from the last known good version until the column is fixed.`,
+                data: { kind: 'billing_invariants', alert: 'pricing-config-invalid', invalid: pricingScan.invalid.slice(0, 10) },
+              }),
+            ).catch(() => {});
+          }
           break;
         }
       }

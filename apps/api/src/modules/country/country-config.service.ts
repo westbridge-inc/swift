@@ -1,6 +1,7 @@
 import type { PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
-import { mergeDeliveryRates, type DeliveryRates } from '../../utils/markup';
+import type { DeliveryRates } from '../../utils/markup';
+import { readDeliveryRates } from './pricing-config';
 import { docProfilesFor, feeBandFor } from '../../config/vehicle-classes';
 
 /** Weekly subscription tiers in local currency. */
@@ -162,11 +163,9 @@ export class CountryConfigService {
    *  the defaults rather than throwing, so a delivery fee never crashes
    *  checkout (unlike the ID gate, delivery pricing has a safe default). */
   async getDeliveryRates(code: string): Promise<DeliveryRates> {
-    const config = await this.prisma.countryConfig.findUnique({
-      where: { code },
-      select: { deliveryRates: true },
-    });
-    return mergeDeliveryRates(config?.deliveryRates ?? null);
+    // [M-35] Validated and versioned — an invalid column fails closed to the
+    // last known good version, a missing country to the defaults. Never throws.
+    return (await readDeliveryRates(this.prisma, code)).payload;
   }
 
   /** Required-document checklist for a role key (drives verification). */

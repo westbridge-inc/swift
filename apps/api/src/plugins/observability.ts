@@ -420,6 +420,24 @@ export const fareZoneGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [M-35] Pricing config validity per country and kind (invalid = 1 while
+ *  the live column fails the schema and readers price from the last known
+ *  good version). */
+export const pricingConfigGauge = new client.Gauge({
+  name: 'swift_pricing_config',
+  help: 'Pricing config state by kind, country and check (invalid)',
+  labelNames: ['kind', 'country', 'check'] as const,
+  registers: [registry],
+});
+/** [M-35] Pricing events: a refused (invalid) read, a shadow disagreement
+ *  with the old tolerant merge, an unsane fare refused, an outlier fare. */
+export const pricingConfigCounter = new client.Counter({
+  name: 'swift_pricing_events_total',
+  help: 'Pricing events (refused, shadow_diff, unsane_fare, outlier) by kind or context',
+  labelNames: ['event', 'kind'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {
