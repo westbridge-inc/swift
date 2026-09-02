@@ -552,6 +552,12 @@ describe('Services — job lifecycle + two-way rating', () => {
     }, customerB.token);
     expect(sameTenantHire.statusCode).toBe(201);
     expect(sameTenantHire.json().data.providerId).toBe(providerB.providerId);
+    // [TA-S1-006] The job records its tenant DURABLY at creation — the hiring
+    // customer's — so safety routing never re-derives it from a participant.
+    const hired = await runWithoutTenant(() => app.prisma.serviceJob.findUniqueOrThrow({
+      where: { id: sameTenantHire.json().data.id }, select: { tenantId: true },
+    }));
+    expect(hired.tenantId).toBe(TENANT_B);
   });
 
   it('runs request → quote → schedule → complete → both parties rate', async () => {

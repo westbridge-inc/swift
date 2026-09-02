@@ -1962,6 +1962,12 @@ model ServiceQualification {
 /// IDENTICAL start collides — overlap needs a duration field [reported].
 model ServiceJob {
   id                  String           @id @default(cuid())
+  /// [TA-S1-006] The job's DURABLE tenant, stamped at creation from the two
+  /// co-tenanted parties and never re-derived. Safety routing (an SOS raised
+  /// on this job) follows THIS column, not whichever participant pressed the
+  /// button — so drifted or corrupt participant state can no longer route one
+  /// incident to two different operators depending on the caller.
+  tenantId            String           @default("swift-default")
   customerId          String
   customer            User             @relation("customerServiceJobs", fields: [customerId], references: [id])
   providerId          String
@@ -1983,6 +1989,7 @@ model ServiceJob {
   @@index([customerId])
   @@index([providerId])
   @@index([status])
+  @@index([tenantId])
   @@map("service_jobs")
 }
 

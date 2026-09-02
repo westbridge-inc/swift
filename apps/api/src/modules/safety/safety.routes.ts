@@ -126,13 +126,20 @@ export async function safetyRoutes(app: FastifyInstance) {
     // clause: only the CUSTOMER on the job or the PROVIDER doing it gets the
     // job attached.
     if (serviceJobId) {
-      const job = await app.prisma.serviceJob.findFirst({
+      // [TA-S1-006] Participation is by USER ID; the job's tenant is its own
+      // durable column and decides the routing downstream. Read outside the
+      // request's tenant binding so a participant whose account has drifted
+      // from the job's tenant still gets the job ATTACHED — an emergency at a
+      // job must page the operator whose job it is, never degrade to a
+      // context-free alert because of a bookkeeping mismatch.
+      const claimedJobId: string = serviceJobId;
+      const job = await runWithoutTenant(() => app.prisma.serviceJob.findFirst({
         where: {
-          id: serviceJobId,
+          id: claimedJobId,
           OR: [{ customerId: request.user.userId }, { provider: { userId: request.user.userId } }],
         },
         select: { id: true, customerId: true, provider: { select: { userId: true } } },
-      });
+      }));
       if (!job) {
         request.log.warn({ userId: request.user.userId, serviceJobId }, '[F-035-04] SOS service-job context did not resolve for this caller — degrading to a context-free alert');
         serviceJobId = null;

@@ -4,6 +4,7 @@ import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { warRoomsFor } from './war-room';
+import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 
 // SOS engine — the life-safety state machine (safety spec §4). Server-owned,
@@ -86,9 +87,14 @@ export class SosService {
   async create(input: SosCreateInput) {
     let key = input.clientIdempotencyKey ?? null;
     if (key) {
-      const existing = await this.prisma.sosAlert.findUnique({
-        where: { actorUserId_clientIdempotencyKey: { actorUserId: input.actorUserId, clientIdempotencyKey: key } },
-      });
+      // [TA-S1-006] Bound by the ACTOR, so it runs outside the request's tenant
+      // binding: an alert lives in the INCIDENT's tenant (below), which under
+      // drift is not the caller's — a replay that could not see it would mint
+      // a second alert for the same emergency.
+      const claimedKey: string = key;
+      const existing = await runWithoutTenant(() => this.prisma.sosAlert.findUnique({
+        where: { actorUserId_clientIdempotencyKey: { actorUserId: input.actorUserId, clientIdempotencyKey: claimedKey } },
+      }));
       if (existing) {
         // [REPORT-035 F-035-01/02 · S0] A key hit is a REPLAY only when it is
         // the same request: same context AND the alert is still live. The old
@@ -137,7 +143,10 @@ export class SosService {
     // constraint that can REFUSE an insert is the limiter's hazard in a new
     // coat. Under a true burst a handful may still slip through the read, and
     // a handful is the point — it is bounded, not zero.
-    const live = await this.prisma.sosAlert.findFirst({
+    // [TA-S1-006] Actor-bound, and read outside the request's tenant binding
+    // for the same reason as the replay above: the live alert sits in the
+    // incident's tenant, and the collapse must still find it under drift.
+    const live = await runWithoutTenant(() => this.prisma.sosAlert.findFirst({
       where: {
         actorUserId: input.actorUserId,
         orderId: input.orderId ?? null,
@@ -148,7 +157,7 @@ export class SosService {
         status: { in: LIVE_STATUSES },
       },
       orderBy: { triggeredAt: 'desc' },
-    });
+    }));
     if (live) {
       // [F-028-03] Carry the NEW FACTS forward. The first version of this
       // recorded only a count and a timestamp — so a person who pressed again
@@ -178,7 +187,9 @@ export class SosService {
       // though their emergency had been received. updateMany with the status
       // guard makes losing that race observable, and a loser FALLS THROUGH to
       // mint a real alert rather than silently attaching to a corpse.
-      const merged = await this.prisma.sosAlert.updateMany({
+      // [TA-S1-006] The row lives in the incident's tenant; the retrigger must
+      // reach it from a drifted caller too.
+      const merged = await runWithoutTenant(() => this.prisma.sosAlert.updateMany({
         where: { id: live.id, status: { in: LIVE_STATUSES } },
         data: {
           retriggerCount: { increment: 1 },
@@ -194,7 +205,7 @@ export class SosService {
           // closes. Only fills an empty slot — never overwrites the original.
           ...(key && !live.clientIdempotencyKey ? { clientIdempotencyKey: key } : {}),
         },
-      });
+      }));
 
       if (merged.count === 1) {
         try {
@@ -212,7 +223,7 @@ export class SosService {
         // nobody was re-paged with the new position.
         if (skipGrace && live.status === 'TRIGGER_PENDING') return this.confirm(live.id);
         if (skipGrace || movedTo) await this.fanOut(live.id);
-        return this.prisma.sosAlert.findUniqueOrThrow({ where: { id: live.id } });
+        return runWithoutTenant(() => this.prisma.sosAlert.findUniqueOrThrow({ where: { id: live.id } }));
       }
       // Lost the race to a terminal transition — fall through and mint.
       log().warn({ sosAlertId: live.id, actorUserId: input.actorUserId }, '[F-028-03] the live alert closed mid-collapse; raising a NEW alert rather than attaching to a closed one');
@@ -228,10 +239,27 @@ export class SosService {
     // schema default, `swift-default`, and since F-026-15 the ops page follows
     // alert.tenantId, so a tenant-B customer's auto-escalated alert paged
     // swift-default's admins and NOBODY IN TENANT B WAS EVER TOLD.
-    const tenantId = (await tenantOfUser(this.prisma, input.actorUserId))
-      ?? (input.orderId
-        ? (await this.prisma.order.findUnique({ where: { id: input.orderId }, select: { tenantId: true } }))?.tenantId ?? null
-        : null);
+    //
+    // [TA-S1-006] The SUBJECT's durable tenant decides the routing — the
+    // service job's own column, or the order's — and the actor's tenant only
+    // for a context-free panic. Both parties are co-tenanted at creation, so
+    // on a healthy row the answer is the actor's tenant anyway; on a drifted
+    // or corrupt one, the incident no longer routes to two different
+    // operators depending on who pressed the button. The subject is read
+    // OUTSIDE the request's tenant binding: the route has already proven
+    // participation by user id, and a binding that hid the row would
+    // silently re-route a life-safety page to the caller's operator instead
+    // of the incident's.
+    const subjectTenant = await runWithoutTenant(async () => {
+      if (input.serviceJobId) {
+        return (await this.prisma.serviceJob.findUnique({ where: { id: input.serviceJobId }, select: { tenantId: true } }))?.tenantId ?? null;
+      }
+      if (input.orderId) {
+        return (await this.prisma.order.findUnique({ where: { id: input.orderId }, select: { tenantId: true } }))?.tenantId ?? null;
+      }
+      return null;
+    });
+    const tenantId = subjectTenant ?? (await tenantOfUser(this.prisma, input.actorUserId));
     if (!tenantId) {
       // [F-028-04] This used to say "falling back to the platform tenant" while
       // the insert OMITTED the column — so the row took the schema default and
@@ -247,16 +275,17 @@ export class SosService {
 
     let alert;
     try {
-      alert = await this.prisma.sosAlert.create({
+      alert = await runWithoutTenant(() => this.prisma.sosAlert.create({
         data: {
           // ALWAYS written, never omitted [F-028-04]. Omitting it let the
           // `swift-default` column default decide the routing of a life-safety
           // row. An explicit null overrides that default and says "unknown",
           // which every consumer already reads correctly: warRoomsFor(null) is
           // the platform war room alone, notifyAdmins(null) is SUPER_ADMIN
-          // only, and the RLS predicate is never true for NULL. (Under an HTTP
-          // request the tenant-scope extension still stamps the request's own
-          // tenant over this, which is the right answer when we have one.)
+          // only, and the RLS predicate is never true for NULL. [TA-S1-006]
+          // The insert runs OUTSIDE the request's tenant binding, so the
+          // tenant resolved above — the INCIDENT's — is what lands; the
+          // extension would otherwise stamp the caller's tenant over it.
           tenantId,
           actorUserId: input.actorUserId,
           actorRole: input.actorRole,
@@ -274,7 +303,7 @@ export class SosService {
           clientCreatedAt: input.clientCreatedAt ?? null,
           clientIdempotencyKey: key,
         },
-      });
+      }));
     } catch (err) {
       // [F-026-17] read-then-create is not atomic: two genuine retries from the
       // same device can both miss the read. The loser must return the WINNER,

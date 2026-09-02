@@ -533,6 +533,9 @@ export async function createServiceJobWithLiveAuthority(
 
     const job = await tx.serviceJob.create({
       data: {
+        // [TA-S1-006] Both parties were just proven to live in input.tenantId;
+        // the job records it durably so safety routing never re-derives it.
+        tenantId: input.tenantId,
         customerId: input.customerId,
         providerId: provider.id,
         description: input.description,
