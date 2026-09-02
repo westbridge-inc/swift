@@ -368,6 +368,17 @@ export const securityAuditFailuresCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [M-32] Promo funding invariants, by check: active promos with invalid
+ *  terms; discounted orders with no redemption snapshot (no named funder);
+ *  orders whose tip was discounted — the order checks also fenced at the
+ *  enforcement date. A non-zero since-enforced value is a page. */
+export const promoFundingGauge = new client.Gauge({
+  name: 'swift_promo_funding',
+  help: 'Promo funding invariant breaches by check (invalid_terms, discount_without_funder[_since_enforced], tip_funding_gap[_since_enforced])',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

@@ -47,6 +47,7 @@ import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { computeOrderSla } from '../fulfillment/order-sla';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
+import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import { createHash } from 'node:crypto';
 import { billingTopupMissingKeyCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
@@ -161,17 +162,25 @@ const createPromoSchema = z.object({
 }).refine((d) => d.discountType !== 'PERCENTAGE' || d.discountValue <= 100, {
   message: 'A percentage discount cannot exceed 100',
   path: ['discountValue'],
+}).refine((d) => d.validFrom.getTime() < d.validUntil.getTime(), {
+  // [M-32] A window is a window: the end must follow the start.
+  message: 'validUntil must be after validFrom',
+  path: ['validUntil'],
 });
 
+// [M-32] The patch carries the same bounds as create. The percentage cap and
+// the window are properties of the WHOLE record, so the handler validates the
+// merged row (updatePromoTerms) — an update can no longer set 200%, invert
+// the dates, or slip a value past the money ceiling.
 const updatePromoSchema = z.object({
   description: z.string().max(500).optional(),
-  discountValue: z.number().min(0).optional(),
-  minOrderAmount: z.number().min(0).optional(),
-  maxDiscount: z.number().min(0).optional(),
+  discountValue: z.number().min(0).max(10_000_000).optional(),
+  minOrderAmount: z.number().min(0).max(10_000_000).optional(),
+  maxDiscount: z.number().min(0).max(10_000_000).optional(),
   validFrom: z.coerce.date().optional(),
   validUntil: z.coerce.date().optional(),
-  maxUses: z.number().int().min(1).optional(),
-  maxUsesPerUser: z.number().int().min(1).optional(),
+  maxUses: z.number().int().min(1).max(1_000_000).optional(),
+  maxUsesPerUser: z.number().int().min(1).max(100).optional(),
   isActive: z.boolean().optional(),
 });
 
@@ -2215,23 +2224,35 @@ export async function adminRoutes(app: FastifyInstance) {
     const existingCode = await app.prisma.promoCode.findUnique({ where: { code: body.code.toUpperCase() } });
     if (existingCode) throw new AppError(409, 'DUPLICATE_CODE', 'A promo code with this code already exists');
 
-    const promo = await app.prisma.promoCode.create({
-      data: {
-        code: body.code.toUpperCase(),
-        description: body.description,
-        discountType: body.discountType,
-        discountValue: body.discountValue,
-        minOrderAmount: body.minOrderAmount,
-        maxDiscount: body.maxDiscount,
-        applicableTo: (body.applicableTo || []) as any,
-        validFrom: new Date(body.validFrom),
-        validUntil: new Date(body.validUntil),
-        maxUses: body.maxUses,
-        maxUsesPerUser: body.maxUsesPerUser || 1,
-      },
+    // [M-32] The platform funds an admin code. The whole record is validated
+    // under the one law, and version 1 of its terms is written with the row.
+    assertPromoTerms({
+      discountType: body.discountType, discountValue: body.discountValue, minOrderAmount: body.minOrderAmount ?? null, maxDiscount: body.maxDiscount ?? null,
+      validFrom: new Date(body.validFrom), validUntil: new Date(body.validUntil), maxUses: body.maxUses ?? null, maxUsesPerUser: body.maxUsesPerUser || 1,
+    });
+    const promo = await app.prisma.$transaction(async (tx) => {
+      const row = await tx.promoCode.create({
+        data: {
+          code: body.code.toUpperCase(),
+          description: body.description,
+          discountType: body.discountType,
+          discountValue: body.discountValue,
+          minOrderAmount: body.minOrderAmount,
+          maxDiscount: body.maxDiscount,
+          applicableTo: (body.applicableTo || []) as any,
+          validFrom: new Date(body.validFrom),
+          validUntil: new Date(body.validUntil),
+          maxUses: body.maxUses,
+          maxUsesPerUser: body.maxUsesPerUser || 1,
+          funder: 'PLATFORM',
+          termsVersion: 1,
+        },
+      });
+      await recordPromoTermsVersion(tx, row.id, { createdBy: request.user.userId });
+      return row;
     });
 
-    await audit(request.user.userId, 'CREATE_PROMO', 'PromoCode', promo.id, { code: promo.code }, request);
+    await audit(request.user.userId, 'CREATE_PROMO', 'PromoCode', promo.id, { code: promo.code, termsVersion: promo.termsVersion }, request);
 
     return { success: true, data: promo };
   });
@@ -2243,24 +2264,27 @@ export async function adminRoutes(app: FastifyInstance) {
     const existing = await app.prisma.promoCode.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('PromoCode', id);
 
-    const promo = await app.prisma.promoCode.update({
-      where: { id },
-      data: {
-        ...(body.description !== undefined && { description: body.description }),
-        ...(body.discountValue !== undefined && { discountValue: body.discountValue }),
-        ...(body.minOrderAmount !== undefined && { minOrderAmount: body.minOrderAmount }),
-        ...(body.maxDiscount !== undefined && { maxDiscount: body.maxDiscount }),
-        ...(body.validFrom !== undefined && { validFrom: new Date(body.validFrom) }),
-        ...(body.validUntil !== undefined && { validUntil: new Date(body.validUntil) }),
-        ...(body.maxUses !== undefined && { maxUses: body.maxUses }),
-        ...(body.maxUsesPerUser !== undefined && { maxUsesPerUser: body.maxUsesPerUser }),
-        ...(body.isActive !== undefined && { isActive: body.isActive }),
-      },
-    });
+    // [M-32] The MERGED record is validated — never the patch alone — and a
+    // change of terms writes an immutable new version. A refused patch
+    // changes nothing.
+    const promo = await updatePromoTerms(app.prisma, id, body, request.user.userId);
 
-    await audit(request.user.userId, 'UPDATE_PROMO', 'PromoCode', id, body as Record<string, unknown>, request);
+    await audit(request.user.userId, 'UPDATE_PROMO', 'PromoCode', id, { ...(body as Record<string, unknown>), termsVersion: promo.termsVersion }, request);
 
     return { success: true, data: promo };
+  });
+
+  /** [M-32] POST /promos/:id/rollback — pin a prior terms version. The row
+   *  takes that version's terms and a NEW version is written naming what it
+   *  restored; nothing in the history is edited. Defaults to the previous. */
+  app.post('/promos/:id/rollback', { preHandler: [platformControlGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ version: z.number().int().min(1).optional() }).parse(request.body ?? {});
+    const existing = await app.prisma.promoCode.findUnique({ where: { id }, select: { id: true } });
+    if (!existing) throw new NotFoundError('PromoCode', id);
+    const result = await rollbackPromoTerms(app.prisma, id, body.version, request.user.userId);
+    await audit(request.user.userId, 'UPDATE_PROMO', 'PromoCode', id, { rollback: true, restoredFrom: result.restoredFrom, termsVersion: result.version }, request);
+    return { success: true, data: { ...result.promo, restoredFrom: result.restoredFrom } };
   });
 
   app.delete('/promos/:id', { preHandler: [platformControlGuard] }, async (request) => {

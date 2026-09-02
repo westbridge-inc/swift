@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
-import { lineTotal, orderTotal, promoDiscount } from '../../utils/order-total';
+import { lineTotal, orderTotal, promoDiscount, promoCapacity } from '../../utils/order-total';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
@@ -402,11 +402,15 @@ async function buildCartResponse(
   if (promoCodeRecord) {
     const promo = promoCodeRecord as {
       code: string; discountType: string; discountValue: unknown;
-      maxDiscount: unknown; description?: string;
+      maxDiscount: unknown; funder?: string | null; description?: string;
     };
     // [ALG-24] The one promo switch — the same function checkout's
     // validatePromoCode applies, so the quote's discount is the charge's.
     discount = promoDiscount(promo, { subtotal: subtotalCustomer, deliveryFee });
+    // [M-32] The quote absorbs exactly what checkout will: the goods, plus the
+    // delivery fee for a platform code — never the tip. A code larger than the
+    // basket used to be quoted in full and charged clamped.
+    discount = Math.min(discount, promoCapacity(promo.funder, { subtotal: subtotalCustomer, deliveryFee }, promo.discountType));
     promoInfo = {
       code: promo.code,
       discountType: promo.discountType,
