@@ -344,6 +344,7 @@ model Tenant {
   vendors          Vendor[]
   orders           Order[]
   rideQueueEntries RideQueueEntry[]
+  zones            Zone[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
   adRefundOutbox   AdRefundOutbox[]
@@ -2955,6 +2956,21 @@ model Zone {
   description     String?
   boundary        Json
   isActive        Boolean    @default(true)
+  /// [M-34] Zone pricing is one operator's, in one market. Every zone is
+  /// owned (backfilled to the default tenant / GY) and resolved only within
+  /// the requester's tenant and country — another market's overlapping
+  /// polygon can never price a trip here.
+  tenantId        String     @default("swift-default")
+  tenant          Tenant     @relation(fields: [tenantId], references: [id])
+  countryCode     String     @default("GY")
+  /// [M-34] Deterministic precedence inside a market: the highest priority
+  /// wins; among equals the smallest polygon, then the id. Two ACTIVE zones
+  /// of one market may not overlap at the same priority — refused at write,
+  /// reported by the scan when it exists anyway.
+  priority        Int        @default(0)
+  /// [M-34] Bumped on every boundary / priority change; an estimate names
+  /// the versions it was priced against.
+  version         Int        @default(1)
   deliveryBaseFee Decimal?   @db.Decimal(10, 2)
   deliveryPerKm   Decimal?   @db.Decimal(10, 2)
   surgeMultiplier Float      @default(1.0)
@@ -2964,6 +2980,7 @@ model Zone {
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
 
+  @@index([tenantId, countryCode, isActive])
   @@map("zones")
 }
 

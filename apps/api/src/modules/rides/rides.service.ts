@@ -156,7 +156,8 @@ export async function createRideRequest(
   }
   const orderTenantId = expectedTenantId ?? user.tenantId;
 
-  const tiered = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode);
+  // [M-34] Zone pricing is the order's tenant's, in the rider's country.
+  const tiered = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, orderTenantId);
   const tier = tiered.tiers.find((t) => t.rideClass === body.rideClass);
   if (!tier) {
     throw new AppError(400, 'INVALID_RIDE_CLASS', 'That ride tier is not available.');

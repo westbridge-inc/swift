@@ -123,9 +123,10 @@ export async function ridesRoutes(app: FastifyInstance) {
     const body = estimateSchema.parse(request.body);
     const user = await app.prisma.user.findUniqueOrThrow({
       where: { id: request.user.userId },
-      select: { countryCode: true },
+      select: { countryCode: true, tenantId: true },
     });
-    const estimate = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode);
+    // [M-34] Zone pricing is the requester's tenant's, in the requester's country.
+    const estimate = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, user.tenantId);
     return { success: true, data: estimate };
   });
 

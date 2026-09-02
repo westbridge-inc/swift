@@ -48,6 +48,7 @@ import { computeOrderSla } from '../fulfillment/order-sla';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
+import { assertNoZoneOverlap } from '../rides/fare-zones';
 import { createHash } from 'node:crypto';
 import { billingTopupMissingKeyCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
@@ -192,6 +193,10 @@ const createZoneSchema = z.object({
   deliveryBaseFee: z.number().min(0).optional(),
   deliveryPerKm: z.number().min(0).optional(),
   surgeMultiplier: z.number().min(0.5).max(10).optional(),
+  // [M-34] The market the zone prices in, and its precedence inside it. The
+  // tenant is the caller's — never a body field.
+  countryCode: z.string().trim().length(2).transform((c) => c.toUpperCase()).optional(),
+  priority: z.number().int().min(0).max(100).optional(),
 });
 
 const updateZoneSchema = createZoneSchema.partial().extend({
@@ -2316,6 +2321,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/zones', { preHandler: [platformControlGuard] }, async (request) => {
     const body = createZoneSchema.parse(request.body);
 
+    // [M-34] One operator's zone, in one market, never overlapping a peer at
+    // the same priority.
+    const market = { tenantId: requireTenantId(), countryCode: body.countryCode ?? 'GY', priority: body.priority ?? 0 };
+    await assertNoZoneOverlap(app.prisma, { ...market, boundary: body.boundary, isActive: true });
     const zone = await app.prisma.zone.create({
       data: {
         name: body.name,
@@ -2324,10 +2333,14 @@ export async function adminRoutes(app: FastifyInstance) {
         deliveryBaseFee: body.deliveryBaseFee,
         deliveryPerKm: body.deliveryPerKm,
         surgeMultiplier: body.surgeMultiplier || 1.0,
+        tenantId: market.tenantId,
+        countryCode: market.countryCode,
+        priority: market.priority,
+        version: 1,
       },
     });
 
-    await audit(request.user.userId, 'CREATE_ZONE', 'Zone', zone.id, { name: zone.name }, request);
+    await audit(request.user.userId, 'CREATE_ZONE', 'Zone', zone.id, { name: zone.name, countryCode: zone.countryCode, priority: zone.priority }, request);
 
     return { success: true, data: zone };
   });
@@ -2339,6 +2352,18 @@ export async function adminRoutes(app: FastifyInstance) {
     const existing = await app.prisma.zone.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('Zone', id);
 
+    // [M-34] The MERGED zone is judged: a new boundary, priority, country or
+    // activation may not overlap a peer at the same priority; a boundary or
+    // priority change is a new version.
+    const merged = {
+      tenantId: existing.tenantId,
+      countryCode: body.countryCode ?? existing.countryCode,
+      priority: body.priority ?? existing.priority,
+      boundary: body.boundary !== undefined ? body.boundary : existing.boundary,
+      isActive: body.isActive ?? existing.isActive,
+    };
+    await assertNoZoneOverlap(app.prisma, merged, id);
+    const termsChanged = (body.boundary !== undefined && JSON.stringify(body.boundary) !== JSON.stringify(existing.boundary)) || (body.priority !== undefined && body.priority !== existing.priority);
     const zone = await app.prisma.zone.update({
       where: { id },
       data: {
@@ -2349,6 +2374,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ...(body.deliveryBaseFee !== undefined && { deliveryBaseFee: body.deliveryBaseFee }),
         ...(body.deliveryPerKm !== undefined && { deliveryPerKm: body.deliveryPerKm }),
         ...(body.surgeMultiplier !== undefined && { surgeMultiplier: body.surgeMultiplier }),
+        ...(body.countryCode !== undefined && { countryCode: merged.countryCode }),
+        ...(body.priority !== undefined && { priority: body.priority }),
+        ...(termsChanged && { version: { increment: 1 } }),
       },
     });
 
