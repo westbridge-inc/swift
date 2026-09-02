@@ -13,7 +13,8 @@ import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import {
-  foodAge, retireTooOldOrder, sweepFoodAge, grantRescueIncentive, rescueIncentiveGyd, incentiveKey, FOOD_TOO_OLD_REASON,
+  foodAge, retireTooOldOrder, settleTooOldOrder, sweepFoodAge, grantRescueIncentive, rescueIncentiveGyd, incentiveKey, isCapturedMmg,
+  FOOD_TOO_OLD_REASON, FOOD_TOO_OLD_PAID_HELD_OUTCOME,
 } from '../modules/dispatch/rescue';
 import { ALGO_DEFAULTS, invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { explainEarning } from '../utils/explain-earning';
@@ -59,7 +60,7 @@ async function purge() {
   const riders = await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } });
   const orders = await app.prisma.order.findMany({ where: { customerId: { in: ids } }, select: { id: true } });
   const oids = orders.map((o) => o.id);
-  for (const o of oids) await app.redis.del(...dispatchKeys(o), `ops_page:food_too_old:${o}`);
+  for (const o of oids) await app.redis.del(...dispatchKeys(o), `ops_page:food_too_old:${o}`, `ops_page:food_too_old_paid:${o}`);
   await app.prisma.algoDecision.deleteMany({ where: { algo: 'ALG-06', subjectId: { in: [...oids, ...riders.map((r) => r.id)] } } });
   await app.prisma.earning.deleteMany({ where: { orderId: { in: oids } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
@@ -94,7 +95,7 @@ async function makeRider() {
   return { riderId: rider.id, userId: user.id };
 }
 
-async function makeOrder(opts: { orderType?: OrderType; status?: OrderStatus; readyAgoMin?: number | null; paymentMethod?: 'CASH' | 'MOBILE_MONEY'; riderId?: string } = {}) {
+async function makeOrder(opts: { orderType?: OrderType; status?: OrderStatus; readyAgoMin?: number | null; paymentMethod?: 'CASH' | 'MOBILE_MONEY'; paymentStatus?: 'PENDING' | 'CAPTURED'; riderId?: string } = {}) {
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `RSC-${nanoid(8)}`, orderType: opts.orderType ?? 'FOOD_DELIVERY', customerId, vendorId,
@@ -103,6 +104,7 @@ async function makeOrder(opts: { orderType?: OrderType; status?: OrderStatus; re
       ...(opts.riderId ? { riderId: opts.riderId } : {}),
       pickupAddress: 'Store', pickupLat: PICKUP.lat, pickupLng: PICKUP.lng, deliveryAddress: 'Home', deliveryLat: PICKUP.lat + 0.01, deliveryLng: PICKUP.lng + 0.01,
       subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 500, totalAmount: 2500, paymentMethod: opts.paymentMethod ?? 'CASH',
+      ...(opts.paymentStatus ? { paymentStatus: opts.paymentStatus } : {}),
     },
   });
   orderIds.push(order.id);
@@ -301,6 +303,112 @@ describe('[ALG-06 ②] the cutoff inside dispatch', () => {
     // Idempotent: a second sweep finds nothing of ours.
     const again = await sweepFoodAge(deps());
     expect(again.retired).not.toContain(old.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('[TA-S0-001] paid MMG money is never cancelled by the system', () => {
+  const vendorInclude = { vendor: { select: { name: true, owner: { select: { userId: true } } } } } as const;
+
+  it('the predicate: captured money on the MMG rail, and nothing else', () => {
+    expect(isCapturedMmg({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' })).toBe(true);
+    expect(isCapturedMmg({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' })).toBe(false);
+    expect(isCapturedMmg({ paymentMethod: 'CASH', paymentStatus: 'CAPTURED' })).toBe(false);
+  });
+
+  it('inside dispatch: a captured MMG order past the cutoff is HELD for a person — not cancelled, the truth told, ops paged', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    const cap = captureEmits();
+    try {
+      // The loop still stops: too old is too old. But nothing is cancelled.
+      expect(await dispatch.dispatchOrder(order.id)).toEqual({ exhausted: true });
+      expect(cap.emits.find((e) => e.event === 'order:status_changed')).toBeUndefined();
+    } finally {
+      cap.restore();
+    }
+
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ status: after.status, riderId: after.riderId, cancelledAt: after.cancelledAt, cancelledBy: after.cancelledBy, paymentStatus: after.paymentStatus })
+      .toEqual({ status: 'READY_FOR_PICKUP', riderId: null, cancelledAt: null, cancelledBy: null, paymentStatus: 'CAPTURED' });
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'CANCELLED' } })).toBe(0);
+
+    // The log says why it was NOT cancelled, in words.
+    const logRow = await app.prisma.orderStatusLog.findFirst({ where: { orderId: order.id }, orderBy: { createdAt: 'desc' } });
+    expect(logRow?.changedBy).toBe('system');
+    expect(logRow?.note).toContain('already paid by MMG');
+    expect(logRow?.note).toContain('HELD for a person, not cancelled');
+
+    // The decision row names the held outcome — never the cancel outcome.
+    const rows = await app.prisma.algoDecision.findMany({ where: { algo: 'ALG-06', subjectType: 'ORDER', subjectId: order.id } });
+    expect(rows.map((r) => r.outcome)).toEqual([FOOD_TOO_OLD_PAID_HELD_OUTCOME]);
+    expect(rows[0]?.shadow).toBe(false);
+    expect(rows[0]?.inputs).toMatchObject({ ageMinutes: 60, limitMinutes: 45, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    expect(rows[0]?.sentence.length).toBeLessThanOrEqual(240);
+
+    // Customer: already paid, a person is on it, the store refunds directly — never "cancelled", never "Swift refunds".
+    const toCustomer = await app.prisma.notification.findFirst({ where: { userId: customerId, dedupeKey: `food-too-old-paid:customer:${order.id}` } });
+    expect(toCustomer?.body).toContain('already paid the store by MMG');
+    expect(toCustomer?.body).toContain('the store refunds you directly');
+    expect(toCustomer?.body).not.toMatch(/cancel/i);
+    expect(toCustomer?.body).not.toMatch(/Swift (will )?refund/i);
+    expect(await app.prisma.notification.count({ where: { userId: customerId, dedupeKey: `food-too-old:customer:${order.id}` } })).toBe(0);
+    // Store: not cancelled, keep it, a person is handling it.
+    const toVendor = await app.prisma.notification.findFirst({ where: { userId: vendorOwnerUserId, dedupeKey: `food-too-old-paid:vendor:${order.id}` } });
+    expect(toVendor?.title).toBe('No rider found — the customer has already paid');
+    expect(toVendor?.body).toContain('NOT cancelled');
+    // Ops: paged once on the paid-hold key, never on the cancel key.
+    expect(await app.redis.get(`ops_page:food_too_old_paid:${order.id}`)).toBe('1');
+    expect(await app.redis.exists(`ops_page:food_too_old:${order.id}`)).toBe(0);
+  });
+
+  it('the sweep holds it too, and holding is idempotent: a second tick writes no second row, page or notice', async () => {
+    const order = await makeOrder({ orderType: 'GROCERY_DELIVERY', readyAgoMin: 100, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    const first = await sweepFoodAge(deps());
+    expect(first.held).toContain(order.id);
+    expect(first.retired).not.toContain(order.id);
+    const second = await sweepFoodAge(deps());
+    expect(second.held).toContain(order.id);
+    expect(second.retired).not.toContain(order.id);
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ status: after.status, riderId: after.riderId }).toEqual({ status: 'READY_FOR_PICKUP', riderId: null });
+    expect(await app.prisma.algoDecision.count({ where: { algo: 'ALG-06', subjectId: order.id } })).toBe(1);
+    expect(await app.prisma.notification.count({ where: { userId: customerId, dedupeKey: `food-too-old-paid:customer:${order.id}` } })).toBe(1);
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, changedBy: 'system' } })).toBe(1);
+  });
+
+  it('the guard is in the CAS, not the snapshot: money captured after the caller read the order is respected', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' });
+    // The caller's view: still unpaid.
+    const snapshot = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: vendorInclude });
+    expect(snapshot.paymentStatus).toBe('PENDING');
+    // Then the store's capture lands between that read and the cutoff's write.
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'CAPTURED' } });
+    expect(await settleTooOldOrder(deps(), snapshot, 60, 45)).toBe('HELD_PAID');
+    expect(await retireTooOldOrder(deps(), snapshot, 60, 45)).toBe(false);
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ status: after.status, cancelledAt: after.cancelledAt, paymentStatus: after.paymentStatus })
+      .toEqual({ status: 'READY_FOR_PICKUP', cancelledAt: null, paymentStatus: 'CAPTURED' });
+    expect(await app.prisma.algoDecision.count({ where: { algo: 'ALG-06', subjectId: order.id, outcome: FOOD_TOO_OLD_PAID_HELD_OUTCOME } })).toBe(1);
+  });
+
+  it('an UNPAID MMG order is still retired — cancellation is the only exit from money nobody has paid', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' });
+    const full = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: vendorInclude });
+    expect(await settleTooOldOrder(deps(), full, 60, 45)).toBe('RETIRED');
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ status: after.status, reason: after.cancellationReason }).toEqual({ status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON });
+    expect(await app.prisma.algoDecision.count({ where: { algo: 'ALG-06', subjectId: order.id, outcome: FOOD_TOO_OLD_PAID_HELD_OUTCOME } })).toBe(0);
+  });
+
+  it('a rider who claimed it in the meantime is neither retired nor held — UNTOUCHED', async () => {
+    const rider = await makeRider();
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false, isAvailable: false } });
+    const order = await makeOrder({ readyAgoMin: 120, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED', riderId: rider.riderId });
+    const full = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: vendorInclude });
+    expect(await settleTooOldOrder(deps(), full, 120, 45)).toBe('UNTOUCHED');
+    expect(await app.prisma.algoDecision.count({ where: { algo: 'ALG-06', subjectId: order.id } })).toBe(0);
+    expect(await app.prisma.notification.count({ where: { userId: customerId, dedupeKey: `food-too-old-paid:customer:${order.id}` } })).toBe(0);
   });
 });
 
