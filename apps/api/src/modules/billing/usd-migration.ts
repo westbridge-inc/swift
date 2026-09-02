@@ -1,8 +1,9 @@
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { convertUsdToLocal, formatMoney, resolveRateForRun } from './fx';
 import { log } from '../../utils/logger';
+import { usdMigrationFlipsCounter, usdMigrationHeldGauge } from '../../plugins/observability';
 
 // System 2 Part 13/20 — migration of existing local-priced subscriptions.
 // The founder picks a mode per tenant at enable time:
@@ -115,88 +116,206 @@ export async function enactModeA(prisma: PrismaClient, io: Server): Promise<{ no
   return { noticed, unmapped };
 }
 
-/** MODE B enable — freeze every existing payer on today's local price via
- *  customRate (the priceFor legacy branch), stamp the tenant sunset date. */
-export async function enableModeB(prisma: PrismaClient, sunsetAt: Date): Promise<{ grandfathered: number }> {
+/** [M-15] A subscription belongs to the tenant of the vendor, rider or driver
+ *  that holds it. The migration's every read and write is scoped by this. */
+export const subscriptionTenantWhere = (tenantId: string) => ({
+  OR: [
+    { vendor: { tenantId }, riderId: null, driverId: null },
+    { rider: { user: { tenantId } }, vendorId: null, driverId: null },
+    { driver: { user: { tenantId } }, vendorId: null, riderId: null },
+  ],
+});
+
+export const modeBKey = (subscriptionId: string, phase: 't30' | 't7' | 'freeze' | 'flip') => `usdmigB:${subscriptionId}:${phase}`;
+
+/** MODE B enable — freeze every existing payer OF THIS TENANT on today's
+ *  local price via customRate (the priceFor legacy branch), record the
+ *  immutable price assignment per payer, stamp the tenant's sunset date.
+ *  [M-15] Before, this selected and froze every tenant's payers while the
+ *  control row was hardcoded to swift-default. */
+export async function enableModeB(prisma: PrismaClient, sunsetAt: Date, tenantId = 'swift-default'): Promise<{ grandfathered: number; tenantId: string }> {
   const subs = await prisma.subscription.findMany({
-    where: { status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE'] }, customRate: null },
-    select: { id: true, weeklyRate: true },
+    where: { status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE'] }, customRate: null, ...subscriptionTenantWhere(tenantId) },
+    select: { id: true, weeklyRate: true, currencyCode: true },
   });
   let grandfathered = 0;
   for (const s of subs) {
-    await prisma.subscription.update({ where: { id: s.id }, data: { customRate: s.weeklyRate } });
+    await prisma.$transaction(async (tx) => {
+      await tx.subscription.update({ where: { id: s.id }, data: { customRate: s.weeklyRate } });
+      // The immutable assignment: what this payer was pinned at, and when.
+      await tx.billingEvent.create({
+        data: {
+          subscriptionId: s.id, type: 'TIER_CHANGE', amount: s.weeklyRate, currencyCode: s.currencyCode,
+          idempotencyKey: modeBKey(s.id, 'freeze'),
+          note: `Mode B grandfathered at ${formatMoney(Number(s.weeklyRate), s.currencyCode)} (tenant ${tenantId}, sunset ${sunsetAt.toISOString().slice(0, 10)})`,
+        },
+      }).catch((err: { code?: string }) => { if (err.code !== 'P2002') throw err; });
+    });
     grandfathered += 1;
   }
   await prisma.tenantBillingCurrency.upsert({
-    where: { tenantId: 'swift-default' },
-    create: { tenantId: 'swift-default', usdMigrationMode: 'B', usdSunsetAt: sunsetAt },
+    where: { tenantId },
+    create: { tenantId, usdMigrationMode: 'B', usdSunsetAt: sunsetAt },
     update: { usdMigrationMode: 'B', usdSunsetAt: sunsetAt },
   });
-  log().info({ grandfathered, sunsetAt }, 'usd migration Mode B enabled — existing payers grandfathered');
-  return { grandfathered };
+  log().info({ grandfathered, sunsetAt, tenantId }, 'usd migration Mode B enabled — existing payers grandfathered');
+  return { grandfathered, tenantId };
 }
 
-/** MODE B daily sweep — T−30/T−7 notices recomputed from the sunset date and
- *  DB-deduped; past sunset, grandfathered rates clear (the book takes over)
- *  with a loud alert if either notice never went out. */
-export async function sweepModeB(prisma: PrismaClient, io: Server, now = new Date()): Promise<{ notices: number; flipped: number; alerts: number }> {
-  const tenant = await prisma.tenantBillingCurrency.findUnique({ where: { tenantId: 'swift-default' } });
-  if (tenant?.usdMigrationMode !== 'B' || !tenant.usdSunsetAt) return { notices: 0, flipped: 0, alerts: 0 };
-  const sunset = tenant.usdSunsetAt;
-  const notifications = new NotificationService(prisma, io);
-  const grandfathered = await prisma.subscription.findMany({
-    where: { customRate: { not: null }, status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE', 'SUSPENDED'] } },
-    select: { id: true, customRate: true },
+/** MODE B daily sweep — per tenant in Mode B: T−30/T−7 notices recomputed
+ *  from the sunset date, DB-deduped, with delivery PROOF (the event is the
+ *  obligation; `deliveredAt` is stamped only after the send succeeded, and an
+ *  undelivered notice is re-attempted every sweep). Past sunset a payer flips
+ *  to the USD book ONLY when both notices are verifiably delivered — otherwise
+ *  they stay pinned, are counted, and the tenant's operators are paged.
+ *  [M-15] Before: every tenant's payers were selected and flipped from the
+ *  default tenant's control row; a failed send was swallowed after the event
+ *  was written; and a payer with missing notices was flipped anyway with a
+ *  log line. Every flip records the immutable snapshot rollback points to. */
+export async function sweepModeB(
+  prisma: PrismaClient,
+  io: Server,
+  now = new Date(),
+  opts: { tenantIds?: string[] } = {},
+): Promise<{ notices: number; delivered: number; undelivered: number; flipped: number; held: number; alerts: number; tenants: number }> {
+  const out = { notices: 0, delivered: 0, undelivered: 0, flipped: 0, held: 0, alerts: 0, tenants: 0 };
+  const tenants = await prisma.tenantBillingCurrency.findMany({
+    where: { usdMigrationMode: 'B', usdSunsetAt: { not: null }, ...(opts.tenantIds ? { tenantId: { in: opts.tenantIds } } : {}) },
   });
-  let notices = 0;
-  let flipped = 0;
-  let alerts = 0;
-  const currency = tenant.settlementCurrency;
+  const notifications = new NotificationService(prisma, io);
+  for (const tenant of tenants) {
+    const sunset = tenant.usdSunsetAt!;
+    const currency = tenant.settlementCurrency;
+    out.tenants += 1;
+    const grandfathered = await prisma.subscription.findMany({
+      where: { customRate: { not: null }, status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE', 'SUSPENDED'] }, ...subscriptionTenantWhere(tenant.tenantId) },
+      select: { id: true, customRate: true, currencyCode: true },
+    });
+    let heldHere = 0;
+    for (const s of grandfathered) {
+      const phases: Array<{ key: 't30' | 't7'; dueFrom: number }> = [
+        { key: 't30', dueFrom: sunset.getTime() - 30 * DAY_MS },
+        { key: 't7', dueFrom: sunset.getTime() - 7 * DAY_MS },
+      ];
+      for (const phase of phases) {
+        if (now.getTime() < phase.dueFrom) continue;
+        const key = modeBKey(s.id, phase.key);
+        let event = await prisma.billingEvent.findUnique({ where: { idempotencyKey: key }, select: { id: true, deliveredAt: true } });
+        if (!event) {
+          try {
+            event = await prisma.billingEvent.create({
+              data: {
+                subscriptionId: s.id, type: 'REMINDER', currencyCode: currency,
+                idempotencyKey: key,
+                note: `Mode B sunset notice ${phase.key} (sunset ${sunset.toISOString().slice(0, 10)})`,
+              },
+              select: { id: true, deliveredAt: true },
+            });
+            out.notices += 1;
+          } catch (err) {
+            if ((err as { code?: string }).code !== 'P2002') throw err;
+            event = await prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: key }, select: { id: true, deliveredAt: true } });
+          }
+        }
+        if (event.deliveredAt) continue; // told already
+        const userId = await userIdFor(prisma, s.id);
+        if (!userId) continue;
+        const days = Math.max(1, Math.ceil((sunset.getTime() - now.getTime()) / DAY_MS));
+        try {
+          await notifications.send({
+            userId, type: 'SYSTEM_ANNOUNCEMENT',
+            title: 'Your weekly fee moves to USD pricing soon',
+            body: `In ${days} day${days === 1 ? '' : 's'} your fee follows the USD price book. Your current ${formatMoney(Number(s.customRate), currency)} rate applies until then.`,
+            data: { kind: 'usd_migration_notice', mode: 'B', phase: phase.key, subscriptionId: s.id },
+          });
+          await prisma.billingEvent.update({ where: { id: event.id }, data: { deliveredAt: now } });
+          out.delivered += 1;
+        } catch (err) {
+          out.undelivered += 1;
+          log().warn({ err, subscriptionId: s.id, phase: phase.key }, '[M-15] Mode B notice not delivered — the payer stays pinned until it is');
+        }
+      }
 
-  for (const s of grandfathered) {
-    const phases: Array<{ key: string; dueFrom: number }> = [
-      { key: 't30', dueFrom: sunset.getTime() - 30 * DAY_MS },
-      { key: 't7', dueFrom: sunset.getTime() - 7 * DAY_MS },
-    ];
-    for (const phase of phases) {
-      if (now.getTime() < phase.dueFrom) continue;
-      try {
-        await prisma.billingEvent.create({
-          data: {
-            subscriptionId: s.id, type: 'REMINDER', currencyCode: currency,
-            idempotencyKey: `usdmigB:${s.id}:${phase.key}`,
-            note: `Mode B sunset notice ${phase.key} (sunset ${sunset.toISOString().slice(0, 10)})`,
+      if (now >= sunset) {
+        // The hard gate: both notices verifiably DELIVERED — and the T−7 one
+        // delivered at least seven days ago, so a notice that only got through
+        // late still gives its week of warning — or the payer stays pinned at
+        // the price they were promised.
+        const proofs = await prisma.billingEvent.count({
+          where: {
+            subscriptionId: s.id,
+            OR: [
+              { idempotencyKey: modeBKey(s.id, 't30'), deliveredAt: { not: null } },
+              { idempotencyKey: modeBKey(s.id, 't7'), deliveredAt: { lte: new Date(now.getTime() - 7 * DAY_MS) } },
+            ],
           },
         });
-      } catch {
-        continue; // this phase already sent
-      }
-      const userId = await userIdFor(prisma, s.id);
-      if (userId) {
-        const days = Math.max(1, Math.ceil((sunset.getTime() - now.getTime()) / DAY_MS));
-        await notifications.send({
-          userId, type: 'SYSTEM_ANNOUNCEMENT',
-          title: 'Your weekly fee moves to USD pricing soon',
-          body: `In ${days} day${days === 1 ? '' : 's'} your fee follows the USD price book. Your current ${formatMoney(Number(s.customRate), currency)} rate applies until then.`,
-          data: { kind: 'usd_migration_notice', mode: 'B', phase: phase.key, subscriptionId: s.id },
-        }).catch(() => {});
-        notices += 1;
+        if (proofs < 2) {
+          heldHere += 1;
+          log().error({ subscriptionId: s.id, proofs, tenantId: tenant.tenantId }, '[M-15] Mode B past sunset with notice proof missing — payer HELD at the grandfathered rate');
+          continue;
+        }
+        await prisma.$transaction(async (tx) => {
+          // The immutable snapshot rollback points to: the pinned price, now released.
+          try {
+            await tx.billingEvent.create({
+              data: {
+                subscriptionId: s.id, type: 'TIER_CHANGE', amount: s.customRate!, currencyCode: s.currencyCode,
+                idempotencyKey: modeBKey(s.id, 'flip'),
+                note: `Mode B sunset: ${formatMoney(Number(s.customRate), currency)} released to the USD price book (tenant ${tenant.tenantId})`,
+              },
+            });
+          } catch (err) {
+            if ((err as { code?: string }).code !== 'P2002') throw err;
+          }
+          await tx.subscription.update({ where: { id: s.id }, data: { customRate: null } });
+        });
+        out.flipped += 1;
+        usdMigrationFlipsCounter.labels('flipped').inc();
       }
     }
-
-    if (now >= sunset) {
-      // Verify both notices actually exist before flipping — missing → alert.
-      const sent = await prisma.billingEvent.count({
-        where: { subscriptionId: s.id, idempotencyKey: { in: [`usdmigB:${s.id}:t30`, `usdmigB:${s.id}:t7`] } },
-      });
-      if (sent < 2) {
-        alerts += 1;
-        log().error({ subscriptionId: s.id, sent }, 'usd migration Mode B: flipping past sunset with MISSING notices — investigate');
-      }
-      await prisma.subscription.update({ where: { id: s.id }, data: { customRate: null } });
-      flipped += 1;
+    if (heldHere > 0) {
+      out.held += heldHere;
+      out.alerts += 1;
+      await notifyAdmins(prisma, notifications, {
+        tenantId: tenant.tenantId,
+        title: '💱 USD migration: payers held at their old rate — notice proof missing',
+        body: `${heldHere} grandfathered payer(s) passed the sunset without both T−30 and T−7 notices verifiably delivered. They stay pinned at the rate they were promised until the notices are delivered; nothing was flipped for them.`,
+        data: { kind: 'billing_invariants', alert: 'usd-migration-notice-proof', held: heldHere },
+      }).catch(() => {});
     }
   }
-  if (notices + flipped > 0) log().info({ notices, flipped, alerts }, 'usd migration Mode B sweep');
-  return { notices, flipped, alerts };
+  usdMigrationHeldGauge.set(out.held);
+  if (out.notices + out.flipped + out.held > 0) log().info(out, 'usd migration Mode B sweep');
+  return out;
+}
+
+/** [M-15] Rollback is a pointer back to the immutable snapshot, never a
+ *  rewrite: every payer of THIS tenant who was released at sunset is pinned
+ *  again at the exact price the flip event recorded, and the return trip is
+ *  itself recorded. The tenant leaves Mode B. */
+export async function rollbackModeB(prisma: PrismaClient, tenantId: string, now = new Date()): Promise<{ restored: number; tenantId: string }> {
+  const flips = await prisma.billingEvent.findMany({
+    where: { idempotencyKey: { startsWith: 'usdmigB:' }, type: 'TIER_CHANGE', note: { startsWith: 'Mode B sunset:' }, subscription: { ...subscriptionTenantWhere(tenantId), customRate: null } },
+    select: { id: true, subscriptionId: true, amount: true, currencyCode: true },
+  });
+  let restored = 0;
+  for (const flip of flips) {
+    if (flip.amount == null) continue;
+    await prisma.$transaction(async (tx) => {
+      await tx.subscription.update({ where: { id: flip.subscriptionId }, data: { customRate: flip.amount! } });
+      await tx.billingEvent.create({
+        data: {
+          subscriptionId: flip.subscriptionId, type: 'TIER_CHANGE', amount: flip.amount!, currencyCode: flip.currencyCode,
+          idempotencyKey: `usdmigB:${flip.subscriptionId}:rollback:${now.getTime()}`,
+          note: `Mode B rollback: pinned again at ${formatMoney(Number(flip.amount), flip.currencyCode)} from the sunset snapshot (tenant ${tenantId})`,
+        },
+      });
+    });
+    restored += 1;
+    usdMigrationFlipsCounter.labels('rolled_back').inc();
+  }
+  await prisma.tenantBillingCurrency.updateMany({ where: { tenantId }, data: { usdMigrationMode: null, usdSunsetAt: null } });
+  log().warn({ restored, tenantId }, '[M-15] usd migration Mode B rolled back — payers pinned again from their snapshots');
+  return { restored, tenantId };
 }

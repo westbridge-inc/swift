@@ -3046,7 +3046,17 @@ export async function adminRoutes(app: FastifyInstance) {
       throw new AppError(400, 'SUNSET_TOO_SOON', 'The sunset must be at least 30 days out — the T−30 notice needs its window.');
     }
     const { enableModeB } = await import('../billing/usd-migration');
-    return { success: true, data: await enableModeB(tenantPrisma, sunset) };
+    // [M-15] The migration is this tenant's, never every tenant's.
+    return { success: true, data: await enableModeB(tenantPrisma, sunset, requireTenantId()) };
+  });
+
+  /** [M-15] Rollback is a pointer back to each payer's sunset snapshot —
+   *  never a destructive rewrite — for THIS tenant. */
+  app.post('/billing/usd-migration/mode-b/rollback', { preHandler: [adminGuard] }, async (request) => {
+    const { rollbackModeB } = await import('../billing/usd-migration');
+    const result = await rollbackModeB(tenantPrisma, requireTenantId());
+    await audit(request.user.userId, 'USD_MIGRATION_ROLLBACK', 'TenantBillingCurrency', requireTenantId(), result, request);
+    return { success: true, data: result };
   });
 
   /** Pure preview (Part 12): the full plan table at a hypothetical rate —

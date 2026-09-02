@@ -225,12 +225,14 @@ describe('System 2 ⑤ — Mode B grandfather → sunset (Part 13/20)', () => {
       await sweepModeB(prisma, io, t20);
       expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, idempotencyKey: `usdmigB:${sub.id}:t30` } })).toBe(1);
 
-      // T−3: the T−7 notice fires too.
-      await sweepModeB(prisma, io, new Date(sunset.getTime() - 3 * 86_400_000));
+      // T−6: the T−7 notice fires too.
+      await sweepModeB(prisma, io, new Date(sunset.getTime() - 6 * 86_400_000));
       expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, idempotencyKey: `usdmigB:${sub.id}:t7` } })).toBe(1);
 
-      // Past sunset: customRate clears (the USD book takes over) with zero alerts.
-      const res = await sweepModeB(prisma, io, new Date(sunset.getTime() + 3600_000));
+      // Past sunset — [M-15] and a week past the T−7 delivery, the gate's
+      // warning period: customRate clears (the USD book takes over) with zero
+      // alerts, because both notices carry delivery proof.
+      const res = await sweepModeB(prisma, io, new Date(sunset.getTime() + 2 * 86_400_000));
       expect(res.flipped).toBeGreaterThanOrEqual(1);
       expect(res.alerts).toBe(0); // both notices verifiably sent
       const after = await prisma.subscription.findUnique({ where: { id: sub.id } });
