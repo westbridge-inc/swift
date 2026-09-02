@@ -226,3 +226,46 @@ describe('the result is written with the order and replayed from the database', 
     expect(await app.prisma.checkoutReceipt.count({ where: { userId: c.userId, idempotencyKey: key } })).toBe(1);
   });
 });
+
+describe('[M-12] the command key is claimed only for a valid, canonical request', () => {
+  it('a malformed request never consumes the key: an invalid payment method is 400, the key stays free, and the corrected same-key request places immediately', async () => {
+    const c = await makeCustomer();
+    await fillCart(c);
+    const key = `dur-${nanoid(10)}`;
+    const bad = await checkout(c, key, { paymentMethod: 'CARD' });
+    expect(bad.statusCode).toBe(400);
+    expect(await app.redis.get(`checkout:idem:${c.userId}:${key}`)).toBeNull(); // not IN_FLIGHT for a day
+    expect(await app.prisma.checkoutReceipt.count({ where: { userId: c.userId, idempotencyKey: key } })).toBe(0);
+    const good = await checkout(c, key);
+    expect(good.statusCode, good.body).toBe(200); // not the 409 a stranded claim answered
+    expect(await ordersOf(c.userId)).toBe(1);
+  });
+
+  it('a malformed timestamp is refused, not silently accepted through two false comparisons', async () => {
+    const c = await makeCustomer();
+    await fillCart(c);
+    const key = `dur-${nanoid(10)}`;
+    const res = await checkout(c, key, { paymentMethod: 'CASH', scheduledFor: 'tomorrow-ish' });
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toContain('valid ISO 8601');
+    expect(await ordersOf(c.userId)).toBe(0);
+    expect(await app.redis.get(`checkout:idem:${c.userId}:${key}`)).toBeNull();
+  });
+
+  it('two spellings of the same instant are the same request: the second is a replay, not a refusal', async () => {
+    const c = await makeCustomer();
+    await fillCart(c);
+    const key = `dur-${nanoid(10)}`;
+    const slot = new Date(Date.now() + 2 * 86_400_000);
+    slot.setUTCMilliseconds(0);
+    const first = await checkout(c, key, { paymentMethod: 'CASH', scheduledFor: slot.toISOString() });
+    expect(first.statusCode, first.body).toBe(200);
+    await app.redis.del(`checkout:idem:${c.userId}:${key}`);
+    await fillCart(c);
+    const spelledDifferently = slot.toISOString().replace('.000Z', '+00:00');
+    const again = await checkout(c, key, { paymentMethod: 'CASH', scheduledFor: spelledDifferently });
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json().replayed).toBe(true);
+    expect(await ordersOf(c.userId)).toBe(1);
+  });
+});
