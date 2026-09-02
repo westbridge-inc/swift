@@ -187,6 +187,14 @@ export class BillingService {
             sub, recordedFailure.note ?? 'Charge failed (outcome resumed after interruption)', now, periodKey,
           );
         }
+        // [TA-S0-002] A run that reserved this attempt's MMG intent and died
+        // before recording the outcome left a live intent the poller owns.
+        // That is "pending", not "skipped" — and nobody re-initiates over it.
+        const liveIntent = await this.prisma.subscriptionPayment.findUnique({
+          where: { clientKey: this.mmgReference(sub) },
+          select: { status: true },
+        });
+        if (liveIntent && (liveIntent.status === 'PENDING' || liveIntent.status === 'UNKNOWN')) return 'pending';
         return 'skipped'; // someone (or a concurrent run) already attempted this
       }
       throw error;
@@ -246,18 +254,14 @@ export class BillingService {
       // succeeded (no money confirmed). The intent records our clientKey with
       // no provider id; the poller adopts it from transaction history or
       // expires it at TTL, and SWIFT-004 refuses to fire over it meanwhile.
-      await this.prisma.subscriptionPayment.create({
+      // [TA-S0-002] The intent row already exists (reserved before the
+      // provider call); it just learns that the initiate itself died.
+      await this.prisma.subscriptionPayment.updateMany({
+        where: { id: charged.intentId, status: 'UNKNOWN', externalRef: null },
         data: {
-          subscriptionId: sub.id,
-          amount,
-          status: 'UNKNOWN',
-          paymentMethod: sub.billingMethod,
-          clientKey: charged.clientKey,
           failureCode: 'TIMEOUT_UNKNOWN',
           ...(charged.failureRaw ? { failureRaw: { reason: charged.failureRaw } } : {}),
           expiresAt: new Date(now.getTime() + MMG_REQUEST_TTL_MS),
-          periodStart: sub.nextBillingDate,
-          periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
         },
       });
       await this.prisma.subscription.update({
@@ -272,18 +276,11 @@ export class BillingService {
       // the in-flight payment; the poller settles it either way. The retry
       // clock still advances so an ignored request becomes tomorrow's dunning
       // attempt instead of a same-hour duplicate ping.
-      await this.prisma.subscriptionPayment.create({
-        data: {
-          subscriptionId: sub.id,
-          amount,
-          status: 'PENDING',
-          paymentMethod: sub.billingMethod,
-          externalRef: charged.pendingTx,
-          clientKey: charged.clientKey,
-          expiresAt: charged.expiresAt,
-          periodStart: sub.nextBillingDate,
-          periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
-        },
+      // [TA-S0-002] The intent row was reserved before the provider call;
+      // MMG's own id lands on it now, and the poller takes it from here.
+      await this.prisma.subscriptionPayment.updateMany({
+        where: { id: charged.intentId, status: 'UNKNOWN', externalRef: null },
+        data: { status: 'PENDING', externalRef: charged.pendingTx, expiresAt: charged.expiresAt, failureCode: null },
       });
       await this.prisma.subscription.update({
         where: { id: sub.id },
@@ -301,6 +298,45 @@ export class BillingService {
     }
 
     return this.applyFailedCharge(sub, amount, charged.reason, now, periodKey);
+  }
+
+  /** The MMG merchant reference for one attempt — ONE format, shared by the
+   *  initiate, the duplicate-attempt check and the poller's adoption. */
+  private mmgReference(sub: Pick<Subscription, 'id' | 'nextBillingDate' | 'failedAttempts'>): string {
+    return `sub:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}:a${sub.failedAttempts}`;
+  }
+
+  /**
+   * [TA-S0-002 / M-03] Reserve the durable MMG intent for one attempt BEFORE
+   * the provider is asked: UNKNOWN, our clientKey, no provider id yet, the
+   * TTL already ticking. `clientKey` is unique, so a second reservation for
+   * the same attempt is refused at the database — that means a previous run
+   * reserved it and died: the poller owns that row (history adoption by our
+   * reference, or expiry at TTL) and no second prompt may ever be issued.
+   * Returns null in that case.
+   */
+  private async reserveMmgIntent(sub: SubWithRelations, amount: number, reference: string, now = new Date()): Promise<{ id: string } | null> {
+    try {
+      return await this.prisma.subscriptionPayment.create({
+        data: {
+          subscriptionId: sub.id,
+          amount,
+          status: 'UNKNOWN',
+          paymentMethod: sub.billingMethod,
+          clientKey: reference,
+          expiresAt: new Date(now.getTime() + MMG_REQUEST_TTL_MS),
+          periodStart: sub.nextBillingDate,
+          periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
+        },
+        select: { id: true },
+      });
+    } catch (error) {
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+        log().warn({ subscriptionId: sub.id, reference }, 'mmg intent already reserved for this attempt — deferring to the poller, never a second prompt');
+        return null;
+      }
+      throw error;
+    }
   }
 
   private amountFor(sub: Subscription): Prisma.Decimal | number {
@@ -373,8 +409,8 @@ export class BillingService {
      *  advance transaction, so the money and the week it buys commit together. */
     | { ok: true; ref: string; settlePaymentId?: string; spendPrepaid?: number }
     | { ok: false; reason: string; failureCode?: NormalizedFailure }
-    | { ok: false; pendingTx: string; clientKey: string; expiresAt: Date }
-    | { ok: false; unknown: true; clientKey: string; failureRaw?: string }
+    | { ok: false; pendingTx: string; clientKey: string; expiresAt: Date; intentId: string }
+    | { ok: false; unknown: true; clientKey: string; failureRaw?: string; intentId: string }
     | { ok: false; deferred: true; reopenPaymentId?: string }
   > {
     // Prepaid balance is money Swift already holds — spend it before pinging any
@@ -460,22 +496,43 @@ export class BillingService {
       // provider seam; the reference doubles as the retry-safe correlation id
       // AND lands on the intent row as clientKey (the key that survives an
       // initiate timeout, when MMG's own id never came back).
-      const reference = `sub:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}:a${sub.failedAttempts}`;
+      const reference = this.mmgReference(sub);
+
+      // [TA-S0-002 / M-03] THE INTENT BEFORE THE EFFECT. The row used to be
+      // written AFTER MMG answered — so a process that died between MMG
+      // accepting the request and the row landing left a live prompt on the
+      // payer's phone that nothing here could poll, settle, bank or retry,
+      // while the next run collided on the attempt key and skipped forever.
+      // Now the durable intent (UNKNOWN, our clientKey, no provider id yet)
+      // exists before MMG is asked; every outcome below settles THAT row, and
+      // a run that dies at any point leaves a row the poller already owns:
+      // adopted from MMG's history by our reference, or expired at TTL.
+      const intent = await this.reserveMmgIntent(sub, amount, reference);
+      if (!intent) return { ok: false, deferred: true }; // this attempt's intent is already live — never a second prompt
+
       const result = await mmg.initiatePayment({
         payerId: sub.mmgPayerMsisdn,
         amountMinor: Math.round(amount * 100),
         currencyCode: sub.currencyCode,
         reference,
       });
-      if (result.status === 'approved') return { ok: true, ref: result.transactionId };
+      if (result.status === 'approved') return { ok: true, ref: result.transactionId, settlePaymentId: intent.id };
       if (result.status === 'pending' && result.transactionId) {
-        return { ok: false, pendingTx: result.transactionId, clientKey: reference, expiresAt: new Date(Date.now() + MMG_REQUEST_TTL_MS) };
+        return { ok: false, pendingTx: result.transactionId, clientKey: reference, expiresAt: new Date(Date.now() + MMG_REQUEST_TTL_MS), intentId: intent.id };
       }
-      if (result.status === 'error') {
-        // Transport-shaped: the request MAY be live on the payer's phone.
-        return { ok: false, unknown: true, clientKey: reference, failureRaw: result.reason };
+      if (result.status === 'error' || result.status === 'pending') {
+        // Transport-shaped (or pending with no id to poll by): the request
+        // MAY be live on the payer's phone — UNKNOWN, owned by the poller.
+        return { ok: false, unknown: true, clientKey: reference, failureRaw: result.reason, intentId: intent.id };
       }
-      return { ok: false, reason: result.reason ?? 'MMG request failed', failureCode: mapMmgFailure(result.status, result.reason) };
+      // MMG answered "no" (declined / reversed / expired at initiate): the
+      // intent closes as FAILED on the same row, with the normalized code.
+      const failureCode = mapMmgFailure(result.status, result.reason);
+      await this.prisma.subscriptionPayment.updateMany({
+        where: { id: intent.id, status: 'UNKNOWN', externalRef: null },
+        data: { status: 'FAILED', failureCode, ...(result.reason ? { failureRaw: { reason: result.reason } } : {}) },
+      });
+      return { ok: false, reason: result.reason ?? 'MMG request failed', failureCode };
     }
 
     // Prepaid already tried and came up short above; no usable external rail
@@ -545,9 +602,11 @@ export class BillingService {
     }
 
     if (settlePaymentId) {
+      // A guard-detected late approval carries the row's own externalRef
+      // (same value); a reserved intent approved at initiate learns it here.
       await tx.subscriptionPayment.update({
         where: { id: settlePaymentId },
-        data: { status: 'CAPTURED', paidAt: now },
+        data: { status: 'CAPTURED', paidAt: now, externalRef: paymentRef, failureCode: null },
       });
     } else {
       await tx.subscriptionPayment.create({
