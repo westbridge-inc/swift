@@ -1484,6 +1484,12 @@ model Order {
   /// accept and offer accept all exclude it) and the dispatch loop leaves it
   /// alone. Cleared only by an operator's decision (releaseFoodAgeHold).
   foodAgeHeldAt         DateTime?
+  /// [TA-S0-001 hold v3] An OPERATOR's decision to deliver a held order anyway,
+  /// durably: the food-age cutoff no longer applies to this order, so releasing
+  /// the hold does not simply re-hold it on the next tick. Who decided is
+  /// recorded beside it and in the status log.
+  foodAgeWaivedAt       DateTime?
+  foodAgeWaivedBy       String?
   placedAt              DateTime  @default(now())
   acceptedAt            DateTime?
   /// [Band F] When the mover REPORTED arriving at the pickup point. The

@@ -127,6 +127,9 @@ export class AgentService {
           fulfillment: 'DELIVERY',
           orderType: { not: 'TAXI' },
           riderId: null,
+          // [hold v3 · N-04] Held for review is a person's decision, not a
+          // problem the agent may re-propose every minute.
+          foodAgeHeldAt: null,
           updatedAt: { lt: min(20), ...ACTIVE_WINDOW },
           ...notHeld,
         },

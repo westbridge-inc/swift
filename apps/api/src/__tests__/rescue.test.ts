@@ -7,6 +7,12 @@ vi.mock('../modules/notification/notification.service', async (importOriginal) =
   const mod = await importOriginal<typeof import('../modules/notification/notification.service')>();
   return { ...mod, notifyAdmins: vi.fn(mod.notifyAdmins) };
 });
+// [hold v3 · N-02] recordDecision is spied the same way so one case can make
+// the decision write FAIL inside the claim transaction.
+vi.mock('../modules/algo/decisions', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../modules/algo/decisions')>();
+  return { ...mod, recordDecision: vi.fn(mod.recordDecision) };
+});
 import { nanoid } from 'nanoid';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -20,9 +26,10 @@ import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { NotificationService, notifyAdmins } from '../modules/notification/notification.service';
 import { OrderService } from '../modules/order/order.service';
+import { recordDecision } from '../modules/algo/decisions';
 import { ConflictError } from '../utils/errors';
 import {
-  foodAge, foodAgeLimitMinutes, retireTooOldOrder, settleTooOldOrder, sweepFoodAge, releaseFoodAgeHold, grantRescueIncentive, rescueIncentiveGyd, incentiveKey, isCapturedMmg,
+  foodAge, foodAgeLimitMinutes, retireTooOldOrder, settleTooOldOrder, sweepFoodAge, releaseFoodAgeHold, grantRescueIncentive, rescueIncentiveGyd, incentiveKey, isCapturedMmg, SWEEP_PAGE,
   FOOD_TOO_OLD_REASON, FOOD_TOO_OLD_PAID_HELD_OUTCOME,
 } from '../modules/dispatch/rescue';
 import { ALGO_DEFAULTS, invalidateAlgoConfig } from '../modules/algo/algo-config';
@@ -173,6 +180,8 @@ beforeAll(async () => {
   customerId = customer.id;
   userIds.push(customer.id);
   const ownerUser = await app.prisma.user.create({ data: { phone: `${PHONE_PREFIX}91`, firstName: 'Rescue', lastName: 'Owner', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true, selfieCapturedAt: new Date() } });
+  // [hold v3 · N-11] "ops paged" is proved against THIS admin, not whatever the CI seed happens to hold.
+  await app.prisma.user.create({ data: { phone: `${PHONE_PREFIX}92`, firstName: 'Rescue', lastName: 'Admin', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true, selfieCapturedAt: new Date() } });
   vendorOwnerUserId = ownerUser.id;
   userIds.push(ownerUser.id);
   const vo = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
@@ -371,16 +380,17 @@ describe('[TA-S0-001] paid MMG money is never cancelled by the system', () => {
     const toCustomer = await app.prisma.notification.findFirst({ where: { userId: customerId, dedupeKey: `food-too-old-paid:customer:${order.id}` } });
     expect(toCustomer?.body).toContain('already paid the store by MMG');
     expect(toCustomer?.body).toContain('NOT cancelled automatically');
-    expect(toCustomer?.body).toContain('sent to Swift for review');
+    expect(toCustomer?.body).toContain('flagged for review by Swift');
     expect(toCustomer?.body).toContain('the store refunds you directly');
     // [REPORT-070 F-13] Nobody has acknowledged anything: no claim of a person already on it, no Swift refund.
-    expect(toCustomer?.body).not.toMatch(/sorting|handling|a person at Swift is|Swift (will )?refund/i);
+    expect(toCustomer?.body).not.toMatch(/sorting|handling|a person at Swift is|sent to Swift|Swift (will )?refund/i);
     expect(await app.prisma.notification.count({ where: { userId: customerId, dedupeKey: `food-too-old:customer:${order.id}` } })).toBe(0);
     // Store: not cancelled, keep it, a person is handling it.
     const toVendor = await app.prisma.notification.findFirst({ where: { userId: vendorOwnerUserId, dedupeKey: `food-too-old-paid:vendor:${order.id}` } });
     expect(toVendor?.title).toBe('No rider found — the customer has already paid');
     expect(toVendor?.body).toContain('NOT cancelled');
-    expect(toVendor?.body).toContain('sent to Swift for review');
+    expect(toVendor?.body).toContain('flagged for a Swift operator');
+    expect(toVendor?.body).toContain('you refund the customer directly');
     expect(toVendor?.body).not.toMatch(/sorting|handling|a person at Swift is/i);
     // The hold is a COLUMN, and it is set.
     expect(after.foodAgeHeldAt).not.toBeNull();
@@ -536,8 +546,8 @@ describe('[TA-S0-001 hold v2 — REPORT-070] the hold is durable, enforceable an
   it('[F-03] releaseFoodAgeHold is an operator’s decision: it clears the hold once, logs who, and reopens the page', async () => {
     const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
     await settleTooOldOrder(deps(), await full(order.id), 60, 45);
-    expect(await releaseFoodAgeHold(deps(), order.id, 'ops-user-1')).toBe(true);
-    expect(await releaseFoodAgeHold(deps(), order.id, 'ops-user-1')).toBe(false);
+    expect(await releaseFoodAgeHold(deps(), { orderId: order.id, tenantId: 'swift-default', byUserId: 'ops-user-1' })).toBe('RELEASED');
+    expect(await releaseFoodAgeHold(deps(), { orderId: order.id, tenantId: 'swift-default', byUserId: 'ops-user-1' })).toBe('NOT_HELD');
     const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(after.foodAgeHeldAt).toBeNull();
     expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, changedBy: 'ops-user-1' } })).toBe(1);
@@ -547,13 +557,100 @@ describe('[TA-S0-001 hold v2 — REPORT-070] the hold is durable, enforceable an
 
 // ---------------------------------------------------------------------------
 
+describe('[TA-S0-001 hold v3 — the review of #991] a two-way door with a durable record', () => {
+  const vendorInclude = { vendor: { select: { name: true, owner: { select: { userId: true } } } } } as const;
+  const full = (id: string) => app.prisma.order.findUniqueOrThrow({ where: { id }, include: vendorInclude });
+  const audit = async (id: string) => ({
+    decisions: await app.prisma.algoDecision.count({ where: { algo: 'ALG-06', subjectId: id, outcome: FOOD_TOO_OLD_PAID_HELD_OUTCOME } }),
+    notes: await app.prisma.orderStatusLog.count({ where: { orderId: id, changedBy: 'system', note: { startsWith: 'Food-age cutoff:' } } }),
+  });
+
+  it('[N-02] the claim and its record are one transaction: a refused decision write rolls the hold back, and the next tick lands all three', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    vi.mocked(recordDecision).mockImplementationOnce(async () => { throw new Error('decision store refused the write'); });
+    await expect(settleTooOldOrder(deps(), await full(order.id), 60, 45)).rejects.toThrow('decision store refused');
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.foodAgeHeldAt).toBeNull(); // no hold without its record
+    expect(await audit(order.id)).toEqual({ decisions: 0, notes: 0 });
+
+    expect(await settleTooOldOrder(deps(), await full(order.id), 60, 45)).toBe('HELD_PAID');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).foodAgeHeldAt).not.toBeNull();
+    expect(await audit(order.id)).toEqual({ decisions: 1, notes: 1 });
+  });
+
+  it('[N-02] the sweep repairs a hold that has no record (a pre-v3 hold), idempotently', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED', heldAgoMin: 3 });
+    expect(await audit(order.id)).toEqual({ decisions: 0, notes: 0 });
+    await sweepFoodAge(deps());
+    expect(await audit(order.id)).toEqual({ decisions: 1, notes: 1 });
+    await sweepFoodAge(deps());
+    expect(await audit(order.id)).toEqual({ decisions: 1, notes: 1 });
+  });
+
+  it('[N-07] the holds pass walks past its page across ticks: five holds, a page of two, every one served', async () => {
+    const ids: string[] = [];
+    for (let i = 5; i >= 1; i -= 1) ids.push((await makeOrder({ readyAgoMin: 90, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED', heldAgoMin: i })).id);
+    const saved = SWEEP_PAGE.holds;
+    SWEEP_PAGE.holds = 2;
+    try {
+      // Other cases in this file leave holds behind too, so the walk is driven
+      // until the cursor wraps: every hold in the set has been visited once.
+      await app.redis.del('rescue:cursor:holds');
+      let ticks = 0;
+      do {
+        await sweepFoodAge(deps());
+        ticks += 1;
+      } while ((await app.redis.exists('rescue:cursor:holds')) === 1 && ticks < 60);
+      expect(ticks).toBeGreaterThan(2); // the page really was smaller than the set
+    } finally {
+      SWEEP_PAGE.holds = saved;
+      await app.redis.del('rescue:cursor:holds');
+    }
+    for (const id of ids) {
+      expect(await app.prisma.notification.count({ where: { userId: customerId, dedupeKey: `food-too-old-paid:customer:${id}` } })).toBe(1);
+    }
+  });
+
+  it('[N-01/N-12] release is a durable "deliver anyway": the waiver is recorded, the sweep leaves the order alone, and the claim refuses it', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    expect(await settleTooOldOrder(deps(), await full(order.id), 60, 45)).toBe('HELD_PAID');
+    expect(await releaseFoodAgeHold(deps(), { orderId: order.id, tenantId: 'swift-default', byUserId: 'ops-user-2' })).toBe('RELEASED');
+    const released = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ held: released.foodAgeHeldAt, waivedBy: released.foodAgeWaivedBy }).toEqual({ held: null, waivedBy: 'ops-user-2' });
+    expect(released.foodAgeWaivedAt).not.toBeNull();
+    // Still 60 minutes old, still riderless — and no longer the cutoff's business.
+    const swept = await sweepFoodAge(deps());
+    expect(swept.held).not.toContain(order.id);
+    expect(swept.retired).not.toContain(order.id);
+    expect(await settleTooOldOrder(deps(), await full(order.id), 60, 45)).toBe('UNTOUCHED');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).foodAgeHeldAt).toBeNull();
+  });
+
+  it('[N-12] release binds tenant and lifecycle: another tenant sees nothing to release; a rider on the order makes it unreleasable', async () => {
+    const order = await makeOrder({ readyAgoMin: 60, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    expect(await settleTooOldOrder(deps(), await full(order.id), 60, 45)).toBe('HELD_PAID');
+    expect(await releaseFoodAgeHold(deps(), { orderId: order.id, tenantId: 'tenant-somewhere-else', byUserId: 'ops-user-3' })).toBe('NOT_HELD');
+    const rider = await makeRider();
+    try {
+      await app.prisma.order.update({ where: { id: order.id }, data: { riderId: rider.riderId } });
+      expect(await releaseFoodAgeHold(deps(), { orderId: order.id, tenantId: 'swift-default', byUserId: 'ops-user-3' })).toBe('NOT_RELEASABLE');
+    } finally {
+      await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null } });
+      await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false, isAvailable: false } });
+    }
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).foodAgeHeldAt).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
 describe('[ALG-06 ①] the escalating re-offer — Swift’s own money', () => {
   it('nothing at the shipped 0, nothing before the configured cascade, the amount from it on', async () => {
-    expect(await rescueIncentiveGyd(app.prisma, 5)).toBe(0);
+    expect(await rescueIncentiveGyd(app.prisma, 5, 'swift-default')).toBe(0);
     await setAlgo('rescue.incentiveGyd', 500);
-    expect(await rescueIncentiveGyd(app.prisma, 1)).toBe(0);
-    expect(await rescueIncentiveGyd(app.prisma, 2)).toBe(500);
-    expect(await rescueIncentiveGyd(app.prisma, 3)).toBe(500);
+    expect(await rescueIncentiveGyd(app.prisma, 1, 'swift-default')).toBe(0);
+    expect(await rescueIncentiveGyd(app.prisma, 2, 'swift-default')).toBe(500);
+    expect(await rescueIncentiveGyd(app.prisma, 3, 'swift-default')).toBe(500);
   });
 
   it('a second-cascade offer carries the incentive; accepting it creates the payable once, after the durable claim', async () => {
