@@ -51,7 +51,7 @@ describe('one screen, a stop list, each stop its own', () => {
   });
 
   it('the PIN sheet, cash line and customer all read `job` — the selected stop', () => {
-    expect(SCREEN).toContain("const isMmgPaid = job?.paymentMethod === 'MOBILE_MONEY';");
+    expect(SCREEN).toContain("const isMmgPaid = door.kind === 'no-cash' && job?.paymentMethod === 'MOBILE_MONEY';");
     expect(SCREEN).toContain('const cust: any = job?.customer ?? job?.user ?? null;');
     expect(SCREEN).toContain('riderAct.mutate({ id: job.id,');
   });

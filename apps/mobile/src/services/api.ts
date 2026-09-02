@@ -787,7 +787,8 @@ export const riderApi = {
   pickedUp: (id: string) => api.put(`/rider/orders/${id}/picked-up`),
   enRouteDelivery: (id: string) => api.put(`/rider/orders/${id}/en-route-delivery`),
   arrivedAtCustomer: (id: string) => api.put(`/rider/orders/${id}/arrived`),
-  delivered: (id: string) => api.put(`/rider/orders/${id}/delivered`),
+  /** [MOB-023] Echoes the handover authority version the screen rendered; the server refuses a stale one. */
+  delivered: (id: string, body?: { handoverVersion?: string }) => api.put(`/rider/orders/${id}/delivered`, body ?? {}),
   // G14: pre-pickup only — the server refuses with CUSTODY after pickup.
   handback: (id: string, reason: string) => api.post(`/rider/orders/${id}/handback`, { reason }),
   earningsToday: () => api.get('/rider/earnings/today'),

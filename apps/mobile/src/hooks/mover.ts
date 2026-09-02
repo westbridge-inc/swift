@@ -480,14 +480,14 @@ export function useRiderAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ id, action, reason, outcome }: { id: string; action: RiderAction; reason?: string; outcome?: FareOutcome }) => {
+    mutationFn: async ({ id, action, reason, outcome, handoverVersion }: { id: string; action: RiderAction; reason?: string; outcome?: FareOutcome; handoverVersion?: string }) => {
       switch (action) {
         case 'en-route-pickup': return unwrap(riderApi.enRoutePickup(id));
         case 'arrived-pickup': return unwrap(riderApi.arrivedPickup(id));
         case 'picked-up': return unwrap(riderApi.pickedUp(id));
         case 'en-route-delivery': return unwrap(riderApi.enRouteDelivery(id));
         case 'arrived': return unwrap(riderApi.arrivedAtCustomer(id));
-        case 'delivered': return unwrap(riderApi.delivered(id));
+        case 'delivered': return unwrap(riderApi.delivered(id, handoverVersion ? { handoverVersion } : undefined));
         case 'handback': return unwrap(riderApi.handback(id, reason ?? 'unable to continue'));
         case 'handover': {
           const owner = requireAuthSessionSnapshot();

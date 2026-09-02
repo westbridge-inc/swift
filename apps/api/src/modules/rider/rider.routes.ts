@@ -27,6 +27,8 @@ import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { handoverAuthorityFor, handoverVersionMatches } from '../order/handover-authority';
+import { handoverBlockCounter } from '../../plugins/observability';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
@@ -78,6 +80,8 @@ const riderGoOnlineSchema = riderLocationSchema.pick({ latitude: true, longitude
 
 const pickupPinSchema = z.object({
   ridePin: z.string().min(1).max(10).optional(),
+  /** [MOB-023] The handover authority version the screen rendered; a stale one is refused. */
+  handoverVersion: z.string().min(1).max(64).optional(),
 });
 
 const riderHistoryQuerySchema = z.object({
@@ -1077,12 +1081,16 @@ export async function riderRoutes(app: FastifyInstance) {
     items: { select: { name: true, quantity: true, totalCustomer: true, specialInstructions: true } },
     statusHistory: { orderBy: { createdAt: 'desc' as const }, take: 10 },
   };
-  const activeOrderView = <O extends { deliveryFee: unknown; tipAmount: unknown; totalAmount: unknown }>(order: O) => ({
+  const activeOrderView = <O extends { id: string; status: string; paymentMethod: string; paymentStatus: string; updatedAt: Date; currencyCode?: string | null; deliveryFee: unknown; tipAmount: unknown; totalAmount: unknown }>(order: O) => ({
     ...order,
     deliveryFee: Number(order.deliveryFee),
     tipAmount: Number(order.tipAmount),
     totalAmount: Number(order.totalAmount),
     totalEarning: Number(order.deliveryFee) + Number(order.tipAmount),
+    // [MOB-023] What the door may do is the SERVER's to say: rail, payment
+    // state, custody state, amount, a version the screen echoes back, and the
+    // permitted action. The screen renders this — never `paymentMethod` alone.
+    handover: handoverAuthorityFor(order),
     // [F-0011] The delivery PIN is deliberately NOT returned: this rider is
     // the party who verifies it at PUT /orders/:id/delivered. They must ask
     // the customer for it.
@@ -1443,7 +1451,7 @@ export async function riderRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/delivered — Final step: complete delivery, create earnings, free rider. */
   app.put('/orders/:id/delivered', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { ridePin } = pickupPinSchema.parse(request.body ?? {});
+    const { ridePin, handoverVersion } = pickupPinSchema.parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
     // Idempotent on Idempotency-Key: a retried final step returns the original
     // result instead of failing the now-terminal transition. The whole effect
@@ -1451,6 +1459,22 @@ export async function riderRoutes(app: FastifyInstance) {
     // replay short-circuits to the stored result.
     const { data, replayed } = await withIdempotency(app, request, 'delivered', id, async () => {
       const order = await getOwnedOrder(app, id, rider.id);
+
+      // [MOB-023] The door's authority, validated at the moment of hand-over:
+      // a screen that rendered an older payment or custody state is refused
+      // (refresh), and a non-cash rail whose money has not landed — PENDING,
+      // UNKNOWN, FAILED, EXPIRED, REFUNDED — is never handed over as paid.
+      if (!handoverVersionMatches(order, handoverVersion)) {
+        handoverBlockCounter.labels('STALE_VERSION').inc();
+        throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
+      }
+      const authority = handoverAuthorityFor(order);
+      if (authority.permitted === 'BLOCKED') {
+        handoverBlockCounter.labels(authority.blockReason ?? 'BLOCKED').inc();
+        // PENDING keeps the fulfilment gate's one domain error (SPS-F-0016); every other un-landed state is the door's.
+        const code = order.paymentStatus === 'PENDING' ? 'MMG_PAYMENT_PENDING' : 'PAYMENT_NOT_CAPTURED';
+        throw new AppError(409, code, `Payment is ${order.paymentStatus.toLowerCase()} — do not hand over. Refresh, or ask the store to confirm the payment.`);
+      }
 
       const validFrom = ['ARRIVED', 'EN_ROUTE_DELIVERY'];
       if (!validFrom.includes(order.status)) {
