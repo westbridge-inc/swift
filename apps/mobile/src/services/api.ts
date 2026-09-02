@@ -1,4 +1,6 @@
 import axios, { type AxiosRequestConfig } from 'axios';
+import Constants from 'expo-constants';
+import { TurboModuleRegistry } from 'react-native';
 import {
   getAuthSessionSnapshot,
   isAuthSessionSnapshotCurrent,
@@ -6,11 +8,26 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
+import {
+  getReactNativeBundleScriptUrl,
+  resolveApiOrigin,
+} from './apiOrigin';
 
 // Build-time override (set per EAS build profile, e.g. preview→staging,
-// production→prod). Falls back to localhost in dev and the prod domain otherwise.
+// production→prod). Development follows the current Expo/Metro bundle host so
+// each physical device or emulator resolves the workstation through its own topology.
 // eslint-disable-next-line no-undef
-export const API_URL = process.env['EXPO_PUBLIC_API_URL'] ?? (__DEV__ ? 'http://localhost:3000' : 'https://api.swift.gy');
+const isDevelopment = typeof __DEV__ !== 'undefined' && __DEV__;
+const sourceCodeModule = isDevelopment
+  ? TurboModuleRegistry.get('SourceCode')
+  : null;
+export const API_URL = resolveApiOrigin({
+  // @ts-expect-error Expo statically inlines this declared public build-time variable.
+  explicitOrigin: process.env.EXPO_PUBLIC_API_URL,
+  isDev: isDevelopment,
+  expoHostUri: Constants.expoConfig?.hostUri,
+  bundleScriptUrl: getReactNativeBundleScriptUrl(sourceCodeModule),
+});
 
 /** [B9] Where PUBLIC share links point — the web app, never the API. Used by
  *  parcel tracking (`/track/:token`); trip shares join it when they move off

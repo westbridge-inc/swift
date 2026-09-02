@@ -9,13 +9,17 @@ import type { AuthSessionSnapshot, RotatedAuthTokens } from '../lib/authSession'
 
 const auth = vi.hoisted(() => {
   const previousApiUrl = process.env['EXPO_PUBLIC_API_URL'];
-  process.env['EXPO_PUBLIC_API_URL'] = 'https://api.test';
+  delete process.env['EXPO_PUBLIC_API_URL'];
+  const devGlobal = globalThis as typeof globalThis & { __DEV__?: boolean };
+  const previousDev = devGlobal.__DEV__;
+  devGlobal.__DEV__ = true;
   return {
     current: null as AuthSessionSnapshot | null,
     logoutCalls: 0,
     rotateCalls: 0,
     selectedStoreId: null as string | null,
     previousApiUrl,
+    previousDev,
   };
 });
 
@@ -51,7 +55,22 @@ vi.mock('../stores/storeSwitcher', () => ({
   useStoreSwitcher: { getState: () => ({ selectedStoreId: auth.selectedStoreId }) },
 }));
 
+vi.mock('expo-constants', () => ({
+  default: { expoConfig: {} },
+}));
+
+vi.mock('react-native', () => ({
+  TurboModuleRegistry: {
+    get: () => ({
+      getConstants: () => ({
+        scriptURL: 'http://10.0.2.2:8081/index.bundle?platform=android',
+      }),
+    }),
+  },
+}));
+
 import {
+  API_URL,
   adsApi,
   api,
   authApi,
@@ -146,6 +165,19 @@ afterAll(() => {
   } else {
     process.env['EXPO_PUBLIC_API_URL'] = auth.previousApiUrl;
   }
+  const devGlobal = globalThis as typeof globalThis & { __DEV__?: boolean };
+  if (auth.previousDev === undefined) {
+    delete devGlobal.__DEV__;
+  } else {
+    devGlobal.__DEV__ = auth.previousDev;
+  }
+});
+
+describe('API origin integration', () => {
+  it('uses the native SourceCode host for the shared Axios base URL', () => {
+    expect(API_URL).toBe('http://10.0.2.2:3000');
+    expect(api.defaults.baseURL).toBe('http://10.0.2.2:3000/api/v1');
+  });
 });
 
 describe('Axios auth interceptor integration', () => {
