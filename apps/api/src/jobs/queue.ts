@@ -577,6 +577,21 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ctx.log.warn(tails, '[M-08] top-up tails owed — drained');
           }
           await billing.scanUnkeyedTopUpDuplicates();
+          // [M-20] Settlement imports a person must see: unbalanced publications
+          // and rejected files with a credited row. Reported, never reversed.
+          const { scanSettlementImports } = await import('../modules/billing/settlement-import');
+          const imports = await scanSettlementImports(ctx.prisma);
+          if (imports.unbalanced.length + imports.rejectedButCredited.length > 0) {
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'settlement-imports-review', 24 * 3600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: '📄 Settlement imports need a person',
+                body: `${imports.unbalanced.length} published import(s) do not balance and ${imports.rejectedButCredited.length} rejected file(s) have a credited row. Reconcile against the MMG statement; nothing is reversed automatically.`,
+                data: { kind: 'billing_invariants', alert: 'settlement-imports-review', ...imports },
+              }),
+            ).catch(() => {});
+          }
           // [M-01 / M-02] Every UNKNOWN card intent is retrieved by its key and
           // settled, declined, re-sent under the same key, or expired — the
           // kill switch stops new instructions, never this.

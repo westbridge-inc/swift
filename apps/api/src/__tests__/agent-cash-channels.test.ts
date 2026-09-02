@@ -100,6 +100,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env['AGENT_CASH_WEBHOOK_SECRET'];
   await prisma.mmgAgentPayment.deleteMany({ where: { externalId: { in: externalIds } } });
+  await prisma.settlementImport.deleteMany({ where: { source: { startsWith: 'test-' } } });
   await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -190,13 +191,26 @@ describe('Channel B — settlement import + scenario G', () => {
       'TOTAL,9999',
     ].join('\n');
 
-    const report = await importSettlementCsv(prisma, svc, csv, { source: 'test-file-1' });
+    // [M-20] A file that disagrees with itself is REJECTED before any row
+    // publishes: zero credits. (Before, both rows had already credited and the
+    // mismatch was only a flag on the report.)
+    const bad = await importSettlementCsv(prisma, svc, csv, { source: 'test-file-1' });
+    expect(bad.status).toBe('REJECTED');
+    expect(bad.trailerMismatch).toBe(true); // 3100 ≠ 9999
+    expect(bad.credited).toBe(0);
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(0);
+
+    const good = csv.replace('TOTAL,9999', 'TOTAL,3100');
+    const report = await importSettlementCsv(prisma, svc, good, { source: 'test-file-1' });
+    expect(report.status).toBe('PUBLISHED');
     expect(report.fileRows).toBe(2);
     expect(report.credited).toBe(2);
-    expect(report.trailerTotalGyd).toBe(9999);
-    expect(report.trailerMismatch).toBe(true); // 3100 ≠ 9999 — the file disagrees with itself
+    expect(report.trailerTotalGyd).toBe(3100);
+    expect(report.trailerMismatch).toBe(false);
 
-    const again = await importSettlementCsv(prisma, svc, csv, { source: 'test-file-1-reimport' });
+    // The same file again is the same import: it answers, it does not re-ingest.
+    const again = await importSettlementCsv(prisma, svc, good, { source: 'test-file-1-reimport' });
+    expect(again.replayed).toBe(true);
     expect(again.credited).toBe(0);
     expect(again.duplicates).toBe(2);
     const topups = await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } });
@@ -210,8 +224,10 @@ describe('Channel B — settlement import + scenario G', () => {
     const wh = await app.inject({ url: '/api/v1/billing/mmg/agent-notification', ...signed({ transactionId: txn, accountNumber: san, amount: 2100, currency: 'GYD' }) });
     expect(wh.json().status).toBe('accepted');
 
-    const csv = ['transaction_id,account_number,amount', `${txn},${san},2100`].join('\n');
+    // [M-20] A settlement file carries the payment date; the strict parser refuses a file without it.
+    const csv = ['transaction_id,account_number,amount,paid_at', `${txn},${san},2100,2026-08-01T10:00:00Z`].join('\n');
     const report = await importSettlementCsv(prisma, svc, csv, { source: 'test-xc' });
+    expect(report.status).toBe('PUBLISHED');
     expect(report.reconciled).toBe(1);
     expect(report.credited).toBe(0);
     const topups = await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } });
@@ -219,9 +235,12 @@ describe('Channel B — settlement import + scenario G', () => {
   });
 
   it('unparseable rows are reported, never silently skipped', async () => {
-    const csv = ['transaction_id,account_number,amount', ',4729058836,2100', `BAD-${nanoid(6)},,abc`].join('\n');
+    const csv = ['transaction_id,account_number,amount,paid_at', ',4729058836,2100,2026-08-01T10:00:00Z', `BAD-${nanoid(6)},,abc,2026-08-01T10:00:00Z`].join('\n');
     const report = await importSettlementCsv(prisma, svc, csv, { source: 'test-bad' });
+    // [M-20] Every bad row is named with its line — and the whole file is
+    // refused before any row could publish.
     expect(report.rejectedRows).toHaveLength(2);
-    expect(report.fileRows).toBe(2);
+    expect(report.status).toBe('REJECTED');
+    expect(report.credited).toBe(0);
   });
 });
