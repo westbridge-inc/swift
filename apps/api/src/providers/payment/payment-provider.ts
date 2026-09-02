@@ -9,9 +9,20 @@ import { isProduction } from '../../utils/runtime-mode';
 // ---------------------------------------------------------------------------
 
 export interface ChargeResult {
-  status: 'succeeded' | 'failed';
+  /** [M-02] 'unknown' = the instruction MAY have reached the processor (a
+   *  timeout, a transport error, a 5xx): neither a capture nor a decline.
+   *  Billing never duns on it and never issues a new instruction over it —
+   *  it retrieves the truth by the same key first. */
+  status: 'succeeded' | 'failed' | 'unknown';
   /** Provider-side charge reference */
   providerRef: string;
+  reason?: string;
+}
+
+/** [M-01] The provider's truth about an instruction we sent, by our key. */
+export interface ChargeLookup {
+  status: 'succeeded' | 'failed' | 'not_found' | 'unknown';
+  providerRef?: string;
   reason?: string;
 }
 
@@ -35,6 +46,10 @@ export interface PaymentProvider {
   }): Promise<ChargeResult>;
 
   refund(input: { providerRef: string; amount: number; idempotencyKey: string }): Promise<ChargeResult>;
+  /** [M-01] Retrieve the truth of an instruction by our idempotency key (and
+   *  the provider's own id when known) BEFORE any retry. 'not_found' means the
+   *  processor never received it; 'unknown' means the processor cannot say. */
+  lookupCharge(input: { idempotencyKey: string; providerRef?: string }): Promise<ChargeLookup>;
 }
 
 /**
@@ -42,6 +57,10 @@ export interface PaymentProvider {
  * a token containing "fail" always declines; everything else succeeds.
  */
 export class SandboxPaymentProvider implements PaymentProvider {
+  /** [M-01] What a real processor does with an idempotency key: the same key
+   *  answers the same result and captures once. The lookup reads it back. */
+  private readonly charges = new Map<string, ChargeResult>();
+
   async tokenizeCard(input: { userId: string; cardNumber: string }): Promise<{ token: string }> {
     // Card numbers ending 0002 produce an always-declining token (Stripe-style)
     const marker = input.cardNumber.endsWith('0002') ? 'fail_' : '';
@@ -49,14 +68,23 @@ export class SandboxPaymentProvider implements PaymentProvider {
   }
 
   async chargeToken(input: { token: string; idempotencyKey: string }): Promise<ChargeResult> {
-    if (input.token.includes('fail')) {
-      return { status: 'failed', providerRef: `ch_${nanoid(10)}`, reason: 'Card declined (sandbox)' };
-    }
-    return { status: 'succeeded', providerRef: `ch_${nanoid(10)}` };
+    const seen = this.charges.get(input.idempotencyKey);
+    if (seen) return seen;
+    const result: ChargeResult = input.token.includes('fail')
+      ? { status: 'failed', providerRef: `ch_${nanoid(10)}`, reason: 'Card declined (sandbox)' }
+      : { status: 'succeeded', providerRef: `ch_${nanoid(10)}` };
+    this.charges.set(input.idempotencyKey, result);
+    return result;
   }
 
   async refund(_input: { providerRef: string; amount: number; idempotencyKey: string }): Promise<ChargeResult> {
     return { status: 'succeeded', providerRef: `re_${nanoid(10)}` };
+  }
+
+  async lookupCharge(input: { idempotencyKey: string; providerRef?: string }): Promise<ChargeLookup> {
+    const seen = this.charges.get(input.idempotencyKey);
+    if (!seen) return { status: 'not_found' };
+    return { status: seen.status === 'succeeded' ? 'succeeded' : 'failed', providerRef: seen.providerRef, reason: seen.reason };
   }
 }
 
@@ -161,7 +189,9 @@ export class PowerTranzPaymentProvider implements PaymentProvider {
         body: JSON.stringify(body),
       });
       if (!res.ok) {
-        return { status: 'failed', providerRef: '', reason: `Gateway HTTP ${res.status}` };
+        // [M-02] A 5xx is ambiguous — the sale MAY have been processed; a 4xx
+        // was refused before processing.
+        return { status: res.status >= 500 ? 'unknown' : 'failed', providerRef: '', reason: `Gateway HTTP ${res.status}` };
       }
       const data = (await res.json()) as PowerTranzResponse;
       if (data.Approved) {
@@ -170,11 +200,19 @@ export class PowerTranzPaymentProvider implements PaymentProvider {
       const reason = data.ResponseMessage ?? data.Errors?.[0]?.Message ?? data.IsoResponseCode ?? 'Declined';
       return { status: 'failed', providerRef: data.TransactionIdentifier ?? '', reason };
     } catch {
-      // Unreachable / timed out — soft failure; billing retries on the next cycle.
-      return { status: 'failed', providerRef: '', reason: 'Gateway unreachable' };
+      // [M-02] Unreachable / timed out — UNKNOWN, never a decline: the sale
+      // may have gone through. Billing retrieves before it ever retries.
+      return { status: 'unknown', providerRef: '', reason: 'Gateway unreachable' };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** [M-01] PowerTranz exposes no query by merchant reference in this
+   *  integration: an ambiguous sale stays UNKNOWN until reconciled against the
+   *  acquirer statement by a person. Saying so is safer than guessing. */
+  async lookupCharge(_input: { idempotencyKey: string; providerRef?: string }): Promise<ChargeLookup> {
+    return { status: 'unknown', reason: 'PowerTranz: no query by merchant reference — reconcile against the acquirer statement' };
   }
 }
 
@@ -241,12 +279,46 @@ export class StripePaymentProvider implements PaymentProvider {
       ...(input.description ? { description: input.description } : {}),
     });
     const data = await this.post<StripePaymentIntent>('/v1/payment_intents', body, input.idempotencyKey);
-    if (!data) return { status: 'failed', providerRef: '', reason: 'Gateway unreachable' };
+    // [M-02] Unreachable / timed out — UNKNOWN, never a decline: Stripe may
+    // have created and confirmed the intent. Billing retrieves before a retry.
+    if (!data) return { status: 'unknown', providerRef: '', reason: 'Gateway unreachable' };
     if (data.status === 'succeeded') {
       return { status: 'succeeded', providerRef: data.id ?? '' };
     }
     const reason = data.error?.decline_code ?? data.error?.message ?? data.status ?? 'Declined';
     return { status: 'failed', providerRef: data.id ?? '', reason };
+  }
+
+  /** [M-01] The truth of an instruction: by the PaymentIntent id when we have
+   *  it. Without an id there is nothing to retrieve by — UNKNOWN, for the
+   *  reconciler and a person. */
+  async lookupCharge(input: { idempotencyKey: string; providerRef?: string }): Promise<ChargeLookup> {
+    if (!input.providerRef) return { status: 'unknown', reason: 'Stripe: no PaymentIntent id was recorded for this key' };
+    const data = await this.get<StripePaymentIntent>(`/v1/payment_intents/${encodeURIComponent(input.providerRef)}`);
+    if (!data) return { status: 'unknown', reason: 'Gateway unreachable' };
+    if (data.error?.code === 'resource_missing') return { status: 'not_found' };
+    if (data.status === 'succeeded') return { status: 'succeeded', providerRef: data.id };
+    if (data.status === 'canceled' || data.status === 'requires_payment_method') {
+      return { status: 'failed', providerRef: data.id, reason: data.error?.decline_code ?? data.error?.message ?? data.status };
+    }
+    return { status: 'unknown', providerRef: data.id, reason: data.status };
+  }
+
+  private async get<T>(path: string): Promise<T | null> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), STRIPE_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${this.baseUrl}${path}`, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: { authorization: `Bearer ${this.secretKey}` },
+      });
+      return (await res.json()) as T;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async refund(input: { providerRef: string; amount: number; idempotencyKey: string }): Promise<ChargeResult> {

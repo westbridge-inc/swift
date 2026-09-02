@@ -8,9 +8,9 @@ import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
-import { mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
+import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
-import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge } from '../../plugins/observability';
+import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge } from '../../plugins/observability';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -93,6 +93,10 @@ export interface BillingObserver {
    *  is staged (credit, receipt, ledger, audit, command row) and before the
    *  commit — a thrown error rolls the whole command back as a crash would. */
   afterTopUpCommandStaged?: () => Promise<void>;
+  /** [M-01] Called the instant the card processor has answered and before any
+   *  local write — the crash the register names (money moved, nothing
+   *  recorded). A thrown error here is that crash. */
+  afterProviderReturned?: (result: { status: string; providerRef: string }) => Promise<void>;
 }
 
 /** [M-08] What a top-up command answers — stored with the command, replayed verbatim. */
@@ -228,6 +232,10 @@ export class BillingService {
         const liveIntent = await this.prisma.subscriptionPayment.findUnique({
           where: { clientKey: this.mmgReference(sub) },
           select: { status: true },
+        }) ?? await this.prisma.subscriptionPayment.findUnique({
+          // [M-01] ...or this attempt's CARD intent, reserved before the charge.
+          where: { clientKey: this.cardReference(sub) },
+          select: { status: true },
         });
         if (liveIntent && (liveIntent.status === 'PENDING' || liveIntent.status === 'UNKNOWN')) return 'pending';
         return 'skipped'; // someone (or a concurrent run) already attempted this
@@ -351,6 +359,21 @@ export class BillingService {
     return `sub:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}:a${sub.failedAttempts}`;
   }
 
+  /** [M-01 / M-02] The card rail's idempotency key for one attempt: ours, the
+   *  processor's, and the intent row's clientKey — ONE value. It advances only
+   *  with failedAttempts, and failedAttempts advances only on a PROVEN
+   *  terminal, so an ambiguous result retries under the same key and the
+   *  processor's own idempotency makes the capture exactly-once. */
+  private cardReference(sub: Pick<Subscription, 'id' | 'nextBillingDate' | 'failedAttempts'>): string {
+    return `card:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}:a${sub.failedAttempts}`;
+  }
+
+  /** [M-01] The card intent before the charge — the same durable row the MMG
+   *  rail reserves before it asks the provider. */
+  private reserveCardIntent(sub: SubWithRelations, amount: number, reference: string, now = new Date()): Promise<{ id: string } | null> {
+    return this.reserveMmgIntent(sub, amount, reference, now);
+  }
+
   /**
    * [TA-S0-002 / M-03] Reserve the durable MMG intent for one attempt BEFORE
    * the provider is asked: UNKNOWN, our clientKey, no provider id yet, the
@@ -411,6 +434,103 @@ export class BillingService {
       currency: tenant.settlementCurrency,
       book,
     };
+  }
+
+  /** [M-01 / M-02] The card reconciler, run with every billing poll: every
+   *  UNKNOWN card intent is retrieved by its key. Captured → settled in place
+   *  (the paid week, the success event, the ledger — the defect the register
+   *  names, repaired, and paged); declined → the proven terminal enters
+   *  dunning; never received → the same instruction goes again under the same
+   *  key, or expires at TTL; still unknown → waits, and its age is published.
+   *  The kill switch never stops this. */
+  async reconcileUnknownCardCharges(now = new Date()): Promise<{ settled: number; declined: number; reissued: number; expired: number; stillUnknown: number; oldestMinutes: number }> {
+    const out = { settled: 0, declined: 0, reissued: 0, expired: 0, stillUnknown: 0, oldestMinutes: 0 };
+    const rows = await this.prisma.subscriptionPayment.findMany({
+      where: { paymentMethod: 'CARD', status: 'UNKNOWN' },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+    });
+    for (const row of rows) {
+      const sub = await this.prisma.subscription.findUnique({
+        where: { id: row.subscriptionId },
+        include: {
+          rider: { select: { userId: true } },
+          driver: { select: { userId: true } },
+          vendor: { select: { id: true, owner: { select: { userId: true } } } },
+        },
+      });
+      if (!sub || !row.clientKey) { out.stillUnknown += 1; continue; }
+      const periodKey = row.periodStart.toISOString().slice(0, 10);
+      const amount = Number(row.amount);
+      const ttlAt = row.expiresAt ?? new Date(row.createdAt.getTime() + MMG_REQUEST_TTL_MS);
+      await this.prisma.subscriptionPayment.updateMany({ where: { id: row.id }, data: { lastPolledAt: now } }).catch(() => {});
+
+      const found = await this.payments.lookupCharge({ idempotencyKey: row.clientKey, providerRef: row.externalRef ?? undefined });
+      if (found.status === 'succeeded') {
+        // The processor took the money and we had no local payment: repair it
+        // exactly once, then tell a person it happened.
+        const trio = await this.pinnedTrioFor(sub.id, periodKey);
+        await this.applySuccessfulCharge(sub as SubWithRelations, amount, found.providerRef ?? row.clientKey, now, periodKey, row.id, trio);
+        out.settled += 1;
+        cardChargesReconciledCounter.labels('captured_late').inc();
+        log().error({ paymentId: row.id, subscriptionId: sub.id, providerRef: found.providerRef }, '[M-01] card charge captured by the processor with no local payment — settled by reconciliation');
+        await notifyAdmins(this.prisma, this.notifications, {
+          tenantId: await tenantOfSubscription(this.prisma, sub.id),
+          title: '💳 A card charge was captured with no local payment — repaired',
+          body: `The processor captured ${amount.toLocaleString()} ${sub.currencyCode} for subscription ${sub.id} and Swift had no record of it until reconciliation. The paid week, payment and ledger are now written. A crash or timeout sat between the capture and the record — read the logs for this payment.`,
+          data: { kind: 'billing_invariants', alert: 'card-captured-without-local-payment', subscriptionId: sub.id, paymentId: row.id },
+        }).catch(() => {});
+        continue;
+      }
+      if (found.status === 'failed') {
+        const outcome = await this.terminalizeFailedPayment(
+          sub as SubWithRelations, row,
+          { status: 'FAILED', failureCode: mapCardFailure(found.reason), from: ['UNKNOWN'], ...(found.reason ? { failureRaw: found.reason } : {}) },
+          found.reason ?? 'Card declined', now, periodKey,
+        );
+        if (outcome) { out.declined += 1; cardChargesReconciledCounter.labels('declined').inc(); }
+        continue;
+      }
+      if (found.status === 'not_found') {
+        if (now.getTime() < ttlAt.getTime() && sub.paymentToken && process.env['CARD_RAIL_KILL'] !== '1') {
+          // Never received: the SAME instruction under the SAME key — the
+          // processor's idempotency makes a late arrival of the first one and
+          // this one the same capture.
+          const result = await this.payments.chargeToken({ token: sub.paymentToken, amount, currencyCode: sub.currencyCode, idempotencyKey: row.clientKey, description: `Swift weekly subscription (${sub.type})` });
+          if (result.status === 'succeeded') {
+            const trio = await this.pinnedTrioFor(sub.id, periodKey);
+            await this.applySuccessfulCharge(sub as SubWithRelations, amount, result.providerRef, now, periodKey, row.id, trio);
+            out.settled += 1; cardChargesReconciledCounter.labels('reissued').inc();
+          } else if (result.status === 'failed') {
+            const outcome = await this.terminalizeFailedPayment(
+              sub as SubWithRelations, row,
+              { status: 'FAILED', failureCode: mapCardFailure(result.reason), from: ['UNKNOWN'], ...(result.reason ? { failureRaw: result.reason } : {}) },
+              result.reason ?? 'Card declined', now, periodKey,
+            );
+            if (outcome) { out.declined += 1; cardChargesReconciledCounter.labels('declined').inc(); }
+          } else {
+            out.stillUnknown += 1;
+          }
+          continue;
+        }
+        if (now.getTime() >= ttlAt.getTime()) {
+          const outcome = await this.terminalizeFailedPayment(
+            sub as SubWithRelations, row,
+            { status: 'EXPIRED', failureCode: 'REQUEST_EXPIRED', from: ['UNKNOWN'] },
+            'Card instruction never reached the processor before its TTL', now, periodKey,
+          );
+          if (outcome) { out.expired += 1; cardChargesReconciledCounter.labels('expired').inc(); }
+          continue;
+        }
+      }
+      out.stillUnknown += 1;
+    }
+    const remaining = await this.prisma.subscriptionPayment.findFirst({ where: { paymentMethod: 'CARD', status: 'UNKNOWN' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } });
+    const count = await this.prisma.subscriptionPayment.count({ where: { paymentMethod: 'CARD', status: 'UNKNOWN' } });
+    out.oldestMinutes = remaining ? Math.max(0, Math.round((now.getTime() - remaining.createdAt.getTime()) / 60_000)) : 0;
+    cardIntentsUnknownGauge.labels('count').set(count);
+    cardIntentsUnknownGauge.labels('oldest_minutes').set(out.oldestMinutes);
+    return out;
   }
 
   /** The pinned trio from this period's charge attempt — recovered for late
@@ -485,16 +605,55 @@ export class BillingService {
     }
 
     if (sub.billingMethod === 'CARD' && sub.paymentToken) {
+      // [M-01] The kill switch stops NEW instructions only; the reconciler
+      // that settles what the processor already did never stops.
+      if (process.env['CARD_RAIL_KILL'] === '1') return { ok: false, deferred: true };
+
+      // [M-01 / M-02] THE INTENT BEFORE THE EFFECT, on the card rail. Before,
+      // the processor was asked with nothing durable on our side: a process
+      // that died after the capture and before applySuccessfulCharge left a
+      // charged payer with no paid week, no payment row and no ledger line,
+      // and every rerun collided on the attempt key and skipped forever. And
+      // an ambiguous transport result was recorded as a decline, dunned, and
+      // retried under a NEW key — a second capture and a wrongful suspension.
+      const key = this.cardReference(sub);
+      const live = await this.prisma.subscriptionPayment.findUnique({ where: { clientKey: key } });
+      let intentId: string;
+      if (live) {
+        if (live.status === 'CAPTURED') return { ok: true, ref: live.externalRef ?? key, settlePaymentId: live.id };
+        if (live.status === 'UNKNOWN') {
+          // Retrieve the truth by the same key BEFORE any retry.
+          const found = await this.payments.lookupCharge({ idempotencyKey: key, providerRef: live.externalRef ?? undefined });
+          if (found.status === 'succeeded') return { ok: true, ref: found.providerRef ?? key, settlePaymentId: live.id };
+          if (found.status === 'failed') {
+            return { ok: false, reason: found.reason ?? 'Card declined', failureCode: mapCardFailure(found.reason), intentId: live.id, ...(found.reason ? { failureRaw: found.reason } : {}) };
+          }
+          if (found.status === 'unknown') return { ok: false, deferred: true }; // the processor cannot say: the reconciler owns it
+          intentId = live.id; // never received — the same instruction, the same key, goes again
+        } else {
+          // A proven terminal for this exact key: this attempt is over; the
+          // next one carries the next key. Nothing to send.
+          return { ok: false, deferred: true };
+        }
+      } else {
+        const reserved = await this.reserveCardIntent(sub, amount, key);
+        if (!reserved) return { ok: false, deferred: true }; // a concurrent run holds this attempt
+        intentId = reserved.id;
+      }
+
       const result = await this.payments.chargeToken({
         token: sub.paymentToken,
         amount,
         currencyCode: sub.currencyCode,
-        idempotencyKey: `prov:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}:a${sub.failedAttempts}`,
+        idempotencyKey: key,
         description: `Swift weekly subscription (${sub.type})`,
       });
-      return result.status === 'succeeded'
-        ? { ok: true, ref: result.providerRef }
-        : { ok: false, reason: result.reason ?? 'Charge declined' };
+      await this.observer.afterProviderReturned?.(result);
+      if (result.status === 'succeeded') return { ok: true, ref: result.providerRef, settlePaymentId: intentId };
+      if (result.status === 'unknown') {
+        return { ok: false, unknown: true, clientKey: key, intentId, ...(result.reason ? { failureRaw: result.reason } : {}) };
+      }
+      return { ok: false, reason: result.reason ?? 'Charge declined', failureCode: mapCardFailure(result.reason), intentId, ...(result.reason ? { failureRaw: result.reason } : {}) };
     }
 
     if (sub.billingMethod === 'MOBILE_MONEY' && sub.mmgPayerMsisdn) {

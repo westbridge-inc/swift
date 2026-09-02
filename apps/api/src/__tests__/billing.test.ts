@@ -186,7 +186,10 @@ describe('Idempotency — the double-charge guard', () => {
     ]);
     const outcomes = results.map((r) => (r.status === 'fulfilled' ? r.value : 'error'));
     expect(outcomes.filter((o) => o === 'succeeded')).toHaveLength(1);
-    expect(outcomes.filter((o) => o === 'skipped')).toHaveLength(1);
+    // [M-01] The loser is 'skipped' when it collides before the winner reserved
+    // its card intent, and 'pending' when the intent already exists — a live
+    // instruction the reconciler owns. Either way it sends nothing.
+    expect(outcomes.filter((o) => o === 'skipped' || o === 'pending')).toHaveLength(1);
 
     const payments = await app.prisma.subscriptionPayment.count({ where: { subscriptionId: subId } });
     expect(payments).toBe(1);
