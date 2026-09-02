@@ -165,6 +165,25 @@ export const billingOutcomeRepairsCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [M-10] Terminal orders whose expected earnings tuples — the mover's fee or
+ *  fare row, and the tip row when a tip was paid — are not all present. Set by
+ *  the reconciler on every sweep: `found` before the repair, `unhealed` after
+ *  it (equal to `found` in a dry run), and the oldest gap's age. The alert is
+ *  on `unhealed` staying above zero. */
+export const earningsMissingTuplesGauge = new client.Gauge({
+  name: 'swift_earnings_missing_tuples',
+  help: 'Terminal orders with a missing expected earnings tuple: found by the sweep, left unhealed, and the oldest gap in minutes',
+  labelNames: ['measure'] as const,
+  registers: [registry],
+});
+
+export const earningsRepairsCounter = new client.Counter({
+  name: 'swift_earnings_repairs_total',
+  help: 'Earnings tuples inserted by the M-10 reconciler that a completion path had missed, by earning type',
+  labelNames: ['type'] as const,
+  registers: [registry],
+});
+
 // Security actions must remain externally uniform even when their audit sink
 // is degraded. Count the write failure separately so a successful revocation
 // can still return the required 401/200 while operations alerts on lost audit
