@@ -117,6 +117,15 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+// [MOB-010] A vendor store header (x-vendor-id) received outside the vendor
+// endpoint family is a client leak: counted per family, ignored or rejected.
+export const unexpectedTenantHeaderCounter = new client.Counter({
+  name: 'swift_unexpected_tenant_header_total',
+  help: 'x-vendor-id received outside /api/v1/vendor, by outcome (ignored/rejected) and endpoint family',
+  labelNames: ['outcome', 'family'] as const,
+  registers: [registry],
+});
+
 export const dispatchTimeToAssign = new client.Histogram({
   name: 'swift_dispatch_time_to_assign_seconds',
   help: 'Seconds from search start to a mover claiming the job',

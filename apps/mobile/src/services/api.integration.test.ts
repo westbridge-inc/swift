@@ -601,3 +601,71 @@ describe('Axios auth interceptor integration', () => {
     expect(inspected).toBe(true);
   });
 });
+
+describe('[MOB-010 / TST-010] the store header is vendor-scoped, never global', () => {
+  const FAMILIES = ['auth', 'discovery', 'vendor-discovery', 'market', 'customer', 'safety', 'moderation', 'rides', 'places', 'courier', 'services', 'verification', 'partner', 'rider', 'driver', 'chat', 'ads', 'search', 'blocks', 'reports', 'public', 'vendors'];
+
+  it('with a store selected, every non-vendor family leaves WITHOUT x-vendor-id and the vendor family carries it', async () => {
+    auth.selectedStoreId = 'store-a';
+    const seen: Array<[string, string | null]> = [];
+    setAdapter(async (config) => {
+      seen.push([config.url ?? '', (config.headers.get('x-vendor-id') as string | undefined) ?? null]);
+      return response(config, 200, { data: {} });
+    });
+    for (const family of FAMILIES) {
+      await api.get(`/${family}/probe`);
+      await api.post(`/${family}/probe`, { value: 1 });
+    }
+    await api.get('/vendor');
+    await api.get('/vendor/orders');
+    await api.post('/vendor/items', { name: 'x' });
+    await api.put('/vendor/items/i1', { name: 'y' });
+    expect(seen.length).toBe(FAMILIES.length * 2 + 4);
+    for (const [url, header] of seen) {
+      expect(header, url).toBe(url === '/vendor' || url.startsWith('/vendor/') ? 'store-a' : null);
+    }
+  });
+
+  it('a caller-supplied store header on a non-vendor URL is stripped; on a vendor URL the caller’s pin wins over the selection', async () => {
+    auth.selectedStoreId = 'store-a';
+    const seen: Array<[string, string | null]> = [];
+    setAdapter(async (config) => {
+      seen.push([config.url ?? '', (config.headers.get('x-vendor-id') as string | undefined) ?? null]);
+      return response(config, 200, { data: {} });
+    });
+    await api.get('/customer/home', { headers: { 'x-vendor-id': 'smuggled' } });
+    await api.post('/auth/refresh', {}, { headers: { 'x-vendor-id': 'smuggled' } });
+    await api.get('/vendor/orders', { headers: { 'x-vendor-id': 'store-pinned' } });
+    expect(seen).toEqual([['/customer/home', null], ['/auth/refresh', null], ['/vendor/orders', 'store-pinned']]);
+  });
+
+  it('no store selected: nothing carries the header, the vendor family included', async () => {
+    auth.selectedStoreId = null;
+    const seen: Array<[string, string | null]> = [];
+    setAdapter(async (config) => {
+      seen.push([config.url ?? '', (config.headers.get('x-vendor-id') as string | undefined) ?? null]);
+      return response(config, 200, { data: {} });
+    });
+    await api.get('/vendor/orders');
+    await api.get('/customer/home');
+    expect(seen).toEqual([['/vendor/orders', null], ['/customer/home', null]]);
+  });
+
+  it('a refresh retry of a NON-vendor call carries no store header even when a store is selected mid-flight', async () => {
+    auth.selectedStoreId = null;
+    const seen: Array<[string, string | null]> = [];
+    let requestCalls = 0;
+    setAdapter(async (config) => {
+      if ((config.url ?? '').endsWith('/auth/refresh')) {
+        auth.selectedStoreId = 'store-b';
+        return response(config, 200, { data: { accessToken: 'access-a-2', refreshToken: 'refresh-a-2' } });
+      }
+      requestCalls += 1;
+      seen.push([config.url ?? '', (config.headers.get('x-vendor-id') as string | undefined) ?? null]);
+      if (requestCalls === 1) return unauthorized(config);
+      return response(config, 200, { data: { orders: [] } });
+    });
+    await expect(api.get('/customer/orders')).resolves.toMatchObject({ status: 200 });
+    expect(seen).toEqual([['/customer/orders', null], ['/customer/orders', null]]);
+  });
+});
