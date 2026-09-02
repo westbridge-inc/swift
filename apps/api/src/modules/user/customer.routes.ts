@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
+import { refundBasisCounter, refundInferenceDeltaCounter } from '../../plugins/observability';
 import { lineTotal, orderTotal, promoDiscount, promoCapacity } from '../../utils/order-total';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
@@ -2640,7 +2641,9 @@ export async function customerRoutes(app: FastifyInstance) {
         id: true, status: true, vendor: { select: { vendorType: true } },
         // [ALG-25] The stored fields the refund is computed from.
         paymentMethod: true, deliveryFee: true, discount: true, totalAmount: true, fulfillment: true,
-        items: { select: { totalCustomer: true, subStatus: true } },
+        items: { select: { id: true, totalCustomer: true, subStatus: true } },
+        // [M-33] The immutable component/line allocation and its funder.
+        promoRedemption: { select: { goodsDiscount: true, deliveryDiscount: true, funder: true, discountType: true, lineAllocations: true } },
       },
     });
     if (!order) throw new NotFoundError('Order', id);
@@ -2657,14 +2660,39 @@ export async function customerRoutes(app: FastifyInstance) {
     // [ALG-25] Say which of the three refunds this is and what it would be —
     // recorded on the request for the store and the admin. A whole-order
     // return on a delivered order: every live line, the delivery happened.
+    // [M-33] The refund consumes the order's snapshot — each line's own goods
+    // share, never the delivery component, never an aggregate inference. A
+    // legacy order without one is computed by inference and MARKED so.
+    const snapshot = order.promoRedemption
+      ? {
+          goodsDiscount: order.promoRedemption.goodsDiscount,
+          deliveryDiscount: order.promoRedemption.deliveryDiscount,
+          funder: order.promoRedemption.funder,
+          discountType: order.promoRedemption.discountType,
+          lineAllocations: Array.isArray(order.promoRedemption.lineAllocations)
+            ? (order.promoRedemption.lineAllocations as Array<{ orderItemId: string; goods: number }>)
+            : null,
+        }
+      : null;
     const refund = computeRefund({
       paymentMethod: order.paymentMethod, status: order.status,
-      lines: order.items.map((l) => ({ totalCustomer: l.totalCustomer, subStatus: l.subStatus, affected: true })),
+      lines: order.items.map((l) => ({ id: l.id, totalCustomer: l.totalCustomer, subStatus: l.subStatus, affected: true })),
       deliveryFee: order.deliveryFee, discount: order.discount, totalAmount: order.totalAmount,
       deliveryHappened: order.fulfillment === 'DELIVERY',
+      snapshot,
     });
+    const promoType = snapshot?.discountType ?? (Number(order.discount) > 0 ? 'UNKNOWN' : 'NONE');
+    refundBasisCounter.labels(refund.basis, promoType).inc();
+    // The dual calculation: what the old inference would have told the store.
+    refundInferenceDeltaCounter.labels(promoType).inc(Math.abs(refund.amount - refund.inferredAmount));
+    if (refund.basis === 'INFERRED') {
+      request.log.warn({ orderId: id, inferred: refund.inferredAmount }, '[M-33] return computed by inference — no redemption snapshot; routed to review');
+    }
     const created = await app.prisma.returnRequest.create({
-      data: { orderId: id, customerId: userId, reason, refundKind: refund.kind, refundAmount: refund.amount, refundSentence: refund.sentence },
+      data: {
+        orderId: id, customerId: userId, reason, refundKind: refund.kind, refundAmount: refund.amount, refundSentence: refund.sentence,
+        refundBasis: refund.basis, refundInferredAmount: refund.inferredAmount, refundFunder: refund.funder,
+      },
     });
     reply.code(201);
     return { success: true, data: created };

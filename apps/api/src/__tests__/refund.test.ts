@@ -11,6 +11,7 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { classifyRefund, computeRefund } from '../utils/refund';
+import { allocateAcrossLines } from '../utils/order-total';
 
 // ---------------------------------------------------------------------------
 // [ALG-25] Refund computation — constrained by law before maths. Swift holds
@@ -67,6 +68,69 @@ describe('item-level partials', () => {
     expect(computeRefund({ ...base, totalAmount: 1000, lines: lines([[4300, true]]) }).amount).toBe(1000);
     expect(computeRefund({ ...base, discount: 9_999, lines: lines([[1200, true]]) }).amount).toBe(0);
     expect(computeRefund({ ...base, lines: [] }).amount).toBe(0);
+  });
+});
+
+describe('[M-33] the refund consumes the snapshot, never an aggregate inference', () => {
+  const base = { paymentMethod: 'CASH', status: 'DELIVERED', deliveryFee: 500, totalAmount: 4300, deliveryHappened: true };
+  const twoLines = (kettle: boolean, fan: boolean) => [
+    { id: 'K', totalCustomer: 1200, affected: kettle },
+    { id: 'F', totalCustomer: 3100, affected: fan },
+  ];
+
+  it('the register’s red test: a full goods return after FREE_DELIVERY refunds every goods dollar and no delivery fee — the old inference under-refunded by the fee', () => {
+    const freeDelivery = { goodsDiscount: 0, deliveryDiscount: 500, funder: 'PLATFORM', discountType: 'FREE_DELIVERY', lineAllocations: [{ orderItemId: 'K', goods: 0 }, { orderItemId: 'F', goods: 0 }] };
+    const r = computeRefund({ ...base, discount: 500, lines: twoLines(true, true), snapshot: freeDelivery });
+    expect(r).toMatchObject({ basis: 'SNAPSHOT', funder: 'PLATFORM', lineTotal: 4300, discountShare: 0, deliveryFee: 0, amount: 4300 });
+    expect(r.sentence).toBe('The store owes the customer GY$4,300: GY$4,300 for the returned items. Swift records this; the store and customer settle it directly.');
+    // the dual calculation: what the aggregate inference would have said
+    expect(r.inferredAmount).toBe(3800);
+  });
+
+  it('a discounted fee was never paid: when the delivery did not happen, nothing of it comes back', () => {
+    const freeDelivery = { goodsDiscount: 0, deliveryDiscount: 500, funder: 'PLATFORM', discountType: 'FREE_DELIVERY', lineAllocations: null };
+    const r = computeRefund({ ...base, status: 'PREPARING', deliveryHappened: false, discount: 500, lines: twoLines(true, true), snapshot: freeDelivery });
+    expect(r).toMatchObject({ kind: 'CASH_PRE_HANDOVER', deliveryFee: 0, amount: 4300, basis: 'SNAPSHOT' });
+    const halfOff = computeRefund({ ...base, status: 'PREPARING', deliveryHappened: false, discount: 200, totalAmount: 4600, lines: twoLines(true, true), snapshot: { ...freeDelivery, deliveryDiscount: 200 } });
+    expect(halfOff.deliveryFee).toBe(300);
+  });
+
+  it('a returned line carries ITS OWN goods share from the allocation — exact, not proportional — and the sentence names the funder', () => {
+    const platform = { goodsDiscount: 430, deliveryDiscount: 0, funder: 'PLATFORM', discountType: 'FIXED_AMOUNT', lineAllocations: [{ orderItemId: 'K', goods: 200 }, { orderItemId: 'F', goods: 230 }] };
+    const kettle = computeRefund({ ...base, discount: 430, totalAmount: 4370, lines: twoLines(true, false), snapshot: platform });
+    expect(kettle).toMatchObject({ basis: 'SNAPSHOT', lineTotal: 1200, discountShare: 200, amount: 1000, funder: 'PLATFORM' });
+    expect(kettle.sentence).toContain('less GY$200 of the discount they carried (funded by Swift)');
+    expect(kettle.inferredAmount).toBe(1080); // the proportional guess
+    const vendor = computeRefund({ ...base, discount: 430, totalAmount: 4370, lines: twoLines(true, true), snapshot: { ...platform, funder: 'VENDOR', discountType: 'PERCENTAGE' } });
+    expect(vendor).toMatchObject({ discountShare: 430, amount: 3870, funder: 'VENDOR' });
+    expect(vendor.sentence).toContain('(funded by the store)');
+  });
+
+  it('a snapshot without line shares falls back to the GOODS component in proportion — never the delivery component', () => {
+    const mixed = { goodsDiscount: 100, deliveryDiscount: 330, funder: 'PLATFORM', discountType: 'FIXED_AMOUNT', lineAllocations: null };
+    const r = computeRefund({ ...base, discount: 430, totalAmount: 4370, lines: twoLines(true, false), snapshot: mixed });
+    expect(r.discountShare).toBe(28); // round(100 × 1200 / 4300)
+    expect(r.amount).toBe(1172);
+  });
+
+  it('no snapshot: a discounted order is INFERRED and says so; an undiscounted order is NONE', () => {
+    const inferred = computeRefund({ ...base, discount: 430, totalAmount: 4370, lines: twoLines(true, false) });
+    expect(inferred).toMatchObject({ basis: 'INFERRED', discountShare: 120, amount: 1080, inferredAmount: 1080, funder: null });
+    expect(inferred.sentence).toContain('INFERRED from the order’s total discount (no component record) — review before settling');
+    const none = computeRefund({ ...base, discount: 0, lines: twoLines(true, false) });
+    expect(none).toMatchObject({ basis: 'NONE', discountShare: 0, amount: 1200 });
+    expect(none.sentence).not.toContain('INFERRED');
+  });
+
+  it('allocateAcrossLines: shares sum exactly to the amount, largest remainder first, zero when there is nothing to share', () => {
+    expect(allocateAcrossLines(430, [{ id: 'K', amount: 1200 }, { id: 'F', amount: 3100 }])).toEqual([{ id: 'K', share: 120 }, { id: 'F', share: 310 }]);
+    expect(allocateAcrossLines(100, [{ id: 'a', amount: 1 }, { id: 'b', amount: 1 }, { id: 'c', amount: 1 }])).toEqual([{ id: 'a', share: 34 }, { id: 'b', share: 33 }, { id: 'c', share: 33 }]);
+    expect(allocateAcrossLines(0, [{ id: 'a', amount: 500 }])).toEqual([{ id: 'a', share: 0 }]);
+    expect(allocateAcrossLines(50, [{ id: 'a', amount: 0 }, { id: 'b', amount: 0 }])).toEqual([{ id: 'a', share: 0 }, { id: 'b', share: 0 }]);
+    for (const amount of [1, 7, 99, 430, 4299, 4300]) {
+      const shares = allocateAcrossLines(amount, [{ id: 'K', amount: 1200 }, { id: 'F', amount: 3100 }, { id: 'S', amount: 1 }]);
+      expect(shares.reduce((s, x) => s + x.share, 0)).toBe(amount);
+    }
   });
 });
 
@@ -161,8 +225,14 @@ describe('POST /customer/orders/:id/return records what the algorithm said', () 
     expect(row.refundKind).toBe('CASH_POST_HANDOVER');
     expect(Number(row.refundAmount)).toBe(4300 - 430); // every line, the whole discount, no delivery fee
     expect(row.refundSentence).toContain('The store owes the customer GY$3,870');
+    // [M-33] No snapshot on this legacy-shaped order: the number is the
+    // inference, and it is MARKED so — never silently used as truth.
+    expect(row.refundBasis).toBe('INFERRED');
+    expect(row.refundSentence).toContain('INFERRED');
+    expect(Number(row.refundInferredAmount)).toBe(3870);
     const stored = await app.prisma.returnRequest.findFirstOrThrow({ where: { orderId: order.id } });
     expect(stored.refundKind).toBe('CASH_POST_HANDOVER');
+    expect(stored.refundBasis).toBe('INFERRED');
   });
 
   it('a delivered MMG retail order: computed for the record, marked blocked', async () => {

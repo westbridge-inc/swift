@@ -4,7 +4,7 @@ import type { Server } from 'socket.io';
 import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
-import { lineTotal, orderTotal, promoDiscount, promoCapacity, allocatePromo, type PromoAllocation } from '../../utils/order-total';
+import { lineTotal, orderTotal, promoDiscount, promoCapacity, allocatePromo, allocateAcrossLines, type PromoAllocation } from '../../utils/order-total';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
@@ -1346,6 +1346,12 @@ export class OrderService {
               goodsDiscount: parts?.goods ?? 0,
               deliveryDiscount: parts?.delivery ?? 0,
               tipDiscount: 0,
+              // [M-33] The goods discount owned line by line from this moment,
+              // summing exactly to goodsDiscount — a return refunds each line's
+              // own share, never a share inferred from the aggregate.
+              lineAllocations: allocateAcrossLines(parts?.goods ?? 0, order.items.map((it) => ({ id: it.id, amount: Number(it.totalCustomer) })))
+                .map((a) => ({ orderItemId: a.id, goods: a.share })),
+              refundPolicy: REFUND_POLICY,
             },
           });
         }
@@ -2533,6 +2539,11 @@ export class OrderService {
     };
   }
 }
+
+/** [M-33] The refund policy an order is placed under (recorded on its
+ *  redemption): the delivery component is never refunded as goods, a
+ *  discounted fee was never paid, and line shares come from lineAllocations. */
+const REFUND_POLICY = 'ALG-25/M-33';
 
 /** [M-32] The promo terms an order is priced under, as they stood at redemption. */
 type RedeemedPromoTerms = {

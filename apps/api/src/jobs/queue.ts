@@ -570,6 +570,22 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               }),
             ).catch(() => {});
           }
+          // [M-33] Returns whose refund was inferred from the aggregate
+          // discount (no snapshot) wait for a person: never settled on the
+          // inferred number.
+          const { scanInferredRefunds } = await import('../modules/order/refund-review');
+          const refundReview = await scanInferredRefunds(ctx.prisma);
+          if (refundReview.inferredOpen + refundReview.legacyOpen > 0) {
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'refunds-awaiting-review', 24 * 3600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: '↩️ Returns with an inferred refund await review',
+                body: `${refundReview.inferredOpen} open return(s) were computed by inference (no order snapshot) and ${refundReview.legacyOpen} legacy return(s) sit on discounted orders. Recompute each from the order's items and contact the store and customer before anything settles.`,
+                data: { kind: 'billing_invariants', alert: 'refunds-awaiting-review', inferredOpen: refundReview.inferredOpen, legacyOpen: refundReview.legacyOpen },
+              }),
+            ).catch(() => {});
+          }
           break;
         }
       }

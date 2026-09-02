@@ -1980,6 +1980,16 @@ model ReturnRequest {
   refundKind     String?
   refundAmount   Decimal?     @db.Decimal(12, 2)
   refundSentence String?
+  /// [M-33] Where the discount share came from: SNAPSHOT (the order's
+  /// immutable component/line allocation), INFERRED (no snapshot — the legacy
+  /// proportional share of the aggregate discount, routed to review) or NONE
+  /// (no discount). Never silently inferred.
+  refundBasis    String?
+  /// [M-33] The dual calculation: what the aggregate inference would have
+  /// said. The delta against refundAmount is the observed refund drift.
+  refundInferredAmount Decimal? @db.Decimal(12, 2)
+  /// [M-33] Who funded the discount the refund is net of (PLATFORM | VENDOR).
+  refundFunder   String?
   createdAt      DateTime     @default(now())
 
   @@index([orderId])
@@ -2872,6 +2882,15 @@ model PromoRedemption {
   goodsDiscount    Decimal      @db.Decimal(12, 2)
   deliveryDiscount Decimal      @db.Decimal(12, 2)
   tipDiscount      Decimal      @default(0) @db.Decimal(12, 2)
+  /// [M-33] The goods discount allocated per order line at checkout —
+  /// `[{ orderItemId, goods }]`, summing exactly to goodsDiscount — so a
+  /// return refunds each line's own share, never a share inferred from the
+  /// order's aggregate discount.
+  lineAllocations  Json?
+  /// [M-33] The refund policy the order was placed under. ALG-25/M-33: the
+  /// delivery component is never refunded as goods; a discounted fee was
+  /// never paid; line shares come from lineAllocations.
+  refundPolicy     String       @default("ALG-25")
   createdAt        DateTime     @default(now())
 
   @@index([promoCodeId])
