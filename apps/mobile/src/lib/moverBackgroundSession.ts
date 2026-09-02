@@ -1,10 +1,22 @@
 import type { MoverKind } from './moverLocation';
 
+/**
+ * The durable authority record for background mover tracking.
+ *
+ * [MOB-017] It is bound to the LOGIN GENERATION, not only the user: a same-user
+ * logout/login is a new principal boundary, and a record written under the old
+ * one must never restore native tracking under the new one. A legacy record
+ * without a generation cannot be reauthorized and does not decode — the fresh
+ * runtime treats it as unknown authority (native stopped), and the person goes
+ * online again explicitly.
+ */
 export interface DurableMoverLocationSession {
   kind: MoverKind;
   startedAt: number;
   /** Principal identity only; credentials remain in encrypted auth storage. */
   userId: string;
+  /** The login generation that authorized this tracking session. */
+  generation: number;
   /** Last accepted publication is durable because TaskManager may cold-launch
    * a fresh JS runtime for each native event. All three fields are atomic. */
   lastPublishedAt?: number;
@@ -28,6 +40,7 @@ export function decodeMoverLocationSession(raw: string | null): DurableMoverLoca
     if (value.kind !== 'DRIVER' && value.kind !== 'RIDER') return null;
     if (!Number.isFinite(value.startedAt) || (value.startedAt as number) <= 0) return null;
     if (typeof value.userId !== 'string' || !value.userId.trim() || value.userId.length > 128) return null;
+    if (!Number.isSafeInteger(value.generation) || (value.generation as number) < 0) return null;
     const hasPublicationState = value.lastPublishedAt !== undefined
       || value.lastLatitude !== undefined
       || value.lastLongitude !== undefined;
@@ -58,6 +71,7 @@ export function decodeMoverLocationSession(raw: string | null): DurableMoverLoca
       kind: value.kind,
       startedAt: value.startedAt as number,
       userId: value.userId,
+      generation: value.generation as number,
       ...(hasPublicationState ? {
         lastPublishedAt: value.lastPublishedAt as number,
         lastLatitude: value.lastLatitude as number,

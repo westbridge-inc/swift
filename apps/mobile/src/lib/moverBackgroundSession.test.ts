@@ -7,6 +7,7 @@ describe('durable mover background sessions', () => {
       kind: 'RIDER' as const,
       startedAt: 1_786_100_000_000,
       userId: 'account-a',
+      generation: 3,
     };
     expect(decodeMoverLocationSession(encodeMoverLocationSession(value))).toEqual(value);
   });
@@ -16,6 +17,7 @@ describe('durable mover background sessions', () => {
       kind: 'DRIVER' as const,
       startedAt: 1_786_100_000_000,
       userId: 'account-a',
+      generation: 3,
       lastPublishedAt: 1_786_100_008_000,
       lastLatitude: 6.81234,
       lastLongitude: -58.14321,
@@ -39,6 +41,12 @@ describe('durable mover background sessions', () => {
     '{"kind":"RIDER","startedAt":1,"userId":"a","lastPublishedAt":2}',
     '{"kind":"RIDER","startedAt":1,"userId":"a","lastPublishedAt":2,"lastLatitude":91,"lastLongitude":0}',
     '{"kind":"RIDER","startedAt":1,"userId":"a","cleanupPending":true}',
+    // [MOB-017] a record without a login generation cannot be reauthorized — legacy records retire, never restore
+    '{"kind":"RIDER","startedAt":1,"userId":"a"}',
+    '{"kind":"RIDER","startedAt":1,"userId":"a","generation":-1}',
+    '{"kind":"RIDER","startedAt":1,"userId":"a","generation":1.5}',
+    '{"kind":"RIDER","startedAt":1,"userId":"a","generation":"1"}',
+    '{"kind":"RIDER","startedAt":1,"userId":"a","generation":null}',
   ])('rejects corrupt or unauthorized durable state: %s', (raw) => {
     expect(decodeMoverLocationSession(raw)).toBeNull();
   });
