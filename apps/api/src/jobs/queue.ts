@@ -199,75 +199,14 @@ export async function enqueueVendorAlertFollowup(
  *  instances — this function's own guard is what makes a RETRY or an operator
  *  requeue safe (see the covered-window check). */
 export async function runWeeklySettlement(ctx: JobContext) {
-  const now = new Date();
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-  const vendors = await ctx.prisma.vendor.findMany({
-    where: { status: 'ACTIVE' },
-    select: { id: true },
-  });
-  const activeIds = vendors.map((v) => v.id);
-  if (activeIds.length === 0) return;
-
-  // Idempotency guard [SWIFT-AUD-D7-01]: period bounds are wall-clock, so a
-  // retry recomputes a shifted window and no unique key could dedupe it. A
-  // vendor whose latest settlement already reaches into this window is
-  // settled for the week and skipped; its tail (prior periodEnd → now) rolls
-  // into the next weekly cycle rather than risking a double-created week.
-  const covered = await ctx.prisma.settlement.findMany({
-    where: { vendorId: { in: activeIds }, periodEnd: { gt: weekAgo } },
-    select: { vendorId: true },
-  });
-  const alreadyCovered = new Set(covered.map((s) => s.vendorId));
-
-  // SWIFT-AUD-D6-05: one grouped aggregate instead of a per-vendor
-  // findMany+create loop (N+1 that grew linearly with the vendor count).
-  //
-  // SWIFT-022: window on the COMPLETED status-log entry, NOT deliveredAt. Only
-  // delivery orders ever set deliveredAt, so filtering on it silently dropped
-  // ALL takeaway (PICKUP) and appointment revenue from the digest. Every order
-  // type reaches COMPLETED exactly once (delivery auto-completes), so its
-  // COMPLETED log is the one universal, once-per-order completion marker — no
-  // type is missed and nothing is counted in two weeks.
-  const completed = await ctx.prisma.orderStatusLog.findMany({
-    where: {
-      status: 'COMPLETED',
-      createdAt: { gte: weekAgo, lte: now },
-      order: { vendorId: { in: activeIds } },
-    },
-    select: { orderId: true },
-    distinct: ['orderId'],
-  });
-  const completedOrderIds = completed.map((c) => c.orderId);
-  if (completedOrderIds.length === 0) return;
-
-  const groups = await ctx.prisma.order.groupBy({
-    by: ['vendorId'],
-    where: {
-      id: { in: completedOrderIds },
-      // Exclude anything refunded/cancelled after it completed.
-      status: { in: ['DELIVERED', 'COMPLETED'] },
-    },
-    _sum: { subtotalBase: true, subtotalMarkup: true },
-    _count: { _all: true },
-  });
-
-  const settlements = groups
-    .filter((g) => g.vendorId && g._count._all > 0 && !alreadyCovered.has(g.vendorId!))
-    .map((g) => ({
-      vendorId: g.vendorId!,
-      periodStart: weekAgo,
-      periodEnd: now,
-      totalOrders: g._count._all,
-      totalBase: Number(g._sum.subtotalBase ?? 0),
-      totalMarkup: Number(g._sum.subtotalMarkup ?? 0),
-      status: 'PENDING' as const,
-    }));
-
-  if (settlements.length > 0) {
-    await ctx.prisma.settlement.createMany({ data: settlements });
-  }
-  ctx.log.info({ settlements: settlements.length }, 'Settlements created');
+  // [M-27] The weekly SALES DIGEST on canonical calendar weeks — one row per
+  // vendor and period, enforced by the database; every vendor that sold;
+  // discounts allocated; then the ledger delta for the recent periods.
+  const { generateSalesDigests, scanSalesDigestDelta } = await import('../modules/billing/sales-digest');
+  const res = await generateSalesDigests(ctx.prisma);
+  ctx.log.info({ settlements: res.created, periods: res.periods }, 'Sales digests created');
+  const delta = await scanSalesDigestDelta(ctx.prisma);
+  if (delta.length > 0) ctx.log.warn({ count: delta.length }, '[M-27] sales digests differ from the ledger — adjust them');
 }
 
 /** One ops page per condition per window [SWIFT-AUD-D7-02]: redis SET NX is

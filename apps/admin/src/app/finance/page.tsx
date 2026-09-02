@@ -161,7 +161,9 @@ function MmgSection() {
   );
 }
 
-/** Manual weekly vendor payouts: mark PAID with a transfer reference. */
+/** [M-27] Weekly SALES DIGESTS: each vendor's own completed sales for one
+ *  calendar week. Swift takes no cut and moves no vendor money, so a digest
+ *  is acknowledged as reviewed — it is a record, never a payout. */
 function SettlementsSection() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['settlements'], queryFn: () => fetchSettlements('limit=50&status=PENDING') });
@@ -174,9 +176,9 @@ function SettlementsSection() {
 
   return (
     <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 mb-6">
-      <h2 className="text-lg font-semibold mb-1">Vendor settlements pending</h2>
+      <h2 className="text-lg font-semibold mb-1">Vendor sales digests to review</h2>
       <p className="text-[var(--muted)] text-xs mb-4">
-        Manual transfers — mark each PAID with its bank reference once the money has moved.
+        Each vendor’s own completed sales for the week. Swift takes no cut and pays nothing out — acknowledge a digest once you have reviewed it.
       </p>
       {process.error && (
         <div className="mb-3">
@@ -194,16 +196,16 @@ function SettlementsSection() {
                 {s.periodStart ? new Date(s.periodStart).toLocaleDateString() : ''} –{' '}
                 {s.periodEnd ? new Date(s.periodEnd).toLocaleDateString() : ''}
               </span>
-              <span className="ml-auto font-semibold">{gyd(s.totalBase ?? s.amount)}</span>
+              <span className="ml-auto font-semibold">{gyd(s.netSales ?? s.totalBase ?? s.amount)}</span>
               <button
                 onClick={() => {
-                  const ref = window.prompt(`Bank/transfer reference for ${s.vendor?.name ?? 'this settlement'} (optional):`) ?? undefined;
-                  if (window.confirm(`Mark this settlement PAID?`)) process.mutate({ id: s.id, reference: ref || undefined });
+                  const ref = window.prompt(`Note for ${s.vendor?.name ?? 'this digest'} (optional):`) ?? undefined;
+                  if (window.confirm(`Acknowledge this sales digest? Swift moves no money — this records that you reviewed it.`)) process.mutate({ id: s.id, reference: ref || undefined });
                 }}
                 disabled={process.isPending}
                 className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
               >
-                Mark paid
+                Acknowledge
               </button>
             </div>
           ))}

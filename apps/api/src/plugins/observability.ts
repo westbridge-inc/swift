@@ -230,6 +230,14 @@ export const settlementBatchesUnbalancedGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [M-27] Sales digests whose latest row no longer matches a recompute from the
+ *  ledger — periods to adjust. Set by the weekly digest job. */
+export const salesDigestDeltaGauge = new client.Gauge({
+  name: 'swift_sales_digest_delta',
+  help: 'Recent vendor sales digests whose stored totals differ from the ledger',
+  registers: [registry],
+});
+
 /** [M-22] Bank reconciliation refusals: a batch from another tenant, a second
  *  confirmation of a confirmed batch, a bank reference used before, and the
  *  read-only hold. Each is a page for a person. */

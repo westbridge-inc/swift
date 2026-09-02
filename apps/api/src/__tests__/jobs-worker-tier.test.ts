@@ -5,6 +5,7 @@ import Redis from 'ioredis';
 import type { Worker } from 'bullmq';
 import { prismaPlugin } from '../plugins/prisma';
 import { runWeeklySettlement, createQueues, createWorkers, type JobContext } from '../jobs/queue';
+import { startOfWeekGY } from '../utils/time-gy';
 import { probeQueueProducers } from '../jobs/runtime';
 import { withTimeout } from '../utils/async-lifecycle';
 
@@ -76,7 +77,9 @@ beforeAll(async () => {
   // A real completed order carries a COMPLETED status-log entry — that is what
   // the settlement now windows on [SWIFT-022].
   await app.prisma.orderStatusLog.create({
-    data: { orderId: settled.id, status: 'COMPLETED', note: 'test', createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+    // [M-27] The digest is canonical calendar weeks: the completion must fall
+    // in the PREVIOUS complete week, never the week in progress.
+    data: { orderId: settled.id, status: 'COMPLETED', note: 'test', createdAt: new Date(startOfWeekGY().getTime() - 3 * 24 * 60 * 60 * 1000) },
   });
 });
 
@@ -122,7 +125,7 @@ describe('runWeeklySettlement — idempotent weekly snapshot [SWIFT-AUD-D7-01]',
       },
     });
     await app.prisma.orderStatusLog.create({
-      data: { orderId: takeaway.id, status: 'COMPLETED', note: 'test', createdAt: new Date(Date.now() - 12 * 60 * 60 * 1000) },
+      data: { orderId: takeaway.id, status: 'COMPLETED', note: 'test', createdAt: new Date(startOfWeekGY().getTime() - 2 * 24 * 60 * 60 * 1000) },
     });
 
     await runWeeklySettlement(ctx());
