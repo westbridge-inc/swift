@@ -230,6 +230,16 @@ export const settlementBatchesUnbalancedGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [M-22] Bank reconciliation refusals: a batch from another tenant, a second
+ *  confirmation of a confirmed batch, a bank reference used before, and the
+ *  read-only hold. Each is a page for a person. */
+export const bankReconRefusalsCounter = new client.Counter({
+  name: 'swift_bank_recon_refusals_total',
+  help: 'Deposit confirmations refused: foreign batch, reconfirmation, reused bank reference, read-only hold',
+  labelNames: ['reason'] as const,
+  registers: [registry],
+});
+
 /** [M-15] Grandfathered payers held past their tenant's sunset because a
  *  T−30 / T−7 notice has no delivery proof — pinned until it does. */
 export const usdMigrationHeldGauge = new client.Gauge({

@@ -2350,6 +2350,33 @@ model SettlementBatch {
   @@map("settlement_batches")
 }
 
+/// [M-22] A bank deposit confirmation is IMMUTABLE. The first record for a
+/// batch is the confirmation (the batch's compare-and-set makes it unique);
+/// every later change is a separate ADJUSTMENT that names the record it
+/// supersedes. The bank reference is mandatory and unique per provider.
+model DepositConfirmation {
+  id           String   @id @default(cuid())
+  tenantId     String   @default("swift-default")
+  batchId      String
+  provider     String   @default("MMG")
+  /// CONFIRMATION | ADJUSTMENT
+  kind         String
+  supersedesId String?
+  depositedGyd Decimal  @db.Decimal(12, 2)
+  depositedAt  DateTime
+  bankRef      String
+  /// DEPOSITED | MISMATCH — against the batch's expected net at the time
+  status       String
+  deltaGyd     Decimal  @db.Decimal(12, 2)
+  reason       String?
+  confirmedBy  String
+  createdAt    DateTime @default(now())
+
+  @@unique([tenantId, provider, bankRef])
+  @@index([batchId, createdAt])
+  @@map("deposit_confirmations")
+}
+
 /// GRA-ready sequential receipts [san spec 20.1]: per-tenant-per-year gapless
 /// counter, one receipt per credit (cash, manual, promo — promo shows GY$0
 /// cash). Financial rows survive DPA erasure (legal-obligation basis, 20.5).

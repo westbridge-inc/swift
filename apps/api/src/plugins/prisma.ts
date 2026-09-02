@@ -70,6 +70,8 @@ const TENANT_QUERY_EXTENSIONS = {
   livenessCheck: scoped, incidentCase: scoped, evidenceBundle: scoped, safetyAccessLog: scoped,
   // Money: settlement, receipts, the agent-cash rail, trials.
   mmgAgentPayment: scoped, settlementBatch: scoped, feeReceipt: scoped, receiptCounter: scoped,
+  // [M-22] Immutable bank deposit confirmations and their adjustments.
+  depositConfirmation: scoped,
   // [M-20] A settlement file as one staged, validated import.
   settlementImport: scoped,
   // [M-18] The provider-transaction identity behind every agent-cash observation.

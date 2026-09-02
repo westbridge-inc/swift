@@ -42,6 +42,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await prisma.depositConfirmation.deleteMany({ where: { batchId: { in: batchIds } } });
+  await prisma.auditLog.deleteMany({ where: { entity: 'SettlementBatch', entityId: { in: batchIds } } });
   await prisma.settlementBatch.deleteMany({ where: { id: { in: batchIds } } });
   await prisma.mmgAgentPayment.deleteMany({ where: { id: { in: paymentIds } } });
   await prisma.platformConfig.deleteMany({ where: { key: { in: CONFIG_KEYS } } });
@@ -88,11 +90,13 @@ describe('bank-truth reconciliation (scenario U)', () => {
     expect(again).toBeGreaterThanOrEqual(0);
 
     // The founder confirms a SHORT deposit → MISMATCH with the delta named.
+    // [M-22] A confirmation carries the actor and a bank reference that is
+    // unique per provider; it is immutable (bank-recon-immutable.test.ts).
     const res = await confirmDeposit(prisma, batch!.id, {
       depositedGyd: Number(batch!.expectedNetGyd) - 500,
       depositedAt: new Date(),
-      bankRef: 'GBTI-TEST-001',
-    });
+      bankRef: `GBTI-TEST-${nanoid(8)}`,
+    }, { userId: 'bank-recon-test', tenantId: 'swift-default' });
     expect(res.status).toBe('MISMATCH');
     expect(res.deltaGyd).toBe(-500);
     const after = await prisma.settlementBatch.findUniqueOrThrow({ where: { id: batch!.id } });
