@@ -194,12 +194,18 @@ describe('learn → predict → shadow → grade, against the database', () => {
     silent = await makeVendor('SUPERMARKET', 0);
     await seedCompleted(busy, [...Array.from({ length: 25 }, (_, i) => 540 + i * 5), 4 * 3600]);
     await seedCompleted(quiet, [900, 960, 1020]);
+    // The learner runs at a FROZEN clock, so the stale row must be stale
+    // relative to THAT clock, not the wall clock: pruning deletes rows whose
+    // lastComputedAt precedes the run's start, and a row stamped from
+    // Date.now() is newer than a frozen past `now` from the day after the
+    // test was written — it survived every prune and the assertion below
+    // went red on its own, one day later. Same frozen instant, minus two days.
+    const now = new Date('2026-08-30T12:00:00Z');
     // A stale row from a previous window that no sample supports any more.
     await app.prisma.vendorPrepStat.create({
-      data: { vendorId: busy, dayOfWeek: 3, hourBucket: 9, sampleCount: 40, p50Seconds: 1, p80Seconds: 1, p95Seconds: 1, lastComputedAt: new Date(Date.now() - 2 * DAY) },
+      data: { vendorId: busy, dayOfWeek: 3, hourBucket: 9, sampleCount: 40, p50Seconds: 1, p80Seconds: 1, p95Seconds: 1, lastComputedAt: new Date(now.getTime() - 2 * DAY) },
     });
 
-    const now = new Date('2026-08-30T12:00:00Z');
     const r = await computePrepStats(app.prisma, now);
     expect(r.orders).toBeGreaterThanOrEqual(29);
     expect(r.pruned).toBeGreaterThanOrEqual(1);
