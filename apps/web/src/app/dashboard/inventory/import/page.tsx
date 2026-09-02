@@ -4,9 +4,8 @@ import { useRef, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { Download, FileSpreadsheet, Upload } from 'lucide-react';
 import { getToken, getSelectedStore } from '@/lib/auth';
+import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 import { automapCsv, automapXlsx, confirmImport, templateUrl } from '@/lib/vendor-api';
-
-const API_URL = process.env['NEXT_PUBLIC_API_URL'] ?? 'http://localhost:3000';
 
 type Preview = { mapping: Record<string, string>; rowCount: number; preview: Record<string, string>[]; normalizedCsv: string };
 type Result = { imported: number; failedCount: number; failures: Array<{ row: number; errors: string[] }> };

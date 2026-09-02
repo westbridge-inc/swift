@@ -1,13 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 // The polling client for the public parcel page [B9]. Renders exactly what
 // the server said, marks how fresh it is, and degrades honestly: an unknown
 // token is a clear "not active", a network blip keeps the last-good view and
 // keeps retrying — never a spinner forever, never a dressed-up guess.
 
-const API_URL = process.env['NEXT_PUBLIC_API_URL'] ?? 'http://localhost:3000';
 const POLL_MS = 5000;
 
 interface ParcelView {
