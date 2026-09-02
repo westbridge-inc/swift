@@ -1872,9 +1872,45 @@ export async function customerRoutes(app: FastifyInstance) {
     const redisKey = typeof idemKey === 'string' && idemKey.length >= 8 && idemKey.length <= 128
       ? `checkout:idem:${userId}:${idemKey}`
       : null;
+    // [M-12] Validate and canonicalise BEFORE the command key is claimed: a
+    // malformed request must never consume a financial command key (it used
+    // to strand the key as IN_FLIGHT for a day) and must never be fingerprinted.
+    // Validate payment method. Orders are cash-only P2P: CASH, or MOBILE_MONEY
+    // (the vendor's own MMG "pay me" link — money never touches Swift). CARD /
+    // BANK_TRANSFER are NOT valid for orders — Swift is a SaaS, not a money
+    // transmitter, and must never carry an in-app order-payment method.
+    const validMethods = ['CASH', 'MOBILE_MONEY'];
+    const paymentMethod = body.paymentMethod || 'CASH';
+    if (!validMethods.includes(paymentMethod)) {
+      throw new ValidationError(`Invalid payment method. Valid options: ${validMethods.join(', ')}`);
+    }
+
+    // Validate scheduled time
+    // [M-12] A malformed timestamp used to become an Invalid Date, fail BOTH
+    // range comparisons, and sail through to the order. It is refused here,
+    // and the accepted value is canonicalised so the request's fingerprint is
+    // the same for '…+00:00' and '…Z'.
+    let scheduledForCanonical: string | undefined;
+    if (body.scheduledFor) {
+      const scheduledDate = new Date(body.scheduledFor);
+      if (Number.isNaN(scheduledDate.getTime())) {
+        throw new ValidationError('scheduledFor must be a valid ISO 8601 timestamp');
+      }
+      scheduledForCanonical = scheduledDate.toISOString();
+      const now = new Date();
+      const minLeadMs = 30 * 60 * 1000; // 30 min minimum
+      const maxLeadMs = 7 * 24 * 60 * 60 * 1000; // 7 days max
+      if (scheduledDate.getTime() < now.getTime() + minLeadMs) {
+        throw new ValidationError('Scheduled orders must be at least 30 minutes in the future');
+      }
+      if (scheduledDate.getTime() > now.getTime() + maxLeadMs) {
+        throw new ValidationError('Scheduled orders can be at most 7 days in the future');
+      }
+    }
+
     // [M-11] The request's fingerprint travels with the key: one key, one
-    // request, one immutable answer.
-    const requestHash = checkoutRequestHash(body);
+    // request, one immutable answer — over the canonical request.
+    const requestHash = checkoutRequestHash({ ...body, ...(scheduledForCanonical ? { scheduledFor: scheduledForCanonical } : {}) });
     if (redisKey) {
       // [M-11] The DATABASE is the truth for a replay. Before touching the
       // in-flight lock, ask whether this command already has a receipt: if
@@ -1897,30 +1933,6 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
-    // Validate payment method. Orders are cash-only P2P: CASH, or MOBILE_MONEY
-    // (the vendor's own MMG "pay me" link — money never touches Swift). CARD /
-    // BANK_TRANSFER are NOT valid for orders — Swift is a SaaS, not a money
-    // transmitter, and must never carry an in-app order-payment method.
-    const validMethods = ['CASH', 'MOBILE_MONEY'];
-    const paymentMethod = body.paymentMethod || 'CASH';
-    if (!validMethods.includes(paymentMethod)) {
-      throw new ValidationError(`Invalid payment method. Valid options: ${validMethods.join(', ')}`);
-    }
-
-    // Validate scheduled time
-    if (body.scheduledFor) {
-      const scheduledDate = new Date(body.scheduledFor);
-      const now = new Date();
-      const minLeadMs = 30 * 60 * 1000; // 30 min minimum
-      const maxLeadMs = 7 * 24 * 60 * 60 * 1000; // 7 days max
-      if (scheduledDate.getTime() < now.getTime() + minLeadMs) {
-        throw new ValidationError('Scheduled orders must be at least 30 minutes in the future');
-      }
-      if (scheduledDate.getTime() > now.getTime() + maxLeadMs) {
-        throw new ValidationError('Scheduled orders can be at most 7 days in the future');
-      }
-    }
-
     let result;
     try {
       result = await orderService.checkout({
@@ -1928,7 +1940,7 @@ export async function customerRoutes(app: FastifyInstance) {
         paymentMethod,
         deliveryInstructions: body.deliveryInstructions,
         tipAmount: body.tipAmount,
-        scheduledFor: body.scheduledFor,
+        scheduledFor: scheduledForCanonical,
         promoCode: body.promoCode,
         fulfillmentSelections: body.fulfillmentSelections,
         express: body.express,
