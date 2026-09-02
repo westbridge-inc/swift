@@ -4198,12 +4198,47 @@ export async function adminRoutes(app: FastifyInstance) {
     }
   }
 
+  /**
+   * [TA-S0-005] The compare-and-act must be ATOMIC in Redis, not a state read
+   * followed by an awaited audit write followed by the act. In that gap a
+   * Retry from another operator (or a stale second tab) moves the job from
+   * `failed` to `waiting`, and BullMQ's `remove` deletes a waiting job just as
+   * happily — live money work gone, from the screen built to rescue it.
+   *
+   * The claim is BullMQ's own dead-letter set: `ZREM <queue>:failed <id>`
+   * returns 1 for exactly one caller. Retry goes through BullMQ's reprocess
+   * script, which performs the same ZREM and refuses when the job is no longer
+   * there — so Retry and Discard serialize on one Redis key, whichever lands
+   * first, and the loser is told 409 instead of acting on a job that moved.
+   */
+  const NO_LONGER_FAILED = (what: string) =>
+    new AppError(409, 'JOB_NO_LONGER_FAILED', `That job left the dead-letter set while you were deciding — ${what}. Reload before deciding again.`);
+  async function claimDeadLetter(q: import('bullmq').Queue, id: string): Promise<boolean> {
+    const client = await q.client;
+    return (await client.zrem(q.toKey('failed'), id)) === 1;
+  }
+  async function restoreDeadLetter(q: import('bullmq').Queue, id: string, finishedOn: number | undefined): Promise<void> {
+    const client = await q.client;
+    await client.zadd(q.toKey('failed'), String(finishedOn ?? Date.now()), id);
+  }
+
   /** POST /dlq/:queue/:id/requeue — retry a dead job. */
   app.post('/dlq/:queue/:id/requeue', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
     const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string };
+    const q = dlqQueue(queue);
     const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
-    await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { jobName: job.name }, () => job.retry());
+    await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { jobName: job.name }, async () => {
+      try {
+        await job.retry();
+      } catch (err) {
+        // BullMQ's reprocess refused: the job is no longer in the failed set
+        // (a Discard claimed it, or another Retry already moved it).
+        const now = (await q.getJob(id)) ? await job.getState() : 'unknown';
+        if (now !== 'failed') throw NO_LONGER_FAILED(now === 'unknown' ? 'it was discarded' : `it is now "${now}"`);
+        throw err;
+      }
+    });
     return { success: true, data: { queue, id, retried: true } };
   });
 
@@ -4211,6 +4246,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.delete('/dlq/:queue/:id', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
     const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string };
+    const q = dlqQueue(queue);
     const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
     await auditedDlqAction(
       request,
@@ -4218,7 +4254,19 @@ export async function adminRoutes(app: FastifyInstance) {
       queue,
       id,
       { jobName: job.name, failedReason: job.failedReason ?? null },
-      () => job.remove(),
+      async () => {
+        // The atomic claim, immediately before the destructive act: whoever
+        // pulls the id out of the failed set acts; everyone else is refused.
+        if (!(await claimDeadLetter(q, id))) throw NO_LONGER_FAILED('someone requeued it, and it is live work again; nothing was discarded');
+        try {
+          await job.remove();
+        } catch (err) {
+          // The claim succeeded but the removal did not: put the dead letter
+          // back so it is neither orphaned nor silently lost.
+          await restoreDeadLetter(q, id, job.finishedOn).catch(() => undefined);
+          throw err;
+        }
+      },
     );
     return { success: true, data: { queue, id, discarded: true } };
   });

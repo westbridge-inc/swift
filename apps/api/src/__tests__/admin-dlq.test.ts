@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -53,6 +53,93 @@ afterAll(async () => {
   await testQueue.obliterate({ force: true }).catch(() => {});
   await testQueue.close();
   await app.close();
+});
+
+/** Manufacture a real dead letter: one attempt, a worker that throws. */
+async function failedJob(tag: string) {
+  const { Worker } = await import('bullmq');
+  const job = await testQueue.add('doomed', { orderId: tag }, { attempts: 1 });
+  const worker = new Worker(
+    testQueue.name,
+    async () => { throw new Error(`boom: ${tag}`); },
+    { connection: app.redis.duplicate({ maxRetriesPerRequest: null }) as unknown as import('bullmq').ConnectionOptions },
+  );
+  for (let i = 0; i < 50; i++) {
+    if ((await job.getState()) === 'failed') break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  await worker.close();
+  expect(await job.getState()).toBe('failed');
+  return job;
+}
+
+const adminHeaders = () => ({ authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' });
+
+describe('[TA-S0-005] compare-and-act is atomic in Redis', () => {
+  it('two operators: Retry lands inside Discard’s audit gap → Discard is refused by the atomic claim and the waiting job survives', async () => {
+    const job = await failedJob('race-retry-first');
+    const since = new Date();
+
+    // Barrier: hold DISCARD between its state read and its act by stalling
+    // its audit write (the awaited step that separates the two).
+    const delegate = app.prisma.auditLog;
+    const original = delegate.create.bind(delegate);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held = false;
+    const spy = vi.spyOn(delegate, 'create').mockImplementation((async (args: { data?: { action?: string } }) => {
+      if (!held && args?.data?.action === 'DISCARD_DLQ_JOB') {
+        held = true;
+        await gate;
+      }
+      return original(args as never);
+    }) as never);
+    try {
+      const discard = app.inject({ method: 'DELETE', url: `/api/v1/admin/dlq/order/${job.id}`, headers: adminHeaders() });
+      for (let i = 0; i < 100 && !held; i++) await new Promise((r) => setTimeout(r, 20));
+      expect(held).toBe(true); // Discard has read "failed" and is parked before its act
+
+      // Retry lands first: the job is live work again.
+      const requeue = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`, headers: adminHeaders(), payload: {} });
+      expect(requeue.statusCode).toBe(200);
+      expect(await job.getState()).toBe('waiting');
+
+      release();
+      const res = await discard;
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe('JOB_NO_LONGER_FAILED');
+    } finally {
+      spy.mockRestore();
+    }
+    // The live job survived, and the audit trail says: asked, then refused.
+    expect(await job.getState()).toBe('waiting');
+    expect(await testQueue.getJob(job.id!)).toBeTruthy();
+    // BullMQ reuses small numeric ids across obliterated queues, so only this run's rows count.
+    const trail = await app.prisma.auditLog.findMany({ where: { entity: 'Job', entityId: `order:${job.id}`, createdAt: { gte: since }, action: { in: ['DISCARD_DLQ_JOB', 'DISCARD_DLQ_JOB_FAILED'] } } });
+    expect(trail.map((r) => r.action).sort()).toEqual(['DISCARD_DLQ_JOB', 'DISCARD_DLQ_JOB_FAILED']);
+  });
+
+  it('the other order: Discard claims first → Retry is refused with the same 409 and the job is gone', async () => {
+    const job = await failedJob('race-discard-first');
+    const discard = await app.inject({ method: 'DELETE', url: `/api/v1/admin/dlq/order/${job.id}`, headers: adminHeaders() });
+    expect(discard.statusCode).toBe(200);
+    expect(await testQueue.getJob(job.id!)).toBeUndefined();
+
+    const requeue = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`, headers: adminHeaders(), payload: {} });
+    expect([404, 409]).toContain(requeue.statusCode); // gone: nothing to retry, and never a resurrection
+  });
+
+  it('the claim is the failed set itself: a job that leaves it between the read and the act cannot be removed', async () => {
+    // Direct proof of the primitive, independent of request timing: pull the
+    // id out of the failed set (what a concurrent Retry does) and the claim
+    // must report "not yours".
+    const job = await failedJob('race-primitive');
+    const client = await testQueue.client;
+    expect(await client.zrem(testQueue.toKey('failed'), job.id!)).toBe(1); // a Retry took it
+    expect(await client.zrem(testQueue.toKey('failed'), job.id!)).toBe(0); // the claim after it must lose
+    // Put it back so the queue's obliterate can clean it up.
+    await client.zadd(testQueue.toKey('failed'), String(job.finishedOn ?? Date.now()), job.id!);
+  });
 });
 
 describe('GET /admin/dlq', () => {
