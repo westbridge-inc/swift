@@ -41,7 +41,7 @@ async function sale(vendorId: string, completedAt: Date, base: number, discount 
   const order = await prisma.order.create({
     data: {
       orderNumber: `DG-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'PICKUP', customerId, vendorId, status: 'COMPLETED',
-      deliveryAddress: 'counter', deliveryLat: 6.8, deliveryLng: -58.15, subtotalBase: base, subtotalMarkup: 0, subtotalCustomer: base - discount, deliveryFee: 0, discount, totalAmount: base - discount, paymentMethod: 'CASH',
+      deliveryAddress: 'counter', deliveryLat: 6.8, deliveryLng: -58.15, subtotalBase: base, subtotalMarkup: 0, subtotalCustomer: base, deliveryFee: 0, discount, totalAmount: base - discount, paymentMethod: 'CASH',
     },
   });
   orderIds.push(order.id);
@@ -131,7 +131,9 @@ describe('[M-27] canonical periods', () => {
     await generateSalesDigests(prisma, new Date());
     const [row] = await rowsFor(vendorId);
     expect({ orders: row!.totalOrders, base: Number(row!.totalBase), discount: Number(row!.totalDiscount), net: Number(row!.netSales) }).toEqual({ orders: 2, base: 4000, discount: 500, net: 3500 });
-    expect(await computeDigest(prisma, vendorId, { periodStart: lastWeek(), periodEnd: thisMonday() })).toEqual({ totalOrders: 2, totalBase: 4000, totalMarkup: 0, totalDiscount: 500, netSales: 3500 });
+    // [M-38] legacy orders (no redemption snapshot): the split is the conservative estimate and says so
+    expect({ goods: Number(row!.goodsSales), vendorPromo: Number(row!.vendorPromoDiscount), sponsor: Number(row!.sponsorReceivable), estimated: row!.estimatedOrders, version: row!.componentsVersion }).toEqual({ goods: 4000, vendorPromo: 500, sponsor: 0, estimated: 1, version: 1 });
+    expect(await computeDigest(prisma, vendorId, { periodStart: lastWeek(), periodEnd: thisMonday() })).toMatchObject({ totalOrders: 2, totalBase: 4000, totalMarkup: 0, totalDiscount: 500, netSales: 3500 });
   });
 });
 

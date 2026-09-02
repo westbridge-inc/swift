@@ -448,6 +448,22 @@ export const moneyBoundaryCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [M-38] Sales components: legacy digests still to recompute, and the
+ *  shadow — digests whose old "net" (every discount subtracted) disagrees
+ *  with what the vendor actually keeps. */
+export const salesComponentsGauge = new client.Gauge({
+  name: 'swift_sales_components',
+  help: 'Sales-component state by check (legacy_digests_pending)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+export const salesComponentsCounter = new client.Counter({
+  name: 'swift_sales_components_events_total',
+  help: 'Sales-component events (shadow_diff: the legacy net disagreed with the separated net)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

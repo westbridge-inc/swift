@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { startOfWeekGY } from '../../utils/time-gy';
-import { salesDigestDeltaGauge } from '../../plugins/observability';
+import { salesDigestDeltaGauge, salesComponentsGauge, salesComponentsCounter } from '../../plugins/observability';
+import { aggregateSalesComponents, type SalesTotals } from './sales-components';
 import { log } from '../../utils/logger';
 
 // [M-27] The weekly SALES DIGEST. Swift takes no commission and never holds
@@ -22,13 +23,16 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
  *  rebuild years in one tick; older weeks are adjusted on request. */
 export const DIGEST_LOOKBACK_WEEKS = 26;
 
-export interface DigestTotals {
+export interface DigestTotals extends SalesTotals {
   totalOrders: number;
   totalBase: number;
   totalMarkup: number;
   totalDiscount: number;
-  netSales: number;
+  /** [M-38] 1 = the separated components are present. */
+  componentsVersion: number;
 }
+export const DIGEST_COMPONENTS_VERSION = 1;
+const EMPTY_COMPONENTS: SalesTotals = { goodsSales: 0, vendorPromoDiscount: 0, sponsorReceivable: 0, customerCollection: 0, feeFunding: 0, moverPayable: 0, estimatedOrders: 0, netSales: 0 };
 
 /** The canonical period a moment belongs to. */
 export function digestPeriodFor(at: Date): { periodStart: Date; periodEnd: Date } {
@@ -56,21 +60,51 @@ export async function computeDigest(prisma: PrismaClient, vendorId: string, peri
     select: { orderId: true },
     distinct: ['orderId'],
   });
-  if (completed.length === 0) return { totalOrders: 0, totalBase: 0, totalMarkup: 0, totalDiscount: 0, netSales: 0 };
+  if (completed.length === 0) return { totalOrders: 0, totalBase: 0, totalMarkup: 0, totalDiscount: 0, ...EMPTY_COMPONENTS, componentsVersion: DIGEST_COMPONENTS_VERSION };
+  const ids = completed.map((c) => c.orderId);
   const agg = await prisma.order.aggregate({
-    where: { id: { in: completed.map((c) => c.orderId) }, vendorId, status: { in: ['DELIVERED', 'COMPLETED'] } },
+    where: { id: { in: ids }, vendorId, status: { in: ['DELIVERED', 'COMPLETED'] } },
     _sum: { subtotalBase: true, subtotalMarkup: true, discount: true },
     _count: { _all: true },
   });
   const totalBase = Number(agg._sum.subtotalBase ?? 0);
   const totalDiscount = Number(agg._sum.discount ?? 0);
+  // [M-38] The separated components from each order's redemption snapshot;
+  // netSales is what the vendor keeps from goods (its own promotions only).
+  const { orders: componentOrders, ...components } = await aggregateSalesComponents(prisma, { vendorId, orderIds: ids });
+  void componentOrders; // the digest counts orders by the COMPLETED log, not by the components query
+  // The shadow: what the old digest called net (every discount subtracted).
+  const legacyNet = Math.round((totalBase - totalDiscount) * 100) / 100;
+  if (Math.abs(legacyNet - components.netSales) > 0.009) salesComponentsCounter.labels('shadow_diff').inc();
   return {
     totalOrders: agg._count._all,
     totalBase,
     totalMarkup: Number(agg._sum.subtotalMarkup ?? 0),
     totalDiscount,
-    netSales: Math.round((totalBase - totalDiscount) * 100) / 100,
+    ...components,
+    componentsVersion: DIGEST_COMPONENTS_VERSION,
   };
+}
+
+/** [M-38 · operations] Recompute historical digests with versioned
+ *  adjustments: the latest row of every (vendor, period) still at
+ *  componentsVersion 0 gets an ADJUSTMENT carrying the components — bounded
+ *  per run, idempotent (an adjusted period is no longer at version 0). */
+export async function recomputeLegacyDigests(prisma: PrismaClient, limit = 50): Promise<{ adjusted: number; pending: number }> {
+  const legacy = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT s."id" FROM "settlements" s
+    WHERE s."componentsVersion" = 0
+      AND s."sequence" = (SELECT max(x."sequence") FROM "settlements" x WHERE x."vendorId" = s."vendorId" AND x."periodStart" = s."periodStart")
+    ORDER BY s."periodStart" DESC LIMIT ${limit + 1}`;
+  let adjusted = 0;
+  for (const row of legacy.slice(0, limit)) {
+    await adjustSalesDigest(prisma, row.id, '[M-38] components recompute — legacy digest was estimated, not settled');
+    adjusted += 1;
+  }
+  const pending = Math.max(0, legacy.length - adjusted);
+  salesComponentsGauge.labels('legacy_digests_pending').set(pending);
+  if (adjusted > 0) log().info({ adjusted, pending }, '[M-38] legacy sales digests recomputed with components');
+  return { adjusted, pending };
 }
 
 /** Generate the missing DIGEST rows: for every complete period in the lookback,

@@ -618,6 +618,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               }),
             ).catch(() => {});
           }
+          // [M-38] Recompute historical digests with versioned adjustments —
+          // a bounded batch per tick; a legacy row is estimated until then.
+          const { recomputeLegacyDigests } = await import('../modules/billing/sales-digest');
+          await recomputeLegacyDigests(ctx.prisma, 50).catch(() => {});
           break;
         }
       }
