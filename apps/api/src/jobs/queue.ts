@@ -622,6 +622,23 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // a bounded batch per tick; a legacy row is estimated until then.
           const { recomputeLegacyDigests } = await import('../modules/billing/sales-digest');
           await recomputeLegacyDigests(ctx.prisma, 50).catch(() => {});
+          // [R045-ADS] Execute staged ad-refund obligations (leased, once each,
+          // retried with backoff), then report what is outstanding and page
+          // for failures or a terminal paid campaign with no intent.
+          const { AdsRefundService, scanAdRefunds } = await import('../modules/ads/refund.service');
+          await new AdsRefundService(ctx.prisma, ctx.io).drainOutbox({ limit: 50 }).catch(() => {});
+          const adRefunds = await scanAdRefunds(ctx.prisma);
+          if (adRefunds.failed > 0 || adRefunds.terminalWithoutIntent.length > 0) {
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'ad-refund-obligations', 6 * 3600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: '📣 Ad refund obligations need a person',
+                body: `${adRefunds.failed} refund intent(s) FAILED after every retry and ${adRefunds.terminalWithoutIntent.length} cancelled or killed paid campaign(s) have no refund intent (run the backfill). ${adRefunds.awaitingPayout.count} executed intent(s) await a payout reference.`,
+                data: { kind: 'billing_invariants', alert: 'ad-refund-obligations', failed: adRefunds.failed, terminalWithoutIntent: adRefunds.terminalWithoutIntent.slice(0, 10), awaitingPayout: adRefunds.awaitingPayout.count },
+              }),
+            ).catch(() => {});
+          }
           break;
         }
       }

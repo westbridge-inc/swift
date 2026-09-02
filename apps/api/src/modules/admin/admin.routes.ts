@@ -2732,11 +2732,45 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/ads/campaigns/:id/kill', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { reason } = z.object({ reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    const killed = await adsLifecycle.transition(id, 'kill', request.user.userId, reason);
-    // §8.4 row 5: kill refunds future weeks by default (current week 0%).
+    // [R045-ADS-08] Kill and its refund obligation are ONE database generation:
+    // the intent is staged inside the transition's transaction. No empty catch
+    // on money — if staging fails the kill fails too; if execution fails the
+    // outbox worker retries the same intent.
     const { AdsRefundService } = await import('../ads/refund.service');
-    await new AdsRefundService(tenantPrisma, app.io).execute(id, 'ADMIN_KILL', request.user.userId).catch(() => {});
-    return { success: true, data: { id: killed.id, status: killed.status } };
+    const refunds = new AdsRefundService(tenantPrisma, app.io);
+    let staged: { intentId: string } | null = null;
+    const killed = await adsLifecycle.transition(id, 'kill', request.user.userId, reason, {
+      within: async (tx) => { staged = await refunds.stage(tx, id, 'ADMIN_KILL', request.user.userId); },
+    });
+    if (staged) await refunds.executeNow((staged as { intentId: string }).intentId).catch((err: unknown) => request.log.warn({ err, campaignId: id }, '[R045-ADS-08] kill refund execution deferred to the worker'));
+    return { success: true, data: { id: killed.id, status: killed.status, refundIntentId: staged ? (staged as { intentId: string }).intentId : null } };
+  });
+
+  /** [R045-ADS] The refund obligations: what is outstanding, awaiting a human's payout, failed. */
+  app.get('/ads/refund-intents', { preHandler: [adminGuard] }, async (request) => {
+    const q = z.object({ status: z.enum(['PENDING', 'PROCESSING', 'MANUAL_REQUIRED', 'SUCCEEDED', 'FAILED']).optional() }).parse(request.query ?? {});
+    const rows = await tenantPrisma.adRefundIntent.findMany({ where: q.status ? { status: q.status } : {}, orderBy: { createdAt: 'desc' }, take: 200, include: { items: true, outbox: { select: { attempts: true, lastError: true, processedAt: true, deadLetteredAt: true } } } });
+    return { success: true, data: rows.map((r) => ({ ...r, amountMinor: r.amountMinor.toString(), items: r.items.map((i) => ({ ...i, amountMinor: i.amountMinor.toString() })) })) };
+  });
+
+  /** [R045-ADS] The payout reference is the evidence that settles an executed intent. */
+  app.post('/ads/refund-intents/:id/settle', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { manualPayoutRef } = z.object({ manualPayoutRef: z.string().trim().min(3).max(120) }).parse(request.body ?? {});
+    const { AdsRefundService } = await import('../ads/refund.service');
+    await new AdsRefundService(tenantPrisma, app.io).settleManual(id, manualPayoutRef, request.user.userId);
+    await audit(request.user.userId, 'SETTLE_AD_REFUND', 'AdRefundIntent', id, { manualPayoutRef }, request);
+    return { success: true, data: { id, status: 'SUCCEEDED' } };
+  });
+
+  /** [R045-ADS · operations] Backfill intents for every terminal paid campaign
+   *  that has none — dry run first, then one tenant as the canary. */
+  app.post('/ads/refund-intents/backfill', { preHandler: [platformControlGuard] }, async (request) => {
+    const body = z.object({ dryRun: z.boolean().default(true), tenantId: z.string().optional(), limit: z.number().int().min(1).max(500).optional() }).parse(request.body ?? {});
+    const { backfillAdRefundIntents } = await import('../ads/refund.service');
+    const result = await backfillAdRefundIntents(app.prisma, { dryRun: body.dryRun, tenantId: body.tenantId, limit: body.limit, actor: request.user.userId });
+    if (!body.dryRun) await audit(request.user.userId, 'BACKFILL_AD_REFUNDS', 'AdRefundIntent', 'backfill', { created: result.created, tenantId: body.tenantId ?? null }, request);
+    return { success: true, data: result };
   });
 
   /** §8.2 admin "mark invoice paid" — the Caribbean reality path (bank

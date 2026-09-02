@@ -3987,6 +3987,10 @@ model Advertiser {
   statusReason    String?
   /// The User who registered the company (first OWNER member).
   createdByUserId String
+  /// [R045-ADS-02] Promised service credit is an advertiser liability: the
+  /// balance every applied CREDIT refund item moved, once (major units, two
+  /// decimals — a Decimal so every route that spreads the row still serializes).
+  creditBalance   Decimal            @default(0) @db.Decimal(14, 2)
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
   members         AdvertiserMember[]

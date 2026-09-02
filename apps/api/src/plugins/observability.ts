@@ -464,6 +464,22 @@ export const salesComponentsCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [R045-ADS] Ad refund obligations: outstanding count / minor amount / oldest
+ *  age, intents awaiting a human's payout, failed, and terminal paid
+ *  campaigns with no intent (the backfill's population). */
+export const adRefundGauge = new client.Gauge({
+  name: 'swift_ad_refund',
+  help: 'Ad refund obligation state by check (outstanding, outstanding_minor, outstanding_oldest_minutes, awaiting_payout, failed, terminal_without_intent)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+export const adRefundCounter = new client.Counter({
+  name: 'swift_ad_refund_events_total',
+  help: 'Ad refund events (staged, executed, credited, settled, dead_letter)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {
