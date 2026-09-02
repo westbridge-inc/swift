@@ -10,6 +10,7 @@ import { getChannels } from '../../providers/notifications/channels';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { NotFoundError, ForbiddenError, AppError } from '../../utils/errors';
+import { NotificationService } from '../notification/notification.service';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 
 // SOS endpoints (safety spec §4.5). The engine (state machine, grace, fan-out)
@@ -201,6 +202,27 @@ export async function safetyRoutes(app: FastifyInstance) {
     if (!a) throw new NotFoundError('SosAlert', request.params.id);
     if (a.actorUserId !== request.user.userId && !isOps(request.user.role)) throw new ForbiddenError('This is not your alert.');
     return { success: true, data: a };
+  });
+
+  // [S-19] Ops alerts: the durable page with per-recipient acknowledgement.
+  const { acknowledgeOpsAlert, runOpsAlertDrillIfDue } = await import('./ops-alert');
+  app.get('/ops-alerts', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can list alerts.');
+    const rows = await app.prisma.opsAlert.findMany({ where: { acknowledgedAt: null, closedAt: null }, orderBy: { createdAt: 'desc' }, take: 100, include: { recipients: { select: { userId: true, deliveredAt: true, seenAt: true, ackedAt: true } } } });
+    return { success: true, data: rows };
+  });
+  app.post<{ Params: { id: string } }>('/ops-alerts/:id/ack', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can acknowledge an alert.');
+    const res = await acknowledgeOpsAlert(app.prisma, { opsAlertId: request.params.id, userId: request.user.userId });
+    return { success: true, data: { acknowledged: res.acknowledged.length > 0 } };
+  });
+  app.post('/ops-alerts/drill', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can run a drill.');
+    process.env['OPS_ALERT_DRILL_INTERVAL_DAYS'] ??= '7';
+    const { openOpsAlert } = await import('./ops-alert');
+    const res = await openOpsAlert(app.prisma, new NotificationService(app.prisma, app.io), { kind: 'DRILL', tenantId: null, title: '🧪 Ops alert drill — acknowledge now', body: 'A manual drill of the SOS paging path. Acknowledge it before the deadline; unacknowledged, it escalates like a real SOS.', data: { kind: 'ops_alert_drill', manual: true, by: request.user.userId } });
+    void runOpsAlertDrillIfDue;
+    return { success: true, data: res };
   });
 
   app.post<{ Params: { id: string } }>('/sos/:id/ack', auth, async (request) => {

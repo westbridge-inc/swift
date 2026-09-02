@@ -74,6 +74,8 @@ const TENANT_QUERY_EXTENSIONS = {
   sosRetrigger: scoped,
   guardianCheckinDelivery: scoped,
   legalHold: scoped,
+  opsAlert: scoped,
+  opsAlertRecipient: scoped,
   livenessCheck: scoped, incidentCase: scoped, evidenceBundle: scoped, safetyAccessLog: scoped,
   // Money: settlement, receipts, the agent-cash rail, trials.
   mmgAgentPayment: scoped, settlementBatch: scoped, feeReceipt: scoped, receiptCounter: scoped,
