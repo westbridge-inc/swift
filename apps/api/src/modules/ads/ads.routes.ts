@@ -345,10 +345,18 @@ export async function adsRoutes(app: FastifyInstance) {
     const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true, tenantId: true } });
     if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
     await advertisers.assertMember(campaign.advertiserId, request.user.userId);
-    const updated = await lifecycle.transition(request.params.id, 'cancel', request.user.userId);
     const { AdsRefundService } = await import('./refund.service');
     const settings = await app.prisma.adsSettings.findUnique({ where: { tenantId: campaign.tenantId }, select: { cancelFullRefundDays: true } });
-    const refund = await new AdsRefundService(app.prisma, app.io).execute(request.params.id, 'ADVERTISER_CANCEL', request.user.userId, { cancelFullRefundDays: settings?.cancelFullRefundDays ?? 7 });
+    const refunds = new AdsRefundService(app.prisma, app.io);
+    // [R045-ADS-01] The obligation is staged in the SAME transaction as the
+    // cancel; execution follows, and the worker retries it if that fails.
+    let staged: { intentId: string } | null = null;
+    const updated = await lifecycle.transition(request.params.id, 'cancel', request.user.userId, undefined, {
+      within: async (tx) => { staged = await refunds.stage(tx, request.params.id, 'ADVERTISER_CANCEL', request.user.userId, { cancelFullRefundDays: settings?.cancelFullRefundDays ?? 7 }); },
+    });
+    const refund = staged
+      ? await refunds.executeNow((staged as { intentId: string }).intentId).catch(() => ({ planTotal: 0, refundedTotal: 0, creditedTotal: 0, releasedSlots: 0, intentId: (staged as { intentId: string }).intentId }))
+      : { planTotal: 0, refundedTotal: 0, creditedTotal: 0, releasedSlots: 0, intentId: null };
     return { success: true, data: { id: updated.id, status: updated.status, refund } };
   });
 }

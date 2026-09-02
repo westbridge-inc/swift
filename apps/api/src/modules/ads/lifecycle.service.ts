@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import type { PrismaClient, AdCampaign, AdCampaignStatus } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -62,7 +63,18 @@ export class AdsLifecycleService {
 
   /** The one transition point. CAS on the pre-read status; illegal moves 409.
    *  actor = the userId performing it (or 'system:<cron>'). */
-  async transition(campaignId: string, event: CampaignEvent, actor: string, reason?: string): Promise<AdCampaign> {
+  async transition(
+    campaignId: string,
+    event: CampaignEvent,
+    actor: string,
+    reason?: string,
+    opts: {
+      /** [R045-ADS-08/09] Runs INSIDE the transition's transaction, after the
+       *  status moved: the refund obligation is staged in the same database
+       *  generation as the terminal state, or neither happens. */
+      within?: (tx: Prisma.TransactionClient, moved: { before: AdCampaign; to: AdCampaignStatus }) => Promise<void>;
+    } = {},
+  ): Promise<AdCampaign> {
     const rule = TABLE[event];
     const before = await this.prisma.adCampaign.findUnique({ where: { id: campaignId } });
     if (!before) throw new NotFoundError('AdCampaign', campaignId);
@@ -73,19 +85,24 @@ export class AdsLifecycleService {
       log().warn({ campaignId, from: before.status, event }, 'illegal ad campaign transition rejected');
       throw new AppError(409, 'INVALID_CAMPAIGN_TRANSITION', `Cannot ${event} a ${before.status} campaign.`);
     }
-    const moved = await this.prisma.adCampaign.updateMany({
-      where: { id: campaignId, status: before.status },
-      data: { status: rule.to, statusReason: reason ?? null },
+    // ONE generation: the status CAS, the audit row and whatever the caller
+    // stages within (the refund obligation) commit together — never a killed
+    // campaign whose money obligation vanished on the way.
+    await this.prisma.$transaction(async (tx) => {
+      const moved = await tx.adCampaign.updateMany({
+        where: { id: campaignId, status: before.status },
+        data: { status: rule.to, statusReason: reason ?? null },
+      });
+      if (moved.count === 0) throw new AppError(409, 'CAMPAIGN_TRANSITION_RACE', 'The campaign changed underneath this action — retry.');
+      await tx.adsAuditLog.create({
+        data: {
+          tenantId: before.tenantId, actorUserId: actor, action: `CAMPAIGN_${event.toUpperCase()}`,
+          entityType: 'AdCampaign', entityId: campaignId,
+          before: { status: before.status } as never, after: { status: rule.to } as never, reason: reason ?? null,
+        },
+      });
+      if (opts.within) await opts.within(tx, { before, to: rule.to });
     });
-    if (moved.count === 0) throw new AppError(409, 'CAMPAIGN_TRANSITION_RACE', 'The campaign changed underneath this action — retry.');
-
-    await this.prisma.adsAuditLog.create({
-      data: {
-        tenantId: before.tenantId, actorUserId: actor, action: `CAMPAIGN_${event.toUpperCase()}`,
-        entityType: 'AdCampaign', entityId: campaignId,
-        before: { status: before.status } as never, after: { status: rule.to } as never, reason: reason ?? null,
-      },
-    }).catch(() => {});
 
     const notice = NOTICE[event];
     if (notice) await this.notifyOwners(before.advertiserId, notice.title, notice.body, notice.kind, campaignId).catch(() => {});

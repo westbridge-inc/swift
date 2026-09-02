@@ -24,14 +24,11 @@ const invoiceIds: string[] = [];
 beforeAll(async () => { await prisma.$connect(); });
 
 afterAll(async () => {
-  await prisma.adInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
-  await prisma.adBooking.deleteMany({ where: { campaignId: { in: campaignIds } } });
-  await prisma.adInventoryWeek.deleteMany({ where: { placementId: { in: placementIds } } });
+  // [R045-ADS] refunds now leave durable intents that reference the invoices
+  // The refund outbox, intents and items are IMMUTABLE by trigger (deletes are refused) and they RESTRICT
+  // their invoice, booking and campaign — so the ads-money fixtures stay in place; every id is unique per run.
   await prisma.adCreative.deleteMany({ where: { campaignId: { in: campaignIds } } });
   await prisma.adsAuditLog.deleteMany({ where: { entityId: { in: campaignIds } } });
-  await prisma.adCampaign.deleteMany({ where: { id: { in: campaignIds } } });
-  await prisma.advertiser.deleteMany({ where: { id: { in: advertiserIds } } });
-  await prisma.adPlacement.deleteMany({ where: { id: { in: placementIds } } });
   await prisma.$disconnect();
 });
 
@@ -62,7 +59,7 @@ describe('§6.1 week_start / week_end crons', () => {
     const done = await scaffold({ status: 'LIVE', startWeek: WK_PAST, endWeek: WK_PAST });
     const notYet = await scaffold({ status: 'SCHEDULED', startWeek: WK_FUTURE });
 
-    const res = await cron.tick(NOW);
+    const res = await cron.tick(NOW, { campaignIds }); // this suite's campaigns only — a global tick races other suites' fixtures
     expect(res.activated).toBeGreaterThanOrEqual(1);
     expect(res.completed).toBeGreaterThanOrEqual(1);
     expect((await prisma.adCampaign.findUniqueOrThrow({ where: { id: sched.campaign.id } })).status).toBe('LIVE');

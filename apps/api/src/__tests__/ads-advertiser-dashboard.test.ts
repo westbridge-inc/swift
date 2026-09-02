@@ -74,12 +74,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.adInvoice.deleteMany({ where: { campaignId: { in: campaignIds } } });
-  await app.prisma.adBooking.deleteMany({ where: { campaignId: { in: campaignIds } } });
-  await app.prisma.adCampaign.deleteMany({ where: { id: { in: campaignIds } } });
+  // [R045-ADS] a cancel now leaves a durable refund intent that references the invoice
+  // The refund outbox, intents and items are IMMUTABLE by trigger (deletes are refused) and they RESTRICT
+  // their invoice, booking and campaign — so the ads-money fixtures stay in place; every id is unique per run.
   await app.prisma.advertiserMember.deleteMany({ where: { advertiserId: { in: advertiserIds } } });
-  await app.prisma.advertiser.deleteMany({ where: { id: { in: advertiserIds } } });
-  await app.prisma.adPlacement.deleteMany({ where: { id: { in: placementIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();

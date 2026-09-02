@@ -35,6 +35,7 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'AdInvoice', field: 'refundedAmount', unit: 'MAJOR_2DP' },
   { model: 'AdPlacement', field: 'weeklyPrice', unit: 'MAJOR_2DP' },
   { model: 'AdStatsDaily', field: 'spend', unit: 'MAJOR_2DP' },
+  { model: 'Advertiser', field: 'creditBalance', unit: 'MAJOR_2DP' },
   { model: 'AdsSettings', field: 'platformFeePct', unit: 'PERCENT' },
   { model: 'BillingEvent', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'BillingEvent', field: 'amountUsd', unit: 'USD_MAJOR' },

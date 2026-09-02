@@ -19,20 +19,21 @@ export class AdsCronService {
   }
 
   /** Run all three time-driven transitions for this tick. */
-  async tick(now = new Date()): Promise<{ autoCancelled: number; activated: number; completed: number }> {
+  /** `scope.campaignIds` narrows every phase to those campaigns — test isolation; production ticks pass nothing. */
+  async tick(now = new Date(), scope: { campaignIds?: string[] } = {}): Promise<{ autoCancelled: number; activated: number; completed: number }> {
     return {
-      autoCancelled: await this.autoCancelUnapproved(now),
-      activated: await this.activateScheduled(now),
-      completed: await this.completeFinished(now),
+      autoCancelled: await this.autoCancelUnapproved(now, scope),
+      activated: await this.activateScheduled(now, scope),
+      completed: await this.completeFinished(now, scope),
     };
   }
 
   /** §6.1 auto_cancel_unapproved: a PENDING_REVIEW campaign whose go-live
    *  cutoff (startWeek − autoCancelUnapprovedHours) has passed without every
    *  creative approved → CANCELLED + full refund (§8.4 row 1). */
-  async autoCancelUnapproved(now: Date): Promise<number> {
+  async autoCancelUnapproved(now: Date, scope: { campaignIds?: string[] } = {}): Promise<number> {
     const pending = await this.prisma.adCampaign.findMany({
-      where: { status: 'PENDING_REVIEW' },
+      where: { status: 'PENDING_REVIEW', ...(scope.campaignIds ? { id: { in: scope.campaignIds } } : {}) },
       select: { id: true, startWeek: true, tenantId: true },
       take: 500,
     });
@@ -53,9 +54,15 @@ export class AdsCronService {
       const approved = await this.prisma.adCreative.count({ where: { campaignId: c.id, status: 'APPROVED' } });
       if (total > 0 && approved === total) continue; // fully approved — the approval hook will schedule it
       try {
-        await this.lifecycle.transition(c.id, 'auto_cancel_unapproved', 'system:ads-cron');
-        await this.refunds.execute(c.id, 'AUTO_CANCEL_UNAPPROVED', 'system:ads-cron', { now });
+        // [R045-ADS-09] The refund obligation is staged INSIDE the transition's
+        // transaction — terminalization never outruns it. Execution follows
+        // right away; if it fails, the outbox worker retries the same intent.
+        let staged: { intentId: string } | null = null;
+        await this.lifecycle.transition(c.id, 'auto_cancel_unapproved', 'system:ads-cron', undefined, {
+          within: async (tx) => { staged = await this.refunds.stage(tx, c.id, 'AUTO_CANCEL_UNAPPROVED', 'system:ads-cron', { now }); },
+        });
         cancelled += 1;
+        if (staged) await this.refunds.executeNow((staged as { intentId: string }).intentId).catch((err: unknown) => log().warn({ err, campaignId: c.id }, 'ads auto-cancel refund execution deferred to the worker'));
       } catch (err) {
         log().error({ err, campaignId: c.id }, 'ads auto-cancel failed — continuing');
       }
@@ -65,10 +72,10 @@ export class AdsCronService {
 
   /** §6.1 week_start: a SCHEDULED campaign whose start week has arrived (today
    *  ≥ startWeek in tenant TZ) → LIVE. */
-  async activateScheduled(now: Date): Promise<number> {
+  async activateScheduled(now: Date, scope: { campaignIds?: string[] } = {}): Promise<number> {
     const thisMonday = mondayOf(now, this.tz);
     const due = await this.prisma.adCampaign.findMany({
-      where: { status: 'SCHEDULED', startWeek: { lte: thisMonday } },
+      where: { status: 'SCHEDULED', startWeek: { lte: thisMonday }, ...(scope.campaignIds ? { id: { in: scope.campaignIds } } : {}) },
       select: { id: true },
       take: 500,
     });
@@ -121,10 +128,10 @@ export class AdsCronService {
 
   /** §6.1 week_end: a LIVE/PAUSED campaign whose booked window is over (the
    *  current tenant week is past endWeek) → COMPLETED. */
-  async completeFinished(now: Date): Promise<number> {
+  async completeFinished(now: Date, scope: { campaignIds?: string[] } = {}): Promise<number> {
     const thisMonday = mondayOf(now, this.tz);
     const due = await this.prisma.adCampaign.findMany({
-      where: { status: { in: ['LIVE', 'PAUSED'] }, endWeek: { lt: thisMonday } },
+      where: { status: { in: ['LIVE', 'PAUSED'] }, endWeek: { lt: thisMonday }, ...(scope.campaignIds ? { id: { in: scope.campaignIds } } : {}) },
       select: { id: true },
       take: 500,
     });
