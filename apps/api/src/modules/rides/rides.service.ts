@@ -216,6 +216,8 @@ export async function createRideRequest(
         billableKmSource: estimate.routeSource,
         taxiDuration: estimate.durationMin,
         taxiFareTotal: estimate.fare,
+        // [M-36] The ride's money is in the estimate's currency — stamped on the order.
+        currencyCode: estimate.currencyCode,
         subtotalBase: estimate.fare,
         subtotalMarkup: 0,
         subtotalCustomer: estimate.fare,

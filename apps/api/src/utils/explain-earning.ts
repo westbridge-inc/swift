@@ -1,3 +1,4 @@
+import { formatMoney } from './currency-amount';
 import { billableDistance } from './billable-distance';
 
 /**
@@ -33,8 +34,10 @@ export interface OrderForSentence {
   taxiDistance?: unknown;
 }
 
-export function gyd(n: unknown): string {
-  return `GY$${Math.round(Number(n ?? 0)).toLocaleString('en-US')}`;
+/** [M-36] Money in the sentence, through the registry. The name survives for
+ *  its callers; the currency is a parameter, GYD only when nobody said. */
+export function gyd(n: unknown, currencyCode: string = 'GYD'): string {
+  return formatMoney(n, currencyCode, { whole: true }); // Earning.amount is MAJOR_WHOLE
 }
 
 function distancePhrase(order: OrderForSentence | null | undefined): string {

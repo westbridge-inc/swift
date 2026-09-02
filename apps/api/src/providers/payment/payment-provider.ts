@@ -1,3 +1,4 @@
+import { toProviderMinor } from '../../utils/currency-amount';
 import { nanoid } from 'nanoid';
 import { randomUUID } from 'node:crypto';
 import { isProduction } from '../../utils/runtime-mode';
@@ -45,7 +46,8 @@ export interface PaymentProvider {
     description?: string;
   }): Promise<ChargeResult>;
 
-  refund(input: { providerRef: string; amount: number; idempotencyKey: string }): Promise<ChargeResult>;
+  /** [M-36] A refund names its currency: the adapter scales by the registry exponent, never a bare × 100. */
+  refund(input: { providerRef: string; amount: number; currencyCode: string; idempotencyKey: string }): Promise<ChargeResult>;
   /** [M-01] Retrieve the truth of an instruction by our idempotency key (and
    *  the provider's own id when known) BEFORE any retry. 'not_found' means the
    *  processor never received it; 'unknown' means the processor cannot say. */
@@ -77,7 +79,7 @@ export class SandboxPaymentProvider implements PaymentProvider {
     return result;
   }
 
-  async refund(_input: { providerRef: string; amount: number; idempotencyKey: string }): Promise<ChargeResult> {
+  async refund(_input: { providerRef: string; amount: number; currencyCode: string; idempotencyKey: string }): Promise<ChargeResult> {
     return { status: 'succeeded', providerRef: `re_${nanoid(10)}` };
   }
 
@@ -164,7 +166,7 @@ export class PowerTranzPaymentProvider implements PaymentProvider {
     });
   }
 
-  async refund(input: { providerRef: string; amount: number; idempotencyKey: string }): Promise<ChargeResult> {
+  async refund(input: { providerRef: string; amount: number; currencyCode: string; idempotencyKey: string }): Promise<ChargeResult> {
     return this.post('/api/spi/Refund', {
       TransactionIdentifier: randomUUID(),
       OriginalTransactionIdentifier: input.providerRef,
@@ -268,10 +270,11 @@ export class StripePaymentProvider implements PaymentProvider {
     idempotencyKey: string;
     description?: string;
   }): Promise<ChargeResult> {
-    // Stripe amounts are MINOR units; every supported market currency here
-    // (GYD, USD, TTD, JMD, BBD, XCD) carries 2 decimals.
+    // Stripe amounts are MINOR units. [M-36] The exponent comes from the
+    // currency registry — the ONLY place a major amount becomes minor — and
+    // a major amount that already looks minor-scaled is refused, not sent 100× too large.
     const body = new URLSearchParams({
-      amount: String(Math.round(input.amount * 100)),
+      amount: String(toProviderMinor(input.amount, input.currencyCode, 'stripe.charge')),
       currency: input.currencyCode.toLowerCase(),
       payment_method: input.token,
       confirm: 'true',
@@ -321,10 +324,10 @@ export class StripePaymentProvider implements PaymentProvider {
     }
   }
 
-  async refund(input: { providerRef: string; amount: number; idempotencyKey: string }): Promise<ChargeResult> {
+  async refund(input: { providerRef: string; amount: number; currencyCode: string; idempotencyKey: string }): Promise<ChargeResult> {
     const body = new URLSearchParams({
       payment_intent: input.providerRef,
-      amount: String(Math.round(input.amount * 100)),
+      amount: String(toProviderMinor(input.amount, input.currencyCode, 'stripe.refund')),
     });
     const data = await this.post<StripeRefund>('/v1/refunds', body, input.idempotencyKey);
     if (!data) return { status: 'failed', providerRef: '', reason: 'Gateway unreachable' };

@@ -178,7 +178,7 @@ describe('StripePaymentProvider', () => {
   it('refunds by payment intent in minor units', async () => {
     const f = mockFetch(200, { id: 're_1', status: 'succeeded' });
     vi.stubGlobal('fetch', f);
-    const r = await p.refund({ providerRef: 'pi_1', amount: 500, idempotencyKey: 'ref:1' });
+    const r = await p.refund({ providerRef: 'pi_1', amount: 500, currencyCode: 'GYD', idempotencyKey: 'ref:1' });
     expect(r).toEqual({ status: 'succeeded', providerRef: 're_1' });
     const [url, init] = f.mock.calls[0] as unknown as [string, { body: string }];
     expect(url).toContain('/v1/refunds');

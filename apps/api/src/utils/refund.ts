@@ -1,3 +1,4 @@
+import { formatMoney } from './currency-amount';
 /**
  * [ALG-25] Refund computation — constrained by law before it is constrained
  * by maths. Swift never holds order money, so "refund" means one of three
@@ -69,6 +70,8 @@ export interface RefundInput {
   deliveryHappened: boolean;
   /** [M-33] The redemption snapshot; null/undefined = no snapshot (legacy). */
   snapshot?: RefundSnapshot | null;
+  /** [M-36] The order's currency; the sentence is rendered in it. */
+  currencyCode?: string | null;
 }
 
 export interface RefundComputation {
@@ -89,7 +92,6 @@ export interface RefundComputation {
 }
 
 const HANDED_OVER = new Set(['DELIVERED', 'COMPLETED']);
-const gyd = (n: number) => `GY$${Math.round(n).toLocaleString('en-US')}`;
 
 export function classifyRefund(order: { paymentMethod: string | null | undefined; status: string }): RefundKind {
   if (order.paymentMethod === 'MOBILE_MONEY') return 'MMG_BLOCKED';
@@ -98,6 +100,8 @@ export function classifyRefund(order: { paymentMethod: string | null | undefined
 
 export function computeRefund(input: RefundInput): RefundComputation {
   const kind = classifyRefund(input);
+  // [M-36] Every figure in the sentence carries the order's currency.
+  const gyd = (n: number) => formatMoney(n, input.currencyCode ?? 'GYD', { whole: true });
   const live = input.lines.filter((l) => l.subStatus !== 'REFUNDED' && l.subStatus !== 'REJECTED');
   const subtotal = live.reduce((s, l) => s + Number(l.totalCustomer ?? 0), 0);
   const lineTotal = live.filter((l) => l.affected).reduce((s, l) => s + Number(l.totalCustomer ?? 0), 0);

@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { earningsWindow } from '../order/earnings-window';
-import { zMoneyMinor } from '../../utils/money-schema';
+import { zMoneyWhole } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
@@ -756,7 +756,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     // [REPORT-011 F-04] fare 0 = "no choice", never the 60% floor (a
     // forged/legacy client must not clamp the driver's own fare down).
-    const { fare: rawFare } = z.object({ fare: zMoneyMinor.optional() }).parse(request.body ?? {});
+    const { fare: rawFare } = z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
     const fare = rawFare && rawFare > 0 ? rawFare : undefined;
     const driver = await getDriver(request.user.userId);
 
@@ -860,7 +860,7 @@ export async function driverRoutes(app: FastifyInstance) {
     await getDriver(request.user.userId); // authz before validation
     const { orderId, fare, offerAttemptId } = z.object({
       orderId: z.string().min(1).max(64),
-      fare: zMoneyMinor.optional(),
+      fare: zMoneyWhole.optional(),
       offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
     }).parse(request.body);
     // [REPORT-010 F-07] fare 0 is never a legitimate choice — a recovered

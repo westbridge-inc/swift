@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { earningsWindow } from '../order/earnings-window';
-import { zMoneyMinor } from '../../utils/money-schema';
+import { zMoneyWhole } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { CashRulesService, customerTrustSummaries, gpsEvidence } from '../cash/cash-rules.service';
@@ -295,7 +295,7 @@ export async function riderRoutes(app: FastifyInstance) {
    *  acceptance — unlike the board-grab entrance, which is for the open list. */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getRider(app, request.user.userId); // authz before validation
-    const { orderId, fare, offerAttemptId } = offerActionSchema.extend({ fare: zMoneyMinor.optional() }).parse(request.body);
+    const { orderId, fare, offerAttemptId } = offerActionSchema.extend({ fare: zMoneyWhole.optional() }).parse(request.body);
     // Rider-set delivery fee (CASH only) rides INSIDE the locked claim
     // transaction [REPORT-005 F-005-01]: assignment, price, float, and audit
     // commit or roll back together — never a post-assignment second commit
@@ -1153,7 +1153,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // is 60% of market). A forged/legacy client posting 0 must NOT clamp the
     // rider's own pay to the floor — normalize zero to "no choice" so the
     // market fee applies, at THIS entrance too, not just the offer card.
-    const { fare: rawFare } = z.object({ fare: zMoneyMinor.optional() }).parse(request.body ?? {});
+    const { fare: rawFare } = z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
     const fare = rawFare && rawFare > 0 ? rawFare : undefined;
     const rider = await getRider(app, request.user.userId);
 
