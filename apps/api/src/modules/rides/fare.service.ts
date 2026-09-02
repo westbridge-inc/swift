@@ -1,7 +1,8 @@
 import type { PrismaClient, RideClass } from '@prisma/client';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
-import { pointInPolygon, type GeoPoint } from '../../utils/geo';
+import { type GeoPoint } from '../../utils/geo';
+import { resolveFareZones, DEFAULT_TENANT_ID } from './fare-zones';
 import { CountryConfigService } from '../country/country-config.service';
 
 // ---------------------------------------------------------------------------
@@ -100,6 +101,9 @@ export interface FareEstimate {
   routeSource: RouteSource;
   fromZoneId?: string;
   toZoneId?: string;
+  /** [M-34] The zone versions the fare was priced against, when the table priced it. */
+  fromZoneVersion?: number;
+  toZoneVersion?: number;
 }
 
 export class FareService {
@@ -112,7 +116,7 @@ export class FareService {
     this.countryConfig = new CountryConfigService(prisma);
   }
 
-  async estimate(pickup: GeoPoint, dropoff: GeoPoint, countryCode: string): Promise<FareEstimate> {
+  async estimate(pickup: GeoPoint, dropoff: GeoPoint, countryCode: string, tenantId: string = DEFAULT_TENANT_ID): Promise<FareEstimate> {
     // Real road route when a routing engine (OSRM) is configured; the
     // deterministic estimate otherwise — identical to the historical numbers.
     const route = await this.maps.routeKm(pickup, dropoff);
@@ -122,10 +126,13 @@ export class FareService {
 
     const config = await this.countryConfig.getByCode(countryCode);
 
-    // Zone table first — both ends must resolve
-    const zones = await this.prisma.zone.findMany({ where: { isActive: true } });
-    const fromZone = zones.find((z) => pointInPolygon(pickup, z.boundary));
-    const toZone = zones.find((z) => pointInPolygon(dropoff, z.boundary));
+    // Zone table first — both ends must resolve. [M-34] Only THIS tenant's
+    // active zones in THIS country are candidates, with deterministic
+    // precedence (priority, then the smallest polygon, then the id); the
+    // legacy first-match pick is shadowed and every disagreement counted.
+    const resolved = await resolveFareZones(this.prisma, { tenantId, countryCode }, pickup, dropoff);
+    const fromZone = resolved.from.zone;
+    const toZone = resolved.to.zone;
 
     if (fromZone && toZone) {
       const zoneFare = await this.prisma.zoneFare.findUnique({
@@ -142,6 +149,8 @@ export class FareService {
           source: 'zone_table',
           fromZoneId: fromZone.id,
           toZoneId: toZone.id,
+          fromZoneVersion: fromZone.version,
+          toZoneVersion: toZone.version,
         };
       }
     }
@@ -169,8 +178,8 @@ export class FareService {
    * once, then each tier = base × class multiplier (Economy unchanged). All
    * deterministic; shown before any driver sees the request.
    */
-  async estimateTiers(pickup: GeoPoint, dropoff: GeoPoint, countryCode: string): Promise<TieredEstimate> {
-    const base = await this.estimate(pickup, dropoff, countryCode);
+  async estimateTiers(pickup: GeoPoint, dropoff: GeoPoint, countryCode: string, tenantId: string = DEFAULT_TENANT_ID): Promise<TieredEstimate> {
+    const base = await this.estimate(pickup, dropoff, countryCode, tenantId);
     const config = await this.countryConfig.getByCode(countryCode);
     const rates = { ...DEFAULT_RATES, ...((config.taxiRates as Partial<TaxiRates> | null) ?? {}) };
     const classRates: ClassRates = {

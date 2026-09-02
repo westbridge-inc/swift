@@ -403,6 +403,23 @@ export const refundsAwaitingReviewGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [M-34] Fare-zone resolution events: an ambiguous pick (equal-priority
+ *  overlap decided by the tie-break), a shadow disagreement with the legacy
+ *  first-match pick per end, or the table ignored by the kill switch. */
+export const fareZoneCounter = new client.Counter({
+  name: 'swift_fare_zone_events_total',
+  help: 'Fare-zone resolution events (ambiguous, shadow_diff_from, shadow_diff_to, killed)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+/** [M-34] Standing ambiguity: pairs of active zones in one market overlapping at the same priority. */
+export const fareZoneGauge = new client.Gauge({
+  name: 'swift_fare_zone_state',
+  help: 'Fare-zone table state by check (ambiguous_pairs)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

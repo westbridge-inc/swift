@@ -586,6 +586,22 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               }),
             ).catch(() => {});
           }
+          // [M-34] Quarantine ambiguity: active zones of one market that
+          // overlap at the same priority. Pricing already resolves them
+          // deterministically; a person decides which zone keeps the kerb.
+          const { scanFareZones } = await import('../modules/rides/fare-zones');
+          const zoneScan = await scanFareZones(ctx.prisma);
+          if (zoneScan.ambiguousPairs.length > 0) {
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'fare-zone-ambiguity', 24 * 3600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: '🗺️ Fare zones overlap at the same priority',
+                body: `${zoneScan.ambiguousPairs.length} pair(s) of active fare zones overlap at equal priority in one market. Trips there price by the smallest zone until you give one of each pair a different priority or redraw it.`,
+                data: { kind: 'billing_invariants', alert: 'fare-zone-ambiguity', pairs: zoneScan.ambiguousPairs.slice(0, 10) },
+              }),
+            ).catch(() => {});
+          }
           break;
         }
       }

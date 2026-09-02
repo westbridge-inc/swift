@@ -60,6 +60,8 @@ export const TENANT_TABLES = [
   'tenant_billing_currency',
   // [M-08] The prepaid top-up as one persisted command.
   'topup_commands', 'trial_grants', 'trip_share_tokens',
+  // [M-34] Fare zones are one operator's, in one market.
+  'zones',
   // [STORE-002] Who a person refuses contact with.
   'user_blocks',
   'users',
