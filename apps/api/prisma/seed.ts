@@ -25,6 +25,7 @@ async function main() {
       activeRole: 'SUPER_ADMIN',
       status: 'ACTIVE',
       isPhoneVerified: true,
+      syntheticRunId: 'seed-demo', // [SCR-002] synthetic, forever
       admin: { create: { permissions: ['*'] } },
     },
   });
@@ -41,6 +42,7 @@ async function main() {
       activeRole: 'VENDOR_OWNER',
       status: 'ACTIVE',
       isPhoneVerified: true,
+      syntheticRunId: 'seed-demo', // [SCR-002] synthetic, forever
       vendorOwner: { create: {} },
     },
   });
@@ -546,6 +548,7 @@ async function main() {
       activeRole: 'CUSTOMER',
       status: 'ACTIVE',
       isPhoneVerified: true,
+      syntheticRunId: 'seed-demo', // [SCR-002] synthetic, forever
       customer: { create: {} },
       addresses: {
         create: { label: 'Home', addressLine1: '123 Main Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8045, longitude: -58.1553, isDefault: true },
@@ -565,6 +568,7 @@ async function main() {
       activeRole: 'RIDER',
       status: 'ACTIVE',
       isPhoneVerified: true,
+      syntheticRunId: 'seed-demo', // [SCR-002] synthetic, forever
       rider: {
         create: {
           riderType: 'BOTH',
@@ -601,6 +605,7 @@ async function main() {
         activeRole: 'DRIVER',
         status: 'ACTIVE',
         isPhoneVerified: true,
+      syntheticRunId: 'seed-demo', // [SCR-002] synthetic, forever
         driver: {
           create: {
             vehicleMake: d.make,
