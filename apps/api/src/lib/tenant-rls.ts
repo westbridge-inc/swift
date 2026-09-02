@@ -151,3 +151,12 @@ export function appRoleDdl(): string[] {
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO swift_app`,
   ];
 }
+
+/** [TEN-03 · runbook] The CONTRACT stage, as statements: FORCE RLS on every
+ *  walled table (so even the owner is subject to the policies) — applied by
+ *  the founder's approved migration once the app connects as the
+ *  least-privilege login (a member of swift_app, NOBYPASSRLS). Derived from
+ *  the census, never hand-written. */
+export function forceRlsStatements(): string[] {
+  return TENANT_TABLES.map((t) => `ALTER TABLE "${t}" FORCE ROW LEVEL SECURITY;`);
+}

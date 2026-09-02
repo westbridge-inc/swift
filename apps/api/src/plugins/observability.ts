@@ -633,6 +633,24 @@ export const opsAlertGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [TEN-01] Every tenant-model query that reached the database with no tenant
+ *  bound, by model, operation and mode — `system` work names its capability;
+ *  `request` and `unbound` are the callers to fix (denied under the flag). */
+export const tenantUnscopedAccessCounter = new client.Counter({
+  name: 'swift_tenant_unscoped_access_total',
+  help: 'Tenant-model queries with no tenant bound (mode = request | unbound | system; capability names system work)',
+  labelNames: ['model', 'operation', 'mode', 'capability'] as const,
+  registers: [registry],
+});
+/** [TEN-03] Transaction-local bindings performed (tenant / system) and the
+ *  in-transaction fallbacks that could not be batched. */
+export const tenantBindCounter = new client.Counter({
+  name: 'swift_tenant_bind_total',
+  help: 'RLS bindings by kind (tenant, system, tenant_fallback_in_tx, system_fallback_in_tx)',
+  labelNames: ['kind'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

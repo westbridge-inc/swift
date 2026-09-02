@@ -1,7 +1,8 @@
 import { PrismaClient } from '@prisma/client';
 import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
-import { getTenantId } from './tenant-context';
+import { getTenantContext, type TenantMode } from './tenant-context';
+import { tenantUnscopedAccessCounter, tenantBindCounter } from './observability';
 import { poolRoleForApiProcess, resolveDatabaseUrl } from '../utils/db-pool';
 import { isDevelopment } from '../utils/runtime-mode';
 
@@ -137,14 +138,62 @@ function stampTenant(data: unknown, tenantId: string): Record<string, unknown> {
   return { ...((data as Record<string, unknown> | undefined) ?? {}), tenantId };
 }
 
+/**
+ * [TEN-01] Unscoped access to a tenant model is a DECISION, never a default.
+ *  - `log` (the default): the access runs as before and is counted by model,
+ *    operation and mode — the shadow that finds every unnamed caller.
+ *  - `deny`: a request that has not bound a tenant, or an unbound composition
+ *    root, is refused before the query; audited system work still runs.
+ */
+export const unscopedAccessPolicy = (env: Record<string, string | undefined> = process.env): 'log' | 'deny' => (env['TENANT_UNSCOPED_ACCESS'] === 'deny' ? 'deny' : 'log');
+/** [TEN-03] Bind the tenant transaction-locally on every tenant-model query
+ *  (`set_config('app.current_tenant', …, true)`; system work SETs the bypass
+ *  role) so the database wall binds the APP under a NOBYPASSRLS login. Off
+ *  until the least-privilege login exists (runbook in TEN-03). */
+export const rlsBindEnabled = (env: Record<string, string | undefined> = process.env): boolean => env['TENANT_RLS_BIND'] === '1';
+/** [TEN-01 · split clients] Audited system work runs on its OWN client — a
+ *  login that is a member of `swift_bypass_rls` — when `SYSTEM_DATABASE_URL`
+ *  is set. The request client's login must never be a member of that role
+ *  (the wall's contract test refuses it), so cross-tenant work cannot be
+ *  reached from a request by any SET ROLE; it is a different connection. */
+let systemClient: PrismaClient | null = null;
+export function systemPrismaClient(): PrismaClient | null {
+  const url = process.env['SYSTEM_DATABASE_URL'];
+  if (!url) return null;
+  if (!systemClient) systemClient = new PrismaClient({ datasourceUrl: url });
+  return systemClient;
+}
+/** Test seam: route system work to a given client. */
+export function setSystemPrismaClient(client: PrismaClient | null): void { systemClient = client; }
+
+export class TenantContextRequiredError extends Error {
+  readonly code = 'TENANT_CONTEXT_REQUIRED';
+  readonly statusCode = 500;
+  constructor(model: string, operation: string, mode: TenantMode) {
+    super(`[TEN-01] ${model}.${operation} reached the database with no tenant bound (${mode}); bind a tenant or use runAsSystem(capability)`);
+  }
+}
+let unscopedLogBudget = 200;
+
 function tenantScope({ model, operation, args, query }: {
   model?: string;
   operation: string;
   args: Record<string, unknown>;
   query: (a: Record<string, unknown>) => Promise<unknown>;
 }): Promise<unknown> {
-  const tenantId = getTenantId();
-  if (!tenantId || !model || !TENANT_MODELS.has(model.toLowerCase())) return query(args);
+  if (!model || !TENANT_MODELS.has(model.toLowerCase())) return query(args);
+  const ctx = getTenantContext();
+  const tenantId = ctx.tenantId;
+  if (!tenantId) {
+    if (ctx.mode === 'system') {
+      tenantUnscopedAccessCounter.labels(model, operation, 'system', ctx.capability ?? 'unnamed').inc();
+      return rlsBindEnabled() ? onSystemClient(query, args, model, operation) : query(args);
+    }
+    tenantUnscopedAccessCounter.labels(model, operation, ctx.mode, 'none').inc();
+    if (unscopedAccessPolicy() === 'deny') return Promise.reject(new TenantContextRequiredError(model, operation, ctx.mode));
+    if (unscopedLogBudget > 0) { unscopedLogBudget -= 1; console.warn(`[TEN-01] unscoped ${model}.${operation} (${ctx.mode}) — no tenant bound; counted, allowed under TENANT_UNSCOPED_ACCESS=log`); }
+    return query(args);
+  }
 
   if (SCOPED_WHERE_OPERATIONS.has(operation)) {
     args['where'] = { ...((args['where'] as object) ?? {}), tenantId };
@@ -163,7 +212,50 @@ function tenantScope({ model, operation, args, query }: {
     args['create'] = stampTenant(args['create'], tenantId);
     args['update'] = stampTenant(args['update'], tenantId);
   }
-  return query(args);
+  return rlsBindEnabled() ? bindTenant(query, args, tenantId, model, operation) : query(args);
+}
+
+/** [TEN-03] The bound query: `set_config` and the operation in ONE batch
+ *  transaction, so the policy's `app.current_tenant` is this connection's
+ *  for exactly this statement. Inside a caller's own interactive transaction
+ *  the batch cannot be formed; the query then runs on that transaction,
+ *  which must have been bound with `bindTenantTransaction` — under a
+ *  NOBYPASSRLS login an unbound transaction sees ZERO rows (fail closed). */
+async function bindTenant(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, tenantId: string, _model: string, _operation: string): Promise<unknown> {
+  try {
+    const [, result] = await prisma.$transaction([
+      prisma.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`,
+      query(args) as never,
+    ]);
+    tenantBindCounter.labels('tenant').inc();
+    return result;
+  } catch (err) {
+    if (err instanceof Error && /transaction/i.test(err.message) && /(PrismaPromise|same client|batch)/i.test(err.message)) {
+      tenantBindCounter.labels('tenant_fallback_in_tx').inc();
+      return query(args);
+    }
+    throw err;
+  }
+}
+/** [TEN-03] System work under binding: the same operation, re-issued on the
+ *  system client (its own login). Without one, the walled login runs it
+ *  unbound and the database shows ZERO rows — fail closed, never a leak. */
+async function onSystemClient(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, model: string, operation: string): Promise<unknown> {
+  const sys = systemPrismaClient();
+  if (!sys) { tenantBindCounter.labels('system_no_client').inc(); return query(args); }
+  tenantBindCounter.labels('system').inc();
+  const delegate = (sys as unknown as Record<string, Record<string, (a: Record<string, unknown>) => Promise<unknown>>>)[model.charAt(0).toLowerCase() + model.slice(1)];
+  const op = delegate?.[operation];
+  if (!op) { tenantBindCounter.labels('system_no_client').inc(); return query(args); }
+  return op.call(delegate, args);
+}
+
+/** [TEN-03] Bind a caller's own interactive transaction to the current
+ *  context: the tenant, or the bypass role for system work. Idempotent. */
+export async function bindTenantTransaction(tx: { $executeRaw: (q: TemplateStringsArray, ...v: unknown[]) => Promise<unknown> }): Promise<void> {
+  const ctx = getTenantContext();
+  if (ctx.tenantId) await tx.$executeRaw`SELECT set_config('app.current_tenant', ${ctx.tenantId}, true)`;
+  // system work has no binding on the walled login: it belongs on the system client
 }
 
 // order_status_logs is the immutable event trail behind cash disputes and claims
@@ -207,6 +299,36 @@ const prisma = new PrismaClient({
   name: 'tenantScope',
   query: TENANT_QUERY_EXTENSIONS,
 });
+/** The process's one extended client — the plugin decorates it; tests reach it here. */
+export const scopedPrisma = prisma;
+
+/** [TEN-03] The same scoping extension for a client that connects as another
+ *  role — the red test boots one under the intended NOBYPASSRLS login. The
+ *  binding batches run on THAT client. */
+export function tenantScopeExtensionFor(client: PrismaClient, system: PrismaClient | null = null) {
+  const scoped = async ({ model, operation, args, query }: { model?: string; operation: string; args: Record<string, unknown>; query: (a: Record<string, unknown>) => Promise<unknown> }) => {
+    if (!model || !TENANT_MODELS.has(model.toLowerCase())) return query(args);
+    const ctx = getTenantContext();
+    if (!ctx.tenantId) {
+      if (ctx.mode === 'system') {
+        if (!rlsBindEnabled() || !system) return query(args);
+        const delegate = (system as unknown as Record<string, Record<string, (a: Record<string, unknown>) => Promise<unknown>>>)[model.charAt(0).toLowerCase() + model.slice(1)];
+        const op = delegate?.[operation];
+        if (!op) return query(args);
+        return op.call(delegate, args);
+      }
+      if (unscopedAccessPolicy() === 'deny') throw new TenantContextRequiredError(model, operation, ctx.mode);
+      return query(args);
+    }
+    const scopedArgs: Record<string, unknown> = { ...args };
+    if (SCOPED_WHERE_OPERATIONS.has(operation)) scopedArgs['where'] = { ...((args['where'] as object) ?? {}), tenantId: ctx.tenantId };
+    if (operation === 'create') scopedArgs['data'] = stampTenant(args['data'], ctx.tenantId);
+    if (!rlsBindEnabled()) return query(scopedArgs);
+    const [, r] = await client.$transaction([client.$executeRaw`SELECT set_config('app.current_tenant', ${ctx.tenantId}, true)`, query(scopedArgs) as never]);
+    return r;
+  };
+  return { name: 'tenantScopeProbe', query: Object.fromEntries(TENANT_MODEL_NAMES.map((n) => [n, { $allOperations: scoped }])) } as never;
+}
 
 // Re-export the tenant helpers FROM the module that owns the scoping extension.
 // The extension reads the ALS via this module's single import of tenant-context;
