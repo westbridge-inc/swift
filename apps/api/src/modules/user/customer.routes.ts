@@ -37,9 +37,9 @@ import {
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
-import { vendorResponseSlaMinutes } from '../order/response-sla';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
+import { checkoutRequestHash, drainCheckoutOutbox, findCheckoutReceipt } from '../order/checkout-outbox';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
  *  constrained to the known set — never a hardcoded guess. */
@@ -971,6 +971,9 @@ export async function customerRoutes(app: FastifyInstance) {
               // number the cancellation policy is built around. An absolute
               // timestamp is still exactly true when it comes out of the cache.
               holdExpiresAt: true,
+              // [ALG-07] A scheduled order is held until its release: the card
+              // says the slot and the release, not a thirty-hour countdown.
+              scheduledFor: true,
               estimatedDeliveryTime: true, placedAt: true,
               promisedAt: true, promiseRevisedAt: true, promiseRevisionReason: true, promiseRevisions: true,
             },
@@ -1869,7 +1872,21 @@ export async function customerRoutes(app: FastifyInstance) {
     const redisKey = typeof idemKey === 'string' && idemKey.length >= 8 && idemKey.length <= 128
       ? `checkout:idem:${userId}:${idemKey}`
       : null;
+    // [M-11] The request's fingerprint travels with the key: one key, one
+    // request, one immutable answer.
+    const requestHash = checkoutRequestHash(body);
     if (redisKey) {
+      // [M-11] The DATABASE is the truth for a replay. Before touching the
+      // in-flight lock, ask whether this command already has a receipt: if
+      // Redis forgot (a lost write, an eviction, a restart) the old code would
+      // claim the key afresh and place a SECOND order for the same request.
+      const receipt = await findCheckoutReceipt(app.prisma, userId, idemKey as string);
+      if (receipt) {
+        if (receipt.requestHash !== requestHash) {
+          throw new AppError(422, 'IDEMPOTENCY_KEY_REUSED', 'This Idempotency-Key was already used for a different order request. Use a new key for a new order.');
+        }
+        return { success: true, data: receipt.result, replayed: true };
+      }
       const claimed = await app.redis.set(redisKey, 'IN_FLIGHT', 'EX', 86_400, 'NX');
       if (!claimed) {
         const existing = await app.redis.get(redisKey);
@@ -1916,6 +1933,7 @@ export async function customerRoutes(app: FastifyInstance) {
         fulfillmentSelections: body.fulfillmentSelections,
         express: body.express,
         appointments: body.appointments,
+        ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
       });
     } catch (err) {
       // A failed attempt must not hold the key hostage — release so the same
@@ -1924,45 +1942,26 @@ export async function customerRoutes(app: FastifyInstance) {
       throw err;
     }
 
-    // the vendor order alert escalates while unacknowledged —
-    // re-alert after 60s, SMS fallback 60s after that
+    // [M-11] The vendor alert ladder and the auto-cancel were written INSIDE
+    // the order transaction as outbox rows. Publish them now for latency; a
+    // failure here is logged, not surfaced — the order exists, the answer is
+    // the order, and the worker's outbox sweep publishes whatever this could
+    // not. (The old code awaited the queue here and answered a 500 for an
+    // order that had already committed.)
     if (app.queues) {
-      // SWIFT-021: schedule the vendor-no-response auto-cancel so an order the
-      // vendor never accepts doesn't hang in PENDING forever. Fire after the
-      // hold window (LIFECYCLE_V2 only) PLUS the response SLA; the worker
-      // re-checks status + hold, so an accepted or still-held order is a no-op.
-      // [F036-03b] Same default as holdWindowMs (5, the settled value) — the
-      // preview and the writer must never disagree about the window.
-      const holdMin = process.env['LIFECYCLE_V2'] === '1' ? Number(process.env['ORDER_HOLD_MINUTES'] ?? 5) : 0;
-      // The response window now comes from `order_auto_reject_minutes` in
-      // PlatformConfig — the field the admin config page has always shown and
-      // nothing has ever read. Falls back to the env var, then to the shipped
-      // default, so a missing row can never leave an order without a deadline.
-      const slaMin = await vendorResponseSlaMinutes(app.prisma);
-      for (const order of result.orders) {
-        await app.queues.notificationQueue.add('vendor-alert-escalate', { orderId: order.id, level: 0 }, {
-          // Alerts spec §A1 ladder: second alert at +30s when loud alerts are
-          // on; the shipping default stays 60s.
-          delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
-          removeOnComplete: 100,
-          removeOnFail: 50,
-        });
-        await app.queues.orderQueue.add('auto-cancel', { orderId: order.id }, {
-          delay: (holdMin + slaMin) * 60_000,
-          removeOnComplete: 100,
-          removeOnFail: 50,
-        });
-      }
+      await drainCheckoutOutbox(
+        { prisma: app.prisma, queues: app.queues, log: request.log },
+        { orderIds: result.orders.map((o) => o.id) },
+      ).catch((err: unknown) => request.log.error({ err }, '[M-11] immediate outbox drain failed — the sweep will publish'));
     }
-
     // Invalidate caches
     await Promise.all([
       app.redis.del(`cart:${userId}`).catch(() => {}),
       invalidateHomeCache(app, userId).catch(() => {}),
     ]);
 
-    // Store the result for idempotent replay (best-effort — the order exists
-    // regardless; a lost write only downgrades a replay to NO_CART).
+    // The Redis copy is a cache for the replay; the receipt row written inside
+    // the transaction is the truth [M-11], so a lost write here costs nothing.
     if (redisKey) {
       await app.redis.set(redisKey, JSON.stringify(result), 'EX', 86_400).catch(() => {});
     }

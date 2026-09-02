@@ -189,6 +189,56 @@ enum SessionAuthMethod {
 /// together; a worker retries Redis cleanup and redispatch after process death.
 /// Customer notices and custody IncidentCases are persisted in that same
 /// transaction, so this queue never substitutes an ephemeral signal for proof.
+/// [M-11] The checkout command's durable TAIL: the queue work an order needs
+/// after it commits — the vendor alert ladder and the auto-cancel — written
+/// INSIDE the checkout transaction and published by a leased drainer. A queue
+/// outage after the commit can delay this work; it can no longer lose it.
+model OrderOutbox {
+  id          String    @id
+  tenantId    String    @default("swift-default")
+  /// `order:<orderId>:<kind>` — one row per effect, ever.
+  dedupeKey   String    @unique
+  orderId     String
+  /// The job name on the target queue.
+  kind        String
+  /// 'order' | 'notification' — which queue receives it.
+  queue       String
+  payload     Json
+  delayMs     Int       @default(0)
+  attempts    Int       @default(0)
+  availableAt DateTime  @default(now())
+  claimedAt   DateTime?
+  processedAt DateTime?
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([processedAt, availableAt])
+  @@index([orderId])
+  @@index([tenantId])
+  @@map("order_outbox")
+}
+
+/// [M-11] The checkout command's durable RESULT: one immutable answer per
+/// (customer, idempotency key), written inside the checkout transaction with
+/// the request's fingerprint. A crash after the commit can no longer lose
+/// the replay, and a same-key request with a different body is refused
+/// instead of being answered with an order it did not ask for.
+model CheckoutReceipt {
+  id             String   @id @default(cuid())
+  tenantId       String   @default("swift-default")
+  userId         String
+  idempotencyKey String
+  requestHash    String
+  orderIds       String[]
+  result         Json
+  createdAt      DateTime @default(now())
+
+  @@unique([userId, idempotencyKey])
+  @@index([tenantId])
+  @@map("checkout_receipts")
+}
+
 model MoverRevocationOutbox {
   id          String    @id
   dedupeKey   String    @unique

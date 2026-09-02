@@ -64,6 +64,8 @@ const TENANT_QUERY_EXTENSIONS = {
   // Safety spine — SOS, guardian sessions, incidents and their evidence.
   // [TA-S1-006] A hired-professional job is one operator's incident scope.
   serviceJob: scoped,
+  // [M-11] The checkout command's durable tail and result are one operator's rows.
+  orderOutbox: scoped, checkoutReceipt: scoped,
   sosAlert: scoped, emergencyContact: scoped, tripShareToken: scoped, tripSafetySession: scoped,
   livenessCheck: scoped, incidentCase: scoped, evidenceBundle: scoped, safetyAccessLog: scoped,
   // Money: settlement, receipts, the agent-cash rail, trials.

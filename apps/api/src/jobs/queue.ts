@@ -803,6 +803,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       const { DispatchService, sweepStaleMovers, reconcileStuckDispatch, recoverStrandedTaxiRides } = await import('../modules/dispatch/dispatch.service');
       const { getMapsProvider } = await import('../providers/maps/maps-provider');
 
+      if (job.name === 'checkout-outbox') {
+        // [M-11] Publish whatever a request's immediate drain could not: a
+        // queue outage, a crash after the commit, a lapsed lease.
+        const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
+        const result = await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { limit: 200 });
+        if (result.processed + result.failed > 0) ctx.log.info(result, '[M-11] checkout outbox sweep');
+        return;
+      }
       if (job.name === 'mover-revocation-outbox') {
         const dispatch = new DispatchService(
           ctx.prisma,
@@ -1897,6 +1905,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Durable mover-session revocations: low-latency callers attempt delivery
   // immediately, while this sweep reclaims process-death leases and retries
   // Redis cleanup, online-hours closure, redispatch and realtime fan-out.
+  // [M-11] The checkout outbox sweep: low-latency callers publish their own
+  // rows immediately; this reclaims lapsed leases and retries failures.
+  await queues.dispatchQueue.add('checkout-outbox', {}, {
+    repeat: { every: Math.max(1_000, Number(process.env['ORDER_OUTBOX_SWEEP_MS']) || 10_000) },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
   await queues.dispatchQueue.add('mover-revocation-outbox', {}, {
     repeat: {
       every: Math.max(1_000, Number(process.env['MOVER_REVOCATION_SWEEP_MS']) || 10_000),
