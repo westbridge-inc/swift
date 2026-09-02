@@ -1,12 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 // The polling client for the §6 public trip page. Renders exactly what the
 // server said, marks how fresh it is, and degrades honestly: an expired or
 // revoked share is a clear "no longer available", never a spinner forever.
 
-const API_URL = process.env['NEXT_PUBLIC_API_URL'] ?? 'http://localhost:3000';
 const POLL_MS = 5000;
 
 interface TripView {

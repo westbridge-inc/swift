@@ -1,6 +1,10 @@
 // Server-side fetchers against the existing Fastify API — the web app is
 // another client on the same backend, never a second source of truth.
-const API_URL = process.env['API_URL'] ?? process.env['NEXT_PUBLIC_API_URL'] ?? 'http://localhost:3000';
+import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+
+// The server-side fetch origin may be overridden (an internal address on the
+// same network); the browser side is the one authority, never a fallback.
+const API_URL = process.env['API_URL'] ?? BROWSER_API_ORIGIN;
 
 export interface CountryPricing {
   countryCode: string;

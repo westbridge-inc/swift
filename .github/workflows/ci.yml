@@ -244,9 +244,15 @@ jobs:
       # so the artifact scan after it can prove no server secret was inlined.
       - name: Arm the secret canaries
         run: node scripts/secret-canary.js --emit >> "$GITHUB_ENV"
+      # [SWX-DEV-WEB-076 · integrated] A production web build REQUIRES the one
+      # canonical release origin (src/lib/browser-api-origin.ts) and refuses
+      # anything else, so CI hands it exactly that and the law is exercised on
+      # every PR. The real deploy runs on Vercel, whose project environment
+      # carries the same value.
       - run: pnpm --filter @swift/web build
         env:
           NEXT_PUBLIC_ALLOW_SITE_TOKENS: '1'
+          NEXT_PUBLIC_API_URL: https://api.swiftgy.com
       # [GRD-1 §2 / WS-15] See the admin job: the inlining happens at build
       # time, so the artefact is the only place the leak is real.
       - name: No unlisted public variable reached the built web bundle

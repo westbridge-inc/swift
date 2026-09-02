@@ -5,8 +5,7 @@
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
 import { apiFetch, getSessionPrincipal, sendOtp, setTokens } from './auth';
 import type { StorefrontDetail } from './api';
-
-const API_URL = process.env['NEXT_PUBLIC_API_URL'] ?? 'http://localhost:3000';
+import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 export { sendOtp };
 

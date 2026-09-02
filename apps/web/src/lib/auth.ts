@@ -1,10 +1,10 @@
 'use client';
 
+import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
+
 // Vendor-dashboard auth: same localStorage-token pattern as the admin console
 // (accepted V1 risk), plus the x-vendor-id store-switch header the vendor API
 // uses everywhere.
-const API_URL = process.env['NEXT_PUBLIC_API_URL'] ?? 'http://localhost:3000';
-
 const ACCESS_KEY = 'swift_web_token';
 const REFRESH_KEY = 'swift_web_refresh';
 const STORE_KEY = 'swift_web_store';
