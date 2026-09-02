@@ -2,7 +2,7 @@
 import React from 'react';
 import { ScrollView, Pressable, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import { color, radius, space } from '@swift/ui';
+import { color, fontSize, radius, space } from '@swift/ui';
 import { useDiscoveryCategories } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
@@ -72,7 +72,8 @@ export function CategoryGridScreen() {
                             justifyContent: 'center',
                           }}
                         >
-                          <T style={{ fontSize: 30, lineHeight: 38 }}>{c.emoji}</T>
+                          {/* Emoji glyph metric, derived from the scale. */}
+                          <T style={{ fontSize: fontSize.base * 2, lineHeight: fontSize.base * 2 + space.sm }}>{c.emoji}</T>
                         </View>
                         <T variant="caption" center numberOfLines={2} style={{ marginTop: space.xs }}>
                           {c.name}
