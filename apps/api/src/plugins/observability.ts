@@ -497,6 +497,22 @@ export const adCheckoutGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [S-01] The SOS escalation outbox: ACTIVE alerts whose ops page is still
+ *  undelivered (and the oldest such age), pending / failed rows, live alerts
+ *  with no rows at all. */
+export const sosEscalationGauge = new client.Gauge({
+  name: 'swift_sos_escalation',
+  help: 'SOS escalation state by check (active_without_page, active_without_page_oldest_seconds, pending, failed, live_without_rows)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+export const sosEscalationCounter = new client.Counter({
+  name: 'swift_sos_escalation_events_total',
+  help: 'SOS escalation events (staged, sent, failed, dead_letter, zero_listeners, backfilled)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {

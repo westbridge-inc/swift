@@ -6,6 +6,7 @@ import { NotificationService, notifyAdmins, tenantOfUser } from '../notification
 import { warRoomsFor } from './war-room';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
+import { stageEscalations, drainSosEscalations } from './sos-escalation';
 
 // SOS engine — the life-safety state machine (safety spec §4). Server-owned,
 // exactly like the order machine: an explicit transition table, compare-and-set
@@ -69,6 +70,10 @@ export interface SosCreateInput {
 
 export class SosService {
   private notifications: NotificationService;
+  /** Test seam: runs right after an ACTIVE commit and BEFORE the inline
+   *  delivery — a throw here is the process dying between the two. Never set
+   *  in routes. */
+  observer: { afterActive?: (sosAlertId: string) => Promise<void> } = {};
   constructor(private prisma: PrismaClient, private io: Server) {
     this.notifications = new NotificationService(prisma, io);
   }
@@ -222,7 +227,7 @@ export class SosService {
         // ACKNOWLEDGED alert did nothing at all: no confirm, no fan-out, so
         // nobody was re-paged with the new position.
         if (skipGrace && live.status === 'TRIGGER_PENDING') return this.confirm(live.id);
-        if (skipGrace || movedTo) await this.fanOut(live.id);
+        if (skipGrace || movedTo) await this.escalate(live.id, { repage: live.retriggerCount + 1 });
         return runWithoutTenant(() => this.prisma.sosAlert.findUniqueOrThrow({ where: { id: live.id } }));
       }
       // Lost the race to a terminal transition — fall through and mint.
@@ -275,7 +280,7 @@ export class SosService {
 
     let alert;
     try {
-      alert = await runWithoutTenant(() => this.prisma.sosAlert.create({
+      alert = await runWithoutTenant(() => this.prisma.$transaction(async (tx) => tx.sosAlert.create({
         data: {
           // ALWAYS written, never omitted [F-028-04]. Omitting it let the
           // `swift-default` column default decide the routing of a life-safety
@@ -303,7 +308,12 @@ export class SosService {
           clientCreatedAt: input.clientCreatedAt ?? null,
           clientIdempotencyKey: key,
         },
-      }));
+      }).then(async (created) => {
+        // [S-01] ACTIVE-at-birth (ops-raised / immediate / no grace): the
+        // delivery policy is staged in the SAME transaction as the row.
+        if (!grace) await stageEscalations(tx, created);
+        return created;
+      })));
     } catch (err) {
       // [F-026-17] read-then-create is not atomic: two genuine retries from the
       // same device can both miss the read. The loser must return the WINNER,
@@ -314,19 +324,50 @@ export class SosService {
       }
       throw err;
     }
-    if (!grace) await this.fanOut(alert.id); // already ACTIVE (ops-raised / immediate / no-grace tenant)
+    if (!grace) await this.escalate(alert.id); // already ACTIVE (ops-raised / immediate / no-grace tenant)
     return alert;
   }
 
   /** TRIGGER_PENDING → ACTIVE. Called by the owner ("I need help now") and by
    *  the grace-expiry sweep. CAS so a race between the two fires the fan-out once. */
   async confirm(id: string) {
-    const moved = await this.prisma.sosAlert.updateMany({
-      where: { id, status: 'TRIGGER_PENDING' },
-      data: { status: 'ACTIVE', graceEndsAt: null },
-    });
-    if (moved.count === 1) await this.fanOut(id);
+    const moved = await this.activate(id);
+    if (moved) await this.escalate(id);
     return this.prisma.sosAlert.findUniqueOrThrow({ where: { id } });
+  }
+
+  /** [S-01] TRIGGER_PENDING → ACTIVE and the delivery policy, ONE transaction:
+   *  a process that dies right after this commit leaves rows a worker
+   *  delivers, never an ACTIVE alert nobody was told about. CAS: a race
+   *  between the owner and the grace sweep stages once. */
+  private async activate(id: string): Promise<boolean> {
+    return runWithoutTenant(() => this.prisma.$transaction(async (tx) => {
+      const moved = await tx.sosAlert.updateMany({ where: { id, status: 'TRIGGER_PENDING' }, data: { status: 'ACTIVE', graceEndsAt: null } });
+      if (moved.count !== 1) return false;
+      const row = await tx.sosAlert.findUniqueOrThrow({ where: { id }, select: { id: true, tenantId: true, actorUserId: true, triggerSource: true } });
+      await stageEscalations(tx, row);
+      return true;
+    }));
+  }
+
+  /** [S-01] Deliver what the alert owns — inline, right now (the fail-safe
+   *  path); anything that fails or is left over is the worker's. A re-page
+   *  (a retrigger with a new position) stages fresh page rows first. */
+  private async escalate(id: string, opts: { repage?: number } = {}): Promise<void> {
+    await this.observer.afterActive?.(id);
+    await runWithoutTenant(async () => {
+      if (opts.repage) {
+        const row = await this.prisma.sosAlert.findUnique({ where: { id }, select: { id: true, tenantId: true, actorUserId: true, triggerSource: true, status: true } });
+        if (!row || (row.status !== 'ACTIVE' && row.status !== 'ACKNOWLEDGED')) return;
+        await this.prisma.$transaction(async (tx) => {
+          // An alert that reached ACTIVE without rows (pre-outbox history, or
+          // an ops-side status edit) gains its base policy here — idempotent.
+          await stageEscalations(tx, row);
+          await stageEscalations(tx, row, { repage: opts.repage });
+        });
+      }
+      await drainSosEscalations(this.prisma, this.io, { alertIds: [id] });
+    });
   }
 
   /** Slide-to-cancel — ONLY during the grace window. After ACTIVE it is impossible. */
@@ -411,116 +452,6 @@ export class SosService {
    *  VERIFIED emergency contact (§5), receipts recorded. High-frequency location
    *  streaming rides on a later slice. The counterparty is NEVER notified (don't
    *  tip off an attacker). */
-  private async fanOut(id: string) {
-    const alert = await this.prisma.sosAlert.findUnique({ where: { id } });
-    // [REPORT-035 F-035-05] ACTIVE or ACKNOWLEDGED — the re-page path exists
-    // so a retrigger with a new position re-pages ops. Guarding on ACTIVE
-    // alone made the collapse branch's promise ("the stronger trigger wins,
-    // even on an acknowledged alert") a no-op: ops had acked, the person
-    // moved, and nobody was told. Terminal states still never fan out.
-    if (!alert || (alert.status !== 'ACTIVE' && alert.status !== 'ACKNOWLEDGED')) return;
-    const receipts: Record<string, unknown> = {};
-    try {
-      // [F-026-15] The grace-expiry backstop runs in a BACKGROUND WORKER,
-      // which carries no request tenant context — and notifyAdmins without a
-      // tenantId deliberately falls back to paging every active admin. So an
-      // alert in one tenant paged every tenant's admins with its role, order
-      // id and COORDINATES. Same class as REPORT-014 F-014-03, which the
-      // dispatch ops-page already fixed by passing the row's own tenantId.
-      // [REPORT-035 F-035-07] No coordinates in the PUSH payload: it rides a
-      // third-party push provider, and the invariant is that coordinates stay
-      // behind the authenticated war-room surfaces. The body already points
-      // there. serviceJobId rides along so the page can say WHAT KIND of
-      // emergency this is — a provider-side home visit reads differently.
-      const n = await notifyAdmins(this.prisma, this.notifications, {
-        tenantId: alert.tenantId,
-        title: '🚨 SOS ACTIVE — respond now',
-        body: `${alert.actorRole} raised an SOS${alert.orderId ? ` on order ${alert.orderId}` : alert.serviceJobId ? ' on a service job (home visit)' : ''}. Location on the war-room map. Ack immediately.`,
-        data: { kind: 'sos_active', sosAlertId: id, orderId: alert.orderId, serviceJobId: alert.serviceJobId },
-      });
-      receipts['opsPaged'] = n;
-    } catch (e) {
-      receipts['opsPaged'] = 0;
-      log().error({ err: e, sosAlertId: id }, 'SOS fan-out: ops page failed');
-    }
-    try {
-      // [F-027-16] `socket: true` recorded that we CALLED emit, not that
-      // anyone received it — and emitting into an empty room never throws, so
-      // the receipt read "delivered" for a room that, until this batch, had
-      // seven producers and no subscriber anywhere in the codebase. Count the
-      // sockets actually in the room: a silence receipt has to be able to say
-      // zero. fetchSockets() is adapter-aware, so this is the cluster-wide
-      // count, not just this node's.
-      const rooms = warRoomsFor(alert.tenantId);
-      this.io.to(rooms).emit('sos:active', { sosAlertId: id, tenantId: alert.tenantId, actorRole: alert.actorRole, orderId: alert.orderId, serviceJobId: alert.serviceJobId, lat: alert.triggerLat, lng: alert.triggerLng, triggeredAt: alert.triggeredAt });
-      const listeners = await this.io.in(rooms).fetchSockets();
-      receipts['socketListeners'] = listeners.length;
-      if (listeners.length === 0) {
-        log().error({ sosAlertId: id, tenantId: alert.tenantId, rooms }, 'SOS fan-out: war-room emit reached ZERO sockets — nobody is watching the live feed');
-      }
-    } catch (e) {
-      receipts['socketListeners'] = 0;
-      log().error({ err: e, sosAlertId: id }, 'SOS fan-out: war-room emit failed');
-    }
-
-    // Guardian §5.3 L4: an alert born from an UNANSWERED check-in timeout is
-    // the server guessing, not a human asking. Contacts are NOT auto-SMSed by
-    // default — a false-positive "emergency" text to someone's mother erodes
-    // the whole feature; ops decides within their SLA. Per-tenant override:
-    // GUARDIAN_AUTONOTIFY_CONTACTS=1. Explicit human triggers (BUTTON, the
-    // check-in "I need help" → GUARDIAN_ESCALATION) always fan out.
-    //
-    // AUDIT-FIX (F1, 2026-08-01): this gate skips ONLY the contact SMS — NOT
-    // the whole fan-out. The prior `return` here also skipped the evidence
-    // bundle open below, so the single highest-stakes alert (a suspected
-    // abduction the server auto-escalated) captured no evidence and no live
-    // location trail — exactly when tracking the victim matters most. The
-    // bundle open + receipts write now always run for every ACTIVE alert.
-    const skipContactSms = alert.triggerSource === 'CHECKIN_TIMEOUT' && process.env['GUARDIAN_AUTONOTIFY_CONTACTS'] !== '1';
-
-    // Verified emergency contacts (§5), in priority order. Best-effort PER
-    // contact — one failed send must not stop the rest. NEVER rate-limited or
-    // budgeted: this is the real emergency, not the verification handshake.
-    // Unverified numbers are skipped (they never proved reachable / aware).
-    if (skipContactSms) {
-      receipts['contacts'] = 'skipped:guardian-default';
-    } else try {
-      const contacts = await this.prisma.emergencyContact.findMany({
-        where: { userId: alert.actorUserId, verifiedAt: { not: null } },
-        orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
-        take: 10,
-      });
-      if (contacts.length > 0) {
-        const { getChannels } = await import('../../providers/notifications/channels');
-        const sms = getChannels().sms;
-        const actor = await this.prisma.user.findUnique({ where: { id: alert.actorUserId }, select: { firstName: true } });
-        const who = actor?.firstName?.trim() || 'Someone you know';
-        const where = alert.triggerLat != null && alert.triggerLng != null
-          ? ` Last known location: https://maps.google.com/?q=${alert.triggerLat},${alert.triggerLng}.`
-          : '';
-        const body = `🚨 ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if needed.`;
-        const contactReceipts: Array<{ id: string; ok: boolean }> = [];
-        for (const c of contacts) {
-          try { await sms.sendSms(c.phoneE164, body); contactReceipts.push({ id: c.id, ok: true }); }
-          catch { contactReceipts.push({ id: c.id, ok: false }); }
-        }
-        receipts['contacts'] = contactReceipts;
-      }
-    } catch (e) {
-      log().error({ err: e, sosAlertId: id }, 'SOS fan-out: emergency-contact SMS failed');
-    }
-
-    await this.prisma.sosAlert.update({ where: { id }, data: { deliveryReceipts: receipts as never } }).catch(() => {});
-
-    // §9.1 — an ACTIVE SOS opens its evidence bundle: capture what the
-    // platform knows NOW, before anything moves. Best-effort; a vault hiccup
-    // must never slow the fan-out that just happened.
-    const { EvidenceService } = await import('./evidence.service');
-    await new EvidenceService(this.prisma, this.io)
-      .openForSos(id)
-      .catch((err) => log().error({ err, sosAlertId: id }, 'evidence bundle open failed — alert unaffected'));
-  }
-
   /** All-clear to the emergency contacts once ops CLOSE an alert — you don't
    *  alarm someone's contacts and then leave them in the dark. Kept deliberately
    *  neutral ("closed by our safety team", not "they're safe") so it's accurate
@@ -565,9 +496,10 @@ export class SosService {
     });
     const promoted: string[] = [];
     for (const { id } of due) {
-      const moved = await this.prisma.sosAlert.updateMany({ where: { id, status: 'TRIGGER_PENDING' }, data: { status: 'ACTIVE', graceEndsAt: null } });
-      if (moved.count === 1) {
-        await this.fanOut(id);
+      // [S-01] The CAS and the policy are one transaction; delivery follows.
+      const moved = await this.activate(id);
+      if (moved) {
+        await this.escalate(id);
         promoted.push(id);
       }
     }

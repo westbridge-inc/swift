@@ -1055,6 +1055,31 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (promoted.length > 0) {
           ctx.log.warn({ promoted, count: promoted.length }, 'SOS grace backstop promoted pending alerts to ACTIVE (client never confirmed)');
         }
+        // [S-01] The escalation worker: drain what every ACTIVE alert owns
+        // (leased, once each, retried), backfill live alerts with no rows,
+        // and page the platform for any ACTIVE alert whose ops page is still
+        // undelivered past the threshold — the watchdog.
+        const { drainSosEscalations, backfillSosEscalations, scanSosEscalations, sosEscalationWorkerKilled } = await import('../modules/safety/sos-escalation');
+        if (!sosEscalationWorkerKilled()) {
+          const back = await backfillSosEscalations(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
+          if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-01] live SOS alerts had no escalation rows — policy staged now');
+          const drained = await drainSosEscalations(ctx.prisma, ctx.io, { limit: 200 }).catch(() => null);
+          if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-01] SOS escalation deliveries failed this tick');
+        }
+        const watchdog = await scanSosEscalations(ctx.prisma).catch(() => null);
+        if (watchdog && watchdog.activeWithoutPage.length > 0) {
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+          for (const stuck of watchdog.activeWithoutPage.slice(0, 20)) {
+            await opsPageOnce(ctx, `sos-active-without-page:${stuck.sosAlertId}`, 600, () =>
+              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: '🚨 SOS ACTIVE with no ops page delivered',
+                body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the war room and respond now; the worker keeps retrying.`,
+                data: { kind: 'sos_active', sosAlertId: stuck.sosAlertId, watchdog: true },
+              }),
+            ).catch(() => {});
+          }
+        }
         // §9.1 live trail: the same life-safety tick appends the mover's
         // newest fix to every open alert's unsealed bundle — the war room
         // replays this later. Cheap no-op when no alert is open.
