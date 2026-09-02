@@ -36,7 +36,7 @@ const DEFAULT_RETRY_BASE_MS = 2_000;
 const DEFAULT_RETRY_MAX_MS = 5 * 60_000;
 
 export type CheckoutOutboxKind = 'vendor-alert-escalate' | 'auto-cancel';
-export type CheckoutOutboxQueue = 'order' | 'notification';
+export type CheckoutOutboxQueue = 'order' | 'notification' | 'dispatch';
 
 export interface CheckoutQueueTiming {
   /** The vendor alert ladder's first re-alert. */
@@ -47,7 +47,10 @@ export interface CheckoutQueueTiming {
 
 export interface CheckoutOutboxRuntime {
   prisma: PrismaClient;
-  queues: { orderQueue: Pick<Queue, 'add'>; notificationQueue: Pick<Queue, 'add'> };
+  queues: { orderQueue: Pick<Queue, 'add'>; notificationQueue: Pick<Queue, 'add'>
+    /** [S-13] the dispatch queue — a `dispatch` row publishes a dispatch-order job */
+    dispatchQueue?: { add: (name: string, data: Record<string, unknown>, opts?: Record<string, unknown>) => Promise<unknown> };
+  };
   log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
 }
 
@@ -137,6 +140,26 @@ export async function persistCheckoutOutboxInTransaction(
   }
   if (rows.length) await tx.orderOutbox.createMany({ data: rows, skipDuplicates: true });
   return rows.map((r) => r.id);
+}
+
+/** [S-13] A durable dispatch command, inside the caller's transaction: the
+ *  order must be dispatched again, whatever happens to the process after the
+ *  commit. Deterministic id = the BullMQ jobId, so an inline fast-path enqueue
+ *  and the drainer's publish are the same job. */
+export function dispatchCommandDedupeKey(orderId: string, reason: string): string {
+  return `order:${orderId}:redispatch:${reason}`;
+}
+export async function persistDispatchCommandInTransaction(
+  tx: Prisma.TransactionClient,
+  input: { orderId: string; tenantId: string; reason: string; now?: Date },
+): Promise<{ id: string; dedupeKey: string }> {
+  const dedupeKey = dispatchCommandDedupeKey(input.orderId, input.reason);
+  const id = checkoutOutboxId(dedupeKey);
+  await tx.orderOutbox.createMany({
+    data: [{ id, tenantId: input.tenantId, dedupeKey, orderId: input.orderId, kind: 'dispatch-order', queue: 'dispatch', payload: { version: CHECKOUT_OUTBOX_VERSION, orderId: input.orderId, reason: input.reason } as Prisma.InputJsonValue, delayMs: 0, availableAt: input.now ?? new Date() }],
+    skipDuplicates: true,
+  });
+  return { id, dedupeKey };
 }
 
 /** Write the command's one immutable result, inside the caller's transaction. */
@@ -232,7 +255,8 @@ export async function drainCheckoutOutbox(
     const row = await claimNextRow(runtime.prisma, { ...(options.orderIds ? { orderIds: options.orderIds } : {}), leaseMs });
     if (!row) break;
     try {
-      const queue = row.queue === 'order' ? runtime.queues.orderQueue : runtime.queues.notificationQueue;
+      const queue = row.queue === 'dispatch' ? runtime.queues.dispatchQueue : row.queue === 'order' ? runtime.queues.orderQueue : runtime.queues.notificationQueue;
+      if (!queue) throw new Error(`no ${row.queue} queue in this runtime`);
       const payload = { ...((row.payload ?? {}) as Record<string, unknown>) };
       delete payload['version'];
       await queue.add(row.kind, payload, {

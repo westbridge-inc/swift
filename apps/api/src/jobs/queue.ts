@@ -915,6 +915,24 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       const { getMapsProvider } = await import('../providers/maps/maps-provider');
 
       if (job.name === 'checkout-outbox') {
+        // [S-13 · operations] Every not-my-driver decision owns its case and its
+        // dispatch command; a decision lacking either is repaired now and paged.
+        {
+          const { scanNotMyDriverDecisions, repairNotMyDriverDecisions } = await import('../modules/safety/liveness.service');
+          const gaps = await scanNotMyDriverDecisions(ctx.prisma).catch(() => null);
+          if (gaps && (gaps.missingCase.length > 0 || gaps.missingDispatch.length > 0)) {
+            const fixed = await repairNotMyDriverDecisions(ctx.prisma, ctx.io).catch(() => ({ repaired: [] as string[] }));
+            const { notifyAdmins: pageNmd, NotificationService: NmdNS } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'not-my-driver-discrepancy', 1800, () =>
+              pageNmd(ctx.prisma, new NmdNS(ctx.prisma, ctx.io), {
+                tenantId: null,
+                title: `Not-my-driver: ${gaps.missingCase.length} decision(s) without a case, ${gaps.missingDispatch.length} without a dispatch command`,
+                body: `Repaired ${fixed.repaired.length}. A passenger may have been left without a redispatch or a case — check the named rides now.`,
+                data: { kind: 'not_my_driver_discrepancy', missingCase: gaps.missingCase.slice(0, 10), missingDispatch: gaps.missingDispatch.slice(0, 10), repaired: fixed.repaired.slice(0, 10) },
+              }),
+            ).catch(() => {});
+          }
+        }
         // [M-11] Publish whatever a request's immediate drain could not: a
         // queue outage, a crash after the commit, a lapsed lease.
         const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');

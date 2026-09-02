@@ -588,6 +588,21 @@ export const legalHoldCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [S-13] Not-my-driver decisions: released / manual (rollback) / repaired,
+ *  and decisions found lacking their case or their dispatch command. */
+export const notMyDriverCounter = new client.Counter({
+  name: 'swift_not_my_driver_events_total',
+  help: 'Not-my-driver decision events (released, manual_review, repaired)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+export const notMyDriverGauge = new client.Gauge({
+  name: 'swift_not_my_driver',
+  help: 'Not-my-driver decisions lacking an artifact (missing_case, missing_dispatch)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+
 export async function observabilityPlugin(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {
