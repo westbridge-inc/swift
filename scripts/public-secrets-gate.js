@@ -60,7 +60,11 @@ const ALLOWLIST_PATH = positional.allowlist
 
 /** Names that read like a credential. A match needs an explicit marker. */
 const SECRET_WORD = /(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|DSN|PRIVATE|AUTH)/;
-const PUBLIC_PREFIX = /\b((?:EXPO|NEXT)_PUBLIC_[A-Z0-9_]+)\b/g;
+// [TA-S0-006] Three naming seams inline at build time, not two: Expo and
+// Next publish `*_PUBLIC_*`, and Vite (the Mission Control desktop app)
+// publishes every `VITE_*` through import.meta.env. The desktop bundle was
+// outside this gate entirely until the third prefix was named here.
+const PUBLIC_PREFIX = /\b((?:EXPO_PUBLIC|NEXT_PUBLIC|VITE)_[A-Z0-9_]+)\b/g;
 /**
  * The one escape hatch, and it is deliberately narrow.
  *
@@ -80,7 +84,7 @@ const SOURCE_DIRS = ['apps', 'packages'];
 const SCANNED_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|json)$/;
 const SKIP_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'coverage', 'ios', 'android']);
 
-function walk(dir, matchExt, out = []) {
+function walk(dir, matchExt, out = [], skip = SKIP_DIRS) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -88,7 +92,7 @@ function walk(dir, matchExt, out = []) {
     return out;
   }
   for (const entry of entries) {
-    if (SKIP_DIRS.has(entry.name)) continue;
+    if (skip.has(entry.name)) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) walk(full, matchExt, out);
     else if (!matchExt || matchExt.test(entry.name)) out.push(full);
@@ -176,7 +180,12 @@ function assertScannableBundle(dir) {
 
 if (bundleDir) assertScannableBundle(path.resolve(bundleDir));
 
-const files = scanRoots.flatMap((dir) => walk(dir, bundleDir ? null : SCANNED_EXT));
+// [TA-S0-006] The skip list is for SOURCE trees (a checkout's node_modules,
+// its build outputs, its native folders). A bundle IS a build output, and a
+// mobile export lays its platforms out as ios/ and android/ — so in bundle
+// mode nothing is skipped: every directory under the bundle is scanned.
+const NO_SKIP = new Set();
+const files = scanRoots.flatMap((dir) => walk(dir, bundleDir ? null : SCANNED_EXT, [], bundleDir ? NO_SKIP : SKIP_DIRS));
 
 if (bundleDir) {
   const bytes = files.reduce((sum, f) => {
@@ -203,7 +212,10 @@ for (const file of files) {
     continue;
   }
   const lines = text.split('\n');
-  const isTest = TEST_FILE.test(file);
+  // [TA-S0-006] The fixture marker is a SOURCE-mode courtesy for the gate's
+  // own test file. A built bundle has no test files, so nothing in it may be
+  // skipped on the strength of a comment — a bundle is scanned whole.
+  const isTest = !bundleDir && TEST_FILE.test(file);
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (isTest && line.includes(FIXTURE_MARKER)) {
@@ -255,6 +267,14 @@ if (!bundleDir && unused.length) {
   console.error(`\n✖ Allowlisted but used nowhere — stale permission, remove it:\n`);
   for (const name of unused) console.error(`  ${name}`);
   console.error('');
+}
+
+// [TA-S0-006] In bundle mode a file that could not be read is a file that was
+// not certified. "scanned everything and found nothing" must never print over
+// a partial read: the count used to be a footnote on a green result.
+if (bundleDir && unreadable) {
+  failed = true;
+  console.error(`\n✖ ${unreadable} file(s) in ${bundleDir} could not be read. A partial scan is not a scan.\n`);
 }
 
 if (failed) process.exit(1);
