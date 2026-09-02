@@ -199,8 +199,20 @@ jobs:
       # bundle is where a mis-prefixed secret actually becomes public. Scanning
       # the artefact catches what a source grep cannot — a dependency or a
       # generated file introducing one.
+      # [SCR-006] What the build IS: its manifest (every file's digest, the entrypoints, the commit), so the gate
+      # certifies THIS artifact and writes a receipt for it; both stay with the run as the scan attestation.
+      - name: Artifact manifest (admin)
+        run: node scripts/artifact-manifest.js apps/admin/.next --app admin --commit ${{ github.sha }} --entry BUILD_ID --out artifact-admin.manifest.json
       - name: No unlisted public variable reached the built admin bundle
-        run: node scripts/public-secrets-gate.js --bundle apps/admin/.next
+        run: node scripts/public-secrets-gate.js --bundle apps/admin/.next --manifest artifact-admin.manifest.json --app admin --commit ${{ github.sha }} --receipt artifact-admin.receipt.json
+      - name: Keep the admin manifest and scan receipt with the run
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifact-admin-attestation
+          path: |
+            artifact-admin.manifest.json
+            artifact-admin.receipt.json
+          if-no-files-found: error
       # [TA-S0-006] The name gate above reasons about identifiers; a bundler
       # inlines VALUES and drops the names. These two certify the artifact:
       # no armed canary anywhere in the build output (server chunks and
@@ -255,8 +267,20 @@ jobs:
           NEXT_PUBLIC_API_URL: https://api.swiftgy.com
       # [GRD-1 §2 / WS-15] See the admin job: the inlining happens at build
       # time, so the artefact is the only place the leak is real.
+      # [SCR-006] What the build IS: its manifest (every file's digest, the entrypoints, the commit), so the gate
+      # certifies THIS artifact and writes a receipt for it; both stay with the run as the scan attestation.
+      - name: Artifact manifest (web)
+        run: node scripts/artifact-manifest.js apps/web/.next --app web --commit ${{ github.sha }} --entry BUILD_ID --out artifact-web.manifest.json
       - name: No unlisted public variable reached the built web bundle
-        run: node scripts/public-secrets-gate.js --bundle apps/web/.next
+        run: node scripts/public-secrets-gate.js --bundle apps/web/.next --manifest artifact-web.manifest.json --app web --commit ${{ github.sha }} --receipt artifact-web.receipt.json
+      - name: Keep the web manifest and scan receipt with the run
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifact-web-attestation
+          path: |
+            artifact-web.manifest.json
+            artifact-web.receipt.json
+          if-no-files-found: error
       - name: No server secret reached the built web artifacts
         run: node scripts/secret-canary.js --scan apps/web/.next
       - name: No secret-shaped value in what the site ships to browsers
@@ -290,8 +314,20 @@ jobs:
       # [TA-S0-006] The desktop app was outside every artifact gate: Vite
       # inlines VITE_* through import.meta.env, and dist/ is exactly what the
       # packaged app carries.
+      # [SCR-006] What the build IS: its manifest (every file's digest, the entrypoints, the commit), so the gate
+      # certifies THIS artifact and writes a receipt for it; both stay with the run as the scan attestation.
+      - name: Artifact manifest (desktop)
+        run: node scripts/artifact-manifest.js apps/desktop/dist --app desktop --commit ${{ github.sha }} --entry index.html --out artifact-desktop.manifest.json
       - name: No unlisted public variable reached the desktop bundle
-        run: node scripts/public-secrets-gate.js --bundle apps/desktop/dist
+        run: node scripts/public-secrets-gate.js --bundle apps/desktop/dist --manifest artifact-desktop.manifest.json --app desktop --commit ${{ github.sha }} --receipt artifact-desktop.receipt.json
+      - name: Keep the desktop manifest and scan receipt with the run
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifact-desktop-attestation
+          path: |
+            artifact-desktop.manifest.json
+            artifact-desktop.receipt.json
+          if-no-files-found: error
       - name: No server secret reached the desktop bundle
         run: node scripts/secret-canary.js --scan apps/desktop/dist
       - name: No secret-shaped value in the desktop bundle
@@ -490,8 +526,20 @@ jobs:
         run: |
           npx expo export --platform ios --output-dir dist/ios
           npx expo export --platform android --output-dir dist/android
+      # [SCR-006] What the build IS: its manifest (every file's digest, the entrypoints, the commit), so the gate
+      # certifies THIS artifact and writes a receipt for it; both stay with the run as the scan attestation.
+      - name: Artifact manifest (mobile)
+        run: node scripts/artifact-manifest.js apps/mobile/dist --app mobile --commit ${{ github.sha }} --entry ios/metadata.json --entry android/metadata.json --out artifact-mobile.manifest.json
       - name: No unlisted public variable reached the mobile bundles
-        run: node scripts/public-secrets-gate.js --bundle apps/mobile/dist
+        run: node scripts/public-secrets-gate.js --bundle apps/mobile/dist --manifest artifact-mobile.manifest.json --app mobile --commit ${{ github.sha }} --receipt artifact-mobile.receipt.json
+      - name: Keep the mobile manifest and scan receipt with the run
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifact-mobile-attestation
+          path: |
+            artifact-mobile.manifest.json
+            artifact-mobile.receipt.json
+          if-no-files-found: error
       - name: No server secret reached the mobile bundles
         run: node scripts/secret-canary.js --scan apps/mobile/dist
       - name: No secret-shaped value in the mobile bundles

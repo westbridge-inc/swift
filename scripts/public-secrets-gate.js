@@ -28,6 +28,16 @@
  * identifier that is not allowlisted, which catches a dependency or a generated
  * file introducing one where no source grep would look.
  *
+ * [SCR-006] --bundle is bound to the artifact manifest the build emitted
+ * (scripts/artifact-manifest.js): `--manifest <file> --app <name> --commit <sha>`
+ * proves the directory is THIS build — every declared file by digest, the tree
+ * digest recomputed from the bytes, the entrypoints present and non-empty, no
+ * undeclared file, no symlink escaping the root, nothing unreadable — and
+ * `--receipt <file>` writes the scan attestation for it, only on a pass.
+ * VALUES are the other half: a bundler inlines a server secret under a new
+ * name, and scripts/secret-canary.js arms and scans for those. Two gates, one
+ * artifact, no overlap.
+ *
  * LOCAL-RUN CAVEAT: this walks the filesystem. In this repo a worktree's disk
  * copy can legitimately LAG origin/main (work ships through a temp index and
  * never lands on disk), so a local run can under-report. CI checks out the real
@@ -39,9 +49,15 @@ const path = require('path');
 const args = process.argv.slice(2);
 let bundleDir = null;
 const positional = [];
+// [SCR-006] Bundle mode is bound to an artifact manifest (what the build IS)
+// and the app and commit it must be for; --receipt records the certification.
+const opt = { manifest: null, app: null, commit: null, receipt: null };
 for (let i = 0; i < args.length; i += 1) {
   if (args[i] === '--bundle') {
     bundleDir = args[i + 1];
+    i += 1;
+  } else if (args[i] === '--manifest' || args[i] === '--app' || args[i] === '--commit' || args[i] === '--receipt') {
+    opt[args[i].slice(2)] = args[i + 1];
     i += 1;
   } else if (args[i] === '--allowlist') {
     positional.allowlist = args[i + 1];
@@ -80,8 +96,10 @@ const PUBLIC_PREFIX = /\b((?:EXPO_PUBLIC|NEXT_PUBLIC|VITE)_[A-Z0-9_]+)\b/g;
  */
 const FIXTURE_MARKER = 'public-secrets-gate:fixture';
 const TEST_FILE = /\.test\.(ts|tsx|js|jsx)$/;
-const SOURCE_DIRS = ['apps', 'packages'];
-const SCANNED_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|json)$/;
+const SOURCE_DIRS = ['apps', 'packages', '.github/workflows', 'infrastructure'];
+// [SCR-005] Root-level config files are seams too (Expo/Next/Vite config, EAS, env templates).
+const ROOT_FILES = /^(app\.config\.(ts|js)|eas\.json|next\.config\.(js|mjs|ts)|vite\.config\.(ts|js)|\.env(\..*)?)$/;
+const SCANNED_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|json|ya?ml|toml|plist|xml|env|example)$/;
 const SKIP_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'coverage', 'ios', 'android']);
 
 function walk(dir, matchExt, out = [], skip = SKIP_DIRS) {
@@ -94,7 +112,11 @@ function walk(dir, matchExt, out = [], skip = SKIP_DIRS) {
   for (const entry of entries) {
     if (skip.has(entry.name)) continue;
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full, matchExt, out);
+    // [SCR-005] The skip set travels with the recursion. It used to be dropped
+    // below the top level, so a bundle walked with NO skip still skipped every
+    // nested ios/, android/, build/ or dist/ — and an Expo export keeps its JS
+    // at dist/ios/_expo/static/js/ios/: the mobile bundle was never scanned.
+    if (entry.isDirectory()) walk(full, matchExt, out, skip);
     else if (!matchExt || matchExt.test(entry.name)) out.push(full);
   }
   return out;
@@ -180,13 +202,84 @@ function assertScannableBundle(dir) {
 
 if (bundleDir) assertScannableBundle(path.resolve(bundleDir));
 
+/**
+ * [SCR-006] A bundle is certified only against its manifest: the right app, the
+ * right commit, every declared file present with its digest, every entrypoint
+ * present and non-empty, no symlink escaping the root, nothing unreadable.
+ * A nonempty directory proves nothing; the manifest proves it is THIS build.
+ */
+const crypto = require('crypto');
+function verifyManifest(dir) {
+  if (!opt.manifest) { console.error('\n✖ --bundle requires --manifest <artifact manifest> (scripts/artifact-manifest.js). A directory is not an artifact.\n'); process.exit(1); }
+  let m;
+  try { m = JSON.parse(fs.readFileSync(path.resolve(opt.manifest), 'utf8')); } catch (e) { console.error(`\n✖ manifest ${opt.manifest} unreadable: ${e.message}\n`); process.exit(1); }
+  const problems = [];
+  if (!m || m.version !== 1 || !Array.isArray(m.files)) problems.push('manifest is not a version-1 artifact manifest');
+  if (opt.app && m.app !== opt.app) problems.push(`manifest is for app "${m.app}", not "${opt.app}"`);
+  if (opt.commit && m.commit !== opt.commit) problems.push(`manifest is for commit ${m.commit}, not ${opt.commit} (stale or foreign build)`);
+  if (!Array.isArray(m.entrypoints) || m.entrypoints.length === 0) problems.push('manifest declares no entrypoints');
+  const realRoot = fs.realpathSync(dir);
+  /** path → the digest line the GATE computed, so the tree digest is recomputed from the bytes, never copied from the manifest. */
+  const seen = [];
+  for (const f of m.files || []) {
+    const full = path.join(dir, f.path);
+    if (!full.startsWith(dir + path.sep) && full !== dir) { problems.push(`${f.path}: path escapes the bundle`); continue; }
+    let st;
+    try { st = fs.lstatSync(full); } catch { problems.push(`${f.path}: declared but missing`); continue; }
+    if (f.unreadable) { problems.push(`${f.path}: could not be read at build time (${f.unreadable}) — a partial scan is not a scan`); continue; }
+    if (st.isSymbolicLink()) {
+      let target;
+      try { target = fs.realpathSync(full); } catch { problems.push(`${f.path}: dangling symlink`); continue; }
+      if (!target.startsWith(realRoot + path.sep)) problems.push(`${f.path}: symlink escapes the bundle (${target})`);
+      seen.push({ path: f.path, line: `${f.path}:symlink:${fs.readlinkSync(full)}` });
+      continue;
+    }
+    if (!st.isFile()) { problems.push(`${f.path}: not a regular file`); continue; }
+    let buf;
+    try { buf = fs.readFileSync(full); } catch (e) { problems.push(`${f.path}: could not be read (${e.code || e.message}) — a partial scan is not a scan`); continue; }
+    const digest = crypto.createHash('sha256').update(buf).digest('hex');
+    seen.push({ path: f.path, line: `${f.path}:${digest}` });
+    if (f.sha256 && digest !== f.sha256) problems.push(`${f.path}: digest ${digest.slice(0, 12)}… does not match the manifest`);
+    if (typeof f.bytes === 'number' && buf.length !== f.bytes) problems.push(`${f.path}: ${buf.length} byte(s), manifest says ${f.bytes}`);
+  }
+  for (const entry of m.entrypoints || []) {
+    const full = path.join(dir, entry);
+    let st;
+    try { st = fs.statSync(full); } catch { problems.push(`entrypoint ${entry}: missing`); continue; }
+    if (!st.isFile() || st.size === 0) problems.push(`entrypoint ${entry}: ${st.isFile() ? 'zero bytes' : 'not a file'}`);
+  }
+  // every file in the tree must be declared: an undeclared file is an unscanned seam
+  const declared = new Set((m.files || []).map((f) => f.path));
+  const present = walk(dir, null, [], NO_SKIP).map((f) => path.relative(dir, f).split(path.sep).join('/'));
+  for (const p of present) if (!declared.has(p)) problems.push(`${p}: present in the bundle but not in the manifest`);
+  // the tree digest names the whole artifact in the receipt; it is recomputed here exactly as the generator computes it
+  const tree = crypto.createHash('sha256').update(seen.sort((a, b) => (a.path < b.path ? -1 : 1)).map((e) => e.line).join('\n')).digest('hex');
+  if (typeof m.treeDigest !== 'string' || m.treeDigest.length !== 64) problems.push('manifest carries no tree digest');
+  else if (tree !== m.treeDigest) problems.push(`tree digest ${tree.slice(0, 12)}… recomputed from the bytes does not match the manifest's ${m.treeDigest.slice(0, 12)}…`);
+  if (problems.length) {
+    console.error(`\n✖ --bundle ${bundleDir} does not match its manifest ${opt.manifest}:\n`);
+    for (const p of problems.slice(0, 40)) console.error(`  ${p}`);
+    if (problems.length > 40) console.error(`  … and ${problems.length - 40} more`);
+    console.error('\n  Nothing is certified until the artifact and the manifest agree.\n');
+    process.exit(1);
+  }
+  console.log(`  manifest ok: ${m.app} @ ${m.commit}, ${m.files.length} file(s) verified by digest, ${m.entrypoints.length} entrypoint(s) present, tree ${tree.slice(0, 12)}…`);
+  return m;
+}
 // [TA-S0-006] The skip list is for SOURCE trees (a checkout's node_modules,
 // its build outputs, its native folders). A bundle IS a build output, and a
 // mobile export lays its platforms out as ios/ and android/ — so in bundle
 // mode nothing is skipped: every directory under the bundle is scanned.
 const NO_SKIP = new Set();
 const files = scanRoots.flatMap((dir) => walk(dir, bundleDir ? null : SCANNED_EXT, [], bundleDir ? NO_SKIP : SKIP_DIRS));
-
+// [SCR-005] In source mode the root-level config seams are scanned as well.
+if (!bundleDir) {
+  for (const name of fs.readdirSync(ROOT)) if (ROOT_FILES.test(name)) files.push(path.join(ROOT, name));
+  for (const app of ['apps/mobile', 'apps/web', 'apps/admin', 'apps/desktop']) {
+    const dir = path.join(ROOT, app);
+    if (fs.existsSync(dir)) for (const name of fs.readdirSync(dir)) if (ROOT_FILES.test(name)) files.push(path.join(dir, name));
+  }
+}
 if (bundleDir) {
   const bytes = files.reduce((sum, f) => {
     try {
@@ -202,7 +295,9 @@ if (bundleDir) {
   }
   console.log(`  scanned ${files.length} file(s), ${(bytes / 1024 / 1024).toFixed(1)} MB of built output`);
 }
+const manifest = bundleDir ? verifyManifest(path.resolve(bundleDir)) : null;
 
+const exemptFiles = new Set(); // [SCR-007] source files whose lines were skipped on the fixture marker
 for (const file of files) {
   let text;
   try {
@@ -216,10 +311,12 @@ for (const file of files) {
   // own test file. A built bundle has no test files, so nothing in it may be
   // skipped on the strength of a comment — a bundle is scanned whole.
   const isTest = !bundleDir && TEST_FILE.test(file);
+  const isYaml = /\.ya?ml$/.test(file);
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
+    if (isYaml && /^\s*#/.test(line)) continue; // a workflow comment is prose, not a variable reaching a build
     if (isTest && line.includes(FIXTURE_MARKER)) {
-      if (PUBLIC_PREFIX.test(line)) fixtureSkips += 1;
+      if (PUBLIC_PREFIX.test(line)) { fixtureSkips += 1; exemptFiles.add(file); }
       PUBLIC_PREFIX.lastIndex = 0; // the regex is /g — .test() advances it
       continue;
     }
@@ -277,7 +374,46 @@ if (bundleDir && unreadable) {
   console.error(`\n✖ ${unreadable} file(s) in ${bundleDir} could not be read. A partial scan is not a scan.\n`);
 }
 
+// [SCR-007] A fixture exemption is honoured only in a test file that NO production source imports.
+// The same fixture imported by a non-test file, or copied into a build, is a leak wearing a comment.
+if (!bundleDir && exemptFiles.size) {
+  const importers = new Map();
+  const IMPORT = /(?:import\s+(?:[^'"]*from\s+)?|require\()\s*['"]([^'"]+)['"]/g;
+  for (const file of files) {
+    if (TEST_FILE.test(file)) continue;
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    let m;
+    while ((m = IMPORT.exec(text)) !== null) {
+      const spec = m[1];
+      if (!spec.startsWith('.')) continue;
+      const base = path.resolve(path.dirname(file), spec);
+      for (const cand of [base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.jsx`, `${base}.mjs`, path.join(base, 'index.ts'), path.join(base, 'index.js')]) {
+        if (exemptFiles.has(cand)) { if (!importers.has(cand)) importers.set(cand, []); importers.get(cand).push(file); }
+      }
+    }
+  }
+  if (importers.size) {
+    failed = true;
+    console.error(`\n✖ ${importers.size} fixture-exempt test file(s) are imported by production source — an exemption that production can reach is a leak:\n`);
+    for (const [exempt, by] of importers) console.error(`  ${path.relative(ROOT, exempt)} ← ${by.map((b) => path.relative(ROOT, b)).join(', ')}`);
+    console.error('');
+  }
+}
+
 if (failed) process.exit(1);
+
+// [SCR-006] The scan receipt: one attestation per certified artifact, tied to
+// the manifest's tree digest and the release commit. Written only on a pass —
+// a receipt that exists says the bytes it names were scanned whole and passed.
+if (bundleDir && opt.receipt) {
+  const receipt = {
+    version: 1, gate: 'public-secrets-gate', result: 'pass', app: manifest.app, commit: manifest.commit, treeDigest: manifest.treeDigest,
+    manifestFiles: manifest.files.length, scannedFiles: files.length, scannedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(path.resolve(opt.receipt), JSON.stringify(receipt, null, 2));
+  console.log(`  receipt → ${opt.receipt} (${manifest.app} @ ${manifest.commit}, tree ${manifest.treeDigest.slice(0, 12)}…)`);
+}
 
 console.log(
   `✔ public-secrets-gate: ${found.size} public-prefixed variable(s) in the ${label}, all allowlisted with justifications.`,
