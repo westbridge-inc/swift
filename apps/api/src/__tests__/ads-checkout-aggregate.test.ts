@@ -130,8 +130,9 @@ describe('[R045-ADS-05] the barrier race between expiry and confirmation never p
     } finally {
       checkout.observer = {};
     }
-    const swept = await sweep!;
-    expect(swept.voided).toBe(0);
+    // The sweep is global: other suites' expired holds may be voided in the same pass. The invariant
+    // under test is THIS campaign's: its booking stays confirmed, its invoice paid, nothing of its voided.
+    await sweep!;
     expect((await bookingsOf(campaign.id)).map((b) => b.status)).toEqual(['CONFIRMED']);
     expect((await campaignOf(campaign.id)).status).toBe('PENDING_REVIEW');
     expect((await invoicesOf(campaign.id))[0]!.status).toBe('PAID');
