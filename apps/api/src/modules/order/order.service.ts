@@ -16,6 +16,7 @@ import { orderingRestriction, CashRulesService } from '../cash/cash-rules.servic
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
+import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction } from './checkout-outbox';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout, promiseView } from '../eta/promise';
@@ -33,6 +34,11 @@ import { lockActiveOrderCustomer } from './order-creation-authority';
 
 interface CheckoutInput {
   userId: string;
+  /** [M-11] The command's identity: the customer's idempotency key and the
+   *  request's fingerprint. When present the result is written inside the
+   *  order transaction as a receipt, so a replay is answered from the
+   *  database even if Redis forgot. */
+  idempotency?: { key: string; requestHash: string };
   paymentMethod: string;
   deliveryInstructions?: string;
   tipAmount?: number;
@@ -54,6 +60,11 @@ interface CheckoutInput {
    *  suspension, an item going dark) can be driven deterministically into the
    *  exact window the in-transaction barriers close. Never set in routes. */
   beforeTransaction?: () => Promise<void>;
+  /** Test seam [M-11]: runs INSIDE the checkout transaction after the outbox
+   *  rows and the receipt are written and before the commit, so a proof can
+   *  make the commit fail and observe that neither the order nor its tail
+   *  nor its receipt survive. Never set in routes. */
+  afterDurableTail?: () => Promise<void>;
   /** Test seam [REPORT-017B F-016-01]: runs INSIDE the checkout transaction,
    *  right after the cart + cart-item rows are FOR UPDATE-locked, so an
    *  interleaving proof can attempt a concurrent child mutation and observe it
@@ -968,6 +979,9 @@ export class OrderService {
 
     if (input.beforeTransaction) await input.beforeTransaction();
 
+    // [M-11] The two effects every order owes after it commits carry their
+    // delays; computed before the transaction so the rows inside it are whole.
+    const queueTiming = await checkoutQueueTiming(this.prisma);
     // Atomic: all orders, stock movements, stats, and the cart deletion commit together
     const checkoutCommit = await this.prisma.$transaction(async (tx) => {
       // Global creation lock order starts with User. Account deletion takes the
@@ -1324,6 +1338,19 @@ export class OrderService {
           }
         : null;
 
+      // [M-11] The command's durable tail and result commit WITH the orders:
+      // the vendor alert ladder and the auto-cancel as outbox rows, and the
+      // one immutable answer for this idempotency key as a receipt. A crash
+      // or a queue outage after this point can delay the tail; it can no
+      // longer lose it, and a same-key retry can no longer place twice.
+      await persistCheckoutOutboxInTransaction(tx, { orders: created.map((o) => ({ id: o.id, tenantId: o.tenantId })), timing: queueTiming, now });
+      if (input.idempotency) {
+        await persistCheckoutReceiptInTransaction(tx, {
+          userId: input.userId, tenantId: user.tenantId, idempotencyKey: input.idempotency.key, requestHash: input.idempotency.requestHash,
+          orderIds: created.map((o) => o.id), result: { orders: created, paymentAction },
+        });
+      }
+      await input.afterDurableTail?.();
       return { orders: created, paymentAction };
     });
     const { orders, paymentAction } = checkoutCommit;
