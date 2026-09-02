@@ -425,16 +425,48 @@ export function useDeclineOffer(kind: MoverKind) {
   });
   return pv ? PV.previewMutation() : m;
 }
+export type FareOutcome = 'paid' | 'refused' | 'no_show';
+export type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'handover';
+export type DriverActionInput =
+  | { id: string; action: Exclude<DriverAction, 'handover'>; pin?: string }
+  /** [M-29] The fare outcome is explicit — never defaulted — because it moves money. */
+  | { id: string; action: 'handover'; outcome: FareOutcome };
+
+/** The evidence fix for a handover / fare outcome. The server REQUIRES the
+ *  mover's GPS (it is what a guarantee claim stands on). Last-known is
+ *  instant; fall back to a fresh fix. The auth principal is re-checked around
+ *  the wait so a session that changed underneath cannot sign the outcome. */
+async function evidenceFix(owner: AuthSessionSnapshot) {
+  let pos = await Location.getLastKnownPositionAsync().catch(() => null);
+  let current = requireAuthSessionForPrincipal(owner);
+  if (!pos) {
+    pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+    current = requireAuthSessionForPrincipal(owner);
+  }
+  return { gps: { lat: pos.coords.latitude, lng: pos.coords.longitude }, current };
+}
+
 export function useDriverAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: ({ id, action, pin }: { id: string; action: 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'complete'; pin?: string }) => {
-      if (action === 'en-route') return unwrap(driverApi.enRoute(id));
-      if (action === 'arrived') return unwrap(driverApi.arrived(id));
-      if (action === 'verify-pin') return unwrap(driverApi.verifyPin(id, pin ?? ''));
-      if (action === 'start') return unwrap(driverApi.start(id));
-      return unwrap(driverApi.complete(id));
+    mutationFn: async (input: DriverActionInput) => {
+      const { id } = input;
+      if (input.action === 'handover') {
+        // [M-29] The fare outcome at the destination IS the ride's completion:
+        // 'paid' captures and completes in one commit; 'refused' / 'no_show'
+        // fail it with this GPS as evidence, strike the passenger and open the
+        // driver's guarantee claim. No bare "complete" exists any more.
+        const owner = requireAuthSessionSnapshot();
+        const { gps, current } = await evidenceFix(owner);
+        const result = await unwrap(driverApi.handover(id, { outcome: input.outcome, gps }, current));
+        requireAuthSessionForPrincipal(owner);
+        return result;
+      }
+      if (input.action === 'en-route') return unwrap(driverApi.enRoute(id));
+      if (input.action === 'arrived') return unwrap(driverApi.arrived(id));
+      if (input.action === 'verify-pin') return unwrap(driverApi.verifyPin(id, input.pin ?? ''));
+      return unwrap(driverApi.start(id));
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
   });
@@ -448,7 +480,7 @@ export function useRiderAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ id, action, reason }: { id: string; action: RiderAction; reason?: string }) => {
+    mutationFn: async ({ id, action, reason, outcome }: { id: string; action: RiderAction; reason?: string; outcome?: FareOutcome }) => {
       switch (action) {
         case 'en-route-pickup': return unwrap(riderApi.enRoutePickup(id));
         case 'arrived-pickup': return unwrap(riderApi.arrivedPickup(id));
@@ -460,19 +492,11 @@ export function useRiderAction() {
         case 'handover': {
           const owner = requireAuthSessionSnapshot();
           // The golden-rule handover NEEDS the rider's GPS (server-side mandatory —
-          // it's the evidence a guarantee claim stands on). Last-known is instant;
-          // fall back to a fresh fix.
-          let pos = await Location.getLastKnownPositionAsync().catch(() => null);
-          let current = requireAuthSessionForPrincipal(owner);
-          if (!pos) {
-            pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-            current = requireAuthSessionForPrincipal(owner);
-          }
-          const result = await unwrap(riderApi.handover(
-            id,
-            { outcome: 'paid', gps: { lat: pos.coords.latitude, lng: pos.coords.longitude } },
-            current,
-          ));
+          // it's the evidence a guarantee claim stands on). 'paid' is the door's
+          // default; [M-29] 'refused' / 'no_show' are the failed outcomes the
+          // unpaid sheet sends explicitly.
+          const { gps, current } = await evidenceFix(owner);
+          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps }, current));
           requireAuthSessionForPrincipal(owner);
           return result;
         }

@@ -808,7 +808,17 @@ export const driverApi = {
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),
   verifyPin: (id: string, pin: string) => api.put(`/driver/rides/${id}/verify-pin`, { pin }),
   start: (id: string) => api.put(`/driver/rides/${id}/start`),
-  complete: (id: string) => api.put(`/driver/rides/${id}/complete`),
+  // [M-29] The fare outcome at the destination — a cash ride's completion.
+  // GPS is mandatory server-side (a guarantee claim stands on it). 'paid'
+  // captures the fare and completes the ride in one commit; 'refused' /
+  // 'no_show' (left without paying) fail it, strike the passenger and open
+  // the driver's guarantee claim. The bare "complete" tap is refused by the
+  // server for a cash ride, so the client no longer offers it.
+  handover: (
+    id: string,
+    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
+    session?: AuthSessionSnapshot,
+  ) => api.post(`/driver/rides/${id}/handover`, body, capturedAuthConfig(session)),
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/driver/earnings', { params }),
