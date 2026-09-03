@@ -12,6 +12,7 @@ import {
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
 } from '../stores/authStore';
+import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -55,19 +56,40 @@ function usePreviewSafeMutation<TData = unknown, TError = unknown, TVars = void,
 export function useVendorProfile() {
   const pv = usePreviewDataset();
   const q = useQuery({
+    // [MOB-038] Absence is a 404 and nothing else. This used to run through a
+    // helper that turned EVERY failure into null, and the shell read null as
+    // "you have no business" — so an outage offered a working restaurant the
+    // setup wizard while its orders were live.
     queryKey: ['vendor', 'profile'],
-    queryFn: () => tryUnwrap(vendorApi.profile()),
+    queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile()),
     retry: false,
     refetchInterval: 20000,
     enabled: !pv,
   });
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
-  if (pv) return { owner: pv.owner, store: pv.store, stores: pv.stores, myRole: 'OWNER' as const, isLoading: false };
+  if (pv) {
+    return {
+      owner: pv.owner, store: pv.store, stores: pv.stores, myRole: 'OWNER' as const,
+      isLoading: false, state: 'ready' as const, failure: undefined, refetch: () => {},
+    };
+  }
   const owner: any = q.data ?? null;
-  const stores: any[] = owner?.vendors ?? [];
+  const verdict = classifyVendorProfile({ isLoading: q.isLoading, error: q.error, owner, fetched: q.isFetched });
+  const stores: any[] = Array.isArray(owner?.vendors) ? owner.vendors : [];
   const store: any = stores.find((v) => v.id === selectedStoreId) ?? stores[0] ?? null;
-  const myRole: 'OWNER' | 'MANAGER' | 'STAFF' = owner?.myRole ?? 'OWNER';
-  return { owner, store, stores, myRole, isLoading: q.isLoading };
+  return {
+    owner,
+    store,
+    stores,
+    // [MOB-038] The role the SERVER named, or undefined. It used to default to
+    // OWNER, so an outage did not merely hide the business — it handed
+    // whoever was looking owner capability over it.
+    myRole: verdict.myRole,
+    isLoading: q.isLoading,
+    state: verdict.state,
+    failure: verdict.failure,
+    refetch: () => { void q.refetch(); },
+  };
 }
 
 // ─── Reviews (manager+ replies) ──────────────────────────────────────────────
