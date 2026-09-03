@@ -8,6 +8,7 @@ import { resolveSan } from './san.service';
 import { validateSanShape, maskDisplayName, formatSan } from './san';
 import { NotificationService } from '../notification/notification.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
+import { weeklyFeeAmount } from './subscription-fee';
 
 // Channel A (webhook) + Channel A' (bill inquiry) [san spec 4.1/4.2] —
 // BUILT FIRST, ENABLED LAST: both 503 until AGENT_CASH_WEBHOOK_SECRET is
@@ -137,7 +138,7 @@ export async function agentCashRoutes(app: FastifyInstance) {
     }
     // Amount-due math [3.4], the single source of truth: next week's fee
     // minus whatever already sits in the wallet, floored at zero.
-    const weekly = Number(sub.customRate ?? sub.weeklyRate);
+    const weekly = weeklyFeeAmount(sub);
     const amountDue = Math.max(0, weekly - Number(balance?.balance ?? 0));
     return reply.send({
       valid: true,

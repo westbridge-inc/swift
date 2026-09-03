@@ -64,7 +64,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   return { userId: user.id, token };
 }
 
-async function makeVendorWithSub(opts: { rate: number; prepaid: number; due: Date }) {
+async function makeVendorWithSub(opts: { rate: number; prepaid: number; due: Date; customRate?: number }) {
   const { userId } = await makeUserWithSession(['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
   const owner = await app.prisma.vendorOwner.create({ data: { userId } });
   const vendor = await app.prisma.vendor.create({
@@ -96,6 +96,7 @@ async function makeVendorWithSub(opts: { rate: number; prepaid: number; due: Dat
       type: 'RESTAURANT',
       status: 'ACTIVE',
       weeklyRate: opts.rate,
+      ...(opts.customRate !== undefined ? { customRate: opts.customRate } : {}),
       billingMethod: 'CASH',
       currentPeriodStart: new Date(opts.due.getTime() - 7 * DAY),
       currentPeriodEnd: opts.due,
@@ -303,7 +304,7 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
     const res = await app.inject({
       method: 'POST',
       url: `/api/v1/admin/subscriptions/${subId}/topup`,
-      payload: { amount: 100000, reference: 'bank-transfer-123' },
+      payload: { amount: 100000, reference: `BANK-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
       headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(res.statusCode).toBe(200);
@@ -660,7 +661,7 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     });
     const resA = await app.inject({
       method: 'POST', url: `/api/v1/admin/subscriptions/${a.subId}/topup`,
-      payload: { amount: 100000, reference: 'test-admin-survives' },
+      payload: { amount: 100000, reference: `ADMINSURVIVES-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
       headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(resA.statusCode).toBe(200);
@@ -682,7 +683,7 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     });
     const resB = await app.inject({
       method: 'POST', url: `/api/v1/admin/subscriptions/${b.subId}/topup`,
-      payload: { amount: 100000, reference: 'test-docs-dead' },
+      payload: { amount: 100000, reference: `DOCSDEAD-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
       headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(resB.statusCode).toBe(200);
@@ -723,5 +724,44 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     expect(vend.status).toBe('SUSPENDED');
     expect(vend.suspensionSource).toBe('BILLING');
     expect(vend.acceptingOrders).toBe(false);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// [A-07] THE PRICE THE BILLER CHARGES.
+//
+// `customRate ?? weeklyRate` was written seven times and asserted nowhere: no
+// test had ever proved the biller charges the agreed price rather than the tier
+// list price. Charging the wrong amount is the most expensive defect this
+// platform can have, and it was one edit away at all times.
+// ---------------------------------------------------------------------------
+describe('[A-07] a subscription is charged its own price', () => {
+  it('an explicit customRate is what is charged — not the tier list rate', async () => {
+    const now = new Date();
+    // List price 90,000; the agreed price is 10,000. Prepaid covers the agreed
+    // price and nothing like the list price, so charging the wrong one both
+    // takes the wrong amount and fails the charge.
+    const { subId } = await makeVendorWithSub({ rate: 90_000, customRate: 10_000, prepaid: 20_000, due: now });
+
+    await billing.runBillingCycle(now);
+
+    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+    expect(payments).toHaveLength(1);
+    expect(Number(payments[0]!.amount)).toBe(10_000);
+
+    const balance = await app.prisma.prepaidBalance.findFirstOrThrow({ where: { subscriptionId: subId } });
+    expect(Number(balance.balance)).toBe(10_000); // 20,000 − the agreed 10,000
+  });
+
+  it('with no customRate the tier rate is charged — the fallback still works', async () => {
+    const now = new Date();
+    const { subId } = await makeVendorWithSub({ rate: 8_000, prepaid: 20_000, due: now });
+
+    await billing.runBillingCycle(now);
+
+    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+    expect(payments).toHaveLength(1);
+    expect(Number(payments[0]!.amount)).toBe(8_000);
   });
 });

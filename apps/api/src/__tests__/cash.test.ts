@@ -534,7 +534,7 @@ describe('Admin review + founder metrics', () => {
     const paid = await inject(
       'PUT',
       `/api/v1/admin/cash-rules/claims/${claimId}/paid`,
-      { reference: 'cash-payout-1', amount: pending[0]!.amount },
+      { reference: `CASHPAYOUT-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}`, amount: pending[0]!.amount },
       adminToken,
     );
     expect(paid.statusCode).toBe(200);

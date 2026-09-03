@@ -134,8 +134,22 @@ export interface DashboardOverview {
   activeDrivers: number;
   activeVendors: number;
   totalVendors: number;
-  revenue: { weeklySubscriptionRevenue: number; todayDeliveryFees: number; todayTotal: number };
-  subscriptionBreakdown: { type: string; count: number; weeklyRevenue: number }[];
+  revenue: {
+    /** [A-07] What active subscriptions will be BILLED this week — custom rates
+     *  honoured, waived subscriptions excluded. Not cash collected. */
+    weeklySubscriptionRevenue: number;
+    /** [A-07] What has been waived out of that figure this period. */
+    weeklySubscriptionWaived: number;
+    todayDeliveryFees: number;
+    todayTotal: number;
+  };
+  subscriptionBreakdown: {
+    type: string;
+    count: number;
+    weeklyRevenue: number;
+    waivedCount: number;
+    weeklyWaived: number;
+  }[];
   alerts: { pendingVendors: number; pastDueSubs: number; unassignedOrders: number };
 }
 

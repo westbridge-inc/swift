@@ -25,7 +25,11 @@ const vendorIds: string[] = [];
 const ownerUserIds: string[] = [];
 const subIds: string[] = [];
 
-async function makeVendorSub(weeklyRate: number, status: 'ACTIVE' | 'TRIAL') {
+async function makeVendorSub(
+  weeklyRate: number,
+  status: 'ACTIVE' | 'TRIAL',
+  extra: { customRate?: number; feeWaived?: boolean } = {},
+) {
   const owner = await app.prisma.user.create({
     data: {
       phone: `+59200748${String(subIds.length + 1).padStart(2, '0')}`, firstName: 'Rev', lastName: 'Own',
@@ -46,9 +50,12 @@ async function makeVendorSub(weeklyRate: number, status: 'ACTIVE' | 'TRIAL') {
     data: {
       vendorId: vendor.id, type: 'RESTAURANT', status,
       weeklyRate, currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * 86400000), nextBillingDate: new Date(Date.now() + 7 * 86400000),
+      ...(extra.customRate !== undefined ? { customRate: extra.customRate } : {}),
+      ...(extra.feeWaived !== undefined ? { feeWaived: extra.feeWaived } : {}),
     },
   });
   subIds.push(sub.id);
+  return sub;
 }
 
 beforeAll(async () => {
@@ -126,6 +133,61 @@ describe('overview revenue fields serialize as numbers [SWIFT-119]', () => {
     } finally {
       await app.prisma.order.deleteMany({ where: { id: order.id } });
       await app.prisma.user.deleteMany({ where: { id: cust.id } });
+    }
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// [A-07] THE HEADLINE FIGURE MUST BE THE ONE SWIFT WILL BILL.
+//
+// The biller charges `customRate ?? weeklyRate`, and charges nothing at all for
+// a waived period. The dashboard summed `weeklyRate` — so every subscription on
+// an explicit custom price was reported at its LIST price, and every waived one
+// was reported as full revenue for a period it will be charged nothing.
+// ---------------------------------------------------------------------------
+const overview = async () => (await app.inject({
+  method: 'GET', url: '/api/v1/admin/dashboard/overview',
+  headers: { authorization: `Bearer ${adminToken}` },
+})).json().data;
+
+describe('[A-07] the dashboard reports what will be billed', () => {
+  it('a custom-priced subscription is counted at its CUSTOM rate, not its list rate', async () => {
+    const before = (await overview()).revenue.weeklySubscriptionRevenue;
+    // List rate 90,000; the agreed price is 10,000. The old sum added 90,000.
+    await makeVendorSub(90_000, 'ACTIVE', { customRate: 10_000 });
+    const after = (await overview()).revenue.weeklySubscriptionRevenue;
+    expect(after - before).toBe(10_000);
+  });
+
+  it('a waived subscription adds nothing to the figure, and is reported separately', async () => {
+    const before = await overview();
+    await makeVendorSub(77_000, 'ACTIVE', { feeWaived: true });
+    const after = await overview();
+    expect(after.revenue.weeklySubscriptionRevenue).toBe(before.revenue.weeklySubscriptionRevenue);
+    expect(after.revenue.weeklySubscriptionWaived - before.revenue.weeklySubscriptionWaived).toBe(77_000);
+  });
+
+  it('a waived CUSTOM-priced subscription is waived at the price it would have been billed', async () => {
+    const before = (await overview()).revenue.weeklySubscriptionWaived;
+    await makeVendorSub(90_000, 'ACTIVE', { customRate: 12_345, feeWaived: true });
+    const after = (await overview()).revenue.weeklySubscriptionWaived;
+    expect(after - before).toBe(12_345);
+  });
+
+  it('the per-type lines reconcile with the totals, to the dollar', async () => {
+    const data = await overview();
+    const lines = data.subscriptionBreakdown as Array<{ weeklyRevenue: number; weeklyWaived: number }>;
+    expect(lines.reduce((n, l) => n + l.weeklyRevenue, 0)).toBe(data.revenue.weeklySubscriptionRevenue);
+    expect(lines.reduce((n, l) => n + l.weeklyWaived, 0)).toBe(data.revenue.weeklySubscriptionWaived);
+  });
+
+  it('every line carries its own waived count — one number never stands for three', async () => {
+    const lines = (await overview()).subscriptionBreakdown as Array<{ count: number; waivedCount: number; weeklyWaived: number }>;
+    for (const line of lines) {
+      expect(typeof line.waivedCount).toBe('number');
+      expect(line.waivedCount).toBeLessThanOrEqual(line.count);
+      if (line.waivedCount === 0) expect(line.weeklyWaived).toBe(0);
     }
   });
 });

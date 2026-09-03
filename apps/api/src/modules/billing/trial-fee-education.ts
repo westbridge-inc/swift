@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import type { NotificationService } from '../notification/notification.service';
 import { formatSan } from './san';
 import { ensureSan } from './san.service';
+import { weeklyFeeAmount } from './subscription-fee';
 
 // Trial first-payment funnel [san spec 21.4]: teach HOW to pay before the
 // first bill ever exists. Day 10 (trial end − 4d): "how you'll pay your
@@ -53,7 +54,7 @@ export async function sweepTrialFeeEducation(
       continue; // this stage already sent — the unique key is the gate
     }
     const san = formatSan(await ensureSan(prisma, sub.id));
-    const weekly = Number(sub.customRate ?? sub.weeklyRate);
+    const weekly = weeklyFeeAmount(sub);
     const audience = sub.vendor ? 'VENDOR' : 'MOVER';
     if (stage === 'd10') {
       await notifications.send({

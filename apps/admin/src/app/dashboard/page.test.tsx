@@ -22,8 +22,8 @@ const healthy = {
   totalVendors: 7,
   activeRiders: 3,
   activeDrivers: 2,
-  revenue: { weeklySubscriptionRevenue: 45000 },
-  subscriptionBreakdown: [{ type: 'RESTAURANT', count: 4, weeklyRevenue: 45000 }],
+  revenue: { weeklySubscriptionRevenue: 45000, weeklySubscriptionWaived: 5000 },
+  subscriptionBreakdown: [{ type: 'RESTAURANT', count: 4, weeklyRevenue: 45000, waivedCount: 1, weeklyWaived: 5000 }],
   alerts: { pendingVendors: 0, pastDueSubs: 0, unassignedOrders: 0 },
 };
 
@@ -81,5 +81,43 @@ describe('[A-06] a failed dashboard read is never a quiet platform', () => {
     expect(screen.queryByText(/could not be loaded/i)).toBeNull();
     expect(await screen.findByText('12')).toBeTruthy(); // today's orders, really 12
     expect(screen.getByText(/Monthly Projection/i)).toBeTruthy();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// [A-07] The figure is GUYANESE, it is what will be BILLED, and a missing one
+// is unknown — never zero.
+// ---------------------------------------------------------------------------
+describe('[A-07] the revenue figure says what it is', () => {
+  it('renders GY$, never a bare US dollar sign, and names the figure as billable', async () => {
+    mockApi(handler('ok'));
+    renderWithQuery(<DashboardPage />);
+    // The card and the breakdown both carry it — that they AGREE is the point.
+    const shown = await screen.findAllByText('GY$45,000');
+    expect(shown.length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/billable this week/i).length).toBeGreaterThanOrEqual(1);
+    // The old card rendered "$45,000" with a "GYD · subscriptions" subtitle.
+    expect(screen.queryByText('$45,000')).toBeNull();
+  });
+
+  it('shows what has been waived out of the figure, as its own number', async () => {
+    mockApi(handler('ok'));
+    renderWithQuery(<DashboardPage />);
+    expect(await screen.findByText('Waived this period')).toBeTruthy();
+    expect(screen.getByText('−GY$5,000')).toBeTruthy();
+    expect(screen.getByText(/1 waived/)).toBeTruthy();
+  });
+
+  it('a MISSING total is unavailable, not GY$0 — the read succeeded and the field did not come', async () => {
+    mockApi((request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/admin/dashboard/overview') {
+        return { body: { success: true, data: { ...healthy, revenue: {} } } };
+      }
+      return handler('ok')(request);
+    });
+    renderWithQuery(<DashboardPage />);
+    await waitFor(() => expect(screen.queryByText('GY$0')).toBeNull());
+    expect(screen.queryByText('Monthly Projection')).toBeNull();
   });
 });

@@ -91,10 +91,18 @@ describe('[A-06] no admin dashboard panel invents an absence', () => {
 
   it('a projection is never multiplied out of a total the page does not have', () => {
     const revenue = source(join(ADMIN, 'RevenueBreakdown.tsx'));
-    expect(revenue).toMatch(/!unavailable && \(/);
     const projection = revenue.indexOf('Monthly Projection');
     expect(projection).toBeGreaterThan(0);
-    expect(revenue.slice(Math.max(0, projection - 300), projection)).toMatch(/!unavailable/);
+    const guard = revenue.slice(Math.max(0, projection - 300), projection);
+    // A-06: the read FAILED — the page is blind and must project nothing.
+    expect(guard).toMatch(/!unavailable/);
+    // [A-07] and the read SUCCEEDED but the field did not come. That is a
+    // different absence, and `weeklyTotal || 0` used to turn it into an
+    // authoritative zero which the projection then multiplied. Graded on the
+    // guard's meaning rather than on one literal spelling of it, which is what
+    // made this assertion break when the guard got STRONGER.
+    expect(guard).toMatch(/weeklyTotal !== undefined/);
+    expect(guard).toMatch(/weeklyTotal !== null/);
   });
 
   it('the shared component says the two things an operator needs', () => {
