@@ -1,6 +1,7 @@
 'use client';
 
 import Image from 'next/image';
+import { formatAmount, parseAmount } from '@/lib/money';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -76,7 +77,9 @@ const CATALOG_REFRESH_MS = 30_000;
 // "GY$0" — an INVENTED zero, indistinguishable from a real one and the worst
 // lie a price can tell. A non-finite figure now renders an em-dash; a genuine
 // 0 still renders "GY$0". Same guarantee as `money()` on the vendor side.
-const gyMoney = (value: number) => (Number.isFinite(value) ? `GY$${Math.round(value).toLocaleString()}` : '—');
+// [W-13] One parser, one em-dash. `null` now reaches here from itemPrice and
+// optionPrice — a price the server never sent, which must never render as free.
+const gyMoney = (value: unknown) => formatAmount(value, 'GY$');
 
 const verticalLabel: Record<ReturnType<typeof storefrontVertical>, string> = {
   food: 'Food',
@@ -125,16 +128,24 @@ function publicCatalog(store: StorefrontDetail): DisplayVendor {
   };
 }
 
-function itemPrice(item: DisplayItem): number {
-  return Number(item.customerPrice ?? item.basePrice ?? 0);
+// [W-13] A price the server did not send used to become ZERO here, so a broken
+// item rendered as free and could still be added to a cart and ordered. An
+// unparseable price is now null: the item shows an em-dash and cannot be added.
+function itemPrice(item: DisplayItem): number | null {
+  return parseAmount(item.customerPrice ?? item.basePrice);
 }
 
-function optionPrice(item: DisplayItem, selected: Record<string, string[]>): number {
-  let total = itemPrice(item);
+function optionPrice(item: DisplayItem, selected: Record<string, string[]>): number | null {
+  const base = itemPrice(item);
+  if (base === null) return null;
+  let total = base;
   for (const group of item.optionGroups ?? []) {
     for (const optionId of selected[group.id] ?? []) {
       const option = group.options.find((candidate) => candidate.id === optionId);
-      total += Number(option?.additionalPrice ?? 0);
+      // an option whose surcharge is unreadable poisons the line the same way
+      const extra = option ? parseAmount(option.additionalPrice ?? 0) : 0;
+      if (extra === null) return null;
+      total += extra;
     }
   }
   return total;
@@ -809,7 +820,10 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
                   {(category.items as DisplayItem[]).map((item) => {
                     const quantity = quantities.get(item.id) ?? 0;
                     const fulfillmentVerified = item.fulfillment === 'DELIVERY' || item.fulfillment === 'PICKUP' || item.fulfillment === 'APPOINTMENT';
-                    const available = item.isAvailable && orderable && item.fulfillment === 'DELIVERY';
+                    // [W-13] A price Swift cannot read is not an orderable item. It used
+                    // to become GY$0 and stay addable, so a broken row shipped as free.
+                    const priced = itemPrice(item) !== null;
+                    const available = item.isAvailable && orderable && item.fulfillment === 'DELIVERY' && priced;
                     return (
                       <article
                         key={item.id}
@@ -825,6 +839,9 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
                             {item.isPopular ? <span className={styles.popular}>Popular</span> : null}
                             {item.unit ? <span className={styles.unit}>per {item.unit}</span> : null}
                             {!item.isAvailable ? <span className={styles.soldOut}>Sold out</span> : null}
+                            {item.isAvailable && !priced ? (
+                              <span className={styles.soldOut}>Price unavailable</span>
+                            ) : null}
                           </div>
                         </div>
 

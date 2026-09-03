@@ -4,6 +4,7 @@
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
 import { apiFetch, getSessionPrincipal, sendOtp, setTokens } from './auth';
+import { formatAmount } from './money';
 import type { StorefrontDetail } from './api';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
@@ -346,4 +347,7 @@ export async function placeDetails(placeId: string): Promise<{ lat: number; lng:
   return (await apiFetch(`/api/v1/places/details?placeId=${encodeURIComponent(placeId)}`)).data;
 }
 
-export const money = (n: number) => `GY$${Math.round(n ?? 0).toLocaleString()}`;
+// [W-13] `Math.round(n ?? 0)` printed "GY$0" for a price the server never sent
+// and "GY$NaN" for a broken one. Free and unknown are different facts, and a
+// customer must never be shown either as the other.
+export const money = (n: unknown) => formatAmount(n, 'GY$');
