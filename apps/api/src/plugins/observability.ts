@@ -117,6 +117,15 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+// [MOB-023] The door refused a hand-over: by the authority's block reason
+// (rail_state), or because the screen acted on a stale authority version.
+export const handoverBlockCounter = new client.Counter({
+  name: 'swift_handover_block_total',
+  help: 'Hand-overs refused at the door, by reason (MOBILE_MONEY_PENDING, MOBILE_MONEY_UNKNOWN, …, STALE_VERSION)',
+  labelNames: ['reason'] as const,
+  registers: [registry],
+});
+
 // [MOB-020] The checkout command key, by what the server did with it: a
 // replay answered from the receipt or the cache, a key reused under another
 // body refused, a concurrent twin refused, and the client's receipt probe.

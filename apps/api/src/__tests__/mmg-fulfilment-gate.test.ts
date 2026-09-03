@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { handoverAuthorityFor, handoverVersionFor } from '../modules/order/handover-authority';
+import { handoverBlockCounter } from '../plugins/observability';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { OrderStatus, PaymentStatus, UserRole } from '@prisma/client';
@@ -596,5 +598,63 @@ describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmi
         expect(fresh.paymentStatus).toBe('PENDING');
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [MOB-023] The door's authority. The screen used to say "collect NOTHING"
+// from the payment METHOD; the server now says what the door may do from the
+// payment STATE, carries it on every rider job with a version, and validates
+// it again at the moment of hand-over.
+// ---------------------------------------------------------------------------
+describe('[MOB-023] the handover authority at the door', () => {
+  const blocked = async (reason: string): Promise<number> => {
+    const m = await handoverBlockCounter.get();
+    return m.values.find((v) => v.labels['reason'] === reason)?.value ?? 0;
+  };
+
+  it('an MMG order whose payment is UNKNOWN, FAILED or REFUNDED is never handed over as paid — 409, the reason counted', async () => {
+    for (const paymentStatus of ['UNKNOWN', 'FAILED', 'REFUNDED'] as const) {
+      const order = await makeMmgOrder('ARRIVED', { fee: 300, tip: 0, paymentStatus });
+      const before = await blocked(`MOBILE_MONEY_${paymentStatus}`);
+      const res = await inject('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, {});
+      expect(res.statusCode, paymentStatus).toBe(409);
+      expect(res.json().error?.code ?? res.json().code, paymentStatus).toBe('PAYMENT_NOT_CAPTURED');
+      expect(await blocked(`MOBILE_MONEY_${paymentStatus}`), paymentStatus).toBe(before + 1);
+      const still = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true } });
+      expect(still.status, paymentStatus).toBe('ARRIVED');
+    }
+  });
+
+  it('the rider job carries the authority: BLOCKED with its reason while pending, DELIVER_NO_CASH once captured, and a version that changes with the state', async () => {
+    const order = await makeMmgOrder('ARRIVED', { fee: 300, tip: 0 });
+    await app.prisma.rider.update({ where: { id: riderId }, data: { currentOrderId: order.id } });
+    const pending = await inject('GET', '/api/v1/rider/orders/active', rider.token);
+    expect(pending.statusCode).toBe(200);
+    expect(pending.json().data?.handover).toMatchObject({ rail: 'MOBILE_MONEY', paymentState: 'PENDING', custodyState: 'ARRIVED', permitted: 'BLOCKED', blockReason: 'MOBILE_MONEY_PENDING', currency: 'GYD' });
+    const v1 = pending.json().data.handover.version as string;
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'CAPTURED' } });
+    const captured = await inject('GET', '/api/v1/rider/orders/active', rider.token);
+    expect(captured.json().data?.handover).toMatchObject({ permitted: 'DELIVER_NO_CASH', blockReason: null, paymentState: 'CAPTURED' });
+    expect(captured.json().data.handover.version).not.toBe(v1);
+    // the pure derivation agrees with the served one
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(handoverAuthorityFor(row).version).toBe(captured.json().data.handover.version);
+    expect(handoverVersionFor(row)).toBe(captured.json().data.handover.version);
+  });
+
+  it('a screen that echoes a stale version is refused (409 HANDOVER_STALE, counted); the current version hands over', async () => {
+    const order = await makeMmgOrder('ARRIVED', { fee: 300, tip: 0 });
+    await app.prisma.rider.update({ where: { id: riderId }, data: { currentOrderId: order.id } });
+    const stale = (await inject('GET', '/api/v1/rider/orders/active', rider.token)).json().data.handover.version as string;
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'CAPTURED' } });
+    const before = await blocked('STALE_VERSION');
+    const refused = await inject('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: stale });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error?.code ?? refused.json().code).toBe('HANDOVER_STALE');
+    expect(await blocked('STALE_VERSION')).toBe(before + 1);
+    const fresh = (await inject('GET', '/api/v1/rider/orders/active', rider.token)).json().data.handover.version as string;
+    const done = await inject('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: fresh });
+    expect(done.statusCode).toBe(200);
   });
 });

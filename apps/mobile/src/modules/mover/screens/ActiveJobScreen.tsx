@@ -26,6 +26,7 @@ import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
 import { openExternal } from '../../../lib/openExternal';
 import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
+import { doorFor, recordDoorBlocked, recordDoorMismatch } from '../../../lib/handoverAuthority';
 import { telUrl } from '../../../lib/emergencyPolicy';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
@@ -218,12 +219,25 @@ export function ActiveJobScreen({ navigation }: any) {
       if (!(proofError instanceof AuthSessionBoundaryError)) throw proofError;
     }
   };
+  // [MOB-023] What the door may do is the SERVER's to say (lib/handoverAuthority):
+  // rail, payment state, custody state, a version echoed on hand-over, and the
+  // permitted action. "Already paid" is never inferred from the payment method.
+  const door = doorFor(job);
+  const doorBlocked = door.kind === 'blocked';
+  const onHandoverRefused = (err: unknown) => {
+    const code = (err as { response?: { data?: { error?: { code?: string } } } })?.response?.data?.error?.code;
+    if (code === 'HANDOVER_STALE' || code === 'PAYMENT_NOT_CAPTURED' || code === 'MMG_PAYMENT_PENDING') {
+      // The server's door differs from the one on screen: count it, and re-read the job.
+      recordDoorMismatch(code);
+      active.refetch?.();
+    }
+  };
   const markDelivered = () =>
-    isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered' });
+    isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered', handoverVersion: door.version ?? undefined }, { onError: onHandoverRefused });
   const deliverLabel = isCourier ? 'Capture proof & deliver' : 'Mark delivered';
   // MMG direct-pay: the customer already paid the STORE — the rider collects
   // NOTHING at the door; their delivery fee comes from the store in cash.
-  const isMmgPaid = job?.paymentMethod === 'MOBILE_MONEY';
+  const isMmgPaid = door.kind === 'no-cash' && job?.paymentMethod === 'MOBILE_MONEY';
   // [M-28] Courier cash: WHO pays decides WHEN the money is recorded, and the
   // server refuses a proof that would imply money it never saw. Sender pays →
   // the fee is collected at pickup, before custody (the collect step below);
@@ -689,6 +703,19 @@ export function ActiveJobScreen({ navigation }: any) {
                     {bigButton('Capture proof & deliver', () => captureCourierProof(), { loading: courierProof.isPending, disabled: busy })}
                   </>
                 )}
+              </>
+            ) : doorBlocked ? (
+              <>
+                {/* [MOB-023] The rail says "paid" but the payment state does not
+                    (pending, unknown, failed, reversed): no hand-over, nothing
+                    collected, nothing completed — refresh, or the store confirms. */}
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.error, 0.12), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md }}>
+                  <Feather name="alert-triangle" size={15} color={color.error} style={{ marginTop: 1 }} />
+                  <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
+                    {`Payment not confirmed (${door.reason.replace(/_/g, ' ').toLowerCase()}) — do not hand over the order yet. Ask the store to confirm the payment, then refresh.`}
+                  </T>
+                </View>
+                {bigButton('Refresh payment status', () => { recordDoorBlocked(door.reason); active.refetch?.(); }, { loading: active.isFetching === true, disabled: busy })}
               </>
             ) : isMmgPaid ? (
               <>
