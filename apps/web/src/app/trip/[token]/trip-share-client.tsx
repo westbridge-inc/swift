@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createSequence, freshness, mapEmbedUrl, mapLinkUrl, validPoint } from '@/lib/live-tracking';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 // The polling client for the §6 public trip page. Renders exactly what the
@@ -28,13 +29,20 @@ export function TripShareClient({ token }: { token: string }) {
   const [view, setView] = useState<TripView | null>(null);
   const [gone, setGone] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [fetchedAt, setFetchedAt] = useState<number | null>(null);
+  const [positionAt, setPositionAt] = useState<number | null>(null);
+  const [serverTimed, setServerTimed] = useState(false);
+  // [W-47] see track-client: an INDEPENDENT clock, so a stopped poll stops
+  // looking fresh. This page is someone watching a person's ride home.
+  const [now, setNow] = useState(() => Date.now());
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sequence = useRef(createSequence());
 
   const load = useCallback(async () => {
+    const seq = sequence.current.next();
     try {
       const res = await fetch(`${API_URL}/api/v1/safety/public/trip/${encodeURIComponent(token)}`, { cache: 'no-store' });
       if (res.status === 404) {
+        if (!sequence.current.accept(seq)) return;
         setGone(true);
         setView(null);
         if (timer.current) clearInterval(timer.current);
@@ -42,13 +50,21 @@ export function TripShareClient({ token }: { token: string }) {
       }
       const body = await res.json();
       if (body?.success && body.data) {
-        setView(body.data as TripView);
-        setFetchedAt(Date.now());
-        if (body.data.ended && timer.current) clearInterval(timer.current); // trip over — stop polling
+        if (!sequence.current.accept(seq)) return;
+        const data = body.data as TripView;
+        setView(data);
+        // the service already sends the position's own timestamp; this page
+        // was throwing it away and timing its own fetch instead
+        const serverAt = data.location?.at ? Date.parse(data.location.at) : NaN;
+        const hasServerAt = Number.isFinite(serverAt);
+        setServerTimed(hasServerAt);
+        setPositionAt(hasServerAt ? serverAt : Date.now());
+        setNow(Date.now());
+        if (data.ended && timer.current) clearInterval(timer.current); // trip over — stop polling
       }
     } catch {
-      // Network blip: keep the last-good view on screen; the freshness line
-      // tells the truth about its age.
+      // Network blip: keep the last-good view on screen. The freshness line
+      // keeps ageing it, so it stops claiming to be current.
     } finally {
       setLoading(false);
     }
@@ -62,7 +78,15 @@ export function TripShareClient({ token }: { token: string }) {
     };
   }, [load]);
 
-  const ageSeconds = fetchedAt ? Math.max(0, Math.round((Date.now() - fetchedAt) / 1000)) : null;
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, []);
+
+  const age = freshness(positionAt, now);
+  const point = validPoint(view?.location?.lat, view?.location?.lng);
+  const showMap = point !== null && age.kind !== 'lost';
+  const freshnessLabel = age.kind === 'none' ? null : serverTimed ? age.label : age.label.replace('Updated', 'Received');
 
   return (
     <main className="min-h-screen bg-[var(--swift-canvas)] text-[var(--swift-ink)]">
@@ -99,8 +123,15 @@ export function TripShareClient({ token }: { token: string }) {
           <>
             <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm">
               <p className="text-base font-semibold">{view.status}</p>
-              {ageSeconds !== null && !view.ended ? (
-                <p className="mt-0.5 text-xs text-[#786C6C]">Updated {ageSeconds < 3 ? 'just now' : `${ageSeconds}s ago`}</p>
+              {/* [W-47] aria-live, and red once it stops being current. Someone is
+                  watching this because they are worried about the person in the car. */}
+              {freshnessLabel && !view.ended ? (
+                <p
+                  aria-live="polite"
+                  className={`mt-0.5 text-xs ${age.kind === 'fresh' ? 'text-[#786C6C]' : 'font-semibold text-[var(--swift-red)]'}`}
+                >
+                  {freshnessLabel}
+                </p>
               ) : null}
             </div>
 
@@ -124,21 +155,26 @@ export function TripShareClient({ token }: { token: string }) {
               </div>
             ) : null}
 
-            {view.location ? (
+            {showMap && point ? (
               <div className="mt-3 overflow-hidden rounded-2xl bg-white shadow-sm">
+                {/* [W-47] Coarsened to about 110 m and sent with no referer. The exact
+                    position of a person in a moving car, and the token identifying who
+                    was watching, used to reach a third party on every map load. */}
                 <iframe
-                  title="Live trip location"
+                  title="Trip location, approximate"
                   className="h-64 w-full border-0"
                   loading="lazy"
-                  src={`https://www.openstreetmap.org/export/embed.html?bbox=${view.location.lng - 0.008}%2C${view.location.lat - 0.008}%2C${view.location.lng + 0.008}%2C${view.location.lat + 0.008}&layer=mapnik&marker=${view.location.lat}%2C${view.location.lng}`}
+                  referrerPolicy="no-referrer"
+                  src={mapEmbedUrl(point)}
                 />
                 <a
                   className="block px-4 py-3 text-sm font-semibold text-[var(--swift-red)]"
-                  href={`https://www.openstreetmap.org/?mlat=${view.location.lat}&mlon=${view.location.lng}#map=16/${view.location.lat}/${view.location.lng}`}
+                  href={mapLinkUrl(point)}
                   target="_blank"
                   rel="noreferrer"
+                  referrerPolicy="no-referrer"
                 >
-                  Open full map ↗
+                  Open approximate map ↗
                 </a>
               </div>
             ) : view.ended ? (
