@@ -325,6 +325,19 @@ export const billingOutcomeRepairsCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [DB-028] Stale weekly-charge attempts: an attempt event that committed and
+ *  whose run then died before recording ANY outcome or reserving ANY provider
+ *  intent. `reclaimed` is a run taking such an attempt forward; `lost_race` is
+ *  a second reclaimer fenced off it; `blocked_intent` is one correctly left
+ *  alone because the provider already holds a live request. A rising
+ *  `reclaimed` means the biller is crashing mid-attempt. */
+export const billingAttemptReclaimCounter = new client.Counter({
+  name: 'swift_billing_attempt_reclaim_total',
+  help: 'Stale CHARGE_ATTEMPT outcomes (reclaimed/lost_race/blocked_intent)',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 /** [M-10] Terminal orders whose expected earnings tuples — the mover's fee or
  *  fare row, and the tip row when a tip was paid — are not all present. Set by
  *  the reconciler on every sweep: `found` before the repair, `unhealed` after

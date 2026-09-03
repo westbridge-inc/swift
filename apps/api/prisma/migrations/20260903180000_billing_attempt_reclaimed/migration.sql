@@ -1,0 +1,13 @@
+-- [DB-028] A weekly-charge attempt that committed and whose run then died
+-- before recording ANY outcome or reserving ANY provider intent is not
+-- "already handled" — it is abandoned. The attempt event's unique key made it
+-- a permanent one-shot lock: the period and attempt level never move, so every
+-- later cycle recomputes the same key, collides, and skips. Billing for that
+-- subscriber stops for good, in silence.
+--
+-- A later cycle may now reclaim such an attempt. The reclaim is itself a
+-- billing event under its own unique key, so two cycles reaching the same
+-- stale attempt cannot both go forward, and a reclaim that dies in turn can be
+-- reclaimed by the next generation rather than becoming a second permanent
+-- block.
+ALTER TYPE "BillingEventType" ADD VALUE IF NOT EXISTS 'CHARGE_ATTEMPT_RECLAIMED';
