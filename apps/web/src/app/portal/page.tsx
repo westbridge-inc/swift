@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { MutationNotice } from '@/components/mutation-notice';
 import { DataUnavailable } from '@/components/data-unavailable';
@@ -59,9 +60,16 @@ export default function PortalHome() {
   const riderSub = useQuery({ queryKey: ['p-rider-sub'], queryFn: getRiderSubscription, enabled: !!rider.data, retry: 0 });
   const driverSub = useQuery({ queryKey: ['p-driver-sub'], queryFn: getDriverSubscription, enabled: !!driver.data, retry: 0 });
   const settlements = useQuery({ queryKey: ['p-settlements'], queryFn: getRiderCashSettlements, enabled: !!rider.data, retry: 0 });
+  // [W-26] see the store's half in dashboard/settings: confirming this row says
+  // real cash reached the rider's hand. It names the store and the figure, and
+  // takes a second deliberate step.
+  const [pending, setPending] = useState<string | null>(null);
   const confirm = useMutation({
-    mutationFn: confirmRiderSettlement,
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['p-settlements'] }),
+    mutationFn: ({ id, amount }: { id: string; amount: string | number }) => confirmRiderSettlement(id, amount),
+    onSettled: () => {
+      setPending(null);
+      queryClient.invalidateQueries({ queryKey: ['p-settlements'] });
+    },
   });
 
   const loading = rider.isLoading || driver.isLoading;
@@ -149,13 +157,27 @@ export default function PortalHome() {
                     {status === 'RIDER_CONFIRMED' && <span className="ml-2 text-xs text-amber-600">waiting on store</span>}
                   </span>
                   {status !== 'RIDER_CONFIRMED' && (
-                    <button
-                      onClick={() => confirm.mutate(id)}
-                      disabled={confirm.isPending}
-                      className="rounded-lg bg-[var(--swift-red)] px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50"
-                    >
-                      Fee received
-                    </button>
+                    pending === id ? (
+                      <span className="flex shrink-0 items-center gap-2">
+                        <span className="text-xs font-semibold">Received {money(Number(r['amount']))} from {vendorName}?</span>
+                        <button
+                          onClick={() => confirm.mutate({ id, amount: String(r['amount'] ?? '') })}
+                          disabled={confirm.isPending}
+                          className="rounded-lg bg-[var(--swift-red)] px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50"
+                        >
+                          {confirm.isPending ? 'Confirming…' : 'Yes, received'}
+                        </button>
+                        <button onClick={() => setPending(null)} className="text-xs font-semibold text-[var(--swift-muted)]">Cancel</button>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => setPending(id)}
+                        disabled={confirm.isPending}
+                        className="shrink-0 rounded-lg border border-[var(--swift-red)] px-3 py-1.5 text-xs font-bold text-[var(--swift-red)] disabled:opacity-50"
+                      >
+                        Fee received
+                      </button>
+                    )
                   )}
                 </div>
               );

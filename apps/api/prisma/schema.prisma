@@ -2827,6 +2827,15 @@ model DeliveryCashSettlement {
   status           CashSettlementStatus @default(OWED)
   riderConfirmedAt DateTime?
   storeConfirmedAt DateTime?
+  /// [W-26] WHO closed each half, and WHAT they say changed hands.
+  /// The row used to carry timestamps alone: it recorded that "the store"
+  /// confirmed, never which person, and never the amount they attested to.
+  /// A cash handover that closes a debt needs both — the confirmer names the
+  /// figure, and the ledger refuses a figure that is not its own.
+  riderConfirmedById  String?
+  storeConfirmedById  String?
+  riderAttestedAmount Decimal?             @db.Decimal(10, 2)
+  storeAttestedAmount Decimal?             @db.Decimal(10, 2)
   createdAt        DateTime             @default(now())
 
   @@index([riderId, status])

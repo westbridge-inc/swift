@@ -291,5 +291,8 @@ export const confirmImport = (csv: string) =>
 // ── Analytics + money ────────────────────────────────────────────────────────
 export const getOverview = () => apiFetch(`${V}/analytics/overview`).then((r) => r.data);
 export const getCashSettlements = () => apiFetch(`${V}/cash-settlements`).then((r) => r.data);
-export const confirmSettlement = (id: string) =>
-  apiFetch(`${V}/cash-settlements/${id}/confirm`, { method: 'POST', body: '{}' });
+// [W-26] A settlement confirmation carries the amount the confirmer says
+// changed hands. The server refuses any figure that is not the ledger's own, so
+// a mis-click on the wrong row cannot close a debt.
+export const confirmSettlement = (id: string, amount: string | number) =>
+  apiFetch(`${V}/cash-settlements/${id}/confirm`, { method: 'POST', body: JSON.stringify({ amount }) });

@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { PrismaClient } from '@prisma/client';
 import { CashSettlementStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -18,6 +19,44 @@ import type { NotificationService } from '../notification/notification.service';
  * Every transition is compare-and-set; re-confirming your own side is a no-op
  * (double-tap safe), so the endpoints are idempotent.
  */
+
+/**
+ * [W-26] Money is parsed exactly or refused. A settlement amount arriving as a
+ * Prisma `Decimal` (a STRING on the wire) or as a number must land on the same
+ * value; anything else is not an amount.
+ */
+function toAmount(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'object' && value !== null && 'toString' in value) {
+    const parsed = Number((value as { toString(): string }).toString());
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!/^-?\d+(\.\d+)?$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** The confirmer must name the ledger's own figure, to the cent. */
+function assertAttestedAmountMatches(ledger: unknown, attested: unknown): void {
+  const owed = toAmount(ledger);
+  const said = toAmount(attested);
+  if (said === null) {
+    throw new AppError(400, 'ATTESTED_AMOUNT_REQUIRED', 'State the amount that changed hands before confirming.');
+  }
+  if (owed === null) {
+    throw new AppError(409, 'SETTLEMENT_AMOUNT_UNREADABLE', 'This settlement has no readable amount and cannot be confirmed.');
+  }
+  // Cents, so 4500 and "4500.00" agree and 4500.01 does not.
+  if (Math.round(owed * 100) !== Math.round(said * 100)) {
+    throw new AppError(
+      409,
+      'ATTESTED_AMOUNT_MISMATCH',
+      `This settlement is for GYD ${owed.toLocaleString()}, not GYD ${said.toLocaleString()}. Confirm only the amount that actually changed hands.`,
+    );
+  }
+}
 
 const SETTLEMENT_INCLUDE = {
   order: { select: { orderNumber: true } },
@@ -99,14 +138,50 @@ export class DeliveryCashSettlementService {
    * confirm their own rows, a store only rows for its vendors (404 otherwise —
    * existence stays hidden, matching the rest of the API).
    */
-  async confirm(settlementId: string, side: 'RIDER' | 'STORE', owner: { riderId?: string; vendorIds?: string[] }) {
+  /**
+   * [W-26] Close one side of a cash handover.
+   *
+   * This used to be a single click with no evidence behind it: the row recorded
+   * a TIMESTAMP for "the store confirmed" and nothing else — not which person
+   * pressed it, and not what amount they say changed hands. A mis-click, or a
+   * confirmation on the wrong settlement, closed a real debt with nothing to
+   * reconstruct afterwards.
+   *
+   * So a confirmation is now an ATTESTATION. The confirmer states the amount
+   * they handed over or received, and the ledger refuses any figure that is not
+   * its own — a settlement cannot be closed for an amount nobody agreed to.
+   * The actor is recorded beside the timestamp.
+   *
+   * What was already right and is unchanged: both sides must confirm to reach
+   * SETTLED, every transition is compare-and-set, and re-confirming your own
+   * side is a no-op.
+   */
+  async confirm(
+    settlementId: string,
+    side: 'RIDER' | 'STORE',
+    owner: { riderId?: string; vendorIds?: string[] },
+    attestation: { actorId: string; amount: unknown },
+  ) {
     const scope =
       side === 'RIDER'
         ? { riderId: owner.riderId! }
         : { vendorId: { in: owner.vendorIds! } };
 
+    // Read first: the attested figure is checked against the ledger's own
+    // amount BEFORE anything is written.
+    const existing = await this.prisma.deliveryCashSettlement.findFirst({
+      where: { id: settlementId, ...scope },
+      select: { amount: true },
+    });
+    if (!existing) throw new NotFoundError('Settlement', settlementId);
+    assertAttestedAmountMatches(existing.amount, attestation.amount);
+
     const now = new Date();
-    const mine = side === 'RIDER' ? { riderConfirmedAt: now } : { storeConfirmedAt: now };
+    const attested = toAmount(attestation.amount)!;
+    const mine =
+      side === 'RIDER'
+        ? { riderConfirmedAt: now, riderConfirmedById: attestation.actorId, riderAttestedAmount: attested }
+        : { storeConfirmedAt: now, storeConfirmedById: attestation.actorId, storeAttestedAmount: attested };
     const half = side === 'RIDER' ? CashSettlementStatus.RIDER_CONFIRMED : CashSettlementStatus.STORE_CONFIRMED;
     const otherHalf = side === 'RIDER' ? CashSettlementStatus.STORE_CONFIRMED : CashSettlementStatus.RIDER_CONFIRMED;
 
@@ -174,6 +249,15 @@ export class DeliveryCashSettlementService {
 }
 
 /** Guard shared by both confirm routes. */
+/**
+ * [W-26] The body a confirmation must carry. `amount` is required and is
+ * checked against the ledger — a confirmation with no figure is a click, not an
+ * attestation.
+ */
+export const settlementAttestationSchema = z.object({
+  amount: z.union([z.number(), z.string()]),
+});
+
 export function assertSettlementId(id: string | undefined): string {
   if (!id || id.length > 50) throw new AppError(400, 'INVALID_ID', 'Invalid settlement id');
   return id;
