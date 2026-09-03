@@ -4,7 +4,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { Sidebar } from './Sidebar';
 import { Header } from './Header';
-import { getToken } from '@/lib/api';
+import { sessionProbe } from '@/lib/api';
 
 /**
  * Auth gate. `/login` renders standalone; every other route requires a token —
@@ -22,11 +22,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       setReady(true);
       return;
     }
-    if (!getToken()) {
-      router.replace('/login');
-    } else {
-      setReady(true);
-    }
+    // [A-01] the shell gates on the SERVER's attestation of a session — not on a token's presence,
+    // because there is no token to be present: the session is an HttpOnly cookie
+    let cancelled = false;
+    void sessionProbe().then((session) => {
+      if (cancelled) return;
+      if (!session.ok) router.replace('/login');
+      else setReady(true);
+    });
+    return () => { cancelled = true; };
   }, [isLogin, pathname, router]);
 
   if (isLogin) return <>{children}</>;

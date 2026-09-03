@@ -7,6 +7,7 @@ import {
   hasPrivilegedSessionAssurance,
   requiresPrivilegedSessionAssurance,
 } from '../modules/auth/session-assurance';
+import { adoptCookieCredential, bearerOrCookieToken } from '../modules/auth/browser-session';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -71,11 +72,13 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
 
   app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
+      adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
       await request.jwtVerify();
 
       // SEC-8: a JWT alone is not enough — the session must still exist.
       // Logout/reset delete sessions, which kills the access token immediately.
-      const token = request.headers.authorization?.slice('Bearer '.length) ?? '';
+      // [A-01 / W-01] a Bearer header, or — for a browser client from an allowed origin — the HttpOnly access cookie
+      const token = bearerOrCookieToken(request);
       const session = await app.prisma.session.findUnique({
         where: { token },
         select: {
@@ -157,8 +160,9 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   // guest — never 401s. Action routes keep using `authenticate`.
   app.decorate('authenticateOptional', async (request: FastifyRequest) => {
     try {
+      adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
       await request.jwtVerify();
-      const token = request.headers.authorization?.slice('Bearer '.length) ?? '';
+      const token = bearerOrCookieToken(request);
       const session = await app.prisma.session.findUnique({
         where: { token },
         select: {

@@ -1,56 +1,70 @@
 const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 
-// ── Token store (localStorage — SEC-11 accepted V1 risk) ────────────────────
-const ACCESS_KEY = 'swift_admin_token';
-const REFRESH_KEY = 'swift_admin_refresh';
+// ── The session ──────────────────────────────────────────────────────────────
+// [A-01] THE CONSOLE HOLDS NO CREDENTIAL. The session is an HttpOnly cookie pair
+// the API sets when this client names itself (`X-Swift-Client: admin-web`) —
+// nothing a script on this origin can read or replay. Every request goes out
+// with credentials; a 401 is refreshed ONCE (single flight) from the refresh
+// cookie; a second 401 signs the console out.
+export const BROWSER_CLIENT = 'admin-web';
+const clientHeaders = { 'X-Swift-Client': BROWSER_CLIENT } as const;
 
-export function getToken() {
-  return typeof window !== 'undefined' ? localStorage.getItem(ACCESS_KEY) : null;
-}
-export function setTokens(accessToken: string, refreshToken?: string | null) {
-  if (typeof window === 'undefined') return;
-  localStorage.setItem(ACCESS_KEY, accessToken);
-  if (refreshToken) localStorage.setItem(REFRESH_KEY, refreshToken);
-}
-export function clearTokens() {
-  if (typeof window === 'undefined') return;
-  localStorage.removeItem(ACCESS_KEY);
-  localStorage.removeItem(REFRESH_KEY);
+let refreshFlight: Promise<boolean> | null = null;
+
+/** One refresh at a time: concurrent 401s share the flight, so a rotated refresh cookie is never replayed. */
+async function tryRefresh(): Promise<boolean> {
+  if (!refreshFlight) {
+    refreshFlight = (async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/v1/auth/refresh`, { method: 'POST', credentials: 'include', headers: { ...clientHeaders } });
+        return res.ok;
+      } catch {
+        return false;
+      } finally {
+        refreshFlight = null;
+      }
+    })();
+  }
+  return refreshFlight;
 }
 
-// Access tokens live 30m; transparently refresh on 401 so admins aren't kicked
-// out mid-session (refresh token lasts 7d). Mirrors the mobile client.
-async function tryRefresh(): Promise<string | null> {
-  const refreshToken = typeof window !== 'undefined' ? localStorage.getItem(REFRESH_KEY) : null;
-  if (!refreshToken) return null;
-  const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refreshToken }),
-  });
-  const json = await res.json().catch(() => null);
-  if (!res.ok || !json?.data?.accessToken) return null;
-  setTokens(json.data.accessToken, json.data.refreshToken);
-  return json.data.accessToken as string;
+/** The server's word on whether this browser has a session — the shell gates on this, never on a stored token. */
+export async function sessionProbe(): Promise<{ ok: boolean; user?: { id: string; activeRole: string; roles: string[] } }> {
+  try {
+    const res = await fetch(`${API_URL}/api/v1/auth/me`, { credentials: 'include', headers: { ...clientHeaders } });
+    if (!res.ok) return { ok: false };
+    const json = await res.json().catch(() => null);
+    return json?.data?.user ? { ok: true, user: json.data.user } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless. */
+export async function logout(): Promise<void> {
+  try {
+    await fetch(`${API_URL}/api/v1/auth/logout`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' });
+  } catch {
+    // the cookies are HttpOnly and path-scoped: with the server unreachable the shell still redirects to login
+  }
 }
 
 async function apiFetch(path: string, options?: RequestInit) {
-  const doFetch = (token: string | null) =>
+  const doFetch = () =>
     fetch(`${API_URL}${path}`, {
       ...options,
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
-        ...(token && { Authorization: `Bearer ${token}` }),
+        ...clientHeaders,
         ...options?.headers,
       },
     });
-
-  let res = await doFetch(getToken());
+  let res = await doFetch();
   if (res.status === 401) {
-    const fresh = await tryRefresh();
-    if (fresh) res = await doFetch(fresh);
+    const refreshed = await tryRefresh();
+    if (refreshed) res = await doFetch();
     if (res.status === 401) {
-      clearTokens();
       if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
         window.location.href = '/login';
       }
@@ -101,20 +115,22 @@ export async function sendOtp(phone: string) {
 export async function verifyOtpLogin(phone: string, code: string) {
   const res = await fetch(`${API_URL}/api/v1/auth/verify-otp`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', ...clientHeaders },
     body: JSON.stringify({ phone, code }),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
   const data = json.data;
-  if (data.isNewUser || !data.tokens?.accessToken) {
+  // [A-01] a browser sign-in comes back as a cookie session — never as tokens in the body
+  if (data.isNewUser || data.session !== 'cookie') {
     throw new Error('No Swift account is registered to that number.');
   }
   const roles: string[] = data.user?.roles ?? [];
   if (!roles.some((r) => ADMIN_ROLES.includes(r))) {
     throw new Error('This account does not have admin access.');
   }
-  setTokens(data.tokens.accessToken, data.tokens.refreshToken);
+  // [A-01] the session arrived as HttpOnly cookies; there is nothing to store
   return data.user;
 }
 

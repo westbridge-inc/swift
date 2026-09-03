@@ -9,6 +9,8 @@ import { sendStepUpOtp, verifyStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { browserClientOf, clearSessionCookies, refreshCredentialOf, setSessionCookies, withoutTokens } from './browser-session';
+import { browserSessionCounter } from '../../plugins/observability';
 
 const sendOtpSchema = z.object({
   phone: zPhone,
@@ -92,7 +94,19 @@ export async function authRoutes(app: FastifyInstance) {
       ipAddress: request.ip,
       userAgent: request.headers['user-agent'] || '',
     });
+    // [A-01 / W-01] A browser client gets its session as HttpOnly cookies and no credential in the body.
+    if (browserClientOf(request) && 'tokens' in result && result.tokens) {
+      setSessionCookies(reply, result.tokens);
+      return reply.send({ success: true, data: withoutTokens(result) });
+    }
     return reply.send({ success: true, data: result });
+  });
+
+  /** [A-01] The session bootstrap a browser shell gates on — the server's attestation, never a token's presence. */
+  app.get('/me', { preHandler: [app.authenticate] }, async (request) => {
+    const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { id: true, phone: true, firstName: true, lastName: true, roles: true, activeRole: true, status: true } });
+    if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
+    return { success: true, data: { user, sessionId: request.authSessionId, client: browserClientOf(request) } };
   });
 
   app.post('/register', authRateLimit, async (request, reply) => {
@@ -114,13 +128,26 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.post('/refresh', authRateLimit, async (request, reply) => {
-    const body = refreshSchema.parse(request.body);
-    const result = await authService.refreshTokens(body.refreshToken);
+    // [A-01 / W-01] a browser refreshes from its HttpOnly refresh cookie (client header + allowed origin), never from a body it could not have
+    const credential = refreshCredentialOf(request);
+    if (!credential) {
+      if (browserClientOf(request)) throw new AppError(401, 'INVALID_TOKEN', 'No refresh session on this browser');
+      refreshSchema.parse(request.body);
+      throw new AppError(401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
+    }
+    const result = await authService.refreshTokens(credential);
+    if (browserClientOf(request)) {
+      setSessionCookies(reply, result);
+      browserSessionCounter.labels('cookie_refreshed').inc();
+      return reply.send({ success: true, data: { expiresIn: result.expiresIn, session: 'cookie' } });
+    }
     return reply.send({ success: true, data: result });
   });
 
   app.post('/logout', { preHandler: [app.authenticate] }, async (request, reply) => {
     const body = logoutSchema.parse(request.body ?? {});
+    // [A-01 / W-01] a browser's cookies are cleared whether or not the revoke below succeeds — fail closed locally
+    if (browserClientOf(request)) clearSessionCookies(reply);
     const sessionId = request.authSessionId;
     if (!sessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
@@ -151,6 +178,14 @@ export async function authRoutes(app: FastifyInstance) {
    * credentials resolve to the same locked Session, and every valid/invalid
    * credential receives the same response shape. */
   app.post('/logout/refresh', authRateLimit, async (request, reply) => {
+    // [A-01 / W-01] a browser signs out from its refresh cookie; the cookies are cleared either way
+    const cookieMode = !!browserClientOf(request);
+    const credential = cookieMode ? refreshCredentialOf(request) : null;
+    if (cookieMode) clearSessionCookies(reply);
+    if (cookieMode && credential) {
+      await authService.logoutByRefreshToken(credential, undefined);
+      return reply.send({ success: true });
+    }
     const body = refreshLogoutSchema.parse(request.body);
     await authService.logoutByRefreshToken(body.refreshToken, body.pushToken);
     return reply.send({ success: true });
