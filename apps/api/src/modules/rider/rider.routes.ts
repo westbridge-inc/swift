@@ -13,7 +13,7 @@ import { VerificationService } from '../verification/verification.service';
 import { CashRulesService, customerTrustSummaries, gpsEvidence } from '../cash/cash-rules.service';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
-import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
+import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
 import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
 import { FloatService, riderFloatForOrder, floatAdvice } from '../dispatch/float.service';
 import { explainEarning } from '../../utils/explain-earning';
@@ -1963,7 +1963,14 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/cash-settlements/:id/confirm', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const rider = await getRider(app, request.user.userId);
-    const data = await settlements.confirm(assertSettlementId(id), 'RIDER', { riderId: rider.id });
+    // [W-26] see the vendor half: a confirmation names its own amount.
+    const { amount } = settlementAttestationSchema.parse(request.body ?? {});
+    const data = await settlements.confirm(
+      assertSettlementId(id),
+      'RIDER',
+      { riderId: rider.id },
+      { actorId: request.user.userId, amount },
+    );
     return { success: true, data };
   });
 

@@ -64,8 +64,10 @@ export const getRiderCashSettlements = () => absentOrThrow<{
   unsettled: Array<Record<string, unknown>>;
   settled: Array<Record<string, unknown>>;
 }>(apiFetch('/api/v1/rider/cash-settlements'));
-export const confirmRiderSettlement = (id: string) =>
-  apiFetch(`/api/v1/rider/cash-settlements/${id}/confirm`, { method: 'POST', body: '{}' });
+// [W-26] see vendor-api: the confirmation names its own amount, and the server
+// refuses a figure that is not the one owed.
+export const confirmRiderSettlement = (id: string, amount: string | number) =>
+  apiFetch(`/api/v1/rider/cash-settlements/${id}/confirm`, { method: 'POST', body: JSON.stringify({ amount }) });
 export const updateDriverProfile = (body: Record<string, unknown>) =>
   apiFetch('/api/v1/driver/profile', { method: 'PUT', body: JSON.stringify(body) });
 

@@ -179,12 +179,12 @@ describe('dual-confirm ledger', () => {
     const orderId = await makeDeliveredOrder({ payment: 'MOBILE_MONEY', fee: 500 });
     const row = (await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId } }))!;
 
-    const r1 = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, {});
+    const r1 = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, { amount: row.amount });
     expect(r1.statusCode).toBe(200);
     expect(r1.json().data.status).toBe('RIDER_CONFIRMED');
     expect(r1.json().data.riderConfirmedAt).toBeTruthy();
 
-    const r2 = await inject('POST', `/api/v1/vendor/cash-settlements/${row.id}/confirm`, vendorOwner.token, {}, vendorId);
+    const r2 = await inject('POST', `/api/v1/vendor/cash-settlements/${row.id}/confirm`, vendorOwner.token, { amount: row.amount }, vendorId);
     expect(r2.statusCode).toBe(200);
     expect(r2.json().data.status).toBe('SETTLED');
     expect(r2.json().data.storeConfirmedAt).toBeTruthy();
@@ -194,10 +194,10 @@ describe('dual-confirm ledger', () => {
     const orderId = await makeDeliveredOrder({ payment: 'MOBILE_MONEY' });
     const row = (await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId } }))!;
 
-    const s1 = await inject('POST', `/api/v1/vendor/cash-settlements/${row.id}/confirm`, vendorOwner.token, {}, vendorId);
+    const s1 = await inject('POST', `/api/v1/vendor/cash-settlements/${row.id}/confirm`, vendorOwner.token, { amount: row.amount }, vendorId);
     expect(s1.json().data.status).toBe('STORE_CONFIRMED');
 
-    const s2 = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, {});
+    const s2 = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, { amount: row.amount });
     expect(s2.json().data.status).toBe('SETTLED');
   });
 
@@ -205,8 +205,8 @@ describe('dual-confirm ledger', () => {
     const orderId = await makeDeliveredOrder({ payment: 'MOBILE_MONEY' });
     const row = (await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId } }))!;
 
-    await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, {});
-    const again = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, {});
+    await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, { amount: row.amount });
+    const again = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, { amount: row.amount });
     expect(again.statusCode).toBe(200);
     expect(again.json().data.status).toBe('RIDER_CONFIRMED'); // still waiting on the store
 
@@ -217,7 +217,7 @@ describe('dual-confirm ledger', () => {
   it("another rider can't confirm my settlement (404 — existence hidden)", async () => {
     const orderId = await makeDeliveredOrder({ payment: 'MOBILE_MONEY' });
     const row = (await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId } }))!;
-    const res = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, outsiderRider.token, {});
+    const res = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, outsiderRider.token, { amount: row.amount });
     expect(res.statusCode).toBe(404);
   });
 
@@ -226,14 +226,14 @@ describe('dual-confirm ledger', () => {
     const row = (await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId } }))!;
     const stranger = await makeUser(['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
     await makeVendor(stranger.userId, 'Stranger Shop');
-    const res = await inject('POST', `/api/v1/vendor/cash-settlements/${row.id}/confirm`, stranger.token, {});
+    const res = await inject('POST', `/api/v1/vendor/cash-settlements/${row.id}/confirm`, stranger.token, { amount: row.amount });
     expect(res.statusCode).toBe(404);
   });
 
   it('confirming notifies the other side', async () => {
     const orderId = await makeDeliveredOrder({ payment: 'MOBILE_MONEY' });
     const row = (await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId } }))!;
-    await inject('POST', `/api/v1/vendor/cash-settlements/${row.id}/confirm`, vendorOwner.token, {}, vendorId);
+    await inject('POST', `/api/v1/vendor/cash-settlements/${row.id}/confirm`, vendorOwner.token, { amount: row.amount }, vendorId);
     const note = await app.prisma.notification.findFirst({
       where: { userId: rider.userId, data: { path: ['settlementId'], equals: row.id } },
     });
@@ -377,5 +377,99 @@ describe('FUL-004c: VENDOR_DELIVERY settles as matrix rows 3/4 (vendor keeps all
     expect(oracle.riderNets).toBe(0);
     expect(oracle.obligations).toHaveLength(0);
     await app.prisma.order.delete({ where: { id: order.id } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [W-26] S0 money. Closing one side of this ledger settles a REAL cash debt
+// between a store and a rider. It used to be a single click: the row recorded a
+// timestamp for "the store confirmed" and nothing else — not which person
+// pressed it, and not what amount they say changed hands. A mis-click, a tap on
+// the wrong row, or a confirmation nobody could later account for closed the
+// debt with nothing to reconstruct.
+//
+// What was already right and is NOT re-fixed here: both sides must confirm to
+// reach SETTLED, every transition is compare-and-set, re-confirming your own
+// side is a no-op, and each side can only reach its own settlements. Those are
+// covered by the suites above. This block is about EVIDENCE.
+// ---------------------------------------------------------------------------
+
+describe('[W-26] a confirmation is an attestation, not a click', () => {
+  async function owed(fee = 500) {
+    const orderId = await makeDeliveredOrder({ payment: 'MOBILE_MONEY', fee });
+    return (await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId } }))!;
+  }
+
+  it('refuses a confirmation that names no amount', async () => {
+    const row = await owed();
+    const res = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, {});
+    expect(res.statusCode).toBe(400);
+    const after = await app.prisma.deliveryCashSettlement.findUnique({ where: { id: row.id } });
+    expect(after!.status).toBe('OWED'); // nothing moved
+    expect(after!.riderConfirmedAt).toBeNull();
+  });
+
+  it('refuses an amount that is not the one owed — in either direction', async () => {
+    const row = await owed(500);
+    for (const wrong of [400, 600, 500.01, '499.99']) {
+      const res = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, { amount: wrong });
+      expect(res.statusCode, String(wrong)).toBe(409);
+      expect(res.json().error.code).toBe('ATTESTED_AMOUNT_MISMATCH');
+    }
+    expect((await app.prisma.deliveryCashSettlement.findUnique({ where: { id: row.id } }))!.status).toBe('OWED');
+  });
+
+  it('refuses a non-numeric amount rather than coercing it', async () => {
+    const row = await owed(500);
+    // `Number('')` and `Number([])` are both 0; neither is an attestation.
+    for (const bad of ['', '  ', 'five hundred', 'GYD 500', '5e2']) {
+      const res = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, { amount: bad });
+      expect([400, 409], String(bad)).toContain(res.statusCode);
+    }
+    expect((await app.prisma.deliveryCashSettlement.findUnique({ where: { id: row.id } }))!.status).toBe('OWED');
+  });
+
+  it('accepts the exact figure, as a number or as the wire STRING', async () => {
+    const a = await owed(500);
+    expect((await inject('POST', `/api/v1/rider/cash-settlements/${a.id}/confirm`, rider.token, { amount: 500 })).statusCode).toBe(200);
+    const b = await owed(750);
+    expect((await inject('POST', `/api/v1/rider/cash-settlements/${b.id}/confirm`, rider.token, { amount: '750.00' })).statusCode).toBe(200);
+  });
+
+  it('records WHO confirmed and WHAT they attested, on each side', async () => {
+    const row = await owed(500);
+    await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, { amount: '500.00' });
+    const half = await app.prisma.deliveryCashSettlement.findUnique({ where: { id: row.id } });
+    expect(half!.riderConfirmedById).toBe(rider.userId);
+    expect(Number(half!.riderAttestedAmount)).toBe(500);
+    expect(half!.storeConfirmedById).toBeNull(); // the other side has not spoken
+
+    await inject('POST', `/api/v1/vendor/cash-settlements/${row.id}/confirm`, vendorOwner.token, { amount: '500.00' }, vendorId);
+    const done = await app.prisma.deliveryCashSettlement.findUnique({ where: { id: row.id } });
+    expect(done!.status).toBe('SETTLED');
+    expect(done!.storeConfirmedById).toBe(vendorOwner.userId);
+    expect(Number(done!.storeAttestedAmount)).toBe(500);
+    // and the two halves are separately attributable — the point of the change
+    expect(done!.riderConfirmedById).not.toBe(done!.storeConfirmedById);
+  });
+
+  it('a stranger still cannot confirm, and learns nothing about the amount', async () => {
+    const row = await owed(500);
+    const outsider = await makeUser(['RIDER'], 'RIDER');
+    await app.prisma.rider.create({ data: { userId: outsider.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+    const res = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, outsider.token, { amount: 500 });
+    expect(res.statusCode).toBe(404); // scoped read happens before anything else
+    expect((await app.prisma.deliveryCashSettlement.findUnique({ where: { id: row.id } }))!.status).toBe('OWED');
+  });
+
+  it('re-confirming your own side stays a no-op, and does not rewrite the attestation', async () => {
+    const row = await owed(500);
+    await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, { amount: 500 });
+    const first = await app.prisma.deliveryCashSettlement.findUnique({ where: { id: row.id } });
+    const again = await inject('POST', `/api/v1/rider/cash-settlements/${row.id}/confirm`, rider.token, { amount: 500 });
+    expect(again.statusCode).toBe(200);
+    const second = await app.prisma.deliveryCashSettlement.findUnique({ where: { id: row.id } });
+    expect(second!.status).toBe('RIDER_CONFIRMED');
+    expect(second!.riderConfirmedById).toBe(first!.riderConfirmedById);
   });
 });

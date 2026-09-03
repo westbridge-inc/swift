@@ -154,9 +154,17 @@ function SettlementsCard() {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
   const data = useQuery({ queryKey: storeKey(storeId, 'cash-settlements'), queryFn: getCashSettlements, refetchInterval: 60_000 });
+  // [W-26] Closing this row settles a REAL cash debt. It used to be one click
+  // with nothing behind it. Now the store confirms a named amount for a named
+  // rider, in a second deliberate step, and the server refuses any figure that
+  // is not the one owed.
+  const [pending, setPending] = useState<string | null>(null);
   const confirm = useMutation({
-    mutationFn: confirmSettlement,
-    onSettled: () => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'cash-settlements') }),
+    mutationFn: ({ id, amount }: { id: string; amount: string | number }) => confirmSettlement(id, amount),
+    onSettled: () => {
+      setPending(null);
+      queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'cash-settlements') });
+    },
   });
   const d = data.data;
   if (!d) return null;
@@ -194,13 +202,27 @@ function SettlementsCard() {
                     {status === 'STORE_CONFIRMED' && <span className="ml-2 text-xs text-amber-600">waiting on rider</span>}
                   </span>
                   {status !== 'STORE_CONFIRMED' && (
-                    <button
-                      onClick={() => confirm.mutate(id)}
-                      disabled={confirm.isPending}
-                      className="rounded-lg bg-[var(--swift-red)] px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50"
-                    >
-                      Fee handed over
-                    </button>
+                    pending === id ? (
+                      <span className="flex shrink-0 items-center gap-2">
+                        <span className="text-xs font-semibold">Hand {rider} {money(r['amount'])}?</span>
+                        <button
+                          onClick={() => confirm.mutate({ id, amount: String(r['amount'] ?? '') })}
+                          disabled={confirm.isPending}
+                          className="rounded-lg bg-[var(--swift-red)] px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50"
+                        >
+                          {confirm.isPending ? 'Confirming…' : 'Yes, handed over'}
+                        </button>
+                        <button onClick={() => setPending(null)} className="text-xs font-semibold text-[var(--swift-muted)]">Cancel</button>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => setPending(id)}
+                        disabled={confirm.isPending}
+                        className="shrink-0 rounded-lg border border-[var(--swift-red)] px-3 py-1.5 text-xs font-bold text-[var(--swift-red)] disabled:opacity-50"
+                      >
+                        Fee handed over
+                      </button>
+                    )
                   )}
                 </div>
               );

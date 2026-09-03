@@ -24,7 +24,7 @@ import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
-import { DeliveryCashSettlementService, assertSettlementId } from '../cash/delivery-cash-settlement.service';
+import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
@@ -1746,7 +1746,16 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  it. Idempotent; any staff can confirm (same as the payment-received button). */
   app.post<{ Params: IdParam }>('/cash-settlements/:id/confirm', auth, async (request) => {
     const access = await resolveVendor(app, request.user.userId);
-    const data = await settlementLedger.confirm(assertSettlementId(request.params.id), 'STORE', { vendorIds: access.vendorIds });
+    // [W-26] The confirmer states the amount they handed over; the ledger
+    // refuses any figure that is not its own. A one-click close of a real cash
+    // debt left nothing to reconstruct — not the person, not the figure.
+    const { amount } = settlementAttestationSchema.parse(request.body ?? {});
+    const data = await settlementLedger.confirm(
+      assertSettlementId(request.params.id),
+      'STORE',
+      { vendorIds: access.vendorIds },
+      { actorId: request.user.userId, amount },
+    );
     return { success: true, data };
   });
 
