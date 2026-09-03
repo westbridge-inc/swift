@@ -124,6 +124,15 @@ export async function authRoutes(app: FastifyInstance) {
       deviceId: (request.headers['x-device-id'] as string) || null,
       ipAddress: request.ip || null,
     });
+    // [W-01] Registration issues a session exactly as verify-otp does, so a
+    // browser must receive it exactly as verify-otp gives it: HttpOnly cookies
+    // and no credential in the body. Without this the web app's signup handed
+    // a token to a page that no longer stores one — the new customer was
+    // created, then immediately bounced to /login on their first request.
+    if (browserClientOf(request) && result.tokens) {
+      setSessionCookies(reply, result.tokens);
+      return reply.status(201).send({ success: true, data: withoutTokens(result) });
+    }
     return reply.status(201).send({ success: true, data: result });
   });
 

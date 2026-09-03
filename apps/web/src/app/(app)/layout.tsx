@@ -4,23 +4,27 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { ShoppingBag, User, MapPin, Search } from 'lucide-react';
-import { getToken } from '@/lib/auth';
+import { sessionProbe } from '@/lib/auth';
 import { SwiftLogo } from '@/components/swift-logo';
 
 // The customer ordering shell — everything under (app) requires a signed-in
-// customer. Same localStorage token as the partner flow; a customer just lands
-// on /order instead of /dashboard.
+// customer. Same HttpOnly cookie session as the partner flow; a customer just
+// lands on /order instead of /dashboard.
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    if (!getToken()) {
-      router.replace(`/login?next=${encodeURIComponent(pathname)}`);
-      return;
-    }
-    setReady(true);
+    // [W-01] The session is an HttpOnly cookie: gate on the SERVER's word,
+    // never on a token's presence, because there is no token to be present.
+    let cancelled = false;
+    void sessionProbe().then((session) => {
+      if (cancelled) return;
+      if (!session.ok) router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+      else setReady(true);
+    });
+    return () => { cancelled = true; };
   }, [router, pathname]);
 
   if (!ready) {

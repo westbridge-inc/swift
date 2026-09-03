@@ -6,7 +6,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { LayoutDashboard, ClipboardList, Boxes, FileUp, Settings, LogOut, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
-import { clearSession, getSelectedStore, getToken, setSelectedStore } from '@/lib/auth';
+import { getSelectedStore, logout, sessionProbe, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore } from '@/lib/store-scope';
 
@@ -125,8 +125,8 @@ function Shell({ children, storeId, onSwitch }: {
         </nav>
         <button
           onClick={() => {
-            clearSession();
-            router.replace('/login');
+            // the session lives in a cookie only the server can expire
+            void logout().then(() => router.replace('/login'));
           }}
           className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-[var(--swift-muted)] hover:bg-[var(--swift-subtle)] hover:text-[var(--swift-ink)]"
         >
@@ -189,13 +189,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const [ready, setReady] = useState(false);
 
-  // localStorage only exists client-side — gate rendering on the token check.
+  // [W-01] The session is an HttpOnly cookie the page cannot read, so the gate
+  // asks the SERVER whether one exists instead of inspecting localStorage.
   useEffect(() => {
-    if (!getToken()) {
-      router.replace('/login');
-    } else {
-      setReady(true);
-    }
+    let cancelled = false;
+    void sessionProbe().then((session) => {
+      if (cancelled) return;
+      if (!session.ok) router.replace('/login');
+      else setReady(true);
+    });
+    return () => { cancelled = true; };
   }, [router]);
 
   if (!ready) return null;

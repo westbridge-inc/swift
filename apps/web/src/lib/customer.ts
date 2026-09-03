@@ -3,7 +3,7 @@
 // Customer ordering client for the web app — talks to the SAME backend the
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
-import { apiFetch, getSessionPrincipal, sendOtp, setTokens } from './auth';
+import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
 import { formatAmount } from './money';
 import type { StorefrontDetail } from './api';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
@@ -15,16 +15,19 @@ export { sendOtp };
 export async function verifyCustomerLogin(phone: string, code: string): Promise<{ user: any }> {
   const res = await fetch(`${API_URL}/api/v1/auth/verify-otp`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
     body: JSON.stringify({ phone, code }),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
   const data = json.data;
-  if (data.isNewUser || !data.tokens?.accessToken) {
+  // [W-01] A browser client is answered with HttpOnly cookies and NO tokens,
+  // so the user the server names is the signal a session exists.
+  if (data.isNewUser || !data.user?.id) {
     throw new Error('No Swift account is registered to that number yet. Create your account on this page to continue.');
   }
-  setTokens(data.tokens.accessToken, data.tokens.refreshToken);
+  adoptSession(data.user.id);
   return { user: data.user };
 }
 
@@ -33,24 +36,28 @@ const API_BASE = API_URL;
 /** Verify the OTP without deciding a role — returns whether the number is new. */
 export async function verifyOtp(phone: string, code: string): Promise<{ isNewUser: boolean; user?: any; signedIn: boolean }> {
   const res = await fetch(`${API_BASE}/api/v1/auth/verify-otp`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, code }),
+    method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
+    body: JSON.stringify({ phone, code }),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
   const d = json.data;
-  if (!d.isNewUser && d.tokens?.accessToken) { setTokens(d.tokens.accessToken, d.tokens.refreshToken); return { isNewUser: false, user: d.user, signedIn: true }; }
+  if (!d.isNewUser && d.user?.id) { adoptSession(d.user.id); return { isNewUser: false, user: d.user, signedIn: true }; }
   return { isNewUser: true, signedIn: false };
 }
 
 /** Register a brand-new account with the chosen role (after OTP verify). */
 export async function registerAccount(body: { phone: string; firstName: string; lastName: string; role: 'CUSTOMER' | 'VENDOR' | 'MOVER'; countryCode?: string; acceptTerms?: boolean }): Promise<{ user: any; roles: string[] }> {
   const res = await fetch(`${API_BASE}/api/v1/auth/register`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ countryCode: 'GY', ...body }),
+    method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
+    body: JSON.stringify({ countryCode: 'GY', ...body }),
   });
   const json = await res.json().catch(() => ({}));
-  const token = json?.data?.tokens?.accessToken;
-  if (!res.ok || !token) throw new Error(json?.error?.message || 'Could not create your account.');
-  setTokens(token, json.data.tokens.refreshToken);
+  const registered = json?.data?.user;
+  if (!res.ok || !registered?.id) throw new Error(json?.error?.message || 'Could not create your account.');
+  adoptSession(registered.id);
   return { user: json.data.user, roles: json.data.user?.roles ?? [] };
 }
 

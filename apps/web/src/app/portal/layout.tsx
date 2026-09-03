@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { LayoutDashboard, History, FileCheck2, UserRound, LogOut } from 'lucide-react';
 import { Providers } from '@/components/providers';
-import { clearSession, getToken } from '@/lib/auth';
+import { logout, sessionProbe } from '@/lib/auth';
 
 const NAV = [
   { href: '/portal', label: 'Earnings', icon: LayoutDashboard, exact: true },
@@ -45,8 +45,8 @@ function Shell({ children }: { children: React.ReactNode }) {
         </nav>
         <button
           onClick={() => {
-            clearSession();
-            router.replace('/login');
+            // the session lives in a cookie only the server can expire
+            void logout().then(() => router.replace('/login'));
           }}
           className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-[var(--swift-muted)] hover:bg-[var(--swift-subtle)] hover:text-[var(--swift-ink)]"
         >
@@ -63,11 +63,15 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   const router = useRouter();
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    if (!getToken()) {
-      router.replace('/login');
-    } else {
-      setReady(true);
-    }
+    // [W-01] The session is an HttpOnly cookie: gate on the SERVER's word,
+    // never on a token's presence, because there is no token to be present.
+    let cancelled = false;
+    void sessionProbe().then((session) => {
+      if (cancelled) return;
+      if (!session.ok) router.replace('/login');
+      else setReady(true);
+    });
+    return () => { cancelled = true; };
   }, [router]);
   if (!ready) return null;
   return (

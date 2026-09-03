@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { Download, FileSpreadsheet, Upload } from 'lucide-react';
-import { getToken, getSelectedStore } from '@/lib/auth';
+import { BROWSER_CLIENT, getSelectedStore } from '@/lib/auth';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 import { automapCsv, automapXlsx, confirmImport, templateUrl } from '@/lib/vendor-api';
 
@@ -36,10 +36,13 @@ export default function ImportPage() {
   });
 
   async function downloadTemplate() {
-    // The template route needs the auth + store headers — fetch it, then save.
+    // The template route needs the session + store headers — fetch it, then save.
+    // [W-01] The session rides as an HttpOnly cookie, so this raw fetch must send
+    // credentials and name itself a browser client; there is no bearer to attach.
     const store = getSelectedStore();
     const res = await fetch(`${API_URL}/api/v1${templateUrl().replace('/api/v1', '')}`, {
-      headers: { Authorization: `Bearer ${getToken()}`, ...(store ? { 'x-vendor-id': store } : {}) },
+      credentials: 'include',
+      headers: { 'X-Swift-Client': BROWSER_CLIENT, ...(store ? { 'x-vendor-id': store } : {}) },
     });
     // [WR-042] An error body must never download as a .csv the vendor opens
     // in Excel and mistakes for the template.
