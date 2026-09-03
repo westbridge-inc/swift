@@ -27,6 +27,7 @@ import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
+import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -51,20 +52,10 @@ const LIVE_ETA_STATUSES = new Set([
   'DRIVER_EN_ROUTE',
 ]);
 
-type MapCoordinate = { latitude: number; longitude: number };
 
-function validMapCoordinate(latitudeRaw: unknown, longitudeRaw: unknown): MapCoordinate | null {
-  if (latitudeRaw == null || longitudeRaw == null) return null;
-  const latitude = Number(latitudeRaw);
-  const longitude = Number(longitudeRaw);
-  if (
-    !Number.isFinite(latitude)
-    || !Number.isFinite(longitude)
-    || Math.abs(latitude) > 90
-    || Math.abs(longitude) > 180
-  ) return null;
-  return { latitude, longitude };
-}
+// [MOB-024] One definition of "a coordinate a map may show", shared with the
+// live-fix decision so the screen and the socket cannot disagree about it.
+const validMapCoordinate = coordinateOf;
 
 function isTerminalOrderSnapshot(order: any): boolean {
   const status = String(order?.status ?? '').toUpperCase();
@@ -484,34 +475,41 @@ export function DeliveryScreen() {
     connectSocket();
     subscribeToOrder(orderId);
     const s = getSocket();
-    const acceptFix = (latitudeRaw: unknown, longitudeRaw: unknown, timestampRaw: unknown, etaRaw: unknown) => {
-      if (!liveTrackingAllowedRef.current) return;
-      const coordinate = validMapCoordinate(latitudeRaw, longitudeRaw);
-      const fixedAt = typeof timestampRaw === 'string' ? Date.parse(timestampRaw) : Number.NaN;
-      if (
-        !coordinate
-        || !Number.isFinite(fixedAt)
-        || (lastCourierServerFixAt.current != null && fixedAt < lastCourierServerFixAt.current)
-      ) return;
-      lastCourierServerFixAt.current = fixedAt;
-      setCourier(coordinate);
+    // [MOB-024] ONE decision for both events. The rider handler used to accept
+    // a coordinate without checking which order it was for, while the driver
+    // handler two lines below it did — one law written twice, and the copy
+    // that mattered was the one that forgot. An event from another room moved
+    // the courier marker and the ETA on the wrong customer's screen.
+    const acceptFix = (event: LiveFixEvent): boolean => {
+      const decision = decideLiveFix(event, {
+        orderId,
+        lastFixAt: lastCourierServerFixAt.current,
+        allowed: liveTrackingAllowedRef.current,
+      });
+      if (!decision.accepted) {
+        recordFixDrop(decision.reason);
+        return false;
+      }
+      lastCourierServerFixAt.current = decision.fixedAt;
+      setCourier(decision.coordinate);
       // Freshness is time since THIS device received a timestamped server fix;
       // comparing two different wall clocks would make skew look like staleness.
       setLastCourierFixAt(Date.now());
-      if (etaRaw == null) {
-        setLiveEtaMin(null);
-      } else {
-        const etaMinutes = Number(etaRaw);
-        setLiveEtaMin(Number.isFinite(etaMinutes) && etaMinutes >= 0 ? etaMinutes : null);
-      }
+      setLiveEtaMin(decision.etaMinutes);
+      return true;
     };
     const onRider = (p: any) => {
-      acceptFix(p?.lat, p?.lng, p?.ts, p?.etaMinutes);
-      setLiveEtaBasis(p?.etaBasis === 'after_current' ? 'after_current' : 'direct');
+      const accepted = acceptFix({
+        orderId: p?.orderId, latitude: p?.lat, longitude: p?.lng, timestamp: p?.ts, etaMinutes: p?.etaMinutes,
+      });
+      // the basis labels the ETA that was just accepted; a dropped event
+      // must not relabel the one still on screen
+      if (accepted) setLiveEtaBasis(p?.etaBasis === 'after_current' ? 'after_current' : 'direct');
     };
     const onDriver = (p: any) => {
-      if (p?.orderId !== orderId) return;
-      acceptFix(p?.latitude, p?.longitude, p?.timestamp, p?.etaMinutes);
+      acceptFix({
+        orderId: p?.orderId, latitude: p?.latitude, longitude: p?.longitude, timestamp: p?.timestamp, etaMinutes: p?.etaMinutes,
+      });
     };
     const onStatus = (payload: any) => {
       if (payload?.orderId !== orderId) return;
