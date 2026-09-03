@@ -21,13 +21,25 @@
  *
  * This script COPIES text. It never writes, edits, summarises or reformats a
  * single legal word — SITE-1.1: "The agent writes no legal text."
+ *
+ * [W-42] It also REFUSES text it cannot prove safe. Every body is parsed under
+ * the legal grammar (`src/legal/legal-html.ts`) before it is written: a
+ * document carrying a script, an event handler, a foreign link, a control
+ * character or malformed markup fails the sync with the exact offset, so a
+ * compromised legal endpoint or build environment cannot put same-origin
+ * script into a release artifact. What lands in the snapshot is the grammar's
+ * own canonical serialisation — built from the parse tree, never copied from
+ * the input — and its SHA-256 is stamped alongside it as the provenance a
+ * consent record and a legal signoff can name.
  */
 
+import { createHash } from 'node:crypto';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { LEGAL_VERSION, TERMS, PRIVACY, CHILD_SAFETY } from '../../api/src/modules/legal/legal.routes';
+import { sanitizeLegalHtml } from '../src/legal/legal-html';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = resolve(HERE, '../src/legal/generated.ts');
@@ -53,9 +65,27 @@ function extractBody(html: string): { body: string; lastUpdated: string } {
   return { body, lastUpdated: updated[1]!.trim() };
 }
 
-const terms = extractBody(TERMS);
-const privacy = extractBody(PRIVACY);
-const childSafety = extractBody(CHILD_SAFETY);
+/** [W-42] Parse under the legal grammar; the canonical serialisation is what ships. */
+function canonical(name: string, extracted: { body: string; lastUpdated: string }): { body: string; lastUpdated: string; digest: string } {
+  const checked = sanitizeLegalHtml(extracted.body);
+  if (!checked.ok) {
+    throw new Error(
+      `sync-legal: ${name} is outside the legal document grammar — ${checked.reason} ` +
+        `at character ${checked.at}, near: ${checked.near}\n` +
+        '  Nothing was written. Fix the source document in apps/api/src/modules/legal/legal.routes.ts.\n' +
+        '  If this appeared without a source edit, treat it as a compromised legal source and stop.',
+    );
+  }
+  return {
+    body: checked.html,
+    lastUpdated: extracted.lastUpdated,
+    digest: createHash('sha256').update(checked.html, 'utf8').digest('hex'),
+  };
+}
+
+const terms = canonical('Terms of Service', extractBody(TERMS));
+const privacy = canonical('Privacy Policy', extractBody(PRIVACY));
+const childSafety = canonical('Child Safety Standards', extractBody(CHILD_SAFETY));
 
 // One LEGAL_VERSION covers all three, so all three must agree on the date it
 // stands for. A document drifting to its own date would be stamped onto consent
@@ -92,6 +122,15 @@ export const PRIVACY_BODY = ${JSON.stringify(privacy.body)};
 
 /** [STORE-003] Play requires this published at a public, stable URL. */
 export const CHILD_SAFETY_BODY = ${JSON.stringify(childSafety.body)};
+
+/** [W-42] SHA-256 of each canonical body above — the provenance a signoff, a
+ *  consent record or an incident review names. Regenerating changes these only
+ *  when the legal words change. */
+export const LEGAL_DOCUMENT_DIGESTS = {
+  terms: ${JSON.stringify(terms.digest)},
+  privacy: ${JSON.stringify(privacy.digest)},
+  childSafety: ${JSON.stringify(childSafety.digest)},
+} as const;
 `;
 
 const check = process.argv.includes('--check');

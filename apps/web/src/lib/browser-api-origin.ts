@@ -88,9 +88,18 @@ export function buildBrowserContentSecurityPolicy(mode: BrowserApiMode): string 
   const connectSources = mode === 'production'
     ? ["'self'", RELEASE_BROWSER_API_ORIGIN, RELEASE_BROWSER_API_ORIGIN.replace('https://', 'wss://')]
     : ["'self'", DEVELOPMENT_BROWSER_API_ORIGIN, 'ws://localhost:3000', 'ws://localhost:3002'];
+  // [W-42] The legal pages inject document HTML. Nothing a script can reach
+  // survives the legal grammar (src/legal/legal-html.ts), and the CSP shrinks
+  // what an injected script could DO: 'unsafe-eval' is granted to development
+  // alone (Next's HMR needs it) and never to a production build. A nonce/hash
+  // policy and Trusted Types are the next step, stated as such in the register.
+  const scriptSources = mode === 'production'
+    ? "script-src 'self' 'unsafe-inline'"
+    : "script-src 'self' 'unsafe-inline' 'unsafe-eval'";
+
   return [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    scriptSources,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
