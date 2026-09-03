@@ -5,7 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
-import { LoadingBlock, Screen } from '../../kit';
+import { ErrorState, LoadingBlock, Screen } from '../../kit';
 import { VendorOrderDetailScreen } from './screens/VendorOrderDetailScreen';
 import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
@@ -20,6 +20,7 @@ import { useVendorPreview } from '../../stores/vendorPreview';
 import { VendorBulkImportScreen } from './screens/VendorBulkImportScreen';
 import { NewOrderTakeover } from './NewOrderTakeover';
 import { catalogueMeta, safeVendorRole } from './shared';
+import { billingBlocked } from '../../lib/vendorProfile';
 import { BusinessSetup, VendorOnboarding } from './screens/BusinessSetup';
 import { VendorSwiftNumberScreen } from './screens/VendorSwiftNumberScreen';
 import { VendorOps } from './screens/VendorOps';
@@ -44,7 +45,7 @@ function VendorWentLiveLayer({ status }: { status: string }) {
 }
 
 function VendorRoot() {
-  const { owner, store, stores, isLoading } = useVendorProfile();
+  const { owner, store, stores, isLoading, state: profileState, failure, refetch } = useVendorProfile();
   const qc = useQueryClient();
   const myRole = safeVendorRole(owner?.myRole);
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
@@ -93,12 +94,33 @@ function VendorRoot() {
       </Screen>
     );
   }
+  // [MOB-038] An outage is not "you have no business". A failed profile read
+  // used to arrive as null and land here as the setup wizard — offered to a
+  // working restaurant while its orders were live. Absence is a verified 404
+  // (or a well-formed owner with no stores); everything else says so, and
+  // offers the one thing that helps: try again.
+  if (profileState === 'error') {
+    return (
+      <Screen>
+        <ErrorState
+          message={
+            failure === 'unauthorized' ? 'Your session ended. Sign in again to open your store.'
+              : failure === 'forbidden' ? 'This account cannot open that store. Ask the owner to add you again.'
+                : failure === 'malformed' ? "Swift could not read your store's details. This is our problem, not yours — try again."
+                  : "Swift can't reach your store right now. Your orders are safe; try again in a moment."
+          }
+          onRetry={refetch}
+        />
+      </Screen>
+    );
+  }
   if (!store) return <BusinessSetup />;
   const suspensionSource = store.suspensionSource == null ? null : String(store.suspensionSource).toUpperCase();
-  const subscriptionBlocked = ['SUSPENDED', 'CHURNED'].includes(String(store.subscription?.status ?? '').toUpperCase());
-  const billingSuspended =
-    store.status === 'SUSPENDED' &&
-    (suspensionSource === 'BILLING' || (suspensionSource === null && subscriptionBlocked));
+  // [MOB-038] A blocked subscription blocks, whether or not it was mirrored
+  // onto the store row. Requiring store.status === 'SUSPENDED' left a store
+  // whose subscription was SUSPENDED or CHURNED taking orders it could not be
+  // paid for. The suspension SOURCE still decides which reason is shown.
+  const billingSuspended = billingBlocked(store) && suspensionSource !== 'MODERATION';
   return (
     <>
       {billingSuspended ? (
