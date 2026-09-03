@@ -3,6 +3,7 @@
 // Typed client over the EXISTING vendor endpoints — the web dashboard is
 // another client on the same backend; it never invents its own order logic.
 import { apiFetch } from './auth';
+import { formatAmount, parseAmount } from './money';
 
 const V = '/api/v1/vendor';
 
@@ -33,12 +34,10 @@ export interface Store {
  * are both `0`, which is exactly the invented zero this guard exists to stop.
  */
 export function toAmount(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (trimmed === '') return null;
-  const parsed = Number(trimmed);
-  return Number.isFinite(parsed) ? parsed : null;
+  // [W-13] One parser for the whole app. This was the strict one and the
+  // customer client had a permissive one beside it; they are the same function
+  // now, in lib/money, so they cannot drift apart again.
+  return parseAmount(value);
 }
 
 /**
@@ -50,9 +49,7 @@ export function toAmount(value: unknown): number | null {
  * "$0". A real zero still renders "$0".
  */
 export function money(value: unknown): string {
-  const amount = toAmount(value);
-  if (amount === null) return '—';
-  return `$${Math.round(amount).toLocaleString()}`;
+  return formatAmount(value, '$');
 }
 
 export interface OrderLine {

@@ -26,6 +26,7 @@ import {
   type Cart,
   type Place,
 } from '@/lib/customer';
+import { MONEY_UNKNOWN, parseAmount, sumAmounts } from '@/lib/money';
 import { ApiRequestError } from '@/lib/auth';
 import styles from './cart.module.css';
 
@@ -150,10 +151,20 @@ export default function CartPage() {
   // SWIFT-071: the total must reflect the DELIVERY FEE (and discount), not just
   // items + tip. Delivery fee and discount are server-computed money; only the
   // tip is the shopper's live selection.
-  const serverSubtotal = cart?.subtotalCustomer ?? subtotal;
-  const deliveryFee = cart?.deliveryFee ?? 0;
-  const discount = cart?.discount ?? 0;
-  const total = serverSubtotal + deliveryFee - discount + tip;
+  // [W-13] These arrive from a Prisma `Decimal`, which crosses the wire as a
+  // STRING. The type here says `number` and nothing enforced it, so this line
+  // was one schema change away from `"4000" + 500` — a displayed and submitted
+  // total off by a factor of a thousand. Each part is parsed exactly; if any
+  // one of them is not money, there is no total and checkout says so rather
+  // than showing a figure built from a part that was quietly read as zero.
+  const serverSubtotal = parseAmount(cart?.subtotalCustomer) ?? subtotal;
+  const deliveryFee = parseAmount(cart?.deliveryFee) ?? 0;
+  const discount = parseAmount(cart?.discount) ?? 0;
+  const totalParts = cart
+    ? sumAmounts(cart.subtotalCustomer ?? subtotal, cart.deliveryFee ?? 0, -(parseAmount(cart.discount) ?? 0), tip)
+    : subtotal + tip;
+  const total = totalParts;
+  const moneyUnreadable = cart != null && totalParts === null;
   const meetsMinimum = cart?.meetsMinimum ?? true;
   const minimumShortfall = Math.max(0, Number(cart?.minimumOrderAmount ?? 0) - serverSubtotal);
   const hasDestinationQuote = Boolean(addrId && cart?.deliveryAddress?.id === addrId);
@@ -538,15 +549,24 @@ export default function CartPage() {
             <div className={styles.moneyLine}><span className={styles.moneyLabel}>Delivery fee</span><strong className={styles.moneyValue}>{hasDestinationQuote ? money(deliveryFee) : 'Choose an address for a quote'}</strong></div>
             {discount > 0 ? <div className={styles.moneyLine}><span className={styles.moneyLabel}>Discount</span><strong className={styles.moneyValue}>−{money(discount)}</strong></div> : null}
             <div className={styles.moneyLine}><span className={styles.moneyLabel}>Rider tip</span><strong className={styles.moneyValue}>{money(tip)}</strong></div>
-            <div className={styles.totalLine}><span>Total</span><strong>{hasDestinationQuote ? money(total) : 'Quote needed'}</strong></div>
+            <div className={styles.totalLine}><span>Total</span><strong>{moneyUnreadable ? MONEY_UNKNOWN : hasDestinationQuote ? money(total) : 'Quote needed'}</strong></div>
           </div>
+          {/* [W-13] A total Swift cannot compute is not shown as a number and
+              cannot be ordered against. The old line added a part it could not
+              read as if it were zero, or concatenated it as a string. */}
+          {moneyUnreadable ? (
+            <p role="alert" className={styles.noRidersCopy}>
+              Swift cannot read this order&apos;s figures from the server. Checkout stays locked until the total is
+              certain — refresh, and contact support if it persists.
+            </p>
+          ) : null}
           {noRiders ? (
             <div className={styles.noRiders}>
               <p className={styles.noRidersCopy}>No delivery riders are online right now.</p>
-              <button type="button" onClick={() => void placeOrder()} disabled={busy} className={`${styles.button} ${styles.buttonPrimary}`}>Try cash delivery again</button>
+              <button type="button" onClick={() => void placeOrder()} disabled={busy || moneyUnreadable} className={`${styles.button} ${styles.buttonPrimary}`}>Try cash delivery again</button>
             </div>
           ) : (
-            <button type="button" onClick={() => void placeOrder()} disabled={busy || !addrId || !meetsMinimum} className={`${styles.button} ${styles.buttonPrimary} ${styles.checkoutButton}`}>
+            <button type="button" onClick={() => void placeOrder()} disabled={busy || !addrId || !meetsMinimum || moneyUnreadable} className={`${styles.button} ${styles.buttonPrimary} ${styles.checkoutButton}`}>
               {busy ? 'Placing…' : !addrId ? 'Add a delivery address to order' : !meetsMinimum ? `Add ${money(minimumShortfall)} to reach the minimum` : hasDestinationQuote ? `Place cash order · ${money(total)}` : 'Get delivery quote'}
             </button>
           )}
