@@ -54,7 +54,7 @@ import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePr
 import { assertNoZoneOverlap } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { createHash } from 'node:crypto';
-import { billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter } from '../../plugins/observability';
+import { billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
@@ -253,6 +253,12 @@ const returnsQuerySchema = z.object({
 const resolveReturnSchema = z.object({
   status: z.enum(['APPROVED', 'REJECTED', 'REFUND_DUE']),
   note: z.string().max(1000).optional(),
+});
+
+// [A-14] What a settler states about a cash refund actually handed back.
+const settleOrderRefundSchema = z.object({
+  reference: z.string(),
+  amount: z.union([z.number(), z.string()]),
 });
 
 const settleRefundSchema = z.object({
@@ -2004,7 +2010,13 @@ export async function adminRoutes(app: FastifyInstance) {
       );
     }
 
-    const newStatus: OrderStatus = refund ? 'REFUNDED' : 'CANCELLED';
+    // [A-14] `refund: true` used to write REFUNDED here — a terminal state whose
+    // name asserts the customer has their money back — off a click, with no
+    // amount, no actor and no evidence. On the cash rail the STORE holds the
+    // customer's money, so that terminal was a claim about somebody else's cash
+    // drawer. The cancellation is now just a cancellation; the refund is
+    // recorded as OWED and closed separately, against evidence.
+    const newStatus: OrderStatus = 'CANCELLED';
     const allowedFrom = Object.values(OrderStatus)
       .filter((status) => !(TERMINAL_ORDER_STATUSES as string[]).includes(status)) as OrderStatus[];
     const cancellationReason = reason || 'Cancelled by admin';
@@ -2031,6 +2043,23 @@ export async function adminRoutes(app: FastifyInstance) {
         userAgent: request.headers['user-agent'],
       },
       invalidStatus: (current) => new AppError(400, 'INVALID_STATUS', `Cannot cancel an order with status ${current}`),
+      // [A-14] The obligation is part of the cancellation fact, not a follow-up
+      // write: an operator who decided the customer is owed money must never be
+      // able to leave a cancelled order with no record of it.
+      ...(refund
+        ? {
+          withinTransaction: async (tx: Prisma.TransactionClient) => {
+            await tx.order.update({
+              where: { id },
+              data: {
+                refundOwedAmount: order.totalAmount,
+                refundOwedAt: new Date(),
+                refundOwedById: request.user.userId,
+              },
+            });
+          },
+        }
+        : {}),
     });
 
     // V1 is cash-only: the platform never holds order money, so there is no wallet
@@ -2069,7 +2098,100 @@ export async function adminRoutes(app: FastifyInstance) {
       });
     }
 
-    return { success: true, data: { orderId: id, status: newStatus, refunded: !!refund } };
+    if (refund) orderRefundCounter.labels('owed').inc();
+    // `refunded` is deliberately absent: nothing here refunded anything.
+    return {
+      success: true,
+      data: {
+        orderId: id,
+        status: newStatus,
+        refundOwed: refund ? String(order.totalAmount) : null,
+      },
+    };
+  });
+
+  /**
+   * [A-14] PUT /orders/:id/refund-settled — the cash actually went back.
+   *
+   * The ONLY way an order reaches REFUNDED. The settler names the handover
+   * (unique across orders: one handover settles one order) and the amount
+   * actually handed back, checked against what was recorded as owed.
+   *
+   * An order that is merely cancelled-with-a-refund-decision stays CANCELLED
+   * and sits in the outstanding queue, which is the honest place for it.
+   */
+  app.put('/orders/:id/refund-settled', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = settleOrderRefundSchema.parse(request.body);
+    const existing = await tenantPrisma.order.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError('Order', id);
+    if (existing.refundOwedAt === null || existing.refundSettledAt !== null) {
+      orderRefundCounter.labels('refused_not_due').inc();
+      throw new AppError(
+        400,
+        'NO_REFUND_DUE',
+        existing.refundSettledAt !== null
+          ? 'This refund was already settled.'
+          : 'This order has no recorded refund obligation. Cancel it with a refund decision first.',
+      );
+    }
+    const reference = normaliseReference(body.reference, {
+      required: 'Enter the reference for the refund that was handed back — it is the only proof it happened.',
+      invalid: 'That does not look like a refund reference. Use the receipt or handover number.',
+    }, 'REFUND_REF');
+    const paid = assertAmountAttested(existing.refundOwedAmount, body.amount, {
+      required: 'State the amount actually handed back before closing this refund.',
+      unreadable: 'This order has no readable refund amount and cannot be closed.',
+      mismatch: (owed, stated) =>
+        `This order owes GY$${owed.toLocaleString()}, not GY$${stated.toLocaleString()}. Refund the owed amount, or record the difference as an exception first.`,
+    }, 'REFUND_AMOUNT');
+
+    // CAS on the obligation still being open, so two settlers racing produce
+    // one settlement and one honest refusal.
+    const settled = await tenantPrisma.order.updateMany({
+      where: { id, refundOwedAt: { not: null }, refundSettledAt: null },
+      data: {
+        status: 'REFUNDED',
+        refundRef: reference,
+        refundPaidAmount: paid,
+        refundSettledById: request.user.userId,
+        refundSettledAt: new Date(),
+      },
+    }).catch((err: unknown) => {
+      if (isDuplicateOn(err, 'refundRef')) {
+        orderRefundCounter.labels('refused_duplicate').inc();
+        throw new AppError(
+          409,
+          'REFUND_REF_ALREADY_USED',
+          'That reference is already recorded against another order. One handover settles one order.',
+        );
+      }
+      throw err;
+    });
+    if (settled.count === 0) {
+      orderRefundCounter.labels('refused_not_due').inc();
+      throw new AppError(409, 'ALREADY_SETTLED', 'This refund was settled by someone else just now.');
+    }
+    await tenantPrisma.orderStatusLog.create({
+      data: {
+        orderId: id,
+        status: 'REFUNDED',
+        changedBy: request.user.userId,
+        note: `Refund settled — reference ${reference}`,
+      },
+    });
+    await audit(
+      request.user.userId,
+      'SETTLE_ORDER_REFUND',
+      'Order',
+      id,
+      { reference, amount: String(paid) },
+      request,
+    );
+    orderRefundCounter.labels('settled').inc();
+    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'REFUNDED' });
+    const updated = await tenantPrisma.order.findUniqueOrThrow({ where: { id } });
+    return { success: true, data: updated };
   });
 
   // ─── Finance ───────────────────────────────────────────────────────────

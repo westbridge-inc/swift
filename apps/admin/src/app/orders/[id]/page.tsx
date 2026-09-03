@@ -4,7 +4,7 @@ import { use } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Phone } from 'lucide-react';
-import { fetchOrderDetail, cancelOrder } from '@/lib/api';
+import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { MutationError } from '@/components/MutationError';
 
@@ -50,6 +50,16 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const { data, isLoading, isError } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
   const cancelMutation = useMutation({
     mutationFn: ({ refund }: { refund: boolean }) => cancelOrder(id, { reason: 'Cancelled by admin', refund }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['order', id] });
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+    },
+  });
+  // [A-14] Closing a refund is a separate act from deciding one is owed, and it
+  // needs what a refund actually is: a reference and the amount handed back.
+  const settleRefundMutation = useMutation({
+    mutationFn: ({ reference, amount }: { reference: string; amount: string }) =>
+      settleOrderRefund(id, reference, amount),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['order', id] });
       queryClient.invalidateQueries({ queryKey: ['orders'] });
@@ -119,20 +129,68 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
               {o.paymentMethod === 'CASH' && (
                 <button
                   onClick={() => {
-                    if (window.confirm(`Cancel ${o.orderNumber} and record cash as refunded by ${refundingStore}?`)) {
+                    if (window.confirm(
+                      `Cancel ${o.orderNumber} and record that ${refundingStore} OWES the customer a refund?`
+                      + '\n\nThis does not mark anything refunded. The order stays in the outstanding'
+                      + ' list until someone records the reference and the amount actually handed back.',
+                    )) {
                       cancelMutation.mutate({ refund: true });
                     }
                   }}
                   disabled={cancelMutation.isPending}
                   className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
                 >
-                  Record store refund
+                  Record refund owed
                 </button>
               )}
             </>
           )}
         </div>
       </div>
+
+      {/* [A-14] An obligation nobody has settled is money the customer is still
+          waiting for. It says so, with its age, until evidence closes it. */}
+      {o.refundOwedAt && !o.refundSettledAt && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
+          <p className="text-sm text-amber-300 font-medium">Refund owed — not yet settled</p>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            GY${Number(o.refundOwedAmount ?? 0).toLocaleString()} recorded as owed on{' '}
+            {new Date(o.refundOwedAt).toLocaleString()}. Nothing here says the money moved.
+          </p>
+          <button
+            onClick={() => {
+              const reference = window.prompt(
+                'Reference for the refund that was handed back (receipt or handover number):',
+              );
+              if (!reference) return;
+              const amount = window.prompt(
+                `Amount actually handed back (the order owes GY$${Number(o.refundOwedAmount ?? 0).toLocaleString()}):`,
+              );
+              if (!amount) return;
+              settleRefundMutation.mutate({ reference, amount });
+            }}
+            disabled={settleRefundMutation.isPending}
+            className="mt-3 px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
+          >
+            Record refund handed back
+          </button>
+          {settleRefundMutation.isError && (
+            <p className="mt-2 text-sm text-red-400" role="alert">
+              {(settleRefundMutation.error as Error).message}
+            </p>
+          )}
+        </div>
+      )}
+
+      {o.refundSettledAt && (
+        <div className="rounded-xl border border-[var(--border)] p-4">
+          <p className="text-sm font-medium">Refund settled</p>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            GY${Number(o.refundPaidAmount ?? 0).toLocaleString()} — reference {o.refundRef} —{' '}
+            {new Date(o.refundSettledAt).toLocaleString()}
+          </p>
+        </div>
+      )}
 
       {cancelMutation.error && (
         <div className="mb-4">

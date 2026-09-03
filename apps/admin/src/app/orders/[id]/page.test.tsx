@@ -93,12 +93,14 @@ describe('order cancel and refund mutations', () => {
     const { user } = renderWithQuery(
       <OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />,
     );
-    const refundButton = await screen.findByRole('button', { name: 'Record store refund' });
+    const refundButton = await screen.findByRole('button', { name: 'Record refund owed' });
 
     await user.click(refundButton);
     expect(confirm).toHaveBeenNthCalledWith(
       1,
-      'Cancel ORDER-TEST-1 and record cash as refunded by Test Store?',
+      'Cancel ORDER-TEST-1 and record that Test Store OWES the customer a refund?'
+      + '\n\nThis does not mark anything refunded. The order stays in the outstanding'
+      + ' list until someone records the reference and the amount actually handed back.',
     );
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
@@ -107,7 +109,9 @@ describe('order cancel and refund mutations', () => {
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
     expect(confirm).toHaveBeenNthCalledWith(
       2,
-      'Cancel ORDER-TEST-1 and record cash as refunded by Test Store?',
+      'Cancel ORDER-TEST-1 and record that Test Store OWES the customer a refund?'
+      + '\n\nThis does not mark anything refunded. The order stays in the outstanding'
+      + ' list until someone records the reference and the amount actually handed back.',
     );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/orders/order-1/cancel`);
     expect(init?.method).toBe('PUT');
@@ -117,7 +121,7 @@ describe('order cancel and refund mutations', () => {
     });
   });
 
-  it.each(['Cancel order', 'Record store refund'])(
+  it.each(['Cancel order', 'Record refund owed'])(
     'renders a %s failure without changing the visible order state',
     async (buttonName) => {
       vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
@@ -170,7 +174,7 @@ describe('order cancel and refund mutations', () => {
     const { user } = renderWithQuery(
       <OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />,
     );
-    const refundButton = await screen.findByRole('button', { name: 'Record store refund' });
+    const refundButton = await screen.findByRole('button', { name: 'Record refund owed' });
 
     await user.click(refundButton);
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
@@ -197,12 +201,98 @@ describe('order cancel and refund mutations', () => {
     );
 
     const cancelButton = await screen.findByRole('button', { name: 'Cancel order' });
-    expect(screen.queryByRole('button', { name: 'Record store refund' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Record refund owed' })).toBeNull();
     await user.click(cancelButton);
 
     expect(confirm).toHaveBeenCalledWith(
       'Cancel order ORDER-TEST-1?\n\nMMG payment stays between customer and store. If paid, it is refunded by Test Store; Swift cannot refund it.',
     );
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// [A-14] Deciding a refund is owed and proving it was handed back are two acts.
+// The console must never let the first look like the second.
+// ---------------------------------------------------------------------------
+const owedOrder = {
+  ...order,
+  status: 'CANCELLED',
+  refundOwedAmount: 2500,
+  refundOwedAt: '2026-09-03T10:00:00.000Z',
+  refundOwedById: 'admin-1',
+  refundRef: null,
+  refundPaidAmount: null,
+  refundSettledAt: null,
+};
+
+describe('[A-14] an unsettled refund obligation', () => {
+  it('says the money has NOT moved, and names the amount and the moment it was recorded', async () => {
+    mockApi(orderHandler(() => {
+      throw new Error('no mutation expected');
+    }, owedOrder));
+
+    renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+
+    expect(await screen.findByText('Refund owed — not yet settled')).toBeTruthy();
+    expect(screen.getByText(/GY\$2,500 recorded as owed/)).toBeTruthy();
+    expect(screen.getByText(/Nothing here says the money moved/)).toBeTruthy();
+  });
+
+  it('settles only with a reference AND an amount, and sends both to the settle endpoint', async () => {
+    const prompt = vi.fn()
+      .mockReturnValueOnce('CASH-REF-001')
+      .mockReturnValueOnce('2500');
+    vi.stubGlobal('prompt', prompt);
+    const fetchMock = mockApi(orderHandler((request) => {
+      if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/refund-settled') {
+        return { body: { success: true, data: {} } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    }, owedOrder));
+
+    const { user } = renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+    await user.click(await screen.findByRole('button', { name: 'Record refund handed back' }));
+
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
+    expect(url).toBe(`${API_ORIGIN}/api/v1/admin/orders/order-1/refund-settled`);
+    expect(JSON.parse(String(init?.body))).toEqual({ reference: 'CASH-REF-001', amount: '2500' });
+  });
+
+  it('abandoning either prompt sends NO money mutation', async () => {
+    for (const answers of [[null], ['CASH-REF-002', null]]) {
+      const prompt = vi.fn();
+      answers.forEach((a) => prompt.mockReturnValueOnce(a));
+      vi.stubGlobal('prompt', prompt);
+      const fetchMock = mockApi(orderHandler(() => {
+        throw new Error('no mutation expected');
+      }, owedOrder));
+
+      const { user } = renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+      await user.click(await screen.findByRole('button', { name: 'Record refund handed back' }));
+
+      await waitFor(() => expect(prompt).toHaveBeenCalledTimes(answers.length));
+      expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
+    }
+  });
+
+  it('a settled refund shows its evidence, and the owed banner is gone', async () => {
+    mockApi(orderHandler(() => {
+      throw new Error('no mutation expected');
+    }, {
+      ...owedOrder,
+      status: 'REFUNDED',
+      refundRef: 'CASH-REF-003',
+      refundPaidAmount: 2500,
+      refundSettledAt: '2026-09-03T11:00:00.000Z',
+    }));
+
+    renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+
+    expect(await screen.findByText('Refund settled')).toBeTruthy();
+    expect(screen.getByText(/CASH-REF-003/)).toBeTruthy();
+    expect(screen.queryByText('Refund owed — not yet settled')).toBeNull();
   });
 });

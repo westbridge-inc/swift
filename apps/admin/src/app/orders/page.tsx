@@ -113,14 +113,18 @@ export default function OrdersPage() {
                           <button
                             onClick={() => {
                               const storeName = order.vendor?.name ?? 'the store';
-                              if (window.confirm(`Cancel order ${order.orderNumber} and record cash as refunded by ${storeName}?`)) {
+                              if (window.confirm(
+                                `Cancel order ${order.orderNumber} and record that ${storeName} OWES the customer a refund?`
+                                + '\n\nThis does not mark anything refunded — settle it on the order page'
+                                + ' once the reference and the amount handed back are known.',
+                              )) {
                                 cancelMutation.mutate({ id: order.id, refund: true });
                               }
                             }}
                             disabled={cancelMutation.isPending}
                             className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] text-white hover:bg-[var(--accent)]/80 disabled:opacity-50"
                           >
-                            Record store refund
+                            Record refund owed
                           </button>
                         )}
                       </div>

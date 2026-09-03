@@ -65,12 +65,14 @@ describe('order list money controls', () => {
     );
     const { user } = renderWithQuery(<OrdersPage />);
     const row = await targetRow();
-    const refundButton = row.getByRole('button', { name: 'Record store refund' });
+    const refundButton = row.getByRole('button', { name: 'Record refund owed' });
 
     await user.click(refundButton);
     expect(confirm).toHaveBeenNthCalledWith(
       1,
-      'Cancel order ORDER-TARGET and record cash as refunded by Target Store?',
+      'Cancel order ORDER-TARGET and record that Target Store OWES the customer a refund?'
+      + '\n\nThis does not mark anything refunded — settle it on the order page'
+      + ' once the reference and the amount handed back are known.',
     );
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
@@ -101,7 +103,7 @@ describe('order list money controls', () => {
     const { user } = renderWithQuery(<OrdersPage />);
     const row = await targetRow();
 
-    expect(row.queryByRole('button', { name: 'Record store refund' })).toBeNull();
+    expect(row.queryByRole('button', { name: 'Record refund owed' })).toBeNull();
     await user.click(row.getByRole('button', { name: 'Cancel' }));
 
     expect(confirm).toHaveBeenCalledWith(
