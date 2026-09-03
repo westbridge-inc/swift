@@ -45,6 +45,28 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // the server is the only thing that knows.
   if (kind === 'guardian_checkin') return { screen: 'Taxi' };
 
+  // [TST-001] The DRIVER's half of that check: the passenger did not answer,
+  // so the driver is asked to confirm the trip's status before it escalates.
+  // This went to Delivery — a screen MoverStack never mounts — and the census
+  // asserted that dead end as passing, with a comment admitting it. The
+  // endpoint existed with no caller and there was no control anywhere.
+  //
+  // It carries the cycle and the nonce that identify the question: the screen
+  // answers THAT check, never whichever one happens to be open, so a stale
+  // notification cannot resolve a later one.
+  if (kind === 'guardian_driver_confirm') {
+    return {
+      screen: 'GuardianDriverConfirm',
+      params: {
+        sessionId: data['sessionId'],
+        cycleId: data['cycleId'],
+        nonce: data['nonce'],
+        respondBy: data['respondBy'],
+        orderId: data['orderId'],
+      },
+    };
+  }
+
   // [E36 / danger #22] An OFFER ping is for the EARNER: their role-resolved
   // Main IS the mover home where the live offer card (and its countdown)
   // renders. The generic orderId branch below would have dropped them on the

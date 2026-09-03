@@ -229,7 +229,7 @@ const CENSUS: Case[] = [
   { k: 'agent_delay_notice', d: O, to: DELIVERY('o1'), why: 'customer — order delayed' },
   { k: 'claim_over_gate', d: O, to: { screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', orderId: 'o1' } }, why: 'rider — the body says "support will follow up"; this is the door for someone who would rather not wait. GetHelp is mounted in every navigator. Was Delivery, which MoverStack never mounts' },
   { k: 'guardian_checkin', d: { ...O, sessionId: 's1', level: 'SOFT' }, to: { screen: 'Taxi' }, why: 'passenger mid-RIDE — the check-in card lives on Taxi, which asks the server whether one is outstanding. Was Delivery, a screen a ride never renders on, so the person being asked if they are safe could not answer' },
-  { k: 'guardian_driver_confirm', d: { ...O, sessionId: 's1' }, to: DELIVERY('o1'), why: 'GAP: driver recipient; MoverStack never mounts Delivery — and there is NO driver-side confirm control anywhere in the app, so no destination is right yet. POST /safety/guardian/driver-confirm has no caller. Needs a screen, not a route change' },
+  { k: 'guardian_driver_confirm', d: { ...O, sessionId: 's1', cycleId: 'cy1', nonce: 'n1', respondBy: '2026-09-03T12:00:00.000Z' }, to: { screen: 'GuardianDriverConfirm', params: { sessionId: 's1', cycleId: 'cy1', nonce: 'n1', respondBy: '2026-09-03T12:00:00.000Z', orderId: 'o1' } }, why: '[TST-001] the DRIVER, on a screen MoverStack mounts. This used to route to Delivery — which MoverStack never mounts — and this census asserted that dead end as passing, on a SAFETY path, while POST /safety/guardian/driver-confirm sat with no caller. It carries the cycle and the nonce so the screen answers THAT check' },
   { k: 'guardian_deescalation', d: { ...O, sessionId: 's1', cycleId: 'cy1' }, to: DELIVERY('o1'), why: 'admins — [S-04] a passenger never answered a hard check and the driver de-escalated; the review is an ops surface, not mobile' },
   { k: 'guardian_checkin_undelivered', d: { ...O, sessionId: 's1', cycleId: 'cy1', delivery: 'PENDING' }, to: DELIVERY('o1'), why: 'admins — [S-06] a hard check-in that never reached the passenger; the deadline is held and a human looks — an ops surface' },
   { k: 'incident_duplicate_intake', d: { clusters: [] }, to: null, why: 'admins — [S-08] likely duplicate intakes that drove enforcement; review and merge is an ops surface' },
@@ -411,6 +411,39 @@ describe('every destination is a route the app actually registers', () => {
     wanted.add('ServiceJobs');
     const missing = [...wanted].filter((s) => !registered.has(s)).sort();
     expect(missing, 'tap destinations no navigator registers — these taps go nowhere').toEqual([]);
+  });
+
+  // [TST-001] EXISTING SOMEWHERE IS NOT REACHABLE BY THE RECIPIENT.
+  //
+  // The test above asks whether ANY navigator registers the screen. That is
+  // how `guardian_driver_confirm -> Delivery` passed for so long: Delivery is
+  // a real screen, in the CUSTOMER stack, and the recipient is a driver whose
+  // navigator never mounts it. The tap opened nothing, on a safety path, and
+  // the census said it was fine.
+  //
+  // A push aimed at a mover must land on a screen MoverStack mounts.
+  const MOVER_KINDS: Record<string, string> = {
+    guardian_driver_confirm: 'the driver is asked to confirm the trip status',
+    dispatch_offer: 'the earner has an offer with a running clock',
+    claim_over_gate: 'the rider is owed a delivery guarantee',
+  };
+
+  it('a push aimed at a MOVER lands on a screen MoverStack mounts', () => {
+    const stack = readFileSync(join(process.cwd(), 'src', 'modules', 'mover', 'MoverStack.tsx'), 'utf8');
+    const mounted = new Set([...stack.matchAll(/\.Screen[^>]*?name="([A-Za-z0-9_]+)"/g)].map((m) => m[1]!));
+    // MoverStack composes a role-resolved root; these are reachable from it.
+    mounted.add('Main');
+    mounted.add('MoverRoot');
+    expect(mounted.size, 'the scan itself found the stack').toBeGreaterThan(5);
+
+    const unreachable: string[] = [];
+    for (const [kind, why] of Object.entries(MOVER_KINDS)) {
+      const row = CENSUS.find((c) => c.k === kind);
+      expect(row, `${kind} is in the census`).toBeTruthy();
+      const screen = row!.to?.screen;
+      if (screen && !mounted.has(screen)) unreachable.push(`${kind} -> ${screen} (${why})`);
+    }
+    expect(unreachable, 'a mover tapping these opens nothing — the screen is in another stack').toEqual([]);
   });
 });
 

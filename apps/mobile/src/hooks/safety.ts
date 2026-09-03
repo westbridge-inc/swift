@@ -172,6 +172,23 @@ export interface LivenessCheckOutcome {
 
 /** §7.1 — run one shift identity check. The screen renders every outcome
  *  itself (including the 423 lock), so the global error toast stays out. */
+/**
+ * [TST-001] The driver's answer to a Trip Guardian check.
+ *
+ * The push that asks carries the cycle and a nonce; the server treats the
+ * nonce as the identity of the question, so a retry after a dropped
+ * connection answers the same question rather than a new one.
+ */
+export function useGuardianDriverConfirm() {
+  return useMutation({
+    mutationFn: async ({ cycleId, nonce }: { cycleId: string; nonce: string }) => {
+      const res = await safetyApi.guardianDriverConfirm({ cycleId, nonce });
+      return res.data?.data as { status?: string } | undefined;
+    },
+    meta: { silent: true },
+  });
+}
+
 export function useLivenessCheck() {
   const qc = useQueryClient();
   return useMutation({
