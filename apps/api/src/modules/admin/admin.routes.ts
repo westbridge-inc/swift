@@ -1828,6 +1828,76 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: result };
   });
 
+  /**
+   * [G7] order → customer → identity, for the founder's actual case: a
+   * customer bailed and he starts from the ORDER. This is the most sensitive
+   * read in the product, so it is designed narrowly:
+   *
+   *   - metadata only (type, status, dates). NEVER a file URL. Viewing still
+   *     goes through the one audited door, /verification/:id/document-url.
+   *   - a written reason is REQUIRED, and the audit row records it — the
+   *     difference between a defensible retention story and an indefensible one.
+   *   - gated on a real signal: the order ended without fulfilment (cancelled,
+   *     refunded, failed) or a reimbursement claim exists against it. An admin
+   *     cannot open any customer's ID against a live or completed order.
+   */
+  const customerIdentityQuerySchema = z.object({
+    reason: z.string().trim().min(12, 'Say why, in a sentence — the audit trail records it').max(500),
+  });
+  // Terminal, minus fulfilled — derived from the ONE terminal definition.
+  const BAILED_ORDER_STATUSES = new Set<string>(TERMINAL_ORDER_STATUSES.filter((s) => s !== 'DELIVERED' && s !== 'COMPLETED'));
+
+  app.get('/orders/:id/customer-identity', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { reason } = customerIdentityQuerySchema.parse(request.query);
+
+    const order = await tenantPrisma.order.findUnique({
+      where: { id },
+      select: {
+        id: true, orderNumber: true, status: true, customerId: true,
+        customer: { select: { id: true, firstName: true, lastName: true } },
+      },
+    });
+    if (!order) throw new NotFoundError('Order', id);
+
+    const bailed = BAILED_ORDER_STATUSES.has(order.status);
+    const claim = bailed ? null : await tenantPrisma.reimbursementClaim.findUnique({ where: { orderId: id }, select: { id: true, status: true } });
+    if (!bailed && !claim) {
+      throw new AppError(
+        409,
+        'ORDER_NOT_BAILED',
+        'A customer’s identity can only be opened against an order that was cancelled, refunded or failed, or that carries a reimbursement claim — not a live or completed one.',
+      );
+    }
+    const cause = bailed ? `ORDER_${order.status}` : 'REIMBURSEMENT_CLAIM';
+
+    const documents = await tenantPrisma.verificationDocument.findMany({
+      where: { userId: order.customerId, role: 'CUSTOMER' },
+      // Metadata ONLY. fileUrl and kycRef are deliberately not selected.
+      select: { id: true, docType: true, status: true, createdAt: true, reviewedAt: true, expiresAt: true, purgedAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    await audit(request.user.userId, 'LOOKUP_CUSTOMER_IDENTITY', 'Order', order.id, {
+      reason, cause, customerId: order.customerId, documents: documents.length,
+      ...(claim ? { claimId: claim.id } : {}),
+    }, request);
+
+    return {
+      success: true,
+      data: {
+        order: { id: order.id, orderNumber: order.orderNumber, status: order.status },
+        customer: order.customer,
+        cause,
+        documents: documents.map((d) => ({
+          id: d.id, docType: d.docType, status: d.status,
+          createdAt: d.createdAt, reviewedAt: d.reviewedAt, expiresAt: d.expiresAt,
+          purged: d.purgedAt != null,
+        })),
+      },
+    };
+  });
+
   // STORE-001: the content-moderation queue (admin side of UGC reporting).
   // POST /reports (moderation.routes) files a report; these two surfaces let an
   // admin work the queue and record a decision — the "act on reports" half the
