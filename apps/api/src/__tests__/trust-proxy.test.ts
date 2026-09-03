@@ -2,24 +2,29 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { asFastifyTrustProxy, parseTrustProxy } from '../config/trust-proxy';
+import { TrustProxyConfigError, asFastifyTrustProxy, parseTrustProxy } from '../config/trust-proxy';
 
 // ---------------------------------------------------------------------------
-// [DEP-1] `X-Forwarded-For` is a client-supplied header. Trusting it blindly
+// [DEP-2] `X-Forwarded-For` is a client-supplied header. Trusting it blindly
 // lets a caller claim any source address and walk past every per-IP rate limit
 // and block, so TRUST_PROXY decides who may set it and defaults to nothing.
 //
-// fastify 5.12 narrowed the `trustProxy` OPTION TYPE to
-// `boolean | string | string[] | TrustProxyFunction`, dropping `number`, while
-// leaving the runtime untouched. That made the API fail to type-check on the
-// dependency bump — and the obvious fix (send "1" instead of 1) would have
-// changed a hop count into an invalid address literal, silently altering which
-// proxies are trusted while the compiler went quiet.
+// fastify 5.12 changed the RUNTIME, not just the type, in response to a
+// published advisory: a numeric hop count now FAILS CLOSED, because hop
+// counting cannot validate the immediate peer and a direct client can defeat it
+// by supplying enough hops.
 //
-// These tests pin the shape so that cannot happen by tidying.
+// That makes a hop count silently mean "trust nothing" — every request would be
+// attributed to the proxy's own address, so per-IP limiting would keep working
+// while counting the whole internet as one client, and nothing would be logged.
+// So a hop count is refused AT BOOT instead.
+//
+// DEP-1 (#1071) kept the number, on the basis that the runtime was unchanged.
+// That was measured from `fastify.js`, which only forwards the option; the
+// branch that changed is in `lib/request.js`. This suite is what caught it.
 // ---------------------------------------------------------------------------
 
-describe('[DEP-1] TRUST_PROXY is parsed into what fastify actually honours', () => {
+describe('[DEP-2] TRUST_PROXY is parsed into something fastify honours', () => {
   it('defaults to trusting NOTHING', () => {
     expect(parseTrustProxy(undefined)).toBe(false);
     expect(parseTrustProxy('')).toBe(false);
@@ -30,41 +35,54 @@ describe('[DEP-1] TRUST_PROXY is parsed into what fastify actually honours', () 
     expect(parseTrustProxy('true')).toBe(true);
   });
 
-  it('a hop count stays a NUMBER — this is the whole point', () => {
-    // "1" (string) means an address called "1"; 1 (number) means one hop.
-    // They are different instructions to fastify, not two spellings of one.
-    expect(parseTrustProxy('1')).toBe(1);
-    expect(parseTrustProxy('2')).toBe(2);
-    expect(typeof parseTrustProxy('1')).toBe('number');
-    expect(parseTrustProxy('1')).not.toBe('1');
-  });
-
-  it('an address or preset list stays a STRING', () => {
+  it('an address or preset list is the supported form', () => {
     expect(parseTrustProxy('10.0.0.0/8')).toBe('10.0.0.0/8');
     expect(parseTrustProxy('loopback, 10.0.0.0/8')).toBe('loopback, 10.0.0.0/8');
-    expect(typeof parseTrustProxy('loopback')).toBe('string');
+    expect(parseTrustProxy('  loopback  ')).toBe('loopback');
   });
 
-  it('the fastify-typed wrapper does not change the VALUE, only the type', () => {
-    for (const v of [undefined, 'false', 'true', '1', '10.0.0.0/8']) {
+  it('a bare hop count is REFUSED, loudly', () => {
+    for (const hops of ['1', '2', '10', ' 3 ']) {
+      expect(() => parseTrustProxy(hops), hops).toThrow(TrustProxyConfigError);
+    }
+  });
+
+  it('the refusal says what to set instead', () => {
+    try {
+      parseTrustProxy('1');
+      throw new Error('should have refused');
+    } catch (e) {
+      const m = (e as Error).message;
+      expect(m).toMatch(/hop count/i);
+      expect(m).toMatch(/CIDR|address/i);
+      expect(m).toMatch(/"true"/);
+    }
+  });
+
+  it('the fastify-typed wrapper does not change the value', () => {
+    for (const v of [undefined, 'false', 'true', '10.0.0.0/8']) {
       expect(asFastifyTrustProxy(v)).toEqual(parseTrustProxy(v));
     }
-    expect(asFastifyTrustProxy('1')).toBe(1);
   });
 });
 
-describe('[DEP-1] the assumption the cast rests on, checked against fastify itself', () => {
-  it('fastify still honours a numeric hop count at RUNTIME', () => {
-    // The cast in config/trust-proxy.ts is only safe while this is true. If a
-    // future fastify drops the numeric branch, this goes red and the migration
-    // becomes a deliberate decision instead of a silent behaviour change.
-    // createRequire off the package root — `import.meta` is not available under
-    // this project's module setting, and vitest would not have told us.
-    const require_ = createRequire(join(process.cwd(), 'package.json'));
-    const requestJs = readFileSync(require_.resolve('fastify/lib/request.js'), 'utf8');
-    expect(requestJs).toMatch(/typeof tp === 'number'/);
-    expect(requestJs).toMatch(/Support trusting hop count/);
-    // and that a string is compiled as addresses, which is why "1" is not 1
+describe('[DEP-2] the reason for the refusal, checked against fastify itself', () => {
+  const requestJs = readFileSync(
+    createRequire(join(process.cwd(), 'package.json')).resolve('fastify/lib/request.js'),
+    'utf8',
+  );
+
+  it('a string is still compiled as addresses', () => {
+    // This is why an address list remains the supported form.
     expect(requestJs).toMatch(/tp\.split\(','\)/);
+    expect(requestJs).toMatch(/proxyAddr\.compile/);
+  });
+
+  it('the numeric branch is whatever the installed fastify says it is', () => {
+    // The pinned fact: fastify still BRANCHES on a number. What that branch
+    // does differs by version — ≤5.8 trusted N hops, 5.12 fails closed — and
+    // either way we refuse the input before it reaches here, so Swift's
+    // behaviour no longer depends on which version is installed.
+    expect(requestJs).toMatch(/typeof tp === 'number'/);
   });
 });
