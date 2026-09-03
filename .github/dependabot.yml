@@ -1,6 +1,32 @@
 version: 2
+
+# WHY THIS IS SHAPED THIS WAY
+#
+# The previous config put EVERY production dependency in one group
+# (`patterns: ["*"]`). That produced a weekly pull request bumping 80-odd
+# runtime packages across every app at once — #465, #982 and #1078 were all the
+# same PR under different numbers. None of them was ever merged, because none
+# of them could be:
+#
+#   * an 80-package diff is not reviewable for a platform that moves real money
+#     — a regression in any one of them is indistinguishable from a regression
+#     in any other; and
+#   * a group that large conflicts with `pnpm-lock.yaml` the moment anything
+#     else merges, so it spends its life CONFLICTING and red.
+#
+# A dependency update that cannot be merged protects nothing. So updates are
+# grouped by RISK instead of by "everything at once":
+#
+#   patch  — grouped. Bug fixes; a batch is fine and keeps the noise down.
+#   minor  — grouped, separately from patch, so a behaviour change is never
+#            buried inside a pile of patch bumps.
+#   major  — NOT grouped. Each arrives as its own PR, because each needs its own
+#            reading, its own test run and its own decision.
+#
+# Security updates are deliberately left ungrouped: they arrive one advisory at
+# a time and must be mergeable on their own, immediately, without waiting for
+# eighty unrelated packages to go green.
 updates:
-  # Root and API dependencies
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -8,19 +34,22 @@ updates:
       day: "monday"
     open-pull-requests-limit: 10
     groups:
-      production-dependencies:
-        patterns:
-          - "*"
-        exclude-patterns:
-          - "@types/*"
-          - "typescript"
-          - "vitest"
-          - "eslint*"
-          - "prettier"
+      production-patch:
+        applies-to: version-updates
+        dependency-type: "production"
+        update-types:
+          - "patch"
+      production-minor:
+        applies-to: version-updates
+        dependency-type: "production"
+        update-types:
+          - "minor"
       dev-dependencies:
+        applies-to: version-updates
         dependency-type: "development"
-        patterns:
-          - "*"
+        update-types:
+          - "patch"
+          - "minor"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -29,3 +58,9 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        applies-to: version-updates
+        update-types:
+          - "patch"
+          - "minor"
