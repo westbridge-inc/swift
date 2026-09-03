@@ -45,6 +45,9 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { mintRenderPath } from '../../providers/storage/envelope';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { computeOrderSla } from '../fulfillment/order-sla';
+import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
+import { revealPickupCode, rotatePickupCode, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
+import { requireStepUp } from '../auth/step-up';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
@@ -1407,6 +1410,10 @@ export async function adminRoutes(app: FastifyInstance) {
     const [orders, total] = await Promise.all([
       app.prisma.order.findMany({
         where,
+        // [A-15] The handover secrets never enter the admin DTO. `include`
+        // without a projection returned the whole row, so every order on the
+        // board carried the customer's pickup code in plaintext.
+        omit: HANDOVER_SECRETS_OMIT,
         include: {
           customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
           vendor: { select: { id: true, name: true } },
@@ -1752,6 +1759,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const order = await app.prisma.order.findUnique({
       where: { id },
+      // [A-15] see the list route: the code is a credential the verifier must
+      // not hold, so it is not in this response either. `handover` below says
+      // whether one exists and whether the order is locked out — never the value.
+      omit: HANDOVER_SECRETS_OMIT,
       include: {
         customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
         vendor: { select: { id: true, name: true, phone: true, addressLine1: true, city: true } },
@@ -1769,7 +1780,52 @@ export async function adminRoutes(app: FastifyInstance) {
     // cross-referencing the breach board. Delivery-path only.
     const sla = order.fulfillment === 'DELIVERY' ? computeOrderSla(order, new Date()) : null;
 
-    return { success: true, data: { ...order, sla } };
+    // [A-15] the secrets are omitted above, so read the derived status separately
+    const handoverRow = await app.prisma.order.findUnique({
+      where: { id },
+      select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true },
+    });
+
+    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}) } };
+  });
+
+  /**
+   * [A-15] The audited door to a handover secret.
+   *
+   * The pickup code is a credential: the customer holds it, the vendor types
+   * what the customer reads out, the server compares. It is therefore not in
+   * any admin response (see the two order routes above). Support does need it
+   * occasionally — a customer who cannot open the app, a disputed handover —
+   * so the exception is a door, not a window: re-authentication, a written
+   * reason, an audit row committed before the value is returned, a counter.
+   *
+   * Reading a code spends it. `rotate` issues a new one and clears the
+   * guessing budget; the customer sees the new code in their own app.
+   */
+  const handoverReasonSchema = z.object({
+    reason: z.string().trim().min(HANDOVER_REASON_MIN, 'Say why, in a sentence — the audit trail records it').max(HANDOVER_REASON_MAX),
+  });
+
+  app.get('/orders/:id/handover-secret', { preHandler: [adminGuard] }, async (request) => {
+    await requireStepUp(app, request as never);
+    const { id } = request.params as { id: string };
+    const { reason } = handoverReasonSchema.parse(request.query);
+    const result = await revealPickupCode(
+      { prisma: app.prisma },
+      { orderId: id, actorId: request.user.userId, reason, ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    return { success: true, data: result };
+  });
+
+  app.post('/orders/:id/handover-secret/rotate', { preHandler: [adminGuard] }, async (request) => {
+    await requireStepUp(app, request as never);
+    const { id } = request.params as { id: string };
+    const { reason } = handoverReasonSchema.parse(request.body ?? {});
+    const result = await rotatePickupCode(
+      { prisma: app.prisma },
+      { orderId: id, actorId: request.user.userId, reason, ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    return { success: true, data: result };
   });
 
   // STORE-001: the content-moderation queue (admin side of UGC reporting).

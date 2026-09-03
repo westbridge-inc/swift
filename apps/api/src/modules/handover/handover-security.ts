@@ -52,3 +52,43 @@ export function handoverAttemptState(
   const remaining = Math.max(0, max - currentAttempts - 1);
   return { locked, remaining };
 }
+
+/**
+ * [A-15] What a support surface may know about a handover code: THAT one
+ * exists and how much guessing budget is left — never the value.
+ *
+ * The admin console used to render the pickup code on the order list and the
+ * order detail, which collapsed the holder and the verifier into one role: an
+ * operator (or anyone reading over their shoulder, a screen share, a
+ * screenshot, a compromised session) could complete a stranger's pickup. The
+ * value now leaves the general admin DTO entirely and this derived status
+ * takes its place, so the console can still answer "is a code set?" and "is
+ * this order locked out?" without holding the secret.
+ */
+export interface HandoverStatus {
+  /** a pickup code exists on this order (the customer holds it) */
+  pickupCodeIssued: boolean;
+  /** a ride PIN exists on this order */
+  ridePinIssued: boolean;
+  /** wrong tries already spent */
+  attempts: number;
+  /** the guessing budget is spent — verification refuses until support intervenes */
+  locked: boolean;
+  /** tries left after the next one */
+  remaining: number;
+}
+
+export function handoverStatus(
+  row: { pickupCode?: string | null; ridePin?: string | null; pickupCodeAttempts?: number | null },
+  max: number = MAX_HANDOVER_ATTEMPTS,
+): HandoverStatus {
+  const attempts = row.pickupCodeAttempts ?? 0;
+  const { locked, remaining } = handoverAttemptState(attempts, max);
+  return {
+    pickupCodeIssued: typeof row.pickupCode === 'string' && row.pickupCode.length > 0,
+    ridePinIssued: typeof row.ridePin === 'string' && row.ridePin.length > 0,
+    attempts,
+    locked,
+    remaining,
+  };
+}
