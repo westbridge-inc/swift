@@ -35,7 +35,8 @@ import { redisPlugin } from './plugins/redis';
 import { registerErrorHandler } from './middleware/error-handler';
 import { registerEmptyJsonBodyParser } from './plugins/empty-json';
 import { initializeJobRuntime, type JobRuntime } from './jobs/runtime';
-import { registerReadinessRoute, type RuntimeReadinessState } from './plugins/readiness';
+import { registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegradedCounter, type RuntimeReadinessState } from './plugins/readiness';
+import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
 import { loggerRedactConfig } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
 import { observabilityPlugin } from './plugins/observability';
@@ -93,10 +94,19 @@ async function buildApp() {
     // any healthy request; anything longer is a stuck dependency, not work.
     requestTimeout: Number(process.env['REQUEST_TIMEOUT_MS'] ?? 30_000),
   });
+  // [R048-006] Boot contracts — safe config, production data, the required
+  // taxonomy — complete BEFORE listen (start() below); readiness proves it.
+  let bootContractsComplete = false;
   const runtimeReadiness: RuntimeReadinessState = {
     checkQueues: () => false,
     checkConsumers: () => false,
+    checkWorker: async () => {
+      const beat = await app.redis.get('scheduler:heartbeat').catch(() => null);
+      return workerCheckStatus(evaluateSchedulerHealth({ beat, nowMs: Date.now(), bootAtMs: SERVER_BOOTED_AT, stallMs: schedulerStallMs() }), beat);
+    },
+    checkBoot: () => bootContractsComplete,
   };
+  app.decorate('markBootContractsComplete', () => { bootContractsComplete = true; });
   let jobRuntime: JobRuntime | undefined;
 
   // Give deep services (order, dispatch) the real logger for orderId tracing.
@@ -173,7 +183,12 @@ async function buildApp() {
   // Health check. The load balancer needs a bare status; per-dependency
   // detail (db/redis state, uptime) is an internal map of the deployment and
   // stays behind HEALTH_DETAIL_TOKEN outside development.
-  app.get('/health', async (request) => {
+  // [R048-006] Liveness is dependency-free (/live); /health and /ready are
+  // readiness-grade and say 503 for a known failure — a green container on a
+  // degraded API was the lie the container probe believed.
+  registerLivenessRoute(app);
+  registerRoutedWhileDegradedCounter(app);
+  app.get('/health', async (request, reply) => {
     const checks: Record<string, string> = { api: 'ok' };
 
     try {
@@ -213,31 +228,31 @@ async function buildApp() {
       const neverBooted = health.kind === 'never-booted';
       // Separate dedup keys so a "never booted" alert and a later "stall" don't mask each other.
       const pageKey = neverBooted ? 'ops_page:scheduler-never-booted' : 'ops_page:scheduler-stall';
-      const claimed = await app.redis.set(pageKey, '1', 'EX', 1800, 'NX');
-      if (claimed !== 'OK') return;
       const mins = Math.round(health.ageMs / 60_000);
-      const { notifyAdmins, NotificationService } = await import('./modules/notification/notification.service');
-      try {
-        await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
-        // Boot/infra failure — platform-wide by nature [NOC-A F45].
-        tenantId: null,
-          title: neverBooted ? 'Job scheduler never started' : 'Job scheduler stalled',
-          body: neverBooted
-            ? `No scheduler heartbeat since boot (${mins} min) — the worker fleet never started (crash or RUN_WORKERS misconfigured). Holds, expiry sweeps, billing and settlements have NEVER run. Start the worker.`
-            : `No scheduler heartbeat for ${mins} min — holds, expiry sweeps, billing and settlements are NOT running. Restart the worker.`,
-          data: { kind: neverBooted ? 'ops_scheduler_never_booted' : 'ops_scheduler_stall', ageMs: health.ageMs },
-        });
-      } catch {
-        // Release the dedup claim so the next health check re-pages — a transient
-        // notify failure must not hide a dead worker fleet for the full window.
-        await app.redis.del(pageKey).catch(() => {});
-      }
+      const { NotificationService } = await import('./modules/notification/notification.service');
+      // [R048-006] A page is an OpsAlert row before it is a notification: the dedupe key is claimed
+      // only for a page that reached someone; nobody staffed leaves it PENDING and retryable.
+      await pageOps({ prisma: app.prisma, redis: app.redis, notifications: new NotificationService(app.prisma, app.io) }, {
+        key: pageKey,
+        title: neverBooted ? 'Job scheduler never started' : 'Job scheduler stalled',
+        body: neverBooted
+          ? `No scheduler heartbeat since boot (${mins} min) — the worker fleet never started (crash or RUN_WORKERS misconfigured). Holds, expiry sweeps, billing and settlements have NEVER run. Start the worker.`
+          : `No scheduler heartbeat for ${mins} min — holds, expiry sweeps, billing and settlements are NOT running. Restart the worker.`,
+        data: { kind: neverBooted ? 'ops_scheduler_never_booted' : 'ops_scheduler_stall', ageMs: health.ageMs },
+      });
     })().catch(() => {});
+    // the condition cleared: close the open page so the outbox stays truthful
+    if (!workerHealth.page && beat) {
+      void resolveOpsPage(app.prisma, 'Job scheduler stalled').catch(() => {});
+      void resolveOpsPage(app.prisma, 'Job scheduler never started').catch(() => {});
+    }
 
     // `starting` is the worker inside its boot grace: not a failure, and not a
     // reason to call a freshly deployed API degraded. Everything else must be ok.
     const allOk = Object.values(checks).every((v) => v === 'ok' || v === 'starting');
     const status = allOk ? 'healthy' : 'degraded';
+    // [R048-006] A known failure is never a 200: the container probe reads the status code.
+    reply.status(allOk ? 200 : 503);
 
     const detailToken = process.env['HEALTH_DETAIL_TOKEN'];
     const showDetail =
@@ -429,6 +444,10 @@ async function start() {
         if (created > 0 || aliasUpdated > 0) {
           app.log.info({ created, aliasUpdated }, 'discovery: taxonomy seeded');
         }
+        // [R048-006] The contract is COMPLETE only here. Readiness answers 503
+        // until this line runs, so an orchestrator never routes to a process
+        // whose category rail would be empty.
+        app.markBootContractsComplete();
       } catch (err) {
         app.log.warn({ err }, 'discovery: taxonomy seed failed — the category rail will be empty');
       }

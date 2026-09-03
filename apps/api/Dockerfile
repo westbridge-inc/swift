@@ -54,8 +54,11 @@ WORKDIR /app/apps/api
 # Drop to an unprivileged user (node ships in the base image).
 USER node
 EXPOSE 3000
-# The platform's own /health endpoint is the liveness/readiness probe
-# (checks db + redis). Orchestrators should hit GET /health.
+# [R048-006] READINESS is the container probe: GET /ready answers 503 for any
+# unavailable required dependency (schema, Redis, queues, workers, clock, the
+# realtime adapter, the boot contracts), so a degraded API is never a green
+# container. LIVENESS is GET /live — dependency-free — for an orchestrator
+# that restarts only a wedged process. Neither returns 200 for a known failure.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "dist/server.js"]

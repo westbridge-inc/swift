@@ -44,10 +44,11 @@ async function adminRecipientIds(prisma: PrismaClient, tenantId: string | null):
 export async function openOpsAlert(
   prisma: PrismaClient,
   notifications: NotificationService,
-  input: { kind: OpsAlertKind; tenantId: string | null; sosAlertId?: string | null; title: string; body: string; data: Record<string, unknown>; now?: Date },
+  input: { kind: OpsAlertKind; tenantId: string | null; sosAlertId?: string | null; title: string; body: string; data: Record<string, unknown>; now?: Date; recipientIds?: string[] },
 ): Promise<{ opsAlertId: string; recipients: number; delivered: number }> {
   const now = input.now ?? new Date();
-  const userIds = await adminRecipientIds(prisma, input.tenantId);
+  // [R048-006] the recipient set is resolvable by the caller (a test seam; production uses the admin resolver)
+  const userIds = input.recipientIds ?? (await adminRecipientIds(prisma, input.tenantId));
   const alert = await prisma.opsAlert.create({
     data: {
       tenantId: input.tenantId, kind: input.kind, sosAlertId: input.sosAlertId ?? null, title: input.title, body: input.body,
@@ -122,6 +123,16 @@ export async function escalateOverdueOpsAlerts(
     }
     if (a.lastEscalatedAt && now.getTime() - a.lastEscalatedAt.getTime() < escalationRepeatSeconds() * 1000) continue;
     if (opsAlertEscalationKilled()) { opsAlertCounter.labels('escalation_killed').inc(); continue; }
+    // [R048-006] A page that found nobody staffed stays PENDING, not dark: each pass re-resolves
+    // the recipients so an admin who appears later is attached and notified on this pass.
+    if (a.recipients.length === 0) {
+      const userIds = await adminRecipientIds(prisma, a.tenantId);
+      if (userIds.length > 0) {
+        await prisma.opsAlertRecipient.createMany({ data: userIds.map((userId) => ({ tenantId: a.tenantId, opsAlertId: a.id, userId })), skipDuplicates: true });
+        a.recipients = await prisma.opsAlertRecipient.findMany({ where: { opsAlertId: a.id } });
+        opsAlertCounter.labels('recipients_attached_late').inc();
+      }
+    }
     const level = a.escalationLevel + 1;
     const title = `⏰ UNACKNOWLEDGED (${level}×): ${a.title}`;
     const body = `Nobody has acknowledged this alert since ${a.createdAt.toISOString()}. ${a.body} Acknowledge it now.`;

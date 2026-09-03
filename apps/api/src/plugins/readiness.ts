@@ -1,11 +1,17 @@
 import type { FastifyInstance } from 'fastify';
 import { readInfrastructureClocks } from '../utils/infrastructure-clock';
+import type { WorkerCheck } from '../utils/scheduler-health';
+import { readinessGauge, readyReasonCounter, routedWhileDegradedCounter } from './observability';
 import { positiveDurationMs, withTimeout } from '../utils/async-lifecycle';
 
 export interface RuntimeReadinessState {
   checkQueues: () => boolean | Promise<boolean>;
   checkConsumers?: () => boolean | Promise<boolean>;
   checkRealtime?: () => boolean | Promise<boolean>;
+  /** [R048-006] The worker fleet's heartbeat verdict: `ok`, `starting` (inside the boot grace) or `error` (stalled or never booted). */
+  checkWorker?: () => WorkerCheck | Promise<WorkerCheck>;
+  /** [R048-006] Every pre-listen boot contract (safe config, production data, the required taxonomy) completed for THIS process. */
+  checkBoot?: () => boolean;
 }
 
 export interface ReadinessSnapshot {
@@ -17,9 +23,19 @@ export interface ReadinessSnapshot {
     queueConsumers: boolean;
     realtime: boolean;
     clock: boolean;
+    worker: boolean;
+    boot: boolean;
   };
+  /** [R048-006] The dependencies that failed, by name — the reason a 503 was a 503. */
+  reasons: string[];
   timestamp: string;
 }
+
+/** [R048-006] The last readiness verdict this process computed — what the load
+ *  balancer was last told. Read by the routed-while-degraded counter. */
+let lastSnapshot: ReadinessSnapshot | null = null;
+export function getLastReadiness(): ReadinessSnapshot | null { return lastSnapshot; }
+export function resetReadinessForTests(): void { lastSnapshot = null; }
 
 export const MOVER_AUTHORITY_CUTOVER_MIGRATION =
   '20260808021500_mover_location_authority_cutover';
@@ -212,6 +228,8 @@ export async function evaluateReadiness(
     consumerResult,
     realtimeResult,
     clockResult,
+    workerResult,
+    bootResult,
   ] = await Promise.allSettled([
     bounded(
       hasRequiredSchema(app.prisma),
@@ -237,6 +255,15 @@ export async function evaluateReadiness(
       readInfrastructureClocks(app.prisma, app.redis).then((sample) => sample.aligned),
       'Readiness clock check',
     ),
+    bounded(
+      // `starting` (inside the boot grace) is not a failure; `error` — stalled or never booted — is.
+      Promise.resolve().then(() => state.checkWorker?.() ?? 'ok').then((w) => w !== 'error'),
+      'Readiness worker heartbeat check',
+    ),
+    bounded(
+      Promise.resolve().then(() => state.checkBoot?.() ?? true),
+      'Readiness boot contract check',
+    ),
   ]);
 
   const deps = {
@@ -246,12 +273,20 @@ export async function evaluateReadiness(
     queueConsumers: fulfilledBoolean(consumerResult),
     realtime: fulfilledBoolean(realtimeResult),
     clock: fulfilledBoolean(clockResult),
+    worker: fulfilledBoolean(workerResult),
+    boot: fulfilledBoolean(bootResult),
   };
-  return {
-    ready: Object.values(deps).every(Boolean),
+  const reasons = (Object.keys(deps) as Array<keyof typeof deps>).filter((k) => !deps[k]);
+  for (const k of Object.keys(deps) as Array<keyof typeof deps>) readinessGauge.labels(k).set(deps[k] ? 1 : 0);
+  for (const r of reasons) readyReasonCounter.labels(r).inc();
+  const snapshot: ReadinessSnapshot = {
+    ready: reasons.length === 0,
     deps,
+    reasons,
     timestamp: new Date().toISOString(),
   };
+  lastSnapshot = snapshot;
+  return snapshot;
 }
 
 export function registerReadinessRoute(
@@ -264,4 +299,50 @@ export function registerReadinessRoute(
     reply.status(snapshot.ready ? 200 : 503);
     return snapshot;
   });
+}
+
+const PROCESS_BOOTED_AT = new Date();
+
+/**
+ * [R048-006] LIVENESS proves only that the process is alive and answering.
+ * It touches no dependency — not the database, not Redis, not the queues —
+ * so an orchestrator restarts a process only for being wedged, never for a
+ * dependency it cannot fix by restarting this container.
+ */
+export function registerLivenessRoute(app: FastifyInstance): void {
+  app.get('/live', async () => ({
+    status: 'alive',
+    bootedAt: PROCESS_BOOTED_AT.toISOString(),
+    uptimeSeconds: Math.round(process.uptime()),
+    version: process.env['APP_VERSION'] ?? process.env['GIT_SHA'] ?? null,
+  }));
+}
+
+const PROBE_PATHS = new Set(['/live', '/ready', '/health', '/metrics']);
+
+/**
+ * [R048-006] Every request answered while the last readiness verdict was NOT
+ * ready is counted, by API family: the number of times the load balancer kept
+ * routing to a process that had told it not to.
+ */
+export function registerRoutedWhileDegradedCounter(app: FastifyInstance): void {
+  app.addHook('onResponse', async (request) => {
+    const snap = lastSnapshot;
+    if (!snap || snap.ready) return;
+    const path = request.url.split('?')[0] ?? '';
+    if (PROBE_PATHS.has(path)) return;
+    routedWhileDegradedCounter.labels(apiFamilyOf(path)).inc();
+  });
+}
+
+function apiFamilyOf(path: string): string {
+  const m = /^\/api\/v1\/([a-z-]+)/.exec(path);
+  return m?.[1] ?? 'other';
+}
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** [R048-006] Flipped by start() once every pre-listen boot contract completed; readiness reads it. */
+    markBootContractsComplete: () => void;
+  }
 }

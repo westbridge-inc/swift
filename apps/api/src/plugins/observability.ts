@@ -117,6 +117,35 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [R048-006] Readiness by dependency (1 ready / 0 not) after the last /ready evaluation. */
+export const readinessGauge = new client.Gauge({
+  name: 'swift_readiness_dependency',
+  help: 'Readiness by dependency after the last /ready evaluation (1 ready, 0 not ready)',
+  labelNames: ['dependency'] as const,
+  registers: [registry],
+});
+/** [R048-006] Every 503 readiness answer, by the dependency that failed it. */
+export const readyReasonCounter = new client.Counter({
+  name: 'swift_ready_refused_total',
+  help: 'Readiness refusals (503) by failing dependency',
+  labelNames: ['reason'] as const,
+  registers: [registry],
+});
+/** [R048-006] Requests served while the last readiness evaluation said NOT ready (the load balancer kept routing). */
+export const routedWhileDegradedCounter = new client.Counter({
+  name: 'swift_routed_while_degraded_total',
+  help: 'Requests answered while the last readiness evaluation was not ready',
+  labelNames: ['family'] as const,
+  registers: [registry],
+});
+/** [R048-006] Platform page outcomes: delivered, zero_recipient_pending, already_open, deduped, resolved, failed. */
+export const opsPageCounter = new client.Counter({
+  name: 'swift_ops_page_total',
+  help: 'Platform page outcomes (delivered/zero_recipient_pending/already_open/deduped/resolved/failed)',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 /** [R048-005] Seed-plan outcomes: applied, noop (nothing to change), refused_drift, refused_target,
  *  refused_tampered, refused_config_mismatch, promotion_bootstrap, promotion_break_glass, promotion_refused,
  *  demo_seed_refused. */
