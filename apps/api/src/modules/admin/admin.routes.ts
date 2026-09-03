@@ -56,6 +56,7 @@ import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig
 import { createHash } from 'node:crypto';
 import { billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
+import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
@@ -150,6 +151,22 @@ const promosQuerySchema = z.object({
   active: z.enum(['true', 'false']).optional(),
 });
 
+// [A-22] A DAY THE OPERATOR TYPES IS A DAY IN GUYANA. `z.coerce.date()` reads a
+// bare `YYYY-MM-DD` as UTC midnight, and Guyana is UTC−4 — so a window entered
+// as "4 Sep to 4 Oct" went live at 8pm on the 3rd of September and DIED at 8pm
+// on the 3rd of October, four hours early, in the evening, which is when people
+// order. A full timestamp is still respected as given.
+const guyanaWindowEdge = (edge: 'start' | 'end') =>
+  z.union([z.string(), z.date()]).transform((value, ctx) => {
+    if (isDateOnly(value)) return edge === 'start' ? startOfGuyanaDay(value) : endOfGuyanaDay(value);
+    const parsed = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Not a date' });
+      return z.NEVER;
+    }
+    return parsed;
+  });
+
 const createPromoSchema = z.object({
   code: z.string().trim().min(2).max(40),
   description: z.string().max(500),
@@ -162,18 +179,16 @@ const createPromoSchema = z.object({
   minOrderAmount: z.number().min(0).max(10_000_000).optional(),
   maxDiscount: z.number().min(0).max(10_000_000).optional(),
   applicableTo: z.array(z.string().max(50)).max(20).optional(),
-  validFrom: z.coerce.date(),
-  validUntil: z.coerce.date(),
+  validFrom: guyanaWindowEdge('start'),
+  validUntil: guyanaWindowEdge('end'),
   maxUses: z.number().int().min(1).max(1_000_000).optional(),
   maxUsesPerUser: z.number().int().min(1).max(100).optional(),
-}).refine((d) => d.discountType !== 'PERCENTAGE' || d.discountValue <= 100, {
-  message: 'A percentage discount cannot exceed 100',
-  path: ['discountValue'],
-}).refine((d) => d.validFrom.getTime() < d.validUntil.getTime(), {
-  // [M-32] A window is a window: the end must follow the start.
-  message: 'validUntil must be after validFrom',
-  path: ['validUntil'],
 });
+// [A-22] The cross-field laws — the percentage cap, the window order, money
+// integrality, the mutually exclusive type fields — are NOT restated here. They
+// live in promoTermsProblems, which the UPDATE path already used and the create
+// handler already calls on the row it is about to write. They were two
+// statements of one law, and the copy here was missing three of them.
 
 // [M-32] The patch carries the same bounds as create. The percentage cap and
 // the window are properties of the WHOLE record, so the handler validates the
@@ -184,8 +199,10 @@ const updatePromoSchema = z.object({
   discountValue: z.number().min(0).max(10_000_000).optional(),
   minOrderAmount: z.number().min(0).max(10_000_000).optional(),
   maxDiscount: z.number().min(0).max(10_000_000).optional(),
-  validFrom: z.coerce.date().optional(),
-  validUntil: z.coerce.date().optional(),
+  // [A-22] A patched window is read in Guyana too — an operator moving an end
+  // date must not silently move it four hours earlier than the day they typed.
+  validFrom: guyanaWindowEdge('start').optional(),
+  validUntil: guyanaWindowEdge('end').optional(),
   maxUses: z.number().int().min(1).max(1_000_000).optional(),
   maxUsesPerUser: z.number().int().min(1).max(100).optional(),
   isActive: z.boolean().optional(),

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useId, cloneElement } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchPromos, createPromo, type CreatePromoInput, type Promo } from '@/lib/api';
 
@@ -158,11 +158,16 @@ export default function PromosPage() {
 const inputCls =
   'mt-1 w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none';
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+// [A-22] The label was rendered but never ASSOCIATED: no `htmlFor`, no `id`, so
+// a screen reader announced every one of these as an unnamed edit box and
+// clicking the label did nothing. The id is generated here and handed to the
+// control, so a caller cannot forget it.
+function Field({ label, children }: { label: string; children: React.ReactElement<{ id?: string }> }) {
+  const id = useId();
   return (
     <div>
-      <label className="text-xs text-[var(--muted)]">{label}</label>
-      {children}
+      <label htmlFor={id} className="text-xs text-[var(--muted)]">{label}</label>
+      {cloneElement(children, { id })}
     </div>
   );
 }
