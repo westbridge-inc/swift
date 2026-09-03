@@ -56,7 +56,7 @@ import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePr
 import { assertNoZoneOverlap } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { createHash } from 'node:crypto';
-import { adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
+import { adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
@@ -762,6 +762,44 @@ export async function adminRoutes(app: FastifyInstance) {
     }
   });
 
+
+  // [ADM-007] EVERY SENSITIVE READ LEAVES A RECORD.
+  //
+  // Two of the seventy-seven admin reads were logged. An admin could open any
+  // customer, any driver, any order, any uploaded document and any handover
+  // secret and leave nothing behind — which defeats the "every access is
+  // logged" commitment this platform makes to the people whose data it holds.
+  //
+  // The C1 class is exactly the set that discloses identity, location, a
+  // document or a secret, so it is the set that writes here: 25 routes, not
+  // all 77, because logging a dashboard count is noise that buries the reads
+  // that matter. A failed read disclosed nothing and is not recorded.
+  app.addHook('onResponse', async (request: any, reply: any) => {
+    if (request.method !== 'GET' || reply.statusCode >= 400) return;
+    const routeUrl = routeTemplateOf(request, app.prefix);
+    const authority = ADMIN_ROUTE_AUTHORITY[`GET ${routeUrl}`];
+    if (!authority || authority.cls !== 'C1') return;
+    const userId: string | undefined = request.user?.userId;
+    if (!userId) return;
+    try {
+      const params = (request.params ?? {}) as Record<string, string>;
+      await app.prisma.sensitiveReadLog.create({
+        data: {
+          actorUserId: userId,
+          action: `GET ${routeUrl}`,
+          capability: authority.capability,
+          subjectId: params['id'] ?? params['userId'] ?? params['san'] ?? null,
+          // The stated reason where the route demands one; otherwise the read
+          // itself. A reason demanded on every queue refresh would be typed
+          // without meaning within a day, and would say less than the route.
+          purpose: reasonOf(request.body, request.headers) ?? `GET ${routeUrl}`,
+        },
+      });
+      sensitiveReadCounter.labels(authority.capability).inc();
+    } catch (err) {
+      app.log.error({ err, routeUrl }, '[ADM-007] failed to record a sensitive read');
+    }
+  });
 
   // Every successful admin STATE CHANGE is audited, automatically. A scoped
   // onResponse hook (plugin encapsulation: admin routes only) means a new
