@@ -17,6 +17,7 @@ import {
   dualDisplay,
 } from '../modules/billing/fx';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { injectWithApproval } from './helpers/admin-approval';
 
 // USD Platform Pricing — Part 14 merge gates on the pure core + Part 12/20
 // governance over HTTP: the conversion table (HALF_UP at every increment),
@@ -44,9 +45,9 @@ async function makeAdmin() {
 
 const get = (url: string, token: string) => app.inject({ method: 'GET', url, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), authorization: `Bearer ${token}` } });
 const post = (url: string, payload: unknown, token: string) =>
-  app.inject({ method: 'POST', url, payload: payload as Record<string, unknown>, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json', authorization: `Bearer ${token}` } });
+  injectWithApproval(app, { method: 'POST', url, payload: payload as Record<string, unknown>, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json', authorization: `Bearer ${token}` } });
 const put = (url: string, payload: unknown, token: string) =>
-  app.inject({ method: 'PUT', url, payload: payload as Record<string, unknown>, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json', authorization: `Bearer ${token}` } });
+  injectWithApproval(app, { method: 'PUT', url, payload: payload as Record<string, unknown>, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json', authorization: `Bearer ${token}` } });
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';

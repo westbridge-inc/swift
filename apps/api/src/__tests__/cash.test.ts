@@ -16,6 +16,7 @@ import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { injectWithApproval } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
 // cash rules. The cash-rules table as tests: a simulated dishonest rider
@@ -153,7 +154,7 @@ async function plantClaim(riderId: string, customerId: string, daysAgo: number) 
 }
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, token?: string) {
-  return app.inject({
+  return injectWithApproval(app, {
     method,
     url,
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),

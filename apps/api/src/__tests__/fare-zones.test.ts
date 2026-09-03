@@ -18,6 +18,7 @@ import { polygonArea, polygonsOverlap } from '../utils/geo';
 import { fareZoneCounter, fareZoneGauge } from '../plugins/observability';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { injectWithApproval } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
 // [M-34] Fare zones are global and ambiguous across markets.
@@ -177,24 +178,24 @@ describe('the register’s red test: two tenants, two countries, overlapping pol
   });
   it('the admin refuses a new zone that overlaps a peer at the same priority; a different priority is accepted; a boundary change is a new version, a copy change is not', async () => {
     const headers = { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' };
-    const clash = await app.inject({ method: 'POST', url: '/api/v1/admin/zones', headers: { ...headers, 'x-swift-reason': TEST_ADMIN_REASON }, payload: { name: `${TAG} clash`, boundary: CORE_BIGGER, priority: 1 } });
+    const clash = await injectWithApproval(app, { method: 'POST', url: '/api/v1/admin/zones', headers: { ...headers, 'x-swift-reason': TEST_ADMIN_REASON }, payload: { name: `${TAG} clash`, boundary: CORE_BIGGER, priority: 1 } });
     expect(clash.statusCode, clash.body).toBe(409);
     expect(clash.json().error.code).toBe('ZONE_OVERLAP');
     expect(clash.json().error.message).toContain('GY core');
-    const ok = await app.inject({ method: 'POST', url: '/api/v1/admin/zones', headers: { ...headers, 'x-swift-reason': TEST_ADMIN_REASON }, payload: { name: `${TAG} above`, boundary: CORE_BIGGER, priority: 3, countryCode: 'gy' } });
+    const ok = await injectWithApproval(app, { method: 'POST', url: '/api/v1/admin/zones', headers: { ...headers, 'x-swift-reason': TEST_ADMIN_REASON }, payload: { name: `${TAG} above`, boundary: CORE_BIGGER, priority: 3, countryCode: 'gy' } });
     expect(ok.statusCode, ok.body).toBe(200);
     const created = ok.json().data; zoneIds.push(created.id);
     expect(created).toMatchObject({ tenantId: DEFAULT_TENANT_ID, countryCode: 'GY', priority: 3, version: 1 });
     // it now outranks the core zone for the same point
     const est = await svc().estimate(IN_CORE, IN_CORE, 'GY', DEFAULT_TENANT_ID);
     expect(est.fromZoneId).toBe(created.id);
-    const reworded = await app.inject({ method: 'PUT', url: `/api/v1/admin/zones/${created.id}`, headers: { ...headers, 'x-swift-reason': TEST_ADMIN_REASON }, payload: { description: 'reworded' } });
+    const reworded = await injectWithApproval(app, { method: 'PUT', url: `/api/v1/admin/zones/${created.id}`, headers: { ...headers, 'x-swift-reason': TEST_ADMIN_REASON }, payload: { description: 'reworded' } });
     expect(reworded.json().data.version).toBe(1);
-    const redrawn = await app.inject({ method: 'PUT', url: `/api/v1/admin/zones/${created.id}`, headers: { ...headers, 'x-swift-reason': TEST_ADMIN_REASON }, payload: { boundary: box(-58.04, 6.77, -57.97, 6.84) } });
+    const redrawn = await injectWithApproval(app, { method: 'PUT', url: `/api/v1/admin/zones/${created.id}`, headers: { ...headers, 'x-swift-reason': TEST_ADMIN_REASON }, payload: { boundary: box(-58.04, 6.77, -57.97, 6.84) } });
     expect(redrawn.statusCode, redrawn.body).toBe(200);
     expect(redrawn.json().data.version).toBe(2);
     // moving it onto the core zone's priority is refused as the merged record
-    const collide = await app.inject({ method: 'PUT', url: `/api/v1/admin/zones/${created.id}`, headers: { ...headers, 'x-swift-reason': TEST_ADMIN_REASON }, payload: { priority: 1 } });
+    const collide = await injectWithApproval(app, { method: 'PUT', url: `/api/v1/admin/zones/${created.id}`, headers: { ...headers, 'x-swift-reason': TEST_ADMIN_REASON }, payload: { priority: 1 } });
     expect(collide.statusCode).toBe(409);
     await app.prisma.zone.update({ where: { id: created.id }, data: { isActive: false } });
   });

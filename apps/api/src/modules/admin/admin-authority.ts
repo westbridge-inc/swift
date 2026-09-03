@@ -259,6 +259,13 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /cash-rules/claims/:id/reject': c('C4', 'cashrules.claim.decide'),
   'PUT /cash-rules/claims/:id/paid': c('C4', 'cashrules.claim.pay'),
 
+  // ── Dual control (ADM-005) ──────────────────────────────────────────────
+  // The queue is a read; the decision is consequential and owes a reason, but
+  // is NOT itself C4 — otherwise approving would need approving. The act it
+  // authorises is still gated on its own class when the requester re-issues it.
+  'GET /approvals': c('C0', 'approvals.read'),
+  'POST /approvals/:id/decide': c('C3', 'approvals.decide'),
+
   // ── Support, audit and the agent ────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),
   'GET /support': c('C1', 'support.read'),

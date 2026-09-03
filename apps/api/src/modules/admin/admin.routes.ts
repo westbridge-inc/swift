@@ -39,7 +39,8 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
-import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilityMode, decideCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
+import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
+import { APPROVAL_HEADER, approvalRefusalMessage, decideApproval, requiresApproval, resolveApproval } from './admin-approval';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -50,12 +51,12 @@ import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-secu
 import { revealPickupCode, rotatePickupCode, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
-import { AppError, NotFoundError, ForbiddenError, ValidationError } from '../../utils/errors';
+import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import { assertNoZoneOverlap } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { createHash } from 'node:crypto';
-import { adminCapabilityCounter, adminReasonCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
+import { adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
@@ -709,6 +710,59 @@ export async function adminRoutes(app: FastifyInstance) {
     throw new ValidationError(reasonRefusal(problem, authority.cls));
   });
 
+  // [ADM-005] A MONEY OR PLATFORM ACTION TAKES TWO PEOPLE.
+  //
+  // Registered after the reason hook on purpose: an action with no stated
+  // reason never becomes a pending approval, because the reason is the thing
+  // the second person reads.
+  //
+  // With no approval id the request IS the ask — a PENDING record is written
+  // and the caller is told what to wait for. With one, it must be approved,
+  // unexpired, unused, by someone else, and over THIS request: the fingerprint
+  // covers the method, route, params and body, so an approved settlement
+  // cannot be re-aimed at a different beneficiary or amount afterwards.
+  app.addHook('preValidation', async (request: any, reply: any) => {
+    const routeUrl = routeTemplateOf(request, app.prefix);
+    const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeUrl}`];
+    if (!authority || !requiresApproval(authority.cls)) return;
+    const userId: string | undefined = request.user?.userId;
+    if (!userId) return;
+    const header = request.headers[APPROVAL_HEADER];
+    const outcome = await resolveApproval(
+      app.prisma, authority,
+      { method: request.method, routeUrl, params: (request.params ?? {}) as Record<string, unknown>, body: request.body },
+      { userId },
+      typeof header === 'string' && header ? header : null,
+      reasonOf(request.body, request.headers) ?? '',
+    );
+    if (outcome.outcome === 'granted') {
+      request.privilegedApprovalId = outcome.approvalId;
+      // spent at the gate: holding it IS the authorisation
+      adminApprovalCounter.labels('applied', authority.cls).inc();
+      return;
+    }
+    if (outcome.outcome === 'requested') {
+      adminApprovalCounter.labels('requested', authority.cls).inc();
+      // Nothing happened, so nothing is audited as having happened: the
+      // PENDING approval IS the record of the ask, and an audit row here would
+      // read as a completed action to anyone reviewing the trail later.
+      request.approvalPending = true;
+      return reply.code(202).send({
+        success: false,
+        error: {
+          code: 'APPROVAL_REQUIRED',
+          message: 'A second admin must approve this before it happens. It is in the approvals queue.',
+          details: { approvalId: outcome.approvalId },
+        },
+      });
+    }
+    if (outcome.outcome === 'refused') {
+      adminApprovalCounter.labels(outcome.code, authority.cls).inc();
+      throw new ForbiddenError(approvalRefusalMessage(outcome.code));
+    }
+  });
+
+
   // Every successful admin STATE CHANGE is audited, automatically. A scoped
   // onResponse hook (plugin encapsulation: admin routes only) means a new
   // mutating route is covered the day it ships — the same philosophy as the
@@ -721,6 +775,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const isAuditedRead = request.method === 'GET'
       && auditedAdminReadRoutes.some((template) => routeUrl === template || routeUrl.endsWith(template));
     if ((request.method === 'GET' && !isAuditedRead) || reply.statusCode >= 400) return;
+    // [ADM-005] A request queued for a second person's approval did nothing.
+    if ((request as { approvalPending?: boolean }).approvalPending) return;
     const userId = (request as { user?: { userId?: string } }).user?.userId;
     if (!userId) return;
     try {
@@ -4698,6 +4754,66 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/cash-rules/metrics', { preHandler: [adminGuard] }, async () => {
     const metrics = await cashRules.founderMetrics();
     return { success: true, data: metrics };
+  });
+
+  // ─── Dual control (ADM-005) ────────────────────────────────────────────
+  //
+  // The queue a second admin works. A pending approval carries what was asked,
+  // by whom, over which entity, and the requester's reason — which is the
+  // whole point: an approver who cannot see why is not reviewing anything.
+
+  app.get('/approvals', { preHandler: [adminGuard] }, async (request) => {
+    requireTenantId();
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const { status } = z.object({
+      status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED']).optional(),
+    }).parse(request.query);
+    const where = status ? { status } : { status: 'PENDING' };
+    const [rows, total] = await Promise.all([
+      tenantPrisma.privilegedApproval.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
+      tenantPrisma.privilegedApproval.count({ where }),
+    ]);
+    // An approver must be able to tell their own asks apart at a glance: they
+    // cannot decide those, and a queue that hides the fact wastes their time.
+    const mine = request.user.userId;
+    return {
+      success: true,
+      data: rows.map((row) => ({ ...row, isOwnRequest: row.requestedBy === mine })),
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
+  });
+
+  app.post<{ Params: { id: string } }>('/approvals/:id/decide', { preHandler: [adminGuard] }, async (request) => {
+    requireTenantId();
+    const body = z.object({
+      approve: z.boolean(),
+      // the reason law (ADM-006) covers the free-text field; this is the
+      // decision's own note, kept beside it
+      note: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+
+    const grant = await app.prisma.admin.findUnique({ where: { userId: request.user.userId }, select: { permissions: true } });
+    const held = capabilitiesOf({ role: request.user.role, permissions: grant?.permissions ?? null });
+    const decision = await decideApproval(
+      app.prisma, request.params.id,
+      { userId: request.user.userId, holds: (capability) => holdsCapability(held, capability) },
+      { approve: body.approve, ...(body.note ? { note: body.note } : {}) },
+    );
+    if (!decision.ok) {
+      adminApprovalCounter.labels(`decision_${decision.code}`, 'C4').inc();
+      if (decision.code === 'unknown') throw new NotFoundError('Approval', request.params.id);
+      if (decision.code === 'self-approval') {
+        throw new ForbiddenError('You raised this request. A money or platform action needs a second person.');
+      }
+      if (decision.code === 'missing-capability') {
+        throw new ForbiddenError('Approving an action you could not perform yourself is a signature, not a check.');
+      }
+      throw new ConflictError(decision.code === 'expired'
+        ? 'That request has expired. The requester must ask again.'
+        : 'That request has already been decided.');
+    }
+    adminApprovalCounter.labels(body.approve ? 'decision_approved' : 'decision_rejected', 'C4').inc();
+    return { success: true, data: { id: request.params.id, status: decision.status } };
   });
 
   // ─── Audit Logs ────────────────────────────────────────────────────────

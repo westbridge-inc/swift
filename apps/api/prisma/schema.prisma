@@ -5251,6 +5251,51 @@ model VendorPrepStat {
 /// the revocation consequence and the owner notice intent commit together or
 /// not at all. The notice is delivered after commit and retried by the
 /// cool-off job until sent — exactly one intent per transition.
+/// [ADM-005] DUAL CONTROL ON MONEY AND PLATFORM ACTIONS.
+///
+/// Every `finance/*`, `billing/*`, `subscriptions/*` and `ads/*` money route
+/// decided on ONE actor's request: a settlement processed, a fee waived, a
+/// top-up granted or an invoice marked paid on one person's say-so, with no
+/// independent check and no reversal path. The only approval model in the
+/// schema, AgentActionRequest, gates the autonomous agent, not a human.
+///
+/// This is the general record the C4/C5 classes now require: what was asked,
+/// by whom, with what reason, over exactly which request — and who, other than
+/// the requester, agreed to it. The fingerprint binds the approval to the
+/// request that was reviewed, so an approved settlement cannot be re-aimed at
+/// a different beneficiary or amount between the decision and the act.
+model PrivilegedApproval {
+  id           String    @id @default(cuid())
+  tenantId     String    @default("swift-default")
+  /// "<METHOD> <route template>" — the classified action, never a raw URL
+  action       String
+  /// AJ.3 class that demanded the approval (C4 money, C5 platform)
+  cls          String
+  /// The capability the actor exercised (ADM-001)
+  capability   String
+  /// The entity the action names, where the route names one
+  entityId     String?
+  /// SHA-256 over the method, route, params and body that were reviewed
+  fingerprint  String
+  /// PENDING | APPROVED | REJECTED | APPLIED | EXPIRED
+  status       String    @default("PENDING")
+  requestedBy  String
+  /// The requester's stated reason (ADM-006) — what the approver reads
+  reason       String
+  approvedBy   String?
+  decisionNote String?
+  decidedAt    DateTime?
+  appliedAt    DateTime?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([tenantId])
+  @@index([status, createdAt])
+  @@index([fingerprint])
+  @@map("privileged_approvals")
+}
+
 model MoneySurfaceCommand {
   id              String    @id @default(cuid())
   tenantId        String    @default("swift-default")

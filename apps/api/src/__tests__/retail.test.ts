@@ -12,6 +12,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { guessColumnMapping, applyMapping, toImportCsv } from '../utils/catalogue-map';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { injectWithApproval } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
 // Retail (spec §4.5): AI/heuristic CSV column-mapping import and the
@@ -80,7 +81,7 @@ async function makeDeliveredOrder(customerId: string, vendorId: string) {
 }
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, token?: string) {
-  return app.inject({
+  return injectWithApproval(app, {
     method, url,
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
     headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),

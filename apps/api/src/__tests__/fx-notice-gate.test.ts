@@ -14,6 +14,7 @@ import { runFxChangeNotices, scanChargesWithoutDeliveredNotice, fxNoticeKey } fr
 import { FX_NOTICE_WINDOW_DAYS } from '../modules/billing/fx';
 import { fxChargesIneligibleCounter } from '../plugins/observability';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { injectWithApproval } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
 // [M-14 · S0] The FX notice is a CHARGE GATE, and the evidence follows delivery.
@@ -101,7 +102,7 @@ async function makeAdmin() {
   return { token, userId: user.id };
 }
 const post = (url: string, payload: unknown, token: string) =>
-  app.inject({ method: 'POST', url, payload: payload as Record<string, unknown>, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json', authorization: `Bearer ${token}` } });
+  injectWithApproval(app, { method: 'POST', url, payload: payload as Record<string, unknown>, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json', authorization: `Bearer ${token}` } });
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';

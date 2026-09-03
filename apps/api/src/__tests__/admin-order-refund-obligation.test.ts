@@ -12,6 +12,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { injectWithApproval } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
 // [A-14] A CASH ORDER REFUND IS A PROMISE UNTIL SOMEBODY PROVES IT.
@@ -66,14 +67,14 @@ async function makeCashOrder(opts?: { payment?: 'CASH' | 'MOBILE_MONEY'; total?:
 const refFor = (prefix: string) => `${prefix}-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}`.toUpperCase();
 
 const cancel = (id: string, body: Record<string, unknown>) =>
-  app.inject({
+  injectWithApproval(app, {
     method: 'PUT', url: `/api/v1/admin/orders/${id}/cancel`,
     headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
     payload: body,
   });
 
 const settle = (id: string, body: Record<string, unknown>) =>
-  app.inject({
+  injectWithApproval(app, {
     method: 'PUT', url: `/api/v1/admin/orders/${id}/refund-settled`,
     headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
     payload: body,
