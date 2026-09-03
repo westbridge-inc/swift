@@ -4290,6 +4290,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = z.object({
       status: z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED']).default('RESOLVED'),
       adminNote: z.string().trim().max(2000).optional(),
+      // [A-18] a close carries a disposition, and says what state the screen believed it was in
+      resolution: z.enum(['ANSWERED', 'ACTION_TAKEN', 'ESCALATED_SAFETY', 'NO_RISK_FOUND', 'UNABLE_TO_CONTACT']).optional(),
+      expectedStatus: z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED']).optional(),
     }).parse(request.body ?? {});
     const updated = await mutationOrNotFound('SupportTicket', id, () => support.resolve(id, request.user.userId, body));
     return { success: true, data: updated };

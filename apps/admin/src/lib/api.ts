@@ -241,8 +241,19 @@ export const fetchCashMetrics = () => apiFetch('/api/v1/admin/cash-rules/metrics
 // ─── Support & comms ─────────────────────────────────────────────
 export const fetchSupportTickets = (status?: string) =>
   apiFetch(`/api/v1/admin/support?${status ? `status=${status}` : ''}`);
-export const resolveSupportTicket = (id: string, status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED', adminNote?: string) =>
-  apiFetch(`/api/v1/admin/support/${id}/resolve`, { method: 'PUT', body: JSON.stringify({ status, adminNote }) });
+/** [A-18] A close carries a disposition and the state the screen was looking at. */
+export type SupportResolution = 'ANSWERED' | 'ACTION_TAKEN' | 'ESCALATED_SAFETY' | 'NO_RISK_FOUND' | 'UNABLE_TO_CONTACT';
+export const resolveSupportTicket = (
+  id: string,
+  status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED',
+  adminNote?: string,
+  resolution?: SupportResolution,
+  expectedStatus?: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED',
+) =>
+  apiFetch(`/api/v1/admin/support/${id}/resolve`, {
+    method: 'PUT',
+    body: JSON.stringify({ status, adminNote, resolution, expectedStatus }),
+  });
 export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
 export const resolveReturn = (id: string, status: 'APPROVED' | 'REJECTED' | 'REFUNDED', note?: string) =>

@@ -2674,6 +2674,10 @@ model SupportTicket {
   message      String
   status       SupportStatus   @default(OPEN)
   adminNote    String?
+  /// [A-18] What actually happened. A ticket cannot reach RESOLVED without one,
+  /// and a SAFETY ticket cannot be closed on "answered" alone — the disposition
+  /// is the structured evidence a safety review reads back.
+  resolution   SupportResolution?
   resolvedById String?
   resolvedBy   User?           @relation("supportResolver", fields: [resolvedById], references: [id])
   resolvedAt   DateTime?
@@ -2700,6 +2704,17 @@ enum SupportStatus {
   OPEN
   IN_PROGRESS
   RESOLVED
+}
+
+/// [A-18] The disposition a support ticket closes with. SAFETY tickets accept
+/// only ACTION_TAKEN, ESCALATED_SAFETY or NO_RISK_FOUND — never ANSWERED — so
+/// "someone replied" can never be the record of a safety review.
+enum SupportResolution {
+  ANSWERED
+  ACTION_TAKEN
+  ESCALATED_SAFETY
+  NO_RISK_FOUND
+  UNABLE_TO_CONTACT
 }
 
 enum EarningType {
