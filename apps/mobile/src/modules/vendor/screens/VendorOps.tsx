@@ -173,14 +173,15 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
             </T>
           </View>
         </View>
-      ) : isPickup && order.pickupCode ? (
+      ) : isPickup ? (
+        // [MOB-050 · A-15] The store is the VERIFIER of the collection code, so
+        // the store never sees it. This row printed the customer's code on the
+        // order board; it now says only that a code is due, and the code itself
+        // is typed on the order screen, where the server compares it.
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: space.sm }}>
           <MaterialCommunityIcons name="form-textbox-password" size={13} color={color.text.muted} />
           <T variant="label" tone="muted">
-            Pickup code{' '}
-          </T>
-          <T variant="label" weight="bold" tone="brand">
-            {order.pickupCode}
+            Ask the customer for their code at collection
           </T>
         </View>
       ) : !isPickup && order.deliveryAddress ? (
