@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { DataUnavailable } from '@/components/dashboard/DataUnavailable';
 import {
   fetchVerificationQueue,
   getDocSignedUrl,
@@ -13,6 +14,16 @@ import { MutationError } from '@/components/MutationError';
 
 const STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'] as const;
 type Status = (typeof STATUSES)[number];
+
+// [A-19] Document types that carry a printed expiry date. Mirrors
+// AUTO_APPROVE_EXPIRY_DAYS in apps/api verification.service.ts — the server is
+// the authority and refuses these without a date; a census test asserts the two
+// lists stay identical, so this copy cannot drift.
+const EXPIRING_DOC_TYPES = [
+  'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
+  'road_service_licence', 'food_handler_cert', 'gra_restaurant_licence',
+  'drivers_licence', 'vehicle_registration',
+] as const;
 
 const EMPTY_INSURANCE: InsuranceCheck = {
   insurerName: '',
@@ -47,8 +58,13 @@ export default function VerificationPage() {
   const [reason, setReason] = useState('');
   const [insurance, setInsurance] = useState<InsuranceCheck>(EMPTY_INSURANCE);
   const [mutationError, setMutationError] = useState<unknown>(null);
+  // [A-19] Which document has actually been OPENED in this session, and the
+  // expiry the reviewer keyed off it. Approving used to be possible without
+  // ever looking at the evidence, and without recording the printed date.
+  const [previewed, setPreviewed] = useState<Set<string>>(new Set());
+  const [expiresAt, setExpiresAt] = useState('');
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['verification', status, lane],
     queryFn: () => fetchVerificationQueue(status, lane),
   });
@@ -58,6 +74,7 @@ export default function VerificationPage() {
     setSelected(null);
     setReason('');
     setInsurance(EMPTY_INSURANCE);
+    setExpiresAt('');
     setMutationError(null);
   };
 
@@ -78,13 +95,18 @@ export default function VerificationPage() {
     setSelected(doc);
     setReason('');
     setInsurance(EMPTY_INSURANCE);
+    setExpiresAt('');
     setMutationError(null);
   };
 
   const viewDocument = async (id: string) => {
     try {
       const res = await getDocSignedUrl(id);
-      if (res?.data?.url) window.open(res.data.url, '_blank', 'noopener');
+      if (!res?.data?.url) throw new Error('no url');
+      window.open(res.data.url, '_blank', 'noopener');
+      // Only a SUCCESSFUL open counts. A signed-URL failure must not unlock the
+      // decision — that is the "false green" half of this defect.
+      setPreviewed((seen) => new Set(seen).add(id));
     } catch {
       alert('Could not open document (it may have been purged under retention).');
     }
@@ -96,6 +118,13 @@ export default function VerificationPage() {
     insurance.policyNumber.trim() !== '' &&
     (insurance.coverageClass !== 'HIRE' || (insurance.hireClassConfirmed && insurance.plateCrossChecked));
   const decisionPending = approveMutation.isPending || rejectMutation.isPending;
+  // [A-19] The three things an approval now requires: the evidence was actually
+  // OPENED, the printed expiry was keyed for a type that has one, and it is in
+  // the future.
+  const needsExpiry = selected ? EXPIRING_DOC_TYPES.includes(selected.docType) : false;
+  const expiryOk = !needsExpiry || (expiresAt !== '' && new Date(expiresAt).getTime() > Date.now());
+  const hasPreviewed = selected ? previewed.has(selected.id) : false;
+  const approveBlocked = !hasPreviewed || !expiryOk || (isInsurance && !insuranceReady);
   const applicantName = selected
     ? [selected.user?.firstName, selected.user?.lastName].filter(Boolean).join(' ') || 'this applicant'
     : '';
@@ -161,6 +190,16 @@ export default function VerificationPage() {
             <tbody>
               {isLoading ? (
                 <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
+              ) : isError ? (
+                /* [A-19] A failed read rendered "No documents" — an empty
+                   compliance queue, to the person whose job is to work it. */
+                <tr><td colSpan={6} className="p-4">
+                  <DataUnavailable
+                    what="the verification queue"
+                    notAnAllClear="This is not an empty queue — we could not read it."
+                    onRetry={() => void refetch()}
+                  />
+                </td></tr>
               ) : rows.length === 0 ? (
                 <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">No documents</td></tr>
               ) : (
@@ -211,12 +250,52 @@ export default function VerificationPage() {
                 <div><span className="text-[var(--muted)]">Consent:</span> {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</div>
               </div>
 
+              {/* [A-19] The vehicle facts the reviewer is asked to cross-check.
+                  The H-plate checkbox below used to assert a comparison against
+                  something the page never showed. */}
+              {selected.user?.driver && (
+                <div className="rounded-lg border border-[var(--border)] bg-[var(--panel-2)] p-3 text-sm">
+                  <div className="text-xs font-medium text-[var(--muted)]">On file for this driver</div>
+                  <div className="mt-1 font-mono text-base">{selected.user.driver.licensePlate ?? '—'}</div>
+                  <div className="text-xs text-[var(--muted)]">
+                    {[selected.user.driver.vehicleMake, selected.user.driver.vehicleModel, selected.user.driver.vehicleType]
+                      .filter(Boolean).join(' · ') || 'no vehicle on file'}
+                  </div>
+                </div>
+              )}
+
               <button
                 onClick={() => viewDocument(selected.id)}
                 className="w-full px-3 py-2 bg-[var(--panel-2)] text-white rounded-lg text-sm hover:bg-[#3A3A3C]"
               >
-                View document (signed URL)
+                {hasPreviewed ? 'View document again' : 'View document (signed URL)'}
               </button>
+              {!hasPreviewed && (
+                <p className="text-xs text-amber-400">
+                  Open the document before deciding — a decision without opening it is not a review.
+                </p>
+              )}
+
+              {needsExpiry && (
+                <div className="space-y-1 border-t border-[var(--border)] pt-3">
+                  <label className="text-xs font-medium text-[var(--muted)]">
+                    Expiry printed on the document (required)
+                  </label>
+                  <input
+                    type="date"
+                    value={expiresAt}
+                    onChange={(e) => setExpiresAt(e.target.value)}
+                    className="w-full px-3 py-2 bg-[var(--panel-2)] rounded-lg text-sm border border-[var(--border)]"
+                  />
+                  {!expiryOk && (
+                    <p className="text-xs text-amber-400">
+                      {expiresAt === ''
+                        ? 'This document type expires — key the date from the document.'
+                        : 'That date has already passed; an expired document cannot be approved.'}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {isInsurance && (
                 <div className="space-y-2 border-t border-[var(--border)] pt-3">
@@ -268,10 +347,16 @@ export default function VerificationPage() {
               {selected.status === 'PENDING' && (
                 <div className="space-y-2 border-t border-[var(--border)] pt-3">
                   <button
-                    disabled={decisionPending || (isInsurance && !insuranceReady)}
+                    disabled={decisionPending || approveBlocked}
                     onClick={() => {
                       if (window.confirm(`Approve ${documentLabel} for ${applicantName}? This changes their operating eligibility.`)) {
-                        approveMutation.mutate({ id: selected.id, body: isInsurance ? { insurance } : undefined });
+                        approveMutation.mutate({
+                          id: selected.id,
+                          body: {
+                            ...(needsExpiry ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
+                            ...(isInsurance ? { insurance } : {}),
+                          },
+                        });
                       }
                     }}
                     className="w-full px-3 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80 disabled:opacity-40"
