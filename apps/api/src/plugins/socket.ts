@@ -23,6 +23,7 @@ import {
 import { guardRedisCommandPromises } from '../utils/redis-command-guard';
 import { warRoomsForSocket } from '../modules/safety/war-room';
 import { isProduction } from '../utils/runtime-mode';
+import { assertRoomAccess } from '../modules/chat/chat-authority';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -580,20 +581,18 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       if (parsed.success) socket.leave(`order:${parsed.data.orderId}`);
     });
 
-    // Chat rooms — only participants can join
+    // Chat rooms — only the order's CURRENT participants can join
+    // [R048-004] The door is the same authority the routes use (the order or
+    // job behind the room, inside its tenant), never the cached participant
+    // rows alone — a rider reassigned off the order cannot re-enter the room.
     socket.on('chat:join', async (raw: unknown) => {
       const parsed = chatEvent.safeParse(raw);
       if (!parsed.success) return;
       try {
-        const participant = await app.prisma.chatRoomParticipant.findUnique({
-          where: { chatRoomId_userId: { chatRoomId: parsed.data.roomId, userId } },
-          select: { id: true },
-        });
-        if (participant) {
-          socket.join(`chat:${parsed.data.roomId}`);
-        }
+        await assertRoomAccess(app.prisma, parsed.data.roomId, userId);
+        socket.join(`chat:${parsed.data.roomId}`);
       } catch {
-        // Non-fatal
+        // Refused or not found — non-fatal, the socket simply does not join
       }
     });
 

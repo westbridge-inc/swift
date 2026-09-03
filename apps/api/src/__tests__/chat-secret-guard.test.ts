@@ -60,6 +60,8 @@ beforeAll(async () => {
   const driver = await mk('Driver');
   userId = customer.id;
   otherId = driver.id;
+  // [R048-004] room authority is the ORDER's current people: the driver must be the order's driver, not merely a participant row
+  const driverRow = await app.prisma.driver.create({ data: { userId: driver.id, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2018, vehicleColor: 'Silver', licensePlate: `HC ${nanoid(4).toUpperCase()}`, driverLicenseUrl: 'https://example.invalid/licence.jpg', vehicleInsuranceUrl: 'https://example.invalid/insurance.jpg' } });
   token = app.jwt.sign({ userId: customer.id, role: 'CUSTOMER', jti: nanoid(8) });
   await app.prisma.session.create({
     data: {
@@ -74,6 +76,7 @@ beforeAll(async () => {
       orderNumber: `SG-${nanoid(8)}`,
       orderType: 'TAXI' as never,
       customerId: customer.id,
+      driverId: driverRow.id,
       status: 'DRIVER_EN_ROUTE' as never,
       pickupLat: 6.8, pickupLng: -58.15,
       pickupAddress: 'pickup', deliveryAddress: 'dropoff',

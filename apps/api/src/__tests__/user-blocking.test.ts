@@ -201,6 +201,15 @@ describe('a block stops contact, in both directions (STORE-002)', () => {
     const carol = await mkUser('Carol');
     const dave = await mkUser('Dave');
     const order = await mkSharedOrder(carol.id);
+    // [R048-004] A room's people are the ORDER's people. Dave is the rider on
+    // every order below — a participant row that the order does not back is a
+    // stale row, and the authority refuses it (which is the point of the
+    // finding). The second half of this test already said so; now all of it does.
+    const daveRider = await app.prisma.rider.create({
+      data: { userId: dave.id, riderType: 'DELIVERY' as never, vehicleType: 'MOTORCYCLE' as never, documentsVerified: true },
+    });
+    riderIds.push(daveRider.id);
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: daveRider.id } });
 
     // A room they built while on speaking terms, with one message in it.
     const room = await app.prisma.chatRoom.create({
@@ -240,10 +249,6 @@ describe('a block stops contact, in both directions (STORE-002)', () => {
     // room they can sit and watch. This needs Dave actually ON the order as a
     // rider — a room whose only participant is the caller proves nothing.
     const order2 = await mkSharedOrder(carol.id);
-    const daveRider = await app.prisma.rider.create({
-      data: { userId: dave.id, riderType: 'DELIVERY' as never, vehicleType: 'MOTORCYCLE' as never, documentsVerified: true },
-    });
-    riderIds.push(daveRider.id);
     await app.prisma.order.update({ where: { id: order2.id }, data: { riderId: daveRider.id } });
     const newRoom = await post('/api/v1/chat/rooms', carol.token, { orderId: order2.id });
     expect(newRoom.statusCode).toBe(403);
@@ -253,6 +258,7 @@ describe('a block stops contact, in both directions (STORE-002)', () => {
     // Everyone else is unaffected — one person's block is not a platform ban.
     const eve = await mkUser('Eve');
     const order3 = await mkSharedOrder(eve.id);
+    await app.prisma.order.update({ where: { id: order3.id }, data: { riderId: daveRider.id } });
     const eveRoom = await app.prisma.chatRoom.create({
       data: {
         orderId: order3.id,
