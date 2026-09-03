@@ -147,11 +147,16 @@ describe('census: nothing else turns subtotalBase into a float amount', () => {
 
   it('the one reader is imported where the money moves', () => {
     const importers = files.filter((f) => /\briderFloatForOrder\(/.test(f.code)).map((f) => f.rel).sort();
+    // [ORD-2] mover-authority is NOT here any more, and its absence is the
+    // point. Session revocation used to release the float itself, in a copy of
+    // the release body; it now goes through reopenPreCustodyLeg like the
+    // watchdog and the handback, and the kernel releases the float. One fewer
+    // place that computes what a rider fronted is the improvement, not a gap —
+    // this census caught the change, which is what it is for.
     expect(importers).toEqual([
       'modules/dispatch/delivery-watchdog.ts',
       'modules/dispatch/dispatch.service.ts',
       'modules/dispatch/float.service.ts',
-      'modules/mover-authority.ts',
       'modules/order/order.service.ts',
       'modules/rider/rider.routes.ts',
     ]);

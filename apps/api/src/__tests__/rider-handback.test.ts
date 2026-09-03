@@ -77,13 +77,13 @@ async function makeCustomer() {
 }
 
 async function makeAssignedOrder(opts: {
-  customerId: string; riderId: string; status?: string;
+  customerId: string; riderId: string; status?: string; orderType?: string;
   readyAt?: Date | null; preparingAt?: Date | null; total?: number; subtotal?: number;
 }) {
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `HB-${nanoid(8)}`,
-      orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
+      orderType: (opts.orderType ?? 'FOOD_DELIVERY') as never, fulfillment: 'DELIVERY',
       customerId: opts.customerId, vendorId,
       status: (opts.status ?? 'RIDER_ASSIGNED') as never,
       paymentMethod: 'CASH',
@@ -203,6 +203,27 @@ describe('G14 — the custody line is absolute', () => {
     expect(fresh.riderId).toBe(rider.id);
     const r = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } });
     expect(Number(r.committedFloat)).toBe(3000); // custody keeps the float committed
+  });
+
+  it('[ORD-2] a COURIER parcel re-opens to READY_FOR_PICKUP — it has no kitchen to be un-ready in', async () => {
+    // The release kernel used to read only the timestamps, so a courier parcel
+    // with no readyAt re-opened to ACCEPTED. A COURIER order at ACCEPTED reads
+    // to the customer as "Rider found" — while the rider had just been taken
+    // away. Session revocation already knew better; now there is one answer.
+    const { rider, token } = await makeRider();
+    const customer = await makeCustomer();
+    const order = await makeAssignedOrder({
+      customerId: customer.id, riderId: rider.id, orderType: 'COURIER',
+      readyAt: null, preparingAt: null,
+    });
+
+    const res = await handback(order.id, token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe('READY_FOR_PICKUP');
+
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(fresh.status).toBe('READY_FOR_PICKUP');
+    expect(fresh.riderId).toBeNull();
   });
 
   it("another rider's order is not yours to hand back", async () => {
