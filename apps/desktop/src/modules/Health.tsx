@@ -51,9 +51,26 @@ export default function Health() {
       <section>
         <p className="text-xs font-bold uppercase tracking-wider text-neutral-400">
           Alert delivery · last {alerts.data?.windowHours ?? 24}h
+          {alerts.isError ? <span className="ml-2 text-[var(--swift-red)]">· unavailable</span> : null}
         </p>
+        {/* [D-11] A failed read is not a quiet notification system. This
+            section rendered "No alerts sent in the window" whether the window
+            was genuinely quiet or the telemetry endpoint had 403'd, timed out
+            or drifted — so an operator checking whether safety alerts were
+            going out was told they were fine, by a panel that could see
+            nothing. The DLQ section below already got this right; this one
+            never did. */}
         <div className="mt-2 flex flex-wrap gap-3">
-          {(alerts.data?.kinds ?? []).length === 0 && (
+          {alerts.isError && (
+            <p role="status" className="rounded-xl border border-[var(--swift-red)]/50 bg-[var(--swift-red)]/10 p-4 text-sm">
+              <span className="font-bold text-[var(--swift-red)]">Alert delivery could not be read.</span>{' '}
+              <span className="text-neutral-600">
+                This is NOT "no alerts" — alerts may be sending, or failing, unseen.
+                {alerts.dataUpdatedAt ? ` Last successful read ${new Date(alerts.dataUpdatedAt).toLocaleTimeString()}.` : ''}
+              </span>
+            </p>
+          )}
+          {!alerts.isError && !alerts.isLoading && (alerts.data?.kinds ?? []).length === 0 && (
             <p className="rounded-xl border border-dashed border-neutral-200 p-4 text-sm text-neutral-400">
               No alerts sent in the window.
             </p>
