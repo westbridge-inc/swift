@@ -39,6 +39,7 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
+import { capabilityMode, decideCapability, routeTemplateOf } from './admin-authority';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -54,7 +55,7 @@ import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePr
 import { assertNoZoneOverlap } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { createHash } from 'node:crypto';
-import { billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
+import { adminCapabilityCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
@@ -652,6 +653,38 @@ export async function adminRoutes(app: FastifyInstance) {
   // per-route guards stay (re-running auth is idempotent) so nothing changes
   // for existing routes; this just closes the forgot-the-guard gap.
   app.addHook('onRequest', adminGuard);
+
+  // [ADM-001] THE CAPABILITY DECISION, after authentication and before the
+  // handler, on every admin route including the ones whose per-route guard is
+  // founder-only. `Admin.permissions` has existed in the schema since the
+  // beginning, was written as `['*']` by the seed, and was read by NOTHING:
+  // the whole permission engine was one boolean over 167 routes. It is read
+  // now, live, so revoking a grant takes effect on the next request rather
+  // than on the next token — which is why this is a query and not a claim.
+  app.addHook('onRequest', async (request: any) => {
+    const routeUrl = routeTemplateOf(request, app.prefix);
+    const role: string | undefined = request.user?.role;
+    const userId: string | undefined = request.user?.userId;
+    if (!role || !userId) return; // adminGuard already refused; nothing to decide
+    const grant = await app.prisma.admin.findUnique({ where: { userId }, select: { permissions: true } });
+    const decision = decideCapability({ role, permissions: grant?.permissions ?? null }, request.method, routeUrl);
+    adminCapabilityCounter.labels(decision.allowed ? 'granted' : decision.reason, decision.cls ?? 'none').inc();
+    if (decision.allowed) return;
+    if (capabilityMode() === 'shadow') {
+      adminCapabilityCounter.labels('shadow_denied', decision.cls ?? 'none').inc();
+      app.log.warn({ userId, routeUrl, method: request.method, capability: decision.capability, reason: decision.reason },
+        '[ADM-001] capability decision would DENY (shadow mode)');
+      return;
+    }
+    // An unregistered route is denied, not allowed: default-allow over an
+    // unreviewed action is precisely how one boolean came to govern 79
+    // mutations. The census test keeps this branch unreachable in practice.
+    throw new ForbiddenError(
+      decision.reason === 'unregistered-route'
+        ? 'This admin action is not classified and cannot be performed'
+        : `This admin action requires the ${decision.capability} capability`,
+    );
+  });
 
   // Every successful admin STATE CHANGE is audited, automatically. A scoped
   // onResponse hook (plugin encapsulation: admin routes only) means a new
