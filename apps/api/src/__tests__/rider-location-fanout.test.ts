@@ -173,6 +173,25 @@ describe('one ping, every customer', () => {
     expect(toSecond!.payload.etaMinutes).toBeGreaterThan(toFirst!.payload.etaMinutes);
   });
 
+  it('[MOB-024] each room is told WHICH order the fix is for — with two legs live, that is the only thing telling them apart', async () => {
+    const r = await makeRider();
+    const first = await makeLeg(r.riderId, 'EN_ROUTE_DELIVERY', { lat: 7.1, lng: -58.4 }, new Date(Date.now() - 60_000));
+    const second = await makeLeg(r.riderId, 'RIDER_EN_ROUTE_PICKUP', { lat: PICKUP.lat + 0.001, lng: PICKUP.lng + 0.001 }, new Date());
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { currentOrderId: first.id } });
+
+    const spy = spyEmits();
+    try { await ping(r.token, r.riderId); } finally { spy.restore(); }
+
+    const toFirst = spy.emits.find((e) => e.room === `order:${first.id}` && e.event === 'rider:location');
+    const toSecond = spy.emits.find((e) => e.room === `order:${second.id}` && e.event === 'rider:location');
+    // The customer's screen has no other way to know a fix is theirs: it used
+    // to accept any rider:location it heard, so an event from a room it had
+    // not left moved the courier marker on someone else's delivery.
+    expect(toFirst!.payload.orderId, 'the first room is told its own order').toBe(first.id);
+    expect(toSecond!.payload.orderId, 'the second room is told its own order').toBe(second.id);
+    expect(toFirst!.payload.orderId).not.toBe(toSecond!.payload.orderId);
+  });
+
   it('a single leg behaves exactly as before: one room, direct ETA', async () => {
     const r = await makeRider();
     const only = await makeLeg(r.riderId, 'EN_ROUTE_DELIVERY', { lat: PICKUP.lat + 0.01, lng: PICKUP.lng + 0.01 }, new Date());

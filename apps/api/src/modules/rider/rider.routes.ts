@@ -898,6 +898,13 @@ export async function riderRoutes(app: FastifyInstance) {
         for (const leg of legEtas) {
           if (!stillLive.has(leg.orderId)) continue;
           app.io.to(`order:${leg.orderId}`).emit('rider:location', {
+            // [MOB-024] The event NAMES its order. It is emitted into that
+            // order's room, so the server already knows — and without it the
+            // customer's screen had nothing to check a fix against, so a
+            // coordinate from another room (a retained subscription, a
+            // reconnect that rejoined an old room) moved the courier marker
+            // and the ETA on the wrong customer's delivery.
+            orderId: leg.orderId,
             riderId: rider.id,
             lat: latitude,
             lng: longitude,
