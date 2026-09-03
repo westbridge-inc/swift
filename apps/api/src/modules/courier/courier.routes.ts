@@ -283,7 +283,9 @@ export default async function courierRoutes(app: FastifyInstance) {
         pickupAddress: true,
         deliveryAddress: true,
         estimatedDeliveryTime: true,
-        rider: { select: { currentLat: true, currentLng: true, user: { select: { firstName: true } } } },
+        // [W-47] the position's OWN timestamp travels with it: the page used to
+        // show the age of its own fetch, so a ten-minute-old point read "just now"
+        rider: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true, user: { select: { firstName: true } } } },
       },
     });
     if (!order) throw new NotFoundError('CourierOrder', token);

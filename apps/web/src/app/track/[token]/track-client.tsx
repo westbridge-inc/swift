@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createSequence, freshness, mapEmbedUrl, mapLinkUrl, validPoint } from '@/lib/live-tracking';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 // The polling client for the public parcel page [B9]. Renders exactly what
@@ -17,7 +18,9 @@ interface ParcelView {
   pickupAddress: string | null;
   deliveryAddress: string | null;
   estimatedDeliveryTime: number | null;
-  rider: { currentLat: number | null; currentLng: number | null; user: { firstName: string | null } | null } | null;
+  /** [W-47] `lastLocationUpdate` is the POSITION's own timestamp: the page shows how old the
+   *  point is, not how recently it happened to fetch. */
+  rider: { currentLat: number | null; currentLng: number | null; lastLocationUpdate?: string | null; user: { firstName: string | null } | null } | null;
 }
 
 /** The recipient's words for the courier state machine — a sentence, not an
@@ -41,13 +44,23 @@ export function TrackClient({ token }: { token: string }) {
   const [view, setView] = useState<ParcelView | null>(null);
   const [gone, setGone] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [fetchedAt, setFetchedAt] = useState<number | null>(null);
+  const [positionAt, setPositionAt] = useState<number | null>(null);
+  const [serverTimed, setServerTimed] = useState(false);
+  // [W-47] An INDEPENDENT clock. The age used to be derived during render from
+  // a value that only changed on a SUCCESSFUL poll, so an outage froze
+  // "Updated 4s ago" on screen for as long as it lasted. This ticks regardless.
+  const [now, setNow] = useState(() => Date.now());
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sequence = useRef(createSequence());
 
   const load = useCallback(async () => {
+    // [W-47] Every request takes a number and only the newest applies, so a
+    // slow response landing after a newer one cannot move the courier backwards.
+    const seq = sequence.current.next();
     try {
       const res = await fetch(`${API_URL}/api/v1/courier/track/${encodeURIComponent(token)}`, { cache: 'no-store' });
       if (res.status === 404) {
+        if (!sequence.current.accept(seq)) return;
         setGone(true);
         setView(null);
         if (timer.current) clearInterval(timer.current);
@@ -55,13 +68,21 @@ export function TrackClient({ token }: { token: string }) {
       }
       const body = await res.json();
       if (body?.success && body.data) {
-        setView(body.data as ParcelView);
-        setFetchedAt(Date.now());
-        if (TERMINAL.has((body.data as ParcelView).status) && timer.current) clearInterval(timer.current);
+        if (!sequence.current.accept(seq)) return;
+        const data = body.data as ParcelView;
+        setView(data);
+        // [W-47] The POSITION's own timestamp when the server sends one; the
+        // arrival time only as a fallback, and the page says which it means.
+        const serverAt = data.rider?.lastLocationUpdate ? Date.parse(data.rider.lastLocationUpdate) : NaN;
+        const hasServerAt = Number.isFinite(serverAt);
+        setServerTimed(hasServerAt);
+        setPositionAt(hasServerAt ? serverAt : Date.now());
+        setNow(Date.now());
+        if (TERMINAL.has(data.status) && timer.current) clearInterval(timer.current);
       }
     } catch {
-      // Network blip: keep the last-good view on screen; the freshness line
-      // tells the truth about its age.
+      // Network blip: keep the last-good view on screen. The freshness line
+      // below keeps ageing it, so it stops claiming to be current.
     } finally {
       setLoading(false);
     }
@@ -75,12 +96,19 @@ export function TrackClient({ token }: { token: string }) {
     };
   }, [load]);
 
-  const ageSeconds = fetchedAt ? Math.max(0, Math.round((Date.now() - fetchedAt) / 1000)) : null;
+  // the clock that makes an outage visible
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, []);
+
+  const age = freshness(positionAt, now);
   const live = view ? !TERMINAL.has(view.status) : false;
-  const loc =
-    view?.rider && view.rider.currentLat != null && view.rider.currentLng != null
-      ? { lat: view.rider.currentLat, lng: view.rider.currentLng }
-      : null;
+  // [W-47] An unvalidated point rendered a map of wherever the numbers landed.
+  const loc = validPoint(view?.rider?.currentLat, view?.rider?.currentLng);
+  // and a position too old to trust is not shown as a live map at all
+  const showMap = loc !== null && age.kind !== 'lost';
+  const freshnessLabel = age.kind === 'none' ? null : serverTimed ? age.label : age.label.replace('Updated', 'Received');
 
   return (
     <main className="min-h-screen bg-[var(--swift-canvas)] text-[var(--swift-ink)]">
@@ -118,8 +146,16 @@ export function TrackClient({ token }: { token: string }) {
           <>
             <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm">
               <p className="text-base font-semibold">{STATUS_LABEL[view.status] ?? view.status}</p>
-              {ageSeconds !== null && live ? (
-                <p className="mt-0.5 text-xs text-[#786C6C]">Updated {ageSeconds < 3 ? 'just now' : `${ageSeconds}s ago`}</p>
+              {/* [W-47] aria-live so a screen reader hears the position age change,
+                  and red once it stops being current — the page used to look
+                  identical whether it was polling or had silently stopped. */}
+              {freshnessLabel && live ? (
+                <p
+                  aria-live="polite"
+                  className={`mt-0.5 text-xs ${age.kind === 'fresh' ? 'text-[#786C6C]' : 'font-semibold text-[var(--swift-red)]'}`}
+                >
+                  {freshnessLabel}
+                </p>
               ) : null}
               {view.estimatedDeliveryTime != null && live ? (
                 <p className="mt-1 text-sm text-[#786C6C]">About {view.estimatedDeliveryTime} min door to door</p>
@@ -138,21 +174,28 @@ export function TrackClient({ token }: { token: string }) {
               </div>
             ) : null}
 
-            {loc ? (
+            {showMap && loc ? (
               <div className="mt-3 overflow-hidden rounded-2xl bg-white shadow-sm">
+                {/* [W-47] The point is COARSENED to about 110 m before it leaves for
+                    a third party, and no referer goes with it — every map load used
+                    to disclose a live person's precise position and which tracking
+                    token was watching. A first-party tile proxy is the real answer
+                    and is stated as deferred in the register. */}
                 <iframe
-                  title="Courier location"
+                  title="Courier location, approximate"
                   className="h-64 w-full border-0"
                   loading="lazy"
-                  src={`https://www.openstreetmap.org/export/embed.html?bbox=${loc.lng - 0.008}%2C${loc.lat - 0.008}%2C${loc.lng + 0.008}%2C${loc.lat + 0.008}&layer=mapnik&marker=${loc.lat}%2C${loc.lng}`}
+                  referrerPolicy="no-referrer"
+                  src={mapEmbedUrl(loc)}
                 />
                 <a
                   className="block px-4 py-3 text-sm font-semibold text-[var(--swift-red)]"
-                  href={`https://www.openstreetmap.org/?mlat=${loc.lat}&mlon=${loc.lng}#map=16/${loc.lat}/${loc.lng}`}
+                  href={mapLinkUrl(loc)}
                   target="_blank"
                   rel="noreferrer"
+                  referrerPolicy="no-referrer"
                 >
-                  Open full map ↗
+                  Open approximate map ↗
                 </a>
               </div>
             ) : live ? (
