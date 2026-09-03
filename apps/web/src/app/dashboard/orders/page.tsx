@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import NewOrderTakeover from '@/components/NewOrderTakeover';
 import { MutationNotice } from '@/components/mutation-notice';
+import { storeKey, useStoreId } from '@/lib/store-scope';
 import {
   acceptOrder, completePickup, confirmPayment, getItems, getOrder, getOrders,
   markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
@@ -74,11 +75,12 @@ function actionsFor(o: VendorOrder) {
 
 function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
   const queryClient = useQueryClient();
+  const storeId = useStoreId();
   const refresh = () => {
-    queryClient.invalidateQueries({ queryKey: ['order', order.id] });
-    queryClient.invalidateQueries({ queryKey: ['orders'] });
+    queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'order', order.id) });
+    queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'orders') });
   };
-  const items = useQuery({ queryKey: ['items', 'all'], queryFn: () => getItems() });
+  const items = useQuery({ queryKey: storeKey(storeId, 'items', 'all'), queryFn: () => getItems() });
   const [subFor, setSubFor] = useState<string | null>(null);
 
   const pickedMut = useMutation({
@@ -192,7 +194,8 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
 
 function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const queryClient = useQueryClient();
-  const order = useQuery({ queryKey: ['order', id], queryFn: () => getOrder(id), refetchInterval: 10_000 });
+  const storeId = useStoreId();
+  const order = useQuery({ queryKey: storeKey(storeId, 'order', id), queryFn: () => getOrder(id), refetchInterval: 10_000 });
   const [prepTime, setPrepTime] = useState(20);
   const [pickupCode, setPickupCode] = useState('');
   // [W-25] The store's attestation carries the provider reference from its own
@@ -201,8 +204,8 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = () => {
-    queryClient.invalidateQueries({ queryKey: ['order', id] });
-    queryClient.invalidateQueries({ queryKey: ['orders'] });
+    queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'order', id) });
+    queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'orders') });
   };
   const act = useMutation({
     mutationFn: async (kind: string) => {
@@ -368,12 +371,13 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
 }
 
 export default function OrdersPage() {
+  const storeId = useStoreId();
   const [bucket, setBucket] = useState<(typeof BUCKETS)[number]['key']>('new');
   const [selected, setSelected] = useState<string | null>(null);
 
   // One poll feeds every lane — the queue is the live surface, keep it fresh.
   const orders = useQuery({
-    queryKey: ['orders'],
+    queryKey: storeKey(storeId, 'orders'),
     queryFn: () => getOrders({ limit: 100 }),
     refetchInterval: 10_000,
   });

@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, Search } from 'lucide-react';
 import { adjustStock, getCategories, getItems, money, setItemAvailability, updateItem, type CatalogItem } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
+import { storeKey, useStoreId } from '@/lib/store-scope';
 
 type AdjustReason = 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN';
 
@@ -88,16 +89,17 @@ function PriceEdit({ item, onDone }: { item: CatalogItem; onDone: () => void }) 
 
 export default function InventoryPage() {
   const queryClient = useQueryClient();
+  const storeId = useStoreId();
   const [search, setSearch] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [lowOnly, setLowOnly] = useState(false);
   const [adjusting, setAdjusting] = useState<string | null>(null);
   const [editingPrice, setEditingPrice] = useState<string | null>(null);
 
-  const items = useQuery({ queryKey: ['items', 'all'], queryFn: () => getItems() });
-  const categories = useQuery({ queryKey: ['categories'], queryFn: getCategories });
+  const items = useQuery({ queryKey: storeKey(storeId, 'items', 'all'), queryFn: () => getItems() });
+  const categories = useQuery({ queryKey: storeKey(storeId, 'categories'), queryFn: getCategories });
 
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ['items'] });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'items') });
   const availMut = useMutation({
     mutationFn: (v: { id: string; isAvailable: boolean }) => setItemAvailability(v.id, v.isAvailable),
     onSettled: refresh,
