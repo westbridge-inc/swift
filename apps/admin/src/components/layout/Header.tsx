@@ -2,14 +2,15 @@
 
 import { LogOut } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { clearTokens } from '@/lib/api';
+import { logout } from '@/lib/api';
 import { GlobalSearch } from './GlobalSearch';
 
 export function Header() {
   const router = useRouter();
 
-  function handleLogout() {
-    clearTokens();
+  async function handleLogout() {
+    // [A-01] revoke on the server (family + cookies); the shell fails closed to /login either way
+    await logout();
     router.replace('/login');
   }
 

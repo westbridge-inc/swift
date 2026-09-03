@@ -19,9 +19,15 @@ const API = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 // hydration/HMR without nonce infrastructure; the load-bearing protections here
 // are frame-ancestors (no clickjacking), a restricted connect-src (limits where
 // an injected script could exfiltrate a token), object-src 'none', base-uri 'self'.
+// [A-01] No credential lives in the browser any more (the session is an
+// HttpOnly cookie pair), so an injected script has nothing to read; the CSP
+// still shrinks what it could DO: 'unsafe-eval' is granted only to development
+// (Next's HMR needs it) and never to a production build. A nonce/hash script
+// policy and Trusted Types are the next step, stated as such in the register.
+const isProductionBuild = process.env['NODE_ENV'] === 'production';
 const csp = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  isProductionBuild ? "script-src 'self' 'unsafe-inline'" : "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",

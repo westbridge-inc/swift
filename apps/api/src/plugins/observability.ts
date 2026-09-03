@@ -120,6 +120,16 @@ export const dispatchSearchesCounter = new client.Counter({
 /** [R048-007] Money-surface authority transitions and refusals: staged, stage_replay, cancelled, cleared, applied,
  *  apply_lease_missed, refused_authority_moved, refused_no_decision, refused_step_up, refused_control_unavailable,
  *  notice_sent, notice_retry, notice_sweep. */
+/** [A-01 / W-01] Browser (cookie-mode) sessions: cookie_issued, cookie_refreshed, cookie_auth, cookie_cleared,
+ *  cookie_rejected_header (a cookie without the client header), cookie_rejected_origin (a cookie from an origin
+ *  outside the CORS allowlist), body_tokens_refused. */
+export const browserSessionCounter = new client.Counter({
+  name: 'swift_browser_session_total',
+  help: 'Browser cookie-session events (cookie_issued/cookie_refreshed/cookie_auth/cookie_cleared/cookie_rejected_header/cookie_rejected_origin)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 export const moneySurfaceCounter = new client.Counter({
   name: 'swift_money_surface_total',
   help: 'Money-surface authority transitions and refusals by event',
