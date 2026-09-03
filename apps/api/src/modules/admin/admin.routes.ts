@@ -54,10 +54,11 @@ import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePr
 import { assertNoZoneOverlap } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { createHash } from 'node:crypto';
-import { billingTopupMissingKeyCounter, ratingReportTenancyCounter } from '../../plugins/observability';
+import { billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
+import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -246,8 +247,17 @@ const claimsQueueQuerySchema = z.object({
 const returnsQuerySchema = z.object({
   status: z.nativeEnum(ReturnStatus).optional(),
 });
+// [A-13] REFUNDED is no longer settable here. Deciding to refund records an
+// OBLIGATION (REFUND_DUE); only reconciled evidence closes it, through
+// /returns/:id/refund-settled below.
 const resolveReturnSchema = z.object({
-  status: z.enum(['APPROVED', 'REJECTED', 'REFUNDED']),
+  status: z.enum(['APPROVED', 'REJECTED', 'REFUND_DUE']),
+  note: z.string().max(1000).optional(),
+});
+
+const settleRefundSchema = z.object({
+  reference: z.string(),
+  amount: z.union([z.number(), z.string()]),
   note: z.string().max(1000).optional(),
 });
 
@@ -4249,7 +4259,77 @@ export async function adminRoutes(app: FastifyInstance) {
       where: { id },
       data: { status: body.status, resolutionNote: body.note, reviewedBy: request.user.userId, reviewedAt: new Date() },
     }));
+    if (body.status === 'REFUND_DUE') returnRefundCounter.labels('owed').inc();
     await audit(request.user.userId, 'RESOLVE_RETURN', 'ReturnRequest', id, { status: body.status }, request);
+    return { success: true, data: updated };
+  });
+
+  /**
+   * [A-13] PUT /returns/:id/refund-settled — the money actually moved.
+   *
+   * This is the ONLY way a return reaches REFUNDED. The settler names the
+   * transfer (unique across returns: one payment settles one return) and the
+   * amount they actually sent, checked against the refund the algorithm
+   * computed. A return that is merely decided stays REFUND_DUE, visible as
+   * money owed rather than money paid.
+   */
+  app.put('/returns/:id/refund-settled', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = settleRefundSchema.parse(request.body);
+    const existing = await tenantPrisma.returnRequest.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundError('ReturnRequest', id);
+    if (existing.status !== 'REFUND_DUE') {
+      throw new AppError(
+        400,
+        'NOT_REFUND_DUE',
+        `Only a return awaiting payment can be settled — this one is ${existing.status.toLowerCase()}.`,
+      );
+    }
+    const reference = normaliseReference(body.reference, {
+      required: 'Enter the bank or MMG reference for the refund you sent — it is the only proof it happened.',
+      invalid: 'That does not look like a transfer reference. Copy it from the bank or MMG receipt.',
+    }, 'REFUND_REF');
+    // counted after the shape check so a refusal is attributable
+    const paid = assertAmountAttested(existing.refundAmount, body.amount, {
+      required: 'State the amount you actually refunded before closing this return.',
+      unreadable: 'This return has no readable refund amount and cannot be closed.',
+      mismatch: (owed, stated) =>
+        `This return is owed GY$${owed.toLocaleString()}, not GY$${stated.toLocaleString()}. Refund the owed amount, or record the difference as an exception first.`,
+    }, 'REFUND_AMOUNT');
+
+    const settled = await tenantPrisma.returnRequest.updateMany({
+      where: { id, status: 'REFUND_DUE' },
+      data: {
+        status: 'REFUNDED',
+        refundRef: reference,
+        refundPaidAmount: paid,
+        refundPaidById: request.user.userId,
+        refundPaidAt: new Date(),
+        ...(body.note ? { resolutionNote: body.note } : {}),
+      },
+    }).catch((err: unknown) => {
+      if (isDuplicateOn(err, 'refundRef')) {
+        returnRefundCounter.labels('refused_duplicate').inc();
+        throw new AppError(
+          409,
+          'REFUND_REF_ALREADY_USED',
+          'That reference is already recorded against another return. One transfer settles one return.',
+        );
+      }
+      throw err;
+    });
+    if (settled.count === 0) throw new AppError(409, 'ALREADY_SETTLED', 'This return was settled by someone else just now.');
+
+    await audit(
+      request.user.userId,
+      'SETTLE_RETURN_REFUND',
+      'ReturnRequest',
+      id,
+      { reference, amount: String(paid) },
+      request,
+    );
+    returnRefundCounter.labels('settled').inc();
+    const updated = await tenantPrisma.returnRequest.findUniqueOrThrow({ where: { id } });
     return { success: true, data: updated };
   });
 

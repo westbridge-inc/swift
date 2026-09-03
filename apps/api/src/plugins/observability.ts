@@ -797,6 +797,18 @@ export const mmgAttestationCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [A-13] Return refunds by lifecycle event. `owed` is an obligation recorded,
+ *  `settled` is money proved to have moved, and the refusal labels are the
+ *  evidence a settlement was turned away for. The gap between `owed` and
+ *  `settled` IS the unpaid-refund backlog — the number the register asks for
+ *  under "refunded-without-provider evidence and refund aging". */
+export const returnRefundCounter = new client.Counter({
+  name: 'swift_return_refund_total',
+  help: 'Return refund lifecycle (owed, settled, refused_reference, refused_amount, refused_duplicate)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 /** [S-19] Ops alerts: opened, acknowledged, escalated (zero ACK by deadline),
  *  on-call texts, drills, and alerts nobody can acknowledge. */
 export const opsAlertCounter = new client.Counter({
