@@ -153,3 +153,48 @@ describe('a money queue is not one queue among six', () => {
     expect(settlement.className).toMatch(/red/);
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// [A-08] The page used to state, of all 53 job classes at once, that "every
+// Swift job is written to be idempotent" — and offer one-click retry on the
+// strength of it. Each row now carries its own answer, and the button obeys it.
+// ---------------------------------------------------------------------------
+const uncertifiedFailure = {
+  ...settlementFailure,
+  id: '911',
+  name: 'process-billing',
+  recovery: { policy: 'NOT_CERTIFIED' as const, why: 'Not yet certified — see the method in this file.' },
+};
+const certifiedFailure = {
+  ...settlementFailure,
+  id: '912',
+  name: 'qr-attribution-purge',
+  recovery: { policy: 'SAFE_REPLAY' as const, why: 'Hard-deletes rows already past their expiry.' },
+};
+
+describe('[A-08] retry-safety is a property each class earns', () => {
+  it('the blanket promise is gone — the page no longer says every job is idempotent', async () => {
+    mockApi(() => ({ body: { success: true, data: [certifiedFailure] } }));
+    renderWithQuery(<JobsPage />);
+    await screen.findByText(/qr-attribution-purge/);
+    expect(screen.queryByText(/every Swift job is written to be idempotent/)).toBeNull();
+    expect(screen.getByText(/Whether that is safe depends on the job/)).toBeTruthy();
+  });
+
+  it('an uncertified class cannot be retried from the page, and says why', async () => {
+    mockApi(() => ({ body: { success: true, data: [uncertifiedFailure] } }));
+    renderWithQuery(<JobsPage />);
+    await screen.findByText(/process-billing/);
+    expect(screen.getByText(/Not replayable:/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Retry this job' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('a certified class still retries — the tool works where the property was established', async () => {
+    mockApi(() => ({ body: { success: true, data: [certifiedFailure] } }));
+    renderWithQuery(<JobsPage />);
+    await screen.findByText(/qr-attribution-purge/);
+    expect(screen.queryByText(/Not replayable:/)).toBeNull();
+    expect((screen.getByRole('button', { name: 'Retry this job' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
