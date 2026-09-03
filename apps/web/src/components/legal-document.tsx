@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { site, SITE_ORIGIN } from '@/site.config';
 import { LEGAL_VERSION, LEGAL_LAST_UPDATED } from '@/legal/generated';
+import { legalPlainText, sanitizeLegalHtml } from '@/legal/legal-html';
 
 /**
  * The shell every legal document renders inside.  [SITE-1.1 Part 2]
@@ -10,9 +11,16 @@ import { LEGAL_VERSION, LEGAL_LAST_UPDATED } from '@/legal/generated';
  * (see scripts/sync-legal.ts), so the page is fully static and survives an API
  * outage — which is the state Apple is most likely to hit during enrollment.
  *
- * The document HTML comes from DGP-1 and is inserted verbatim. The site styles
- * its presentation and supplies the heading, version and effective date; it
- * changes no legal word.
+ * The document HTML comes from DGP-1. The site styles its presentation and
+ * supplies the heading, version and effective date; it changes no legal word.
+ *
+ * [W-42] It is not inserted verbatim. The snapshot is written by the build in
+ * the canonical form of the legal grammar (`@/legal/legal-html`), and this
+ * component re-parses it before injecting anything: what reaches the DOM is
+ * the grammar's own serialisation, built from the parse tree. A document that
+ * fails the grammar — a tampered artifact, a hand-edit, a poisoned build — is
+ * never injected; its words are rendered as plain text instead, so the page
+ * still tells the reader the truth and carries no markup at all.
  */
 
 export function legalMetadata(title: string, description: string, path: string): Metadata {
@@ -32,6 +40,7 @@ export function legalMetadata(title: string, description: string, path: string):
 }
 
 export function LegalDocument({ title, html }: { title: string; html: string }) {
+  const parsed = sanitizeLegalHtml(html);
   return (
     <article className="mx-auto max-w-3xl px-5 py-14 md:py-20">
       <header className="border-b border-[var(--swift-border)] pb-7">
@@ -58,9 +67,20 @@ export function LegalDocument({ title, html }: { title: string; html: string }) 
         </dl>
       </header>
 
-      {/* eslint-disable-next-line react/no-danger -- DGP-1 document text, committed
-          to the repo and drift-checked in CI. Not user input, never remote. */}
-      <div className="legal-prose mt-10" dangerouslySetInnerHTML={{ __html: html }} />
+      {parsed.ok ? (
+        /* eslint-disable-next-line react/no-danger -- [W-42] not the prop: `parsed.html`
+           is this render's own re-serialisation of the parse tree, under the legal
+           grammar, which admits no script, no event handler and no foreign link. */
+        <div className="legal-prose mt-10" dangerouslySetInnerHTML={{ __html: parsed.html }} />
+      ) : (
+        <div className="legal-prose mt-10">
+          <p className="rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-subtle)] p-4 text-sm text-[var(--swift-muted)]">
+            This document could not be verified for display, so it is shown as plain text. The
+            words below are the published document; nothing has been added or removed.
+          </p>
+          <p className="whitespace-pre-wrap">{legalPlainText(html)}</p>
+        </div>
+      )}
 
       <footer className="mt-14 rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-subtle)] p-6 text-sm text-[var(--swift-muted)]">
         <p>
