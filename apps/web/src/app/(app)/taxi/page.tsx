@@ -1,9 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { MapPin, Navigation, Search } from 'lucide-react';
-import { rideAvailability, rideEstimate, requestRide, activeRide, watchRide, placesAutocomplete, placeDetails, money, type Place } from '@/lib/customer';
+import { MapPin } from 'lucide-react';
+import { rideAvailability, rideEstimate, requestRide, activeRide, watchRide, money } from '@/lib/customer';
+import { LocationField } from '@/components/location-field';
+import { submittablePlace, type PickedPlace } from '@/lib/place';
 import { currentCoords } from '@/lib/geolocate';
 
 type Pt = { lat: number; lng: number; label: string };
@@ -11,9 +13,13 @@ type Pt = { lat: number; lng: number; label: string };
 export default function TaxiPage() {
   const router = useRouter();
   const [pickup, setPickup] = useState<Pt | null>(null);
-  const [dropoff, setDropoff] = useState<Pt | null>(null);
-  const [q, setQ] = useState('');
-  const [sugg, setSugg] = useState<Place[]>([]);
+  // [W-18] The text the passenger sees and the point we would dispatch to are
+  // ONE thing. They used to be two: editing the box left `dropoff` holding the
+  // previously chosen coordinates, and the request submitted those — a driver
+  // sent to the address the passenger had just replaced, while the screen
+  // showed the new one and the confirmation named it.
+  const [dropText, setDropText] = useState('');
+  const [dropPlace, setDropPlace] = useState<PickedPlace | null>(null);
   const [avail, setAvail] = useState<{ level: string; gate?: boolean; nearestEtaMinutes?: number | null } | null>(null);
   const [fare, setFare] = useState<any>(null);
   const [busy, setBusy] = useState(false);
@@ -22,7 +28,6 @@ export default function TaxiPage() {
   /** [F-027-02] Why there is no pickup. Without this the page just sits with
    *  a dead "Request" button and no explanation. */
   const [pickupError, setPickupError] = useState<string | null>(null);
-  const debounce = useRef<any>(null);
 
   // [F-027-02] Pickup = device location, or NO pickup.
   //
@@ -46,26 +51,17 @@ export default function TaxiPage() {
   // Availability at the pickup.
   useEffect(() => { if (pickup) rideAvailability(pickup.lat, pickup.lng).then(setAvail).catch(() => {}); }, [pickup]);
 
-  // Fare estimate once both ends are set.
+  // [W-18] THE destination: the chosen place, but only while the box still
+  // names it. Everything downstream — the fare, the button, the request —
+  // reads this and never the raw selection.
+  const dropoff = useMemo(() => submittablePlace(dropPlace, dropText), [dropPlace, dropText]);
+
+  // Fare estimate once both ends are set. Editing the destination invalidates
+  // it, so a price can never belong to a route the passenger has moved on from.
   useEffect(() => {
     if (pickup && dropoff) rideEstimate({ pickup, dropoff }).then(setFare).catch(() => setFare(null));
+    else setFare(null);
   }, [pickup, dropoff]);
-
-  function onSearch(v: string) {
-    setQ(v);
-    clearTimeout(debounce.current);
-    if (v.trim().length < 3) { setSugg([]); return; }
-    debounce.current = setTimeout(() => {
-      placesAutocomplete(v.trim(), pickup ?? undefined).then(setSugg).catch(() => setSugg([]));
-    }, 250);
-  }
-  async function pick(p: Place) {
-    setQ(p.primary); setSugg([]);
-    try {
-      const d = p.lat != null && p.lng != null ? { lat: p.lat, lng: p.lng } : await placeDetails(p.placeId);
-      setDropoff({ lat: d.lat, lng: d.lng, label: p.primary });
-    } catch (e: any) { setError(e.message); }
-  }
 
   async function request() {
     if (!pickup || !dropoff) return;
@@ -98,18 +94,16 @@ export default function TaxiPage() {
             {pickupError} Without it we can’t send a driver to the right place.
           </p>
         )}
-        <div className="relative pt-3">
-          <div className="flex items-center gap-2">
-            <Search className="h-4 w-4 text-[var(--swift-muted)]" />
-            <input value={q} onChange={(e) => onSearch(e.target.value)} placeholder="Where to?" className="w-full py-1 outline-none" />
-          </div>
-          {sugg.length > 0 && (
-            <ul className="absolute inset-x-0 top-full z-10 mt-1 overflow-hidden rounded-xl border border-black/10 bg-white shadow-lg">
-              {sugg.map((s) => (
-                <li key={s.placeId}><button onClick={() => pick(s)} className="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-[var(--swift-subtle)]"><Navigation className="h-4 w-4 text-[var(--swift-muted)]" /><span><span className="font-semibold">{s.primary}</span>{s.secondary && <span className="block text-xs text-[var(--swift-muted)]">{s.secondary}</span>}</span></button></li>
-              ))}
-            </ul>
-          )}
+        <div className="pt-3">
+          {/* [W-18] The SAME field the courier form uses. Typing invalidates
+              the selection, so the box and the pin cannot disagree. */}
+          <LocationField
+            label="Where to?"
+            text={dropText}
+            place={dropPlace}
+            onChange={(text, place) => { setDropText(text); setDropPlace(place); }}
+            near={pickup ? { label: pickup.label, lat: pickup.lat, lng: pickup.lng, placeId: '' } : null}
+          />
         </div>
       </div>
 
