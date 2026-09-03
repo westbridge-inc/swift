@@ -167,3 +167,74 @@ describe('the moderation queues finally have a reviewer', () => {
     expect(JSON.parse(String(init?.body))).toEqual({ action: 'remove', reason: 'MODERATION' });
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// [A-17] A CSAE report closes as a CASE. Swift's published child-safety
+// standards promise the material is removed, the account banned, the matter
+// reported to the authorities and the evidence preserved — so the console asks
+// for those, and a dismissal takes two people.
+// ---------------------------------------------------------------------------
+describe('[A-17] the child-safety case panel', () => {
+  const openCsae = async () => {
+    const fetchMock = mockApi(handler());
+    const { user } = renderWithQuery(<ModerationPage />);
+    await screen.findByText('csae content');
+    // The CSAE row is the second one in the fixture queue.
+    await user.click(screen.getAllByRole('button', { name: 'Decide' })[1]!);
+    return { fetchMock, user };
+  };
+
+  it('will not let an operator record it as actioned until the evidence is there', async () => {
+    const { fetchMock, user } = await openCsae();
+    const actioned = screen.getByRole('button', { name: 'Record as actioned' });
+    expect((actioned as HTMLButtonElement).disabled).toBe(true);
+
+    await user.type(screen.getByPlaceholderText(/user:banned/), 'user:banned:abc123');
+    expect((screen.getByRole('button', { name: 'Record as actioned' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(screen.getByLabelText(/evidence needed for those reports has been preserved/i));
+    expect((screen.getByRole('button', { name: 'Record as actioned' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
+  });
+
+  it('sends the coded disposition and the evidence — and names the authority report when there is one', async () => {
+    const { fetchMock, user } = await openCsae();
+    await user.type(screen.getByPlaceholderText(/user:banned/), 'user:banned:abc123');
+    await user.type(screen.getByPlaceholderText('NCMEC-2026-00417'), 'NCMEC-2026-00417');
+    await user.click(screen.getByLabelText(/evidence needed for those reports has been preserved/i));
+    await user.click(screen.getByRole('button', { name: 'Record as actioned' }));
+
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
+    expect(url).toBe(`${API_ORIGIN}/api/v1/admin/moderation/reports/report-csae`);
+    expect(JSON.parse(String(init?.body))).toEqual({
+      status: 'ACTIONED',
+      disposition: 'ENFORCED_AND_REPORTED',
+      enforcementRef: 'user:banned:abc123',
+      authorityRef: 'NCMEC-2026-00417',
+      evidencePreserved: true,
+    });
+  });
+
+  it('a dismissal is PROPOSED, never taken in one click', async () => {
+    const { fetchMock, user } = await openCsae();
+    expect(screen.queryByRole('button', { name: 'Dismiss' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Propose dismissal' }));
+
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetchMock, 'PUT')[0]![1]?.body))).toEqual({
+      status: 'PROPOSE_DISMISS',
+      disposition: 'NO_VIOLATION',
+    });
+  });
+
+  it('ordinary moderation keeps its one-click buttons — a spam report is not a case file', async () => {
+    mockApi(handler());
+    const { user } = renderWithQuery(<ModerationPage />);
+    await screen.findByText('the actual reported words');
+    await user.click(screen.getAllByRole('button', { name: 'Decide' })[0]!);
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeTruthy();
+    expect(screen.queryByPlaceholderText(/user:banned/)).toBeNull();
+  });
+});

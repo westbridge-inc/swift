@@ -407,9 +407,20 @@ export interface InsuranceCheck {
 // every report a customer filed landed in a table no human could open.
 export const fetchModerationReports = (status = 'PENDING', reason?: string) =>
   apiFetch(`/api/v1/admin/moderation/reports?status=${status}${reason ? `&reason=${reason}` : ''}&limit=100`);
+// [A-17] A child-safety report closes with a CODED disposition and the evidence
+// that disposition implies — and a dismissal is proposed by one reviewer and
+// confirmed by another. Ordinary moderation still sends just a status.
+export type CsaeDisposition = 'ENFORCED' | 'ENFORCED_AND_REPORTED' | 'NO_VIOLATION' | 'DUPLICATE';
 export const resolveModerationReport = (
   id: string,
-  body: { status: 'REVIEWING' | 'ACTIONED' | 'DISMISSED'; note?: string },
+  body: {
+    status: 'REVIEWING' | 'ACTIONED' | 'DISMISSED' | 'PROPOSE_DISMISS';
+    note?: string;
+    disposition?: CsaeDisposition;
+    enforcementRef?: string;
+    authorityRef?: string;
+    evidencePreserved?: boolean;
+  },
 ) => apiFetch(`/api/v1/admin/moderation/reports/${id}`, { method: 'PUT', body: JSON.stringify(body) });
 
 // The OTHER two moderation queues, also without a caller until now:

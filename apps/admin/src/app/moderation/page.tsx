@@ -7,6 +7,7 @@ import {
   fetchRatingsModeration,
   moderateRating,
   resolveModerationReport,
+  type CsaeDisposition,
   resolveRatingReport,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
@@ -85,8 +86,16 @@ export default function ModerationPage() {
   const onError = (error: unknown) => setMutationError(error);
 
   const decideReport = useMutation({
-    mutationFn: ({ id, next }: { id: string; next: 'REVIEWING' | 'ACTIONED' | 'DISMISSED' }) =>
-      resolveModerationReport(id, { status: next, ...(note.trim() ? { note: note.trim() } : {}) }),
+    mutationFn: ({ id, next, csae }: {
+      id: string;
+      next: 'REVIEWING' | 'ACTIONED' | 'DISMISSED' | 'PROPOSE_DISMISS';
+      csae?: { disposition: CsaeDisposition; enforcementRef?: string; authorityRef?: string; evidencePreserved?: boolean };
+    }) =>
+      resolveModerationReport(id, {
+        status: next,
+        ...(note.trim() ? { note: note.trim() } : {}),
+        ...(csae ?? {}),
+      }),
     onMutate: () => setMutationError(null),
     onError,
     onSuccess: refresh,
@@ -202,6 +211,21 @@ export default function ModerationPage() {
                           className="w-full text-sm bg-[var(--bg)] border border-[var(--border)] rounded-lg p-2"
                           rows={2}
                         />
+                        {r.reason === 'CSAE' ? (
+                          /* [A-17] A child-safety report closes with a CODED
+                             decision and the evidence it implies — what was
+                             enforced, whether the evidence is preserved, and
+                             the authority report where one was made. The
+                             standards page promises all three. A dismissal is
+                             PROPOSED here and confirmed by a second reviewer. */
+                          <CsaeCase
+                            busy={busy}
+                            proposedBy={r.dismissProposedBy ?? null}
+                            onAction={(csae) => decideReport.mutate({ id: r.id, next: 'ACTIONED', csae })}
+                            onProposeDismiss={(disposition) => decideReport.mutate({ id: r.id, next: 'PROPOSE_DISMISS', csae: { disposition } })}
+                            onConfirmDismiss={(disposition) => decideReport.mutate({ id: r.id, next: 'DISMISSED', csae: { disposition } })}
+                          />
+                        ) : (
                         <div className="flex gap-2">
                           <button
                             disabled={busy}
@@ -225,6 +249,7 @@ export default function ModerationPage() {
                             Cancel
                           </button>
                         </div>
+                        )}
                       </div>
                     ) : (
                       <div className="flex gap-2 mt-3">
@@ -364,6 +389,116 @@ export default function ModerationPage() {
           )}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// [A-17] THE CHILD-SAFETY CASE PANEL.
+//
+// A CSAE report used to close through the same two buttons as a spam report.
+// Swift's published child-safety standards promise that confirmed material is
+// removed, the account banned, the matter reported to the relevant authorities
+// and the evidence preserved — so the panel asks for exactly those, and the
+// server refuses a closure that does not carry them.
+//
+// Acting is one step: the failure mode there is acting too slowly. Dismissing
+// takes two people, because deciding a child-safety report is NOT a violation
+// is the highest-consequence "nothing happened" decision here.
+// ---------------------------------------------------------------------------
+function CsaeCase({ busy, proposedBy, onAction, onProposeDismiss, onConfirmDismiss }: {
+  busy: boolean;
+  proposedBy: string | null;
+  onAction: (_csae: { disposition: CsaeDisposition; enforcementRef: string; authorityRef?: string; evidencePreserved: boolean }) => void;
+  onProposeDismiss: (_disposition: CsaeDisposition) => void;
+  onConfirmDismiss: (_disposition: CsaeDisposition) => void;
+}) {
+  const [enforcementRef, setEnforcementRef] = useState('');
+  const [authorityRef, setAuthorityRef] = useState('');
+  const [preserved, setPreserved] = useState(false);
+  const [dismissReason, setDismissReason] = useState<CsaeDisposition>('NO_VIOLATION');
+  const reported = authorityRef.trim().length > 0;
+
+  return (
+    <div className="space-y-3 border border-red-500/30 rounded-lg p-3 bg-red-500/5">
+      <p className="text-xs text-red-300 font-medium">Child safety — this closes as a case, not a click</p>
+
+      <label className="block text-xs text-[var(--muted)]">
+        What was enforced (the content removed, or the account actioned)
+        <input
+          value={enforcementRef}
+          onChange={(e) => setEnforcementRef(e.target.value)}
+          placeholder="user:banned:… or rating:removed:…"
+          className="mt-1 w-full text-sm bg-[var(--bg)] border border-[var(--border)] rounded-lg p-2"
+        />
+      </label>
+
+      <label className="block text-xs text-[var(--muted)]">
+        Report made to an authority or child-protection body (optional — leave blank if none was made yet)
+        <input
+          value={authorityRef}
+          onChange={(e) => setAuthorityRef(e.target.value)}
+          placeholder="NCMEC-2026-00417"
+          className="mt-1 w-full text-sm bg-[var(--bg)] border border-[var(--border)] rounded-lg p-2"
+        />
+      </label>
+
+      <label className="flex items-center gap-2 text-xs text-[var(--muted)]">
+        <input type="checkbox" checked={preserved} onChange={(e) => setPreserved(e.target.checked)} />
+        The evidence needed for those reports has been preserved
+      </label>
+
+      <div className="flex gap-2 flex-wrap">
+        <button
+          disabled={busy || enforcementRef.trim().length < 3 || !preserved}
+          onClick={() => onAction({
+            disposition: reported ? 'ENFORCED_AND_REPORTED' : 'ENFORCED',
+            enforcementRef: enforcementRef.trim(),
+            ...(reported ? { authorityRef: authorityRef.trim() } : {}),
+            evidencePreserved: true,
+          })}
+          className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
+        >
+          Record as actioned
+        </button>
+      </div>
+
+      <div className="border-t border-[var(--border)] pt-3 space-y-2">
+        <label className="block text-xs text-[var(--muted)]">
+          Or dismiss — which needs a second reviewer
+          <select
+            value={dismissReason}
+            onChange={(e) => setDismissReason(e.target.value as CsaeDisposition)}
+            className="mt-1 w-full text-sm bg-[var(--bg)] border border-[var(--border)] rounded-lg p-2"
+          >
+            <option value="NO_VIOLATION">Reviewed against the policy — not a violation</option>
+            <option value="DUPLICATE">Already covered by another open case</option>
+          </select>
+        </label>
+        {proposedBy ? (
+          <>
+            <p className="text-xs text-amber-400">
+              A dismissal has been proposed. A different reviewer confirms it — if that is not you, leave it.
+            </p>
+            <button
+              disabled={busy}
+              onClick={() => onConfirmDismiss(dismissReason)}
+              className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
+            >
+              Confirm dismissal (second reviewer)
+            </button>
+          </>
+        ) : (
+          <button
+            disabled={busy}
+            onClick={() => onProposeDismiss(dismissReason)}
+            className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
+          >
+            Propose dismissal
+          </button>
+        )}
+      </div>
     </div>
   );
 }

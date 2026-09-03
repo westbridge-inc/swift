@@ -3350,6 +3350,26 @@ model ContentReport {
   resolvedBy     String?
   resolvedAt     DateTime?
   resolutionNote String?
+  /// [A-17] WHAT WAS DECIDED, coded — for CSAE reports, required to close.
+  /// A free-text note could say anything or nothing, and "handled" and "nobody
+  /// looked properly" produced identical rows.
+  disposition       String?
+  /// What was actually done, referenced: the content removed, the account
+  /// actioned. Without it, "ENFORCED" is a word rather than a fact.
+  enforcementRef    String?
+  /// The report made to an authority or child-protection body (NCMEC et al),
+  /// which Swift's published child-safety standards promise for confirmed
+  /// material. Nothing recorded whether that promise had ever been kept.
+  authorityRef      String?
+  /// Whether the evidence those reports need has been preserved.
+  evidencePreserved Boolean?
+  /// [A-17] DUAL CONTROL on dismissal. Deciding a child-safety report is NOT a
+  /// violation is the highest-consequence "nothing happened" decision here, and
+  /// the one an overloaded queue produces by accident. One person proposes and
+  /// a DIFFERENT one confirms. Acting on a report stays one click — there, the
+  /// failure mode is acting too slowly.
+  dismissProposedBy String?
+  dismissProposedAt DateTime?
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 

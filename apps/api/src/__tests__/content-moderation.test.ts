@@ -152,3 +152,128 @@ describe('admin moderation queue (STORE-001)', () => {
     expect(ghostRow?.target).toBeNull(); // content already gone
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// [A-17] A CHILD-SAFETY REPORT DOES NOT CLOSE LIKE A SPAM REPORT.
+//
+// Swift's published child-safety standards promise that confirmed material is
+// removed, the account banned, the matter reported to the relevant authorities,
+// and the evidence preserved. A CSAE report used to close on one click with an
+// OPTIONAL note — so "handled" and "nobody looked properly" produced identical
+// rows, and the platform could not show that the promise had been kept once.
+// ---------------------------------------------------------------------------
+async function csaeReport() {
+  const target = await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole);
+  const filed = await report(reporterToken, { targetType: 'USER', targetId: target.id, reason: 'CSAE', detail: 'child safety' });
+  expect(filed.statusCode).toBe(201);
+  return filed.json().data.id as string;
+}
+
+describe('[A-17] closing a child-safety report needs a decision, evidence, and two people', () => {
+  it('one click to ACTIONED is refused — a coded disposition is required, not a note', async () => {
+    const id = await csaeReport();
+    const res = await resolve(id, { status: 'ACTIONED', note: 'handled it' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('CSAE_CLOSURE_INCOMPLETE');
+    const row = await app.prisma.contentReport.findUniqueOrThrow({ where: { id } });
+    expect(row.status).toBe('PENDING');
+    expect(row.resolvedAt).toBeNull();
+  });
+
+  it('"ENFORCED" without naming what was enforced, or preserving evidence, is refused', async () => {
+    const id = await csaeReport();
+    const bare = await resolve(id, { status: 'ACTIONED', disposition: 'ENFORCED' });
+    expect(bare.statusCode).toBe(400);
+    expect(bare.json().error.details.problems.join(' ')).toMatch(/name what was enforced/);
+
+    const noPreservation = await resolve(id, { status: 'ACTIONED', disposition: 'ENFORCED', enforcementRef: 'user:banned:abc123' });
+    expect(noPreservation.statusCode).toBe(400);
+    expect(noPreservation.json().error.details.problems.join(' ')).toMatch(/evidence has been preserved/);
+  });
+
+  it('an enforcement outcome closes with what was done and the evidence preserved', async () => {
+    const id = await csaeReport();
+    const res = await resolve(id, {
+      status: 'ACTIONED', disposition: 'ENFORCED',
+      enforcementRef: 'user:banned:abc123', evidencePreserved: true, note: 'account banned, content removed',
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const row = await app.prisma.contentReport.findUniqueOrThrow({ where: { id } });
+    expect(row.status).toBe('ACTIONED');
+    expect(row.disposition).toBe('ENFORCED');
+    expect(row.enforcementRef).toBe('user:banned:abc123');
+    expect(row.evidencePreserved).toBe(true);
+    expect(row.resolvedBy).toBe(adminId);
+  });
+
+  it('"reported to an authority" must name the report it claims to have made', async () => {
+    const id = await csaeReport();
+    const unnamed = await resolve(id, {
+      status: 'ACTIONED', disposition: 'ENFORCED_AND_REPORTED',
+      enforcementRef: 'user:banned:def456', evidencePreserved: true,
+    });
+    expect(unnamed.statusCode).toBe(400);
+    expect(unnamed.json().error.details.problems.join(' ')).toMatch(/name the report made to the authority/);
+
+    const named = await resolve(id, {
+      status: 'ACTIONED', disposition: 'ENFORCED_AND_REPORTED',
+      enforcementRef: 'user:banned:def456', evidencePreserved: true, authorityRef: 'NCMEC-2026-00417',
+    });
+    expect(named.statusCode, named.body).toBe(200);
+    expect((await app.prisma.contentReport.findUniqueOrThrow({ where: { id } })).authorityRef).toBe('NCMEC-2026-00417');
+  });
+
+  it('a dismissal takes TWO people — and not the same one twice', async () => {
+    const id = await csaeReport();
+
+    // Straight to DISMISSED: refused, nobody has proposed it.
+    const straight = await resolve(id, { status: 'DISMISSED', disposition: 'NO_VIOLATION' });
+    expect(straight.statusCode).toBe(400);
+    expect(straight.json().error.details.problems.join(' ')).toMatch(/proposed first/);
+
+    // The first reviewer proposes. The report stays OPEN.
+    const proposed = await resolve(id, { status: 'PROPOSE_DISMISS', disposition: 'NO_VIOLATION', note: 'reviewed against policy' });
+    expect(proposed.statusCode, proposed.body).toBe(200);
+    const midway = await app.prisma.contentReport.findUniqueOrThrow({ where: { id } });
+    expect(midway.status).toBe('REVIEWING');
+    expect(midway.resolvedAt).toBeNull();
+    expect(midway.dismissProposedBy).toBe(adminId);
+
+    // The SAME person cannot confirm their own proposal.
+    const selfConfirm = await resolve(id, { status: 'DISMISSED', disposition: 'NO_VIOLATION' });
+    expect(selfConfirm.statusCode).toBe(400);
+    expect(selfConfirm.json().error.details.problems.join(' ')).toMatch(/different person/);
+    expect((await app.prisma.contentReport.findUniqueOrThrow({ where: { id } })).status).toBe('REVIEWING');
+
+    // A second reviewer can.
+    const second = await mkUser(['ADMIN'] as UserRole[], 'ADMIN' as UserRole);
+    const confirmed = await resolve(id, { status: 'DISMISSED', disposition: 'NO_VIOLATION' }, second.token);
+    expect(confirmed.statusCode, confirmed.body).toBe(200);
+    const closed = await app.prisma.contentReport.findUniqueOrThrow({ where: { id } });
+    expect(closed.status).toBe('DISMISSED');
+    expect(closed.resolvedBy).toBe(second.id);
+    expect(closed.dismissProposedBy).toBe(adminId);
+  });
+
+  it('the disposition and the status must agree', async () => {
+    const id = await csaeReport();
+    const wrongWay = await resolve(id, { status: 'ACTIONED', disposition: 'NO_VIOLATION' });
+    expect(wrongWay.statusCode).toBe(400);
+    expect(wrongWay.json().error.details.problems.join(' ')).toMatch(/not an enforcement outcome/);
+  });
+
+  it('ORDINARY moderation is untouched — a spam report still closes on one click', async () => {
+    const target = await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole);
+    const filed = await report(reporterToken, { targetType: 'USER', targetId: target.id, reason: 'SPAM' });
+    const id = filed.json().data.id;
+    const res = await resolve(id, { status: 'ACTIONED', note: 'obvious spam' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect((await app.prisma.contentReport.findUniqueOrThrow({ where: { id } })).status).toBe('ACTIONED');
+    // …and a proposed dismissal is not a thing outside child safety.
+    const other = await report(reporterToken, { targetType: 'USER', targetId: (await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole)).id, reason: 'SPAM' });
+    const proposal = await resolve(other.json().data.id, { status: 'PROPOSE_DISMISS' });
+    expect(proposal.statusCode).toBe(400);
+    expect(proposal.json().error.code).toBe('PROPOSAL_NOT_APPLICABLE');
+  });
+});
