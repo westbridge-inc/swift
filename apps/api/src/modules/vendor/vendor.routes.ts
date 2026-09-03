@@ -24,6 +24,7 @@ import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -1573,14 +1574,25 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'UNTRACKED', 'This item does not track stock — set a quantity on it first');
     }
 
-    // Guarded: stock can't be adjusted below zero.
-    const applied = await app.prisma.item.updateMany({
-      where: { id: item.id, stockQuantity: { gte: body.delta < 0 ? -body.delta : 0 } },
-      data: { stockQuantity: { increment: body.delta } },
+    // [MKT-2] Through the single writer, so the vendor's own correction lands in
+    // the same ledger as the sales it is correcting. Still guarded: stock can't
+    // be adjusted below zero — the writer's conditional decrement enforces it.
+    // In a TRANSACTION. applyStockMovement's own contract says it must be —
+    // it moves the counter and writes the ledger row in two statements, so
+    // outside a transaction a crash between them leaves the cache and the truth
+    // disagreeing, which is the exact failure the ledger exists to prevent.
+    await app.prisma.$transaction((tx) => applyStockMovement(tx, {
+      itemId: item.id,
+      delta: body.delta,
+      reason: body.reason,
+      actorId: request.user.userId,
+      note: body.note ?? null,
+    })).catch((err) => {
+      if (err instanceof AppError && err.code === 'INSUFFICIENT_STOCK') {
+        throw new AppError(409, 'INSUFFICIENT_STOCK', 'That would take the stock below zero');
+      }
+      throw err;
     });
-    if (applied.count === 0) {
-      throw new AppError(409, 'INSUFFICIENT_STOCK', 'That would take the stock below zero');
-    }
     // Mirror the inventory engine's edges: zero hides, restock un-hides.
     await app.prisma.item.updateMany({
       where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
@@ -2080,6 +2092,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       },
     });
 
+    // [MKT-2] The ledger has to explain the stock this item was born with, or
+    // it reads as drifted by exactly its own starting quantity forever.
+    await recordOpeningBalance(app.prisma, item.id, body.stockQuantity, request.user.userId);
+
     scheduleVendorSearchSync(app, vendorId);
     // Stage-A categorizer reacts to what the vendor just typed (#17) —
     // fire-and-forget; suggestions are garnish, the save never waits.
@@ -2403,6 +2419,18 @@ export async function vendorRoutes(app: FastifyInstance) {
     const restocksAboveZero = body.stockQuantity !== undefined && (body.stockQuantity ?? 0) > 0;
     const unhide = restocksAboveZero && existing.autoHiddenAt !== null && body.isAvailable === undefined;
 
+    // [MKT-2] STOCK IS NOT AN ORDINARY FIELD ON THIS FORM.
+    //
+    // Editing an item used to set `stockQuantity` directly alongside name and
+    // price, which walked straight past the ledger: the counter moved and
+    // nothing recorded why, so a reconciliation would report drift for a change
+    // the vendor made deliberately.
+    //
+    // Setting an absolute quantity IS a movement — it is a stock count, so the
+    // delta is (new - old) and the reason is RECONCILE. Handled after the row
+    // update, through the single writer.
+    const stockTarget = body.stockQuantity;
+
     const item = await app.prisma.item.update({
       where: { id: request.params.id },
       data: {
@@ -2414,7 +2442,6 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...(body.sku !== undefined && { sku: body.sku }),
         ...(body.unit !== undefined && { unit: body.unit }),
         ...(body.bulk !== undefined && { bulkUnits: bulkUnitsForChoice(body.bulk) }),
-        ...(body.stockQuantity !== undefined && { stockQuantity: body.stockQuantity }),
         ...(body.lowStockThreshold !== undefined && { lowStockThreshold: body.lowStockThreshold }),
         ...(unhide && { isAvailable: true, autoHiddenAt: null }),
         ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable, autoHiddenAt: null }),
@@ -2431,10 +2458,46 @@ export async function vendorRoutes(app: FastifyInstance) {
       },
     });
 
+    // [MKT-2] THE STOCK COUNT, through the single writer.
+    //
+    // The vendor set an absolute quantity; the ledger records movements. So the
+    // delta is (what they typed - what was there) and the reason is RECONCILE —
+    // a human counting a shelf and correcting the system. An item that does not
+    // track stock is left alone, and a no-change edit writes nothing.
+    let newBalance: number | null = null;
+    if (stockTarget !== undefined && stockTarget !== null && existing.stockQuantity !== null) {
+      const delta = stockTarget - existing.stockQuantity;
+      if (delta !== 0) {
+        const moved = await app.prisma.$transaction((tx) => applyStockMovement(tx, {
+          itemId: item.id,
+          delta,
+          reason: 'RECONCILE',
+          actorId: request.user.userId,
+          note: 'Stock count set from the item editor',
+        }));
+        if (moved.applied) newBalance = moved.balanceAfter;
+      }
+    } else if (stockTarget !== undefined && existing.stockQuantity === null) {
+      // The item was untracked and the vendor is now tracking it: that is an
+      // opening balance, not a movement — nothing left or entered a shelf.
+      // recordOpeningBalance sets the counter itself, in the same transaction as
+      // the row it writes, so this route never assigns stockQuantity at all.
+      await app.prisma.$transaction((tx) =>
+        recordOpeningBalance(tx, item.id, stockTarget, request.user.userId),
+      );
+      newBalance = stockTarget;
+    }
+
+    // The row update above no longer writes stockQuantity — the ledger does,
+    // afterwards. So the object it returned still carries the OLD count, and
+    // returning it would tell the vendor their stock is what it was before the
+    // change they just made. The response states what the ledger actually set.
+    const saved = newBalance !== null ? { ...item, stockQuantity: newBalance } : item;
+
     scheduleVendorSearchSync(app, vendorId);
     void discovery.runMatcherForItem(item).catch(() => undefined);
 
-    return { success: true, data: withBulkWord(item) };
+    return { success: true, data: withBulkWord(saved) };
   });
 
   /** DELETE /items/:id — Delete an item and its option groups/options */

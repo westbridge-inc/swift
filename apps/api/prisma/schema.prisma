@@ -1848,6 +1848,75 @@ enum StockAdjustmentReason {
   RETURN
 }
 
+/// THE STOCK LEDGER [MKT-2 Movement 1] — the truth behind `Item.stockQuantity`.
+///
+/// The counter is a CACHE. This table is what it caches.
+///
+/// StockAdjustment (above) was never meant to be the whole story and says so:
+/// "checkout decrements/cancel restocks stay implicit (they ride the order
+/// itself)". That was a defensible scope decision for food — a dish sells out
+/// and comes back tomorrow. A marketplace outgrows it. A store's stock is money
+/// sitting on a shelf: it gets counted, reconciled against a supplier invoice,
+/// and argued about. When a vendor says "I had 12 and you show 9", a log that
+/// records corrections but not SALES cannot answer, because the three that sold
+/// were never written down.
+///
+/// So every movement lands here — sales included — and `balanceAfter` is
+/// recorded on each row so the ledger can be replayed and checked against the
+/// counter without recomputing the whole history.
+///
+/// APPEND-ONLY. No updatedAt, no soft-delete, no UPDATE path. A correction is a
+/// new compensating row, never an edit — an inventory ledger you can rewrite is
+/// not evidence, and the one moment someone wants to rewrite it is the moment it
+/// matters. The migration REVOKEs TRUNCATE and installs a refusing trigger, the
+/// same shape the moderation tables use.
+model StockMovement {
+  id           String              @id @default(cuid())
+  tenantId     String              @default("swift-default")
+  /// Deliberately NOT a relation — see the migration. Inventory evidence must
+  /// outlive the item row it describes, so nothing cascades it away.
+  itemId       String
+  /// Signed. Negative = stock left the shelf, positive = it came back.
+  delta        Int
+  /// The counter's value immediately after this movement committed — lets a
+  /// reconciliation prove the cache without replaying everything.
+  balanceAfter Int
+  reason       StockMovementReason
+  /// The order this movement belongs to, when it has one. Deliberately NOT a
+  /// foreign key: order deletion must never cascade away inventory evidence.
+  orderId      String?
+  /// Who caused it — a user id, or null for system-driven movements.
+  actorId      String?
+  note         String?
+  occurredAt   DateTime            @default(now())
+
+  @@index([itemId, occurredAt])
+  @@index([tenantId, occurredAt])
+  @@index([orderId])
+  @@map("stock_movements")
+}
+
+/// A superset of StockAdjustmentReason: the human reasons are carried over
+/// unchanged, and the movements that used to be implicit now have names.
+enum StockMovementReason {
+  /// Sold at checkout — the movement that was never logged before.
+  SALE
+  /// An order cancelled before pickup put the stock back.
+  CANCEL_RESTOCK
+  /// Decremented while a picker worked the order.
+  PICK
+  /// A picker refunded a line that could not be filled.
+  PICK_REFUND
+  RECEIVED
+  DAMAGED
+  MANUAL
+  RECONCILE
+  RETURN
+  /// One per tracked item at migration time, so the ledger explains the counter
+  /// it inherited instead of pretending history started today.
+  OPENING_BALANCE
+}
+
 model OrderItemOption {
   id              String    @id @default(cuid())
   orderItemId     String

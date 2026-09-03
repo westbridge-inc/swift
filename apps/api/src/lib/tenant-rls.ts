@@ -30,6 +30,8 @@ export const TENANT_TABLES = [
   'SafetyAccessLog', 'SosAlert', 'TripSafetySession', 'actor_rating_stats',
   // [S-01] The SOS escalation outbox belongs to the alert's tenant.
   'sos_escalations',
+  // [MKT-2] the stock ledger: one operator's inventory movements.
+  'stock_movements',
   // [R048-007] money-surface commands: one operator's decided money changes.
   'money_surface_commands',
   'sos_retriggers',
