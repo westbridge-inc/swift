@@ -84,7 +84,9 @@ describe('support ticketing', () => {
     expect(list.statusCode).toBe(200);
     expect(list.json().data.tickets.some((t: { id: string }) => t.id === ticketId)).toBe(true);
 
-    const resolve = await inject('PUT', `/api/v1/admin/support/${ticketId}/resolve`, { status: 'RESOLVED', adminNote: 'Refunded, sorry!' }, admin.token);
+    // [A-18] a close now carries a disposition; the refusal cases are graded in
+    // support-safety-closure.test.ts
+    const resolve = await inject('PUT', `/api/v1/admin/support/${ticketId}/resolve`, { status: 'RESOLVED', resolution: 'ACTION_TAKEN', adminNote: 'Refunded, sorry!' }, admin.token);
     expect(resolve.statusCode).toBe(200);
     expect(resolve.json().data.status).toBe('RESOLVED');
 

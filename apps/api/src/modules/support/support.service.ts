@@ -1,7 +1,13 @@
-import type { PrismaClient, SupportCategory, SupportStatus } from '@prisma/client';
+import type { PrismaClient, SupportCategory, SupportStatus, SupportResolution } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { log } from '../../utils/logger';
+import { supportResolutionCounter } from '../../plugins/observability';
+
+/** [A-18] What a SAFETY ticket may close on. "Answered" is not one of them. */
+export const SAFETY_RESOLUTIONS: SupportResolution[] = ['ACTION_TAKEN', 'ESCALATED_SAFETY', 'NO_RISK_FOUND'];
+/** [A-18] The reporter reads this. A shrug is not a response to a safety report. */
+export const SAFETY_NOTE_MIN = 20;
 
 // ---------------------------------------------------------------------------
 // In-app support / dispute channel. Any signed-in user (customer, mover,
@@ -95,20 +101,71 @@ export class SupportService {
   /** CONTRACT [WR-022]: `adminNote` is CUSTOMER-FACING — it is stored on the
    *  ticket AND sent verbatim as the notification body. There is no internal-
    *  note field on this rail; consoles must label the input accordingly.
-   *  (A true internal-notes feature is a registered follow-on.) */
-  async resolve(ticketId: string, adminId: string, input: { status: SupportStatus; adminNote?: string }) {
+   *  (A true internal-notes feature is a registered follow-on.)
+   *
+   *  [A-18] Closing a ticket is a decision, so it carries one. A resolve must
+   *  name a DISPOSITION, must say what state it believes the ticket is in, and
+   *  on a SAFETY ticket must be more than "answered" and must carry a note the
+   *  reporter can read. The console used to resolve on a cancelled prompt with
+   *  no note at all: an urgent report left the queue with no record of anyone
+   *  having looked at it. */
+  async resolve(
+    ticketId: string,
+    adminId: string,
+    input: { status: SupportStatus; adminNote?: string; resolution?: SupportResolution; expectedStatus?: SupportStatus },
+  ) {
     const ticket = await this.prisma.supportTicket.findUnique({ where: { id: ticketId } });
     if (!ticket) throw new NotFoundError('SupportTicket', ticketId);
 
     const resolving = input.status === 'RESOLVED';
+
+    // [A-18] The screen says what it was looking at. A ticket someone else
+    // already moved is not re-decided from a stale view.
+    if (input.expectedStatus && input.expectedStatus !== ticket.status) {
+      throw new AppError(
+        409,
+        'TICKET_MOVED',
+        `This ticket is now ${ticket.status.toLowerCase().replace('_', ' ')} — reload before deciding.`,
+      );
+    }
+    if (resolving && ticket.status === 'RESOLVED') {
+      throw new AppError(409, 'ALREADY_RESOLVED', 'This ticket is already resolved.');
+    }
+
+    if (resolving) {
+      if (!input.resolution) {
+        throw new AppError(400, 'RESOLUTION_REQUIRED', 'Say what happened: a resolution is required to close a ticket.');
+      }
+      if (ticket.category === 'SAFETY') {
+        if (!SAFETY_RESOLUTIONS.includes(input.resolution)) {
+          throw new AppError(
+            400,
+            'SAFETY_RESOLUTION_REQUIRED',
+            'A safety report closes on what was DONE — action taken, escalated to the safety team, or no risk found after review.',
+          );
+        }
+        const note = (input.adminNote ?? '').trim();
+        if (note.length < SAFETY_NOTE_MIN) {
+          throw new AppError(
+            400,
+            'SAFETY_NOTE_REQUIRED',
+            `Tell the reporter what happened, in a sentence (at least ${SAFETY_NOTE_MIN} characters). They see this.`,
+          );
+        }
+      }
+    }
+
     const updated = await this.prisma.supportTicket.update({
       where: { id: ticketId },
       data: {
         status: input.status,
         adminNote: input.adminNote ?? ticket.adminNote,
-        ...(resolving ? { resolvedById: adminId, resolvedAt: new Date() } : {}),
+        ...(resolving ? { resolvedById: adminId, resolvedAt: new Date(), resolution: input.resolution } : {}),
       },
     });
+    if (resolving) {
+      supportResolutionCounter.labels(ticket.category, input.resolution ?? 'UNSET').inc();
+    }
 
     // Tell the owner what happened.
     await this.notifications.send({

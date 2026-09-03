@@ -676,6 +676,16 @@ export const handoverBreakGlassCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [A-18] How support tickets close, by category and disposition. A SAFETY
+ *  ticket closing as ANSWERED is impossible by construction; this counter is
+ *  how the safety SLA and the reopen rate are read. */
+export const supportResolutionCounter = new client.Counter({
+  name: 'swift_support_resolution_total',
+  help: 'Support tickets resolved, by category and disposition',
+  labelNames: ['category', 'resolution'] as const,
+  registers: [registry],
+});
+
 /** [S-19] Ops alerts: opened, acknowledged, escalated (zero ACK by deadline),
  *  on-call texts, drills, and alerts nobody can acknowledge. */
 export const opsAlertCounter = new client.Counter({
