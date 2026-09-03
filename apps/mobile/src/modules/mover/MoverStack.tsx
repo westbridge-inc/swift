@@ -27,6 +27,7 @@ import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 // [E12 §7.1] The shift identity check — go-online's 428 and the mid-shift
 // push both land here.
 import { LivenessCheckScreen } from '../safety/screens/LivenessCheckScreen';
+import { GuardianDriverConfirmScreen } from '../safety/screens/GuardianDriverConfirmScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -117,6 +118,10 @@ export function MoverStack() {
         <Stack.Screen name="Conversation" component={ConversationScreen} />
         <Stack.Screen name="GetHelp" component={GetHelpScreen} />
         <Stack.Screen name="LivenessCheck" component={LivenessCheckScreen} />
+        {/* [TST-001] The driver's half of a Trip Guardian check. The push that
+            asks for it used to route to Delivery — a screen this stack never
+            mounts — so a safety question had nowhere to be answered. */}
+        <Stack.Screen name="GuardianDriverConfirm" component={GuardianDriverConfirmScreen} />
       </Stack.Navigator>
       {preview ? <MoverPreviewBanner /> : null}
     </View>

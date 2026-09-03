@@ -493,6 +493,12 @@ export const safetyApi = {
   /** Trip Guardian check-in response (prompted via the guardian:checkin
    *  socket event on the order room, or by the outstanding read below). */
   guardianCheckin: (response: 'OK' | 'NEED_HELP') => api.post('/safety/guardian/checkin', { response }),
+  /** [TST-001] The DRIVER's half of a Trip Guardian check: the passenger did
+   *  not answer, so the driver is asked to confirm the trip's status. The
+   *  nonce comes from the push that asked, and the server treats it as the
+   *  identity of the question — so answering twice answers once. */
+  guardianDriverConfirm: (body: { cycleId: string; nonce: string }) =>
+    api.post('/safety/guardian/driver-confirm', body),
   /** Is a check-in waiting on THIS passenger's trip? Null when none is.
    *  The socket event is a live nudge and nothing more — it cannot reach an
    *  app that was closed when it fired, which is precisely when the push is
