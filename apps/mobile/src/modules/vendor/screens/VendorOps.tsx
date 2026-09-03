@@ -8,6 +8,7 @@ import {
   Card,
   Chip,
   IconChip,
+  LabeledInput,
   LoadingBlock,
   PillButton,
   PopupCard,
@@ -55,6 +56,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
+import { canAttestPayment, paymentAttestBlockedReason } from '../../../lib/orderStatus';
 import { vendorSurfaceForRole } from '../../../lib/vendorRbac';
 import { Switch as AvailabilitySwitch } from '../../../kit/switch';
 import {
@@ -84,7 +86,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
   showStore,
 }: {
   order: any;
-  onAction: (action: VendorOrderActionKind) => void;
+  onAction: (action: VendorOrderActionKind, code?: string) => void;
   onOpen?: () => void;
   busy: boolean;
   showStore?: boolean;
@@ -93,6 +95,14 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
   const isMmg = order.paymentMethod === 'MOBILE_MONEY';
   const mmgPaid = order.paymentStatus === 'CAPTURED';
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'].includes((order.status || '').toUpperCase());
+  // [W-25] The states where a store's word is admissible, and the reason when
+  // it is not. "Not captured and not terminal" used to offer the button on a
+  // FAILED, REFUNDED or unresolved payment, so a tap on a reversed payment
+  // recaptured a refund. The words live in lib/orderStatus (one vocabulary),
+  // and the server enforces the same matrix.
+  const attestable = isMmg && canAttestPayment(order.paymentStatus) && !terminal;
+  const payBlockedReason = isMmg && !mmgPaid && !attestable ? paymentAttestBlockedReason(order.paymentStatus) : null;
+  const [mmgRef, setMmgRef] = useState('');
   const items = order.itemCount ?? order.items?.length ?? 0;
   const lines: any[] = order.items ?? [];
   const isPickup = order.fulfillment === 'PICKUP';
@@ -209,15 +219,35 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
               {mmgPaid ? 'MMG payment received' : 'Awaiting MMG payment'}
             </T>
           </View>
-          {!mmgPaid && !terminal ? (
-            <PillButton
-              label="Payment received"
-              size="md"
-              icon="check"
-              style={{ marginTop: space.sm }}
-              disabled={busy}
-              onPress={() => onAction('confirm-payment')}
-            />
+          {/* [W-25] "Not captured and not terminal" offered this button on a
+              FAILED, REFUNDED or unresolved payment, so a tap on a reversed
+              payment recaptured a refund. A store may attest only where money
+              plausibly landed and nothing has reversed it — and only with the
+              reference from its own wallet message, which is what a later
+              reconciliation matches on. The server enforces the same matrix. */}
+          {attestable ? (
+            <>
+              <LabeledInput
+                label="MMG transaction reference"
+                value={mmgRef}
+                onChangeText={setMmgRef}
+                autoCapitalize="characters"
+                placeholder="From the message in your wallet"
+                style={{ marginTop: space.sm }}
+              />
+              <PillButton
+                label={`${money(order.totalAmount ?? order.total)} received in my MMG`}
+                size="md"
+                icon="check"
+                style={{ marginTop: space.sm }}
+                disabled={busy || mmgRef.trim().length < 4}
+                onPress={() => onAction('confirm-payment', mmgRef.trim())}
+              />
+            </>
+          ) : payBlockedReason ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+              {payBlockedReason}
+            </T>
           ) : null}
         </View>
       ) : null}
@@ -1079,7 +1109,7 @@ export function VendorOps({ store, navigation }: any) {
                 key={o.id}
                 order={o}
                 busy={busy}
-                onAction={(action) => orderAction.mutate({ id: o.id, action })}
+                onAction={(action, code) => orderAction.mutate({ id: o.id, action, code })}
                 onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
               />
             ))}
@@ -1093,7 +1123,7 @@ export function VendorOps({ store, navigation }: any) {
                     key={o.id}
                     order={o}
                     busy={busy}
-                    onAction={(action) => orderAction.mutate({ id: o.id, action })}
+                    onAction={(action, code) => orderAction.mutate({ id: o.id, action, code })}
                     onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
                   />
                 ))}
@@ -1108,7 +1138,7 @@ export function VendorOps({ store, navigation }: any) {
             <VendorOrderCard
               order={newOrders[0] ?? inProgress[0]}
               busy={busy}
-              onAction={(action) => orderAction.mutate({ id: (newOrders[0] ?? inProgress[0]).id, action })}
+              onAction={(action, code) => orderAction.mutate({ id: (newOrders[0] ?? inProgress[0]).id, action, code })}
               onOpen={() => {
                 const order = newOrders[0] ?? inProgress[0];
                 navigation.navigate('VendorOrderDetail', { orderId: order.id, orderNumber: order.orderNumber });

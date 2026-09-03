@@ -724,6 +724,16 @@ export const pickingReadinessCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [W-25] Manual MMG captures: a store's word that money reached its own
+ *  wallet. `attested` is every capture with no provider evidence behind it;
+ *  `reference_reused` is one transaction offered for two orders. */
+export const mmgAttestationCounter = new client.Counter({
+  name: 'swift_mmg_attestation_total',
+  help: 'Vendor MMG payment attestations (attested, reference_reused)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 /** [S-19] Ops alerts: opened, acknowledged, escalated (zero ACK by deadline),
  *  on-call texts, drills, and alerts nobody can acknowledge. */
 export const opsAlertCounter = new client.Counter({

@@ -87,3 +87,33 @@ export function orderStatusLabel(status: string | null | undefined, kind?: strin
 export function orderSubtitle(vendorName?: string | null, orderNumber?: string | null): string {
   return [vendorName, orderNumber ? `#${orderNumber}` : null].filter(Boolean).join(' · ');
 }
+
+// ---------------------------------------------------------------------------
+// [W-25] Why a store cannot mark an MMG payment received.
+//
+// These are PAYMENT states, not order states, but they are prose about an
+// order and prose has one owner — a second copy in a screen drifts the day
+// either is edited. Both vendor surfaces read them from here.
+// ---------------------------------------------------------------------------
+
+/** The payment states where a store's word that money arrived is admissible. */
+export const ATTESTABLE_PAYMENT_STATUSES = ['PENDING', 'AUTHORIZED'] as const;
+
+const PAYMENT_BLOCKED: Record<string, string> = {
+  REFUNDED: 'This payment was refunded — a new payment is a new transaction.',
+  PARTIALLY_REFUNDED: 'This payment was partly refunded — support settles the balance.',
+  FAILED: 'MMG reports this payment as failed. Contact support with the reference if money did reach you.',
+  EXPIRED: 'The payment window closed — ask the customer to pay again.',
+  UNKNOWN: 'Unresolved with MMG. Support settles it; it cannot be marked received here.',
+  CANCELLED: 'This payment was superseded.',
+};
+
+/** True when a store may attest against this payment state. */
+export function canAttestPayment(paymentStatus: string | null | undefined): boolean {
+  return (ATTESTABLE_PAYMENT_STATUSES as readonly string[]).includes(String(paymentStatus ?? ''));
+}
+
+/** The sentence to show instead of the button, or null when there is nothing to say. */
+export function paymentAttestBlockedReason(paymentStatus: string | null | undefined): string | null {
+  return PAYMENT_BLOCKED[String(paymentStatus ?? '')] ?? null;
+}

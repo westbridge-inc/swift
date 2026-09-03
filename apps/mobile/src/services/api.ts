@@ -887,7 +887,8 @@ export const vendorApi = {
     api.get('/vendor/orders', { params }),
   order: (id: string) => api.get(`/vendor/orders/${id}`),
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
-  confirmPayment: (id: string) => api.post(`/vendor/orders/${id}/confirm-payment`, {}),
+  // [W-25] a store's attestation carries the provider reference from its own wallet message
+  confirmPayment: (id: string, reference: string) => api.post(`/vendor/orders/${id}/confirm-payment`, { reference }),
   // Grocery picking (§5.3)
   setLinePicked: (orderId: string, lineId: string, picked: boolean) =>
     api.put(`/vendor/orders/${orderId}/items/${lineId}/picked`, { picked }),

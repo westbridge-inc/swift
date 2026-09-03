@@ -229,7 +229,11 @@ export const rejectOrder = (id: string, reason?: string) =>
   apiFetch(`${V}/orders/${id}/reject`, { method: 'PUT', body: JSON.stringify(reason ? { reason } : {}) });
 export const markPreparing = (id: string) => apiFetch(`${V}/orders/${id}/preparing`, { method: 'PUT', body: '{}' });
 export const markReady = (id: string) => apiFetch(`${V}/orders/${id}/ready`, { method: 'PUT', body: '{}' });
-export const confirmPayment = (id: string) => apiFetch(`${V}/orders/${id}/confirm-payment`, { method: 'POST', body: '{}' });
+/** [W-25] A store's attestation carries the provider reference from its own
+ *  wallet message. The server refuses one without it, and refuses a reference
+ *  already recorded against another order. */
+export const confirmPayment = (id: string, reference: string) =>
+  apiFetch(`${V}/orders/${id}/confirm-payment`, { method: 'POST', body: JSON.stringify({ reference }) });
 export const completePickup = (id: string, code: string) =>
   apiFetch(`${V}/orders/${id}/complete-pickup`, { method: 'PUT', body: JSON.stringify({ code }) });
 export const retryDispatch = (id: string) => apiFetch(`${V}/orders/${id}/retry-dispatch`, { method: 'POST', body: '{}' });

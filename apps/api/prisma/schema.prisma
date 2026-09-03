@@ -1574,6 +1574,15 @@ model Order {
   /// Never fall back to the vendor's mutable profile URL for an existing order.
   mmgPayUrlSnapshot       String?
   mmgRecipientNameSnapshot String?
+  /// [W-25] A capture on this rail rests on the STORE's word: Swift holds no
+  /// money and has no provider feed here. These three say so out loud — the
+  /// provider reference the store read out of its wallet (unique across
+  /// orders, so one transaction cannot mark two orders paid), who attested,
+  /// and when. A later reconciliation matches on the reference; until then
+  /// they are the list of captures with no provider evidence behind them.
+  mmgAttestedRef           String?   @unique
+  mmgAttestedById          String?
+  mmgAttestedAt            DateTime?
 
   estimatedPrepTime     Int?
   estimatedDeliveryTime Int?
