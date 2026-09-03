@@ -1,10 +1,11 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
-import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter } from '../../plugins/observability';
+import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter } from '../../plugins/observability';
 import { lineTotal, orderTotal, promoDiscount, promoCapacity } from '../../utils/order-total';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
+import { getTenantContext } from '../../plugins/tenant-context';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, expressDeliveryFee, type DeliveryRates } from '../../utils/markup';
 import { CountryConfigService } from '../country/country-config.service';
@@ -2634,9 +2635,19 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const rating = await app.prisma.rating.findFirst({
       where: { id, type: { in: ['CUSTOMER_TO_VENDOR', 'CUSTOMER_TO_PROVIDER'] }, isPublic: true },
-      select: { id: true },
+      select: { id: true, orderId: true, rater: { select: { tenantId: true } } },
     });
     if (!rating) throw new NotFoundError('Review', id);
+    // [R048-002] A report is filed inside ONE tenant: the review must belong to
+    // the reporter's tenant through its order or its author, or it is not a
+    // review this person can see — indistinguishable from not-found.
+    const reporterTenant = getTenantContext().tenantId;
+    const ratedOrder = await app.prisma.order.findUnique({ where: { id: rating.orderId }, select: { tenantId: true } }).catch(() => null);
+    const ratingTenants = new Set([ratedOrder?.tenantId, rating.rater?.tenantId].filter((t): t is string => typeof t === 'string'));
+    if (!reporterTenant || !ratingTenants.has(reporterTenant)) {
+      ratingReportTenancyCounter.labels('report_refused_foreign_rating').inc();
+      throw new NotFoundError('Review', id);
+    }
 
     const existing = await app.prisma.ratingReport.findFirst({ where: { ratingId: id, reporterId: userId } });
     if (existing) return { success: true, data: existing }; // calm idempotence

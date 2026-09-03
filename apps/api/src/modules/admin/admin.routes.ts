@@ -54,7 +54,7 @@ import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePr
 import { assertNoZoneOverlap } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { createHash } from 'node:crypto';
-import { billingTopupMissingKeyCounter } from '../../plugins/observability';
+import { billingTopupMissingKeyCounter, ratingReportTenancyCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
@@ -4723,23 +4723,30 @@ export async function adminRoutes(app: FastifyInstance) {
       take: 100,
       select: { id: true, orderId: true, vendorId: true, type: true, score: true, comment: true, tags: true, createdAt: true },
     });
-    const reports = await app.prisma.ratingReport.findMany({
+    const pending = await app.prisma.ratingReport.findMany({
       where: { status: 'PENDING' },
       orderBy: { createdAt: 'asc' },
       take: 100,
     });
-    const reported = reports.length
+    const reported = pending.length
       ? await tenantPrisma.rating.findMany({
-          where: { id: { in: reports.map((r) => r.ratingId) } },
+          where: { id: { in: pending.map((r) => r.ratingId) } },
           select: { id: true, score: true, comment: true, tags: true, vendorId: true, state: true },
         })
       : [];
     const byId = new Map(reported.map((r) => [r.id, r]));
+    // [R048-002] A report whose review does not resolve inside this tenant —
+    // a malformed or cross-tenant leg — is never shown or acted on: it is
+    // quarantined for the platform, counted, and the queue names how many.
+    const reports = pending.filter((r) => byId.has(r.ratingId));
+    const quarantined = pending.length - reports.length;
+    if (quarantined > 0) ratingReportTenancyCounter.labels('quarantined_in_queue').inc(quarantined);
     return {
       success: true,
       data: {
         held,
         reports: reports.map((r) => ({ ...r, rating: byId.get(r.ratingId) ?? null })),
+        quarantined,
       },
     };
   });
@@ -4791,14 +4798,27 @@ export async function adminRoutes(app: FastifyInstance) {
     const report = await app.prisma.ratingReport.findUnique({ where: { id: request.params.id } });
     if (!report) throw new NotFoundError('Report', request.params.id);
     if (report.status !== 'PENDING') throw new AppError(400, 'ALREADY_RESOLVED', `This report is ${report.status.toLowerCase()}`);
+    // [R048-002] Every leg resolves to THIS tenant or nothing is resolved: the
+    // review the report names must be readable through the tenant's own
+    // scope; a foreign or malformed leg is indistinguishable from not-found
+    // and changes zero rows.
+    const rating = await tenantPrisma.rating.findUnique({ where: { id: report.ratingId } });
+    if (!rating) {
+      ratingReportTenancyCounter.labels('resolve_refused').inc();
+      throw new NotFoundError('Report', request.params.id);
+    }
 
-    await app.prisma.ratingReport.update({
-      where: { id: report.id },
+    // One conditional write: the report is resolved only if it is still pending — two admins racing resolve it once.
+    const resolved = await app.prisma.ratingReport.updateMany({
+      where: { id: report.id, status: 'PENDING' },
       data: { status: action === 'uphold' ? 'UPHELD' : 'DISMISSED', resolvedBy: request.user.userId, resolvedAt: new Date() },
     });
+    if (resolved.count !== 1) {
+      ratingReportTenancyCounter.labels('resolve_race').inc();
+      throw new AppError(409, 'ALREADY_RESOLVED', 'This report was resolved by someone else a moment ago.');
+    }
     if (action === 'uphold') {
-      const rating = await tenantPrisma.rating.findUnique({ where: { id: report.ratingId } });
-      if (rating && rating.state === 'ACTIVE') {
+      if (rating.state === 'ACTIVE') {
         await mutationOrNotFound('Rating', rating.id, () => tenantPrisma.rating.update({
           where: { id: rating.id },
           data: { state: 'REMOVED', stateReason: 'MODERATION', isPublic: false },
