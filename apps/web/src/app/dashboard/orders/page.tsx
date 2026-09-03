@@ -105,13 +105,30 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
     return grouped.slice(0, 6);
   };
 
+  // [W-28] Settled is not fulfilled. A refunded or rejected line has been
+  // REMOVED from the order — the money came off and the stock went back — so
+  // an order whose every line was refused is settled on every line and
+  // contains nothing. Saying "All picked ✓" there sent a rider to collect an
+  // empty bag; the server now refuses to mark it ready, and this screen says
+  // what is actually true.
   const lineResolved = (l: OrderLine) => l.picked || l.subStatus === 'REFUNDED' || l.subStatus === 'REJECTED';
+  const lineFulfilled = (l: OrderLine) => l.picked && l.subStatus !== 'REFUNDED' && l.subStatus !== 'REJECTED';
   const open = order.items.filter((l) => !lineResolved(l)).length;
+  const fulfilled = order.items.filter(lineFulfilled).length;
+  const removed = order.items.length - open - fulfilled;
+  const pickingSummary =
+    open > 0
+      ? `Shelf picking — ${open} to pick`
+      : fulfilled === 0
+        ? 'Nothing left to hand over — cancel this order'
+        : removed > 0
+          ? `Picked ✓ — ${fulfilled} of ${order.items.length} lines, ${removed} removed`
+          : 'All picked ✓';
   const busy = onBusy || pickedMut.isPending || subMut.isPending || refundMut.isPending;
 
   return (
     <div className="mt-4 rounded-xl border border-black/5 bg-[var(--swift-subtle)] p-4">
-      <p className="text-sm font-bold">{open === 0 ? 'All picked ✓' : `Shelf picking — ${open} to pick`}</p>
+      <p className={`text-sm font-bold${open === 0 && fulfilled === 0 ? ' text-[var(--swift-red)]' : ''}`}>{pickingSummary}</p>
       <MutationNotice errors={[pickedMut.error, subMut.error, refundMut.error]} className="mt-2" />
       <div className="mt-2 space-y-2">
         {order.items.map((it) => (

@@ -713,6 +713,17 @@ export const supportResolutionCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [W-28] Mark-ready outcomes on a quantity-tracked store: an order refused
+ *  because every line was removed, one marked ready with some lines removed,
+ *  and one marked ready complete. A rising refused_empty means customers are
+ *  ordering what the shelf does not have. */
+export const pickingReadinessCounter = new client.Counter({
+  name: 'swift_picking_readiness_total',
+  help: 'Mark-ready outcomes for shelf-picked orders (refused_empty, ready_partial, ready_complete)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 /** [S-19] Ops alerts: opened, acknowledged, escalated (zero ACK by deadline),
  *  on-call texts, drills, and alerts nobody can acknowledge. */
 export const opsAlertCounter = new client.Counter({

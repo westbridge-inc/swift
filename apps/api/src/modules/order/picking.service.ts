@@ -60,18 +60,52 @@ export class PickingService {
     this.notifications = new NotificationService(prisma, io);
   }
 
-  /** A line is settled when it's picked, or its substitution question closed. */
+  /**
+   * A line is SETTLED when nobody is still waiting on a decision about it:
+   * it is picked, or its substitution question was closed by a refund or a
+   * customer rejection.
+   *
+   * [W-28] Settled is not the same as FULFILLED, and conflating the two was
+   * the defect. A refunded or rejected line has been removed from the order —
+   * the money came off, the stock went back — so an order whose every line is
+   * refused is settled on every line and contains nothing. It was still
+   * markable ready, and went out for delivery: a rider dispatched to carry an
+   * empty bag, a customer charged a delivery fee for it.
+   */
   static lineResolved(line: { picked: boolean; subStatus: string }): boolean {
     return line.picked || line.subStatus === 'REFUNDED' || line.subStatus === 'REJECTED';
   }
 
+  /** [W-28] A line is FULFILLED when something is actually going in the bag. */
+  static lineFulfilled(line: { picked: boolean; subStatus: string }): boolean {
+    return line.picked && line.subStatus !== 'REFUNDED' && line.subStatus !== 'REJECTED';
+  }
+
   /** Gate for Mark-ready on quantity-tracked stores: no open lines. */
   async unresolvedLines(orderId: string): Promise<number> {
+    return (await this.readiness(orderId)).unresolved;
+  }
+
+  /**
+   * [W-28] The readiness of an order as the SERVER sees it, in one read: how
+   * many lines still need a decision, how many are actually being handed over,
+   * and how many were removed. `ready` is the invariant the mark-ready route
+   * enforces — every line settled AND at least one line fulfilled.
+   */
+  async readiness(orderId: string): Promise<{ total: number; unresolved: number; fulfilled: number; removed: number; ready: boolean }> {
     const lines = await this.prisma.orderItem.findMany({
       where: { orderId },
       select: { picked: true, subStatus: true },
     });
-    return lines.filter((l) => !PickingService.lineResolved(l)).length;
+    const unresolved = lines.filter((l) => !PickingService.lineResolved(l)).length;
+    const fulfilled = lines.filter((l) => PickingService.lineFulfilled(l)).length;
+    return {
+      total: lines.length,
+      unresolved,
+      fulfilled,
+      removed: lines.length - unresolved - fulfilled,
+      ready: unresolved === 0 && fulfilled > 0,
+    };
   }
 
   private async getLine(orderId: string, lineId: string) {

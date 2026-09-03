@@ -11,6 +11,7 @@ import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
 import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
 import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { pickingReadinessCounter } from '../../plugins/observability';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
@@ -1455,10 +1456,25 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (order.vendorId) {
       const v = await app.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { vendorType: true } });
       if (v && ['SUPERMARKET', 'STORE'].includes(v.vendorType)) {
-        const open = await picking.unresolvedLines(order.id);
-        if (open > 0) {
-          throw new AppError(409, 'PICKING_INCOMPLETE', `${open} line${open === 1 ? '' : 's'} still need picking or a substitution decision`);
+        const state = await picking.readiness(order.id);
+        if (state.unresolved > 0) {
+          throw new AppError(409, 'PICKING_INCOMPLETE', `${state.unresolved} line${state.unresolved === 1 ? '' : 's'} still need picking or a substitution decision`);
         }
+        // [W-28] Settled is not fulfilled. If every line was refunded or the
+        // customer rejected every substitute, the bag is empty: marking this
+        // ready dispatches a rider to collect nothing and charges the customer
+        // a delivery fee for it. An empty order is cancelled, not delivered.
+        if (state.fulfilled === 0) {
+          pickingReadinessCounter.labels('refused_empty').inc();
+          throw new AppError(
+            409,
+            'NOTHING_TO_HAND_OVER',
+            state.total === 0
+              ? 'This order has no lines to hand over.'
+              : `All ${state.total} line${state.total === 1 ? '' : 's'} were removed — there is nothing to hand over. Cancel the order instead so the customer is refunded.`,
+          );
+        }
+        pickingReadinessCounter.labels(state.removed > 0 ? 'ready_partial' : 'ready_complete').inc();
       }
     }
     if (order.status === 'PREPARING') {
