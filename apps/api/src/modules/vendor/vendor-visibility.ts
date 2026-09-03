@@ -73,3 +73,12 @@ export const VISIBLE_VENDOR_SELECT = {
   isVerified: true,
   tenant: { select: { isActive: true } },
 } as const;
+
+/** [R048-003] The visibility predicate INSIDE one tenant — for relation
+ *  filters (`item.vendor`), which the tenant-scoping extension does not reach.
+ *  A public catalogue or search query names its tenant here, or it is not one
+ *  tenant's query. */
+export function visibleVendorInTenant(tenantId: string) {
+  if (!tenantId) throw new Error('[R048-003] visibleVendorInTenant needs a tenant');
+  return { ...VISIBLE_VENDOR, tenantId } as const;
+}

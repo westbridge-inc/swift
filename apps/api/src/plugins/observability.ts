@@ -117,6 +117,23 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [R048-003] Public market / search scope outcomes: an unbound search refused, the public
+ *  tenant unresolved, a disabled tenant hit, a cross-tenant page cursor refused, a filter value
+ *  rejected, stale index documents removed by a reconcile, and a DB/index parity mismatch. */
+export const searchScopeCounter = new client.Counter({
+  name: 'swift_search_scope_total',
+  help: 'Market/search scope outcomes (unbound_request_refused/public_tenant_unresolved/disabled_tenant_hit/cross_tenant_cursor/filter_rejected/stale_docs_removed/parity_mismatch)',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+/** [R048-003] Index document counts by index and tenant, set on every full sync. */
+export const searchIndexDocsGauge = new client.Gauge({
+  name: 'swift_search_index_docs',
+  help: 'Search index documents by index and tenant after the last full sync',
+  labelNames: ['index', 'tenant'] as const,
+  registers: [registry],
+});
+
 // [R048-002] A rating report whose legs do not resolve to one tenant — the
 // rating outside the reporter's tenant at filing, a report the moderation
 // queue cannot resolve, a foreign or malformed id at resolution — is refused
