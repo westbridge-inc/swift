@@ -19,6 +19,10 @@ import { beginRequestTenantContext, prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('unscoped-mutation');
 
 // Ads Phase 4/5 — serving + event tracking (spec §11/§12). The billable loop:
 // serve issues an HMAC impression token → events verify it. "Ads never break

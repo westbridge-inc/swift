@@ -11,6 +11,10 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
 import { computeDaySlots, slotFitsConfig, strideMinutes } from '../modules/booking/availability';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // ONE-SLOT-ONE-PERSON — the availability engine (spec 2.1/2.5, SCH-A/E/F):

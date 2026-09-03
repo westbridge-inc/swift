@@ -7,6 +7,10 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { AgentService, agentEnabled, agentMode, type OpsDecision } from '../modules/agent/agent.service';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('unscoped-mutation');
 
 // ---------------------------------------------------------------------------
 // Ops agent (spec Part B §9): detection is deterministic, the model only

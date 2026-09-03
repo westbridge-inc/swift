@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { TEST_TARGET_DEFAULTS } from './src/lib/test-target-lock';
 
 export default defineConfig({
   test: {
@@ -34,7 +35,11 @@ export default defineConfig({
       // without this pin that default leaked fixture vendors (Race Diner ×3,
       // Audit Corner Shop ×3, …) into the seeded dev DB, where they duplicated
       // in the customer app. CI/local still override by exporting DATABASE_URL.
-      DATABASE_URL: process.env['DATABASE_URL'] ?? 'postgresql://swift:swift@localhost:5434/swift_test',
+      DATABASE_URL: process.env['DATABASE_URL'] ?? TEST_TARGET_DEFAULTS.DATABASE_URL,
+      // [R048-001] Redis is pinned too — to a database of the tests' own, never
+      // 0 where the development app keeps its keys. The global setup refuses a
+      // run whose URL selects 0, wherever it came from.
+      REDIS_URL: process.env['REDIS_URL'] ?? TEST_TARGET_DEFAULTS.REDIS_URL,
       // Dormant feature flags default OFF in tests, exactly as CI runs them.
       // The dev .env turns some ON (LIFECYCLE_V2=1, DISPATCH_AVAILABILITY=1);
       // Prisma's dotenv otherwise leaks those into a bare local `vitest` and
@@ -56,5 +61,9 @@ export default defineConfig({
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)
     // and flake intermittently (FK violations). Sequential is deterministic (~22s).
     fileParallelism: false,
+    // [R048-001] The target lock: no worker is spawned until Postgres and Redis
+    // are proven loopback and disposable, read-only probes agree, and the run
+    // id is minted. Rollback means stopping the suite, never relaxing this.
+    globalSetup: ['./src/__tests__/setup/target-lock.ts'],
   },
 });

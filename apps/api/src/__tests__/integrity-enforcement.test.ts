@@ -14,6 +14,10 @@ import { hasActiveHold, previewTrial, openAppeal, resolveAppeal, appealOverturnR
 import { IdentityService } from '../modules/integrity/identity.service';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { normalizeDocNumber } from '../modules/integrity/normalize';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // Trial-integrity Part 4/5 — the enforcement ladder. Under test: the device-
 // velocity rule flags the Nth signup (scenario H) and the flag means a HUMAN

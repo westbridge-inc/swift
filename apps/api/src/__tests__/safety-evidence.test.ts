@@ -11,6 +11,10 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { SosService } from '../modules/safety/sos.service';
 import { IncidentService } from '../modules/safety/incident.service';
 import { EvidenceService, canonicalJson, sha256 } from '../modules/safety/evidence.service';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('ddl');
 
 // Evidence Vault M7a (safety spec §9) — tamper-evident capture. Bundles open
 // automatically on SOS ACTIVE and S0/S1 intake, items are canonical

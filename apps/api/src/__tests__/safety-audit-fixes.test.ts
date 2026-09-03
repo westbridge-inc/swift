@@ -7,6 +7,10 @@ import { IncidentService } from '../modules/safety/incident.service';
 import { EvidenceService } from '../modules/safety/evidence.service';
 import { devChannelLog, resetDevChannelLog } from '../providers/notifications/channels';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('ddl');
 
 // Fixes for the 2026-08-01 independent hostile-audit findings (P16). Each test
 // FAILS on the pre-fix code and passes after. The bugs were downstream

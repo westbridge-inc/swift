@@ -22,6 +22,10 @@ import { OrderService } from '../modules/order/order.service';
 import { AuthService } from '../modules/auth/auth.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite quiets the WHOLE rider pool between cases (an unscoped Rider.updateMany) so no leftover rider takes a dispatch — a stated, reviewable capability.
+grantSuiteCapability('unscoped-mutation');
 
 // ---------------------------------------------------------------------------
 // dispatch. Hardest paths: the no-acceptance path

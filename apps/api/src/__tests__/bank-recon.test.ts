@@ -2,6 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { buildExpectedBatches, confirmDeposit, reconConfig } from '../modules/billing/bank-recon';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('unscoped-mutation');
 
 // PART 25 — bank truth (scenario U): inert without config; with a cadence set,
 // EXPECTED batches derive gross from payment rows; a short deposit goes

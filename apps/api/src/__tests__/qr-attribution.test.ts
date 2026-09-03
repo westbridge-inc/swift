@@ -8,6 +8,10 @@ import { attributionRoutes } from '../modules/qr/attribution.routes';
 import { AttributionService } from '../modules/qr/attribution.service';
 import { QrService } from '../modules/qr/qr.service';
 import { computeFpHash, normalizeIpForFp, parseInstallReferrer, playStoreUrlFor, uaMajorFamily } from '../modules/qr/attribution';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // Install attribution (spec 4.3 / 12.3). The two laws under test everywhere:

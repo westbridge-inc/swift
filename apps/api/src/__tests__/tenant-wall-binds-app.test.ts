@@ -5,6 +5,10 @@ import { scopedPrisma as prisma, tenantScopeExtensionFor, bindTenantTransaction 
 import { tenantContext, runAsSystem, runWithTenant, runWithoutTenant, getTenantContext } from '../plugins/tenant-context';
 import { tenantUnscopedAccessCounter, tenantBindCounter } from '../plugins/observability';
 import { TENANT_TABLES, forceRlsStatements } from '../lib/tenant-rls';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite creates the NOLOGIN probe role and GRANTs it table access by raw DDL to prove the RLS wall from outside the app — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // [TEN-01 / TEN-03] The tenant wall binds the app.

@@ -8,6 +8,10 @@ import {
   hashDocument, hashIp, REQUIRED_CONSENTS,
 } from '../modules/legal/consent.service';
 import { installDdl } from './helpers/install-ddl';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('ddl');
 
 // [DCR-1 NR-1] The consent ledger is evidence, not bookkeeping: hash-anchored
 // to the exact text, append-only at the DATABASE (a withdrawal is a new row),
