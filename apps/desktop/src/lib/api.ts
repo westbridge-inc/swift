@@ -549,10 +549,14 @@ export const fetchModerationQueue = (status = 'PENDING') =>
     rows: r.data as ModerationReport[],
     pendingTotal: r.pendingTotal as number,
   }));
-export const resolveReport = (id: string, status: 'ACTIONED' | 'DISMISSED' | 'REVIEWING', note?: string) =>
+// [D-17] A CSAE closure carries its disposition and the evidence that
+// disposition implies (A-17), and a dismissal is PROPOSED here — a second
+// reviewer performs it. The body is built by lib/moderationView so the shape
+// is in one place; the server decides whether it is complete.
+export const resolveReport = (id: string, body: Record<string, unknown>) =>
   apiFetch(`/api/v1/admin/moderation/reports/${id}`, {
     method: 'PUT',
-    body: JSON.stringify({ status, ...(note ? { note } : {}) }),
+    body: JSON.stringify(body),
   });
 
 // ── Compliance ───────────────────────────────────────────────────────────────
@@ -626,7 +630,14 @@ export const fetchHealth = () =>
   fetch(`${API_ORIGIN}/health`).then(async (r) => ({ httpOk: r.ok, ...(await r.json()) }));
 export const fetchDlq = () => apiFetch('/api/v1/admin/dlq').then((r) => r.data);
 export const fetchAlertsHealth = () => apiFetch('/api/v1/admin/alerts/health').then((r) => r.data);
-export const requeueDlqJob = (queue: string, id: string) =>
-  apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue`, { method: 'POST', body: '{}' });
+// [D-12] `acknowledgedReconciled` is the operator's statement that they checked
+// a half-finishable job's outcome. The API refuses a RECONCILE_FIRST class
+// without it (A-08); this console now asks for it deliberately instead of
+// sending a bare retry and surfacing the refusal afterwards.
+export const requeueDlqJob = (queue: string, id: string, acknowledgedReconciled = false) =>
+  apiFetch(
+    `/api/v1/admin/dlq/${queue}/${id}/requeue${acknowledgedReconciled ? '?acknowledgedReconciled=true' : ''}`,
+    { method: 'POST', body: '{}' },
+  );
 export const discardDlqJob = (queue: string, id: string) =>
   apiFetch(`/api/v1/admin/dlq/${queue}/${id}`, { method: 'DELETE' });

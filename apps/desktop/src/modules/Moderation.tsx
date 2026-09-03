@@ -1,6 +1,10 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchModerationQueue, resolveReport, type ModerationReport } from '../lib/api';
+import {
+  CSAE_DISPOSITIONS, closureBody, csaeActions, fieldsFor, targetSummary,
+  type ClosureStatus, type CsaeDisposition,
+} from '../lib/moderationView';
 
 // UGC moderation queue (store-compliance §5.4). Consumes the STORE-001/002 API:
 // report → queue → resolve. No optimistic UI (standing order 38): a decision
@@ -10,25 +14,24 @@ import { fetchModerationQueue, resolveReport, type ModerationReport } from '../l
 const pretty = (t: string) => t.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 const hoursSince = (iso: string) => Math.floor((Date.now() - new Date(iso).getTime()) / 3600_000);
 
-// The reported content, whatever its type — one honest line per target.
-function targetSummary(r: ModerationReport): string {
-  const t = r.target;
-  if (!t) return '(content already removed)';
-  if (r.targetType === 'RATING') return `${'★'.repeat(Number(t['score']) || 0)} "${t['comment'] ?? ''}"`;
-  if (r.targetType === 'CHAT_MESSAGE') return `"${t['message'] ?? ''}"`;
-  if (r.targetType === 'USER') return [t['firstName'], t['lastName']].filter(Boolean).join(' ') || String(t['id'] ?? '');
-  if (r.targetType === 'VENDOR') return String(t['name'] ?? '');
-  if (r.targetType === 'ITEM') return String(t['name'] ?? '');
-  return r.targetId;
-}
-
 function Row({ r, onResolved }: { r: ModerationReport; onResolved: () => void }) {
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
   const isCsae = r.reason === 'CSAE';
+  // [D-17] A child-safety closure states WHAT was decided and carries the
+  // evidence that decision implies (A-17). This console used to send
+  // { status, note? } with the note optional, on CSAE rows too.
+  const [disposition, setDisposition] = useState<CsaeDisposition | ''>('');
+  const [enforcementRef, setEnforcementRef] = useState('');
+  const [authorityRef, setAuthorityRef] = useState('');
+  const [evidencePreserved, setEvidencePreserved] = useState(false);
+  const fields = fieldsFor(disposition);
 
   const mut = useMutation({
-    mutationFn: (status: 'ACTIONED' | 'DISMISSED') => resolveReport(r.id, status, note || undefined),
+    mutationFn: (status: ClosureStatus) => resolveReport(
+      r.id,
+      closureBody(status, note, isCsae ? { disposition, enforcementRef, authorityRef, evidencePreserved } : null),
+    ),
     onSuccess: onResolved,
     onError: (e) => setError((e as Error).message),
   });
@@ -51,19 +54,78 @@ function Row({ r, onResolved }: { r: ModerationReport; onResolved: () => void })
           value={note} onChange={(e) => setNote(e.target.value)} placeholder="Resolution note (optional)"
           className="min-w-0 flex-1 rounded-lg border border-neutral-200 bg-neutral-50 px-2 py-1.5 text-sm outline-none focus:border-[var(--swift-red)]"
         />
-        <button
-          onClick={() => mut.mutate('ACTIONED')} disabled={mut.isPending}
-          className="rounded-lg bg-green-100 px-3 py-1.5 text-sm font-semibold text-green-700 hover:bg-green-200 disabled:opacity-50"
-        >
-          Mark handled
-        </button>
-        <button
-          onClick={() => mut.mutate('DISMISSED')} disabled={mut.isPending}
-          className="rounded-lg bg-neutral-100 px-3 py-1.5 text-sm font-semibold text-neutral-600 hover:bg-neutral-200 disabled:opacity-50"
-        >
-          Dismiss
-        </button>
+        {isCsae ? (
+          csaeActions().map((a) => (
+            <button
+              key={a.status}
+              onClick={() => mut.mutate(a.status)} disabled={mut.isPending}
+              className="rounded-lg bg-neutral-100 px-3 py-1.5 text-sm font-semibold text-neutral-700 hover:bg-neutral-200 disabled:opacity-50"
+            >
+              {a.label}
+            </button>
+          ))
+        ) : (
+          <>
+            <button
+              onClick={() => mut.mutate('ACTIONED')} disabled={mut.isPending}
+              className="rounded-lg bg-green-100 px-3 py-1.5 text-sm font-semibold text-green-700 hover:bg-green-200 disabled:opacity-50"
+            >
+              Mark handled
+            </button>
+            <button
+              onClick={() => mut.mutate('DISMISSED')} disabled={mut.isPending}
+              className="rounded-lg bg-neutral-100 px-3 py-1.5 text-sm font-semibold text-neutral-600 hover:bg-neutral-200 disabled:opacity-50"
+            >
+              Dismiss
+            </button>
+          </>
+        )}
       </div>
+
+      {isCsae && (
+        <div className="mt-3 space-y-2 rounded-lg border border-[var(--swift-red)]/40 p-3">
+          <p className="text-xs font-bold uppercase tracking-wider text-[var(--swift-red)]">
+            Child-safety closure — what was decided
+          </p>
+          <select
+            value={disposition}
+            onChange={(e) => setDisposition(e.target.value as CsaeDisposition | '')}
+            aria-label="Disposition"
+            className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-2 py-1.5 text-sm"
+          >
+            <option value="">Choose what was decided…</option>
+            {CSAE_DISPOSITIONS.map((d) => <option key={d} value={d}>{pretty(d)}</option>)}
+          </select>
+          {fields.enforcementRef && (
+            <input
+              value={enforcementRef} onChange={(e) => setEnforcementRef(e.target.value)}
+              aria-label="Enforcement reference" placeholder="Enforcement reference (the ban/removal you performed)"
+              className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-2 py-1.5 text-sm"
+            />
+          )}
+          {fields.authorityRef && (
+            <input
+              value={authorityRef} onChange={(e) => setAuthorityRef(e.target.value)}
+              aria-label="Authority reference" placeholder="Authority reference (the report you filed)"
+              className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-2 py-1.5 text-sm"
+            />
+          )}
+          {fields.evidence && (
+            <label className="flex items-center gap-2 text-xs text-neutral-600">
+              <input
+                type="checkbox" checked={evidencePreserved}
+                onChange={(e) => setEvidencePreserved(e.target.checked)}
+                aria-label="Evidence preserved"
+              />
+              The evidence is preserved and under legal hold
+            </label>
+          )}
+          <p className="text-xs text-neutral-500">
+            A dismissal takes two people. Proposing one records who asked and why, and leaves the report open for a
+            second reviewer.
+          </p>
+        </div>
+      )}
       {/* [WR-021 / VG-007] "Action taken" implied enforcement; the server only
           records the decision. Say exactly what this does — especially on CSAE
           rows, where implying content was removed would be dangerous. */}
