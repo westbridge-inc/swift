@@ -797,6 +797,18 @@ export const mmgAttestationCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [A-14] Cash-order refunds by lifecycle event. `owed` is an obligation
+ *  recorded when an operator decides a customer is due money back, `settled` is
+ *  a refund proved to have been handed over, and the refusal labels are the
+ *  evidence a settlement was turned away for. `owed` minus `settled` IS the
+ *  outstanding cash-refund liability, by tender, which the register asks for. */
+export const orderRefundCounter = new client.Counter({
+  name: 'swift_order_refund_total',
+  help: 'Cash-order refund lifecycle (owed, settled, refused_not_due, refused_duplicate)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 /** [A-13] Return refunds by lifecycle event. `owed` is an obligation recorded,
  *  `settled` is money proved to have moved, and the refusal labels are the
  *  evidence a settlement was turned away for. The gap between `owed` and

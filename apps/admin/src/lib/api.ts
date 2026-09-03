@@ -370,8 +370,17 @@ export const verifyRiderDocuments = (id: string) => apiFetch(`/api/v1/admin/ride
 export const verifyDriverDocuments = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}/verify-documents`, { method: 'PUT' });
 export const setDriverRideClass = (id: string, rideClass: string) =>
   apiFetch(`/api/v1/admin/drivers/${id}/ride-class`, { method: 'PUT', body: JSON.stringify({ rideClass }) });
+// [A-14] `refund: true` records that a refund is OWED. It does not mark
+// anything refunded — settleOrderRefund below is the only thing that can.
 export const cancelOrder = (id: string, body: { reason: string; refund?: boolean }) =>
   apiFetch(`/api/v1/admin/orders/${id}/cancel`, { method: 'PUT', body: JSON.stringify(body) });
+
+/** The cash actually went back: a unique reference and the amount handed over. */
+export const settleOrderRefund = (id: string, reference: string, amount: string | number) =>
+  apiFetch(`/api/v1/admin/orders/${id}/refund-settled`, {
+    method: 'PUT',
+    body: JSON.stringify({ reference, amount }),
+  });
 export const suspendUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }) });
 export const unsuspendUser = (id: string) =>

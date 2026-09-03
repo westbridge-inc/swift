@@ -246,7 +246,7 @@ describe('GET /admin/finance/cash-settlements', () => {
 });
 
 describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
-  it('preserves the admin refund override while writing both canonical audits', async () => {
+  it('[A-14] records the refund as OWED — not as done — while writing both canonical audits', async () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const order = await app.prisma.order.create({
       data: {
@@ -263,9 +263,18 @@ describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
       payload: { reason: 'cash refund approved', refund: true },
     });
     expect(response.statusCode).toBe(200);
-    expect(response.json().data).toMatchObject({ status: 'REFUNDED', refunded: true });
-    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('REFUNDED');
-    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'REFUNDED' } })).toBe(1);
+    // [A-14] This used to assert `{ status: 'REFUNDED', refunded: true }`. That
+    // terminal was written off a click, with no amount, actor or evidence that
+    // the store had handed anything back — a claim about somebody else's cash
+    // drawer. The cancellation is now a cancellation, and the refund is an
+    // obligation until it is settled against evidence.
+    expect(response.json().data).toMatchObject({ status: 'CANCELLED', refundOwed: '1300' });
+    const cancelled = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(cancelled.status).toBe('CANCELLED');
+    expect(Number(cancelled.refundOwedAmount)).toBe(1300);
+    expect(cancelled.refundSettledAt).toBeNull();
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'CANCELLED' } })).toBe(1);
+    // The two canonical audits this test exists for are unchanged.
     expect(await app.prisma.auditLog.count({ where: { action: 'CANCEL_ORDER', entityId: order.id } })).toBe(1);
     await app.prisma.auditLog.deleteMany({ where: { entityId: order.id } });
   });

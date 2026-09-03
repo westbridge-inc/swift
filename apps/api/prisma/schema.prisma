@@ -1653,6 +1653,24 @@ model Order {
   /// and admin visibility. Never charged, never summed into money totals.
   lateCancelFeeDue   Int     @default(0)
 
+  /// [A-14] THE REFUND OBLIGATION. Deciding to refund a cash order records that
+  /// money is OWED — it does not assert that any moved. On the cash rail the
+  /// STORE holds the customer's money, not Swift, so a terminal REFUNDED
+  /// written on a decision was a claim about somebody else's cash drawer.
+  /// `refundOwedAt IS NOT NULL AND refundSettledAt IS NULL` IS the unpaid queue.
+  refundOwedAmount  Decimal?  @db.Decimal(12, 2)
+  refundOwedAt      DateTime?
+  refundOwedById    String?
+  /// [A-14] The settlement's evidence, and it is UNIQUE: one handover settles
+  /// one order. Nullable, so the many orders that owe nothing do not collide.
+  refundRef         String?   @unique
+  /// What the settler states was actually handed back, checked against
+  /// `refundOwedAmount` to the cent before the order closes.
+  refundPaidAmount  Decimal?  @db.Decimal(12, 2)
+  /// WHO closed it — distinct from `refundOwedById`, who decided it was owed.
+  refundSettledById String?
+  refundSettledAt   DateTime?
+
   promoCodeId String?
   promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])
   /// [M-32] The redemption snapshot, when a promo discounted this order.

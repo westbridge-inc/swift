@@ -53,6 +53,10 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'ReimbursementClaim', field: 'paidAmount', unit: 'MAJOR_WHOLE' },
   // [A-13] What the settler attested they refunded; same unit as refundAmount.
   { model: 'ReturnRequest', field: 'refundPaidAmount', unit: 'MAJOR_WHOLE' },
+  // [A-14] What a cash order owes the customer, and what was attested as
+  // handed back. Same unit as the order total the obligation is taken from.
+  { model: 'Order', field: 'refundOwedAmount', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'refundPaidAmount', unit: 'MAJOR_WHOLE' },
   // [W-26] What each side ATTESTED changed hands. Same unit as the amount
   // above by construction: the ledger refuses any figure that is not it.
   { model: 'DeliveryCashSettlement', field: 'riderAttestedAmount', unit: 'MAJOR_WHOLE' },
