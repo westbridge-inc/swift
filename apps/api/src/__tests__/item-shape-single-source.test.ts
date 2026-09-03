@@ -106,7 +106,7 @@ describe('the shapes actually agree, not just structurally', () => {
     imageUrl: null,
     createdAt: new Date(),
     vendorId: 'v1',
-    vendor: { name: 'City Hardware' },
+    vendor: { name: 'City Hardware', tenantId: 'swift-default' },
     category: { name: 'Power Tools' },
     isAvailable: true,
     isPopular: false,

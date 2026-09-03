@@ -137,7 +137,8 @@ describe('the sync doors use the shared predicate', () => {
     // The old early return left a deleted vendor's doc in the index until
     // somebody happened to run a full re-index.
     const fn = service.slice(service.indexOf('async syncVendor('), service.indexOf('async syncVendorItems('));
-    expect(fn).toMatch(/if \(!vendor\) \{[\s\S]*deleteDocument\(vendorId\)/);
+    // [R048-003] the vanished vendor's tenant is unknown by then, so the removal is by ENTITY id (a filter), not a guessed document id
+    expect(fn).toMatch(/if \(!vendor\) \{[\s\S]*deleteDocuments\(\{ filter: renderClause\(\{ attribute: 'entityId', op: '=', value: vendorId \}\) \}\)/);
   });
 
   it('keeps the full re-index on the shared DB predicate too', () => {

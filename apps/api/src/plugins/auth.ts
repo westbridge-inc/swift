@@ -122,6 +122,8 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       // Multi-tenancy stage 2: bind this request to the caller's tenant so
       // every tenant-owned query downstream is scoped to it.
       enterTenant(session.user.tenantId);
+      // [R048-003] and on the request itself, so a route can name the caller's tenant without depending on async-context propagation
+      request.tenantId = session.user.tenantId;
     } catch (err) {
       request.authSessionId = null;
       // [F-250] "I could not REACH the session store" is not "your token is
@@ -195,6 +197,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         request.user.role = session.user.activeRole;
         request.authSessionId = session.id;
         enterTenant(session.user.tenantId);
+        request.tenantId = session.user.tenantId;
       }
     } catch (err) {
       // Falling back to guest is correct here — this decorator never 401s, and

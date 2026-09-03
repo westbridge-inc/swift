@@ -1,3 +1,4 @@
+import { docId } from './search-scope';
 /**
  * `ItemHit` — THE shape an item takes when it is listed outside its own store.
  *
@@ -113,7 +114,12 @@ export function toItemHit(row: ItemHitRow): ItemHit {
  *  Meilisearch has no date type, and a number is also filterable and sortable
  *  should a "new arrivals" facet ever want it. */
 export type ItemSearchDoc = {
+  /** [R048-003] The index primary key: `<tenantId>__<itemId>` — one operator's id space never overlaps another's. */
   id: string;
+  /** The item's own id, what clients receive as `id`. */
+  entityId: string;
+  /** The partition. Filterable; the server-built filter always names it. */
+  tenantId: string;
   name: string;
   description: string;
   vendorId: string;
@@ -135,7 +141,7 @@ type ItemDocRow = {
   name: string;
   description: string | null;
   vendorId: string;
-  vendor: { name: string };
+  vendor: { name: string; tenantId: string };
   category: { name: string };
   basePrice: unknown;
   imageUrl: string | null;
@@ -153,7 +159,9 @@ type ItemDocRow = {
  *  card change shape depending on which job last touched it. */
 export function toItemSearchDoc(row: ItemDocRow, categories: string[]): ItemSearchDoc {
   return {
-    id: row.id,
+    id: docId(row.vendor.tenantId, row.id),
+    entityId: row.id,
+    tenantId: row.vendor.tenantId,
     name: row.name,
     description: row.description || '',
     vendorId: row.vendorId,
@@ -183,7 +191,8 @@ export function toItemSearchDoc(row: ItemDocRow, categories: string[]): ItemSear
 export function itemHitFromSearchDoc(h: Record<string, unknown>): ItemHit {
   const created = typeof h['createdAt'] === 'number' ? (h['createdAt'] as number) : null;
   return {
-    id: String(h['id']),
+    // the entity id, never the tenant-prefixed document id
+    id: String(h['entityId'] ?? h['id']),
     name: String(h['name']),
     basePrice: Number(h['basePrice'] ?? 0),
     imageUrl: (h['imageUrl'] as string | null) ?? null,

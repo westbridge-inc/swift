@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { VISIBLE_VENDOR_REL } from '../vendor/vendor-visibility';
+import { visibleVendorInTenant } from '../vendor/vendor-visibility';
+import { bindPublicMarketTenant, decodeScopedCursor, encodeScopedCursor } from '../search/search-scope';
 import { ITEM_HIT_SELECT, toItemHit, type ItemHit } from '../search/item-hit';
 import { AppError } from '../../utils/errors';
 
@@ -57,26 +58,9 @@ const marketQuerySchema = z.object({
   // filters nothing is a chip that lies". They slot in when the primitive does.
 });
 
-/** Keyset cursor: the last row's id PLUS the sort it was produced under, so a
- *  cursor cannot be replayed against a different ordering and silently return a
- *  nonsense page. Opaque to the client, meaningful to the server. */
-function encodeCursor(id: string, sort: Sort): string {
-  return Buffer.from(JSON.stringify({ i: id, s: sort })).toString('base64url');
-}
-
-function decodeCursor(raw: string, sort: Sort): string {
-  let parsed: { i?: unknown; s?: unknown };
-  try {
-    parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
-  } catch {
-    throw new AppError(400, 'BAD_CURSOR', 'That page cursor is not readable — start from the first page.');
-  }
-  if (typeof parsed.i !== 'string' || parsed.s !== sort) {
-    throw new AppError(400, 'BAD_CURSOR', 'That page cursor belongs to a different sort — start from the first page.');
-  }
-  return parsed.i;
-}
-
+/** Keyset cursors are minted and checked by the scope module: they carry the
+ *  sort AND the tenant they were produced under, so a cursor can neither be
+ *  replayed against a different ordering nor walk another operator's catalogue. */
 /** Ordering, always with `id` as the tiebreaker so keyset paging is stable when
  *  the sort column has duplicates (every price and every totalOrdered does). */
 function orderFor(sort: Sort) {
@@ -87,6 +71,11 @@ function orderFor(sort: Sort) {
 }
 
 export async function marketRoutes(app: FastifyInstance) {
+  // [R048-003] A guest surface has no session to bind a tenant from, so the
+  // public market resolver binds one for every request here — the taxonomy,
+  // the join rows and the vendors are tenant-scoped models and partition
+  // themselves once bound; items carry no tenant and name it explicitly.
+  app.addHook('preHandler', bindPublicMarketTenant(app));
   /**
    * GET /items — the catalogue, across stores.
    *
@@ -96,6 +85,7 @@ export async function marketRoutes(app: FastifyInstance) {
    */
   app.get('/items', async (request) => {
     const q = marketQuerySchema.parse(request.query);
+    const tenantId = request.publicTenantId!;
 
     // Resolve the category slug to an id FIRST, so an unknown slug is an honest
     // 404 rather than a silently empty grid that looks like "we sell nothing".
@@ -105,8 +95,9 @@ export async function marketRoutes(app: FastifyInstance) {
       // is a real category that was folded into another, so it resolves to its
       // target rather than 404ing: the founder's own governance model says
       // merged slugs redirect, and an old link must not become a dead end.
+      // the slug is unique per (tenant, slug): two operators may share it, and only this tenant's resolves
       const cat = await app.prisma.discoveryCategory.findFirst({
-        where: { slug: q.category, status: { in: ['ACTIVE', 'MERGED'] } },
+        where: { tenantId, slug: q.category, status: { in: ['ACTIVE', 'MERGED'] } },
         select: { id: true, status: true, mergedIntoId: true },
       });
       if (!cat) throw new AppError(404, 'CATEGORY_NOT_FOUND', 'That category does not exist.');
@@ -126,7 +117,7 @@ export async function marketRoutes(app: FastifyInstance) {
     let itemIdsInCategory: string[] | null = null;
     if (categoryId) {
       const tags = await app.prisma.itemDiscoveryCategory.findMany({
-        where: { categoryId },
+        where: { tenantId, categoryId },
         select: { itemId: true },
         take: CATEGORY_ITEM_CAP + 1,
       });
@@ -144,9 +135,11 @@ export async function marketRoutes(app: FastifyInstance) {
     const where = {
       isAvailable: true,
       vendor: {
-        // [M4] The ONE visibility predicate, imported. Re-expressing it here
-        // would be its seventh copy, and the copies already disagree.
-        ...VISIBLE_VENDOR_REL,
+        // [M4] The ONE visibility predicate, imported — inside THIS tenant
+        // ([R048-003]: the relation filter is not reached by the scoping
+        // extension, so the tenant is named here). Re-expressing it would be
+        // its seventh copy, and the copies already disagree.
+        ...visibleVendorInTenant(tenantId),
         // THE MARKET IS GOODS. Without this the feed returned every item from
         // every vendor type, so the goods tab filled with restaurant dishes —
         // Dhal Puri, Pork Chops, Margherita — and service listings. `vertical`
@@ -162,7 +155,7 @@ export async function marketRoutes(app: FastifyInstance) {
       ...(itemIdsInCategory ? { id: { in: itemIdsInCategory } } : {}),
     };
 
-    const cursorId = q.cursor ? decodeCursor(q.cursor, q.sort) : null;
+    const cursorId = q.cursor ? decodeScopedCursor(q.cursor, tenantId, q.sort) : null;
 
     const [rows, total] = await Promise.all([
       app.prisma.item.findMany({
@@ -185,7 +178,7 @@ export async function marketRoutes(app: FastifyInstance) {
         items,
         // A cursor only when a further page actually exists — never a cursor
         // that leads to an empty page.
-        nextCursor: rows.length > q.limit && last ? encodeCursor(last.id, q.sort) : null,
+        nextCursor: rows.length > q.limit && last ? encodeScopedCursor(tenantId, last.id, q.sort) : null,
         meta: { total, category: q.category ?? null },
       },
     };
