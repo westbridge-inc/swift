@@ -117,6 +117,18 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [ADM-001] The admin capability decision: granted, missing-capability (the
+ *  actor does not hold what the route demands), unregistered-route (a route
+ *  with no entry in the authority table — denied, and a defect), and
+ *  shadow_denied (a decision that WOULD have denied, under the staged rollout
+ *  mode). Labelled by class so a C4 denial is distinguishable from a C0 one. */
+export const adminCapabilityCounter = new client.Counter({
+  name: 'swift_admin_capability_total',
+  help: 'Admin capability decisions (granted/missing-capability/unregistered-route/shadow_denied) by action class',
+  labelNames: ['decision', 'cls'] as const,
+  registers: [registry],
+});
+
 /** [R048-007] Money-surface authority transitions and refusals: staged, stage_replay, cancelled, cleared, applied,
  *  apply_lease_missed, refused_authority_moved, refused_no_decision, refused_step_up, refused_control_unavailable,
  *  notice_sent, notice_retry, notice_sweep. */
