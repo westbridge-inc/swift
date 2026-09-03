@@ -20,6 +20,26 @@ export const AUDIT_PURGE_SETTING = 'swift.audit_purge';
 const MIN_REASON = 8;
 
 /**
+ * [ADM-007] The same licence, for the access trail. Who looked at whose data
+ * is the same kind of record as what an admin did to it, so it lives under the
+ * same rule rather than a second one that could drift.
+ */
+export async function purgeSensitiveReadLogs(
+  prisma: PrismaClient,
+  where: Prisma.SensitiveReadLogWhereInput,
+  reason: string,
+): Promise<number> {
+  if (!reason || reason.trim().length < MIN_REASON) {
+    throw new Error(`[ADM-003] an audit purge must name its reason (>= ${MIN_REASON} chars)`);
+  }
+  const [, deleted] = await prisma.$transaction([
+    prisma.$executeRaw`SELECT set_config(${AUDIT_PURGE_SETTING}, ${reason}, true)`,
+    prisma.sensitiveReadLog.deleteMany({ where }),
+  ]);
+  return deleted.count;
+}
+
+/**
  * Remove audit rows under a named retention reason. The `set_config` is
  * transaction-local (`is_local = true`), so the licence exists for exactly the
  * statements batched with it and for no other connection or query.

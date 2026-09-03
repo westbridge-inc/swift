@@ -124,6 +124,7 @@ const TENANT_QUERY_EXTENSIONS = {
   // operator's money. It is tenant-owned like the surface it acts on.
   moneySurfaceCommand: scoped,
   privilegedApproval: scoped,
+  sensitiveReadLog: scoped,
   // [MKT-2] The stock ledger is tenant-owned: one operator's inventory
   // history must never be readable through another's session.
   stockMovement: scoped,

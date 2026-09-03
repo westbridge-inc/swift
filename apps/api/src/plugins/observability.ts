@@ -132,6 +132,17 @@ export const adminCapabilityCounter = new client.Counter({
 /** [R048-007] Money-surface authority transitions and refusals: staged, stage_replay, cancelled, cleared, applied,
  *  apply_lease_missed, refused_authority_moved, refused_no_decision, refused_step_up, refused_control_unavailable,
  *  notice_sent, notice_retry, notice_sweep. */
+/** [ADM-007] Sensitive admin reads, by the capability exercised. A record per
+ *  read of identity, location, a document or a secret — the thing that was
+ *  missing for 75 of the 77 admin reads. Unusual volume on one capability is
+ *  the signal worth watching. */
+export const sensitiveReadCounter = new client.Counter({
+  name: 'swift_admin_sensitive_read_total',
+  help: 'C1 (sensitive) admin reads recorded, by capability',
+  labelNames: ['capability'] as const,
+  registers: [registry],
+});
+
 /** [ADM-005] Dual control on money and platform actions: `requested` (the ask
  *  became a pending approval), `granted` (a second admin's decision let it
  *  through), `applied` (the approval was spent), and one label for each way an

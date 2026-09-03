@@ -5251,6 +5251,42 @@ model VendorPrepStat {
 /// the revocation consequence and the owner notice intent commit together or
 /// not at all. The notice is delivered after commit and retried by the
 /// cool-off job until sent — exactly one intent per transition.
+/// [ADM-007] EVERY SENSITIVE ADMIN READ LEAVES A RECORD.
+///
+/// Two of the 77 admin reads were logged. An admin could open any customer,
+/// any driver, any order, any uploaded document and any handover secret and
+/// leave nothing behind — which defeats the "every access is logged"
+/// commitment this platform makes to the people whose data it holds
+/// (Appendix AH, AH-DPA-003).
+///
+/// The C1 class (AJ.3) is exactly the set that discloses identity, location, a
+/// document or a secret, so it is the set that writes here. The shape follows
+/// SafetyAccessLog, which has recorded evidence-vault access from the
+/// beginning — accessor, subject, what they did, why — because a second way of
+/// saying the same thing is a second thing to keep honest.
+model SensitiveReadLog {
+  id          String   @id @default(cuid())
+  tenantId    String   @default("swift-default")
+  actorUserId String
+  /// "<METHOD> <route template>" — the classified read, never a raw URL
+  action      String
+  /// The capability the actor exercised (ADM-001)
+  capability  String
+  /// Who or what was read, where the route names one; null for a list read
+  subjectId   String?
+  /// The stated reason where the route demands one (a handover secret, an
+  /// identity graph); otherwise the read itself, which IS the purpose for a
+  /// queue an operator works. A reason demanded on every list read would be
+  /// typed without meaning within a day.
+  purpose     String
+  at          DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([actorUserId, at])
+  @@index([subjectId, at])
+  @@map("sensitive_read_logs")
+}
+
 /// [ADM-005] DUAL CONTROL ON MONEY AND PLATFORM ACTIONS.
 ///
 /// Every `finance/*`, `billing/*`, `subscriptions/*` and `ads/*` money route
