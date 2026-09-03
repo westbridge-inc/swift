@@ -56,6 +56,7 @@ import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig
 import { createHash } from 'node:crypto';
 import { billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
+import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
@@ -225,9 +226,23 @@ const broadcastSchema = z.object({
   category: z.enum(['service', 'marketing']),
 });
 
+// [A-12] A top-up is money arriving from a real transfer, so it takes the exact
+// money contract (whole GYD, never a float) and it NAMES that transfer. The
+// reference used to be optional and shapeless: a credit could be recorded with
+// no evidence of which payment it was, and the same payment could be credited
+// again tomorrow under a fresh idempotency key.
 const topUpSchema = z.object({
-  amount: z.number().positive().max(10_000_000),
-  reference: z.string().max(200).optional(),
+  amount: zMoneyWhole.refine((n) => n > 0, 'A top-up must be more than zero'),
+  reference: z.string(),
+});
+
+// [A-12] A waiver is Swift's own revenue, given away. `reasonSchema` makes the
+// reason optional and the route defaulted it to "Waived by admin", which is not
+// a reason — it is the absence of one, recorded as though it were present. A
+// dedicated schema, because four other routes share reasonSchema and this is
+// not a reason to tighten them.
+const waiveFeeSchema = z.object({
+  reason: z.string().trim().min(8, 'Say why this fee is being waived — this is revenue Swift is giving up.').max(500),
 });
 
 const verificationQueueQuerySchema = z.object({
@@ -2739,7 +2754,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const tenantId = getTenantId();
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { id } = request.params as { id: string };
-    const { reason } = reasonSchema.parse(request.body ?? {});
+    const { reason } = waiveFeeSchema.parse(request.body ?? {});
     const tenantScope = subscriptionTenantScope(tenantId);
 
     const subscription = await app.prisma.subscription.findFirst({
@@ -2757,7 +2772,7 @@ export async function adminRoutes(app: FastifyInstance) {
       data: {
         feeWaived: true,
         feeWaivedBy: request.user.userId,
-        feeWaivedReason: reason || 'Waived by admin',
+        feeWaivedReason: reason,
       },
     }));
 
@@ -2816,8 +2831,16 @@ export async function adminRoutes(app: FastifyInstance) {
       billingTopupMissingKeyCounter.inc();
       throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
     }
+    // [A-12] Normalised the same way every other manual-rail reference is, so
+    // the same transfer typed two ways cannot occupy two rows and defeat the
+    // unique index that makes one transfer one credit.
+    const reference = normaliseReference(body.reference, {
+      required: 'Enter the bank or MMG reference for the transfer that arrived — it is the only proof this credit is real money.',
+      invalid: 'That does not look like a transfer reference. Copy it from the bank or MMG record.',
+    }, 'TOPUP_REFERENCE');
+
     const requestHash = createHash('sha256')
-      .update(JSON.stringify({ subscriptionId: id, amount: body.amount, reference: body.reference ?? null }))
+      .update(JSON.stringify({ subscriptionId: id, amount: body.amount, reference }))
       .digest('hex');
     const { result, replayed } = await billing.recordTopUpCommand({
       adminId: request.user.userId,
@@ -2825,7 +2848,7 @@ export async function adminRoutes(app: FastifyInstance) {
       requestHash,
       subscriptionId: id,
       amount: body.amount,
-      reference: body.reference,
+      reference,
       audit: { ipAddress: request.ip, userAgent: request.headers['user-agent'] },
     });
 

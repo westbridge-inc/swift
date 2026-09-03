@@ -213,12 +213,16 @@ export const featureVendor = (id: string, featured: boolean) =>
 
 // ─── Money center ────────────────────────────────────────────────
 export const fetchSubscriptions = (params?: string) => apiFetch(`/api/v1/admin/subscriptions?${params || 'limit=50'}`);
-export const waiveSubscriptionFee = (id: string, reason?: string) =>
+// [A-12] The reason is REQUIRED — a waiver with no stated reason is revenue
+// given away with no record of why.
+export const waiveSubscriptionFee = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/waive-fee`, { method: 'PUT', body: JSON.stringify({ reason }) });
 // [M-08] The server REQUIRES an Idempotency-Key on a top-up: a retry after a
 // lost response returns the same result instead of crediting twice. The key
 // belongs to the ATTEMPT and the page owns it — this client never mints one.
-export const topUpSubscription = (id: string, amount: number, reference: string | undefined, idempotencyKey: string) =>
+// [A-12] The provider transaction reference is REQUIRED: it is the identity of
+// the money that arrived, and it is what stops one transfer being credited twice.
+export const topUpSubscription = (id: string, amount: number, reference: string, idempotencyKey: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/topup`, {
     method: 'POST',
     body: JSON.stringify({ amount, reference }),

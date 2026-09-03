@@ -10,7 +10,8 @@ import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
 import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
-import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
+import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
+import { isDuplicateOn } from '../money/evidence';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -1763,7 +1764,8 @@ export class BillingService {
     requestHash: string;
     subscriptionId: string;
     amount: number;
-    reference?: string;
+    /** [A-12] REQUIRED: the provider transaction this credit is evidence of. */
+    reference: string;
     audit?: { ipAddress?: string; userAgent?: string };
   }): Promise<{ replayed: boolean; commandId: string; result: TopUpCommandResult }> {
     if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
@@ -1813,7 +1815,8 @@ export class BillingService {
             requestHash: input.requestHash,
             subscriptionId: input.subscriptionId,
             amount: input.amount,
-            reference: input.reference ?? null,
+            reference: input.reference,
+            providerRef: input.reference,
             billingEventId: event.id,
             result: result as never,
           },
@@ -1823,6 +1826,18 @@ export class BillingService {
         return row;
       });
     } catch (error) {
+      // [A-12] TWO different conflicts land here and they mean opposite things.
+      // A clash on the REFERENCE is a second credit for one real-world
+      // transfer — refuse it, loudly. A clash on the idempotency key is the
+      // same request arriving twice — answer the winner's result.
+      if (isDuplicateOn(error, 'providerRef')) {
+        billingTopupDuplicateReferenceCounter.inc();
+        throw new AppError(
+          409,
+          'TOPUP_REFERENCE_ALREADY_CREDITED',
+          'That transfer reference has already been credited. One transfer credits one subscription — check the billing events before recording it again.',
+        );
+      }
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
         // A concurrent request with the same key won the race: answer its result.
         const winner = await this.prisma.topUpCommand.findUnique({ where, select: { id: true, requestHash: true, result: true } });

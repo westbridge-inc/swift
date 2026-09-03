@@ -143,7 +143,7 @@ describe('[M-08] the key is required — the register’s first red test', () =>
     expect((await billingTopupMissingKeyCounter.get()).values[0]?.value).toBe(before + 2);
     // The service refuses too — the key is not a route convenience.
     await expect(billing.recordTopUp(sub.id, 5000, adminUserId, 'bank-1', '')).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REQUIRED' });
-    await expect(billing.recordTopUpCommand({ adminId: adminUserId, idempotencyKey: 'short', requestHash: hashOf(sub.id, 5000), subscriptionId: sub.id, amount: 5000 })).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REQUIRED' });
+    await expect(billing.recordTopUpCommand({ adminId: adminUserId, idempotencyKey: 'short', requestHash: hashOf(sub.id, 5000), subscriptionId: sub.id, amount: 5000, reference: refFor('SHORTKEY') })).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REQUIRED' });
     expect(await facts(sub.id)).toEqual({ credits: 0, receipts: 0, postings: 0, audits: 0, commands: 0, balance: 0 });
   });
 
@@ -159,15 +159,17 @@ describe('[M-08] the key is required — the register’s first red test', () =>
     expect(again.json()).toMatchObject({ success: true, replayed: true, data: { balance: 5000, currencyCode: 'GYD' } });
     expect(await facts(sub.id)).toEqual({ credits: 1, receipts: 1, postings: 1, audits: 1, commands: 1, balance: 5000 });
     const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entity: 'Subscription', entityId: sub.id, action: 'PREPAID_TOPUP' } });
-    expect(audit.changes).toMatchObject({ amount: 5000, reference: 'bank-2', idempotencyKey: key });
+    // [A-12] Stored upper-cased: normalisation is what makes the unique index
+    // work, so the same transfer typed two ways cannot occupy two rows.
+    expect(audit.changes).toMatchObject({ amount: 5000, reference: 'BANK-2', idempotencyKey: key });
   });
 
   it('the same key under a different request is refused, counted, and credits nothing more', async () => {
     const { sub } = await makeVendorSub();
     const key = `attempt-${nanoid(12)}`;
     const before = (await billingTopupDuplicateFingerprintCounter.get()).values[0]?.value ?? 0;
-    expect((await topup(sub.id, { amount: 5000 }, { 'idempotency-key': key })).statusCode).toBe(200);
-    const reused = await topup(sub.id, { amount: 9000 }, { 'idempotency-key': key });
+    expect((await topup(sub.id, { amount: 5000, reference: refFor('REUSE') }, { 'idempotency-key': key })).statusCode).toBe(200);
+    const reused = await topup(sub.id, { amount: 9000, reference: refFor('REUSE2') }, { 'idempotency-key': key });
     expect(reused.statusCode).toBe(409);
     expect(reused.json().error?.code ?? reused.json().code).toBe('IDEMPOTENCY_KEY_REUSED');
     expect((await facts(sub.id)).balance).toBe(5000);
@@ -180,12 +182,14 @@ describe('[M-08] a failpoint after the credit — the register’s second red te
     const { sub } = await makeVendorSub();
     const key = `attempt-${nanoid(12)}`;
     armed = true;
-    await expect(billing.recordTopUpCommand({ adminId: adminUserId, idempotencyKey: key, requestHash: hashOf(sub.id, 5000), subscriptionId: sub.id, amount: 5000 })).rejects.toThrow(/failpoint/);
+    // ONE real transfer across all three attempts, so ONE reference.
+    const transferRef = refFor('FAILPOINT');
+    await expect(billing.recordTopUpCommand({ adminId: adminUserId, idempotencyKey: key, requestHash: hashOf(sub.id, 5000), subscriptionId: sub.id, amount: 5000, reference: transferRef })).rejects.toThrow(/failpoint/);
     expect(await facts(sub.id)).toEqual({ credits: 0, receipts: 0, postings: 0, audits: 0, commands: 0, balance: 0 });
-    const retry = await billing.recordTopUpCommand({ adminId: adminUserId, idempotencyKey: key, requestHash: hashOf(sub.id, 5000), subscriptionId: sub.id, amount: 5000 });
+    const retry = await billing.recordTopUpCommand({ adminId: adminUserId, idempotencyKey: key, requestHash: hashOf(sub.id, 5000), subscriptionId: sub.id, amount: 5000, reference: transferRef });
     expect(retry.replayed).toBe(false);
     expect(await facts(sub.id)).toEqual({ credits: 1, receipts: 1, postings: 1, audits: 1, commands: 1, balance: 5000 });
-    const again = await billing.recordTopUpCommand({ adminId: adminUserId, idempotencyKey: key, requestHash: hashOf(sub.id, 5000), subscriptionId: sub.id, amount: 5000 });
+    const again = await billing.recordTopUpCommand({ adminId: adminUserId, idempotencyKey: key, requestHash: hashOf(sub.id, 5000), subscriptionId: sub.id, amount: 5000, reference: transferRef });
     expect(again).toMatchObject({ replayed: true, commandId: retry.commandId, result: retry.result });
   });
 
@@ -194,7 +198,7 @@ describe('[M-08] a failpoint after the credit — the register’s second red te
     const key = `attempt-${nanoid(12)}`;
     const spy = vi.spyOn(NotificationService.prototype, 'send').mockRejectedValueOnce(new Error('notification unavailable'));
     try {
-      const res = await billing.recordTopUpCommand({ adminId: adminUserId, idempotencyKey: key, requestHash: hashOf(sub.id, 5000), subscriptionId: sub.id, amount: 5000 });
+      const res = await billing.recordTopUpCommand({ adminId: adminUserId, idempotencyKey: key, requestHash: hashOf(sub.id, 5000), subscriptionId: sub.id, amount: 5000, reference: refFor('TAIL') });
       expect(res.replayed).toBe(false);
     } finally {
       spy.mockRestore();
@@ -222,12 +226,111 @@ describe('[M-08 · operations] rollback is hold-only', () => {
     const { sub } = await makeVendorSub();
     process.env['BILLING_TOPUP_HOLD'] = '1';
     try {
-      const held = await topup(sub.id, { amount: 5000 }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+      const held = await topup(sub.id, { amount: 5000, reference: refFor('HELD') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
       expect(held.statusCode).toBe(503);
       expect(held.json().error?.code ?? held.json().code).toBe('TOPUP_ON_HOLD');
     } finally {
       delete process.env['BILLING_TOPUP_HOLD'];
     }
     expect(await facts(sub.id)).toEqual({ credits: 0, receipts: 0, postings: 0, audits: 0, commands: 0, balance: 0 });
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// [A-12] THE IDEMPOTENCY KEY IS NOT THE TRANSFER'S IDENTITY.
+//
+// M-08 made the same REQUEST safe to repeat: a key, scoped to one admin, that
+// replays its own result. It says nothing about the same real-world TRANSFER
+// being credited twice — under a fresh key, or by a second operator working
+// from the same bank statement. `providerRef` is that identity.
+// ---------------------------------------------------------------------------
+// A reference the shape actually accepts: `nanoid` draws from an alphabet that
+// includes `-` and `_`, and a reference may not END in one. Roughly three runs
+// in a hundred produced a trailing `-` and a 400 that had nothing to do with
+// what the test was grading. Alphanumeric, always.
+const refFor = (prefix: string) => `${prefix}-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}`.toUpperCase();
+
+const waiveFee = (id: string, body: Record<string, unknown>) => app.inject({
+  method: 'PUT', url: `/api/v1/admin/subscriptions/${id}/waive-fee`, payload: body,
+  headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+});
+
+describe('[A-12] one transfer credits one subscription, once', () => {
+  it('a top-up with no reference is refused — a credit with no evidence is not a credit', async () => {
+    const { sub } = await makeVendorSub();
+    const res = await topup(sub.id, { amount: 5000 }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    expect(res.statusCode).toBe(400);
+    expect(await facts(sub.id)).toMatchObject({ credits: 0, balance: 0 });
+  });
+
+  it('nothing entered and something wrong are different mistakes', async () => {
+    const { sub } = await makeVendorSub();
+    const blank = await topup(sub.id, { amount: 5000, reference: '   ' }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    expect(blank.json().error.code).toBe('TOPUP_REFERENCE_REQUIRED');
+    const junk = await topup(sub.id, { amount: 5000, reference: '!!' }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    expect(junk.json().error.code).toBe('TOPUP_REFERENCE_INVALID');
+    expect(await facts(sub.id)).toMatchObject({ credits: 0, balance: 0 });
+  });
+
+  it('the SAME transfer under a FRESH key is refused — the case the idempotency key cannot see', async () => {
+    const { sub } = await makeVendorSub();
+    const other = await makeVendorSub();
+    const transfer = refFor('MMG');
+
+    const first = await topup(sub.id, { amount: 5000, reference: transfer }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    expect(first.statusCode).toBe(200);
+
+    // A different key, and even a different subscription: it is still one
+    // transfer, and it has already been credited.
+    const again = await topup(sub.id, { amount: 5000, reference: transfer }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error.code).toBe('TOPUP_REFERENCE_ALREADY_CREDITED');
+
+    const elsewhere = await topup(other.sub.id, { amount: 5000, reference: transfer }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    expect(elsewhere.statusCode).toBe(409);
+
+    expect(await facts(sub.id)).toMatchObject({ credits: 1, balance: 5000 });
+    expect(await facts(other.sub.id)).toMatchObject({ credits: 0, balance: 0 });
+  });
+
+  it('the same transfer typed in a different case is the same transfer', async () => {
+    const { sub } = await makeVendorSub();
+    const transfer = refFor('BANK');
+    expect((await topup(sub.id, { amount: 5000, reference: transfer }, { 'idempotency-key': `attempt-${nanoid(12)}` })).statusCode).toBe(200);
+    const lower = await topup(sub.id, { amount: 5000, reference: transfer.toLowerCase() }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    expect(lower.statusCode).toBe(409);
+    expect(await facts(sub.id)).toMatchObject({ credits: 1, balance: 5000 });
+  });
+
+  it('money is exact or refused — a top-up is never a float', async () => {
+    const { sub } = await makeVendorSub();
+    for (const amount of [5000.5, 0.001, 0, -100]) {
+      const res = await topup(sub.id, { amount, reference: refFor('EXACT') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+      expect(res.statusCode, `amount ${amount}`).toBe(400);
+    }
+    expect(await facts(sub.id)).toMatchObject({ credits: 0, balance: 0 });
+  });
+});
+
+describe('[A-12] a waived fee records why', () => {
+  it('refuses a waiver with no reason, and one with no substance', async () => {
+    const { sub } = await makeVendorSub();
+    expect((await waiveFee(sub.id, {})).statusCode).toBe(400);
+    expect((await waiveFee(sub.id, { reason: '   ' })).statusCode).toBe(400);
+    expect((await waiveFee(sub.id, { reason: 'ok' })).statusCode).toBe(400);
+    const fresh = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(fresh.feeWaived).toBe(false);
+  });
+
+  it('stores the operator’s own words — never a default standing in for a reason', async () => {
+    const { sub } = await makeVendorSub();
+    const res = await waiveFee(sub.id, { reason: 'Outage on 2 Sep — vendor could not trade for three days' });
+    expect(res.statusCode).toBe(200);
+    const fresh = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(fresh.feeWaived).toBe(true);
+    expect(fresh.feeWaivedReason).toBe('Outage on 2 Sep — vendor could not trade for three days');
+    expect(fresh.feeWaivedReason).not.toBe('Waived by admin');
+    expect(fresh.feeWaivedBy).toBeTruthy();
   });
 });
