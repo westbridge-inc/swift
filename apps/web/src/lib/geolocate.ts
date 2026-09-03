@@ -26,20 +26,47 @@ export interface Coords {
  *                specific, because the message is the entire recourse the
  *                person has.
  */
-export function currentCoords(purpose: string, timeoutMs = 8000): Promise<Coords> {
+/**
+ * [W-08] The fix AS THE DEVICE REPORTED IT, including how good it is.
+ *
+ * `currentCoords` threw `coords.accuracy` away, so a ±5 km cell-tower fix was
+ * indistinguishable from a ±8 m GPS one and both became an exact delivery
+ * address. The caller deciding whether a point is good enough to dispatch a
+ * rider to needs the number, so it travels with the point.
+ */
+export interface Fix extends Coords {
+  /** Metres, as stated by the device. Never invented. */
+  accuracyM: number | null;
+  /** When the device took the reading. */
+  timestamp: number;
+}
+
+export function currentFix(purpose: string, timeoutMs = 8000): Promise<Fix> {
   return new Promise((resolve, reject) => {
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
       reject(new Error(`This browser can’t share your location, so we can’t ${purpose}. Use the Swift app instead.`));
       return;
     }
     navigator.geolocation.getCurrentPosition(
-      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+      (p) => resolve({
+        lat: p.coords.latitude,
+        lng: p.coords.longitude,
+        accuracyM: typeof p.coords.accuracy === 'number' && Number.isFinite(p.coords.accuracy) ? p.coords.accuracy : null,
+        timestamp: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
+      }),
       (err) => reject(new Error(
         err.code === err.PERMISSION_DENIED
           ? `We need your location to ${purpose} — allow location access and try again.`
           : `We couldn’t get your location just now, so we can’t ${purpose}. Move somewhere with a clearer signal and try again.`,
       )),
+      // maximumAge is left at its default of 0: never hand back a cached
+      // position. A remembered point is where you WERE.
       { timeout: timeoutMs, enableHighAccuracy: true },
     );
   });
+}
+
+/** The point only. Delegates, so there is still ONE call into the browser. */
+export function currentCoords(purpose: string, timeoutMs = 8000): Promise<Coords> {
+  return currentFix(purpose, timeoutMs).then(({ lat, lng }) => ({ lat, lng }));
 }
