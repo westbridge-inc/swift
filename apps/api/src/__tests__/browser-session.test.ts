@@ -300,3 +300,70 @@ describe('[A-01] the cookie is marked Secure where it travels over the network',
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// [W-01] REGISTRATION ISSUES A SESSION TOO.
+//
+// verify-otp was made cookie-mode by A-01; /register was not, and it creates a
+// session exactly the same way. A browser that signs UP therefore received a
+// credential in the body — which the web app, having stopped storing tokens,
+// had nowhere to put. The account was created and the new customer was bounced
+// straight to /login on their first authenticated request.
+//
+// Signing up and signing in must hand a browser the same thing.
+// ---------------------------------------------------------------------------
+describe('[W-01] a browser that registers is signed in by cookie, like one that logs in', () => {
+  const newPhone = `+59278${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const WEB = { 'x-swift-client': 'web', origin: ORIGIN } as const;
+
+  it('register answers a browser with the same HttpOnly cookie pair and no tokens — and the cookies authenticate immediately', async () => {
+    const code = await requestOtp(app, newPhone);
+    const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', headers: WEB, payload: { phone: newPhone, code } });
+    expect(verified.statusCode, verified.body).toBe(200);
+    expect(verified.json().data.isNewUser).toBe(true);
+
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/auth/register', headers: WEB,
+      payload: { phone: newPhone, firstName: 'New', lastName: `Web${RUN}`, acceptTerms: true },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    const created = res.json().data.user;
+    userIds.push(created.id);
+
+    const jar: Jar = {};
+    const { raw } = applySetCookies(jar, res);
+    expect(raw).toHaveLength(2);
+    for (const line of raw) {
+      expect(line, line).toMatch(/HttpOnly/);
+      expect(line, line).toMatch(/SameSite=Strict/);
+    }
+    expect(raw.find((l) => l.startsWith(`${REFRESH_COOKIE}=`))).toContain('Path=/api/v1/auth;');
+    // nothing a script can read: no tokens in the body, and neither cookie's
+    // value appears anywhere in it
+    expect(res.json().data.tokens).toBeUndefined();
+    expect(res.json().data.session).toBe('cookie');
+    expect(res.body).not.toContain(jar[ACCESS_COOKIE]!);
+    expect(res.body).not.toContain(jar[REFRESH_COOKIE]!);
+
+    // THE POINT: the new account is signed in — the cookies the response set
+    // are a working session, which is what the body's token used to be for.
+    const me = await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { ...WEB, cookie: cookieHeader(jar) } });
+    expect(me.statusCode, me.body).toBe(200);
+    expect(me.json().data.user.id).toBe(created.id);
+    expect(me.json().data.client).toBe('web');
+  });
+
+  it('a native client registering still gets tokens in the body and no cookie — the apps are untouched', async () => {
+    const nativePhone = `+59279${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const code = await requestOtp(app, nativePhone);
+    await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: nativePhone, code } });
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/auth/register',
+      payload: { phone: nativePhone, firstName: 'New', lastName: `Native${RUN}`, acceptTerms: true },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    userIds.push(res.json().data.user.id);
+    expect(res.json().data.tokens.accessToken).toBeTruthy();
+    expect(res.headers['set-cookie']).toBeUndefined();
+  });
+});

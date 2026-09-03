@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { DataUnavailable } from '@/components/data-unavailable';
@@ -24,12 +24,9 @@ import { getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRide
 // knowledge. Everything else is ignorance, and must surface as an error.
 // ---------------------------------------------------------------------------
 
-const TOKEN_KEY = 'swift_web_token';
-
-beforeEach(() => {
-  // apiFetch attaches a bearer token; without one these reads never leave.
-  localStorage.setItem(TOKEN_KEY, 'test-token');
-});
+// [W-01] These reads used to need a bearer token seeded into localStorage.
+// The session is now an HttpOnly cookie the page cannot see or seed: apiFetch
+// sends `credentials: 'include'` and the mock answers on its own terms.
 afterEach(() => {
   localStorage.clear();
   vi.unstubAllGlobals();

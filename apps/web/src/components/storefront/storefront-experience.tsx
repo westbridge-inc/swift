@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
-import { ApiRequestError, getToken } from '@/lib/auth';
+import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import {
   addToCart,
   checkoutAttemptSignature,
@@ -220,8 +220,6 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
     let alive = true;
     let catalogRefreshInFlight = false;
     setCatalogState('loading');
-    const hasSession = Boolean(getToken());
-    setSignedIn(hasSession);
 
     const refreshCatalog = async () => {
       if (catalogRefreshInFlight) return;
@@ -250,10 +248,17 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
     void refreshCatalog();
     const catalogTimer = window.setInterval(() => void refreshCatalog(), CATALOG_REFRESH_MS);
 
-    if (hasSession) {
+    // [W-01] Signed-in is the server's answer about an HttpOnly cookie, not a
+    // token this script can read. Start signed-OUT, ask, and hydrate the cart
+    // only once the server has attested — so a signed-out visitor never fires
+    // the two authenticated loads, exactly as the token check used to prevent.
+    setSignedIn(false);
+    void sessionProbe().then((session) => {
+      if (!alive || !session.ok) return;
+      setSignedIn(true);
       setLoadingCart(true);
       setCartHydrated(false);
-      void Promise.all([
+      return Promise.all([
         getCart({ redirectOnExpired: false }),
         getAddresses({ redirectOnExpired: false }),
       ])
@@ -271,7 +276,10 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
         })
         .catch((loadError) => {
           if (!alive) return;
-          if (!getToken()) {
+          // [W-01] The session can die between the probe and the load. With a
+          // cookie there is nothing local to re-inspect, so the SERVER's 401 is
+          // the signal — sign out quietly instead of showing a load error.
+          if (loadError instanceof ApiRequestError && loadError.status === 401) {
             setSignedIn(false);
             setCart(null);
             setAddresses([]);
@@ -283,7 +291,7 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
         .finally(() => {
           if (alive) setLoadingCart(false);
         });
-    }
+    });
 
     return () => {
       alive = false;

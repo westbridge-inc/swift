@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Receipt, MapPin, LogOut, ChevronRight } from 'lucide-react';
-import { apiFetch, clearSession } from '@/lib/auth';
+import { apiFetch, logout } from '@/lib/auth';
 
 export default function AccountPage() {
   const router = useRouter();
@@ -38,7 +38,7 @@ export default function AccountPage() {
         ))}
       </div>
 
-      <button onClick={() => { clearSession(); router.replace('/'); }} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-[var(--swift-red)] py-3 font-bold text-[var(--swift-red)]">
+      <button onClick={() => { void logout().then(() => router.replace('/')); }} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-[var(--swift-red)] py-3 font-bold text-[var(--swift-red)]">
         <LogOut className="h-4 w-4" /> Sign out
       </button>
     </div>
