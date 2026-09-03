@@ -70,6 +70,11 @@ export const confirmRiderSettlement = (id: string, amount: string | number) =>
   apiFetch(`/api/v1/rider/cash-settlements/${id}/confirm`, { method: 'POST', body: JSON.stringify({ amount }) });
 export const updateDriverProfile = (body: Record<string, unknown>) =>
   apiFetch('/api/v1/driver/profile', { method: 'PUT', body: JSON.stringify(body) });
+// [W-31] "This wasn't me": drop a staged pay-link change and sign every other
+// device out. The API has always had it; the portal never offered it, so a
+// driver who saw a change they did not make had nowhere to go.
+export const cancelPendingMmgPayUrl = () =>
+  apiFetch('/api/v1/driver/profile/mmg-pay-url/pending', { method: 'DELETE' });
 
 // ── Documents (verification) ────────────────────────────────────────────────
 export interface DocStatus {
