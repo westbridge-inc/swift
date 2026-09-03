@@ -51,6 +51,7 @@ import { statementRoutes } from './modules/order/statement.routes';
 import path from 'node:path';
 import { installProcessLifecycle } from './utils/process-lifecycle';
 import { resolveCorsOrigins } from './utils/cors-origin';
+import { asFastifyTrustProxy } from './config/trust-proxy';
 import { isDevelopment, isProduction } from './utils/runtime-mode';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
@@ -65,19 +66,13 @@ const SERVER_BOOTED_AT = Date.now();
 // private — they are only ever reachable through short-lived signed URLs.
 const UPLOAD_BASE = process.env['UPLOAD_DIR'] ?? path.join(process.cwd(), 'uploads');
 
-// SEC (OWASP API4): only trust X-Forwarded-For when explicitly behind a known proxy.
-// TRUST_PROXY = hop count ("1" for Fly), an IP/CIDR list, or "true". Default false so
-// a client cannot spoof its source IP to bypass rate limiting.
-function parseTrustProxy(v?: string): boolean | number | string {
-  if (!v || v === 'false') return false;
-  if (v === 'true') return true;
-  const n = Number(v);
-  return Number.isNaN(n) ? v : n;
-}
 
 async function buildApp() {
   const app = Fastify({
-    trustProxy: parseTrustProxy(process.env['TRUST_PROXY']),
+    // [DEP-1] `number` is a hop count fastify still honours at runtime but no
+    // longer types (5.12 narrowed the option). config/trust-proxy.ts is where
+    // that gap is absorbed, and where the reason is written down.
+    trustProxy: asFastifyTrustProxy(process.env['TRUST_PROXY']),
     logger: {
       level: process.env['LOG_LEVEL'] || 'info',
       // secrets and credentials never reach log output
