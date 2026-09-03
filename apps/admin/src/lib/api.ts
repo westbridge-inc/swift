@@ -499,6 +499,9 @@ export interface DeadLetter {
   /** JSON payload preview, truncated to 500 chars server-side. */
   data: string;
   finishedOn: number | null;
+  /** [A-08] What may be done with THIS class, and why. The page used to assert
+   *  every job was replayable; each row now carries its own answer. */
+  recovery?: { policy: 'SAFE_REPLAY' | 'RECONCILE_FIRST' | 'NOT_CERTIFIED'; why: string };
 }
 
 export const fetchDeadLetters = () => apiFetch('/api/v1/admin/dlq');

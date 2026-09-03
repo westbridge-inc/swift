@@ -192,10 +192,15 @@ export default function JobsPage() {
             ))}
           </div>
 
+          {/* [A-08] This used to say "Retrying is safe: every Swift job is
+              written to be idempotent" — of all 53 classes, as a fact nobody
+              had established. Retry-safety is a property each class earns, and
+              each row below says where its own class stands. */}
           <p className="text-[var(--muted)] text-xs mb-3">
-            Retrying is safe: every Swift job is written to be idempotent, which is why they retry
-            with backoff by default. Discarding is permanent and means the work should never happen.
-            Both actions are recorded in the audit log.
+            Retrying replays the job. Whether that is safe depends on the job — a class is only
+            replayable once someone has established that re-running it cannot repeat an external
+            effect, and each row says where its class stands. Discarding is permanent and means the
+            work should never happen. Both actions are recorded in the audit log.
           </p>
 
           <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] divide-y divide-[var(--border)]">
@@ -236,9 +241,16 @@ export default function JobsPage() {
                     </pre>
                   ) : null}
 
+                  {row.recovery && row.recovery.policy !== 'SAFE_REPLAY' ? (
+                    <p className="mt-2 text-xs text-amber-400">
+                      Not replayable: {row.recovery.why}
+                    </p>
+                  ) : null}
+
                   <div className="mt-3 flex gap-2 items-center flex-wrap">
                     <button
-                      disabled={busy}
+                      disabled={busy || (row.recovery ? row.recovery.policy !== 'SAFE_REPLAY' : false)}
+                      title={row.recovery && row.recovery.policy !== 'SAFE_REPLAY' ? row.recovery.why : undefined}
                       onClick={() => requeue.mutate({ row })}
                       className="px-3 py-1.5 rounded-lg text-xs bg-[var(--accent)] text-white disabled:opacity-50"
                     >

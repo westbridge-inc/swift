@@ -12,6 +12,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
+import { nanoid } from 'nanoid';
 
 // ---------------------------------------------------------------------------
 // DLQ admin (mission-control §5.7): failed background jobs get eyes, and
@@ -56,9 +57,12 @@ afterAll(async () => {
 });
 
 /** Manufacture a real dead letter: one attempt, a worker that throws. */
-async function failedJob(tag: string) {
+async function failedJob(tag: string, jobName = 'scheduler-heartbeat') {
   const { Worker } = await import('bullmq');
-  const job = await testQueue.add('doomed', { orderId: tag }, { attempts: 1 });
+  // [A-08] The job NAME decides whether a requeue is allowed at all. These
+  // tests are about the claim mechanics, so they use a class that IS certified
+  // for replay; the uncertified case has its own tests below.
+  const job = await testQueue.add(jobName, { orderId: tag }, { attempts: 1 });
   const worker = new Worker(
     testQueue.name,
     async () => { throw new Error(`boom: ${tag}`); },
@@ -164,7 +168,9 @@ describe('GET /admin/dlq', () => {
     // Manufacture a real failure: a job with 0 retries processed by a worker
     // that throws lands in the failed set.
     const { Worker } = await import('bullmq');
-    const job = await testQueue.add('doomed', { orderId: 'test-123' }, { attempts: 1 });
+    // [A-08] A class certified for replay — this test is about the list/requeue/
+    // discard mechanics, not about whether replay is allowed.
+    const job = await testQueue.add('scheduler-heartbeat', { orderId: 'test-123' }, { attempts: 1 });
     const worker = new Worker(
       testQueue.name,
       async () => { throw new Error('boom: downstream exploded'); },
@@ -307,5 +313,63 @@ describe('GET /admin/dlq', () => {
       headers: { authorization: `Bearer ${adminToken}` },
     });
     expect(badJob.statusCode).toBe(404);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// [A-08] "Retrying is safe: every Swift job is written to be idempotent."
+//
+// The page said that, of all 53 job classes, and offered one-click retry on the
+// strength of it. Nobody had established it. A job that failed AFTER an
+// external side effect — a notification sent, a provider called, money moved —
+// and is then retried does that side effect twice.
+//
+// Retry-safety is now a property each class has to earn, and the default is
+// refusal.
+// ---------------------------------------------------------------------------
+describe('[A-08] a dead job is only replayed if its class was certified for it', () => {
+  it('refuses a class nobody has certified, and says so instead of guessing', async () => {
+    const job = await failedJob(`uncertified-${nanoid(6)}`, 'process-billing');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`,
+      headers: adminHeaders(), payload: {},
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('REPLAY_NOT_CERTIFIED');
+    expect(res.json().error.message).toMatch(/not certified for replay/);
+    // And the job is still where it was — a refusal changes nothing.
+    expect(await job.getState()).toBe('failed');
+  });
+
+  it('refuses a job class it has never heard of — an unknown name is not a safe one', async () => {
+    const job = await failedJob(`unknown-${nanoid(6)}`, 'not-a-real-job-class');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`,
+      headers: adminHeaders(), payload: {},
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.details.policy).toBe('NOT_CERTIFIED');
+    expect(await job.getState()).toBe('failed');
+  });
+
+  it('allows a certified class — the tool still works where the property was established', async () => {
+    const job = await failedJob(`certified-${nanoid(6)}`, 'qr-attribution-purge');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`,
+      headers: adminHeaders(), payload: {},
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await job.getState()).toBe('waiting');
+  });
+
+  it('every listed dead job carries its own policy — one blanket promise no longer stands for 53', async () => {
+    const job = await failedJob(`listed-${nanoid(6)}`, 'process-billing');
+    const res = await app.inject({ method: 'GET', url: '/api/v1/admin/dlq', headers: adminHeaders() });
+    expect(res.statusCode).toBe(200);
+    const row = (res.json().data as Array<{ id: string; recovery?: { policy: string; why: string } }>)
+      .find((r) => r.id === String(job.id));
+    expect(row?.recovery?.policy).toBe('NOT_CERTIFIED');
+    expect(row?.recovery?.why).toBeTruthy();
   });
 });

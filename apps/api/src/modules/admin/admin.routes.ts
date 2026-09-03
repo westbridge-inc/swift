@@ -56,6 +56,7 @@ import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig
 import { createHash } from 'node:crypto';
 import { billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
+import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
@@ -4857,6 +4858,9 @@ export async function adminRoutes(app: FastifyInstance) {
           // Payload preview only — enough to triage, never a full dump.
           data: JSON.stringify(j.data ?? {}).slice(0, 500),
           finishedOn: j.finishedOn ?? null,
+          // [A-08] What may be done with this class, and why — so the page
+          // states the truth per job instead of one blanket promise for all 53.
+          recovery: recoveryFor(j.name),
         });
       }
     }
@@ -4964,12 +4968,18 @@ export async function adminRoutes(app: FastifyInstance) {
     await client.zadd(q.toKey('failed'), String(finishedOn ?? Date.now()), id);
   }
 
-  /** POST /dlq/:queue/:id/requeue — retry a dead job. */
+  /** POST /dlq/:queue/:id/requeue — retry a dead job, if its class allows it. */
   app.post('/dlq/:queue/:id/requeue', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
-    const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string };
+    const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string; acknowledgedReconciled?: string };
     const q = dlqQueue(queue);
     const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
+    // [A-08] Retry-safety is a property each job class has to EARN. The page
+    // used to assert it of all 53 of them and offer one click on the strength
+    // of that; a job that failed after an external side effect and is retried
+    // does that side effect twice. Refusal is the default.
+    const refusal = requeueRefusal(job.name, expected.acknowledgedReconciled === 'true');
+    if (refusal) throw new AppError(409, 'REPLAY_NOT_CERTIFIED', refusal, { jobName: job.name, ...recoveryFor(job.name) });
     await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { jobName: job.name }, async () => {
       try {
         await job.retry();
