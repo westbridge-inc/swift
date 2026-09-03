@@ -17,6 +17,7 @@ import {
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
 } from '../../../stores/authStore';
+import { quotedTotal, selectionIsContiguous, submittedRange, toggleWeek, type AvailableWeek } from '../../../lib/adWeeks';
 
 // §14.3 — the 5-step New Campaign wizard: ① placement tier cards with live
 // prices → ② weeks from the availability API (sold-out greyed) → ③ cities
@@ -56,9 +57,27 @@ export function NewCampaignScreen() {
   const to = useMemo(() => fmtISO(new Date(Date.now() + 8 * 7 * 86_400_000)), []);
   const availability = useAdAvailability(placement?.id, '*', from, to);
 
-  const toggleWeek = (w: string, soldOut: boolean) => {
-    if (soldOut) return;
-    setWeeks((prev) => (prev.includes(w) ? prev.filter((x) => x !== w) : [...prev, w].sort()));
+  // [MOB-052] The weeks you pick are the weeks you pay for. The picker used to
+  // let any Mondays be ticked and then submitted startWeek..endWeek — a RANGE —
+  // so picking the 1st, 3rd and 5th showed a price for three weeks and reserved
+  // five. A range is what the platform sells, so a range is what this chooses.
+  const availableWeeks: AvailableWeek[] = useMemo(
+    () => ((availability.data ?? []) as any[]).map((w) => ({
+      iso: String(w.weekStart).slice(0, 10),
+      soldOut: (w.available ?? 0) <= 0,
+    })),
+    [availability.data],
+  );
+  const [weekNotice, setWeekNotice] = useState<string | null>(null);
+  const onToggleWeek = (w: string) => {
+    const next = toggleWeek(weeks, w, availableWeeks);
+    setWeekNotice(
+      next.refused === 'sold_out' ? 'That week is sold out.'
+        : next.refused === 'gap_has_sold_out_week'
+          ? 'A week in between is sold out, so the run cannot reach that far. Campaigns book a continuous block of weeks.'
+          : null,
+    );
+    setWeeks(next.weeks);
   };
 
   const pickImage = async () => {
@@ -67,12 +86,24 @@ export function NewCampaignScreen() {
     if (a?.uri) setAsset({ uri: a.uri, mime: a.mimeType ?? 'image/jpeg', name: a.fileName ?? 'creative.jpg' });
   };
 
-  const total = (placement ? Number(placement.weeklyPrice) : 0) * weeks.length;
+  // [MOB-052] The SERVER's formula: price x weeks x cities. The screen used to
+  // price the count of ticked weeks and ignore cities, while the invoice
+  // multiplied the booked RANGE by the city count.
+  const cities = ['*'];
+  const total = quotedTotal(placement?.weeklyPrice, weeks.length, cities.length);
 
   /** ⑤ — the whole money path, honestly sequenced: draft → creative →
    *  reserve (server row-locks the weeks) → checkout (invoice + countdown). */
   const reserveAndPay = async () => {
     if (!advertiser || !placement || weeks.length === 0) return;
+    // [MOB-052] The submit path sends a RANGE. This is the invariant that
+    // makes that honest: a selection that a range would not reproduce can
+    // never be sent, whatever produced it.
+    const range = submittedRange(weeks);
+    if (!range || !selectionIsContiguous(weeks, availableWeeks)) {
+      setError('Those weeks are not a continuous run. Pick a block of weeks and try again.');
+      return;
+    }
     setError(null);
     try {
       const owner = requireAuthSessionSnapshot();
@@ -81,9 +112,9 @@ export function NewCampaignScreen() {
         advertiserId: advertiser.id,
         placementId: placement.id,
         name: name.trim() || `${advertiser.companyName} — ${placement.name}`,
-        cities: ['*'],
-        startWeek: weeks[0]!,
-        endWeek: weeks[weeks.length - 1]!,
+        cities,
+        startWeek: range.startWeek,
+        endWeek: range.endWeek,
         ...(destinationValue.trim() ? { destinationType: 'URL' as const, destinationValue: destinationValue.trim() } : {}),
       }, owner);
       let current = requireAuthSessionForPrincipal(owner);
@@ -229,7 +260,7 @@ export function NewCampaignScreen() {
                   const soldOut = (w.available ?? 0) <= 0;
                   const selected = weeks.includes(iso);
                   return (
-                    <Pressable key={iso} onPress={() => toggleWeek(iso, soldOut)} disabled={soldOut}>
+                    <Pressable key={iso} onPress={() => onToggleWeek(iso)} disabled={soldOut}>
                       <Card
                         style={{
                           padding: space.lg,
@@ -251,6 +282,9 @@ export function NewCampaignScreen() {
                 })}
               </View>
             )}
+            {weekNotice ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.lg }}>{weekNotice}</T>
+            ) : null}
             <PillButton label={weeks.length ? `Continue — ${weeks.length} week${weeks.length > 1 ? 's' : ''}` : 'Pick at least one week'} disabled={weeks.length === 0} style={{ marginTop: space['2xl'] }} onPress={() => setStep(4)} />
           </>
         ) : null}
