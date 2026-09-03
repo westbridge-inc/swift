@@ -1318,7 +1318,9 @@ describe('tenant-qualified admin access', () => {
     const response = await adminRequest(
       'PUT',
       `/api/v1/admin/cash-rules/claims/${TENANT_B_REIMBURSEMENT_CLAIM_ID}/paid`,
-      { reference: 'foreign-payout-must-not-run' },
+      // [A-11] an amount is now required; supplied so the request reaches the
+      // TENANT check rather than stopping at body validation
+      { reference: 'foreign-payout-must-not-run', amount: 1 },
     );
     expectNotFound(response);
     const afterClaim = await runWithoutTenant(() => app.prisma.reimbursementClaim.findUniqueOrThrow({

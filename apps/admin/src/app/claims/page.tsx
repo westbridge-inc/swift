@@ -29,7 +29,8 @@ export default function ClaimsPage() {
     onSuccess: invalidate,
   });
   const pay = useMutation({
-    mutationFn: ({ id, reference }: { id: string; reference: string }) => payClaim(id, reference),
+    mutationFn: ({ id, reference, amount }: { id: string; reference: string; amount: string | number }) =>
+      payClaim(id, reference, amount),
     onSuccess: invalidate,
   });
 
@@ -154,10 +155,16 @@ export default function ClaimsPage() {
                   {(c.status === 'APPROVED' || c.status === 'AUTO_APPROVED') && (
                     <button
                       onClick={() => {
-                        const ref = window.prompt('Payment reference (bank/MMG ref or receipt no. — required):')?.trim();
+                        // [A-11] The reference must be unique — one transfer
+                        // settles one claim — and the payer states what they
+                        // actually sent, which the server checks against the
+                        // claim's own figure before anything closes.
+                        const ref = window.prompt('Payment reference (bank/MMG ref or receipt no. — required, and unique to this payout):')?.trim();
                         if (!ref) return;
-                        if (window.confirm(`Mark this ${gyd(c.amount)} claim for order ${c.orderId} as PAID (ref: ${ref})?`)) {
-                          pay.mutate({ id: c.id, reference: ref });
+                        const sent = window.prompt(`Amount you actually transferred, in GYD (this claim is ${gyd(c.amount)}):`)?.trim();
+                        if (!sent) return;
+                        if (window.confirm(`Mark this ${gyd(c.amount)} claim for order ${c.orderId} as PAID? Reference ${ref}, amount sent ${sent}.`)) {
+                          pay.mutate({ id: c.id, reference: ref, amount: sent });
                         }
                       }}
                       disabled={busy}

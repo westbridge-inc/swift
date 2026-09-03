@@ -313,8 +313,8 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
 
     // Two admins (or a double-click / retry) mark the SAME claim paid at once.
     const results = await Promise.allSettled([
-      cash.markClaimPaid(claim.id, 'admin-a', 'ref-a'),
-      cash.markClaimPaid(claim.id, 'admin-b', 'ref-b'),
+      cash.markClaimPaid(claim.id, 'admin-a', 'REF-A1', 2000),
+      cash.markClaimPaid(claim.id, 'admin-b', 'REF-B1', 2000),
     ]);
     // Exactly one payout goes through; the loser is rejected, not a second payout.
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
@@ -324,7 +324,7 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     expect(final.status).toBe('PAID');
 
     // A later attempt on an already-PAID claim is a clean 400, never another payout.
-    await expect(cash.markClaimPaid(claim.id, 'admin-c', 'ref-c')).rejects.toThrow(/PAID/);
+    await expect(cash.markClaimPaid(claim.id, 'admin-c', 'REF-C1', 2000)).rejects.toThrow(/PAID/);
   });
 
   it('[WR-004] a claim payout without a payment reference is refused — PAID needs evidence', async () => {
@@ -332,13 +332,13 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     const rider = await makeRider();
     const claim = await plantClaim(rider.riderId, customer.userId, 0); // AUTO_APPROVED
 
-    await expect(cash.markClaimPaid(claim.id, 'admin-a', '')).rejects.toThrow(/reference/i);
-    await expect(cash.markClaimPaid(claim.id, 'admin-a', '   ')).rejects.toThrow(/reference/i);
+    await expect(cash.markClaimPaid(claim.id, 'admin-a', '', 2000)).rejects.toThrow(/reference/i);
+    await expect(cash.markClaimPaid(claim.id, 'admin-a', '   ', 2000)).rejects.toThrow(/reference/i);
 
     // The refusal changed nothing: the claim is still payable with evidence.
     const still = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } });
     expect(still.status).toBe('AUTO_APPROVED');
-    const paid = await cash.markClaimPaid(claim.id, 'admin-a', 'BANK-REF-1');
+    const paid = await cash.markClaimPaid(claim.id, 'admin-a', 'BANK-REF-1', 2000);
     expect(paid.status).toBe('PAID');
     expect(paid.paymentRef).toBe('BANK-REF-1');
   });
@@ -521,7 +521,7 @@ describe('Admin review + founder metrics', () => {
   it('flagged claims queue through review -> approve -> paid', async () => {
     const queue = await inject('GET', '/api/v1/admin/cash-rules/claims?limit=50', undefined, adminToken);
     expect(queue.statusCode).toBe(200);
-    const pending = queue.json().data as Array<{ id: string; status: string }>;
+    const pending = queue.json().data as Array<{ id: string; status: string; amount: string | number }>;
     expect(pending.length).toBeGreaterThan(0);
 
     const claimId = pending[0]!.id;
@@ -529,7 +529,14 @@ describe('Admin review + founder metrics', () => {
     expect(approve.statusCode).toBe(200);
     expect(approve.json().data.status).toBe('APPROVED');
 
-    const paid = await inject('PUT', `/api/v1/admin/cash-rules/claims/${claimId}/paid`, { reference: 'cash-payout-1' }, adminToken);
+    // [A-11] the payer states the amount actually transferred; it must be the
+    // claim's own figure, so the test reads it rather than inventing one
+    const paid = await inject(
+      'PUT',
+      `/api/v1/admin/cash-rules/claims/${claimId}/paid`,
+      { reference: 'cash-payout-1', amount: pending[0]!.amount },
+      adminToken,
+    );
     expect(paid.statusCode).toBe(200);
     expect(paid.json().data.status).toBe('PAID');
 
@@ -546,5 +553,107 @@ describe('Admin review + founder metrics', () => {
     expect(data.guaranteePayoutsThisWeek.total).toBeGreaterThan(0);
     expect(Array.isArray(data.claimsByRider)).toBe(true);
     expect(data.claimsByRider.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [A-11] S0 money. Closing a claim moves real money to a claimant on a MANUAL
+// rail — a bank transfer or an MMG send — so the reference typed afterwards is
+// the only proof the payout ever happened.
+//
+// What was already right and is NOT re-fixed here: WR-004 made that reference
+// required, and the transition is compare-and-set so two admins cannot pay the
+// same claim twice. Both are covered above.
+//
+// What was missing: the reference was not UNIQUE, so one string could close ten
+// claims and a mistyped, reused or invented one read exactly like a real one;
+// `min(1)` accepted a single character; and nothing bound the payment to the
+// claim's amount, so a GY$2,000 claim could be closed by a GY$200 transfer and
+// the record would look identical.
+// ---------------------------------------------------------------------------
+
+describe('[A-11] a claim payout carries evidence that holds up', () => {
+  async function payable() {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    return plantClaim(rider.riderId, customer.userId, 0); // AUTO_APPROVED, amount 2000
+  }
+
+  it('one transfer settles ONE claim — a reused reference is refused', async () => {
+    const first = await payable();
+    const second = await payable();
+    await cash.markClaimPaid(first.id, 'admin-a', 'BANK-REUSE-9', 2000);
+
+    await expect(cash.markClaimPaid(second.id, 'admin-a', 'BANK-REUSE-9', 2000))
+      .rejects.toThrow(/already recorded against another claim/i);
+
+    // the refusal changed nothing: the second claim is still payable
+    const still = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: second.id } });
+    expect(still.status).toBe('AUTO_APPROVED');
+    expect(still.paymentRef).toBeNull();
+  });
+
+  it('the same reference typed in a different case is the SAME reference', async () => {
+    const first = await payable();
+    const second = await payable();
+    await cash.markClaimPaid(first.id, 'admin-a', 'Bank-Case-7', 2000);
+    // normalised on the way in, so case cannot defeat the unique index
+    await expect(cash.markClaimPaid(second.id, 'admin-a', 'bank-case-7', 2000))
+      .rejects.toThrow(/already recorded/i);
+    const stored = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: first.id } });
+    expect(stored.paymentRef).toBe('BANK-CASE-7');
+  });
+
+  it('a reference too short or malformed is refused, and says WHICH', async () => {
+    const claim = await payable();
+    // An empty field and a malformed one are different mistakes, and the payer
+    // is told which they made — "enter it" vs "that is not one".
+    const code = async (bad: unknown) => {
+      try {
+        await cash.markClaimPaid(claim.id, 'admin-a', bad as string, 2000);
+        throw new Error('should have refused');
+      } catch (e) {
+        return (e as { code?: string }).code;
+      }
+    };
+    for (const empty of ['', '   ', undefined]) {
+      expect(await code(empty), String(empty)).toBe('PAYMENT_REF_REQUIRED');
+    }
+    for (const malformed of ['x', 'ab', '!!!!', '-lead', 'trail-', 'A'.repeat(65)]) {
+      expect(await code(malformed), malformed).toBe('PAYMENT_REF_INVALID');
+    }
+    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('AUTO_APPROVED');
+  });
+
+  it('the payer must state the amount, and it must be the claim’s own figure', async () => {
+    const claim = await payable(); // 2000
+    await expect(cash.markClaimPaid(claim.id, 'admin-a', 'BANK-AMT-1', undefined))
+      .rejects.toThrow(/amount/i);
+    for (const wrong of [200, 2001, 1999.99, '200.00']) {
+      await expect(cash.markClaimPaid(claim.id, 'admin-a', 'BANK-AMT-2', wrong), String(wrong))
+        .rejects.toThrow(/not GY\$|amount/i);
+    }
+    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('AUTO_APPROVED');
+  });
+
+  it('a non-numeric amount is refused rather than coerced', async () => {
+    const claim = await payable();
+    // Number('') and Number([]) are both 0; neither is an attestation.
+    for (const bad of ['', '  ', 'two thousand', 'GY$2000', '2e3']) {
+      await expect(cash.markClaimPaid(claim.id, 'admin-a', 'BANK-COERCE-1', bad), String(bad)).rejects.toThrow();
+    }
+    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('AUTO_APPROVED');
+  });
+
+  it('records the exact figure and WHO paid it, alongside who approved it', async () => {
+    const claim = await payable();
+    const paid = await cash.markClaimPaid(claim.id, 'admin-payer', 'BANK-OK-1', '2000.00');
+    expect(paid.status).toBe('PAID');
+    const row = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } });
+    expect(Number(row.paidAmount)).toBe(2000);
+    expect(row.paidById).toBe('admin-payer');
+    expect(row.paymentRef).toBe('BANK-OK-1');
+    // the approver and the payer are separately attributable — the point of paidById
+    expect(row.reviewedBy).not.toBe(null);
   });
 });

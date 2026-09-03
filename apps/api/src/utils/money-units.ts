@@ -48,6 +48,9 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'CountryConfig', field: 'usdExchangeRate', unit: 'FX_RATE' },
   { model: 'Customer', field: 'totalSpent', unit: 'MAJOR_WHOLE' },
   { model: 'DeliveryCashSettlement', field: 'amount', unit: 'MAJOR_WHOLE' },
+  // [A-11] What the payer attested they transferred; same unit as the claim it
+  // must equal.
+  { model: 'ReimbursementClaim', field: 'paidAmount', unit: 'MAJOR_WHOLE' },
   // [W-26] What each side ATTESTED changed hands. Same unit as the amount
   // above by construction: the ledger refuses any figure that is not it.
   { model: 'DeliveryCashSettlement', field: 'riderAttestedAmount', unit: 'MAJOR_WHOLE' },

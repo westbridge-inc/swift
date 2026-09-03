@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient, ReimbursementClaim } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { assertClaimAmountAttested, isDuplicateReferenceError, normaliseClaimPaymentRef } from './claim-payout';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { OrderService, assertMmgFulfilmentAllowed } from '../order/order.service';
@@ -609,17 +610,37 @@ export class CashRulesService {
     return updated;
   }
 
-  async markClaimPaid(claimId: string, adminId: string, paymentRef: string) {
+  async markClaimPaid(claimId: string, adminId: string, paymentRef: string, paidAmount: unknown) {
     // [WR-004] PAID is a money fact on a manual rail — the reference (bank/MMG
     // ref, receipt number) IS the evidence. Without it the record attests a
     // payout nobody can trace, so it is required, not optional.
-    if (!paymentRef?.trim()) {
-      throw new AppError(400, 'PAYMENT_REF_REQUIRED', 'A payment reference is required to record a claim payout.');
-    }
+    //
+    // [A-11] And the evidence has to hold up. The reference is normalised and
+    // shaped so a single character cannot pass, it is UNIQUE in the database so
+    // one transfer cannot close ten claims, and the payer states the amount
+    // they actually sent — checked against the claim's own figure to the cent,
+    // BEFORE anything is written.
+    const reference = normaliseClaimPaymentRef(paymentRef);
     // reviewedBy: keep the original reviewer if there was one; else stamp the payer.
-    const existing = await this.prisma.reimbursementClaim.findUnique({ where: { id: claimId }, select: { reviewedBy: true } });
+    const existing = await this.prisma.reimbursementClaim.findUnique({
+      where: { id: claimId },
+      select: { reviewedBy: true, amount: true },
+    });
+    if (!existing) throw new NotFoundError('ReimbursementClaim', claimId);
+    const attested = assertClaimAmountAttested(existing.amount, paidAmount);
+
     const updated = await this.transitionClaim(claimId, ['AUTO_APPROVED', 'APPROVED'], {
-      status: 'PAID', paidAt: new Date(), paymentRef, reviewedBy: existing?.reviewedBy ?? adminId,
+      status: 'PAID', paidAt: new Date(), paymentRef: reference, paidAmount: attested,
+      paidById: adminId, reviewedBy: existing?.reviewedBy ?? adminId,
+    }).catch((err) => {
+      if (isDuplicateReferenceError(err)) {
+        throw new AppError(
+          409,
+          'PAYMENT_REF_ALREADY_USED',
+          'That reference is already recorded against another claim. One transfer settles one claim — use the reference for THIS payout.',
+        );
+      }
+      throw err;
     });
     await this.notifyClaim(updated, 'Guarantee paid', `$${Number(updated.amount).toLocaleString()} has been paid out to you.`, claimId);
     return updated;
