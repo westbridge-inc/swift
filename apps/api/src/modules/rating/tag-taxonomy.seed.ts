@@ -26,6 +26,8 @@ const TAXONOMY: Record<string, { positive: Row[]; negative: Row[] }> = {
     ],
     negative: [
       ['late', 'Late'], ['rude', 'Rude'], ['rough-handling', 'Poor handling'], ['handover-issue', 'Handover problem'],
+      // [R048-008] the safety tags a rider can be rated for — canonical ids from tag-registry.ts
+      ['felt-unsafe', 'I felt unsafe'], ['harassment', 'Harassment'],
     ],
   },
   DRIVER: {
@@ -35,6 +37,8 @@ const TAXONOMY: Record<string, { positive: Row[]; negative: Row[] }> = {
     ],
     negative: [
       ['unsafe-driving', 'Unsafe driving'], ['vehicle-condition', 'Vehicle condition'], ['late-pickup', 'Late pickup'],
+      // [R048-008] the safety tags a driver can be rated for — canonical ids from tag-registry.ts
+      ['different-driver', 'Not the driver shown'], ['felt-unsafe', 'I felt unsafe'], ['harassment', 'Harassment'], ['impaired-driving', 'Seemed impaired'],
       ['rude', 'Rude'], ['long-route', 'Took a long route'],
     ],
   },
@@ -87,4 +91,13 @@ export async function tagsForRole(prisma: PrismaClient, role: string, stars: num
   const sentiment = stars <= 3 ? 'NEGATIVE' : 'POSITIVE';
   const rows = await prisma.ratingTagDef.findMany({ where: { tenantId, role, sentiment }, select: { slug: true } });
   return new Set(rows.map((r) => r.slug));
+}
+
+let ensuredForProcess = false;
+/** [R048-008] Once per process: every seed row exists (a deployment seeded before a tag was added gets it), never rewriting an admin's edits. */
+export async function ensureRatingTagsSeeded(prisma: PrismaClient, tenantId = 'swift-default'): Promise<void> {
+  if (ensuredForProcess) return;
+  const present = new Set((await prisma.ratingTagDef.findMany({ where: { tenantId }, select: { role: true, slug: true } })).map((r) => `${r.role}/${r.slug}`));
+  if (seedRows().some((r) => !present.has(`${r.role}/${r.slug}`))) await seedRatingTags(prisma, tenantId);
+  ensuredForProcess = true;
 }

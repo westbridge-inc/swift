@@ -5,7 +5,6 @@ import { explainEarning } from '../../utils/explain-earning';
 import { z } from 'zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
 import { OrderService } from '../order/order.service';
-import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { earningsWindow } from '../order/earnings-window';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
@@ -50,6 +49,7 @@ import { requireStepUp } from '../auth/step-up';
 import { assertVelocity } from '../integrity/velocity';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { arrivalEvidence } from '../dispatch/arrival-evidence';
+import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -915,20 +915,11 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     if (existing) throw new AppError(409, 'ALREADY_RATED', 'You already rated this passenger');
 
-    const rating = await app.prisma.rating.create({
-      data: {
-        orderId: id,
-        raterId: request.user.userId,
-        rateeId: order.customerId,
-        type: 'DRIVER_TO_CUSTOMER',
-        score: body.score,
-        comment: body.comment,
-        tags: [],
-      },
-    });
-    // Double-blind: if the passenger already rated, both sides release now.
+    // [R048-008] through the ONE pipeline — scrubbed, transactional, outboxed (release + stats) — never a direct write
     const { RatingService } = await import('../rating/rating.service');
-    await new RatingService(app.prisma).releaseIfBothSidesRated(id);
+    const rating = await new RatingService(app.prisma, app.io).rate({
+      orderId: id, raterId: request.user.userId, rateeId: order.customerId, type: 'DRIVER_TO_CUSTOMER', score: body.score, comment: body.comment, tags: [],
+    });
     return { success: true, data: rating };
   });
 

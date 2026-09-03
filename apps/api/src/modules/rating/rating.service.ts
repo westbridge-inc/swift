@@ -3,7 +3,9 @@ import type { Server } from 'socket.io';
 import { AppError } from '../../utils/errors';
 import { RatingStatsService } from './rating-stats.service';
 import { RATING_WINDOW_DAYS, SHIELD_PREP_BREACH_MIN } from './rating-math';
-import { processReviewText } from './review-scrub';
+import { maskPii, processReviewText } from './review-scrub';
+import { SAFETY_TAGS, canonicalTags, mostSevereSafetyTag } from './tag-registry';
+import { ratingPipelineCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
 
 // Safety spec ("Rating flags: reuse the ratings/quality engine — safety-tagged
@@ -11,15 +13,7 @@ import { log } from '../../utils/logger';
 // auto-opens an incident case via the pre-provisioned RATING_FLAG intake.
 // Deterministic vocabulary, most-severe tag decides the category; the rating
 // itself NEVER fails on intake trouble (fire-and-forget).
-const SAFETY_TAG_CATEGORY: Record<string, string> = {
-  different_driver: 'IDENTITY_MISMATCH', // S1
-  harassment: 'SAFETY_HARASSMENT', // S2
-  felt_unsafe: 'SAFETY_HARASSMENT', // S2
-  unsafe_driving: 'DRIVING_DANGEROUS', // S2
-  impaired_driving: 'DRIVING_DANGEROUS', // S2
-};
-// Severity precedence for picking ONE category when several tags land.
-const SAFETY_TAG_ORDER = ['different_driver', 'harassment', 'felt_unsafe', 'unsafe_driving', 'impaired_driving'];
+// [R048-008] the safety vocabulary lives in tag-registry.ts (canonical, typed); nothing here compares a string literal
 
 type RatingType =
   | 'CUSTOMER_TO_VENDOR'
@@ -147,73 +141,136 @@ export class RatingService {
       order.acceptedAt != null && order.readyAt != null &&
       order.readyAt.getTime() - order.acceptedAt.getTime() >
         ((order.estimatedPrepTime ?? 30) + SHIELD_PREP_BREACH_MIN) * 60_000;
+    // [R048-008] ONE canonical vocabulary: what the client sent is canonicalised (an underscore
+    // alias is accepted and emitted canonical) before it is stored, compared or matched.
+    const tags = canonicalTags(input.tags);
+    if (tags.length !== (input.tags ?? []).length || (input.tags ?? []).some((t, i) => t !== tags[i])) ratingPipelineCounter.labels('alias_tag').inc();
     const shielded =
       input.type === 'CUSTOMER_TO_RIDER' && prepBreached &&
-      (input.score <= 3 || (input.tags ?? []).includes('late'));
+      (input.score <= 3 || tags.includes('late'));
 
+    return this.persist({
+      orderId: input.orderId, raterId: input.raterId, rateeId: input.rateeId, vendorId: input.vendorId, type: input.type, score: input.score,
+      comment: input.comment, tags,
+      ...(shielded ? { state: 'EXCLUDED' as const, stateReason: 'SLA_SHIELD' } : {}),
+    });
+  }
+
+  /** Test seam: a throw here is the process dying at that boundary. */
+  failpoint?: (boundary: string, ctx?: Record<string, unknown>) => Promise<void>;
+
+  /**
+   * [R048-008] THE ONE PIPELINE every ingress ends in. The comment is scrubbed
+   * BEFORE persistence; the rating row and the commands it still owes — the
+   * safety intake when a safety tag was chosen, the double-blind release
+   * check, the stats recompute — are written in ONE transaction; the commands
+   * are then processed after commit, idempotently, or by the sweep when the
+   * process died first. A rating that exists always has its commands.
+   */
+  private async persist(input: {
+    orderId: string; raterId: string; rateeId?: string; vendorId?: string; type: RatingType; score: number; comment?: string; tags: string[];
+    state?: 'EXCLUDED'; stateReason?: string;
+  }) {
     // R7 pipeline: PII masked before storage; profanity auto-HOLDS the text
     // from public view (stars still count) pending the moderation queue.
     const processed = input.comment ? processReviewText(input.comment) : null;
-
-    const rating = await this.prisma.rating.create({
-      data: {
-        orderId: input.orderId,
-        raterId: input.raterId,
-        rateeId: input.rateeId,
-        vendorId: input.vendorId,
-        type: input.type,
-        score: input.score,
-        comment: processed?.text ?? input.comment,
-        ...(processed?.hold ? { isPublic: false, flagged: true, flagReason: 'PROFANITY_HOLD' } : {}),
-        tags: input.tags || [],
-        editableUntil: new Date(Date.now() + RATING_WINDOW_DAYS * 24 * 3600_000),
-        ...(shielded ? { state: 'EXCLUDED' as const, stateReason: 'SLA_SHIELD' } : {}),
-      },
+    const safety = mostSevereSafetyTag(input.tags);
+    const rating = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.rating.create({
+        data: {
+          orderId: input.orderId,
+          raterId: input.raterId,
+          rateeId: input.rateeId,
+          vendorId: input.vendorId,
+          type: input.type,
+          score: input.score,
+          comment: processed?.text ?? input.comment,
+          ...(processed?.hold ? { isPublic: false, flagged: true, flagReason: 'PROFANITY_HOLD' } : {}),
+          tags: input.tags,
+          editableUntil: new Date(Date.now() + RATING_WINDOW_DAYS * 24 * 3600_000),
+          ...(input.state ? { state: input.state, stateReason: input.stateReason } : {}),
+        },
+      });
+      await this.failpoint?.('tx:after-rating');
+      const commands: Array<{ command: string; payload?: Record<string, unknown> }> = [{ command: 'RELEASE' }, { command: 'STATS' }];
+      if (safety && input.rateeId) {
+        // evidence is the SCRUBBED, PII-MASKED text — never the original
+        commands.push({ command: 'SAFETY_INTAKE', payload: { tag: safety, category: SAFETY_TAGS[safety].category, tags: input.tags, score: input.score, ...(processed?.text ? { comment: maskPii(processed.text).slice(0, 500) } : {}) } });
+      }
+      await tx.ratingOutbox.createMany({ data: commands.map((c) => ({ ratingId: row.id, command: c.command, payload: (c.payload ?? undefined) as never })) });
+      await this.failpoint?.('tx:after-outbox', { ratingId: row.id });
+      return row;
     });
-
-    // Safety spec: a safety-tagged rating auto-opens an incident case
-    // (RATING_FLAG intake). Fire-and-forget — a rating never fails on it.
-    void this.flagSafetyTags(rating.id, input).catch(() => {});
-
-    // Double-blind (marketplace §1): written ratings stay hidden until the
-    // other side has rated too (aggregates still update immediately below).
-    await this.releaseIfBothSidesRated(input.orderId);
-
-    // Movement R: ONE aggregate writer. applyRating recomputes the
-    // materialized stat AND syncs the legacy vendor/rider/driver means from
-    // the same ACTIVE-only rows — the old per-role updaters here aggregated
-    // every row regardless of state, so a shielded rating changed the legacy
-    // mean dispatch still reads [REPORT-034 S1]. EXCLUDED rows never count,
-    // in either aggregate, by construction.
-    await this.stats.applyRating(rating);
-
+    ratingPipelineCounter.labels('persisted').inc();
+    await this.failpoint?.('after-commit');
+    // inline, best effort — the sweep finishes whatever this did not
+    await this.processRatingOutbox({ ratingId: rating.id }).catch((err) => log().warn({ err, ratingId: rating.id }, '[R048-008] rating outbox inline pass failed — the sweep retries'));
     return rating;
   }
 
-  /** The rating→incident bridge. Most-severe safety tag decides the category;
-   *  one case per rating (ratings are unique per order+rater+type). */
-  private async flagSafetyTags(ratingId: string, input: RateInput): Promise<void> {
-    const tags = (input.tags ?? []).map((t) => t.trim().toLowerCase());
-    const hit = SAFETY_TAG_ORDER.find((t) => tags.includes(t));
-    if (!hit || !input.rateeId) return;
-    if (!this.io) {
-      // A creating path without io would silently drop safety signal — loud log
-      // so it can never rot unnoticed.
-      log().error({ ratingId, tag: hit }, 'safety-tagged rating with no io wired — incident intake skipped');
-      return;
+  /**
+   * [R048-008] Process the commands a rating owes. Each row is claimed with a
+   * compare-and-set, handled by an idempotent handler (the incident intake is
+   * one-source-one-case; the release and the stats recompute are pure
+   * functions of the rows), and marked processed; a failure records the
+   * attempt and leaves the row for the next pass. Exactly-once by
+   * construction: one row per (rating, command).
+   */
+  async processRatingOutbox(opts: { ratingId?: string; limit?: number; now?: Date } = {}): Promise<{ processed: number; failed: number }> {
+    const now = opts.now ?? new Date();
+    const rows = await this.prisma.ratingOutbox.findMany({
+      where: { processedAt: null, availableAt: { lte: now }, attempts: { lt: 25 }, ...(opts.ratingId ? { ratingId: opts.ratingId } : {}) },
+      orderBy: { createdAt: 'asc' },
+      take: opts.limit ?? 200,
+    });
+    let processed = 0; let failed = 0;
+    for (const row of rows) {
+      const claimed = await this.prisma.ratingOutbox.updateMany({
+        where: { id: row.id, processedAt: null, OR: [{ claimedAt: null }, { claimedAt: { lt: new Date(now.getTime() - 60_000) } }] },
+        data: { claimedAt: now, attempts: { increment: 1 } },
+      });
+      if (claimed.count !== 1) continue;
+      await this.failpoint?.('outbox:after-claim', { rowId: row.id, command: row.command });
+      try {
+        const rating = await this.prisma.rating.findUnique({ where: { id: row.ratingId } });
+        if (!rating) { await this.prisma.ratingOutbox.update({ where: { id: row.id }, data: { processedAt: now, lastError: 'rating gone' } }); continue; }
+        if (row.command === 'SAFETY_INTAKE') await this.flagSafetyTags(rating, (row.payload ?? {}) as { tag: string; category: string; tags: string[]; score: number; comment?: string });
+        else if (row.command === 'RELEASE') await this.releaseIfBothSidesRated(rating.orderId);
+        else if (row.command === 'STATS') await this.stats.applyRating(rating);
+        else throw new Error(`unknown rating command ${row.command}`);
+        await this.prisma.ratingOutbox.update({ where: { id: row.id }, data: { processedAt: new Date(), claimedAt: null, lastError: null } });
+        ratingPipelineCounter.labels('outbox_processed').inc();
+        processed += 1;
+      } catch (err) {
+        await this.prisma.ratingOutbox.update({ where: { id: row.id }, data: { claimedAt: null, lastError: err instanceof Error ? err.message.slice(0, 500) : String(err), availableAt: new Date(now.getTime() + 30_000) } }).catch(() => undefined);
+        ratingPipelineCounter.labels('outbox_retry').inc();
+        failed += 1;
+      }
     }
+    return { processed, failed };
+  }
+
+  /** [R048-008] The rating→incident bridge, run from the committed outbox command.
+   *  Keyed on the canonical registry; evidence is the scrubbed, PII-masked text
+   *  the command carried; the intake is one-source-one-case, so a replay
+   *  returns the existing case. A missing `io` no longer drops the signal:
+   *  the command stays unprocessed for a process that has one. */
+  private async flagSafetyTags(rating: { id: string; orderId: string; raterId: string; rateeId: string | null; score: number }, payload: { tag: string; category: string; tags: string[]; score: number; comment?: string }): Promise<void> {
+    if (!rating.rateeId) return;
+    if (!this.io) throw new Error('safety-tagged rating with no io wired — left for a process that has one');
     const { IncidentService } = await import('../safety/incident.service');
     await new IncidentService(this.prisma, this.io).intake({
-      category: SAFETY_TAG_CATEGORY[hit]!,
+      category: payload.category,
       intake: 'RATING_FLAG',
-      source: { type: 'RATING_FLAG', id: `${input.orderId}:${input.raterId}` },
-      subjectUserId: input.rateeId,
-      reporterUserId: input.raterId,
-      orderId: input.orderId,
-      summary: `Safety-tagged rating (${hit}, score ${input.score}/5)`,
-      details: { ratingId, tags, score: input.score, ...(input.comment ? { comment: input.comment } : {}) },
+      source: { type: 'RATING_FLAG', id: `${rating.orderId}:${rating.raterId}` },
+      subjectUserId: rating.rateeId,
+      reporterUserId: rating.raterId,
+      orderId: rating.orderId,
+      summary: `Safety-tagged rating (${payload.tag}, score ${payload.score}/5)`,
+      details: { ratingId: rating.id, tags: payload.tags, score: payload.score, ...(payload.comment ? { comment: payload.comment } : {}) },
     });
-    log().warn({ ratingId, tag: hit, orderId: input.orderId }, 'safety-tagged rating routed to incident intake');
+    ratingPipelineCounter.labels('safety_incident').inc();
+    log().warn({ ratingId: rating.id, tag: payload.tag, orderId: rating.orderId }, 'safety-tagged rating routed to incident intake');
   }
 
   async rateOrder(userId: string, orderId: string, input: {
@@ -375,15 +432,8 @@ export class RatingService {
     const existing = await this.prisma.rating.findFirst({ where: { orderId: jobId, raterId, type } });
     if (existing) throw new AppError(409, 'ALREADY_RATED', 'You have already rated this job');
 
-    const rating = await this.prisma.rating.create({
-      data: { orderId: jobId, raterId, rateeId, type, score, comment },
-    });
-    // Same one-writer rule as order ratings [REPORT-034 S1]: applyRating
-    // recomputes the materialized stat AND syncs the provider's legacy mean
-    // from ACTIVE rows only. (This path previously had its own unfiltered
-    // aggregate and never fed the materialized stat at all.)
-    await this.stats.applyRating(rating);
-    return rating;
+    // [R048-008] the same pipeline as every other rating: scrubbed, transactional, outboxed
+    return this.persist({ orderId: jobId, raterId, rateeId, type, score, comment, tags: [] });
   }
 
   /**

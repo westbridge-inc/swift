@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
-import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter } from '../../plugins/observability';
+import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
 import { lineTotal, orderTotal, promoDiscount, promoCapacity } from '../../utils/order-total';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
@@ -18,7 +18,8 @@ import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../
 import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
-import { seedRatingTags, tagsForRole } from '../rating/tag-taxonomy.seed';
+import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed';
+import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL } from '../vendor/vendor-visibility';
@@ -2569,7 +2570,7 @@ export async function customerRoutes(app: FastifyInstance) {
       if (tags.length > RATING_MAX_TAGS) throw new ValidationError(`Pick up to ${RATING_MAX_TAGS} tags`);
       const valid = await tagsForRole(app.prisma, role, score);
       for (const t of tags) {
-        if (!valid.has(t)) throw new ValidationError(`Unknown tag for ${role.toLowerCase()}: ${t}`);
+        if (!valid.has(canonicalTag(t))) { ratingPipelineCounter.labels('unknown_tag').inc(); throw new ValidationError(`Unknown tag for ${role.toLowerCase()}: ${t}`); }
       }
     }
 
@@ -2581,9 +2582,8 @@ export async function customerRoutes(app: FastifyInstance) {
   /** GET /rating-tags — the R4 taxonomy, grouped for the rating sheets.
    *  Lazy-seeds on first read (idempotent, tiny) so no boot-time write. */
   app.get('/rating-tags', async () => {
-    if ((await app.prisma.ratingTagDef.count()) === 0) {
-      await seedRatingTags(app.prisma).catch(() => undefined);
-    }
+    // [R048-008] every seed row exists — a deployment seeded before the safety tags were added gets them (once per process)
+    await ensureRatingTagsSeeded(app.prisma).catch(() => undefined);
     const rows = await app.prisma.ratingTagDef.findMany({
       where: { tenantId: 'swift-default' },
       orderBy: [{ role: 'asc' }, { sentiment: 'asc' }, { slug: 'asc' }],

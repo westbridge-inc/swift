@@ -8,6 +8,7 @@ import {
   RATING_AFFECTS_DISPATCH,
 } from '../modules/rating/rating-math';
 import { seedRatingTags, seedRows, tagsForRole } from '../modules/rating/tag-taxonomy.seed';
+import { SAFETY_TAGS } from '../modules/rating/tag-registry';
 
 // ---------------------------------------------------------------------------
 // Movement R foundation: RAT-C's fixture table BYTE-EXACT (the Bayesian
@@ -78,10 +79,20 @@ describe('R4: the tag taxonomy', () => {
   it('seeds all five roles exactly, idempotently; star band gates the set', async () => {
     const rows = seedRows();
     expect(rows.filter((r) => r.role === 'VENDOR')).toHaveLength(12);
-    expect(rows.filter((r) => r.role === 'RIDER')).toHaveLength(8);
-    expect(rows.filter((r) => r.role === 'DRIVER')).toHaveLength(10);
+    // [R048-008] RIDER and DRIVER each gained the safety tags that were
+    // missing: the taxonomy seeded hyphen slugs while the bridge compared
+    // underscores, so no safety tag ever matched — and "not the driver shown",
+    // the S1 identity tag, was never seeded for anyone at all.
+    expect(rows.filter((r) => r.role === 'RIDER')).toHaveLength(10);
+    expect(rows.filter((r) => r.role === 'DRIVER')).toHaveLength(14);
     expect(rows.filter((r) => r.role === 'SERVICE_PROVIDER')).toHaveLength(10);
     expect(rows.filter((r) => r.role === 'CUSTOMER')).toHaveLength(6);
+    // every safety tag the registry names is seeded for every role it names
+    for (const [slug, def] of Object.entries(SAFETY_TAGS)) {
+      for (const role of def.roles) {
+        expect(rows.some((r) => r.role === role && r.slug === slug), `${role}:${slug}`).toBe(true);
+      }
+    }
 
     const first = await seedRatingTags(prisma, TENANT);
     expect(first.created).toBe(rows.length);

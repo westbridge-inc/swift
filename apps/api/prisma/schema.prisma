@@ -5683,3 +5683,25 @@ model ScanDailyRollup {
   @@index([tenantId, qrCodeId, date])
   @@map("scan_daily_rollups")
 }
+
+/// [R048-008] The commands a persisted rating still owes, written in its own
+/// transaction. IN-FLIGHT disk work — not yet shipped.
+model RatingOutbox {
+  id          String    @id @default(cuid())
+  tenantId    String    @default("swift-default")
+  ratingId    String
+  command     String
+  payload     Json?
+  attempts    Int       @default(0)
+  availableAt DateTime  @default(now())
+  claimedAt   DateTime?
+  processedAt DateTime?
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([ratingId, command])
+  @@index([tenantId])
+  @@index([processedAt, availableAt])
+  @@map("rating_outbox")
+}
