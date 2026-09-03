@@ -6,6 +6,7 @@ import { FileUp, ShieldCheck, AlertTriangle } from 'lucide-react';
 import {
   getRiderProfile, getVerificationStatus, submitVerificationDocument, uploadVerificationFile,
 } from '@/lib/mover-api';
+import { DataUnavailable } from '@/components/data-unavailable';
 import { LEGAL_URL } from '@/lib/api';
 
 const pretty = (docType: string) => docType.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -79,6 +80,16 @@ export default function DocumentsPage() {
 
       <div className="space-y-3">
         {status.isLoading && <p className="text-sm text-[var(--swift-muted)]">Loading…</p>}
+        {/* [W-10] `d?.checklist ?? []` rendered an EMPTY checklist on failure —
+            a mover was shown no document obligations at all during an outage,
+            which is the opposite of the truth for anyone missing a document. */}
+        {status.isError && (
+          <DataUnavailable
+            what="your document checklist"
+            error={status.error}
+            onRetry={() => void status.refetch()}
+          />
+        )}
         {(d?.checklist ?? []).map((docType) => {
           const doc = latestByType.get(docType);
           const tone = doc ? statusTone(doc.status, doc.expiresAt) : null;

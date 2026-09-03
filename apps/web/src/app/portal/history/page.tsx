@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getDriverProfile, getDriverRides, getRiderDeliveries, getRiderProfile } from '@/lib/mover-api';
+import { DataUnavailable } from '@/components/data-unavailable';
 
 const money = (n: unknown) => `$${Math.round(Number(n ?? 0)).toLocaleString()}`;
 const when = (iso: unknown) => (iso ? new Date(String(iso)).toLocaleString() : '—');
@@ -47,7 +48,14 @@ function DeliveriesTable() {
         </thead>
         <tbody>
           {q.isLoading && <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--swift-muted)]">Loading…</td></tr>}
-          {!q.isLoading && rows.length === 0 && <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--swift-muted)]">No deliveries yet.</td></tr>}
+          {/* [W-10] a failed read used to render this same sentence, so an
+              outage told a mover they had earned nothing. */}
+          {q.isError && (
+            <tr><td colSpan={5} className="p-4">
+              <DataUnavailable what="your deliveries" error={q.error} onRetry={() => void q.refetch()} />
+            </td></tr>
+          )}
+          {!q.isLoading && !q.isError && rows.length === 0 && <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--swift-muted)]">No deliveries yet.</td></tr>}
           {rows.map((o) => (
             <tr key={String(o['id'])} className="border-b border-black/5 last:border-0">
               <td className="px-4 py-3 font-medium">#{String(o['orderNumber'] ?? '')}</td>
@@ -82,7 +90,14 @@ function RidesTable() {
         </thead>
         <tbody>
           {q.isLoading && <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--swift-muted)]">Loading…</td></tr>}
-          {!q.isLoading && rows.length === 0 && <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--swift-muted)]">No rides yet.</td></tr>}
+          {/* [W-10] a failed read used to render this same sentence, so an
+              outage told a mover they had earned nothing. */}
+          {q.isError && (
+            <tr><td colSpan={5} className="p-4">
+              <DataUnavailable what="your rides" error={q.error} onRetry={() => void q.refetch()} />
+            </td></tr>
+          )}
+          {!q.isLoading && !q.isError && rows.length === 0 && <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--swift-muted)]">No rides yet.</td></tr>}
           {rows.map((r) => (
             <tr key={String(r['id'])} className="border-b border-black/5 last:border-0">
               <td className="px-4 py-3 font-medium">#{String(r['orderNumber'] ?? '')}</td>
