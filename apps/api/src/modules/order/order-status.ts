@@ -197,3 +197,166 @@ export function isPreCustody(status: OrderStatus): boolean {
 export function isMoverHolding(status: OrderStatus): boolean {
   return STATUS_LAW[status].custody === 'MOVER_HOLDING';
 }
+
+// ---------------------------------------------------------------------------
+// THE MACHINE, AND THE TRUTH ABOUT RECOVERY.
+//
+// `ORDER_TRANSITIONS` lives here rather than in order.service because the
+// modules that need it — the rescue watchdog, the rider handback, session
+// revocation — are deliberately light, and order.service is not. This file
+// imports nothing but the Prisma type, so any of them can depend on it.
+// order.service re-exports it, so existing importers are untouched.
+//
+// It described the FORWARD lifecycle only, while claiming to describe all of
+// it: "Anything not listed here is impossible." Twelve transitions production
+// performs were therefore declared impossible, and one comment was simply
+// false — PENDING said "entry state — never transitioned into" while FOUR live
+// paths transition orders into it.
+//
+// Those twelve are not defects. They are RECOVERY: a mover was assigned and
+// then had to be released — they went dark, their session was revoked, they
+// handed the job back, or a passenger said "this isn't my driver" — so the
+// order returns to the honest stage it was at before anyone was assigned. The
+// forward table has no way to say that, because a recovery edge runs BACKWARDS
+// and every forward guard would (correctly) refuse it.
+//
+// So recovery is declared, separately and explicitly. Two tables, because they
+// are two different authorities: a forward edge is something anyone on the
+// happy path may do, a recovery edge is something only a release may do.
+// ---------------------------------------------------------------------------
+
+/**
+ * The locked FORWARD state machine. Key = target state, value = the states it
+ * may be entered from on the normal path. Compare-and-set on these makes a
+ * concurrent transition race safely.
+ *
+ * Canonical chain: placed(PENDING) → accepted → preparing → ready → picked_up →
+ * delivered | cancelled; mover/driver legs are intermediates.
+ *
+ * A backwards move is NOT here and never should be — see RECOVERY_TRANSITIONS.
+ */
+export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  // No FORWARD predecessor: an order is born here. A taxi release returns an
+  // order to PENDING, which is a RECOVERY edge, not a forward one.
+  PENDING: [],
+  ACCEPTED: ['PENDING'],
+  PREPARING: ['ACCEPTED'],
+  READY_FOR_PICKUP: ['PREPARING'],
+  RIDER_ASSIGNED: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'],
+  RIDER_EN_ROUTE_PICKUP: ['RIDER_ASSIGNED'],
+  RIDER_ARRIVED_PICKUP: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP'],
+  PICKED_UP: ['READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'],
+  EN_ROUTE_DELIVERY: ['PICKED_UP'],
+  ARRIVED: ['PICKED_UP', 'EN_ROUTE_DELIVERY'],
+  DRIVER_ASSIGNED: ['PENDING'],
+  DRIVER_EN_ROUTE: ['DRIVER_ASSIGNED'],
+  DRIVER_ARRIVED: ['DRIVER_EN_ROUTE'],
+  RIDE_IN_PROGRESS: ['DRIVER_ARRIVED'],
+  // READY_FOR_PICKUP is here for VENDOR_DELIVERY only [F-0026]: a self-delivering
+  // vendor never has a rider, so the order never passes through PICKED_UP and had
+  // no exit at all — it stranded in READY_FOR_PICKUP forever. The mode check lives
+  // on the one route that can fire this (vendor /orders/:id/delivered); rider
+  // routes cannot reach it because they all require order.riderId.
+  DELIVERED: ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS', 'READY_FOR_PICKUP'],
+  // DELIVERED for delivery; READY_FOR_PICKUP for takeaway (vendor hands it
+  // over); ACCEPTED for appointments, which skip prep/dispatch entirely —
+  // without it the services vertical could never be closed out (found live:
+  // complete-appointment always 409'd).
+  COMPLETED: ['DELIVERED', 'READY_FOR_PICKUP', 'ACCEPTED'],
+  CANCELLED: [
+    'PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED',
+    'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
+    'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED',
+  ],
+  REFUNDED: ['CANCELLED', 'DELIVERED', 'COMPLETED'],
+  FAILED: ['ARRIVED', 'RIDE_IN_PROGRESS', 'PICKED_UP', 'EN_ROUTE_DELIVERY'],
+};
+
+/**
+ * THE RELEASE EDGES. Key = the stage an order is returned to, value = the
+ * pre-custody states a release may return it from.
+ *
+ * Every one of these runs backwards, and every one is only reachable by DROPPING
+ * a mover. The sources are exactly the pre-custody sets: a release may never
+ * touch an order whose goods are in a bag or whose passenger is in the car —
+ * that is asserted against the custody law in the test suite, not restated here.
+ */
+export const RECOVERY_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  // A taxi release un-assigns the driver and puts the ride back on the market.
+  // Four paths do this: driver cancel, the stranded-taxi watchdog, session
+  // revocation, and a passenger reporting "this isn't my driver".
+  PENDING: ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'],
+  // A delivery release returns the order to its HONEST kitchen stage — never
+  // rewinding the vendor's progress, never claiming an unfinished order is
+  // ready. Which of the three depends on the order's own timestamps.
+  ACCEPTED: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'],
+  PREPARING: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'],
+  READY_FOR_PICKUP: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'],
+
+  // Nothing else is recoverable. Forward-only states, in-custody states and
+  // terminal states are all listed so that adding an OrderStatus fails the
+  // build here too, and the answer has to be given deliberately.
+  RIDER_ASSIGNED: [],
+  RIDER_EN_ROUTE_PICKUP: [],
+  RIDER_ARRIVED_PICKUP: [],
+  PICKED_UP: [],
+  EN_ROUTE_DELIVERY: [],
+  ARRIVED: [],
+  DRIVER_ASSIGNED: [],
+  DRIVER_EN_ROUTE: [],
+  DRIVER_ARRIVED: [],
+  RIDE_IN_PROGRESS: [],
+  DELIVERED: [],
+  COMPLETED: [],
+  CANCELLED: [],
+  REFUNDED: [],
+  FAILED: [],
+};
+
+/** True when a RELEASE may move an order from `from` to `to`. */
+export function isRecoveryTransition(from: OrderStatus, to: OrderStatus): boolean {
+  return RECOVERY_TRANSITIONS[to].includes(from);
+}
+
+/**
+ * THE stage a released delivery leg returns to — the order's own furthest
+ * honest milestone, so replacing a rider never rewinds the kitchen and never
+ * claims an unfinished order is ready.
+ *
+ * This was computed TWICE, and the two disagreed. The release kernel read only
+ * the timestamps; session revocation also special-cased COURIER. A courier
+ * parcel has no kitchen — it is ready the moment it is created — so with no
+ * `readyAt` the kernel returned ACCEPTED, and the customer of a parcel whose
+ * rider had just been taken away was shown "Rider found". The courier-aware
+ * answer is the correct one, and now it is the only one.
+ */
+export function releaseStageFor(order: {
+  orderType: string | null;
+  readyAt: Date | null;
+  preparingAt: Date | null;
+}): OrderStatus {
+  if (order.orderType === 'COURIER' || order.readyAt) return 'READY_FOR_PICKUP';
+  if (order.preparingAt) return 'PREPARING';
+  return 'ACCEPTED';
+}
+
+/** Thrown when a release is asked for an edge nobody declared. */
+export class UndeclaredRecoveryError extends Error {
+  constructor(from: OrderStatus, to: OrderStatus) {
+    super(
+      `Refusing to release order from ${from} to ${to}: that is not a declared recovery edge. `
+      + 'Add it to RECOVERY_TRANSITIONS with a reason, or fix the caller.',
+    );
+    this.name = 'UndeclaredRecoveryError';
+  }
+}
+
+/**
+ * The guard a release kernel runs before it writes. It exists because the
+ * kernel used to take the order WITHOUT its status and trust every caller to
+ * have checked custody first — so a third caller that forgot would have
+ * released an order whose goods were already in a rider's bag.
+ */
+export function assertRecoveryTransition(from: OrderStatus, to: OrderStatus): void {
+  if (!isRecoveryTransition(from, to)) throw new UndeclaredRecoveryError(from, to);
+}

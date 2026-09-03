@@ -3,7 +3,7 @@ import { freshRidePinReset } from './rides/ride-pin';
 import type { FastifyInstance } from 'fastify';
 import { AppError, ConflictError, NotFoundError } from '../utils/errors';
 import { makeDispatchService } from './dispatch/dispatch.service';
-import { FloatService, riderFloatForOrder } from './dispatch/float.service';
+import { reopenPreCustodyLeg } from './dispatch/delivery-watchdog';
 import { closeOnlineSession } from './rider/online-hours';
 import { processMoverRevocationOutboxById } from './mover-revocation-outbox';
 import {
@@ -274,19 +274,6 @@ export function emptyMoverSessionRevocationCleanup(): MoverSessionRevocationClea
   return { riderId: null, driverId: null, orders: [], outboxId: null };
 }
 
-function resumeDeliveryStatus(order: {
-  orderType: string;
-  acceptedAt: Date | null;
-  preparingAt: Date | null;
-  readyAt: Date | null;
-}): OrderStatus {
-  // Courier parcels are ready at creation. Store orders retain their furthest
-  // vendor preparation milestone so replacing a rider never rewinds the
-  // kitchen or falsely claims an unfinished order is ready.
-  if (order.orderType === 'COURIER' || order.readyAt) return 'READY_FOR_PICKUP';
-  if (order.preparingAt) return 'PREPARING';
-  return 'ACCEPTED';
-}
 
 /** Retire mover authority owned by one auth session (or every session when
  * sessionId is null). The caller MUST already hold the User row lock.
@@ -362,19 +349,18 @@ export async function retireMoverSessionAuthorityInTransaction(
         if (RIDER_PRE_HANDOFF.includes(order.status)) {
           // Goods still at the store: release the assignment and make it
           // dispatchable again — exactly what a rider-cancel would have done.
-          const resumed = resumeDeliveryStatus(order);
-          await tx.order.update({ where: { id: order.id }, data: { riderId: null, status: resumed } });
-          // MONEY stays with the leg it belongs to: this leg's committed CASH
-          // float, released with this leg's assignment, in this transaction.
-          await new FloatService(tx).release(tx, rider.id, riderFloatForOrder(order));
-          await tx.orderStatusLog.create({
-            data: {
-              orderId: order.id,
-              status: resumed,
-              changedBy: 'system:session-revocation',
-              note: 'Mover session ended before pickup — assignment released for re-dispatch',
-            },
-          });
+          //
+          // Through the ONE kernel [#902], which the watchdog and the G14
+          // handback already use: re-open to the honest stage, clear the
+          // assignment, and release THIS leg's committed CASH float with it,
+          // in this transaction. This body used to be a third copy, and its
+          // stage computation was the one that disagreed with the kernel's.
+          const resumed = await reopenPreCustodyLeg(
+            tx,
+            order,
+            'system:session-revocation',
+            'Mover session ended before pickup — assignment released for re-dispatch',
+          );
           cleanup.orders.push({
             orderId: order.id, orderNumber: order.orderNumber, customerId: order.customerId,
             pool: 'RIDER', status: resumed, action: 'REDISPATCH',

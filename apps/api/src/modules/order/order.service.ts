@@ -13,6 +13,8 @@ import {
   LIVE_ORDER_STATUSES,
   isTerminalOrderStatus,
   MOVER_HOLDING_STATUSES,
+  ORDER_TRANSITIONS,
+  RECOVERY_TRANSITIONS,
 } from './order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
@@ -136,54 +138,12 @@ export async function publishUnattestedMmgCancellation(
   }).catch(() => {});
 }
 
-// ---------------------------------------------------------------------------
-// The locked order state machine. Key = target state, value = states it may
-// be entered from. Anything not listed here is impossible — enforced with a
-// compare-and-set update so concurrent transitions race safely.
-// Canonical chain: placed(PENDING) -> accepted -> preparing -> ready ->
-// picked_up -> delivered | cancelled; mover/driver legs are intermediates.
-// ---------------------------------------------------------------------------
-export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  PENDING: [], // entry state — never transitioned into
-  ACCEPTED: ['PENDING'],
-  PREPARING: ['ACCEPTED'],
-  READY_FOR_PICKUP: ['PREPARING'],
-  RIDER_ASSIGNED: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'],
-  RIDER_EN_ROUTE_PICKUP: ['RIDER_ASSIGNED'],
-  RIDER_ARRIVED_PICKUP: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP'],
-  PICKED_UP: ['READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'],
-  EN_ROUTE_DELIVERY: ['PICKED_UP'],
-  ARRIVED: ['PICKED_UP', 'EN_ROUTE_DELIVERY'],
-  DRIVER_ASSIGNED: ['PENDING'],
-  DRIVER_EN_ROUTE: ['DRIVER_ASSIGNED'],
-  DRIVER_ARRIVED: ['DRIVER_EN_ROUTE'],
-  RIDE_IN_PROGRESS: ['DRIVER_ARRIVED'],
-  // READY_FOR_PICKUP is here for VENDOR_DELIVERY only [F-0026]: a self-delivering
-  // vendor never has a rider, so the order never passes through PICKED_UP and had
-  // no exit at all — it stranded in READY_FOR_PICKUP forever. The mode check lives
-  // on the one route that can fire this (vendor /orders/:id/delivered); rider
-  // routes cannot reach it because they all require order.riderId.
-  DELIVERED: ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS', 'READY_FOR_PICKUP'],
-  // DELIVERED for delivery; READY_FOR_PICKUP for takeaway (vendor hands it
-  // over); ACCEPTED for appointments, which skip prep/dispatch entirely —
-  // without it the services vertical could never be closed out (found live:
-  // complete-appointment always 409'd).
-  COMPLETED: ['DELIVERED', 'READY_FOR_PICKUP', 'ACCEPTED'],
-  CANCELLED: [
-    'PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED',
-    'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
-    'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED',
-  ],
-  REFUNDED: ['CANCELLED', 'DELIVERED', 'COMPLETED'],
-  // Failed cash handover is the only path into FAILED, and it is recorded ONLY
-  // at the door — or, for a ride, at the destination with the passenger aboard
-  // [M-29] (cash-rules HANDOVER_STATES). The old list also allowed
-  // PENDING/PICKED_UP/EN_ROUTE_DELIVERY — states the guard rejects with
-  // NOT_AT_DOOR, so no code could ever exercise them. Narrowed to match reality
-  // (SWIFT-096): an unstarted/in-transit order that goes wrong is CANCELLED, not
-  // FAILED. Kept in lockstep with HANDOVER_STATES by order-transition-failed.test.ts.
-  FAILED: ['ARRIVED', 'RIDE_IN_PROGRESS', 'PICKED_UP', 'EN_ROUTE_DELIVERY'], // [M-28] a courier's recipient outcome is recorded with the parcel in custody
-};
+// The order state machine — FORWARD edges and RELEASE edges — now lives in
+// order-status.ts, the leaf that owns status law, so the rescue watchdog, the
+// rider handback and session revocation can all read it without importing this
+// module. Re-exported here because a dozen call sites already import it from
+// order.service, and moving a table is not a reason to move a dozen imports.
+export { ORDER_TRANSITIONS, RECOVERY_TRANSITIONS };
 
 /** States where the order is physically with the mover — no cancellation. */
 const IN_TRANSIT = MOVER_HOLDING_STATUSES;

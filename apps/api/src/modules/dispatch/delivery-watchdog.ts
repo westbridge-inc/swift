@@ -10,6 +10,8 @@ import {
   TERMINAL_ORDER_STATUSES,
   RIDER_PRE_CUSTODY_STATUSES,
   RIDER_IN_CUSTODY_STATUSES,
+  assertRecoveryTransition,
+  releaseStageFor,
 } from '../order/order-status';
 
 const STALE_LOCATION_MINUTES = 15;
@@ -48,13 +50,19 @@ const STALE_LOCATION_MINUTES = 15;
 export async function reopenPreCustodyLeg(
   tx: Prisma.TransactionClient,
   order: {
-    id: string; riderId: string | null; paymentMethod: string;
+    id: string; status: OrderStatus; orderType: string | null;
+    riderId: string | null; paymentMethod: string;
     subtotalBase: Prisma.Decimal | number; readyAt: Date | null; preparingAt: Date | null;
   },
   changedBy: string,
   note: string,
 ): Promise<OrderStatus> {
-  const reopenStatus: OrderStatus = order.readyAt ? 'READY_FOR_PICKUP' : order.preparingAt ? 'PREPARING' : 'ACCEPTED';
+  const reopenStatus = releaseStageFor(order);
+  // The kernel guards its OWN precondition. It used to take the order without
+  // its status and trust every caller to have checked custody first — so a
+  // third caller that forgot would have released an order whose goods were
+  // already in the rider's bag, and freed the float they had fronted with it.
+  assertRecoveryTransition(order.status, reopenStatus);
   await tx.order.update({
     where: { id: order.id },
     data: { status: reopenStatus, riderId: null },
