@@ -6,15 +6,22 @@ import { LiveOrderFeed } from '@/components/dashboard/LiveOrderFeed';
 import { AlertsPanel } from '@/components/dashboard/AlertsPanel';
 import { useQuery } from '@tanstack/react-query';
 import { fetchDashboard } from '@/lib/api';
+import { DataUnavailable, METRIC_UNAVAILABLE } from '@/components/dashboard/DataUnavailable';
 
 export default function DashboardPage() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch, dataUpdatedAt } = useQuery({
     queryKey: ['dashboard'],
     queryFn: fetchDashboard,
     refetchInterval: 30_000,
   });
 
   const stats = data?.data;
+  // [A-06] A failed read is not a quiet platform. Every card below said "—"
+  // or a zero when this query failed, which reads as "nothing happening"
+  // rather than "we cannot see". The banner says which, and each metric says
+  // "unavailable" rather than inventing an absence.
+  const blind = isError && !stats;
+  const metric = (value: string | undefined) => (blind ? METRIC_UNAVAILABLE : (value ?? '—'));
 
   return (
     <div className="space-y-6">
@@ -32,10 +39,19 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {blind && (
+        <DataUnavailable
+          what="The dashboard"
+          notAnAllClear="These figures are not zero — they are unknown. Do not read this page as a quiet platform."
+          lastSuccessAt={dataUpdatedAt || undefined}
+          onRetry={() => void refetch()}
+        />
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard
           title="Weekly Revenue"
-          value={stats ? `$${Number(stats.revenue?.weeklySubscriptionRevenue ?? 0).toLocaleString()}` : '—'}
+          value={blind ? METRIC_UNAVAILABLE : stats ? `$${Number(stats.revenue?.weeklySubscriptionRevenue ?? 0).toLocaleString()}` : '—'}
           subtitle="GYD · subscriptions"
           loading={isLoading}
         />
@@ -44,7 +60,7 @@ export default function DashboardPage() {
             computed todayCompletedOrders all along and the card dropped it. */}
         <MetricCard
           title="Orders Today"
-          value={stats?.todayOrders?.toString() ?? '—'}
+          value={metric(stats?.todayOrders?.toString())}
           subtitle={
             stats?.todayCompletedOrders != null
               ? `${stats.todayCompletedOrders} completed`
@@ -58,30 +74,30 @@ export default function DashboardPage() {
             the whole admin app [F-260]. */}
         <MetricCard
           title="Live Merchants"
-          value={stats?.activeVendors?.toString() ?? '—'}
+          value={metric(stats?.activeVendors?.toString())}
           subtitle={stats?.totalVendors != null ? `of ${stats.totalVendors} onboarded` : undefined}
           loading={isLoading}
         />
         <MetricCard
           title="Active Riders"
-          value={stats?.activeRiders?.toString() ?? '—'}
+          value={metric(stats?.activeRiders?.toString())}
           subtitle="online"
           loading={isLoading}
         />
         <MetricCard
           title="Active Drivers"
-          value={stats?.activeDrivers?.toString() ?? '—'}
+          value={metric(stats?.activeDrivers?.toString())}
           subtitle="online"
           loading={isLoading}
         />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <RevenueBreakdown data={stats?.subscriptionBreakdown} weeklyTotal={stats?.revenue?.weeklySubscriptionRevenue} />
+        <RevenueBreakdown data={stats?.subscriptionBreakdown} weeklyTotal={stats?.revenue?.weeklySubscriptionRevenue} unavailable={blind} />
         <LiveOrderFeed />
       </div>
 
-      <AlertsPanel alerts={stats?.alerts} />
+      <AlertsPanel alerts={stats?.alerts} unavailable={blind} lastSuccessAt={dataUpdatedAt || undefined} />
     </div>
   );
 }

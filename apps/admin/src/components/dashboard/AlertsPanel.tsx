@@ -2,12 +2,22 @@
 
 import Link from 'next/link';
 import { AlertTriangle, AlertCircle, CheckCircle2, ChevronRight } from 'lucide-react';
+import { DataUnavailable } from './DataUnavailable';
 
 type Alerts = { pendingVendors: number; pastDueSubs: number; unassignedOrders: number };
 
 const plural = (n: number, s: string) => `${n} ${s}${n === 1 ? '' : 's'}`;
 
-export function AlertsPanel({ alerts }: { alerts?: Alerts }) {
+export function AlertsPanel({
+  alerts,
+  unavailable,
+  lastSuccessAt,
+}: {
+  alerts?: Alerts;
+  /** [A-06] the read failed — say so; "all clear" here is the lie the register named */
+  unavailable?: boolean;
+  lastSuccessAt?: number;
+}) {
   // Every alert is a door, not a label — it deep-links to where the work is.
   const items: { level: 'warning' | 'error'; message: string; href: string }[] = [];
   if (alerts) {
@@ -23,7 +33,15 @@ export function AlertsPanel({ alerts }: { alerts?: Alerts }) {
     <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
       <h3 className="text-lg font-semibold mb-4">Alerts & Issues</h3>
       <div className="space-y-2">
-        {items.length === 0 ? (
+        {unavailable ? (
+          // [A-06] The panel that most needed this: an operator reading
+          // "All clear" during an outage believes safety and money are quiet.
+          <DataUnavailable
+            what="Alerts"
+            notAnAllClear="This is NOT an all-clear — there may be alerts you cannot see."
+            lastSuccessAt={lastSuccessAt}
+          />
+        ) : items.length === 0 ? (
           <div className="flex items-center gap-3 p-3 rounded-lg bg-white/5 text-[var(--muted)]">
             <CheckCircle2 size={16} className="text-green-400 shrink-0" />
             <span className="text-sm">All clear — no active alerts.</span>

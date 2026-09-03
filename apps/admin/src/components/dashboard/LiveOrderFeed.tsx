@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { fetchRecentOrders } from '@/lib/api';
+import { DataUnavailable } from './DataUnavailable';
 
 const STATUS_COLORS: Record<string, string> = {
   PENDING: 'bg-red-500',
@@ -18,11 +19,14 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export function LiveOrderFeed() {
-  const { data } = useQuery({
+  const { data, isError, refetch, dataUpdatedAt } = useQuery({
     queryKey: ['recentOrders'],
     queryFn: fetchRecentOrders,
     refetchInterval: 10_000,
   });
+  // [A-06] "No recent orders" was rendered for a failed read too, so an outage
+  // looked like a quiet evening on the busiest surface in the console.
+  const blind = isError && !data?.data;
 
   return (
     <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
@@ -37,7 +41,17 @@ export function LiveOrderFeed() {
               ${Number(order.totalAmount).toLocaleString()}
             </span>
           </Link>
-        )) || <p className="text-[var(--muted)] text-sm">No recent orders</p>}
+        )) ||
+          (blind ? (
+            <DataUnavailable
+              what="The order feed"
+              notAnAllClear="This is not an empty queue — orders may be flowing that this list cannot see."
+              lastSuccessAt={dataUpdatedAt || undefined}
+              onRetry={() => void refetch()}
+            />
+          ) : (
+            <p className="text-[var(--muted)] text-sm">No recent orders</p>
+          ))}
       </div>
     </div>
   );
