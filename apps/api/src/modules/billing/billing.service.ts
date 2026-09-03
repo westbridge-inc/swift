@@ -10,7 +10,7 @@ import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
 import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
-import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
+import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor, weeklyFeeAmount } from './subscription-fee';
 
@@ -31,6 +31,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** Default request TTL until MMG answers Q2 of the question register — the
  *  poller expires an unapproved request past this, into normal dunning. */
 const MMG_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
+/** [DB-028] How long an attempt may sit with no outcome before a later cycle
+ *  treats it as abandoned rather than in progress. Longer than any single
+ *  billing run — a run that is still inside an attempt is not stale, and the
+ *  reclaim is fenced anyway, so this only has to be safely generous. */
+const STALE_ATTEMPT_MS = 30 * 60 * 1000;
 /** Poll backoff ladder [tollgate 14.1]: 30s → 60s → 2m → 5m cap, ±20% jitter
  *  applied at stamp time. Fresh rows poll fast (the approve-on-phone moment);
  *  old rows stop hammering the provider. */
@@ -188,13 +193,17 @@ export class BillingService {
     /** USD pricing context — pass the RUN's context from runBillingCycle;
      *  single-charge callers may pass undefined to resolve fresh. */
     usdCtx?: UsdPricingCtx | null,
+    /** [DB-028] Internal: this call has already won the attempt, by reclaiming
+     *  a stale one. The attempt event exists; re-inserting it would collide
+     *  with the very row that licensed this pass. */
+    reclaimedAttempt = false,
   ): Promise<'succeeded' | 'failed' | 'suspended' | 'skipped' | 'pending'> {
     const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
     const attemptKey = `charge:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const usd = usdCtx === undefined ? await this.loadUsdPricing() : usdCtx;
     const priced = await this.priceEligibleFor(sub, usd);
 
-    try {
+    if (!reclaimedAttempt) try {
       await this.prisma.billingEvent.create({
         data: {
           subscriptionId: sub.id,
@@ -239,7 +248,26 @@ export class BillingService {
           where: { clientKey: this.cardReference(sub) },
           select: { status: true },
         });
-        if (liveIntent && (liveIntent.status === 'PENDING' || liveIntent.status === 'UNKNOWN')) return 'pending';
+        if (liveIntent && (liveIntent.status === 'PENDING' || liveIntent.status === 'UNKNOWN')) {
+          billingAttemptReclaimCounter.labels('blocked_intent').inc();
+          return 'pending';
+        }
+        // [DB-028] An attempt with NO outcome and NO intent behind it is not
+        // "already handled" — it is a run that committed the attempt and then
+        // died before doing anything at all. Skipping it here is permanent:
+        // the period and the failed-attempt level never move, so every future
+        // cycle recomputes the same key, collides, and skips again. Billing
+        // for that subscriber stops for good, silently, and the nightly
+        // invariant only reports the symptom.
+        //
+        // Once the attempt is older than a whole run could take, nobody is
+        // working it. Reclaim it — fenced, so two reclaimers cannot both go
+        // forward — and take the charge from the top. Nothing external was
+        // reserved (both rails write their intent before they call out), and
+        // the provider keys are deterministic regardless.
+        if (await this.reclaimStaleAttempt(sub, attemptKey, now)) {
+          return this.billSubscription(sub, now, usd, true);
+        }
         return 'skipped'; // someone (or a concurrent run) already attempted this
       }
       throw error;
@@ -353,6 +381,89 @@ export class BillingService {
       return outcome ?? 'skipped';
     }
     return this.applyFailedCharge(sub, amount, charged.reason, now, periodKey);
+  }
+
+  /**
+   * [DB-028] Reclaim a weekly-charge attempt that nobody is working.
+   *
+   * The attempt event is the claim. It is also append-only evidence, which is
+   * exactly why it makes a poor lock: a run that commits it and then dies
+   * holds that claim forever, and every later cycle collides on the same key
+   * and skips. Billing for that subscriber stops permanently, in silence.
+   *
+   * A stale attempt is one that is OLDER than any run could plausibly still be
+   * inside, with no failure record, no success record and no live provider
+   * intent for the same period and attempt level — the caller has already
+   * established the last three. This method establishes the first, and then
+   * claims the reclaim itself under a unique key, so if two cycles reach the
+   * same stale attempt together exactly one goes forward and the other skips.
+   * The generation in that key lets a reclaim that itself dies be reclaimed in
+   * turn, rather than replacing one permanent block with another.
+   *
+   * Interim containment, and named as such: DB-028's target design is a
+   * durable attempt state machine with a lease and a fenced reconciler. This
+   * closes the hole that design closes without a second money table, and the
+   * census test asserts no aged attempt is left unaccounted for either way.
+   */
+  private async reclaimStaleAttempt(
+    sub: Pick<Subscription, 'id' | 'nextBillingDate' | 'failedAttempts'>,
+    attemptKey: string,
+    now: Date,
+  ): Promise<boolean> {
+    const attempt = await this.prisma.billingEvent.findUnique({
+      where: { idempotencyKey: attemptKey },
+      select: { createdAt: true },
+    });
+    if (!attempt) return false;
+    if (now.getTime() - attempt.createdAt.getTime() < STALE_ATTEMPT_MS) return false;
+
+    const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
+    const base = `${sub.id}:${periodKey}:a${sub.failedAttempts}`;
+    // A success for this period means the attempt DID complete; never re-charge.
+    const settled = await this.prisma.billingEvent.findFirst({
+      where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', idempotencyKey: { startsWith: `success:${sub.id}:${periodKey}` } },
+      select: { id: true },
+    });
+    if (settled) return false;
+
+    // A reclaim already in progress is not a second licence. The unique key
+    // below stops two cycles that compute the SAME generation, but a cycle
+    // arriving a second after the winner would otherwise count one reclaim,
+    // mint the next generation and charge alongside it — the winner's charge
+    // and this one, both live, with only the success record's timing between
+    // them. So a new generation may be minted ONLY when the latest reclaim is
+    // itself stale, i.e. its own run has been gone as long as the attempt's.
+    const reclaims = await this.prisma.billingEvent.findMany({
+      where: { subscriptionId: sub.id, idempotencyKey: { startsWith: `reclaim:${base}:` } },
+      select: { createdAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    const latest = reclaims[0];
+    if (latest && now.getTime() - latest.createdAt.getTime() < STALE_ATTEMPT_MS) {
+      billingAttemptReclaimCounter.labels('lost_race').inc();
+      return false; // someone is working this attempt right now
+    }
+    const generation = reclaims.length;
+    try {
+      await this.prisma.billingEvent.create({
+        data: {
+          subscriptionId: sub.id,
+          type: 'CHARGE_ATTEMPT_RECLAIMED',
+          amount: 0,
+          currencyCode: 'GYD',
+          idempotencyKey: `reclaim:${base}:g${generation}`,
+          note: `Attempt from ${attempt.createdAt.toISOString()} had no outcome and no provider intent; reclaimed`,
+        },
+      });
+    } catch (error) {
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+        billingAttemptReclaimCounter.labels('lost_race').inc();
+        return false; // another cycle won this reclaim
+      }
+      throw error;
+    }
+    billingAttemptReclaimCounter.labels('reclaimed').inc();
+    return true;
   }
 
   /** The MMG merchant reference for one attempt — ONE format, shared by the

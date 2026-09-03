@@ -2404,6 +2404,11 @@ model BillingEvent {
 
 enum BillingEventType {
   CHARGE_ATTEMPT
+  /// [DB-028] A stale CHARGE_ATTEMPT — no outcome, no provider intent — taken
+  /// forward by a later cycle. Its unique key fences the reclaim, so exactly
+  /// one cycle may proceed; the generation in that key lets a reclaim that
+  /// itself dies be reclaimed in turn.
+  CHARGE_ATTEMPT_RECLAIMED
   CHARGE_SUCCESS
   CHARGE_FAILED
   PREPAID_TOPUP
