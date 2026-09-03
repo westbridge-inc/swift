@@ -117,6 +117,16 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [R048-005] Seed-plan outcomes: applied, noop (nothing to change), refused_drift, refused_target,
+ *  refused_tampered, refused_config_mismatch, promotion_bootstrap, promotion_break_glass, promotion_refused,
+ *  demo_seed_refused. */
+export const seedPlanCounter = new client.Counter({
+  name: 'swift_seed_plan_total',
+  help: 'Versioned configuration seed plan outcomes (applied/noop/refused_*/promotion_*/demo_seed_refused)',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 /** [R048-004] Chat secret protection by surface: redactions (send/socket/push/history/list/create/preview),
  *  legacy media hidden, a stale participant refused, a write to a closed room refused, a media upload
  *  rejected, a leaked ride PIN rotated, stale participant rows removed by reconcile. */

@@ -67,7 +67,18 @@ describe('admin config page — every rendered key has a real reader', () => {
   });
 
   it('the seed plants no dead keys beyond the documented test fixture', () => {
-    const seed = stripComments(readFileSync(join(SEED_DIR, 'seed-platform.ts'), 'utf8'));
+    // [R048-005] The spine's DATA moved from prisma/seed-platform.ts into
+    // src/modules/ops/platform-config.ts; the seed file is now a thin
+    // re-export so the scripts, the demo seed and the tests share ONE module.
+    // This guard follows the keys to wherever they live — and pins the
+    // re-export, so the seed cannot quietly grow a second copy of them.
+    const reexport = readFileSync(join(SEED_DIR, 'seed-platform.ts'), 'utf8');
+    expect(reexport, 'the seed must re-export the one platform config, not restate it').toMatch(
+      /export \{[^}]*desiredPlatformConfig[^}]*\} from '\.\.\/src\/modules\/ops\/platform-config'/s,
+    );
+    expect(stripComments(reexport).match(/key: '/g) ?? [], 'the seed file itself must hold no keys').toHaveLength(0);
+
+    const seed = stripComments(readFileSync(join(API_SRC, 'modules/ops/platform-config.ts'), 'utf8'));
     expect(seed.length, 'stripper emptied the seed').toBeGreaterThan(1_000);
     const seeded = [...seed.matchAll(/key: '([a-z0-9_.]+)'/g)].map((m) => m[1]!);
     expect(seeded.length).toBeGreaterThanOrEqual(1);

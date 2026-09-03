@@ -1,11 +1,13 @@
 import { PrismaClient } from '@prisma/client';
 import { seedPlatformSpine, guyanaTiers } from './seed-platform';
-import { assertSafeToSeedDemo } from '../src/utils/seed-guard';
+import { assertSafeToSeedDemo, ensureEphemeralIdentity } from '../src/utils/seed-guard';
 
 const prisma = new PrismaClient();
 
 async function main() {
   await assertSafeToSeedDemo(prisma);
+  // [R048-005] an empty development/test database declares itself ephemeral so every plan can bind to it
+  await ensureEphemeralIdentity(prisma);
   console.warn('Seeding database...');
 
   // Platform SPINE (tenant, DB objects db-push can't express, config
