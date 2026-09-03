@@ -12,6 +12,13 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { grantStepUp } from './helpers/step-up';
 import { applyDueMmgLinkChanges } from '../modules/integrity/money-surface';
 
+// [W-25] A store's attestation now carries the provider reference from its own
+// wallet message — a bare tap is refused (REFERENCE_REQUIRED), and one reference
+// cannot mark two orders paid. The refusal cases are graded in
+// mmg-vendor-attestation.test.ts; these suites keep grading the lifecycle.
+const mmgRef = () => `MMGT${Math.random().toString(36).slice(2, 12).toUpperCase().replace(/[^A-Z0-9]/g, 'X')}`;
+
+
 // MMG Phase 1: a vendor / taxi driver attaches their OWN MMG "pay me" link
 // (opt-in) so customers can pay them directly. Owner-scoped set/clear.
 
@@ -213,25 +220,25 @@ describe('MMG pay link — taxi driver', () => {
 describe('MMG payment — vendor confirms received', () => {
   it('marks an MMG order paid (CAPTURED) and is idempotent', async () => {
     const id = await makeOrder('MOBILE_MONEY');
-    const res = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    const res = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.paymentStatus).toBe('CAPTURED');
     // double-tap safe
-    const again = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    const again = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(again.statusCode).toBe(200);
     expect(again.json().data.paymentStatus).toBe('CAPTURED');
   });
 
   it('refuses to "confirm payment" on a cash order (cash is settled at handover)', async () => {
     const id = await makeOrder('CASH');
-    const res = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    const res = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('NOT_MMG');
   });
 
   it("a different owner can't confirm this vendor's order", async () => {
     const id = await makeOrder('MOBILE_MONEY');
-    const res = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, driver.token, {});
+    const res = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, driver.token, { reference: mmgRef() });
     expect([403, 404]).toContain(res.statusCode);
   });
 });

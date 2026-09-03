@@ -195,6 +195,9 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const order = useQuery({ queryKey: ['order', id], queryFn: () => getOrder(id), refetchInterval: 10_000 });
   const [prepTime, setPrepTime] = useState(20);
   const [pickupCode, setPickupCode] = useState('');
+  // [W-25] The store's attestation carries the provider reference from its own
+  // wallet message. Without one there is nothing to reconcile against later.
+  const [mmgRef, setMmgRef] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const refresh = () => {
@@ -213,7 +216,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
         const { apiFetch } = await import('@/lib/auth');
         return apiFetch(`/api/v1/vendor/orders/${id}/complete-appointment`, { method: 'PUT', body: '{}' });
       }
-      if (kind === 'confirm-payment') return confirmPayment(id);
+      if (kind === 'confirm-payment') return confirmPayment(id, mmgRef.trim());
       if (kind === 'retry-dispatch') return retryDispatch(id);
       throw new Error(`Unknown action ${kind}`);
     },
@@ -230,7 +233,26 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const actions = actionsFor(o);
   const pickable = ['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
-  const showConfirmPay = isMmg && o.paymentStatus !== 'CAPTURED' && !['CANCELLED'].includes(s);
+  // [W-25] The old predicate was "not captured and not cancelled", so a
+  // FAILED, REFUNDED or UNRESOLVED payment offered a one-tap "received" — a
+  // tap on a reversed payment recaptured a refund. A store may attest only
+  // where money plausibly landed and nothing has reversed or resolved it; the
+  // server enforces the same matrix and refuses the rest by name.
+  const ATTESTABLE_PAYMENT = ['PENDING', 'AUTHORIZED'];
+  const showConfirmPay =
+    isMmg && ATTESTABLE_PAYMENT.includes(String(o.paymentStatus ?? '')) && !['CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
+  // and when it is NOT attestable, the screen says why rather than going quiet
+  const payBlockedReason =
+    isMmg && !showConfirmPay && o.paymentStatus !== 'CAPTURED'
+      ? {
+          REFUNDED: 'This payment was refunded — a new payment is a new transaction.',
+          PARTIALLY_REFUNDED: 'This payment was partly refunded — support settles the balance.',
+          FAILED: 'MMG reports this payment as failed. Contact support with the reference if money did reach you.',
+          EXPIRED: 'The payment window closed — ask the customer to pay again.',
+          UNKNOWN: 'This payment is unresolved with MMG. Support settles it; it cannot be marked received here.',
+          CANCELLED: 'This payment was superseded.',
+        }[String(o.paymentStatus ?? '')] ?? null
+      : null;
   const customer = [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
   const rider = o.rider?.user ? [o.rider.user.firstName, o.rider.user.lastName].filter(Boolean).join(' ') : null;
 
@@ -309,13 +331,25 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
             </button>
           </span>
         ))}
+        {payBlockedReason && (
+          <p className="w-full text-sm text-[var(--swift-muted)]">{payBlockedReason}</p>
+        )}
+        {showConfirmPay && (
+          <input
+            value={mmgRef}
+            onChange={(e) => setMmgRef(e.target.value)}
+            placeholder="MMG transaction reference"
+            aria-label="MMG transaction reference"
+            className="rounded-lg border border-black/10 px-3 py-2 text-sm"
+          />
+        )}
         {showConfirmPay && (
           <button
             onClick={() => act.mutate('confirm-payment')}
-            disabled={act.isPending}
+            disabled={act.isPending || mmgRef.trim().length < 4}
             className="rounded-lg border border-green-600/30 px-4 py-2 text-sm font-semibold text-green-700 hover:bg-green-50 disabled:opacity-50"
           >
-            MMG payment received
+            {money(o.totalAmount)} received in my MMG
           </button>
         )}
         {s === 'READY_FOR_PICKUP' && o.fulfillment !== 'PICKUP' && !rider && (

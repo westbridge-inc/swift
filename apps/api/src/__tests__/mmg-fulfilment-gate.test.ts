@@ -17,6 +17,13 @@ import { OrderService, reconcileMissingEarnings } from '../modules/order/order.s
 import { registerErrorHandler } from '../middleware/error-handler';
 import { loginWithOtp } from './helpers/otp';
 
+// [W-25] A store's attestation now carries the provider reference from its own
+// wallet message — a bare tap is refused (REFERENCE_REQUIRED), and one reference
+// cannot mark two orders paid. The refusal cases are graded in
+// mmg-vendor-attestation.test.ts; these suites keep grading the lifecycle.
+const mmgRef = () => `MMGT${Math.random().toString(36).slice(2, 12).toUpperCase().replace(/[^A-Z0-9]/g, 'X')}`;
+
+
 // ---------------------------------------------------------------------------
 // [SPS-F-0016 / LB-015] The MMG payment-first law. An MMG marketplace order is
 // paid customer→store OUTSIDE Swift, and only the store can attest the money
@@ -163,7 +170,7 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
 
   it('the store CAN confirm payment while PENDING, and acceptance then works', async () => {
     const order = await makeMmgOrder('PENDING', { withRider: false });
-    const confirm = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    const confirm = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(confirm.statusCode).toBe(200);
     const paid = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(paid.paymentStatus).toBe('CAPTURED');
@@ -283,13 +290,16 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
 describe('capture evidence and idempotency', () => {
   it('confirm-payment records its audit row atomically and double-taps stay single-logged', async () => {
     const order = await makeMmgOrder('PENDING', { withRider: false });
-    const first = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    const first = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(first.statusCode).toBe(200);
-    const second = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    const second = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(second.statusCode).toBe(200);
 
-    const logs = await app.prisma.orderStatusLog.findMany({ where: { orderId: order.id, note: { contains: 'MMG payment confirmed' } } });
+    // [W-25] the note now names the attestation and its reference, so match the
+    // durable half rather than the prose: exactly ONE capture log either way
+    const logs = await app.prisma.orderStatusLog.findMany({ where: { orderId: order.id, note: { contains: 'MMG payment' } } });
     expect(logs).toHaveLength(1);
+    expect(logs[0]!.note).toMatch(/ref [A-Z0-9._-]+/);
   });
 
   it('zero-fee, positive-tip MMG delivery still creates the settlement for the tip', async () => {
@@ -478,14 +488,14 @@ describe('capture responses never leak verifier secrets [REPORT-005 F-005-04]', 
   it('winner and double-tap loser responses omit pickup code and ride PIN', async () => {
     const order = await makeMmgOrder('PENDING', { withRider: false });
     await app.prisma.order.update({ where: { id: order.id }, data: { pickupCode: '123456', ridePin: '9876' } });
-    const winner = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    const winner = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(winner.statusCode).toBe(200);
     const wBody = JSON.stringify(winner.json());
     expect(wBody).not.toContain('123456');
     expect(wBody).not.toContain('9876');
     expect(winner.json().data.paymentStatus).toBe('CAPTURED');
 
-    const loser = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    const loser = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(loser.statusCode).toBe(200);
     const lBody = JSON.stringify(loser.json());
     expect(lBody).not.toContain('123456');
@@ -495,7 +505,7 @@ describe('capture responses never leak verifier secrets [REPORT-005 F-005-04]', 
   it('a capture cannot attach to a cancelled order [F-005-03 tail]', async () => {
     const order = await makeMmgOrder('PENDING', { withRider: false });
     await orders.updateStatus(order.id, 'CANCELLED', 'test-system', 'changed mind');
-    const res = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    const res = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(res.statusCode).toBe(409);
     expect(res.json().error?.code ?? res.json().code).toBe('ORDER_CLOSED');
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).paymentStatus).toBe('PENDING');
@@ -528,7 +538,7 @@ describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmi
     // return 200 for it (the old order of checks did) [F-006-01 contradiction].
     const order = await makeMmgOrder('PENDING', { paymentStatus: 'CAPTURED', withRider: false });
     await app.prisma.order.update({ where: { id: order.id }, data: { status: 'CANCELLED' } });
-    const res = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, {}, vendorId);
+    const res = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(res.statusCode).toBe(409);
     expect(res.json().error?.code ?? res.json().code).toBe('ORDER_CLOSED');
   });
@@ -579,7 +589,7 @@ describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmi
     for (let round = 0; round < 3; round += 1) {
       const order = await makeMmgOrder('ACCEPTED', { withRider: false }); // payment PENDING
       const [confirm, cancel] = await Promise.all([
-        inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, {}, vendorId),
+        inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId),
         inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'raced' }),
       ]);
       const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });

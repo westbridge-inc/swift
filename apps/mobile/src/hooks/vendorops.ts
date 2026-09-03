@@ -375,7 +375,7 @@ export function useOrderAction() {
       reason?: string;
     }) => {
       if (action === 'accept') return unwrap(vendorApi.acceptOrder(id));
-      if (action === 'confirm-payment') return unwrap(vendorApi.confirmPayment(id));
+      if (action === 'confirm-payment') return unwrap(vendorApi.confirmPayment(id, code ?? ''));
       if (action === 'preparing') return unwrap(vendorApi.preparing(id));
       if (action === 'ready') return unwrap(vendorApi.ready(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));

@@ -11,7 +11,8 @@ import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
 import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
 import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
-import { pickingReadinessCounter } from '../../plugins/observability';
+import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/observability';
+import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
@@ -1627,6 +1628,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     // CAPTURED+closed row must answer with this refusal, never a success —
     // and re-checked from the LOCKED row inside the transaction (this preview
     // is UX-only; the lock is the authority).
+    // [W-25] The store's word is the only signal on this rail, so it is
+    // admissible only where money plausibly landed and nothing has reversed
+    // it, and only with the provider reference from the wallet's own message.
+    const reference = normaliseMmgReference((request.body as { reference?: unknown } | null)?.reference);
+    assertMmgAttestable(order);
+
     const ORDER_CLOSED_STATUSES = ['CANCELLED', 'REFUNDED', 'FAILED'];
     const orderClosedError = () => new AppError(
       409,
@@ -1654,6 +1661,9 @@ export async function vendorRoutes(app: FastifyInstance) {
         omit: HANDOVER_SECRETS_OMIT,
       });
       if (ORDER_CLOSED_STATUSES.includes(locked.status)) throw orderClosedError();
+      // [W-25] the preview above is UX; THIS is the authority — a payment that
+      // failed or was reversed between the tap and the lock is refused here
+      assertMmgAttestable(locked);
       if (locked.paymentStatus === 'CAPTURED') {
         return { won: false, order: locked }; // idempotent under the lock
       }
@@ -1675,13 +1685,33 @@ export async function vendorRoutes(app: FastifyInstance) {
         omit: HANDOVER_SECRETS_OMIT,
       });
       if (cas.count > 0) {
+        // [W-25] The capture and the evidence behind it commit together: the
+        // provider reference, who attested and when, plus an audit row naming
+        // the amount and the destination. A reference already spent on another
+        // order fails the whole transaction — one payment, one order.
+        const attested = await recordVendorAttestation(tx, {
+          orderId: order.id,
+          reference,
+          actorId: request.user.userId,
+          amount: fresh.totalAmount,
+          recipientName: fresh.mmgRecipientNameSnapshot,
+        });
+        if (!attested.ok) {
+          mmgAttestationCounter.labels('reference_reused').inc();
+          throw new AppError(
+            409,
+            'REFERENCE_ALREADY_USED',
+            'That MMG reference is already recorded against another order. One payment settles one order.',
+          );
+        }
         await tx.orderStatusLog.create({
-          data: { orderId: order.id, status: fresh.status, changedBy: request.user.userId, note: 'MMG payment confirmed received by vendor' },
+          data: { orderId: order.id, status: fresh.status, changedBy: request.user.userId, note: `MMG payment attested by the store (ref ${reference})` },
         });
       }
       return { won: cas.count > 0, order: fresh };
     });
     if (!capture.won) return { success: true, data: capture.order };
+    mmgAttestationCounter.labels('attested').inc();
     const updated = capture.order;
     app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: updated.status, paymentStatus: 'CAPTURED' });
     // The socket covers an open order screen; the notification survives it.

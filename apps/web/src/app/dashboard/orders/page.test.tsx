@@ -136,3 +136,55 @@ describe('vendor order board — money is never invented', () => {
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [W-25] "MMG payment received" is the store's WORD, not a reconciled capture.
+// The old predicate was "not captured and not cancelled", so a FAILED, a
+// REFUNDED and an unresolved payment each offered a one-tap "received" — a tap
+// on a reversed payment recaptured a refund. The server refuses those states
+// by name; the board must not offer the tap in the first place, and when it
+// does offer it, it collects the provider reference that proves the payment.
+// ---------------------------------------------------------------------------
+
+describe('[W-25] the store attests only where money plausibly landed', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  async function openMmgDetail(paymentStatus: string) {
+    const over = { paymentMethod: 'MOBILE_MONEY', paymentStatus };
+    const fetchMock = mockApi(boardHandler([wireVendorOrder(over)], wireVendorOrderDetail(over)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    await waitFor(() => expect(screen.getByText('Total (MMG)')).toBeTruthy());
+    return { user, fetchMock };
+  }
+
+  it.each(['REFUNDED', 'FAILED', 'UNKNOWN', 'EXPIRED', 'PARTIALLY_REFUNDED'])(
+    'offers no attest button on a %s payment, and says why',
+    async (paymentStatus) => {
+      const { fetchMock } = await openMmgDetail(paymentStatus);
+      expect(screen.queryByRole('button', { name: /received in my MMG/i })).toBeNull();
+      // and the screen is not silent about it
+      expect(screen.getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
+      expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
+    },
+  );
+
+  it('offers it on a PENDING payment, names the amount, and will not send without a reference', async () => {
+    const { user, fetchMock } = await openMmgDetail('PENDING');
+    const button = await screen.findByRole('button', { name: /received in my MMG/i });
+    expect((button as HTMLButtonElement).disabled).toBe(true); // no reference yet
+    await user.click(button);
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
+
+    await user.type(screen.getByLabelText(/MMG transaction reference/i), 'MMG12345');
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    await user.click(button);
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('confirm-payment'));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call![1]?.body)).reference).toBe('MMG12345');
+    });
+  });
+});
