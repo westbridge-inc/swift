@@ -4,6 +4,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { convertUsdToLocal, formatMoney, resolveRateForRun } from './fx';
 import { log } from '../../utils/logger';
 import { usdMigrationFlipsCounter, usdMigrationHeldGauge } from '../../plugins/observability';
+import { weeklyFeeAmount } from './subscription-fee';
 
 // System 2 Part 13/20 — migration of existing local-priced subscriptions.
 // The founder picks a mode per tenant at enable time:
@@ -64,7 +65,7 @@ export async function previewModeA(prisma: PrismaClient) {
     rows: subs.map((s) => {
       const role = SUB_ROLE[s.type] ?? 'VENDOR';
       const amountUsd = book.get(`${role}|${s.type}`) ?? book.get(`${role}|`);
-      const current = Number(s.customRate ?? s.weeklyRate);
+      const current = weeklyFeeAmount(s);
       const next = amountUsd !== undefined ? convertUsdToLocal(amountUsd, Number(rate.rate), increment).amountLocal : null;
       return {
         subscriptionId: s.id, type: s.type,

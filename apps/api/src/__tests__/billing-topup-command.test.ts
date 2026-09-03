@@ -150,18 +150,20 @@ describe('[M-08] the key is required — the register’s first red test', () =>
   it('with a key: one command — credit, receipt, ledger posting, audit row and the stored result — and the same key replays it verbatim', async () => {
     const { sub } = await makeVendorSub();
     const key = `attempt-${nanoid(12)}`;
-    const first = await topup(sub.id, { amount: 5000, reference: 'bank-2' }, { 'idempotency-key': key });
+    // ONE transfer, replayed — so one reference, but unique to this run.
+    const transfer = refFor('BANK2');
+    const first = await topup(sub.id, { amount: 5000, reference: transfer }, { 'idempotency-key': key });
     expect(first.statusCode).toBe(200);
     expect(first.json()).toMatchObject({ success: true, replayed: false, data: { balance: 5000, currencyCode: 'GYD' } });
     expect(await facts(sub.id)).toEqual({ credits: 1, receipts: 1, postings: 1, audits: 1, commands: 1, balance: 5000 });
-    const again = await topup(sub.id, { amount: 5000, reference: 'bank-2' }, { 'idempotency-key': key });
+    const again = await topup(sub.id, { amount: 5000, reference: transfer }, { 'idempotency-key': key });
     expect(again.statusCode).toBe(200);
     expect(again.json()).toMatchObject({ success: true, replayed: true, data: { balance: 5000, currencyCode: 'GYD' } });
     expect(await facts(sub.id)).toEqual({ credits: 1, receipts: 1, postings: 1, audits: 1, commands: 1, balance: 5000 });
     const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entity: 'Subscription', entityId: sub.id, action: 'PREPAID_TOPUP' } });
     // [A-12] Stored upper-cased: normalisation is what makes the unique index
     // work, so the same transfer typed two ways cannot occupy two rows.
-    expect(audit.changes).toMatchObject({ amount: 5000, reference: 'BANK-2', idempotencyKey: key });
+    expect(audit.changes).toMatchObject({ amount: 5000, reference: transfer, idempotencyKey: key });
   });
 
   it('the same key under a different request is refused, counted, and credits nothing more', async () => {

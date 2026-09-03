@@ -12,6 +12,7 @@ import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure
 import { log } from '../../utils/logger';
 import { billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 import { isDuplicateOn } from '../money/evidence';
+import { weeklyFeeFor, weeklyFeeAmount } from './subscription-fee';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -409,7 +410,7 @@ export class BillingService {
   }
 
   private amountFor(sub: Subscription): Prisma.Decimal | number {
-    return sub.customRate ?? sub.weeklyRate;
+    return weeklyFeeFor(sub);
   }
 
   /** USD pricing (System 2 ②): the run-scoped pricing context — ONE FxRate +
@@ -1620,7 +1621,7 @@ export class BillingService {
           userId: this.payerUserId(sub as SubWithRelations),
           type: 'SYSTEM_ANNOUNCEMENT',
           title: 'Suspended — pay to restore access',
-          body: `Your weekly fee of $${Number(sub.customRate ?? sub.weeklyRate).toLocaleString()} ${sub.currencyCode} is unpaid. ${rail} and your access is restored instantly.`,
+          body: `Your weekly fee of $${weeklyFeeAmount(sub).toLocaleString()} ${sub.currencyCode} is unpaid. ${rail} and your access is restored instantly.`,
           audience: this.payerAudience(sub),
           data: { kind: 'billing_suspended_nudge', subscriptionId: sub.id },
         });

@@ -6,6 +6,7 @@ import { captureMmgPayer } from '../integrity/capture-hooks';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { agentCashDuplicateCreditsCounter, agentCashDuplicateCreditsGauge, agentCashProviderIdConflictsCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
+import { weeklyFeeAmount } from './subscription-fee';
 
 // Agent-cash ingestion [san spec PART 4] — three channels, ONE pipeline:
 //   persist raw → idempotency → sanity → cross-channel dedupe → resolve SAN
@@ -76,7 +77,7 @@ export async function payInfo(
     prisma.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } }),
     prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_agent.ingestion_mode' } }),
   ]);
-  const weekly = Number(sub.customRate ?? sub.weeklyRate);
+  const weekly = weeklyFeeAmount(sub);
   const balance = Number(balanceRow?.balance ?? 0);
   const mode = (modeRow?.value as string | null) ?? 'MANUAL';
 

@@ -51,8 +51,10 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard
           title="Weekly Revenue"
-          value={blind ? METRIC_UNAVAILABLE : stats ? `$${Number(stats.revenue?.weeklySubscriptionRevenue ?? 0).toLocaleString()}` : '—'}
-          subtitle="GYD · subscriptions"
+          value={blind || stats?.revenue?.weeklySubscriptionRevenue == null
+            ? METRIC_UNAVAILABLE
+            : `GY$${Number(stats.revenue.weeklySubscriptionRevenue).toLocaleString()}`}
+          subtitle="billable this week · subscriptions"
           loading={isLoading}
         />
         {/* Placed alone is not a health signal [F-260]: 40 placed against 12
@@ -93,7 +95,12 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <RevenueBreakdown data={stats?.subscriptionBreakdown} weeklyTotal={stats?.revenue?.weeklySubscriptionRevenue} unavailable={blind} />
+        <RevenueBreakdown
+          data={stats?.subscriptionBreakdown}
+          weeklyTotal={stats?.revenue?.weeklySubscriptionRevenue}
+          weeklyWaived={stats?.revenue?.weeklySubscriptionWaived}
+          unavailable={blind}
+        />
         <LiveOrderFeed />
       </div>
 

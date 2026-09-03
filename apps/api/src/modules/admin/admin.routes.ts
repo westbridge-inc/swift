@@ -56,6 +56,7 @@ import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig
 import { createHash } from 'node:crypto';
 import { billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
+import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
@@ -723,8 +724,7 @@ export async function adminRoutes(app: FastifyInstance) {
       activeDrivers,
       activeVendors,
       totalVendors,
-      subscriptionCounts,
-      activeSubRevenue,
+      activeSubscriptions,
       todayNewUsers,
       pendingVendors,
       pastDueSubs,
@@ -746,15 +746,16 @@ export async function adminRoutes(app: FastifyInstance) {
       // never count × a hardcoded rate table (which undercounted large vendors
       // 33% and counted TRIAL/PAST_DUE/CANCELLED as revenue). ACTIVE-only so
       // the per-type lines reconcile with the weeklySubscriptionRevenue total.
-      app.prisma.subscription.groupBy({
-        by: ['type'],
+      // [A-07] The rows, not a `_sum`. A database aggregate cannot express
+      // "customRate if set, else weeklyRate, and nothing at all if waived" —
+      // which is exactly what the biller charges. Summing `weeklyRate` reported
+      // every custom-priced subscription at its LIST price and every waived one
+      // as full revenue for a period it will be charged nothing. Active
+      // subscriptions are bounded (hundreds), and this keeps Prisma's tenant
+      // scoping, which raw SQL would not.
+      app.prisma.subscription.findMany({
         where: { status: 'ACTIVE', ...subscriptionScope },
-        _count: true,
-        _sum: { weeklyRate: true },
-      }),
-      app.prisma.subscription.aggregate({
-        where: { status: 'ACTIVE', ...subscriptionScope },
-        _sum: { weeklyRate: true },
+        select: { type: true, weeklyRate: true, customRate: true, feeWaived: true },
       }),
       app.prisma.user.count({ where: { createdAt: { gte: today } } }),
       // SWIFT-118: the weeklyTrend raw SQL was removed — it was computed on every
@@ -775,9 +776,23 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
     ]);
 
-    // Real weekly rates from subscriptions (set from CountryConfig tiers),
-    // never a hardcoded rate table.
-    const weeklySubscriptionRevenue = Number(activeSubRevenue._sum.weeklyRate ?? 0);
+    // [A-07] What will actually be billed this week, and — separately — what
+    // has been given away. The two are different facts and the founder is shown
+    // both; folding the waived amount into "revenue" is how the figure came to
+    // overstate itself by exactly the amount nobody is going to pay.
+    const byType = new Map<string, { count: number; billable: number; waivedCount: number; waived: number }>();
+    for (const sub of activeSubscriptions) {
+      const row = byType.get(sub.type) ?? { count: 0, billable: 0, waivedCount: 0, waived: 0 };
+      row.count += 1;
+      row.billable += billableWeeklyFee(sub);
+      if (sub.feeWaived) {
+        row.waivedCount += 1;
+        row.waived += waivedWeeklyFee(sub);
+      }
+      byType.set(sub.type, row);
+    }
+    const weeklySubscriptionRevenue = activeSubscriptions.reduce((n, sub) => n + billableWeeklyFee(sub), 0);
+    const weeklySubscriptionWaived = activeSubscriptions.reduce((n, sub) => n + waivedWeeklyFee(sub), 0);
 
     return {
       success: true,
@@ -794,6 +809,9 @@ export async function adminRoutes(app: FastifyInstance) {
         revenue: {
           // Platform revenue = weekly subscriptions only (no markup, no commission).
           weeklySubscriptionRevenue,
+          // [A-07] What has been given away this period. It sat inside the total
+          // above until now, which is exactly how that total overstated itself.
+          weeklySubscriptionWaived,
           // Context only — mover earnings / GMV, NOT platform revenue.
           // SWIFT-119: Number() at the seam — a Prisma Decimal is truthy, so
           // `|| 0` let the raw Decimal through and it JSON-serialized to a STRING,
@@ -801,11 +819,14 @@ export async function adminRoutes(app: FastifyInstance) {
           todayDeliveryFees: Number(todayRevenue._sum.deliveryFee ?? 0),
           todayTotal: Number(todayRevenue._sum.totalAmount ?? 0),
         },
-        // Per-type ACTIVE count + real summed weekly revenue (Decimal → number).
-        subscriptionBreakdown: subscriptionCounts.map((s) => ({
-          type: s.type,
-          count: s._count,
-          weeklyRevenue: Number(s._sum.weeklyRate ?? 0),
+        // [A-07] Per-type ACTIVE count, what it will be BILLED, and what has
+        // been waived out of it — never one number standing for all three.
+        subscriptionBreakdown: [...byType.entries()].map(([type, row]) => ({
+          type,
+          count: row.count,
+          weeklyRevenue: row.billable,
+          waivedCount: row.waivedCount,
+          weeklyWaived: row.waived,
         })),
         alerts: { pendingVendors, pastDueSubs, unassignedOrders },
       },
@@ -4047,7 +4068,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const rows = subs.map((s) => {
       const person = s.vendor?.owner.user ?? s.rider?.user ?? s.driver?.user;
       const phone = person?.phone ?? '';
-      const weekly = Number(s.customRate ?? s.weeklyRate);
+      const weekly = weeklyFeeAmount(s);
       const due = Math.max(0, weekly - (balanceBy.get(s.id) ?? 0));
       const contact = lastContactBy.get(s.id);
       const promiseMissed = Boolean(
