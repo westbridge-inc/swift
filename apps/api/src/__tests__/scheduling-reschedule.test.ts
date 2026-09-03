@@ -10,6 +10,10 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // ONE-SLOT-ONE-PERSON — reschedule (spec 2.4, SCH-D): reserve the NEW slot

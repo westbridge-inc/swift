@@ -9,6 +9,10 @@ import { socketPlugin } from '../plugins/socket';
 import { servicesRoutes } from '../modules/services/services.routes';
 import { providerChecklist } from '../modules/services/services.service';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // [S0] A service provider has ONE body. Two customers must never hold the same

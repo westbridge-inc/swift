@@ -16,6 +16,10 @@ import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { pointInPolygon } from '../utils/geo';
 import { AuthService } from '../modules/auth/auth.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite quiets the WHOLE driver pool between cases (an unscoped Driver.updateMany) so no leftover driver takes a trip — a stated, reviewable capability.
+grantSuiteCapability('unscoped-mutation');
 
 // ---------------------------------------------------------------------------
 // taxi on the same mover pool and dispatch engine. Hardest paths:

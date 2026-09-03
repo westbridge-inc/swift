@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { destructiveGuardExtension, isTestRuntime } from '../lib/test-target-lock';
 import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
 import { getTenantContext, type TenantMode } from './tenant-context';
@@ -160,7 +161,7 @@ let systemClient: PrismaClient | null = null;
 export function systemPrismaClient(): PrismaClient | null {
   const url = process.env['SYSTEM_DATABASE_URL'];
   if (!url) return null;
-  if (!systemClient) systemClient = new PrismaClient({ datasourceUrl: url });
+  if (!systemClient) systemClient = (isTestRuntime() ? new PrismaClient({ datasourceUrl: url }).$extends(destructiveGuardExtension()) : new PrismaClient({ datasourceUrl: url })) as PrismaClient;
   return systemClient;
 }
 /** Test seam: route system work to a given client. */
@@ -298,7 +299,12 @@ const prisma = new PrismaClient({
 }).$extends({
   name: 'tenantScope',
   query: TENANT_QUERY_EXTENSIONS,
-});
+})
+  // [R048-001] In test mode a deleteMany/updateMany with no predicate and any
+  // raw DDL are refused unless the suite granted itself the capability: cleanup
+  // is namespace-owned or it does not run. Outside tests the extension is not
+  // installed at all.
+  .$extends(isTestRuntime() ? destructiveGuardExtension() : { name: 'testTargetLockInactive' });
 /** The process's one extended client — the plugin decorates it; tests reach it here. */
 export const scopedPrisma = prisma;
 

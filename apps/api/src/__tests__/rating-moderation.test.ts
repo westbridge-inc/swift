@@ -10,6 +10,10 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { RatingService } from '../modules/rating/rating.service';
 import { maskPii, needsProfanityHold, processReviewText } from '../modules/rating/review-scrub';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // Movement R — RAT-F: the scrub pipeline (PII masked, profanity auto-held),

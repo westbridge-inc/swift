@@ -6,6 +6,10 @@ import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { TENANT_TABLES, allRlsDdl, appRoleDdl, policyPredicateIsCanonical } from '../lib/tenant-rls';
 import { installDdl } from './helpers/install-ddl';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('ddl');
 
 // [ELV-1 W-201 stage 1] The database tenant wall, VERIFIED. A NOBYPASSRLS
 // probe role stands in for the future app role (CONTRACT stage): through it,

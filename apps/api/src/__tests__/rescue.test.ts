@@ -34,6 +34,10 @@ import {
 } from '../modules/dispatch/rescue';
 import { ALGO_DEFAULTS, invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { explainEarning } from '../utils/explain-earning';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite quiets the WHOLE rider pool between cases (an unscoped Rider.updateMany) so no leftover rider takes a dispatch — a stated, reviewable capability.
+grantSuiteCapability('unscoped-mutation');
 
 // ---------------------------------------------------------------------------
 // [ALG-06] Rescue: the food-age cutoff and the escalating re-offer, against

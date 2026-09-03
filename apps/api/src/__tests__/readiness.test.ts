@@ -15,6 +15,10 @@ import {
   registerReadinessRoute,
   type RuntimeReadinessState,
 } from '../plugins/readiness';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // Readiness probe (launch-readiness Phase 6): /ready is 200 only when every

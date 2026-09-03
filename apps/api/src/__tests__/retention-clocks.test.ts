@@ -7,6 +7,10 @@ import {
   RETENTION_DEFAULTS, seedRetentionDefaults, runRetentionSweep,
 } from '../modules/compliance/retention.service';
 import { installDdl } from './helpers/install-ddl';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('ddl');
 
 // [DCR-1 NR-2] Retention clocks: the registry declares each window as data,
 // the sweep enforces it by the class's own timestamp, and every enforcement

@@ -10,6 +10,10 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { DiscoveryService } from '../modules/discovery/discovery.service';
 import { seedDiscoveryTaxonomy } from '../modules/discovery/taxonomy.seed';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // FIND-BY-CRAVING — vendor surface (CAT-B) + the sticky-choice law (CAT-C):

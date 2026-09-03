@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('ddl');
 
 // Swift Ads — Phase 1 foundation data model (ads-platform spec §5). Proves the
 // schema persists and the invariants the rest of the platform leans on hold at

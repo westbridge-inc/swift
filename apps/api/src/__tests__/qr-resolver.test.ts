@@ -13,6 +13,10 @@ import { qrPublicRoutes } from '../modules/qr/qr-public.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { QrService, QR_GRACE_CONFIG_KEY } from '../modules/qr/qr.service';
 import { flushScanLog, resetScanLogForTests } from '../modules/qr/scan-log';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // QR growth engine, slice 1 — the /s/:code resolver against real rows (every

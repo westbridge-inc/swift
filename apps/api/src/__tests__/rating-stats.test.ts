@@ -5,6 +5,10 @@ import { RatingService } from '../modules/rating/rating.service';
 import { RatingStatsService } from '../modules/rating/rating-stats.service';
 import { seedRatingTags } from '../modules/rating/tag-taxonomy.seed';
 import { displayRating } from '../modules/rating/rating-math';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // Movement R — RAT-E (shields move aggregates; excluded rows are kept but

@@ -5,6 +5,10 @@ import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { discoveryRoutes, CATEGORY_DISCOVERY_FLAG, resetDiscoveryCacheForTests } from '../modules/discovery/discovery.routes';
 import { seedDiscoveryTaxonomy } from '../modules/discovery/taxonomy.seed';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // The rail's data source (#17 6.1/8): flag OFF → {enabled:false} and the Home

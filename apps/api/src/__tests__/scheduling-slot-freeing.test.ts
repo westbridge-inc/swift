@@ -11,6 +11,10 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService } from '../modules/order/order.service';
 import { BookingService } from '../modules/booking/booking.service';
 import { autoCancelUnresponsiveOrder, type JobContext } from '../jobs/queue';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // ONE-SLOT-ONE-PERSON, SCH-C: EVERY order-death path frees its appointment

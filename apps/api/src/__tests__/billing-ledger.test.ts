@@ -9,6 +9,10 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { postLedger, topupPostings, ensureLedgerAccounts } from '../modules/billing/ledger';
 import { runBillingInvariants } from '../modules/billing/invariants';
+import { grantSuiteCapability } from '../lib/test-target-lock';
+
+// [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
+grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
 // TOLLGATE PART 17 / BE-13 — the double-entry ledger's laws are enforced by
