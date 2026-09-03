@@ -849,7 +849,19 @@ model ReimbursementClaim {
   reviewNote String?
   reviewedAt DateTime?
   paidAt     DateTime?
-  paymentRef String?
+  /// [A-11] The payout's evidence, and it is UNIQUE. One bank/MMG reference
+  /// settles ONE claim: without this a single typed string could close ten of
+  /// them, which is exactly the "reused or fabricated reference" the register
+  /// names. Nullable, so unpaid claims do not collide.
+  paymentRef String?     @unique
+  /// [A-11] What the payer states they actually sent, checked against `amount`
+  /// before the claim closes. Typing a reference alone attested nothing about
+  /// the figure.
+  paidAmount Decimal?    @db.Decimal(12, 2)
+  /// [A-11] WHO recorded the payout — distinct from `reviewedBy`, which is the
+  /// person who approved the claim. The two are often different people and the
+  /// record could not tell them apart.
+  paidById   String?
   createdAt  DateTime    @default(now())
 
   @@index([riderId])

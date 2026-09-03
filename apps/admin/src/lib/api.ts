@@ -234,8 +234,10 @@ export const approveClaim = (id: string, reason?: string) =>
   apiFetch(`/api/v1/admin/cash-rules/claims/${id}/approve`, { method: 'PUT', body: JSON.stringify({ reason }) });
 export const rejectClaim = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/cash-rules/claims/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
-export const payClaim = (id: string, reference: string) =>
-  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/paid`, { method: 'PUT', body: JSON.stringify({ reference }) });
+// [A-11] The payout carries its evidence: a unique transfer reference AND the
+// amount actually sent, which the server checks against the claim's own figure.
+export const payClaim = (id: string, reference: string, amount: string | number) =>
+  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/paid`, { method: 'PUT', body: JSON.stringify({ reference, amount }) });
 export const fetchCashMetrics = () => apiFetch('/api/v1/admin/cash-rules/metrics');
 
 // ─── Support & comms ─────────────────────────────────────────────

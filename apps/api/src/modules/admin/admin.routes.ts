@@ -4292,9 +4292,22 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     // [WR-004] Unlike the settlements digest, this records a REAL payout on a
     // manual rail — the reference is the evidence and is required.
-    const body = z.object({ reference: z.string().trim().min(1) }).parse(request.body ?? {});
-    const claim = await cashRules.markClaimPaid(id, request.user.userId, body.reference);
-    await audit(request.user.userId, 'PAY_CLAIM', 'ReimbursementClaim', id, { reference: body.reference }, request);
+    // [A-11] And the payer states the amount they actually transferred: a
+    // reference alone attested nothing about the figure, so a claim could close
+    // for a fraction of what it was worth and the record would look identical.
+    const body = z.object({
+      reference: z.string(),
+      amount: z.union([z.number(), z.string()]),
+    }).parse(request.body ?? {});
+    const claim = await cashRules.markClaimPaid(id, request.user.userId, body.reference, body.amount);
+    await audit(
+      request.user.userId,
+      'PAY_CLAIM',
+      'ReimbursementClaim',
+      id,
+      { reference: claim.paymentRef, amount: String(claim.paidAmount ?? '') },
+      request,
+    );
     return { success: true, data: claim };
   });
 

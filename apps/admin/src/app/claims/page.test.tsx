@@ -82,11 +82,15 @@ function deferredReply() {
 
 describe('claim payout mutation', () => {
   it('requires evidence, confirms the visible claim, and pays the exact claim id', async () => {
+    // [A-11] two prompts per attempt now: the reference, then the amount the
+    // payer actually transferred. A cancelled reference still stops there.
     const prompt = vi
       .fn()
-      .mockReturnValueOnce(null)
-      .mockReturnValueOnce('  PAY-REF-TARGET  ')
-      .mockReturnValueOnce('  PAY-REF-TARGET  ');
+      .mockReturnValueOnce(null)                    // click 1: reference cancelled
+      .mockReturnValueOnce('  PAY-REF-TARGET  ')    // click 2: reference
+      .mockReturnValueOnce('  3400  ')              // click 2: amount
+      .mockReturnValueOnce('  PAY-REF-TARGET  ')    // click 3: reference
+      .mockReturnValueOnce('  3400  ');             // click 3: amount
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal('prompt', prompt);
     vi.stubGlobal('confirm', confirm);
@@ -112,7 +116,7 @@ describe('claim payout mutation', () => {
     await user.click(targetButton);
     expect(confirm).toHaveBeenNthCalledWith(
       1,
-      'Mark this $3,400 claim for order order-target as PAID (ref: PAY-REF-TARGET)?',
+      'Mark this $3,400 claim for order order-target as PAID? Reference PAY-REF-TARGET, amount sent 3400.',
     );
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
@@ -121,11 +125,13 @@ describe('claim payout mutation', () => {
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
     expect(confirm).toHaveBeenNthCalledWith(
       2,
-      'Mark this $3,400 claim for order order-target as PAID (ref: PAY-REF-TARGET)?',
+      'Mark this $3,400 claim for order order-target as PAID? Reference PAY-REF-TARGET, amount sent 3400.',
     );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/cash-rules/claims/claim-target/paid`);
     expect(init?.method).toBe('PUT');
-    expect(JSON.parse(String(init?.body))).toEqual({ reference: 'PAY-REF-TARGET' });
+    // the amount rides with the reference — the server refuses a payout that
+    // does not name the figure actually sent
+    expect(JSON.parse(String(init?.body))).toEqual({ reference: 'PAY-REF-TARGET', amount: '3400' });
   });
 
   it('surfaces the claim state rejection in the server own words without fake success', async () => {
