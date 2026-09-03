@@ -75,6 +75,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
   const items = useQuery({ queryKey: storeKey(storeId, 'items', 'all'), queryFn: () => getItems() });
   const [subFor, setSubFor] = useState<string | null>(null);
 
+  const MMG_LINE_LOCK = 'MMG order — settle item changes with the customer directly.';
   const pickedMut = useMutation({
     mutationFn: (v: { lineId: string; picked: boolean }) => setPicked(order.id, v.lineId, v.picked),
     onSettled: refresh,
@@ -119,6 +120,10 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
           ? `Picked ✓ — ${fulfilled} of ${order.items.length} lines, ${removed} removed`
           : 'All picked ✓';
   const busy = onBusy || pickedMut.isPending || subMut.isPending || refundMut.isPending;
+  // [W-27] An MMG order's totals cannot change in-app — the server refuses with
+  // MMG_ADJUSTMENT_UNAVAILABLE, because the money went straight to the store
+  // and Swift never held it. Saying so beats letting the store click into a 409.
+  const mmgLocked = order.paymentMethod === 'MOBILE_MONEY';
 
   return (
     <div className="mt-4 rounded-xl border border-black/5 bg-[var(--swift-subtle)] p-4">
@@ -141,7 +146,11 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
               {it.subStatus === 'PROPOSED' && (
                 <span className="text-xs font-semibold text-amber-600">Waiting on customer: {it.substituteName}</span>
               )}
-              {it.subStatus === 'REFUNDED' && <span className="text-xs font-semibold text-[var(--swift-muted)]">Refunded</span>}
+              {/* [W-27] "Refunded" said money came back. On a cash order none
+                  ever left: the line is removed and the bill is smaller at the
+                  door. MMG line changes are refused outright by the server, so
+                  there is no tender here on which a refund could be owed. */}
+              {it.subStatus === 'REFUNDED' && <span className="text-xs font-semibold text-[var(--swift-muted)]">Removed — not charged</span>}
               {it.subStatus === 'REJECTED' && <span className="text-xs font-semibold text-[var(--swift-red)]">Sub declined</span>}
               {!it.picked && !it.subStatus?.match(/PROPOSED|REFUNDED/) && (
                 <button
@@ -167,13 +176,21 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
                       {c.name} · {money(c.basePrice)}
                     </button>
                   ))}
+                  {/* [W-27] The store is not refunding anything — it is taking
+                      the line off the order, and the customer pays less. An MMG
+                      order cannot do this at all (the server refuses), so the
+                      control says so instead of leading the store into a 409. */}
                   <button
                     onClick={() => refundMut.mutate(it.id)}
-                    disabled={busy}
-                    className="rounded-full bg-black/5 px-2.5 py-1 text-xs font-semibold"
+                    disabled={busy || mmgLocked}
+                    title={mmgLocked ? MMG_LINE_LOCK : undefined}
+                    className="rounded-full bg-black/5 px-2.5 py-1 text-xs font-semibold disabled:opacity-50"
                   >
-                    No substitute — refund line
+                    No substitute — remove line
                   </button>
+                  {mmgLocked && (
+                    <span className="text-xs text-[var(--swift-muted)]">{MMG_LINE_LOCK}</span>
+                  )}
                 </div>
               </div>
             )}
