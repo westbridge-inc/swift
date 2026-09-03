@@ -82,3 +82,52 @@ describe('[W-18] the taxi request goes where the screen says', () => {
     await waitFor(() => expect(screen.queryByText('Economy')).toBeNull());
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// [W-17] NO PRICE, NO RIDE — and a dependency that failed says so.
+//
+// The page swallowed every failure: `rideAvailability(...).catch(() => {})`,
+// `activeRide(...).catch(() => {})`, and an estimate failure that simply hid
+// the price block while the Request button stayed live. An outage rendered
+// exactly like a healthy market, and a ride could be ordered with no price
+// shown anywhere.
+// ---------------------------------------------------------------------------
+describe('[W-17] a ride is not ordered on a price nobody saw', () => {
+  it('a failed estimate blocks the request and says why — it used to just hide the price', async () => {
+    vi.spyOn(customer, 'rideEstimate').mockRejectedValue(new Error('pricing down'));
+    const requestRide = vi.spyOn(customer, 'requestRide').mockResolvedValue({ id: 'ride-1' } as never);
+    const user = userEvent.setup();
+    render(<TaxiPage />);
+    await waitFor(() => expect(screen.getByText('Current location')).toBeTruthy());
+
+    await user.type(box(), '42 Lam');
+    await user.click(await screen.findByRole('button', { name: /42 Lamaha Street/ }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    const cta = screen.getByRole('button', { name: 'Waiting for a price…' }) as HTMLButtonElement;
+    expect(cta.disabled).toBe(true);
+    await user.click(cta);
+    expect(requestRide).not.toHaveBeenCalled();
+  });
+
+  it('a failed availability read is stated — an outage is not a quiet night', async () => {
+    vi.spyOn(customer, 'rideAvailability').mockRejectedValue(new Error('availability down'));
+    render(<TaxiPage />);
+    await waitFor(() => expect(screen.getByText('Current location')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/this is our problem, not a quiet night/)).toBeTruthy());
+  });
+
+  it('with a price, the request goes through — the gate is the price, not a permanent block', async () => {
+    const requestRide = vi.spyOn(customer, 'requestRide').mockResolvedValue({ id: 'ride-1' } as never);
+    const user = userEvent.setup();
+    render(<TaxiPage />);
+    await waitFor(() => expect(screen.getByText('Current location')).toBeTruthy());
+
+    await user.type(box(), '42 Lam');
+    await user.click(await screen.findByRole('button', { name: /42 Lamaha Street/ }));
+    await user.click(await screen.findByRole('button', { name: 'Request ride' }));
+
+    await waitFor(() => expect(requestRide).toHaveBeenCalledTimes(1));
+  });
+});
