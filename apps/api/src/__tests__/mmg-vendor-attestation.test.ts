@@ -17,6 +17,7 @@ import {
   normaliseMmgReference,
   vendorAttestedCaptures,
 } from '../modules/vendor/mmg-attestation';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // [W-25] "MMG PAYMENT RECEIVED" IS A PERSON'S WORD.
@@ -147,7 +148,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.auditLog.deleteMany({ where: { entityId: { in: orderIds } } });
+  await purgeAuditLogs(app.prisma, { entityId: { in: orderIds } }, 'test-cleanup:mmg-vendor-attestation');
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
   await app.prisma.vendorOwner.deleteMany({ where: { id: vendorOwnerId } });

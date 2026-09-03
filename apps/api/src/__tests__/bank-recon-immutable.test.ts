@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { buildExpectedBatches, confirmDeposit, adjustDeposit } from '../modules/billing/bank-recon';
 import { bankReconRefusalsCounter } from '../plugins/observability';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // [M-22 · S0] Tenant financial data is isolated; a bank confirmation is
@@ -60,7 +61,7 @@ afterEach(() => { delete process.env['BANK_RECON_READONLY']; });
 afterAll(async () => {
   delete process.env['BANK_RECON_READONLY'];
   await prisma.depositConfirmation.deleteMany({ where: { batchId: { in: batchIds } } });
-  await prisma.auditLog.deleteMany({ where: { entity: 'SettlementBatch', entityId: { in: batchIds } } });
+  await purgeAuditLogs(prisma, { entity: 'SettlementBatch', entityId: { in: batchIds } }, 'test-cleanup:bank-recon-immutable');
   await prisma.settlementBatch.deleteMany({ where: { OR: [{ id: { in: batchIds } }, { tenantId: otherTenantId }] } });
   await prisma.mmgAgentPayment.deleteMany({ where: { id: { in: paymentIds } } });
   await prisma.tenant.delete({ where: { id: otherTenantId } }).catch(() => {});

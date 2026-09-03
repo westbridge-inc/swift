@@ -10,6 +10,7 @@ import { servicesRoutes } from '../modules/services/services.routes';
 import { providerChecklist } from '../modules/services/services.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
 grantSuiteCapability('ddl');
@@ -157,7 +158,7 @@ async function purgeFixtures() {
     await app.prisma.serviceProvider.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.auditLog.deleteMany({ where: { userId: { in: userIds } } });
+    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:services-slot-exclusivity');
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   });
 }

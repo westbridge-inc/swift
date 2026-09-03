@@ -7,6 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // [G7 · P23] order → customer → identity: narrow by design.
@@ -36,7 +37,7 @@ async function purge() {
   const ids = users.map((u) => u.id);
   if (!ids.length) return;
   await app.prisma.reimbursementClaim.deleteMany({ where: { customerId: { in: ids } } });
-  await app.prisma.auditLog.deleteMany({ where: { userId: { in: ids } } });
+  await purgeAuditLogs(app.prisma, { userId: { in: ids } }, 'test-cleanup:order-customer-identity');
   await app.prisma.order.deleteMany({ where: { customerId: { in: ids } } });
   await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: ids } } });
   const vos = await app.prisma.vendorOwner.findMany({ where: { userId: { in: ids } }, select: { id: true } });

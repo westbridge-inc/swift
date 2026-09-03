@@ -14,6 +14,7 @@ import { loginWithOtp } from './helpers/otp';
 import { OrderService } from '../modules/order/order.service';
 import { FloatService } from '../modules/dispatch/float.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // MMG Phase 4 — admin sees the money story without touching money: the
@@ -276,7 +277,7 @@ describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
     expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'CANCELLED' } })).toBe(1);
     // The two canonical audits this test exists for are unchanged.
     expect(await app.prisma.auditLog.count({ where: { action: 'CANCEL_ORDER', entityId: order.id } })).toBe(1);
-    await app.prisma.auditLog.deleteMany({ where: { entityId: order.id } });
+    await purgeAuditLogs(app.prisma, { entityId: order.id }, 'test-cleanup:admin-mmg-visibility');
   });
 
   it('cancelling an unattested-MMG order tells the STORE it may hold the payment [REPORT-012 F-012-04]', async () => {
@@ -312,7 +313,7 @@ describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
       },
     });
     expect(storeNote).not.toBeNull();
-    await app.prisma.auditLog.deleteMany({ where: { entityId: order.id } });
+    await purgeAuditLogs(app.prisma, { entityId: order.id }, 'test-cleanup:admin-mmg-visibility');
   });
 
   it.each([
@@ -635,7 +636,7 @@ describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
     expect(Number(afterRider.committedFloat)).toBe(0);
     expect(logs.map((entry) => entry.status)).toEqual(['RIDER_ASSIGNED', 'CANCELLED']);
     expect((action!.changes as Record<string, unknown>)['previousStatus']).toBe('RIDER_ASSIGNED');
-    await app.prisma.auditLog.deleteMany({ where: { entityId: order.id } });
+    await purgeAuditLogs(app.prisma, { entityId: order.id }, 'test-cleanup:admin-mmg-visibility');
   });
 
   it('rolls back admin status, search, float, mover, and both canonical audits on a fault', async () => {
@@ -706,7 +707,7 @@ describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
     expect(adminAudit).toBe(0);
 
     await app.prisma.dispatchSearch.delete({ where: { id: search.id } });
-    await app.prisma.auditLog.deleteMany({ where: { entityId: order.id } });
+    await purgeAuditLogs(app.prisma, { entityId: order.id }, 'test-cleanup:admin-mmg-visibility');
   });
 
   it('closes an open dispatch search instead of leaving it SEARCHING forever', async () => {
@@ -742,7 +743,7 @@ describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
     expect((action!.changes as Record<string, unknown>)['previousStatus']).toBe('ACCEPTED');
 
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: order.id } });
-    await app.prisma.auditLog.deleteMany({ where: { entityId: order.id } });
+    await purgeAuditLogs(app.prisma, { entityId: order.id }, 'test-cleanup:admin-mmg-visibility');
   });
 });
 
