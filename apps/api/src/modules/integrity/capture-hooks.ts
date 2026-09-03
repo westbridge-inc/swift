@@ -22,11 +22,14 @@ function service(prisma: PrismaClient): IdentityService {
 }
 
 /** Signup (§2.1 PHONE/EMAIL/DEVICE/IP_SUBNET + §5 SignupAttempt velocity row). */
+/** [R048-007] The signup capture is AWAITED by its caller (bounded by `captureTimeoutMs`), so a
+ *  failure is seen and counted where it happens instead of vanishing behind a `void`. Signup itself
+ *  still succeeds when capture fails — a product rule (trial-integrity §2.1), now a stated one. */
 export function captureSignup(
   prisma: PrismaClient,
   input: { userId: string; role: string; phone: string; email?: string | null; deviceId?: string | null; ip?: string | null },
-): void {
-  void (async () => {
+): Promise<void> {
+  return (async () => {
     const identity = service(prisma);
     await identity.capture({
       accountId: input.userId, actorRole: input.role,
@@ -85,7 +88,7 @@ export function captureSignup(
         log().warn({ userId: input.userId, signups: recent }, 'device velocity breach — account enters REVIEW_FIRST');
       }
     }
-  })().catch((err) => log().error({ err, userId: input.userId }, 'signup identity capture failed — flow unaffected'));
+  })(); // [R048-007] the caller awaits, bounds, counts and logs a failure — nothing is swallowed here
 }
 
 /** Extracted ID document number (§2.1 ID_DOC_NUMBER — HARD). The raw number

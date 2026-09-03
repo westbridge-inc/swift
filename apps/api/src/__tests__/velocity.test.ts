@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -8,7 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { checkVelocity, isSafetyAction, resolveLimit, velocityKey } from '../modules/integrity/velocity';
+import { assertVelocity, checkVelocity, failsClosed, hashVelocityId, isSafetyAction, resolveLimit, velocityKey } from '../modules/integrity/velocity';
 import { ALGO_DEFAULTS } from '../modules/algo/algo-config';
 
 // ---------------------------------------------------------------------------
@@ -35,7 +35,9 @@ async function purge() {
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
   if (clusterIds.length) await app.prisma.identityCluster.deleteMany({ where: { id: { in: clusterIds } } });
-  const keys = await app.redis.keys('vel:*:vt-*');
+  // [R048-007] ids are HMAC'd in keys now, and the IP dimension is shared by every injected request: the test Redis
+  // (its own database) drops the whole velocity keyspace so a rerun inside one window starts from zero
+  const keys = await app.redis.keys('vel:*');
   if (keys.length) await app.redis.del(...keys);
 }
 
@@ -111,13 +113,44 @@ describe('the engine', () => {
   });
 
   it('fails open when Redis is unavailable — a burst beats a broken checkout', async () => {
-    const broken = { incr: async () => { throw new Error('redis down'); }, expire: async () => 1 } as unknown as typeof app.redis;
+    const broken = { eval: async () => { throw new Error('redis down'); } } as unknown as typeof app.redis;
     const v = await checkVelocity({ redis: broken }, { action: 'promo.validate', actor: { userId: uid() } });
     expect(v.allowed).toBe(true);
   });
 
-  it('keys are per action, dimension, id and window', () => {
-    expect(velocityKey('cluster', 'c1', 'promo.validate', 1_700_000_000)).toBe('vel:promo.validate:cluster:c1:1700000000');
+  // [R048-007]
+  it('fails CLOSED on a money surface when Redis is unavailable — an unavailable control is a refusal, and the guard says 503, not 200', async () => {
+    const broken = { eval: async () => { throw new Error('redis down'); } } as unknown as typeof app.redis;
+    expect(failsClosed('money.mmg-link')).toBe(true);
+    expect(failsClosed('promo.validate')).toBe(false);
+    const v = await checkVelocity({ redis: broken }, { action: 'money.mmg-link', actor: { userId: uid() } });
+    expect(v).toMatchObject({ allowed: false, controlUnavailable: true });
+    const fake = { prisma: app.prisma, redis: broken } as unknown as typeof app;
+    await expect(assertVelocity(fake, { headers: {}, ip: '10.0.0.1', user: { userId: uid() } } as never, 'money.mmg-link')).rejects.toMatchObject({ statusCode: 503, code: 'CONTROL_UNAVAILABLE' });
+    await expect(assertVelocity(fake, { headers: {}, ip: '10.0.0.1', user: { userId: uid() } } as never, 'promo.validate')).resolves.toBeUndefined();
+  });
+
+  it('the bump is ONE atomic script: twenty concurrent tries against a limit of ten allow exactly ten, the window key always carries a TTL, and neither INCR nor EXPIRE is ever issued on its own', async () => {
+    const userId = uid();
+    const incrSpy = vi.spyOn(app.redis, 'incr');
+    const expireSpy = vi.spyOn(app.redis, 'expire');
+    const verdicts = await Promise.all(Array.from({ length: 20 }, () => checkVelocity({ redis: app.redis }, { action: 'promo.validate', actor: { userId } })));
+    expect(verdicts.filter((v) => v.allowed)).toHaveLength(10);
+    const windowStart = Math.floor(Date.now() / 1000 / 600) * 600;
+    const ttl = await app.redis.ttl(velocityKey('actor', userId, 'promo.validate', windowStart));
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(600);
+    expect(incrSpy).not.toHaveBeenCalled();
+    expect(expireSpy).not.toHaveBeenCalled();
+    incrSpy.mockRestore(); expireSpy.mockRestore();
+  });
+
+  it('keys are per action, dimension, id and window — and the id is HMAC’d, never the raw identifier', () => {
+    const key = velocityKey('cluster', 'c1', 'promo.validate', 1_700_000_000);
+    expect(key).toBe(`vel:promo.validate:cluster:${hashVelocityId('c1')}:1700000000`);
+    expect(key).not.toContain(':c1:');
+    expect(hashVelocityId('c1')).toHaveLength(32);
+    expect(hashVelocityId('c1', { VELOCITY_KEY_SECRET: 'other' })).not.toBe(hashVelocityId('c1'));
   });
 });
 

@@ -117,6 +117,30 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [R048-007] Money-surface authority transitions and refusals: staged, stage_replay, cancelled, cleared, applied,
+ *  apply_lease_missed, refused_authority_moved, refused_no_decision, refused_step_up, refused_control_unavailable,
+ *  notice_sent, notice_retry, notice_sweep. */
+export const moneySurfaceCounter = new client.Counter({
+  name: 'swift_money_surface_total',
+  help: 'Money-surface authority transitions and refusals by event',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+/** [R048-007] Velocity verdicts: allowed, limited, fail_open (non-money surface, Redis down), fail_closed (money surface, Redis down). */
+export const velocityCounter = new client.Counter({
+  name: 'swift_velocity_total',
+  help: 'Velocity control outcomes (allowed/limited/fail_open/fail_closed)',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+/** [R048-007] Signup identity capture, awaited: captured or failed. */
+export const integrityCaptureCounter = new client.Counter({
+  name: 'swift_integrity_capture_total',
+  help: 'Signup identity capture outcomes (captured/failed)',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 /** [R048-006] Readiness by dependency (1 ready / 0 not) after the last /ready evaluation. */
 export const readinessGauge = new client.Gauge({
   name: 'swift_readiness_dependency',

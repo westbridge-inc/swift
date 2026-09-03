@@ -286,7 +286,9 @@ export class AuthService {
     // row. Zero UX change; a capture failure never touches signup.
     {
       const { captureSignup } = await import('../integrity/capture-hooks');
-      captureSignup(this.app.prisma, {
+      const { integrityCaptureCounter } = await import('../../plugins/observability');
+      // [R048-007] awaited and bounded: a capture failure is counted and logged here, never lost behind a void
+      const capture = captureSignup(this.app.prisma, {
         userId: user.id,
         role: signupRole,
         phone: data.phone,
@@ -294,6 +296,10 @@ export class AuthService {
         deviceId: data.deviceId ?? null,
         ip: data.ipAddress ?? null,
       });
+      const timeoutMs = Number(process.env['INTEGRITY_CAPTURE_TIMEOUT_MS'] ?? 5_000);
+      await Promise.race([capture, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`capture exceeded ${timeoutMs}ms`)), timeoutMs).unref())])
+        .then(() => integrityCaptureCounter.labels('captured').inc())
+        .catch((err: unknown) => { integrityCaptureCounter.labels('failed').inc(); this.app.log.error({ err, userId: user.id }, '[R048-007] signup identity capture failed — the account is not in the integrity graph'); });
     }
 
     const tokens = await this.createSession(

@@ -5084,6 +5084,47 @@ model VendorPrepStat {
   @@map("vendor_prep_stats")
 }
 
+/// [R048-007] ONE transactional authority record per money-surface transition
+/// (an MMG pay link staged, cancelled, cleared or applied): the entity change,
+/// the algorithm decision, the old/new evidence digests, the step-up binding,
+/// the revocation consequence and the owner notice intent commit together or
+/// not at all. The notice is delivered after commit and retried by the
+/// cool-off job until sent — exactly one intent per transition.
+model MoneySurfaceCommand {
+  id              String    @id @default(cuid())
+  tenantId        String    @default("swift-default")
+  actor           String
+  entityId        String
+  userId          String
+  kind            String
+  state           String
+  generation      Int
+  oldDigest       String
+  newDigest       String
+  decisionId      String?
+  stepUpSessionId String?
+  stepUpBinding   String?
+  signals         Json?
+  applyAt         DateTime?
+  leasedUntil     DateTime?
+  appliedAt       DateTime?
+  noticeKind      String?
+  noticeDedupeKey String?
+  noticePayload   Json?
+  noticeSentAt    DateTime?
+  noticeAttempts  Int       @default(0)
+  noticeLastError String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([entityId, generation])
+  @@index([tenantId])
+  @@index([entityId, kind, state])
+  @@index([state, applyAt])
+  @@index([noticeSentAt, createdAt])
+  @@map("money_surface_commands")
+}
+
 model AlgoDecision {
   id            String   @id @default(cuid())
   tenantId      String   @default("swift-default")
