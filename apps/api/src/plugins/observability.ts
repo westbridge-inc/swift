@@ -132,6 +132,17 @@ export const adminCapabilityCounter = new client.Counter({
 /** [R048-007] Money-surface authority transitions and refusals: staged, stage_replay, cancelled, cleared, applied,
  *  apply_lease_missed, refused_authority_moved, refused_no_decision, refused_step_up, refused_control_unavailable,
  *  notice_sent, notice_retry, notice_sweep. */
+/** [ADM-006] Whether a consequential action stated why: `stated` for one that
+ *  did, and `missing`/`too-short`/`too-long`/`template` for each way one did
+ *  not. `template` is the console sending its own default text — the shape
+ *  that made "reason recorded" true and meaningless at the same time. */
+export const adminReasonCounter = new client.Counter({
+  name: 'swift_admin_reason_total',
+  help: 'Reasons stated (or not) on C3-C5 admin actions, by outcome and action class',
+  labelNames: ['outcome', 'cls'] as const,
+  registers: [registry],
+});
+
 /** [A-01 / W-01] Browser (cookie-mode) sessions: cookie_issued, cookie_refreshed, cookie_auth, cookie_cleared,
  *  cookie_rejected_header (a cookie without the client header), cookie_rejected_origin (a cookie from an origin
  *  outside the CORS allowlist), body_tokens_refused. */

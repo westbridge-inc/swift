@@ -1,7 +1,10 @@
 import { screen, waitFor } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import ModerationPage from './page';
 import { API_ORIGIN, mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
+
+/** [ADM-006] what a reviewer would actually type. */
+const REVIEW_REASON = 'The review names a competitor and repeats a false claim';
 
 // ---------------------------------------------------------------------------
 // STORE-001. Three moderation queues were filling up with no admin page able
@@ -134,6 +137,7 @@ describe('the moderation queues finally have a reviewer', () => {
       }
       return undefined;
     }));
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const { user } = renderWithQuery(<ModerationPage />);
 
     await user.click(await screen.findByRole('button', { name: /Held reviews/ }));
@@ -143,8 +147,9 @@ describe('the moderation queues finally have a reviewer', () => {
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/ratings/held-1/moderate`);
-    // publish carries no reason; remove/exclude must.
-    expect(JSON.parse(String(init?.body))).toEqual({ action: 'publish' });
+    // [ADM-006] publish carries no CATEGORY; every one of the three carries a
+    // reason, because publishing a held review is a decision too.
+    expect(JSON.parse(String(init?.body))).toEqual({ action: 'publish', reason: REVIEW_REASON });
   });
 
   it('removing a held review sends the reason the route requires', async () => {
@@ -154,6 +159,7 @@ describe('the moderation queues finally have a reviewer', () => {
       }
       return undefined;
     }));
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const { user } = renderWithQuery(<ModerationPage />);
 
     await user.click(await screen.findByRole('button', { name: /Held reviews/ }));
@@ -162,9 +168,11 @@ describe('the moderation queues finally have a reviewer', () => {
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [, init] = requestsByMethod(fetchMock, 'POST')[0]!;
-    // The route refuses remove/exclude without a reason — sending none would
-    // 400 at the moment a reviewer tries to take something down.
-    expect(JSON.parse(String(init?.body))).toEqual({ action: 'remove', reason: 'MODERATION' });
+    // [ADM-006] The route refuses remove/exclude without a CATEGORY, and every
+    // consequential action without a stated reason — sending neither would 400
+    // at the moment a reviewer tries to take something down. The category says
+    // which rule was broken; the reason says what the reviewer actually saw.
+    expect(JSON.parse(String(init?.body))).toEqual({ action: 'remove', category: 'MODERATION', reason: REVIEW_REASON });
   });
 });
 

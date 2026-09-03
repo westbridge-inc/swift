@@ -11,6 +11,7 @@ import {
   resolveRatingReport,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
+import { askReason } from '@/lib/ask-reason';
 
 // ---------------------------------------------------------------------------
 // STORE-001 — the reviewer's side of moderation.
@@ -107,8 +108,8 @@ export default function ModerationPage() {
     onSuccess: refresh,
   });
   const decideHeld = useMutation({
-    mutationFn: ({ id, action }: { id: string; action: 'publish' | 'remove' | 'exclude' }) =>
-      moderateRating(id, action === 'publish' ? { action } : { action, reason: 'MODERATION' }),
+    mutationFn: ({ id, action, reason }: { id: string; action: 'publish' | 'remove' | 'exclude'; reason: string }) =>
+      moderateRating(id, action === 'publish' ? { action, reason } : { action, category: 'MODERATION', reason }),
     onMutate: () => setMutationError(null),
     onError,
     onSuccess: refresh,
@@ -363,21 +364,21 @@ export default function ModerationPage() {
                   <div className="flex gap-2 mt-3">
                     <button
                       disabled={busy}
-                      onClick={() => decideHeld.mutate({ id: h.id, action: 'publish' })}
+                      onClick={() => { const reason = askReason({ action: 'publish this held review' }); if (reason) decideHeld.mutate({ id: h.id, action: 'publish', reason }); }}
                       className="px-3 py-1.5 rounded-lg text-xs bg-green-500/20 text-green-400 disabled:opacity-50"
                     >
                       Publish it
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => decideHeld.mutate({ id: h.id, action: 'remove' })}
+                      onClick={() => { const reason = askReason({ action: 'remove this review' }); if (reason) decideHeld.mutate({ id: h.id, action: 'remove', reason }); }}
                       className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
                     >
                       Remove
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => decideHeld.mutate({ id: h.id, action: 'exclude' })}
+                      onClick={() => { const reason = askReason({ action: 'exclude this review from the rating' }); if (reason) decideHeld.mutate({ id: h.id, action: 'exclude', reason }); }}
                       className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                     >
                       Exclude from average

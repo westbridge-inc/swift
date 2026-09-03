@@ -11,6 +11,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { RatingService } from '../modules/rating/rating.service';
 import { maskPii, needsProfanityHold, processReviewText } from '../modules/rating/review-scrub';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
 grantSuiteCapability('ddl');
@@ -144,11 +145,11 @@ describe('RAT-F: hold, report, uphold, at-risk', () => {
     expect(stat.lifetimeCount).toBe(1);
 
     // The queue lists it; publish clears the hold.
-    const q = await app.inject({ method: 'GET', url: '/api/v1/admin/ratings/moderation', headers: { authorization: `Bearer ${admin.token}` } });
+    const q = await app.inject({ method: 'GET', url: '/api/v1/admin/ratings/moderation', headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${admin.token}` } });
     expect((q.json().data.held as Array<{ id: string }>).map((h) => h.id)).toContain(rating.id);
     const pub = await app.inject({
       method: 'POST', url: `/api/v1/admin/ratings/${rating.id}/moderate`,
-      headers: { authorization: `Bearer ${admin.token}` }, payload: { action: 'publish' },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${admin.token}` }, payload: { action: 'publish' },
     });
     expect(pub.statusCode).toBe(200);
     expect((await app.prisma.rating.findUniqueOrThrow({ where: { id: rating.id } })).isPublic).toBe(true);
@@ -164,7 +165,7 @@ describe('RAT-F: hold, report, uphold, at-risk', () => {
     });
     const res = await app.inject({
       method: 'POST', url: `/api/v1/admin/rating-reports/${report.id}/resolve`,
-      headers: { authorization: `Bearer ${admin.token}` }, payload: { action: 'uphold' },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${admin.token}` }, payload: { action: 'uphold' },
     });
     expect(res.statusCode).toBe(200);
 
@@ -182,7 +183,7 @@ describe('RAT-F: hold, report, uphold, at-risk', () => {
     // Double-resolve refuses.
     const again = await app.inject({
       method: 'POST', url: `/api/v1/admin/rating-reports/${report.id}/resolve`,
-      headers: { authorization: `Bearer ${admin.token}` }, payload: { action: 'dismiss' },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${admin.token}` }, payload: { action: 'dismiss' },
     });
     expect(again.statusCode).toBe(400);
   });
@@ -195,7 +196,7 @@ describe('RAT-F: hold, report, uphold, at-risk', () => {
       where: { tenantId_subjectRole_subjectId: { tenantId: 'swift-default', subjectRole: 'VENDOR', subjectId: vendor.id } },
       data: { standing: 'AT_RISK', rollingCount: 30, rollingSum: 100, lifetimeCount: 30, lifetimeSum: 100 },
     });
-    const q = await app.inject({ method: 'GET', url: '/api/v1/admin/ratings/at-risk', headers: { authorization: `Bearer ${admin.token}` } });
+    const q = await app.inject({ method: 'GET', url: '/api/v1/admin/ratings/at-risk', headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${admin.token}` } });
     expect((q.json().data as Array<{ subjectId: string }>).map((r) => r.subjectId)).toContain(vendor.id);
     // R-Law 3: the vendor row itself is untouched — still ACTIVE, still operating.
     const v = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });

@@ -14,6 +14,7 @@ import { luhnCheckDigit } from '../modules/billing/san';
 import { loginWithOtp } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // HTTP proof for the arbitrary-id admin path in SPS-F-0012. An administrator
 // is an operator inside one tenant, not a platform-wide principal. A real id
@@ -462,6 +463,9 @@ async function adminRequest(
     headers: {
       authorization: `Bearer ${adminToken}`,
       'content-type': 'application/json',
+      // [ADM-006] the reason a consequential action now owes; this suite is
+      // testing tenant isolation, and says why the way a real caller does
+      'x-swift-reason': TEST_ADMIN_REASON,
       ...extraHeaders,
     },
   });
@@ -532,7 +536,7 @@ describe('tenant-qualified admin access', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/v1/admin/discovery/backfill',
-      headers: {
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON, 
         authorization: `Bearer ${tenantBAdminToken}`,
         'content-type': 'application/json',
       },

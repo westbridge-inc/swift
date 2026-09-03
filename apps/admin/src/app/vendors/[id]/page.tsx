@@ -7,6 +7,7 @@ import { fetchVendorDetail, approveVendor, suspendVendor, featureVendor } from '
 import { Section, Row, StatusPill, BackLink, ActionButton, gyd } from '@/components/detail';
 import { statusClass } from '@/lib/status';
 import { MutationError } from '@/components/MutationError';
+import { askReason } from '@/lib/ask-reason';
 
 export default function VendorDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -17,7 +18,8 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     qc.invalidateQueries({ queryKey: ['vendors'] });
   };
   const approve = useMutation({ mutationFn: () => approveVendor(id), onSuccess: invalidate });
-  const suspend = useMutation({ mutationFn: () => suspendVendor(id, 'Suspended by admin'), onSuccess: invalidate });
+  // [ADM-006] a business losing its storefront is owed the real reason
+  const suspend = useMutation({ mutationFn: (reason: string) => suspendVendor(id, reason), onSuccess: invalidate });
   const feature = useMutation({ mutationFn: (featured: boolean) => featureVendor(id, featured), onSuccess: invalidate });
 
   const v: any = data?.data;
@@ -72,7 +74,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
               label="Suspend"
               danger
               confirm={`Suspend ${v.name}? They stop taking orders immediately. This cannot be reversed from the console.`}
-              onClick={() => suspend.mutate()}
+              onClick={() => { const reason = askReason({ action: 'suspend this business', subject: v.name }); if (reason) suspend.mutate(reason); }}
               disabled={busy}
             />
           )}

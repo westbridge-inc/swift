@@ -56,6 +56,8 @@ describe('vendor suspension mutation', () => {
   it('names the visible store, confirms, and suspends the exact vendor', async () => {
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal('confirm', confirm);
+    // [ADM-006] the operator is asked why; the reason is theirs, not a template
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const fetchMock = mockApi(
       vendorHandler((request) => {
         if (
@@ -88,11 +90,12 @@ describe('vendor suspension mutation', () => {
     );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/vendors/vendor-target/suspend`);
     expect(init?.method).toBe('PUT');
-    expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Suspended by admin' });
+    expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Repeated no-shows after three written warnings' });
   });
 
   it('surfaces the server rejection and leaves the active store visible', async () => {
     vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const fetchMock = mockApi(
       vendorHandler((request) => {
         if (

@@ -11,6 +11,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // [A-14] A CASH ORDER REFUND IS A PROMISE UNTIL SOMEBODY PROVES IT.
@@ -67,14 +68,14 @@ const refFor = (prefix: string) => `${prefix}-${nanoid(10).replace(/[^a-zA-Z0-9]
 const cancel = (id: string, body: Record<string, unknown>) =>
   app.inject({
     method: 'PUT', url: `/api/v1/admin/orders/${id}/cancel`,
-    headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+    headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
     payload: body,
   });
 
 const settle = (id: string, body: Record<string, unknown>) =>
   app.inject({
     method: 'PUT', url: `/api/v1/admin/orders/${id}/refund-settled`,
-    headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+    headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
     payload: body,
   });
 

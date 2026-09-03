@@ -14,6 +14,7 @@ import { VerificationService } from '../modules/verification/verification.servic
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // [ACTIVATION AUTHORITY — task #2 slice 1] Document truth drives activation:
@@ -322,8 +323,7 @@ describe('EV-ACT-11 — admin vendor approve is checklist-gated and exactly-once
     const vendor = await makePendingVendor(owner.id);
     const res = await app.inject({
       method: 'PUT', url: `/api/v1/admin/vendors/${vendor.id}/approve`,
-      headers: { authorization: `Bearer ${adminToken}` },
-    });
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
     expect(res.statusCode).toBe(409);
     expect(res.json().error?.code ?? res.json().code).toBe('CHECKLIST_INCOMPLETE');
     const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
@@ -337,15 +337,13 @@ describe('EV-ACT-11 — admin vendor approve is checklist-gated and exactly-once
     for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
     const ok = await app.inject({
       method: 'PUT', url: `/api/v1/admin/vendors/${vendor.id}/approve`,
-      headers: { authorization: `Bearer ${adminToken}` },
-    });
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
     expect(ok.statusCode).toBe(200);
     expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).status).toBe('ACTIVE');
 
     const dup = await app.inject({
       method: 'PUT', url: `/api/v1/admin/vendors/${vendor.id}/approve`,
-      headers: { authorization: `Bearer ${adminToken}` },
-    });
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
     expect(dup.statusCode).toBe(400);
     expect(dup.json().error?.code ?? dup.json().code).toBe('ALREADY_ACTIVE');
   });
@@ -360,8 +358,8 @@ describe('EV-ACT-15 — admin mover verify is checklist-gated; rejection revokes
 
     const refused = await app.inject({
       method: 'PUT', url: `/api/v1/admin/riders/${rider.id}/verify-documents`,
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
-      payload: {},
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      payload: { },
     });
     expect(refused.statusCode).toBe(409);
     expect(refused.json().error?.code ?? refused.json().code).toBe('CHECKLIST_INCOMPLETE');
@@ -370,8 +368,8 @@ describe('EV-ACT-15 — admin mover verify is checklist-gated; rejection revokes
     for (const docType of MOTORCYCLE_DOCS) await approvedDoc(user.id, docType);
     const ok = await app.inject({
       method: 'PUT', url: `/api/v1/admin/riders/${rider.id}/verify-documents`,
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
-      payload: {},
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      payload: { },
     });
     expect(ok.statusCode).toBe(200);
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } })).documentsVerified).toBe(true);
@@ -387,7 +385,7 @@ describe('EV-ACT-15 — admin mover verify is checklist-gated; rejection revokes
     });
     const res = await app.inject({
       method: 'PUT', url: `/api/v1/admin/riders/${rider.id}/verify-documents`,
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
       payload: { verified: false, rejectionReason: 'plate mismatch' },
     });
     expect(res.statusCode).toBe(200);

@@ -15,6 +15,7 @@ import { CashRulesService, orderingRestriction } from '../modules/cash/cash-rule
 import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // cash rules. The cash-rules table as tests: a simulated dishonest rider
@@ -156,8 +157,7 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, 
     method,
     url,
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
-    headers: {
-      ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
+    headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     },
   });

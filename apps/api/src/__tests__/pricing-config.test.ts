@@ -15,6 +15,7 @@ import {
   PRICING_KINDS, assertSaneFare, pricingDefaults, readPricingConfig, scanPricingConfigs, validatePricingConfig, type PricingKind,
 } from '../modules/country/pricing-config';
 import { pricingConfigCounter, pricingConfigGauge } from '../plugins/observability';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // [M-35] Pricing JSON accepts non-finite, negative, and partial values.
@@ -152,14 +153,14 @@ describe('the register’s red test, end to end: an invalid column never prices 
     expect(await app.prisma.pricingConfigVersion.count({ where: { countryCode: ZZ } })).toBe(0);
   });
   it('the admin refuses an invalid write (column unchanged, no version) and versions a valid one; the quote follows', async () => {
-    const bad = await app.inject({ method: 'PUT', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES`, headers: headers(), payload: { base: -50 } });
+    const bad = await app.inject({ method: 'PUT', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES`, headers: { ...headers(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: { base: -50 } });
     expect(bad.statusCode, bad.body).toBe(400);
     expect(bad.json().error.code).toBe('INVALID_PRICING_CONFIG');
     expect(bad.json().error.message).toContain('base');
     expect((await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: ZZ } })).taxiRates).toBeNull();
-    const nan = await app.inject({ method: 'PUT', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES`, headers: headers(), payload: { base: 'NaN' } });
+    const nan = await app.inject({ method: 'PUT', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES`, headers: { ...headers(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: { base: 'NaN' } });
     expect(nan.statusCode).toBe(400);
-    const ok = await app.inject({ method: 'PUT', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES`, headers: headers(), payload: { base: 2000, minimum: 2500 } });
+    const ok = await app.inject({ method: 'PUT', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES`, headers: { ...headers(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: { base: 2000, minimum: 2500 } });
     expect(ok.statusCode, ok.body).toBe(200);
     expect(ok.json().data).toMatchObject({ version: 1, payload: { base: 2000, perKm: 300, perMin: 25, minimum: 2500 } });
     const est = await svc().estimate(P, Q, ZZ);
@@ -186,7 +187,7 @@ describe('the register’s red test, end to end: an invalid column never prices 
     const scan = await scanPricingConfigs(app.prisma);
     expect(scan.invalid.some((i) => i.countryCode === ZZ && i.kind === 'TAXI_RATES')).toBe(true);
     // the admin view says the same: live INVALID, effective from version 1
-    const view = await app.inject({ method: 'GET', url: `/api/v1/admin/countries/${ZZ}/pricing`, headers: headers() });
+    const view = await app.inject({ method: 'GET', url: `/api/v1/admin/countries/${ZZ}/pricing`, headers: { ...headers(), 'x-swift-reason': TEST_ADMIN_REASON } });
     expect(view.statusCode, view.body).toBe(200);
     const taxi = view.json().data.kinds.find((k: { kind: string }) => k.kind === 'TAXI_RATES');
     expect(taxi.live.status).toBe('INVALID');
@@ -194,13 +195,13 @@ describe('the register’s red test, end to end: an invalid column never prices 
     expect(taxi.units).toBe('GYD_WHOLE');
   });
   it('a valid write heals it as version 2; rollback pins version 1 as version 3; the quote follows each', async () => {
-    const v2 = await app.inject({ method: 'PUT', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES`, headers: headers(), payload: { base: 3000, minimum: 4000 } });
+    const v2 = await app.inject({ method: 'PUT', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES`, headers: { ...headers(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: { base: 3000, minimum: 4000 } });
     expect(v2.statusCode, v2.body).toBe(200);
     expect(v2.json().data.version).toBe(2);
     const v2Fare = (await svc().estimate(P, Q, ZZ)).fare;
     expect(v2Fare).toBeGreaterThanOrEqual(4000);
     expect((await readPricingConfig(app.prisma, ZZ, 'TAXI_RATES')).source).toBe('config');
-    const back = await app.inject({ method: 'POST', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES/rollback`, headers: headers(), payload: {} });
+    const back = await app.inject({ method: 'POST', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES/rollback`, headers: { ...headers(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: { } });
     expect(back.statusCode, back.body).toBe(200);
     expect(back.json().data).toMatchObject({ version: 3, restoredFrom: 1, payload: { base: 2000, minimum: 2500 } });
     // the same trip prices lower under the restored terms (base 2,000 vs 3,000) —
