@@ -21,6 +21,7 @@ import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout, promiseView } from '../eta/promise';
 import { AppError, ConflictError } from '../../utils/errors';
+import { applyStockMovement } from '../inventory/stock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
@@ -1299,13 +1300,19 @@ export class OrderService {
         // whole transaction rolls back. Items at zero auto-hide from browse.
         for (const oi of plan.orderItems) {
           if (!oi.tracksStock) continue;
-          const hit = await tx.item.updateMany({
-            where: { id: oi.itemId, stockQuantity: { gte: oi.quantity } },
-            data: { stockQuantity: { decrement: oi.quantity } },
+          // [MKT-2] This is THE SALE, and until now it was the one movement
+          // nobody wrote down: the counter dropped and no row explained why. It
+          // now goes through the single writer, which keeps this exact guard and
+          // records the movement in the same transaction — so a rolled-back
+          // checkout leaves no phantom sale, and a sale can never exist without
+          // the stock having actually moved.
+          await applyStockMovement(tx, {
+            itemId: oi.itemId,
+            delta: -oi.quantity,
+            reason: 'SALE',
+            orderId: order.id,
+            actorId: input.userId,
           });
-          if (hit.count === 0) {
-            throw new AppError(409, 'INSUFFICIENT_STOCK', `${oi.name} just sold out — remove it from your cart and try again`, { itemId: oi.itemId });
-          }
           const after = await tx.item.findUniqueOrThrow({
             where: { id: oi.itemId },
             select: { stockQuantity: true, lowStockThreshold: true, isAvailable: true },
@@ -1506,13 +1513,17 @@ export class OrderService {
       if (oi.subStatus === 'REFUNDED' || oi.subStatus === 'REJECTED') continue;
       const restockItemId = oi.subStatus === 'APPROVED' ? oi.substituteItemId : oi.itemId;
       if (!restockItemId) continue;
-      const restocked = await db.item.updateMany({
-        // Only items still tracking stock — a vendor may have stopped tracking
-        // since the order was placed, and null must stay null.
-        where: { id: restockItemId, stockQuantity: { not: null } },
-        data: { stockQuantity: { increment: oi.quantity } },
+      // [MKT-2] Through the single writer. It no-ops on an untracked item, which
+      // preserves the rule this code already had: a vendor may have stopped
+      // tracking since the order was placed, and null must stay null.
+      const restock = await applyStockMovement(db, {
+        itemId: restockItemId,
+        delta: oi.quantity,
+        reason: 'CANCEL_RESTOCK',
+        orderId,
+        note: 'Order cancelled before pickup',
       });
-      if (restocked.count > 0) {
+      if (restock.applied) {
         await db.item.updateMany({
           where: { id: restockItemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
           data: { isAvailable: true, autoHiddenAt: null },

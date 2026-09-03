@@ -3,6 +3,7 @@ import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
 import { FloatService } from '../dispatch/float.service';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
@@ -363,12 +364,18 @@ export class PickingService {
           select: { stockQuantity: true },
         });
         if (sub?.stockQuantity != null) {
-          // Same conditional-decrement guard as checkout: overselling impossible.
-          const decremented = await tx.item.updateMany({
-            where: { id: fresh.substituteItemId, stockQuantity: { gte: fresh.quantity } },
-            data: { stockQuantity: { decrement: fresh.quantity } },
-          });
-          if (decremented.count === 0) {
+          // [MKT-2] Through the single writer — same conditional guard, now with
+          // a ledger row. A substitution moves real goods off a real shelf, so
+          // it is a movement like any other.
+          try {
+            await applyStockMovement(tx, {
+              itemId: fresh.substituteItemId,
+              delta: -fresh.quantity,
+              reason: 'PICK',
+              orderId: fresh.orderId,
+              note: 'Substitute picked',
+            });
+          } catch {
             throw new AppError(409, 'SUBSTITUTE_OUT_OF_STOCK', 'The substitute just sold out — ask the store to pick another');
           }
           // Mirror the inventory engine: hitting zero auto-hides from browse.
@@ -503,11 +510,15 @@ export class PickingService {
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
   ) {
     if (!line.itemId) return;
-    const restocked = await db.item.updateMany({
-      where: { id: line.itemId, stockQuantity: { not: null } },
-      data: { stockQuantity: { increment: line.quantity } },
+    // [MKT-2] Through the single writer. It no-ops on an untracked item, which
+    // is the same rule the `stockQuantity: { not: null }` guard enforced here.
+    const restock = await applyStockMovement(db, {
+      itemId: line.itemId,
+      delta: line.quantity,
+      reason: 'PICK_REFUND',
+      note: `picking: ${note}`,
     });
-    if (restocked.count > 0) {
+    if (restock.applied) {
       await db.item.updateMany({
         where: { id: line.itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
         data: { isAvailable: true, autoHiddenAt: null },
