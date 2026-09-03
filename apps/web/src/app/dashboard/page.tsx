@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Star } from 'lucide-react';
 import { getLowStock, getOverview, money, toggleOpen, toggleOrders } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
+import { storeKey, useStoreId } from '@/lib/store-scope';
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -36,10 +37,11 @@ function Toggle({ label, on, onChange, busy }: { label: string; on: boolean; onC
 
 export default function TodayPage() {
   const queryClient = useQueryClient();
-  const overview = useQuery({ queryKey: ['overview'], queryFn: getOverview, refetchInterval: 30_000 });
-  const lowStock = useQuery({ queryKey: ['low-stock'], queryFn: getLowStock, refetchInterval: 60_000 });
+  const storeId = useStoreId();
+  const overview = useQuery({ queryKey: storeKey(storeId, 'overview'), queryFn: getOverview, refetchInterval: 30_000 });
+  const lowStock = useQuery({ queryKey: storeKey(storeId, 'low-stock'), queryFn: getLowStock, refetchInterval: 60_000 });
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['overview'] });
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'overview') });
   const openMut = useMutation({ mutationFn: toggleOpen, onSettled: invalidate });
   const ordersMut = useMutation({ mutationFn: toggleOrders, onSettled: invalidate });
 

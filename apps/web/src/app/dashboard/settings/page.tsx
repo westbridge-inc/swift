@@ -4,17 +4,24 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
+import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 type DayRow = { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean };
 
+/** Named so the switch confirmation can tell the operator WHAT is unsaved. */
+const HOURS_DRAFT = 'Operating hours';
+
 function HoursEditor() {
   const queryClient = useQueryClient();
-  const hours = useQuery({ queryKey: ['hours'], queryFn: getHours });
+  const storeId = useStoreId();
+  const hours = useQuery({ queryKey: storeKey(storeId, 'hours'), queryFn: getHours });
   const [rows, setRows] = useState<DayRow[] | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => () => setDraftDirty(HOURS_DRAFT, false), []);
 
   useEffect(() => {
     if (hours.data && !rows) {
@@ -28,8 +35,9 @@ function HoursEditor() {
       putHours(rows!.map((r) => (r.isClosed ? { dayOfWeek: r.dayOfWeek, isClosed: true } : { ...r, isClosed: false }))),
     onSuccess: () => {
       setSaved(true);
+      setDraftDirty(HOURS_DRAFT, false);
       setTimeout(() => setSaved(false), 2500);
-      queryClient.invalidateQueries({ queryKey: ['hours'] });
+      queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'hours') });
     },
     onError: (e) => setError((e as Error).message),
   });
@@ -51,8 +59,13 @@ function HoursEditor() {
     return <p className="text-sm text-[var(--swift-muted)]">Loading…</p>;
   }
 
-  const set = (d: number, patch: Partial<DayRow>) =>
+  // [W-04] Editing marks the draft dirty, so switching stores ASKS before it
+  // discards the work. The remount does the discarding; the register makes the
+  // discard the operator's decision rather than a surprise.
+  const set = (d: number, patch: Partial<DayRow>) => {
+    setDraftDirty(HOURS_DRAFT, true);
     setRows(rows.map((r) => (r.dayOfWeek === d ? { ...r, ...patch } : r)));
+  };
 
   return (
     <div className="rounded-2xl border border-black/5 bg-white p-6">
@@ -106,7 +119,8 @@ function HoursEditor() {
 }
 
 function SubscriptionCard() {
-  const sub = useQuery({ queryKey: ['subscription'], queryFn: getSubscription });
+  const storeId = useStoreId();
+  const sub = useQuery({ queryKey: storeKey(storeId, 'subscription'), queryFn: getSubscription });
   const s = sub.data;
   if (sub.isLoading) return null;
   return (
@@ -138,10 +152,11 @@ function SubscriptionCard() {
 
 function SettlementsCard() {
   const queryClient = useQueryClient();
-  const data = useQuery({ queryKey: ['cash-settlements'], queryFn: getCashSettlements, refetchInterval: 60_000 });
+  const storeId = useStoreId();
+  const data = useQuery({ queryKey: storeKey(storeId, 'cash-settlements'), queryFn: getCashSettlements, refetchInterval: 60_000 });
   const confirm = useMutation({
     mutationFn: confirmSettlement,
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['cash-settlements'] }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'cash-settlements') }),
   });
   const d = data.data;
   if (!d) return null;
@@ -198,7 +213,8 @@ function SettlementsCard() {
 }
 
 export default function SettingsPage() {
-  const profile = useQuery({ queryKey: ['profile'], queryFn: getProfile });
+  const storeId = useStoreId();
+  const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
   const p = profile.data;
 
   return (
