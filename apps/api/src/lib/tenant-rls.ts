@@ -34,6 +34,7 @@ export const TENANT_TABLES = [
   'stock_movements',
   // [R048-007] money-surface commands: one operator's decided money changes.
   'money_surface_commands',
+  'privileged_approvals',
   'sos_retriggers',
   'guardian_checkin_deliveries',
   'legal_holds',

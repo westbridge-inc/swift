@@ -17,6 +17,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { billingTopupMissingKeyCounter, billingTopupDuplicateFingerprintCounter } from '../plugins/observability';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { injectWithApproval } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
 // [M-08 · S0] The prepaid top-up is ONE command.
@@ -91,7 +92,7 @@ async function facts(subscriptionId: string) {
   };
 }
 
-const topup = (id: string, body: Record<string, unknown>, headers: Record<string, string> = {}) => app.inject({
+const topup = (id: string, body: Record<string, unknown>, headers: Record<string, string> = {}) => injectWithApproval(app, {
   method: 'POST', url: `/api/v1/admin/subscriptions/${id}/topup`, payload: body,
   headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', ...headers },
 });
@@ -255,7 +256,7 @@ describe('[M-08 · operations] rollback is hold-only', () => {
 // what the test was grading. Alphanumeric, always.
 const refFor = (prefix: string) => `${prefix}-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}`.toUpperCase();
 
-const waiveFee = (id: string, body: Record<string, unknown>) => app.inject({
+const waiveFee = (id: string, body: Record<string, unknown>) => injectWithApproval(app, {
   method: 'PUT', url: `/api/v1/admin/subscriptions/${id}/waive-fee`, payload: body,
   headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
 });

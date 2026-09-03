@@ -18,6 +18,7 @@ import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { injectWithApproval } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
 // verification behind KycProvider: checklists from config, the
@@ -65,7 +66,7 @@ async function cleanup() {
 }
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, token?: string) {
-  return app.inject({
+  return injectWithApproval(app, {
     method,
     url,
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),

@@ -11,6 +11,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { cleanupSecondApprovers, injectWithApproval } from './helpers/admin-approval';
 import {
   ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_REASON_MAX, ADMIN_REASON_MIN, ADMIN_ROUTE_AUTHORITY,
   reasonOf, reasonProblem, reasonRefusal,
@@ -74,7 +75,10 @@ beforeAll(async () => {
   });
 });
 afterAll(async () => {
+  await cleanupSecondApprovers(app);
   await runWithoutTenant(async () => {
+    await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: userIds } } }).catch(() => {});
+    await app.prisma.platformConfig.deleteMany({ where: { key: { startsWith: 'ADM006_' } } }).catch(() => {});
     await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:admin-reason').catch(() => 0);
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
@@ -156,7 +160,13 @@ describe('[ADM-006] the reason is on the record, by name', () => {
     });
     // a 404 is not audited (nothing changed) — so drive one that reaches a handler
     if (!row) {
-      const probe = await call('PUT', '/api/v1/admin/config/ADM006_AUDIT', { value: { ok: true }, reason });
+      // [ADM-005] a config write is a platform action now: it takes a second
+      // admin, and this suite gets one the way the console will
+      const probe = await injectWithApproval(app, {
+        method: 'PUT', url: '/api/v1/admin/config/ADM006_AUDIT',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        payload: { value: { ok: true }, reason },
+      });
       expect(probe.statusCode, probe.body).toBe(200);
       await new Promise((r) => setTimeout(r, 200));
       const cfg = await app.prisma.auditLog.findFirst({

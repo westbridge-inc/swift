@@ -11,6 +11,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { nanoid } from 'nanoid';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { injectWithApproval } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
 // Admin actions leave a trail. The scoped onResponse hook must write an audit
@@ -49,7 +50,7 @@ afterAll(async () => {
 });
 
 function inject(method: 'GET' | 'PUT' | 'POST', url: string, payload?: unknown, token = adminToken) {
-  return app.inject({
+  return injectWithApproval(app, {
     method,
     url,
     ...(payload === undefined ? {} : { payload: payload as Record<string, unknown> }),
@@ -74,7 +75,12 @@ async function waitForFounderReadAuditCount(routeTemplate: string, expected: num
 
 describe('admin audit trail', () => {
   it('a successful config change writes an audit row with actor + route + params', async () => {
-    const before = await app.prisma.auditLog.count({ where: { action: { startsWith: 'ADMIN ' } } });
+    // [ADM-005] Counted on THIS route: a config write is a platform action, so
+    // a second admin's decision is now part of getting there — and that
+    // decision is itself an audited admin action. Counting every 'ADMIN ' row
+    // would be counting the approval too.
+    const CONFIG_WRITE = 'ADMIN PUT /api/v1/admin/config/:key';
+    const before = await app.prisma.auditLog.count({ where: { action: { startsWith: CONFIG_WRITE } } });
 
     // Read-modify-write the same value: state-neutral for other tests, but a
     // successful mutation as far as the trail is concerned.
@@ -89,7 +95,7 @@ describe('admin audit trail', () => {
     let after = before;
     for (let i = 0; i < 30 && after !== before + 1; i++) {
       await new Promise((r) => setTimeout(r, 100));
-      after = await app.prisma.auditLog.count({ where: { action: { startsWith: 'ADMIN ' } } });
+      after = await app.prisma.auditLog.count({ where: { action: { startsWith: CONFIG_WRITE } } });
     }
     expect(after).toBe(before + 1);
 

@@ -15,6 +15,7 @@ import { loginWithOtp } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { cleanupSecondApprovers, injectWithApproval } from './helpers/admin-approval';
 
 // HTTP proof for the arbitrary-id admin path in SPS-F-0012. An administrator
 // is an operator inside one tenant, not a platform-wide principal. A real id
@@ -443,6 +444,9 @@ afterAll(async () => {
     if (tenantBVendorOwnerId) {
       await app.prisma.vendorOwner.deleteMany({ where: { id: tenantBVendorOwnerId } });
     }
+    // [ADM-005] the second approver this suite's dual-control path created
+    // lives in the tenant it approved for; a tenant cannot go while it is there
+    await cleanupSecondApprovers(app);
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
     await app.prisma.tenant.deleteMany({ where: { id: TENANT_B } });
@@ -456,7 +460,10 @@ async function adminRequest(
   payload?: Record<string, unknown>,
   extraHeaders: Record<string, string> = {},
 ) {
-  return await app.inject({
+  // [ADM-005] Through the real dual-control path: unchanged unless the action
+  // needs a second person, in which case this suite gets one, as the console
+  // will. The tenancy law being tested here still decides the final answer.
+  return await injectWithApproval(app, {
     method,
     url,
     ...(payload === undefined ? {} : { payload }),
@@ -533,7 +540,7 @@ async function foreignBillingState() {
 describe('tenant-qualified admin access', () => {
   it('queues discovery backfill with the authenticated admin tenant', async () => {
     queuedDiscoveryJobs.length = 0;
-    const response = await app.inject({
+    const response = await injectWithApproval(app, {
       method: 'POST',
       url: '/api/v1/admin/discovery/backfill',
       headers: { 'x-swift-reason': TEST_ADMIN_REASON, 

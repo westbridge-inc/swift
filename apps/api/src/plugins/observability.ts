@@ -132,6 +132,19 @@ export const adminCapabilityCounter = new client.Counter({
 /** [R048-007] Money-surface authority transitions and refusals: staged, stage_replay, cancelled, cleared, applied,
  *  apply_lease_missed, refused_authority_moved, refused_no_decision, refused_step_up, refused_control_unavailable,
  *  notice_sent, notice_retry, notice_sweep. */
+/** [ADM-005] Dual control on money and platform actions: `requested` (the ask
+ *  became a pending approval), `granted` (a second admin's decision let it
+ *  through), `applied` (the approval was spent), and one label for each way an
+ *  approval was refused — `self-approval` and `request-changed` are the two
+ *  worth an alert, being an operator trying to act alone and an approved act
+ *  being re-aimed at something nobody read. */
+export const adminApprovalCounter = new client.Counter({
+  name: 'swift_admin_approval_total',
+  help: 'Dual-control outcomes on C4/C5 admin actions, by outcome and action class',
+  labelNames: ['outcome', 'cls'] as const,
+  registers: [registry],
+});
+
 /** [ADM-006] Whether a consequential action stated why: `stated` for one that
  *  did, and `missing`/`too-short`/`too-long`/`template` for each way one did
  *  not. `template` is the console sending its own default text — the shape
