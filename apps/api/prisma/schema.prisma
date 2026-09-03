@@ -3702,6 +3702,8 @@ model OpsAlertRecipient {
 enum OpsAlertKind {
   SOS
   DRILL
+  /// [R048-006] A platform page (scheduler stall, boot contract) — the durable outbox row a page must have before it is a notification.
+  PLATFORM
 }
 
 /// [SCR-001] The database says WHICH deployment it is. Destructive tooling binds
