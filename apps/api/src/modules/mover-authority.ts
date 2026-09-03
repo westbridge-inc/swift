@@ -6,7 +6,11 @@ import { makeDispatchService } from './dispatch/dispatch.service';
 import { FloatService, riderFloatForOrder } from './dispatch/float.service';
 import { closeOnlineSession } from './rider/online-hours';
 import { processMoverRevocationOutboxById } from './mover-revocation-outbox';
-import { TERMINAL_ORDER_STATUSES } from './order/order-status';
+import {
+  TERMINAL_ORDER_STATUSES,
+  RIDER_PRE_CUSTODY_STATUSES as RIDER_PRE_HANDOFF,
+  DRIVER_PRE_CUSTODY_STATUSES as DRIVER_PRE_HANDOFF,
+} from './order/order-status';
 import { settleRiderLegs } from './dispatch/concurrency-policy';
 import {
   hasTaxiPassengerCustody,
@@ -239,12 +243,7 @@ export async function completeUserRoleAuthorityTransition(
   }
 }
 
-const RIDER_PRE_HANDOFF: readonly OrderStatus[] = [
-  'RIDER_ASSIGNED',
-  'RIDER_EN_ROUTE_PICKUP',
-  'RIDER_ARRIVED_PICKUP',
-];
-const DRIVER_PRE_HANDOFF: readonly OrderStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
+
 // Terminality has ONE definition [order/order-status.ts]. This module decides
 // custody and session revocation; a local copy that drifted from the order
 // lifecycle would hold authority over a finished order, or release it on a

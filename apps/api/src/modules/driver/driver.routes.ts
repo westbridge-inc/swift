@@ -5,6 +5,7 @@ import { explainEarning } from '../../utils/explain-earning';
 import { z } from 'zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
 import { OrderService } from '../order/order.service';
+import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { earningsWindow } from '../order/earnings-window';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
@@ -944,7 +945,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const { reason } = driverCancelSchema.parse(request.body ?? {});
     const order = await getDriverRide(driver.id, id);
 
-    const cancellable: OrderStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
+    const cancellable = DRIVER_PRE_CUSTODY_STATUSES;
     if (!cancellable.includes(order.status) || hasTaxiPassengerCustody(order)) {
       throw new AppError(400, 'INVALID_STATUS',
         hasTaxiPassengerCustody(order)

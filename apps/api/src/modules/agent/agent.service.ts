@@ -4,6 +4,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { OrderService } from '../order/order.service';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
+import { RIDER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 
 // ---------------------------------------------------------------------------
 // Ops agent (spec Part B) — ON by default wherever an ANTHROPIC_API_KEY is
@@ -140,7 +141,7 @@ export class AgentService {
       // A rider owns it but the parcel never left
       this.prisma.order.findMany({
         where: {
-          status: { in: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'] },
+          status: { in: RIDER_PRE_CUSTODY_STATUSES },
           updatedAt: { lt: min(25), ...ACTIVE_WINDOW },
         },
         take: SCAN_CAP(),

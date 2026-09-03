@@ -8,7 +8,12 @@ import { lineTotal, orderTotal, promoDiscount, promoCapacity, allocatePromo, all
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
-import { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus } from './order-status';
+import {
+  TERMINAL_ORDER_STATUSES,
+  LIVE_ORDER_STATUSES,
+  isTerminalOrderStatus,
+  MOVER_HOLDING_STATUSES,
+} from './order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
@@ -181,7 +186,7 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
 };
 
 /** States where the order is physically with the mover — no cancellation. */
-const IN_TRANSIT: OrderStatus[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'];
+const IN_TRANSIT = MOVER_HOLDING_STATUSES;
 /**
  * The order is over. EXPORTED because a hand-written copy of this list drifted
  * and shipped: Home's active-order query omitted FAILED, so a failed handover

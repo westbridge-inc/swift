@@ -11,6 +11,7 @@ import {
 import { freshRidePinReset } from '../rides/ride-pin';
 import { persistDispatchCommandInTransaction } from '../order/checkout-outbox';
 import { notMyDriverCounter, notMyDriverGauge } from '../../plugins/observability';
+import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 
 // Identity Assurance (safety spec §7) — "is the person driving the account's
 // approved human?" A fresh shift selfie is face-matched against the signup
@@ -357,7 +358,7 @@ export class LivenessService {
       throw new AppError(409, 'NO_DRIVER_ASSIGNED', 'No driver is assigned to this ride yet.');
     }
 
-    const NOT_ABOARD = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'] as const;
+    const NOT_ABOARD = DRIVER_PRE_CUSTODY_STATUSES;
     const now = new Date();
     const release = await this.prisma.$transaction(async (tx) => {
       await lockTaxiOrderForCustodyDecision(tx, order.id);
