@@ -52,6 +52,8 @@ describe('order list money controls', () => {
   it('binds the visible row to the exact cash-refund request and store-attributed confirmation', async () => {
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal('confirm', confirm);
+    // [ADM-006] the operator is asked why; the reason is theirs, not a template
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const fetchMock = mockApi(
       ordersHandler((request) => {
         if (
@@ -82,7 +84,7 @@ describe('order list money controls', () => {
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/orders/order-target/cancel`);
     expect(init?.method).toBe('PUT');
     expect(JSON.parse(String(init?.body))).toEqual({
-      reason: 'Cancelled by admin',
+      reason: 'Repeated no-shows after three written warnings',
       refund: true,
     });
   });
@@ -90,6 +92,8 @@ describe('order list money controls', () => {
   it('does not offer a Swift refund for MMG and explains the store-direct rail', async () => {
     const confirm = vi.fn().mockReturnValue(false);
     vi.stubGlobal('confirm', confirm);
+    // [ADM-006] the operator is asked why; the reason is theirs, not a template
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const mmgOrder = {
       ...targetOrder,
       paymentMethod: 'MOBILE_MONEY',

@@ -50,6 +50,8 @@ describe('order cancel and refund mutations', () => {
   it('confirms and sends a plain cancellation to the exact endpoint and payload', async () => {
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal('confirm', confirm);
+    // [ADM-006] the operator is asked why; the reason is theirs, not a template
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const fetchMock = mockApi(
       orderHandler((request) => {
         if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/cancel') {
@@ -74,7 +76,7 @@ describe('order cancel and refund mutations', () => {
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/orders/order-1/cancel`);
     expect(init?.method).toBe('PUT');
     expect(JSON.parse(String(init?.body))).toEqual({
-      reason: 'Cancelled by admin',
+      reason: 'Repeated no-shows after three written warnings',
       refund: false,
     });
   });
@@ -82,6 +84,8 @@ describe('order cancel and refund mutations', () => {
   it('confirms and sends cancel-plus-refund with refund=true', async () => {
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal('confirm', confirm);
+    // [ADM-006] the operator is asked why; the reason is theirs, not a template
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const fetchMock = mockApi(
       orderHandler((request) => {
         if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/cancel') {
@@ -116,7 +120,7 @@ describe('order cancel and refund mutations', () => {
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/orders/order-1/cancel`);
     expect(init?.method).toBe('PUT');
     expect(JSON.parse(String(init?.body))).toEqual({
-      reason: 'Cancelled by admin',
+      reason: 'Repeated no-shows after three written warnings',
       refund: true,
     });
   });
@@ -125,6 +129,7 @@ describe('order cancel and refund mutations', () => {
     'renders a %s failure without changing the visible order state',
     async (buttonName) => {
       vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
       const fetchMock = mockApi(
         orderHandler((request) => {
           if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/cancel') {
@@ -163,6 +168,7 @@ describe('order cancel and refund mutations', () => {
   it('disables the cash-refund control while pending and sends only one money mutation', async () => {
     const pending = deferredReply();
     vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const fetchMock = mockApi(
       orderHandler((request) => {
         if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/cancel') {
@@ -190,6 +196,8 @@ describe('order cancel and refund mutations', () => {
   it('never offers Swift refund controls for MMG and names the direct store refund rail', async () => {
     const confirm = vi.fn().mockReturnValue(false);
     vi.stubGlobal('confirm', confirm);
+    // [ADM-006] the operator is asked why; the reason is theirs, not a template
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const mmgOrder = { ...order, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' };
     const fetchMock = mockApi(
       orderHandler((_request) => {

@@ -17,6 +17,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // verification behind KycProvider: checklists from config, the
@@ -68,8 +69,7 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, 
     method,
     url,
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
-    headers: {
-      ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
+    headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     },
   });

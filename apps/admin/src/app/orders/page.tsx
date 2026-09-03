@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchOrders, cancelOrder } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { MutationError } from '@/components/MutationError';
+import { askReason } from '@/lib/ask-reason';
 
 // Orders past these states can't be cancelled/refunded by an operator.
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
@@ -13,8 +14,10 @@ export default function OrdersPage() {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['orders'], queryFn: () => fetchOrders() });
   const cancelMutation = useMutation({
-    mutationFn: ({ id, refund }: { id: string; refund: boolean }) =>
-      cancelOrder(id, { reason: 'Cancelled by admin', refund }),
+    // [ADM-006] The reason was the constant 'Cancelled by admin'. A customer
+    // asking why their order was cancelled deserves the actual answer.
+    mutationFn: ({ id, refund, reason }: { id: string; refund: boolean; reason: string }) =>
+      cancelOrder(id, { reason, refund }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['orders'] }),
   });
 
@@ -100,9 +103,9 @@ export default function OrdersPage() {
                             const mmgNote = order.paymentMethod === 'MOBILE_MONEY'
                               ? `\n\nMMG payment stays between customer and store. If paid, it is refunded by ${storeName}; Swift cannot refund it.`
                               : '';
-                            if (window.confirm(`Cancel order ${order.orderNumber}?${mmgNote}`)) {
-                              cancelMutation.mutate({ id: order.id, refund: false });
-                            }
+                            if (!window.confirm(`Cancel order ${order.orderNumber}?${mmgNote}`)) return;
+                            const reason = askReason({ action: 'cancel this order', subject: order.orderNumber });
+                            if (reason) cancelMutation.mutate({ id: order.id, refund: false, reason });
                           }}
                           disabled={cancelMutation.isPending}
                           className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] text-white hover:bg-white/10 disabled:opacity-50"
@@ -118,7 +121,8 @@ export default function OrdersPage() {
                                 + '\n\nThis does not mark anything refunded — settle it on the order page'
                                 + ' once the reference and the amount handed back are known.',
                               )) {
-                                cancelMutation.mutate({ id: order.id, refund: true });
+                                const reason = askReason({ action: 'cancel this order and record a refund owed', subject: order.orderNumber });
+                                if (reason) cancelMutation.mutate({ id: order.id, refund: true, reason });
                               }
                             }}
                             disabled={cancelMutation.isPending}

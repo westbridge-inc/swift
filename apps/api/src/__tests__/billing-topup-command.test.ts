@@ -16,6 +16,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { billingTopupMissingKeyCounter, billingTopupDuplicateFingerprintCounter } from '../plugins/observability';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // [M-08 · S0] The prepaid top-up is ONE command.
@@ -92,7 +93,7 @@ async function facts(subscriptionId: string) {
 
 const topup = (id: string, body: Record<string, unknown>, headers: Record<string, string> = {}) => app.inject({
   method: 'POST', url: `/api/v1/admin/subscriptions/${id}/topup`, payload: body,
-  headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', ...headers },
+  headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', ...headers },
 });
 
 beforeAll(async () => {
@@ -256,7 +257,7 @@ const refFor = (prefix: string) => `${prefix}-${nanoid(10).replace(/[^a-zA-Z0-9]
 
 const waiveFee = (id: string, body: Record<string, unknown>) => app.inject({
   method: 'PUT', url: `/api/v1/admin/subscriptions/${id}/waive-fee`, payload: body,
-  headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+  headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
 });
 
 describe('[A-12] one transfer credits one subscription, once', () => {

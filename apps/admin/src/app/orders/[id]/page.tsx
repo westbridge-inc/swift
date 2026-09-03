@@ -7,6 +7,7 @@ import { ArrowLeft, Phone } from 'lucide-react';
 import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { MutationError } from '@/components/MutationError';
+import { askReason } from '@/lib/ask-reason';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
@@ -49,7 +50,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const queryClient = useQueryClient();
   const { data, isLoading, isError } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
   const cancelMutation = useMutation({
-    mutationFn: ({ refund }: { refund: boolean }) => cancelOrder(id, { reason: 'Cancelled by admin', refund }),
+    // [ADM-006] the operator's words, not a template
+    mutationFn: ({ refund, reason }: { refund: boolean; reason: string }) => cancelOrder(id, { reason, refund }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['order', id] });
       queryClient.invalidateQueries({ queryKey: ['orders'] });
@@ -119,7 +121,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   const mmgNote = isMmg
                     ? `\n\nMMG payment stays between customer and store. If paid, it is refunded by ${refundingStore}; Swift cannot refund it.`
                     : '';
-                  if (window.confirm(`Cancel order ${o.orderNumber}?${mmgNote}`)) cancelMutation.mutate({ refund: false });
+                  if (!window.confirm(`Cancel order ${o.orderNumber}?${mmgNote}`)) return;
+                  const reason = askReason({ action: 'cancel this order', subject: o.orderNumber });
+                  if (reason) cancelMutation.mutate({ refund: false, reason });
                 }}
                 disabled={cancelMutation.isPending}
                 className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
@@ -134,7 +138,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                       + '\n\nThis does not mark anything refunded. The order stays in the outstanding'
                       + ' list until someone records the reference and the amount actually handed back.',
                     )) {
-                      cancelMutation.mutate({ refund: true });
+                      const reason = askReason({ action: 'cancel this order and record a refund owed', subject: o.orderNumber });
+                      if (reason) cancelMutation.mutate({ refund: true, reason });
                     }
                   }}
                   disabled={cancelMutation.isPending}

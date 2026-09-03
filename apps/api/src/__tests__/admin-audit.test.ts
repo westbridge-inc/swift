@@ -10,6 +10,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { nanoid } from 'nanoid';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // Admin actions leave a trail. The scoped onResponse hook must write an audit
@@ -52,8 +53,7 @@ function inject(method: 'GET' | 'PUT' | 'POST', url: string, payload?: unknown, 
     method,
     url,
     ...(payload === undefined ? {} : { payload: payload as Record<string, unknown> }),
-    headers: {
-      'content-type': 'application/json',
+    headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json',
       authorization: `Bearer ${token}`,
     },
   });

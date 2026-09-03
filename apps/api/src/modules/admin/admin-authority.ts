@@ -399,3 +399,99 @@ export function routeTemplateOf(
   }
   return template;
 }
+
+// ─── [ADM-006] A consequential action states why ─────────────────────────────
+//
+// The record showed WHAT happened and never WHY, so a decision could not be
+// reviewed, appealed or defended. No admin route validated a justification;
+// 43 of the 68 C3-C5 routes took no reason field at all, and the console sent
+// the literal string 'Suspended by admin' where one was accepted — a reason
+// that reasons about nothing.
+//
+// The class decides. C3 (a person's access or livelihood), C4 (money) and C5
+// (pricing, config, algorithms, broadcasts) must carry one; C0-C2 must not be
+// burdened with one. It is checked centrally, from the same table the
+// capability comes from, so a new route inherits the law by being classified
+// rather than by someone remembering.
+
+/** Long enough to be a sentence, short enough to type. Matches the length the
+ *  handover reveal already demands for the same kind of decision. */
+export const ADMIN_REASON_MIN = 12;
+export const ADMIN_REASON_MAX = 500;
+
+/**
+ * The canned strings a screen sends when nobody was actually asked. These are
+ * not a blocklist of words — they are the exact shapes the console shipped, and
+ * the point is that a template cannot satisfy a requirement to explain. The
+ * check is on the WHOLE reason: "Suspended by admin, repeated no-shows after
+ * three warnings" is a real reason that happens to start with the template.
+ */
+const TEMPLATE_REASONS: readonly string[] = [
+  'suspended by admin', 'banned by admin', 'cancelled by admin', 'waived by admin',
+  'approved by admin', 'rejected by admin', 'resolved by admin', 'processed by admin',
+  'admin action', 'no reason', 'n/a', 'none', 'test', 'testing', 'as discussed', 'per policy',
+];
+
+export type ReasonProblem = 'missing' | 'too-short' | 'too-long' | 'template';
+
+/**
+ * The header a caller may state the reason in.
+ *
+ * Twenty-three routes already take a free-text `reason` in the body, where it
+ * is DOMAIN data — the waiver's reason is shown to the vendor, the ban's is
+ * kept on the account — and those keep it. But a reason is a cross-cutting
+ * concern, and some bodies are not a place to put one: `PUT
+ * /countries/:code/pricing/:kind` parses its whole body as the pricing
+ * document under a strict schema, so a `reason` key there is a malformed
+ * price book, not an explanation. The header carries it for those, and for
+ * every route that never had a field.
+ */
+export const ADMIN_REASON_HEADER = 'x-swift-reason';
+
+/** The reason a caller stated, from either place. The header wins: a route
+ *  whose body happens to contain the word is not thereby explained. */
+function statedReason(body: unknown, headers?: Record<string, unknown>): unknown {
+  const fromHeader = headers?.[ADMIN_REASON_HEADER];
+  if (typeof fromHeader === 'string' && fromHeader.trim()) return fromHeader;
+  return (body as { reason?: unknown } | null | undefined)?.reason;
+}
+
+/**
+ * What is wrong with the reason on this request, or null if nothing is.
+ * A class that does not require one always returns null — an operational
+ * action does not owe an explanation, and demanding one would train people to
+ * type anything.
+ */
+export function reasonProblem(cls: AdminActionClass, body: unknown, headers?: Record<string, unknown>): ReasonProblem | null {
+  if (!ADMIN_ACTION_CLASSES[cls].requiresReason) return null;
+  const raw = statedReason(body, headers);
+  if (typeof raw !== 'string' || raw.trim().length === 0) return 'missing';
+  const reason = raw.trim();
+  if (reason.length < ADMIN_REASON_MIN) return 'too-short';
+  if (reason.length > ADMIN_REASON_MAX) return 'too-long';
+  if (TEMPLATE_REASONS.includes(reason.toLowerCase().replace(/[.!]+$/, ''))) return 'template';
+  return null;
+}
+
+/** What the operator is told. Each one says what to do, not merely what failed. */
+export function reasonRefusal(problem: ReasonProblem, cls: AdminActionClass): string {
+  const what = cls === 'C4' ? 'moves money'
+    : cls === 'C5' ? 'changes the platform for everyone'
+      : "affects a person's access or livelihood";
+  switch (problem) {
+    case 'missing':
+      return `This action ${what}. Say why, in a sentence — the record keeps it.`;
+    case 'too-short':
+      return `Say why in at least ${ADMIN_REASON_MIN} characters — a word is not a reason anyone can review.`;
+    case 'too-long':
+      return `Keep the reason under ${ADMIN_REASON_MAX} characters.`;
+    case 'template':
+      return 'That is the default text, not a reason. Say what actually happened.';
+  }
+}
+
+/** The reason as it should be recorded: trimmed, never the raw body. */
+export function reasonOf(body: unknown, headers?: Record<string, unknown>): string | null {
+  const raw = statedReason(body, headers);
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}

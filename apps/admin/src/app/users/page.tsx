@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchUsers, suspendUser, unsuspendUser, type AdminUser } from '@/lib/api';
+import { askReason } from '@/lib/ask-reason';
 
 const STATUS_CLASS: Record<string, string> = {
   ACTIVE: 'bg-green-500/20 text-green-400',
@@ -13,8 +14,10 @@ export default function UsersPage() {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['users'], queryFn: () => fetchUsers() });
   const suspendMutation = useMutation({
-    mutationFn: ({ id, suspended }: { id: string; suspended: boolean }) =>
-      suspended ? unsuspendUser(id) : suspendUser(id, 'Suspended by admin'),
+    // [ADM-006] The reason was the constant 'Suspended by admin' — a field,
+    // not an explanation. The operator states one, or nothing happens.
+    mutationFn: ({ id, suspended, reason }: { id: string; suspended: boolean; reason: string }) =>
+      suspended ? unsuspendUser(id) : suspendUser(id, reason),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
   });
 
@@ -59,7 +62,7 @@ export default function UsersPage() {
                   <td className="p-4 text-right">
                     {user.status === 'SUSPENDED' ? (
                       <button
-                        onClick={() => suspendMutation.mutate({ id: user.id, suspended: true })}
+                        onClick={() => { const reason = askReason({ action: 'unsuspend this account', subject: `${user.firstName} ${user.lastName}` }); if (reason) suspendMutation.mutate({ id: user.id, suspended: true, reason }); }}
                         disabled={suspendMutation.isPending}
                         className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] text-white hover:bg-white/10 disabled:opacity-50"
                       >
@@ -67,7 +70,7 @@ export default function UsersPage() {
                       </button>
                     ) : user.status === 'ACTIVE' ? (
                       <button
-                        onClick={() => { if (window.confirm(`Suspend ${user.firstName} ${user.lastName}?`)) suspendMutation.mutate({ id: user.id, suspended: false }); }}
+                        onClick={() => { const reason = askReason({ action: 'suspend this account', subject: `${user.firstName} ${user.lastName}` }); if (reason) suspendMutation.mutate({ id: user.id, suspended: false, reason }); }}
                         disabled={suspendMutation.isPending}
                         className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] text-white hover:bg-[var(--accent)]/80 disabled:opacity-50"
                       >

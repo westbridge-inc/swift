@@ -10,6 +10,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { ratingReportTenancyCounter } from '../plugins/observability';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // [R048-002] A rating report resolves to exactly one tenant — its reporter, its
@@ -79,7 +80,7 @@ async function makeReport(tenantId: string, ratingId: string, reporterId: string
   return report;
 }
 
-const inject = (method: 'GET' | 'POST', url: string, token: string, payload?: unknown) => app.inject({ method, url, headers: { authorization: `Bearer ${token}` }, ...(payload ? { payload } : {}) });
+const inject = (method: 'GET' | 'POST', url: string, token: string, payload?: unknown) => app.inject({ method, url, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), authorization: `Bearer ${token}` }, ...(payload ? { payload } : {}) });
 const count = async (outcome: string) => (await ratingReportTenancyCounter.get()).values.find((v) => v.labels['outcome'] === outcome)?.value ?? 0;
 
 let adminA: { userId: string; token: string };

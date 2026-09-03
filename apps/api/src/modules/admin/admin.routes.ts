@@ -39,7 +39,7 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
-import { capabilityMode, decideCapability, routeTemplateOf } from './admin-authority';
+import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilityMode, decideCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -50,12 +50,12 @@ import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-secu
 import { revealPickupCode, rotatePickupCode, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
-import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
+import { AppError, NotFoundError, ForbiddenError, ValidationError } from '../../utils/errors';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import { assertNoZoneOverlap } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { createHash } from 'node:crypto';
-import { adminCapabilityCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
+import { adminCapabilityCounter, adminReasonCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
@@ -686,6 +686,29 @@ export async function adminRoutes(app: FastifyInstance) {
     );
   });
 
+  // [ADM-006] A CONSEQUENTIAL ACTION STATES WHY, before it happens.
+  //
+  // The record showed what an admin did and never why, so no ban, waiver,
+  // settlement or price change could be reviewed, appealed or defended. The
+  // class decides who owes an explanation — C3, C4 and C5 — and it is checked
+  // here, from the same table the capability came from, so a route inherits
+  // the law by being classified rather than by someone remembering.
+  //
+  // preValidation, not onRequest: the body is parsed by then, and refusing
+  // before the handler means a missing reason cannot change anything.
+  app.addHook('preValidation', async (request: any) => {
+    const routeUrl = routeTemplateOf(request, app.prefix);
+    const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeUrl}`];
+    if (!authority) return; // the capability hook already refused it
+    const problem = reasonProblem(authority.cls, request.body, request.headers);
+    if (!problem) {
+      if (ADMIN_ACTION_CLASSES[authority.cls].requiresReason) adminReasonCounter.labels('stated', authority.cls).inc();
+      return;
+    }
+    adminReasonCounter.labels(problem, authority.cls).inc();
+    throw new ValidationError(reasonRefusal(problem, authority.cls));
+  });
+
   // Every successful admin STATE CHANGE is audited, automatically. A scoped
   // onResponse hook (plugin encapsulation: admin routes only) means a new
   // mutating route is covered the day it ships — the same philosophy as the
@@ -703,13 +726,22 @@ export async function adminRoutes(app: FastifyInstance) {
     try {
       const params = (request.params ?? {}) as Record<string, string>;
       const body = request.body ? JSON.stringify(request.body).slice(0, 2000) : undefined;
+      // [ADM-006] The reason is recorded as a NAMED field, not left to be dug
+      // out of a truncated body — it is the answer an appeal or an audit is
+      // met with, and it must survive the raw payload's eventual removal
+      // (ADM-004), which is the next clause on this row.
+      const reason = reasonOf(request.body, request.headers);
       await app.prisma.auditLog.create({
         data: {
           userId,
           action: `ADMIN ${request.method} ${routeUrl}`,
           entity: isAuditedRead ? 'integrity' : (routeUrl.split('/').filter(Boolean)[0] ?? 'admin'),
           entityId: params['id'] ?? params['key'] ?? params['userId'] ?? '-',
-          changes: body ? { params, body } : { params },
+          changes: {
+            params,
+            ...(reason ? { reason } : {}),
+            ...(body ? { body } : {}),
+          },
           ipAddress: request.ip,
           userAgent: request.headers['user-agent'],
         },
@@ -5208,11 +5240,17 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** POST /ratings/:id/moderate — publish (clear hold) | remove | exclude. */
   app.post<{ Params: { id: string } }>('/ratings/:id/moderate', { preHandler: [adminGuard] }, async (request) => {
+    // [ADM-006] `reason` is the operator's written justification on every
+    // consequential action, platform-wide. This route had been using that name
+    // for its removal CATEGORY, so the category is `category` now and the two
+    // are no longer one word doing two jobs — the category says which rule was
+    // broken, the reason says what actually happened.
     const body = z.object({
       action: z.enum(['publish', 'remove', 'exclude']),
-      reason: z.enum(['FRAUD', 'RETALIATION', 'OFF_PLATFORM_ISSUE', 'TEST_ACCOUNT', 'MODERATION', 'OTHER']).optional(),
+      category: z.enum(['FRAUD', 'RETALIATION', 'OFF_PLATFORM_ISSUE', 'TEST_ACCOUNT', 'MODERATION', 'OTHER']).optional(),
+      reason: z.string().trim().max(500).optional(),
       note: z.string().trim().max(300).optional(),
-    }).refine((b) => b.action === 'publish' || b.reason != null, { message: 'reason required' }).parse(request.body);
+    }).refine((b) => b.action === 'publish' || b.category != null, { message: 'category required' }).parse(request.body);
 
     const rating = await tenantPrisma.rating.findUnique({ where: { id: request.params.id } });
     if (!rating) throw new NotFoundError('Rating', request.params.id);
@@ -5223,7 +5261,7 @@ export async function adminRoutes(app: FastifyInstance) {
         data: { isPublic: true, flagged: false, flagReason: null },
       }));
     } else {
-      const stateReason = body.action === 'remove' ? 'MODERATION' : `ADMIN_${body.reason}`;
+      const stateReason = body.action === 'remove' ? 'MODERATION' : `ADMIN_${body.category}`;
       await mutationOrNotFound('Rating', rating.id, () => tenantPrisma.rating.update({
         where: { id: rating.id },
         data: {
@@ -5238,7 +5276,7 @@ export async function adminRoutes(app: FastifyInstance) {
           userId: rating.raterId,
           type: 'SYSTEM_ANNOUNCEMENT',
           title: 'A review of yours was removed',
-          body: `A review you wrote was removed for: ${(body.reason ?? 'MODERATION').toLowerCase().replace(/_/g, ' ')}.`,
+          body: `A review you wrote was removed for: ${(body.category ?? 'MODERATION').toLowerCase().replace(/_/g, ' ')}.`,
           data: { kind: 'rating_removed' },
         }).catch(() => undefined);
       }

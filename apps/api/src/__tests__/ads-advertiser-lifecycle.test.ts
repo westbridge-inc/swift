@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // Swift Ads Phase 1b/1c — advertiser registration + the founder review queue
 // (ads-platform spec §4). "Done = a real signup lands in the founder's queue
@@ -38,10 +39,10 @@ const REG = {
 };
 
 const post = (url: string, payload: unknown, token?: string) =>
-  app.inject({ method: 'POST', url, payload: payload as Record<string, unknown>, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) } });
+  app.inject({ method: 'POST', url, payload: payload as Record<string, unknown>, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) } });
 const put = (url: string, payload: unknown, token: string) =>
-  app.inject({ method: 'PUT', url, payload: payload as Record<string, unknown>, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` } });
-const get = (url: string, token: string) => app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${token}` } });
+  app.inject({ method: 'PUT', url, payload: payload as Record<string, unknown>, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json', authorization: `Bearer ${token}` } });
+const get = (url: string, token: string) => app.inject({ method: 'GET', url, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), authorization: `Bearer ${token}` } });
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';

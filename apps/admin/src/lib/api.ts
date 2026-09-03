@@ -462,9 +462,11 @@ export const resolveModerationReport = (
 export const fetchRatingsModeration = () => apiFetch('/api/v1/admin/ratings/moderation');
 export const resolveRatingReport = (id: string, action: 'uphold' | 'dismiss') =>
   apiFetch(`/api/v1/admin/rating-reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }) });
+// [ADM-006] `category` says which rule was broken; `reason` is what the
+// operator actually saw, in their words, and the server requires it.
 export const moderateRating = (
   id: string,
-  body: { action: 'publish' | 'remove' | 'exclude'; reason?: string },
+  body: { action: 'publish' | 'remove' | 'exclude'; category?: string; reason: string },
 ) => apiFetch(`/api/v1/admin/ratings/${id}/moderate`, { method: 'POST', body: JSON.stringify(body) });
 
 // Swift Ads review — the two gates on the whole ads revenue path. An

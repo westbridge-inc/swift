@@ -15,6 +15,7 @@ import { SubscriptionService } from '../modules/subscription/subscription.servic
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // the revenue engine. Hardest paths: idempotency under
@@ -305,7 +306,7 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
       method: 'POST',
       url: `/api/v1/admin/subscriptions/${subId}/topup`,
       payload: { amount: 100000, reference: `BANK-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(res.statusCode).toBe(200);
 
@@ -662,7 +663,7 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     const resA = await app.inject({
       method: 'POST', url: `/api/v1/admin/subscriptions/${a.subId}/topup`,
       payload: { amount: 100000, reference: `ADMINSURVIVES-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(resA.statusCode).toBe(200);
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: a.subId } })).status).toBe('ACTIVE');
@@ -684,7 +685,7 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     const resB = await app.inject({
       method: 'POST', url: `/api/v1/admin/subscriptions/${b.subId}/topup`,
       payload: { amount: 100000, reference: `DOCSDEAD-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(resB.statusCode).toBe(200);
     const vendB = await app.prisma.vendor.findUniqueOrThrow({ where: { id: b.vendorId } });

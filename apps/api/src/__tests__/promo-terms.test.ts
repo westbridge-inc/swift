@@ -16,6 +16,7 @@ import { loginWithOtp } from './helpers/otp';
 import { allocatePromo, promoCapacity, promoDiscount } from '../utils/order-total';
 import { mergedPromoTerms, promoTermsProblems, scanPromoFunding } from '../modules/promo/promo-terms';
 import { promoFundingGauge } from '../plugins/observability';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // [M-32] Promo update bypasses creation bounds; redeemed value lacks a
@@ -75,7 +76,7 @@ async function makeShop(ownerUserId: string) {
 }
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload: unknown, token: string) {
-  return app.inject({ method, url, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}), headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` } });
+  return app.inject({ method, url, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}), headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json', authorization: `Bearer ${token}` } });
 }
 
 async function shopper() {

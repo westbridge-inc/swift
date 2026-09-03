@@ -13,6 +13,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { nanoid } from 'nanoid';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // DLQ admin (mission-control §5.7): failed background jobs get eyes, and
@@ -99,12 +100,12 @@ describe('[TA-S0-005] compare-and-act is atomic in Redis', () => {
       return original(args as never);
     }) as never);
     try {
-      const discard = app.inject({ method: 'DELETE', url: `/api/v1/admin/dlq/order/${job.id}`, headers: adminHeaders() });
+      const discard = app.inject({ method: 'DELETE', url: `/api/v1/admin/dlq/order/${job.id}`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
       for (let i = 0; i < 100 && !held; i++) await new Promise((r) => setTimeout(r, 20));
       expect(held).toBe(true); // Discard has read "failed" and is parked before its act
 
       // Retry lands first: the job is live work again.
-      const requeue = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`, headers: adminHeaders(), payload: {} });
+      const requeue = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
       expect(requeue.statusCode).toBe(200);
       expect(await job.getState()).toBe('waiting');
 
@@ -125,11 +126,11 @@ describe('[TA-S0-005] compare-and-act is atomic in Redis', () => {
 
   it('the other order: Discard claims first → Retry is refused with the same 409 and the job is gone', async () => {
     const job = await failedJob('race-discard-first');
-    const discard = await app.inject({ method: 'DELETE', url: `/api/v1/admin/dlq/order/${job.id}`, headers: adminHeaders() });
+    const discard = await app.inject({ method: 'DELETE', url: `/api/v1/admin/dlq/order/${job.id}`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
     expect(discard.statusCode).toBe(200);
     expect(await testQueue.getJob(job.id!)).toBeUndefined();
 
-    const requeue = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`, headers: adminHeaders(), payload: {} });
+    const requeue = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
     expect([404, 409]).toContain(requeue.statusCode); // gone: nothing to retry, and never a resurrection
   });
 
@@ -150,7 +151,7 @@ describe('GET /admin/dlq', () => {
   it('rejects non-admins', async () => {
     const res = await app.inject({
       method: 'GET', url: '/api/v1/admin/dlq',
-      headers: { authorization: `Bearer ${customerToken}` },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${customerToken}` },
     });
     expect([401, 403, 404]).toContain(res.statusCode);
   });
@@ -158,7 +159,7 @@ describe('GET /admin/dlq', () => {
   it('returns the failed-job list (empty queue = empty list)', async () => {
     const res = await app.inject({
       method: 'GET', url: '/api/v1/admin/dlq',
-      headers: { authorization: `Bearer ${adminToken}` },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` },
     });
     expect(res.statusCode).toBe(200);
     expect(Array.isArray(res.json().data)).toBe(true);
@@ -187,7 +188,7 @@ describe('GET /admin/dlq', () => {
 
     const list = await app.inject({
       method: 'GET', url: '/api/v1/admin/dlq',
-      headers: { authorization: `Bearer ${adminToken}` },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` },
     });
     const rows = list.json().data as Array<{ queue: string; id: string; failedReason: string | null; data: string }>;
     const mine = rows.find((r) => r.id === job.id);
@@ -198,7 +199,7 @@ describe('GET /admin/dlq', () => {
     // Requeue: the job leaves the failed set.
     const requeue = await app.inject({
       method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`,
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
       payload: {},
     });
     expect(requeue.statusCode).toBe(200);
@@ -213,8 +214,7 @@ describe('GET /admin/dlq', () => {
     // operators on the same queue).
     const discardLive = await app.inject({
       method: 'DELETE', url: `/api/v1/admin/dlq/order/${job.id}`,
-      headers: { authorization: `Bearer ${adminToken}` },
-    });
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
     expect(discardLive.statusCode).toBe(409);
     expect(discardLive.json().error.code).toBe('JOB_NO_LONGER_FAILED');
     expect(await testQueue.getJob(job.id!)).toBeTruthy();
@@ -240,8 +240,7 @@ describe('GET /admin/dlq', () => {
     const wrongName = await app.inject({
       method: 'DELETE',
       url: `/api/v1/admin/dlq/order/${job.id}?expectedName=something-else`,
-      headers: { authorization: `Bearer ${adminToken}` },
-    });
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
     expect(wrongName.statusCode).toBe(409);
     expect(wrongName.json().error.code).toBe('JOB_IDENTITY_MISMATCH');
     expect(await testQueue.getJob(job.id!)).toBeTruthy();
@@ -250,8 +249,7 @@ describe('GET /admin/dlq', () => {
     const right = await app.inject({
       method: 'DELETE',
       url: `/api/v1/admin/dlq/order/${job.id}?expectedName=doomed-identity`,
-      headers: { authorization: `Bearer ${adminToken}` },
-    });
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
     expect(right.statusCode).toBe(200);
     expect(await testQueue.getJob(job.id!)).toBeUndefined();
   });
@@ -273,8 +271,7 @@ describe('GET /admin/dlq', () => {
     const before = await app.prisma.auditLog.count({ where: { action: 'DISCARD_DLQ_JOB', entityId: `order:${job.id}` } });
     const res = await app.inject({
       method: 'DELETE', url: `/api/v1/admin/dlq/order/${job.id}`,
-      headers: { authorization: `Bearer ${adminToken}` },
-    });
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
     expect(res.statusCode).toBe(200);
     const after = await app.prisma.auditLog.count({ where: { action: 'DISCARD_DLQ_JOB', entityId: `order:${job.id}` } });
     expect(after).toBe(before + 1);
@@ -304,14 +301,13 @@ describe('GET /admin/dlq', () => {
   it('404s an unknown queue and an unknown job', async () => {
     const badQueue = await app.inject({
       method: 'POST', url: '/api/v1/admin/dlq/nonsense/1/requeue',
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
       payload: {},
     });
     expect(badQueue.statusCode).toBe(404);
     const badJob = await app.inject({
       method: 'DELETE', url: '/api/v1/admin/dlq/order/does-not-exist',
-      headers: { authorization: `Bearer ${adminToken}` },
-    });
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
     expect(badJob.statusCode).toBe(404);
   });
 });
@@ -333,7 +329,7 @@ describe('[A-08] a dead job is only replayed if its class was certified for it',
     const job = await failedJob(`uncertified-${nanoid(6)}`, 'process-billing');
     const res = await app.inject({
       method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`,
-      headers: adminHeaders(), payload: {},
+      headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {},
     });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('REPLAY_NOT_CERTIFIED');
@@ -346,7 +342,7 @@ describe('[A-08] a dead job is only replayed if its class was certified for it',
     const job = await failedJob(`unknown-${nanoid(6)}`, 'not-a-real-job-class');
     const res = await app.inject({
       method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`,
-      headers: adminHeaders(), payload: {},
+      headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {},
     });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.details.policy).toBe('NOT_CERTIFIED');
@@ -357,7 +353,7 @@ describe('[A-08] a dead job is only replayed if its class was certified for it',
     const job = await failedJob(`certified-${nanoid(6)}`, 'qr-attribution-purge');
     const res = await app.inject({
       method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`,
-      headers: adminHeaders(), payload: {},
+      headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {},
     });
     expect(res.statusCode, res.body).toBe(200);
     expect(await job.getState()).toBe('waiting');
@@ -365,7 +361,7 @@ describe('[A-08] a dead job is only replayed if its class was certified for it',
 
   it('every listed dead job carries its own policy — one blanket promise no longer stands for 53', async () => {
     const job = await failedJob(`listed-${nanoid(6)}`, 'process-billing');
-    const res = await app.inject({ method: 'GET', url: '/api/v1/admin/dlq', headers: adminHeaders() });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/admin/dlq', headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON } });
     expect(res.statusCode).toBe(200);
     const row = (res.json().data as Array<{ id: string; recovery?: { policy: string; why: string } }>)
       .find((r) => r.id === String(job.id));

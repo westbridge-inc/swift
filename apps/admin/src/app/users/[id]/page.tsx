@@ -4,6 +4,7 @@ import { use } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchUserDetail, suspendUser, unsuspendUser, banUser } from '@/lib/api';
+import { askReason } from '@/lib/ask-reason';
 import { Section, Row, StatusPill, BackLink, ActionButton, gyd } from '@/components/detail';
 import { statusClass } from '@/lib/status';
 import { MutationError } from '@/components/MutationError';
@@ -16,9 +17,11 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
     qc.invalidateQueries({ queryKey: ['user', id] });
     qc.invalidateQueries({ queryKey: ['users'] });
   };
-  const suspend = useMutation({ mutationFn: () => suspendUser(id, 'Suspended by admin'), onSuccess: invalidate });
+  // [ADM-006] The reason was the constant 'Suspended by admin'. It is the
+  // operator's own words now, and a cancelled prompt cancels the action.
+  const suspend = useMutation({ mutationFn: (reason: string) => suspendUser(id, reason), onSuccess: invalidate });
   const unsuspend = useMutation({ mutationFn: () => unsuspendUser(id), onSuccess: invalidate });
-  const ban = useMutation({ mutationFn: () => banUser(id, 'Banned by admin'), onSuccess: invalidate });
+  const ban = useMutation({ mutationFn: (reason: string) => banUser(id, reason), onSuccess: invalidate });
 
   const u: any = data?.data;
 
@@ -61,10 +64,10 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           {u.status === 'SUSPENDED' ? (
             <ActionButton label="Unsuspend" confirm={`Unsuspend ${name}?`} onClick={() => unsuspend.mutate()} disabled={busy} />
           ) : u.status !== 'BANNED' ? (
-            <ActionButton label="Suspend" confirm={`Suspend ${name}? They can't transact until unsuspended.`} onClick={() => suspend.mutate()} disabled={busy} />
+            <ActionButton label="Suspend" confirm={`Suspend ${name}? They can't transact until unsuspended.`} onClick={() => { const reason = askReason({ action: 'suspend this account', subject: name }); if (reason) suspend.mutate(reason); }} disabled={busy} />
           ) : null}
           {u.status !== 'BANNED' && (
-            <ActionButton label="Ban" danger confirm={`Permanently BAN ${name}? This is not reversible from the console.`} onClick={() => ban.mutate()} disabled={busy} />
+            <ActionButton label="Ban" danger confirm={`Permanently BAN ${name}? This is not reversible from the console.`} onClick={() => { const reason = askReason({ action: 'permanently ban this account', subject: name }); if (reason) ban.mutate(reason); }} disabled={busy} />
           )}
         </div>
       </div>

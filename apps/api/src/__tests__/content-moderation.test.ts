@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // ---------------------------------------------------------------------------
 // STORE-001: UGC reporting + moderation queue (store-compliance §5.4). Apple
@@ -35,9 +36,9 @@ async function mkUser(roles: UserRole[], activeRole: UserRole) {
 const report = (token: string | null, body: unknown) =>
   app.inject({ method: 'POST', url: '/api/v1/reports', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, payload: body as Record<string, unknown> });
 const queue = (qs = '') =>
-  app.inject({ method: 'GET', url: `/api/v1/admin/moderation/reports${qs}`, headers: { authorization: `Bearer ${adminToken}` } });
+  app.inject({ method: 'GET', url: `/api/v1/admin/moderation/reports${qs}`, headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` } });
 const resolve = (id: string, body: unknown, token = adminToken) =>
-  app.inject({ method: 'PUT', url: `/api/v1/admin/moderation/reports/${id}`, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, payload: body as Record<string, unknown> });
+  app.inject({ method: 'PUT', url: `/api/v1/admin/moderation/reports/${id}`, headers: { 'x-swift-reason': TEST_ADMIN_REASON,  'content-type': 'application/json', authorization: `Bearer ${token}` }, payload: body as Record<string, unknown> });
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -112,7 +113,7 @@ describe('admin moderation queue (STORE-001)', () => {
     expect(res.json().pendingTotal).toBeGreaterThanOrEqual(1);
     expect(res.json().data.every((r: { status: string }) => r.status === 'PENDING')).toBe(true);
 
-    const noAuth = await app.inject({ method: 'GET', url: '/api/v1/admin/moderation/reports' });
+    const noAuth = await app.inject({ method: 'GET', url: '/api/v1/admin/moderation/reports', headers: { 'x-swift-reason': TEST_ADMIN_REASON } });
     expect(noAuth.statusCode).toBe(401);
   });
 

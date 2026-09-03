@@ -16,6 +16,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { OrderService, reconcileMissingEarnings } from '../modules/order/order.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { loginWithOtp } from './helpers/otp';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // [W-25] A store's attestation now carries the provider reference from its own
 // wallet message — a bare tap is refused (REFERENCE_REQUIRED), and one reference
@@ -561,7 +562,7 @@ describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmi
     const order = await makeMmgOrder('ACCEPTED', { withRider: false }); // payment PENDING
     const refused = await app.inject({
       method: 'PUT', url: `/api/v1/admin/orders/${order.id}/cancel`,
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
       payload: { reason: 'ops', refund: true },
     });
     expect(refused.statusCode).toBe(409);
@@ -573,7 +574,7 @@ describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmi
     // evidence the customer path writes.
     const cancelled = await app.inject({
       method: 'PUT', url: `/api/v1/admin/orders/${order.id}/cancel`,
-      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
       payload: { reason: 'ops cancel' },
     });
     expect(cancelled.statusCode).toBe(200);

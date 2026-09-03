@@ -13,6 +13,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { AdsRevenueService } from '../modules/ads/revenue.service';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 // Ads §15 operator console. The revenue MERGE GATE is the dashboards law /
 // acceptance #11: booked revenue must tie to paid invoices EXACTLY (delta 0)
@@ -85,9 +86,9 @@ async function seedPaidCampaign(opts: { price?: number; refundWeek2?: boolean } 
   return { advertiser: a, placement: p, campaign: c, price };
 }
 
-const get = (url: string, token: string) => app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${token}` } });
+const get = (url: string, token: string) => app.inject({ method: 'GET', url, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), authorization: `Bearer ${token}` } });
 const putJson = (url: string, payload: unknown, token: string) =>
-  app.inject({ method: 'PUT', url, payload: payload as Record<string, unknown>, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` } });
+  app.inject({ method: 'PUT', url, payload: payload as Record<string, unknown>, headers: { ...(url.includes('/api/v1/admin') ? { 'x-swift-reason': TEST_ADMIN_REASON } : {}), 'content-type': 'application/json', authorization: `Bearer ${token}` } });
 
 function multipartBody(fields: Record<string, string>, file?: { mime: string; content: Buffer }) {
   const boundary = `----swift${nanoid(8)}`;
@@ -293,7 +294,7 @@ describe('§15.7 house ads manager', () => {
       { placementId: placement.id, kind: 'IMAGE', headline: 'Swift Deals', ctaLabel: 'Order now', sort: '2' },
       { mime: 'image/png', content: REAL_PNG },
     );
-    const created = await app.inject({ method: 'POST', url: '/api/v1/admin/ads/house', payload: good.payload, headers: { 'content-type': good.contentType, authorization: `Bearer ${admin.token}` } });
+    const created = await app.inject({ method: 'POST', url: '/api/v1/admin/ads/house', payload: good.payload, headers: { 'x-swift-reason': TEST_ADMIN_REASON,  'content-type': good.contentType, authorization: `Bearer ${admin.token}` } });
     expect(created.statusCode).toBe(200);
     const row = created.json().data as { id: string; fileUrl: string; sort: number };
     houseAdIds.push(row.id);
@@ -301,7 +302,7 @@ describe('§15.7 house ads manager', () => {
     expect(row.sort).toBe(2);
 
     const bad = multipartBody({ placementId: placement.id, kind: 'IMAGE' }, { mime: 'image/png', content: Buffer.alloc(64, 7) });
-    const rejected = await app.inject({ method: 'POST', url: '/api/v1/admin/ads/house', payload: bad.payload, headers: { 'content-type': bad.contentType, authorization: `Bearer ${admin.token}` } });
+    const rejected = await app.inject({ method: 'POST', url: '/api/v1/admin/ads/house', payload: bad.payload, headers: { 'x-swift-reason': TEST_ADMIN_REASON,  'content-type': bad.contentType, authorization: `Bearer ${admin.token}` } });
     expect(rejected.statusCode).toBe(400);
 
     const updated = await putJson(`/api/v1/admin/ads/house/${row.id}`, { sort: 0, active: false }, admin.token);

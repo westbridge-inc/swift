@@ -40,6 +40,8 @@ describe('user suspension mutation', () => {
   it('confirms and suspends through the exact endpoint and reason payload', async () => {
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal('confirm', confirm);
+    // [ADM-006] the operator is asked why; the reason is theirs, not a template
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const fetchMock = mockApi(
       userHandler((request) => {
         if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/users/user-1/suspend') {
@@ -69,11 +71,12 @@ describe('user suspension mutation', () => {
     );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/users/user-1/suspend`);
     expect(init?.method).toBe('PUT');
-    expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Suspended by admin' });
+    expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Repeated no-shows after three written warnings' });
   });
 
   it('renders a suspension failure and leaves the active account controls intact', async () => {
     vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const fetchMock = mockApi(
       userHandler((request) => {
         if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/users/user-1/suspend') {
