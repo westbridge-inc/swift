@@ -56,6 +56,7 @@ import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig
 import { createHash } from 'node:crypto';
 import { billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
+import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
@@ -1955,8 +1956,15 @@ export async function adminRoutes(app: FastifyInstance) {
     reason: z.enum(['SPAM', 'HARASSMENT', 'HATE_SPEECH', 'VIOLENCE', 'SEXUAL_CONTENT', 'CSAE', 'ILLEGAL_GOODS', 'OTHER']).optional(),
   });
   const resolveReportSchema = z.object({
-    status: z.enum(['REVIEWING', 'ACTIONED', 'DISMISSED']),
+    // [A-17] PROPOSE_DISMISS is the first half of dual control on a child-safety
+    // report: it records who wants it dismissed and why, and leaves the report
+    // open for a second reviewer.
+    status: z.enum(['REVIEWING', 'ACTIONED', 'DISMISSED', 'PROPOSE_DISMISS']),
     note: z.string().trim().max(2000).optional(),
+    disposition: z.enum(['ENFORCED', 'ENFORCED_AND_REPORTED', 'NO_VIOLATION', 'DUPLICATE']).optional(),
+    enforcementRef: z.string().trim().max(200).optional(),
+    authorityRef: z.string().trim().max(200).optional(),
+    evidencePreserved: z.boolean().optional(),
   });
 
   app.get('/moderation/reports', { preHandler: [adminGuard] }, async (request) => {
@@ -1992,9 +2000,51 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/moderation/reports/:id', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { status, note } = resolveReportSchema.parse(request.body ?? {});
+    const body = resolveReportSchema.parse(request.body ?? {});
+    const { status, note } = body;
     const existing = await tenantPrisma.contentReport.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('ContentReport', id);
+
+    // [A-17] A child-safety report does not close like a spam report. What was
+    // decided must be CODED, an enforcement outcome must name what was
+    // enforced and confirm the evidence is preserved — which the published
+    // child-safety standards promise — and a dismissal takes two people.
+    // Ordinary moderation is deliberately untouched: requiring a case file for
+    // a spam report would push operators to mislabel reports to clear the
+    // queue, which is worse than the problem.
+    const isCsae = existing.reason === 'CSAE';
+    if (status === 'PROPOSE_DISMISS') {
+      if (!isCsae) {
+        throw new AppError(400, 'PROPOSAL_NOT_APPLICABLE', 'Only a child-safety report needs a proposed dismissal — dismiss it directly.');
+      }
+      const proposed = await mutationOrNotFound('ContentReport', id, () => tenantPrisma.contentReport.update({
+        where: { id },
+        data: {
+          status: 'REVIEWING',
+          dismissProposedBy: request.user.userId,
+          dismissProposedAt: new Date(),
+          ...(body.disposition !== undefined ? { disposition: body.disposition } : {}),
+          ...(note !== undefined ? { resolutionNote: note } : {}),
+        },
+      }));
+      return { success: true, data: proposed };
+    }
+
+    if (isCsae) {
+      const problems = csaeClosureProblems({
+        status,
+        disposition: body.disposition ?? existing.disposition,
+        enforcementRef: body.enforcementRef ?? existing.enforcementRef,
+        authorityRef: body.authorityRef ?? existing.authorityRef,
+        evidencePreserved: body.evidencePreserved ?? existing.evidencePreserved,
+        dismissProposedBy: existing.dismissProposedBy,
+        actorId: request.user.userId,
+      });
+      if (problems.length > 0) {
+        throw new AppError(400, 'CSAE_CLOSURE_INCOMPLETE', `This child-safety report cannot be closed yet: ${problems.join('; ')}`, { problems });
+      }
+    }
+
     // ACTIONED/DISMISSED close the report (stamp who + when); REVIEWING just
     // claims it. Enforcement (remove the rating, ban the user) uses the existing
     // admin endpoints — the report records the DECISION, not the mechanism.
@@ -2004,6 +2054,10 @@ export async function adminRoutes(app: FastifyInstance) {
       data: {
         status,
         ...(note !== undefined ? { resolutionNote: note } : {}),
+        ...(body.disposition !== undefined ? { disposition: body.disposition } : {}),
+        ...(body.enforcementRef !== undefined ? { enforcementRef: body.enforcementRef } : {}),
+        ...(body.authorityRef !== undefined ? { authorityRef: body.authorityRef } : {}),
+        ...(body.evidencePreserved !== undefined ? { evidencePreserved: body.evidencePreserved } : {}),
         ...(closing ? { resolvedBy: request.user.userId, resolvedAt: new Date() } : {}),
       },
     }));
