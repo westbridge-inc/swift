@@ -63,6 +63,12 @@ jobs:
         run: pnpm --filter @swift/admin test
       - name: Web unit tests
         run: pnpm --filter @swift/web test
+      # [D-12 / D-17] The desktop ops console had no test script at all — the
+      # one surface in this repository that can requeue a dead job and close a
+      # child-safety report, with nothing grading it. ci-gates asserts every
+      # package with a `test` script is invoked here.
+      - name: Desktop unit tests
+        run: pnpm --filter @swift/desktop test
 
   api-test:
     name: API Tests

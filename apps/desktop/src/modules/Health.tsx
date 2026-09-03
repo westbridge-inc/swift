@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { discardDlqJob, fetchAlertsHealth, fetchDlq, fetchHealth, requeueDlqJob } from '../lib/api';
+import { acknowledgementPrompt, failureSummary, payloadSummary, replayVerdict } from '../lib/dlqView';
 
 // Health (spec §5.7): is the platform alive, and what died in the queues.
 // The DLQ is where retry-exhausted jobs get eyes; requeue/discard are audited.
@@ -13,7 +14,8 @@ export default function Health() {
   const alerts = useQuery({ queryKey: ['alerts-health'], queryFn: fetchAlertsHealth, refetchInterval: 60_000 });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['dlq'] });
   const requeue = useMutation({
-    mutationFn: ({ queue, id }: { queue: string; id: string }) => requeueDlqJob(queue, id),
+    mutationFn: ({ queue, id, acknowledged }: { queue: string; id: string; acknowledged?: boolean }) =>
+      requeueDlqJob(queue, id, acknowledged ?? false),
     onSettled: refresh,
   });
   const discard = useMutation({
@@ -124,13 +126,38 @@ export default function Health() {
                   <span className="ml-2 text-xs text-neutral-400">#{j.id} · {j.attemptsMade} attempts</span>
                 </p>
                 <div className="flex gap-2">
-                  <button
-                    onClick={() => requeue.mutate({ queue: j.queue, id: j.id })}
-                    disabled={requeue.isPending}
-                    className="rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold disabled:opacity-40"
-                  >
-                    Requeue
-                  </button>
+                  {/* [D-12] The API classifies every job class for replay
+                      (A-08) and sends its verdict with the job. This console
+                      used to ignore it and offer one identical button on all
+                      53 — an offer that read as "this is safe" for the 45 the
+                      server refuses. */}
+                  {(() => {
+                    const verdict = replayVerdict(j);
+                    if (!verdict.offered) {
+                      return (
+                        <span
+                          title={verdict.why}
+                          className="rounded-lg border border-neutral-200 px-3 py-1.5 text-xs font-semibold text-neutral-400"
+                        >
+                          {verdict.label}
+                        </span>
+                      );
+                    }
+                    return (
+                      <button
+                        onClick={() => {
+                          if (verdict.needsAcknowledgement
+                            && !window.confirm(acknowledgementPrompt(j, verdict))) return;
+                          requeue.mutate({ queue: j.queue, id: j.id, acknowledged: verdict.needsAcknowledgement });
+                        }}
+                        disabled={requeue.isPending}
+                        title={verdict.why}
+                        className="rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold disabled:opacity-40"
+                      >
+                        {verdict.label}
+                      </button>
+                    );
+                  })()}
                   <button
                     // [WR-020] Discard permanently drops the job — confirm it.
                     onClick={() => {
@@ -145,8 +172,15 @@ export default function Health() {
                   </button>
                 </div>
               </div>
-              {j.failedReason && <p className="mt-1 text-xs text-[var(--swift-red)]">{j.failedReason}</p>}
-              <p className="mt-1 truncate text-xs text-neutral-400">{j.data}</p>
+              {/* [D-12] The failure text quotes whatever caused it, and the
+                  payload is whatever the job was about — a phone, an address,
+                  a payer reference. `truncate` is CSS: the whole string was in
+                  the DOM, selectable and in every screenshot. The console
+                  needs the SHAPE to triage, not the contents. */}
+              {failureSummary(j.failedReason) && (
+                <p className="mt-1 text-xs text-[var(--swift-red)]">{failureSummary(j.failedReason)}</p>
+              )}
+              <p className="mt-1 truncate text-xs text-neutral-400">{payloadSummary(j.data)}</p>
             </div>
           ))}
         </div>
