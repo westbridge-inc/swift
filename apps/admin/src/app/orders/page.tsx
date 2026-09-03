@@ -63,7 +63,9 @@ export default function OrdersPage() {
                   <td className="p-4">
                     {order.fulfillment === 'PICKUP' ? (
                       <span className="text-[var(--accent)] font-medium">
-                        Takeaway{order.pickupCode ? ` · ${order.pickupCode}` : ''}
+                        {/* [A-15] the pickup code is the customer's credential and the
+                            vendor verifies it — the board says a collection is due, never the value */}
+                        Takeaway
                       </span>
                     ) : (
                       <span className="text-[var(--muted)]">

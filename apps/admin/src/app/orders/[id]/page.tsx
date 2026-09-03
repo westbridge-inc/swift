@@ -277,10 +277,19 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   <span>{o.fulfillment}</span>
                 </div>
               )}
-              {o.pickupCode && (
+              {/* [A-15] The pickup code is a credential: the customer holds it, the
+                  vendor types what the customer reads out, the server compares. It is
+                  not in this response and not on this screen. What an operator needs
+                  to answer a support call is whether a code exists and whether the
+                  order has been locked out by wrong guesses. */}
+              {o.handover?.pickupCodeIssued && (
                 <div className="flex justify-between">
                   <span className="text-[var(--muted)]">Pickup code</span>
-                  <span className="font-mono">{o.pickupCode}</span>
+                  <span className={o.handover.locked ? 'text-[var(--danger)]' : ''}>
+                    {o.handover.locked
+                      ? `Locked — ${o.handover.attempts} wrong tries`
+                      : `Issued to the customer${o.handover.attempts > 0 ? ` · ${o.handover.attempts} wrong tries` : ''}`}
+                  </span>
                 </div>
               )}
               {o.deliveryAddress && !isRide && (

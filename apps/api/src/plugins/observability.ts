@@ -655,6 +655,16 @@ export const tripShareGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [A-15] The audited door to a handover secret: how often support reveals a
+ *  pickup code, asks for one that does not exist, or rotates a spent code.
+ *  A quiet counter is the normal state; a rising one is an access review. */
+export const handoverBreakGlassCounter = new client.Counter({
+  name: 'swift_handover_break_glass_total',
+  help: 'Handover secret break-glass events (reveal, reveal_no_code, rotate)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 /** [S-19] Ops alerts: opened, acknowledged, escalated (zero ACK by deadline),
  *  on-call texts, drills, and alerts nobody can acknowledge. */
 export const opsAlertCounter = new client.Counter({
