@@ -123,6 +123,7 @@ const TENANT_QUERY_EXTENSIONS = {
   // [R048-007] A money-surface command carries the authority to change an
   // operator's money. It is tenant-owned like the surface it acts on.
   moneySurfaceCommand: scoped,
+  ratingOutbox: scoped,
   privilegedApproval: scoped,
   sensitiveReadLog: scoped,
   // [MKT-2] The stock ledger is tenant-owned: one operator's inventory

@@ -803,7 +803,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const flagged = await svc.flagSuspiciousRatings();
         // Double-blind window: a no-show counterpart must not hide feedback forever.
         const released = await svc.releaseDoubleBlind();
-        ctx.log.info(`Rating sweep: ${flagged} flagged, ${released} double-blind released`);
+        // [R048-008] every command a persisted rating still owes — safety intake, release, stats — is finished here
+        // when the process that wrote the rating did not get to it (one row per rating and command: exactly once).
+        const outbox = await new RatingService(ctx.prisma, ctx.io).processRatingOutbox();
+        ctx.log.info(`Rating sweep: ${flagged} flagged, ${released} double-blind released, outbox ${outbox.processed} processed / ${outbox.failed} retried`);
       }
 
       if (job.name === 'collusion-affinity-scan') {

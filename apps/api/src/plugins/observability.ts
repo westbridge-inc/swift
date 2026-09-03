@@ -129,6 +129,15 @@ export const adminCapabilityCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [R048-008] The one rating pipeline: persisted, alias_tag (an underscore alias canonicalised), unknown_tag,
+ *  outbox_processed, outbox_retry, outbox_sweep, safety_incident. */
+export const ratingPipelineCounter = new client.Counter({
+  name: 'swift_rating_pipeline_total',
+  help: 'Rating pipeline events (persisted/alias_tag/unknown_tag/outbox_processed/outbox_retry/outbox_sweep/safety_incident)',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 /** [R048-007] Money-surface authority transitions and refusals: staged, stage_replay, cancelled, cleared, applied,
  *  apply_lease_missed, refused_authority_moved, refused_no_decision, refused_step_up, refused_control_unavailable,
  *  notice_sent, notice_retry, notice_sweep. */
