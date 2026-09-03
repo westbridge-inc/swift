@@ -1,12 +1,14 @@
 /** @jsxImportSource react */
 import { useState, useEffect, type ReactNode } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { RefreshControl, ScrollView, View } from 'react-native';
+import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Card, ErrorState, LinkText, LoadingBlock, PillButton, Screen, Segmented, T } from '../../../kit';
 import { DeltaBadge, GUTTER, InlineInput, KpiTile, fmtDate } from '../shared';
+import { classifyOwedLedger, markPaidPrompt } from '../../../lib/riderFeesOwed';
+import { errorMessage } from '../../../lib/apiError';
 import { StandingCard } from '../../../components/StandingCard';
 import { API_URL, vendorApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
@@ -518,8 +520,13 @@ function InsightMetric({ label, value, detail, badge }: { label: string; value: 
 function RiderFeesOwedCard() {
   const q = useVendorCashSettlements();
   const confirm = useConfirmVendorCashSettlement();
-  const rows: any[] = q.data?.unsettled ?? [];
-  if (rows.length === 0) return null;
+  // [MOB-046] A failed read used to produce an empty list, and an empty list
+  // removed this card from the screen — which to a store owner is not an
+  // outage, it is the absence of a debt. Money owed to a person is the last
+  // thing that may be rendered by omission.
+  const ledger = classifyOwedLedger({ isLoading: q.isLoading, error: q.error, data: q.data, fetched: q.isFetched });
+  if (ledger.state === 'empty') return null;
+  const rows: any[] = ledger.rows;
   return (
     <Card style={{ marginBottom: space.lg }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -527,9 +534,28 @@ function RiderFeesOwedCard() {
           YOU OWE RIDERS
         </T>
         <T variant="label" weight="bold">
-          {money(q.data?.summary?.owed ?? 0)}
+          {ledger.owed == null ? '—' : money(ledger.owed)}
         </T>
       </View>
+      {ledger.state !== 'ready' ? (
+        <View style={{ paddingTop: space.md }}>
+          <T variant="caption" tone="muted">
+            {ledger.state === 'loading'
+              ? 'Checking what you owe riders…'
+              : "Swift can't reach this right now, so what you owe is not shown. It has not gone away — try again in a moment."}
+          </T>
+          {ledger.state === 'unavailable' ? (
+            <PillButton
+              label="Try again"
+              variant="soft"
+              size="sm"
+              style={{ alignSelf: 'flex-start', marginTop: space.sm }}
+              loading={q.isFetching}
+              onPress={() => { void q.refetch(); }}
+            />
+          ) : null}
+        </View>
+      ) : null}
       <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
         MMG orders — the delivery fee came to you with the customer&apos;s payment. Hand it to the rider in cash (usually at pickup).
       </T>
@@ -566,7 +592,23 @@ function RiderFeesOwedCard() {
                 style={{ alignSelf: 'flex-start', marginTop: space.sm }}
                 loading={confirm.isPending && confirm.variables === r.id}
                 disabled={confirm.isPending}
-                onPress={() => confirm.mutate(r.id)}
+                onPress={() => {
+                  // [MOB-046] One tap used to record a cash payment with no
+                  // confirmation and no visible failure. This is an attestation
+                  // that money left the till and reached a named person: it
+                  // names them and the amount, because a mis-tap on the wrong
+                  // row is the same mistake as not paying at all.
+                  const prompt = markPaidPrompt(r, money(r.amount));
+                  Alert.alert(prompt.title, prompt.body, [
+                    { text: 'Not yet', style: 'cancel' },
+                    {
+                      text: prompt.confirm,
+                      onPress: () => confirm.mutate(r.id, {
+                        onError: (mutationError) => Alert.alert('Not recorded', errorMessage(mutationError)),
+                      }),
+                    },
+                  ]);
+                }}
               />
             </>
           )}
