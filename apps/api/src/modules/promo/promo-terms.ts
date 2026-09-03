@@ -51,8 +51,25 @@ export function promoTermsProblems(t: PromoTermsInput): string[] {
   if (!Number.isFinite(t.discountValue) || t.discountValue < 0) problems.push('discountValue must be zero or more');
   else if (t.discountValue > PROMO_MONEY_MAX) problems.push(`discountValue cannot exceed ${PROMO_MONEY_MAX}`);
   if (t.discountType === 'PERCENTAGE' && t.discountValue > 100) problems.push('a percentage discount cannot exceed 100');
+  // [A-22] A FIXED_AMOUNT discount is MONEY, in a currency with no subunit in
+  // use. A percentage may legitimately be 12.5; GY$1,500.70 off is not a figure
+  // anyone can be given.
+  if (t.discountType === 'FIXED_AMOUNT' && Number.isFinite(t.discountValue) && !Number.isInteger(t.discountValue)) {
+    problems.push('a fixed discount is money — whole GYD only');
+  }
+  // [A-22] The type fields are mutually exclusive. A FREE_DELIVERY promo whose
+  // discountValue is 5,000 says two different things at once, and BOTH are
+  // handed to the customer app — which one it acts on is not a decision to
+  // leave open.
+  if (t.discountType === 'FREE_DELIVERY' && t.discountValue !== 0) {
+    problems.push('a free-delivery promo carries no discount value — its value must be 0');
+  }
   if (!money(t.maxDiscount)) problems.push(`maxDiscount must be between 0 and ${PROMO_MONEY_MAX} (0 is an explicit cap of zero)`);
   if (!money(t.minOrderAmount)) problems.push(`minOrderAmount must be between 0 and ${PROMO_MONEY_MAX}`);
+  // [A-22] Both are money. A fractional threshold or cap is a figure no order
+  // total can ever meet exactly.
+  if (t.maxDiscount != null && Number.isFinite(t.maxDiscount) && !Number.isInteger(t.maxDiscount)) problems.push('maxDiscount is money — whole GYD only');
+  if (t.minOrderAmount != null && Number.isFinite(t.minOrderAmount) && !Number.isInteger(t.minOrderAmount)) problems.push('minOrderAmount is money — whole GYD only');
   if (!isDate(t.validFrom)) problems.push('validFrom must be a date');
   if (!isDate(t.validUntil)) problems.push('validUntil must be a date');
   if (isDate(t.validFrom) && isDate(t.validUntil) && t.validFrom.getTime() >= t.validUntil.getTime()) problems.push('validUntil must be after validFrom');

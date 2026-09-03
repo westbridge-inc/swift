@@ -388,3 +388,114 @@ describe('the operations clause: the scan reports what the law would have caught
     expect(value('invalid_terms')).toBe(dirty.invalidTerms);
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// [A-22] A DAY THE OPERATOR TYPES IS A DAY IN GUYANA, AND MONEY IS WHOLE.
+//
+// `z.coerce.date()` reads a bare `YYYY-MM-DD` as UTC midnight. Guyana is UTC−4,
+// so a window entered as two dates went live at 8pm the evening BEFORE it was
+// meant to, and died at 8pm on its last day — during the hours people order.
+// ---------------------------------------------------------------------------
+const inGuyana = (d: Date) => new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'America/Guyana', dateStyle: 'short', timeStyle: 'medium',
+}).format(d);
+
+describe('[A-22] a promo window is a window in Guyana', () => {
+  it('a date-only window starts at local midnight and ends at local 23:59:59 — not four hours early', async () => {
+    const res = await inject('POST', '/api/v1/admin/promos', {
+      code: code('TZ'), description: 'guyana window', discountType: 'PERCENTAGE', discountValue: 10,
+      validFrom: '2026-09-04', validUntil: '2026-10-04', maxUsesPerUser: 1,
+    }, adminToken);
+    expect(res.statusCode, res.body).toBe(200);
+    createdPromoIds.push(res.json().data.id);
+    const row = await app.prisma.promoCode.findUniqueOrThrow({ where: { id: res.json().data.id } });
+
+    // The instants, stated plainly: UTC−4.
+    expect(row.validFrom.toISOString()).toBe('2026-09-04T04:00:00.000Z');
+    expect(row.validUntil.toISOString()).toBe('2026-10-05T03:59:59.999Z');
+    // And what an operator in Georgetown sees.
+    expect(inGuyana(row.validFrom)).toBe('04/09/2026, 00:00:00');
+    expect(inGuyana(row.validUntil)).toBe('04/10/2026, 23:59:59');
+  });
+
+  it('the promo is STILL live at 8pm on its last day — the exact hour it used to die', async () => {
+    const res = await inject('POST', '/api/v1/admin/promos', {
+      code: code('EVE'), description: 'evening', discountType: 'PERCENTAGE', discountValue: 10,
+      validFrom: '2026-09-04', validUntil: '2026-10-04', maxUsesPerUser: 1,
+    }, adminToken);
+    createdPromoIds.push(res.json().data.id);
+    const row = await app.prisma.promoCode.findUniqueOrThrow({ where: { id: res.json().data.id } });
+
+    // 20:00 in Georgetown on the last day = 00:00Z on the 5th.
+    const lastEvening = new Date('2026-10-05T00:00:00.000Z');
+    expect(inGuyana(lastEvening)).toBe('04/10/2026, 20:00:00');
+    // The check every consumer makes: `now > validUntil` means expired.
+    expect(lastEvening.getTime() > row.validUntil.getTime()).toBe(false);
+  });
+
+  it('an explicit instant is respected as given — saying something precise is not overridden', async () => {
+    const exact = '2026-09-04T13:30:00.000Z';
+    const res = await inject('POST', '/api/v1/admin/promos', {
+      code: code('EXACT'), description: 'exact', discountType: 'PERCENTAGE', discountValue: 10,
+      validFrom: exact, validUntil: '2026-10-04T09:15:00.000Z', maxUsesPerUser: 1,
+    }, adminToken);
+    expect(res.statusCode, res.body).toBe(200);
+    createdPromoIds.push(res.json().data.id);
+    const row = await app.prisma.promoCode.findUniqueOrThrow({ where: { id: res.json().data.id } });
+    expect(row.validFrom.toISOString()).toBe(exact);
+    expect(row.validUntil.toISOString()).toBe('2026-10-04T09:15:00.000Z');
+  });
+
+  it('a patched end date moves to the END of the day the operator typed', async () => {
+    const created = await inject('POST', '/api/v1/admin/promos', {
+      code: code('PATCH'), description: 'patch', discountType: 'PERCENTAGE', discountValue: 10,
+      ...window(), maxUsesPerUser: 1,
+    }, adminToken);
+    const id = created.json().data.id; createdPromoIds.push(id);
+    const patched = await inject('PUT', `/api/v1/admin/promos/${id}`, { validUntil: '2026-12-31' }, adminToken);
+    expect(patched.statusCode, patched.body).toBe(200);
+    const row = await app.prisma.promoCode.findUniqueOrThrow({ where: { id } });
+    expect(inGuyana(row.validUntil)).toBe('31/12/2026, 23:59:59');
+  });
+});
+
+describe('[A-22] the type fields are mutually exclusive, and money is whole', () => {
+  const base = { description: 'x', maxUsesPerUser: 1, ...window() };
+
+  it('a FREE_DELIVERY promo carrying a discount value is refused; zero is accepted', async () => {
+    const conflicting = await inject('POST', '/api/v1/admin/promos', {
+      code: code('FD1'), ...base, discountType: 'FREE_DELIVERY', discountValue: 5000,
+    }, adminToken);
+    expect(conflicting.statusCode).toBe(400);
+    expect(conflicting.json().error.code).toBe('INVALID_PROMO_TERMS');
+
+    const clean = await inject('POST', '/api/v1/admin/promos', {
+      code: code('FD2'), ...base, discountType: 'FREE_DELIVERY', discountValue: 0,
+    }, adminToken);
+    expect(clean.statusCode, clean.body).toBe(200);
+    createdPromoIds.push(clean.json().data.id);
+  });
+
+  it('a fractional FIXED_AMOUNT is refused — but a fractional PERCENTAGE is legitimate', async () => {
+    const fractionalMoney = await inject('POST', '/api/v1/admin/promos', {
+      code: code('FX1'), ...base, discountType: 'FIXED_AMOUNT', discountValue: 1500.7,
+    }, adminToken);
+    expect(fractionalMoney.statusCode).toBe(400);
+
+    const halfPercent = await inject('POST', '/api/v1/admin/promos', {
+      code: code('FX2'), ...base, discountType: 'PERCENTAGE', discountValue: 12.5,
+    }, adminToken);
+    expect(halfPercent.statusCode, halfPercent.body).toBe(200);
+    createdPromoIds.push(halfPercent.json().data.id);
+  });
+
+  it('a fractional threshold or cap is refused — no order total can meet it exactly', async () => {
+    for (const patch of [{ minOrderAmount: 999.99 }, { maxDiscount: 250.5 }]) {
+      const res = await inject('POST', '/api/v1/admin/promos', {
+        code: code('MN'), ...base, discountType: 'PERCENTAGE', discountValue: 10, ...patch,
+      }, adminToken);
+      expect(res.statusCode, `${JSON.stringify(patch)} → ${res.body}`).toBe(400);
+    }
+  });
+});
