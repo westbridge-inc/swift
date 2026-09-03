@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, Chip, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
+import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
 import { useOrderAction, useRetryDispatch, useVendorOrder, usePickingActions, useVendorMenu } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
 import { openExternal } from '../../../lib/openExternal';
@@ -18,6 +18,9 @@ import {
   orderActions,
   prettyStatus,
 } from '../shared';
+
+/** [MOB-050] The customer's collection code, as the server mints it. */
+export const PICKUP_CODE_LENGTH = 6;
 
 /** One row of the immutable status log — evidence-grade order history. */
 function TimelineRow({ entry, last }: { entry: any; last: boolean }) {
@@ -103,11 +106,26 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
   const orderAction = useOrderAction();
   const retryDispatch = useRetryDispatch();
   const [confirmReject, setConfirmReject] = useState(false);
+  // [MOB-050] The counter hand-over is a ceremony, not a button: the vendor
+  // TYPES what the customer reads out. The screen used to print the code and
+  // send nothing, so the server (which requires it) refused every attempt and
+  // the failure was swallowed — a button that could not succeed.
+  const [pickupCode, setPickupCode] = useState('');
   const [subFor, setSubFor] = useState<string | null>(null);
   const picking = usePickingActions();
   const menu = useVendorMenu();
 
-  if (isLoading || !orderId) {
+  // [MOB-050] A missing orderId is not a slow network. It used to render the
+  // loading block forever, so a bad deep link looked like a hang.
+  if (!orderId) {
+    return (
+      <Screen>
+        <SubHeader title="Order" navigation={navigation} />
+        <ErrorState message="This order could not be opened — the link did not name an order." onRetry={() => navigation.goBack()} />
+      </Screen>
+    );
+  }
+  if (isLoading) {
     return (
       <Screen>
         <SubHeader title={route.params?.orderNumber ? `#${route.params.orderNumber}` : 'Order'} navigation={navigation} />
@@ -146,6 +164,8 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
   const isAppt = order.fulfillment === 'APPOINTMENT';
   const apptMobile = isAppt && !!order.deliveryAddress && order.deliveryAddress !== order.pickupAddress;
   const actions = orderActions(order);
+  // [MOB-050] The one state where a counter hand-over is due.
+  const awaitingCollection = !terminal && ['READY', 'READY_FOR_PICKUP'].includes(String(order.status).toUpperCase());
   const busy = orderAction.isPending;
   // The log is stored newest-first; the timeline reads placed → latest.
   const timeline: any[] = [...(order.statusHistory ?? [])].reverse();
@@ -157,7 +177,9 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
       setConfirmReject(true);
       return;
     }
-    orderAction.mutate({ id: order.id, action });
+    orderAction.mutate(
+      action === 'complete-pickup' ? { id: order.id, action, code: pickupCode } : { id: order.id, action },
+    );
   };
 
   return (
@@ -202,18 +224,40 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
           </View>
         ) : null}
 
-        {/* Takeaway code — the handover gate for counter pickups */}
-        {isPickup && order.pickupCode && !terminal ? (
-          <Card style={{ alignItems: 'center', marginBottom: space.md }}>
-            <T variant="caption" weight="bold" tone="muted">
-              PICKUP CODE
+{/* [MOB-050 · A-15] The hand-over gate for counter pickups. The vendor is
+            the VERIFIER, so the vendor never sees the code: the customer reads it
+            out and the store types it, and the server compares. This card used to
+            PRINT the code — which made the check prove nothing — while the action
+            sent none, so the server refused every attempt.
+            Same ceremony as the ride PIN on the mover side. */}
+        {isPickup && awaitingCollection ? (
+          <Card style={{ marginBottom: space.md }}>
+            <View style={{ alignItems: 'center', marginBottom: space.md }}>
+              <T variant="caption" weight="bold" tone="muted">
+                HANDOVER CHECK
+              </T>
+              <T variant="body" weight="bold" center style={{ marginTop: 2 }}>
+                Ask {customerName} for their code
+              </T>
+            </View>
+            <CodeInput
+              value={pickupCode}
+              onChange={setPickupCode}
+              length={PICKUP_CODE_LENGTH}
+              error={orderAction.isError}
+              autoFocus={false}
+            />
+            <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+              Their code proves you are handing the order to the person who placed it.
             </T>
-            <T variant="display" tone="brand" style={{ letterSpacing: 6, marginTop: 2 }}>
-              {order.pickupCode}
-            </T>
-            <T variant="caption" tone="muted" center style={{ marginTop: 2 }}>
-              Ask the customer for this code — and take payment — before handing over.
-            </T>
+            {/* [MOB-050] The server's own words — "that code does not match, N
+                attempts remaining", "too many attempts, contact support". The
+                screen used to swallow every one of them. */}
+            {orderAction.isError ? (
+              <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
+                {(orderAction.error as Error)?.message ?? 'That did not go through — try again.'}
+              </T>
+            ) : null}
           </Card>
         ) : null}
 
@@ -440,7 +484,7 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
               label={a.label}
               variant={a.action === 'reject' ? 'outline' : 'primary'}
               style={{ flex: 1 }}
-              disabled={busy}
+              disabled={busy || (a.action === 'complete-pickup' && pickupCode.length < PICKUP_CODE_LENGTH)}
               loading={busy && a.action !== 'reject'}
               onPress={() => runAction(a.action)}
             />
