@@ -147,6 +147,10 @@ export const ALGO_DEFAULTS = {
   'velocity.limits': {
     'promo.validate': { max: 10, perSeconds: 600, clusterMax: 30 },
     'return.request': { max: 5, perSeconds: 86_400, clusterMax: 10 },
+    // [R048-007] the money surfaces: a pay link is changed a handful of times a day at most,
+    // and these fail CLOSED when the control is unavailable (integrity/velocity.ts)
+    'money.mmg-link': { max: 5, perSeconds: 86_400, clusterMax: 10 },
+    'money.mmg-link.cancel': { max: 10, perSeconds: 86_400, clusterMax: 20 },
   } as Record<string, { max: number; perSeconds: number; clusterMax?: number }>,
   /**
    * [ALG-01] The fairness band. Candidates whose score is within `band` of

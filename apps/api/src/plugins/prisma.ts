@@ -120,6 +120,9 @@ const TENANT_QUERY_EXTENSIONS = {
   // belongs to its user's tenant); the opportunistic retry therefore works
   // within the acting tenant — the obligation is discharged per tenant.
   storageOrphan: scoped,
+  // [R048-007] A money-surface command carries the authority to change an
+  // operator's money. It is tenant-owned like the surface it acts on.
+  moneySurfaceCommand: scoped,
 };
 
 /** Model names enrolled for tenant scoping. Derived — never hand-written. */

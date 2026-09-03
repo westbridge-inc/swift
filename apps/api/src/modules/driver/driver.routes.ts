@@ -46,6 +46,7 @@ import {
 } from '../rides/passenger-custody';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { requireStepUp } from '../auth/step-up';
+import { assertVelocity } from '../integrity/velocity';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { arrivalEvidence } from '../dispatch/arrival-evidence';
 
@@ -170,7 +171,10 @@ export async function driverRoutes(app: FastifyInstance) {
     // [ALG-34 / ALG-INV-14] The MMG pay link is where the driver's money goes:
     // step-up first; a new link is STAGED behind a cool-off with the old one
     // still live and the driver told. Clearing it is immediate.
-    if (mmgPayUrl !== undefined) await requireStepUp(app, request);
+    if (mmgPayUrl !== undefined) {
+      await requireStepUp(app, request);
+      await assertVelocity(app, request, 'money.mmg-link'); // [R048-007] a money surface: fails closed when the control is down
+    }
 
     const driver = await app.prisma.driver.update({
       where: { userId: request.user.userId },
@@ -207,9 +211,9 @@ export async function driverRoutes(app: FastifyInstance) {
       },
     });
     if (mmgPayUrl === null) {
-      await clearMmgLink({ prisma: app.prisma, io: app.io }, { actor: 'DRIVER', entityId: me.id });
+      await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'DRIVER', entityId: me.id, userId: request.user.userId });
     } else if (mmgPayUrl !== undefined) {
-      await stageMmgLinkChange({ prisma: app.prisma, io: app.io }, {
+      await stageMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
         actor: 'DRIVER', entityId: me.id, userId: request.user.userId, sessionId: request.authSessionId, newUrl: mmgPayUrl,
       });
     }
@@ -226,8 +230,9 @@ export async function driverRoutes(app: FastifyInstance) {
    *  link change and sign out every other device. No step-up — cancelling
    *  is always the safe direction. */
   app.delete('/profile/mmg-pay-url/pending', { preHandler: [app.authenticate] }, async (request) => {
+    await assertVelocity(app, request, 'money.mmg-link.cancel'); // [R048-007]
     const me = await getDriver(request.user.userId);
-    const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io }, {
+    const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
       actor: 'DRIVER', entityId: me.id, userId: request.user.userId, keepSessionId: request.authSessionId,
     });
     return { success: true, data };

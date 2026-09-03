@@ -1467,9 +1467,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       if (job.name === 'mmg-link-apply') {
         // [ALG-34 / ALG-INV-14] Staged MMG pay link changes go live only after
         // their cool-off passed with no cancellation from the owner.
-        const { applyDueMmgLinkChanges } = await import('../modules/integrity/money-surface');
+        const { applyDueMmgLinkChanges, deliverPendingMoneySurfaceNotices } = await import('../modules/integrity/money-surface');
         const r = await applyDueMmgLinkChanges({ prisma: ctx.prisma, io: ctx.io });
         if (r.applied > 0) ctx.log.info(r, 'money-surface: MMG pay links applied after cool-off');
+        // [R048-007] every committed owner-notice intent not yet delivered is retried here
+        const n = await deliverPendingMoneySurfaceNotices({ prisma: ctx.prisma, io: ctx.io });
+        if (n.delivered > 0 || n.pending > 0) ctx.log.info(n, 'money-surface: owner notices delivered from the outbox');
         return;
       }
       if (job.name === 'algo-decision-retention') {

@@ -41,6 +41,7 @@ import { processReviewText } from '../rating/review-scrub';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
+import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { riderCounterpartySelect } from '../../utils/counterparty';
@@ -981,6 +982,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (mmgPayUrl !== undefined) {
       requireRole(access, 'OWNER');
       await requireStepUp(app, request);
+      await assertVelocity(app, request, 'money.mmg-link'); // [R048-007] a money surface: fails closed when the control is down
     }
     // undefined = field not sent (leave as-is); null/'' = the store takes its
     // number down. publicPhoneForWrite collapses both of the latter to null.
@@ -1016,9 +1018,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     if (mmgPayUrl === null) {
-      await clearMmgLink({ prisma: app.prisma, io: app.io }, { actor: 'VENDOR', entityId: vendorId });
+      await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'VENDOR', entityId: vendorId, userId: request.user.userId });
     } else if (mmgPayUrl !== undefined) {
-      await stageMmgLinkChange({ prisma: app.prisma, io: app.io }, {
+      await stageMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
         actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newUrl: mmgPayUrl,
       });
     }
@@ -1046,8 +1048,9 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  link change and sign out every other device. Owner only; no step-up —
    *  cancelling is always the safe direction. */
   app.delete('/profile/mmg-pay-url/pending', auth, async (request) => {
+    await assertVelocity(app, request, 'money.mmg-link.cancel'); // [R048-007]
     const { vendorId } = await requireVendor(app, request, 'OWNER');
-    const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io }, {
+    const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
       actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, keepSessionId: request.authSessionId,
     });
     return { success: true, data };
