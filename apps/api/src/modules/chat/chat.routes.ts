@@ -2,11 +2,16 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
 import { digitRun, mediaUrlCarriesSecret, redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
-
+import {
+  assertRoomAccess, chatMediaFolder, isServerIssuedMediaId, reconcileParticipants, resolveRoomAuthority, rotateLeakedRidePin,
+  serializeChatMessage, serializeChatMessages,
+} from './chat-authority';
 import { NotificationService } from '../notification/notification.service';
 import { assertUsersMayContact } from '../moderation/user-block.service';
-import { getTenantId } from '../../plugins/tenant-context';
-import { NotFoundError, ForbiddenError } from '../../utils/errors';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { chatGuardCounter } from '../../plugins/observability';
+import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 
 /** How far back the split-code check looks. Bounded on BOTH axes on purpose:
  *  an unbounded scan of a long conversation would put an O(history) query on
@@ -19,7 +24,7 @@ const SPLIT_CODE_WINDOW_MS = 10 * 60 * 1000;
 /** The digits this sender has recently put into this room, oldest first, so a
  *  code delivered across several messages reads the way the RECIPIENT reads
  *  it: in order, as one string. */
-async function recentSenderDigits(app: any, roomId: string, senderId: string): Promise<string> {
+async function recentSenderDigits(app: FastifyInstance, roomId: string, senderId: string): Promise<string> {
   const since = new Date(Date.now() - SPLIT_CODE_WINDOW_MS);
   const rows = await app.prisma.chatMessage.findMany({
     where: { chatRoomId: roomId, senderId, createdAt: { gte: since } },
@@ -37,6 +42,9 @@ const createRoomSchema = z.object({
 const sendMessageSchema = z.object({
   message: z.string().min(1).max(2000),
   messageType: z.string().min(1).max(30).default('text'),
+  /** [R048-004] A media object id minted by this room's upload route — never an arbitrary URL. */
+  mediaId: z.string().max(256).optional(),
+  /** Legacy field, refused: a client-supplied URL is not stored (see `mediaId`). */
   mediaUrl: z.string().max(2048).optional(),
 });
 
@@ -44,6 +52,14 @@ const messagesQuerySchema = z.object({
   before: z.coerce.date().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+
+// ---------------------------------------------------------------------------
+// [R048-004] Every boundary of a room — create, media upload, send, history,
+// read, list, and the socket door in plugins/socket.ts — passes
+// `assertRoomAccess`: the order's CURRENT people inside the order's tenant, a
+// closed room read-only. Every message leaves through the ONE serializer in
+// chat-authority.ts. There is no default tenant anywhere in this file.
+// ---------------------------------------------------------------------------
 
 export async function chatRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
@@ -55,13 +71,19 @@ export async function chatRoutes(app: FastifyInstance) {
     // Verify user is part of this order
     const order = await app.prisma.order.findUnique({
       where: { id: orderId },
-      select: { customerId: true, riderId: true, driverId: true, rider: { select: { userId: true } }, driver: { select: { userId: true } } },
+      select: { tenantId: true, customerId: true, riderId: true, driverId: true, rider: { select: { userId: true } }, driver: { select: { userId: true } } },
     });
+
     // UG-CRAFT-02: chat previously hand-rolled 200-with-success:false error
     // envelopes — axios clients RESOLVED them as success and rendered broken
     // empties. Thrown AppErrors ride the platform taxonomy like every other
     // module (real status codes, standard client error handling).
     if (!order) throw new NotFoundError('Order', orderId);
+    // [R048-004] the order lives in one tenant; a caller bound to another does not see it
+    if (request.tenantId && request.tenantId !== order.tenantId) {
+      chatGuardCounter.labels('create', 'tenant_mismatch').inc();
+      throw new NotFoundError('Order', orderId);
+    }
 
     const participantUserIds = [order.customerId];
     if (order.rider?.userId) participantUserIds.push(order.rider.userId);
@@ -74,7 +96,8 @@ export async function chatRoutes(app: FastifyInstance) {
     // [STORE-002] A block stops contact in BOTH directions. Checked before the
     // room is created rather than only on send, so a blocked party never gets
     // an open room they can watch.
-    const tenantId = getTenantId() ?? 'swift-default';
+    // [R048-004] The tenant is the ORDER's — never a default the caller did not earn.
+    const tenantId = order.tenantId;
     for (const other of participantUserIds.filter((uid) => uid !== request.user.userId)) {
       await assertUsersMayContact(app.prisma, tenantId, request.user.userId, other);
     }
@@ -106,19 +129,68 @@ export async function chatRoutes(app: FastifyInstance) {
       });
     }
 
-    return { success: true, data: room };
+    // [R048-004] The participant rows are a cache of the order's CURRENT people — reconciled on
+    // every open — and the create response is an egress like any other: its messages pass
+    // through the ONE serializer.
+    const authority = await resolveRoomAuthority(app.prisma, room.id);
+    if (authority) {
+      const changed = await reconcileParticipants(app.prisma, authority);
+      if (changed.added || changed.removed) {
+        room = (await app.prisma.chatRoom.findUnique({
+          where: { id: room.id },
+          include: {
+            participants: { include: { user: { select: { id: true, firstName: true, avatar: true } } } },
+            messages: { orderBy: { createdAt: 'desc' }, take: 50 },
+          },
+        })) ?? room;
+      }
+    }
+    const messages = authority ? await serializeChatMessages(room.messages, authority, 'create') : [];
+    return { success: true, data: { ...room, messages } };
+  });
+
+  /**
+   * [R048-004] Chat media is SERVER-ISSUED: the only way to attach an image is
+   * to upload it here, inside the room, as a current participant, while the
+   * room is open. The returned id is the object key under the room's own
+   * folder; a message carrying anything else is refused.
+   */
+  app.post('/rooms/:roomId/media', { preHandler: [app.authenticate] }, async (request) => {
+    const { roomId } = request.params as { roomId: string };
+    await assertRoomAccess(app.prisma, roomId, request.user.userId, { write: true, tenantId: request.tenantId });
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach an image');
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+      chatGuardCounter.labels('media', 'media_rejected').inc();
+      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
+    }
+    const buffer = await file.toBuffer();
+    if (!looksLikeImage(buffer)) {
+      chatGuardCounter.labels('media', 'media_rejected').inc();
+      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    }
+    const { url } = await getStorageProvider().upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: chatMediaFolder(roomId) });
+    if (!isServerIssuedMediaId(url, roomId)) throw new AppError(500, 'MEDIA_ID_UNEXPECTED', 'The storage provider returned an id outside the room folder');
+    return { success: true, data: { mediaId: url } };
   });
 
   // Send a message
   app.post('/rooms/:roomId/messages', { preHandler: [app.authenticate] }, async (request) => {
     const { roomId } = request.params as { roomId: string };
-    const { message, messageType, mediaUrl } = sendMessageSchema.parse(request.body);
+    const { message, messageType, mediaId, mediaUrl } = sendMessageSchema.parse(request.body);
 
-    // Verify participation
-    const participant = await app.prisma.chatRoomParticipant.findFirst({
-      where: { chatRoomId: roomId, userId: request.user.userId },
-    });
-    if (!participant) throw new ForbiddenError('Not a participant');
+    // [R048-004] Authority is the order's CURRENT people, inside the order's tenant, and the room must be open.
+    const access = await assertRoomAccess(app.prisma, roomId, request.user.userId, { write: true, tenantId: request.tenantId });
+
+    // [R048-004] A client-supplied media URL is not stored — not scrubbed, not stored: refused.
+    if (mediaUrl !== undefined) {
+      chatGuardCounter.labels('send', 'media_rejected').inc();
+      throw new AppError(400, 'MEDIA_URL_NOT_ACCEPTED', 'Attach media by uploading it to this conversation first; a URL is not accepted.');
+    }
+    if (mediaId !== undefined && !isServerIssuedMediaId(mediaId, roomId)) {
+      chatGuardCounter.labels('send', 'media_rejected').inc();
+      throw new AppError(400, 'MEDIA_ID_INVALID', 'That attachment does not belong to this conversation.');
+    }
 
     // [STORE-002] Someone can be blocked mid-conversation — which is exactly
     // when a person reaches for it. Refuse the SEND, in both directions, and
@@ -129,13 +201,9 @@ export async function chatRoutes(app: FastifyInstance) {
     // how a customer finds "I left it inside your gate" after they have blocked
     // the person who wrote it; deleting or hiding it would destroy the record
     // at the moment it matters most.
-    const roomParticipants = await app.prisma.chatRoomParticipant.findMany({
-      where: { chatRoomId: roomId, userId: { not: request.user.userId } },
-      select: { userId: true },
-    });
-    const chatTenantId = getTenantId() ?? 'swift-default';
-    for (const other of roomParticipants) {
-      await assertUsersMayContact(app.prisma, chatTenantId, request.user.userId, other.userId);
+    const otherUserIds = [...access.participants.keys()].filter((uid) => uid !== request.user.userId);
+    for (const other of otherUserIds) {
+      await assertUsersMayContact(app.prisma, access.tenantId, request.user.userId, other);
     }
 
     // Off-platform contact detection (spec §2): the message still delivers —
@@ -150,10 +218,8 @@ export async function chatRoutes(app: FastifyInstance) {
     // both defeats the control and lands the secret on a lock screen. Strip it
     // BEFORE the row is written, the socket fires, or a push is built — a
     // stored original is its own disclosure channel.
-    const room = await app.prisma.chatRoom.findUnique({ where: { id: roomId }, select: { orderId: true } });
-    const secrets = room?.orderId
-      ? await app.prisma.order.findUnique({ where: { id: room.orderId }, select: { ridePin: true, pickupCode: true } })
-      : null;
+    const secrets = access.orderId ? access.secrets : null;
+
     // [F-028-02] A code split across messages — "481" then "902" — arrives
     // whole in the ordered transcript while each part looks innocent. Judge
     // this message against the digits THIS sender has already put in THIS
@@ -165,12 +231,12 @@ export async function chatRoutes(app: FastifyInstance) {
       : '';
     const guarded = redactOrderSecrets(message, secrets ?? {}, priorDigits);
     const body = guarded.text;
-    // A mediaUrl is an arbitrary sender-supplied string that is stored and
-    // emitted to the other participant, so a path naming the code crosses
-    // untouched. There is nothing to preserve around a secret in a URL, so
-    // the attachment is dropped rather than mangled into a broken link.
-    const mediaBlocked = mediaUrlCarriesSecret(mediaUrl, secrets ?? {});
-    const safeMediaUrl = mediaBlocked ? undefined : mediaUrl;
+    if (guarded.redacted) chatGuardCounter.labels('send', 'redacted').inc();
+
+    // [R048-004] A server-issued id cannot name the code by construction (a random name under the
+    // room's folder); the check stays as the invariant it is.
+    const mediaBlocked = mediaId !== undefined && mediaUrlCarriesSecret(mediaId, secrets ?? {});
+    const safeMediaId = mediaBlocked ? undefined : mediaId;
 
     const msg = await app.prisma.chatMessage.create({
       data: {
@@ -178,47 +244,48 @@ export async function chatRoutes(app: FastifyInstance) {
         senderId: request.user.userId,
         message: body,
         messageType,
-        mediaUrl: safeMediaUrl,
+        mediaUrl: safeMediaId,
         offPlatformFlag: offPlatform,
       },
     });
 
+    // [R048-004] A live ride PIN typed into chat is in someone's hands now: re-issue it.
+    if (guarded.redacted && access.orderId) await rotateLeakedRidePin(app.prisma, access.orderId, message, secrets ?? {});
+
+    // ONE serializer for every egress: the socket payload, the push body and the response are the same view.
+    const view = await serializeChatMessage(msg, access, 'socket');
+
     // Broadcast via Socket.IO
     app.io.to(`chat:${roomId}`).emit('chat:message', {
-      id: msg.id,
+      id: view.id,
       roomId,
       senderId: request.user.userId,
-      message: msg.message,
-      messageType: msg.messageType,
-      mediaUrl: msg.mediaUrl,
-      createdAt: msg.createdAt,
+      message: view.message,
+      messageType: view.messageType,
+      mediaUrl: view.mediaUrl,
+      createdAt: view.createdAt,
     });
 
-    // Notify other participants
-    const otherParticipants = await app.prisma.chatRoomParticipant.findMany({
-      where: { chatRoomId: roomId, userId: { not: request.user.userId } },
-    });
-
+    // Notify other participants — the order's CURRENT people, not the cached rows
     const sender = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { firstName: true } });
-
     // SWIFT-101: route through NotificationService — the ONE notification path
     // (rule #17) — so a chat message is delivered as a PUSH (when the provider
     // is live), respects the recipient's prefs, and lands in the failure
     // metrics. The old code wrote a row + a socket emit only, so a backgrounded
     // app never learned about the message.
-    for (const p of otherParticipants) {
+    for (const userId of otherUserIds) {
       await notifications.send({
-        userId: p.userId,
+        userId,
         type: 'CHAT_MESSAGE',
         title: `Message from ${sender?.firstName || 'Someone'}`,
-        body: body.substring(0, 100),
+        body: view.message.substring(0, 100),
         data: { roomId, messageId: msg.id },
       });
     }
 
     return {
       success: true,
-      data: msg,
+      data: view,
       // [F-027-12] The redaction warning wins: silently mangling someone's
       // text is worse than the nudge it would have replaced, and this is the
       // one they need to read.
@@ -236,10 +303,8 @@ export async function chatRoutes(app: FastifyInstance) {
     const { roomId } = request.params as { roomId: string };
     const { before, limit } = messagesQuerySchema.parse(request.query);
 
-    const participant = await app.prisma.chatRoomParticipant.findFirst({
-      where: { chatRoomId: roomId, userId: request.user.userId },
-    });
-    if (!participant) throw new ForbiddenError('Not a participant');
+    // [R048-004] reading is bound to the order's CURRENT people too — a reassigned rider does not keep the transcript
+    const access = await assertRoomAccess(app.prisma, roomId, request.user.userId, { tenantId: request.tenantId });
 
     const messages = await app.prisma.chatMessage.findMany({
       where: {
@@ -251,8 +316,8 @@ export async function chatRoutes(app: FastifyInstance) {
     });
 
     // Mark as read
-    await app.prisma.chatRoomParticipant.update({
-      where: { id: participant.id },
+    await app.prisma.chatRoomParticipant.updateMany({
+      where: { chatRoomId: roomId, userId: request.user.userId },
       data: { lastReadAt: new Date() },
     });
 
@@ -263,24 +328,15 @@ export async function chatRoutes(app: FastifyInstance) {
     // messages sent from now on. Stored rows are deliberately left alone: an
     // evidence trail that quietly rewrites itself is worse than one that
     // carries a secret nobody can act on once the code has been used.
-    const historyRoom = await app.prisma.chatRoom.findUnique({ where: { id: roomId }, select: { orderId: true } });
-    const historySecrets = historyRoom?.orderId
-      ? await app.prisma.order.findUnique({ where: { id: historyRoom.orderId }, select: { ridePin: true, pickupCode: true } })
-      : null;
-    const visible = historySecrets
-      ? messages.map((m) => ({
-          ...m,
-          message: redactOrderSecrets(m.message, historySecrets).text,
-          mediaUrl: mediaUrlCarriesSecret(m.mediaUrl, historySecrets) ? null : m.mediaUrl,
-        }))
-      : messages;
-
+    // [R048-004] ...through the ONE serializer: legacy raw text re-scrubbed, legacy raw media hidden.
+    const visible = await serializeChatMessages(messages, access, 'history');
     return { success: true, data: visible.reverse() };
   });
 
   // Mark room as read
   app.put('/rooms/:roomId/read', { preHandler: [app.authenticate] }, async (request) => {
     const { roomId } = request.params as { roomId: string };
+    await assertRoomAccess(app.prisma, roomId, request.user.userId, { tenantId: request.tenantId });
     await app.prisma.chatRoomParticipant.updateMany({
       where: { chatRoomId: roomId, userId: request.user.userId },
       data: { lastReadAt: new Date() },
@@ -300,6 +356,7 @@ export async function chatRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
     const roleFilter = as === 'customer' || as === 'rider' ? { role: as } : {};
+
     // UG-CRAFT-02: bounded — a long-lived account accumulates rooms without
     // limit. The response shape stays a plain array (existing clients read it
     // directly), newest first, with opt-in page/limit for deeper history.
@@ -317,9 +374,19 @@ export async function chatRoutes(app: FastifyInstance) {
       take: limit,
     });
 
-    return {
-      success: true,
-      data: rooms.map((r) => ({
+    // [R048-004] The participant rows are the index; the ORDER is the authority. A room the caller
+    // is no longer part of is dropped (and its cache reconciled); the preview leaves through the
+    // serializer — never a stored row raw.
+    const listed: Array<Record<string, unknown>> = [];
+    for (const r of rooms) {
+      const authority = await resolveRoomAuthority(app.prisma, r.id);
+      if (!authority || !authority.participants.has(request.user.userId) || (request.tenantId && authority.tenantId !== request.tenantId)) {
+        chatGuardCounter.labels('list', 'stale_participant_refused').inc();
+        if (authority) await reconcileParticipants(app.prisma, authority).catch(() => undefined);
+        continue;
+      }
+      const last = r.messages[0];
+      listed.push({
         id: r.id,
         orderId: r.orderId,
         participants: r.participants.map((p) => ({
@@ -328,8 +395,9 @@ export async function chatRoutes(app: FastifyInstance) {
           avatar: p.user.avatar,
           role: p.role,
         })),
-        lastMessage: r.messages[0] || null,
-      })),
-    };
+        lastMessage: last ? await serializeChatMessage(last, authority, 'list') : null,
+      });
+    }
+    return { success: true, data: listed };
   });
 }

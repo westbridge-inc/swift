@@ -20,6 +20,7 @@ import {
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getTenantId } from '../../plugins/prisma';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
+import { deactivateRoom } from '../chat/chat-authority';
 
 // ---------------------------------------------------------------------------
 // Module S: Services (spec §4.6) — hire verified professionals. A ServiceJob is
@@ -517,7 +518,7 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can complete');
     if (!['SCHEDULED', 'IN_PROGRESS'].includes(job.status)) throw new AppError(400, 'BAD_STATE', `Cannot complete a ${job.status.toLowerCase()} job`);
     const updated = await app.prisma.serviceJob.update({ where: { id }, data: { status: 'COMPLETED', completedAt: new Date() } });
-    if (job.chatRoomId) await app.prisma.chatRoom.update({ where: { id: job.chatRoomId }, data: { isActive: false } });
+    if (job.chatRoomId) await deactivateRoom(app.prisma, job.chatRoomId); // [R048-004] compare-and-set: closed exactly once
     // [S0] Completion used to close the chat room and say nothing to anyone.
     // The two-way rating (§4.6) is the only trust signal this marketplace has,
     // and nobody rates a job they were never told had ended. Both sides get the
@@ -543,7 +544,7 @@ export async function servicesRoutes(app: FastifyInstance) {
     const job = await jobForUser(id, request.user.userId);
     if (['COMPLETED', 'CANCELLED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', 'This job is already closed');
     const updated = await app.prisma.serviceJob.update({ where: { id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
-    if (job.chatRoomId) await app.prisma.chatRoom.update({ where: { id: job.chatRoomId }, data: { isActive: false } });
+    if (job.chatRoomId) await deactivateRoom(app.prisma, job.chatRoomId); // [R048-004] compare-and-set: closed exactly once
     // [S0] Cancellation used to be SILENT. A provider who confirmed Tuesday
     // 09:00 and blocked their whole day was never told the customer had gone —
     // they showed up. The other side is always told, and the message states the

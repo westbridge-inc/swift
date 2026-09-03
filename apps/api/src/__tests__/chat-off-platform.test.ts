@@ -60,8 +60,19 @@ beforeAll(async () => {
     },
   });
 
+  // [R048-004] room authority is the ORDER's current people: a room belongs to an order, and the
+  // receiver is that order's rider — a bare participant row is no longer an authority.
+  const riderRow = await app.prisma.rider.create({ data: { userId: u2.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+  const order = await app.prisma.order.create({
+    data: {
+      orderNumber: `OP-${nanoid(8)}`, orderType: 'FOOD_DELIVERY' as never, customerId: u1.id, riderId: riderRow.id, status: 'EN_ROUTE_DELIVERY' as never,
+      deliveryAddress: 'dropoff', deliveryLat: 6.82, deliveryLng: -58.17,
+      subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 0, totalAmount: 900, paymentMethod: 'CASH' as never,
+    },
+  });
   const room = await app.prisma.chatRoom.create({
     data: {
+      orderId: order.id,
       participants: { create: [{ userId: u1.id, role: 'CUSTOMER' }, { userId: u2.id, role: 'RIDER' }] },
     },
   });
@@ -76,6 +87,9 @@ afterAll(async () => {
   }
   await app.prisma.notification.deleteMany({ where: { userId: { in: [userId, otherId] } } });
   await app.prisma.session.deleteMany({ where: { userId } });
+  // [R048-004] the room now belongs to an order, and the receiver is its rider — both go before the users
+  await app.prisma.order.deleteMany({ where: { customerId: userId } });
+  await app.prisma.rider.deleteMany({ where: { userId: otherId } });
   await app.prisma.user.deleteMany({ where: { id: { in: [userId, otherId] } } });
   await app.close();
 });

@@ -117,6 +117,16 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [R048-004] Chat secret protection by surface: redactions (send/socket/push/history/list/create/preview),
+ *  legacy media hidden, a stale participant refused, a write to a closed room refused, a media upload
+ *  rejected, a leaked ride PIN rotated, stale participant rows removed by reconcile. */
+export const chatGuardCounter = new client.Counter({
+  name: 'swift_chat_guard_total',
+  help: 'Chat secret-guard outcomes by surface (redacted/legacy_media_hidden/stale_participant_refused/inactive_room_write_refused/media_rejected/ride_pin_rotated/stale_participant_removed/tenant_mismatch)',
+  labelNames: ['surface', 'outcome'] as const,
+  registers: [registry],
+});
+
 /** [R048-003] Public market / search scope outcomes: an unbound search refused, the public
  *  tenant unresolved, a disabled tenant hit, a cross-tenant page cursor refused, a filter value
  *  rejected, stale index documents removed by a reconcile, and a DB/index parity mismatch. */
