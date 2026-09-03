@@ -64,15 +64,71 @@ export const ADMIN_ACTION_CLASSES: Record<AdminActionClass, AdminActionMeaning> 
   C5: { meaning: 'platform — pricing, config, algorithms, or broadcasts', requiresReason: true, requiresApproval: true },
 };
 
+/**
+ * [ADM-004] The row an action changes.
+ *
+ * The audit trail recorded `{ params, body }` — the REQUEST, not the change.
+ * An investigator could see that a route was called and not what it did, the
+ * 2,000-character truncation lost the tail, and a raw body carried document
+ * numbers, phones and addresses into a table with no privacy shaping.
+ *
+ * Where an action has one subject row, naming its model here lets the trail
+ * record what that row looked like before and after — as digests and a
+ * field-level diff of the fields that matter, never the payload.
+ */
+export interface AdminRouteEntity {
+  /** The Prisma model, as it is named on the client (`subscription`, `order`). */
+  readonly model: string;
+  /** Which route param identifies it. Defaults to `id`. */
+  readonly param?: string;
+  /** The fields whose change is worth naming. The digest covers the whole row
+   *  regardless, so this is what a reader sees first, not the limit of what is
+   *  detected. */
+  readonly fields: readonly string[];
+}
+
 export interface AdminRouteAuthority {
   readonly cls: AdminActionClass;
   readonly capability: string;
+  readonly entity?: AdminRouteEntity;
 }
 
 /** `"<METHOD> <route template>"`, exactly as Fastify reports `routeOptions.url`. */
 export type AdminRouteKey = string;
 
-const c = (cls: AdminActionClass, capability: string): AdminRouteAuthority => ({ cls, capability });
+const c = (cls: AdminActionClass, capability: string, entity?: AdminRouteEntity): AdminRouteAuthority =>
+  (entity ? { cls, capability, entity } : { cls, capability });
+
+/** [ADM-004] Shorthands for the rows the admin surface changes most. */
+const E = {
+  user: { model: 'user', fields: ['status', 'activeRole', 'roles'] },
+  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured'] },
+  rider: { model: 'rider', fields: ['isVerified', 'isAvailable', 'status'] },
+  driver: { model: 'driver', fields: ['isVerified', 'isAvailable', 'rideClass', 'status'] },
+  order: { model: 'order', fields: ['status', 'total', 'refundStatus', 'cancelledAt'] },
+  subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
+  settlement: { model: 'settlement', fields: ['status', 'amount', 'paidAt', 'reference'] },
+  platformConfig: { model: 'platformConfig', param: 'key', fields: ['value'] },
+  promo: { model: 'promoCode', fields: ['isActive', 'discountValue', 'validFrom', 'validUntil'] },
+  zone: { model: 'zone', fields: ['isActive', 'name', 'priority'] },
+  advertiser: { model: 'advertiser', fields: ['status'] },
+  adCampaign: { model: 'adCampaign', fields: ['status'] },
+  adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },
+  adRefundIntent: { model: 'adRefundIntent', fields: ['status', 'amount'] },
+  agentPayment: { model: 'mmgAgentPayment', fields: ['status', 'amount', 'subscriptionId'] },
+  settlementBatch: { model: 'settlementBatch', fields: ['status', 'depositConfirmedAt', 'expectedAmount'] },
+  verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
+  returnRequest: { model: 'returnRequest', fields: ['status', 'refundAmount', 'resolvedAt'] },
+  claim: { model: 'reimbursementClaim', fields: ['status', 'amount', 'paidAt'] },
+  contentReport: { model: 'contentReport', fields: ['status', 'disposition'] },
+  rating: { model: 'rating', fields: ['isPublic', 'moderationState'] },
+  ratingReport: { model: 'ratingReport', fields: ['status'] },
+  approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt'] },
+  agentRequest: { model: 'agentActionRequest', fields: ['status', 'decidedBy', 'decidedAt'] },
+  complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
+  complianceViolation: { model: 'complianceViolation', fields: ['status', 'resolvedAt'] },
+  discoveryCategory: { model: 'discoveryCategory', fields: ['isActive', 'slug', 'name'] },
+} as const satisfies Record<string, AdminRouteEntity>;
 
 /**
  * Every admin route, classified. Grouped as the console groups them.
@@ -89,26 +145,26 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /users': c('C1', 'user.read'),
   'GET /users/:id': c('C1', 'user.read'),
   'GET /users/:id/risk': c('C1', 'user.risk.read'),
-  'PUT /users/:id/suspend': c('C3', 'user.suspend'),
-  'PUT /users/:id/unsuspend': c('C3', 'user.suspend'),
-  'PUT /users/:id/ban': c('C3', 'user.ban'),
+  'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
+  'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
+  'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
 
   // ── Vendors ─────────────────────────────────────────────────────────────
   'GET /vendors': c('C0', 'vendor.read'),
   'GET /vendors/pending': c('C0', 'vendor.read'),
   'GET /vendors/:id': c('C1', 'vendor.read'),
-  'PUT /vendors/:id/approve': c('C3', 'vendor.approve'),
-  'PUT /vendors/:id/suspend': c('C3', 'vendor.suspend'),
-  'PUT /vendors/:id/feature': c('C2', 'vendor.feature'),
+  'PUT /vendors/:id/approve': c('C3', 'vendor.approve', E.vendor),
+  'PUT /vendors/:id/suspend': c('C3', 'vendor.suspend', E.vendor),
+  'PUT /vendors/:id/feature': c('C2', 'vendor.feature', E.vendor),
 
   // ── Movers ──────────────────────────────────────────────────────────────
   'GET /riders': c('C1', 'mover.read'),
   'GET /riders/:id': c('C1', 'mover.read'),
-  'PUT /riders/:id/verify-documents': c('C3', 'mover.verify'),
+  'PUT /riders/:id/verify-documents': c('C3', 'mover.verify', E.rider),
   'GET /drivers': c('C1', 'mover.read'),
   'GET /drivers/:id': c('C1', 'mover.read'),
-  'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify'),
-  'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass'),
+  'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify', E.driver),
+  'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass', E.driver),
 
   // ── Orders and live ops ─────────────────────────────────────────────────
   'GET /orders': c('C1', 'order.read'),
@@ -121,16 +177,16 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders/:id/handover-secret': c('C1', 'order.handover.read'),
   'POST /orders/:id/handover-secret/rotate': c('C2', 'order.handover.rotate'),
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
-  'PUT /orders/:id/cancel': c('C3', 'order.cancel'),
-  'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle'),
+  'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
+  'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
 
   // ── Moderation ──────────────────────────────────────────────────────────
   'GET /moderation/reports': c('C1', 'moderation.read'),
-  'PUT /moderation/reports/:id': c('C3', 'moderation.decide'),
+  'PUT /moderation/reports/:id': c('C3', 'moderation.decide', E.contentReport),
   'GET /ratings/moderation': c('C1', 'moderation.read'),
   'GET /ratings/at-risk': c('C1', 'moderation.read'),
-  'POST /ratings/:id/moderate': c('C3', 'moderation.decide'),
-  'POST /rating-reports/:id/resolve': c('C3', 'moderation.decide'),
+  'POST /ratings/:id/moderate': c('C3', 'moderation.decide', E.rating),
+  'POST /rating-reports/:id/resolve': c('C3', 'moderation.decide', E.ratingReport),
 
   // ── National pricing (founder + default tenant) ─────────────────────────
   'GET /countries': c('C0', 'platform.pricing.read'),
@@ -143,28 +199,28 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /finance/settlements': c('C0', 'finance.read'),
   'GET /finance/cash-settlements': c('C0', 'finance.read'),
   'GET /finance/payment-mix': c('C0', 'finance.read'),
-  'PUT /finance/settlements/:id/process': c('C4', 'finance.settlement.process'),
-  'POST /finance/settlements/:id/adjust': c('C4', 'finance.settlement.adjust'),
+  'PUT /finance/settlements/:id/process': c('C4', 'finance.settlement.process', E.settlement),
+  'POST /finance/settlements/:id/adjust': c('C4', 'finance.settlement.adjust', E.settlement),
 
   // ── Platform configuration ──────────────────────────────────────────────
   'GET /config': c('C0', 'platform.config.read'),
-  'PUT /config/:key': c('C5', 'platform.config.write'),
+  'PUT /config/:key': c('C5', 'platform.config.write', E.platformConfig),
   'GET /promos': c('C0', 'platform.promo.read'),
   'POST /promos': c('C5', 'platform.promo.write'),
-  'PUT /promos/:id': c('C5', 'platform.promo.write'),
-  'POST /promos/:id/rollback': c('C5', 'platform.promo.write'),
-  'DELETE /promos/:id': c('C5', 'platform.promo.write'),
+  'PUT /promos/:id': c('C5', 'platform.promo.write', E.promo),
+  'POST /promos/:id/rollback': c('C5', 'platform.promo.write', E.promo),
+  'DELETE /promos/:id': c('C5', 'platform.promo.write', E.promo),
   'GET /zones': c('C0', 'platform.zone.read'),
   'POST /zones': c('C5', 'platform.zone.write'),
-  'PUT /zones/:id': c('C5', 'platform.zone.write'),
-  'DELETE /zones/:id': c('C5', 'platform.zone.write'),
+  'PUT /zones/:id': c('C5', 'platform.zone.write', E.zone),
+  'DELETE /zones/:id': c('C5', 'platform.zone.write', E.zone),
   'POST /notifications/broadcast': c('C5', 'platform.broadcast'),
 
   // ── Subscriptions ───────────────────────────────────────────────────────
   'GET /subscriptions': c('C0', 'subscription.read'),
   'GET /subscriptions/:id/billing-events': c('C0', 'subscription.read'),
-  'PUT /subscriptions/:id/waive-fee': c('C4', 'subscription.waive'),
-  'POST /subscriptions/:id/topup': c('C4', 'subscription.topup'),
+  'PUT /subscriptions/:id/waive-fee': c('C4', 'subscription.waive', E.subscription),
+  'POST /subscriptions/:id/topup': c('C4', 'subscription.topup', E.subscription),
 
   // ── Ads ─────────────────────────────────────────────────────────────────
   'GET /ads/advertisers/queue': c('C0', 'ads.read'),
@@ -175,16 +231,16 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /ads/campaigns': c('C0', 'ads.read'),
   'GET /ads/settings': c('C0', 'ads.read'),
   'GET /ads/house': c('C0', 'ads.read'),
-  'PUT /ads/advertisers/:id/approve': c('C3', 'ads.advertiser.decide'),
-  'PUT /ads/advertisers/:id/reject': c('C3', 'ads.advertiser.decide'),
-  'PUT /ads/advertisers/:id/suspend': c('C3', 'ads.advertiser.suspend'),
-  'PUT /ads/advertisers/:id/reinstate': c('C3', 'ads.advertiser.suspend'),
+  'PUT /ads/advertisers/:id/approve': c('C3', 'ads.advertiser.decide', E.advertiser),
+  'PUT /ads/advertisers/:id/reject': c('C3', 'ads.advertiser.decide', E.advertiser),
+  'PUT /ads/advertisers/:id/suspend': c('C3', 'ads.advertiser.suspend', E.advertiser),
+  'PUT /ads/advertisers/:id/reinstate': c('C3', 'ads.advertiser.suspend', E.advertiser),
   'PUT /ads/creatives/:id/approve': c('C2', 'ads.creative.decide'),
   'PUT /ads/creatives/:id/reject': c('C2', 'ads.creative.decide'),
-  'PUT /ads/campaigns/:id/kill': c('C3', 'ads.campaign.kill'),
-  'POST /ads/refund-intents/:id/settle': c('C4', 'ads.refund.settle'),
+  'PUT /ads/campaigns/:id/kill': c('C3', 'ads.campaign.kill', E.adCampaign),
+  'POST /ads/refund-intents/:id/settle': c('C4', 'ads.refund.settle', E.adRefundIntent),
   'POST /ads/refund-intents/backfill': c('C4', 'ads.refund.backfill'),
-  'PUT /ads/invoices/:id/mark-paid': c('C4', 'ads.invoice.pay'),
+  'PUT /ads/invoices/:id/mark-paid': c('C4', 'ads.invoice.pay', E.adInvoice),
   'POST /ads/placements/seed': c('C2', 'ads.placement.write'),
   'PUT /ads/placements/:id': c('C2', 'ads.placement.write'),
   'PUT /ads/settings': c('C5', 'ads.settings.write'),
@@ -222,12 +278,12 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /billing/usd-migration/mode-b/rollback': c('C5', 'platform.migration.run'),
   'POST /billing/san-backfill': c('C4', 'billing.san.backfill'),
   'POST /billing/agent-payments': c('C4', 'billing.payment.record'),
-  'POST /billing/agent-payments/:id/attach': c('C4', 'billing.payment.attach'),
-  'POST /billing/agent-payments/:id/refund-flag': c('C4', 'billing.payment.flag'),
-  'POST /billing/agent-payments/:id/note': c('C2', 'billing.payment.note'),
+  'POST /billing/agent-payments/:id/attach': c('C4', 'billing.payment.attach', E.agentPayment),
+  'POST /billing/agent-payments/:id/refund-flag': c('C4', 'billing.payment.flag', E.agentPayment),
+  'POST /billing/agent-payments/:id/note': c('C2', 'billing.payment.note', E.agentPayment),
   'POST /billing/settlement-import': c('C4', 'billing.settlement.import'),
-  'POST /billing/settlement-batches/:id/confirm-deposit': c('C4', 'billing.deposit.confirm'),
-  'POST /billing/settlement-batches/:id/adjust-deposit': c('C4', 'billing.deposit.adjust'),
+  'POST /billing/settlement-batches/:id/confirm-deposit': c('C4', 'billing.deposit.confirm', E.settlementBatch),
+  'POST /billing/settlement-batches/:id/adjust-deposit': c('C4', 'billing.deposit.adjust', E.settlementBatch),
   'POST /billing/collections/:subscriptionId/contact': c('C2', 'billing.collections.contact'),
 
   // ── Algorithms ──────────────────────────────────────────────────────────
@@ -245,26 +301,26 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
 
   // ── Verification ────────────────────────────────────────────────────────
   'GET /verification/queue': c('C0', 'verification.read'),
-  'PUT /verification/:id/approve': c('C3', 'verification.decide'),
-  'PUT /verification/:id/reject': c('C3', 'verification.decide'),
+  'PUT /verification/:id/approve': c('C3', 'verification.decide', E.verification),
+  'PUT /verification/:id/reject': c('C3', 'verification.decide', E.verification),
   'GET /verification/:id/document-url': c('C1', 'verification.document.read'),
 
   // ── Returns and cash rules ──────────────────────────────────────────────
   'GET /returns': c('C0', 'returns.read'),
-  'PUT /returns/:id/resolve': c('C4', 'returns.resolve'),
-  'PUT /returns/:id/refund-settled': c('C4', 'returns.refund.settle'),
+  'PUT /returns/:id/resolve': c('C4', 'returns.resolve', E.returnRequest),
+  'PUT /returns/:id/refund-settled': c('C4', 'returns.refund.settle', E.returnRequest),
   'GET /cash-rules/claims': c('C0', 'cashrules.read'),
   'GET /cash-rules/metrics': c('C0', 'cashrules.read'),
-  'PUT /cash-rules/claims/:id/approve': c('C4', 'cashrules.claim.decide'),
-  'PUT /cash-rules/claims/:id/reject': c('C4', 'cashrules.claim.decide'),
-  'PUT /cash-rules/claims/:id/paid': c('C4', 'cashrules.claim.pay'),
+  'PUT /cash-rules/claims/:id/approve': c('C4', 'cashrules.claim.decide', E.claim),
+  'PUT /cash-rules/claims/:id/reject': c('C4', 'cashrules.claim.decide', E.claim),
+  'PUT /cash-rules/claims/:id/paid': c('C4', 'cashrules.claim.pay', E.claim),
 
   // ── Dual control (ADM-005) ──────────────────────────────────────────────
   // The queue is a read; the decision is consequential and owes a reason, but
   // is NOT itself C4 — otherwise approving would need approving. The act it
   // authorises is still gated on its own class when the requester re-issues it.
   'GET /approvals': c('C0', 'approvals.read'),
-  'POST /approvals/:id/decide': c('C3', 'approvals.decide'),
+  'POST /approvals/:id/decide': c('C3', 'approvals.decide', E.approval),
 
   // ── Support, audit and the agent ────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),
@@ -272,14 +328,14 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /support/:id/resolve': c('C2', 'support.resolve'),
   'GET /agent/approvals': c('C0', 'agent.read'),
   'GET /agent/audit': c('C1', 'agent.read'),
-  'POST /agent/approvals/:id/approve': c('C3', 'agent.approval.decide'),
-  'POST /agent/approvals/:id/reject': c('C3', 'agent.approval.decide'),
+  'POST /agent/approvals/:id/approve': c('C3', 'agent.approval.decide', E.agentRequest),
+  'POST /agent/approvals/:id/reject': c('C3', 'agent.approval.decide', E.agentRequest),
 
   // ── Compliance ──────────────────────────────────────────────────────────
   'GET /compliance': c('C0', 'compliance.read'),
   'POST /compliance/run': c('C2', 'compliance.run'),
-  'POST /compliance/reviews/:id/decide': c('C3', 'compliance.decide'),
-  'POST /compliance/violations/:id/resolve': c('C3', 'compliance.decide'),
+  'POST /compliance/reviews/:id/decide': c('C3', 'compliance.decide', E.complianceReview),
+  'POST /compliance/violations/:id/resolve': c('C3', 'compliance.decide', E.complianceViolation),
 
   // ── Platform health and the dead-letter queue ───────────────────────────
   'GET /alerts/health': c('C0', 'ops.read'),
@@ -290,8 +346,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // ── Discovery taxonomy ──────────────────────────────────────────────────
   'GET /discovery/categories': c('C0', 'discovery.read'),
   'GET /discovery/requests': c('C0', 'discovery.read'),
-  'PUT /discovery/categories/:id': c('C2', 'discovery.write'),
-  'POST /discovery/categories/:id/merge-into': c('C3', 'discovery.merge'),
+  'PUT /discovery/categories/:id': c('C2', 'discovery.write', E.discoveryCategory),
+  'POST /discovery/categories/:id/merge-into': c('C3', 'discovery.merge', E.discoveryCategory),
   'POST /discovery/requests/:id/approve': c('C2', 'discovery.decide'),
   'POST /discovery/requests/:id/map': c('C2', 'discovery.decide'),
   'POST /discovery/requests/:id/reject': c('C2', 'discovery.decide'),
@@ -501,4 +557,50 @@ export function reasonRefusal(problem: ReasonProblem, cls: AdminActionClass): st
 export function reasonOf(body: unknown, headers?: Record<string, unknown>): string | null {
   const raw = statedReason(body, headers);
   return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
+// ─── [ADM-004] What the audit row says happened ──────────────────────────────
+//
+// `changes` was `{ params, body }`: the REQUEST, with the body truncated at
+// 2,000 characters. An investigator could see that a route was called and not
+// what it changed; the truncation lost the tail; and a raw body carried
+// document numbers, phone numbers and addresses into a table with no privacy
+// shaping at all — a privacy problem created by the privacy control.
+//
+// The row now carries the subject's before and after digest and a diff of the
+// declared fields. The digest covers the WHOLE row, so a change outside the
+// declared set still shows as a different digest; the diff is what a reader
+// sees first.
+
+/** Routes whose action has no single subject row, and why. The census test
+ *  holds this list closed: a C3-C5 route is either declared with an entity or
+ *  named here with a reason a reviewer can check. */
+export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>> = {
+  'POST /promos': 'creates the row; there is no before state to digest',
+  'POST /zones': 'creates the row; there is no before state to digest',
+  'POST /notifications/broadcast': 'addresses every user; the subject is the audience, not a row',
+  'PUT /countries/:code/pricing/:kind': 'writes a versioned price book, which keeps its own before/after by version',
+  'POST /countries/:code/pricing/:kind/rollback': 'pins an earlier price-book version; the version register is the record',
+  'PUT /ads/settings': 'a tenant-wide settings singleton with no id in the route',
+  'PUT /billing/price-book': 'a versioned price book; the version register is the record',
+  'PUT /billing/agent-cash-config': 'a tenant-wide settings singleton with no id in the route',
+  'PUT /batching/settings': 'a tenant-wide settings singleton with no id in the route',
+  'POST /billing/fx-rates': 'creates a rate row; there is no before state to digest',
+  'POST /billing/usd-migration/mode-a': 'a fleet-wide migration over many rows, not one subject',
+  'POST /billing/usd-migration/mode-b': 'a fleet-wide migration over many rows, not one subject',
+  'POST /billing/usd-migration/mode-b/rollback': 'a fleet-wide migration over many rows, not one subject',
+  'POST /billing/san-backfill': 'a backfill over many rows, not one subject',
+  'POST /billing/agent-payments': 'records a new payment; there is no before state to digest',
+  'POST /billing/settlement-import': 'stages a file of many rows; the import batch is its own record',
+  'POST /ads/refund-intents/backfill': 'a backfill over many rows, not one subject',
+  'POST /integrity/backfill': 'a backfill over many rows, not one subject',
+  'POST /integrity/exceptions': 'creates the grant; there is no before state to digest',
+  'POST /integrity/appeals/:id/resolve': 'the appeal is founder-scoped and read through the integrity graph, not a tenant row',
+  'PUT /rides/drivers/:id/vehicle-identity': 'writes vehicle identity across driver and ride rows; no single subject',
+  'DELETE /dlq/:queue/:id': 'a queue job, not a database row',
+};
+
+/** The subject row this action changes, if it has one. */
+export function entityFor(method: string, routeUrl: string): AdminRouteEntity | null {
+  return authorityFor(method, routeUrl)?.entity ?? null;
 }

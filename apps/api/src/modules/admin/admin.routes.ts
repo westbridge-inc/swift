@@ -41,6 +41,7 @@ import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import { APPROVAL_HEADER, approvalRefusalMessage, decideApproval, requiresApproval, resolveApproval } from './admin-approval';
+import { ABSENT, changeRecord, snapshot, type EntitySnapshot } from './audit-change';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -763,6 +764,22 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
 
+  // [ADM-004] THE SUBJECT ROW, BEFORE THE ACTION.
+  //
+  // preHandler, so it runs after the capability, reason and approval gates —
+  // a refused action never reads anything — and before the handler changes
+  // it. Where a route has no single subject row it is named in
+  // ADMIN_ROUTES_WITHOUT_ENTITY with a reason, and the census keeps that list
+  // closed rather than letting a route quietly go unrecorded.
+  app.addHook('preHandler', async (request: any) => {
+    if (request.method === 'GET') return;
+    const routeUrl = routeTemplateOf(request, app.prefix);
+    const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeUrl}`];
+    if (!authority?.entity) return;
+    const params = (request.params ?? {}) as Record<string, string>;
+    request.auditBefore = await snapshot(app.prisma, authority.entity, params[authority.entity.param ?? 'id']);
+  });
+
   // [ADM-007] EVERY SENSITIVE READ LEAVES A RECORD.
   //
   // Two of the seventy-seven admin reads were logged. An admin could open any
@@ -819,23 +836,29 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!userId) return;
     try {
       const params = (request.params ?? {}) as Record<string, string>;
-      const body = request.body ? JSON.stringify(request.body).slice(0, 2000) : undefined;
       // [ADM-006] The reason is recorded as a NAMED field, not left to be dug
       // out of a truncated body — it is the answer an appeal or an audit is
-      // met with, and it must survive the raw payload's eventual removal
-      // (ADM-004), which is the next clause on this row.
+      // met with.
       const reason = reasonOf(request.body, request.headers);
+      // [ADM-004] What CHANGED, not what was asked. The raw body is gone: it
+      // answered nothing about the effect, lost its tail to a 2,000-character
+      // truncation, and carried document numbers and addresses into a table
+      // with no privacy shaping.
+      // The action name keeps the full mounted path (stable, and what the
+      // trail has always said); the authority table is keyed on the plugin's
+      // own template, so the lookup strips the mount point.
+      const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeTemplateOf(request, app.prefix)}`];
+      const before: EntitySnapshot = (request as { auditBefore?: EntitySnapshot }).auditBefore ?? ABSENT;
+      const after = authority?.entity
+        ? await snapshot(app.prisma, authority.entity, params[authority.entity.param ?? 'id'])
+        : ABSENT;
       await app.prisma.auditLog.create({
         data: {
           userId,
           action: `ADMIN ${request.method} ${routeUrl}`,
           entity: isAuditedRead ? 'integrity' : (routeUrl.split('/').filter(Boolean)[0] ?? 'admin'),
           entityId: params['id'] ?? params['key'] ?? params['userId'] ?? '-',
-          changes: {
-            params,
-            ...(reason ? { reason } : {}),
-            ...(body ? { body } : {}),
-          },
+          changes: changeRecord({ params, reason, before, after, entityDeclared: !!authority?.entity }) as never,
           ipAddress: request.ip,
           userAgent: request.headers['user-agent'],
         },
