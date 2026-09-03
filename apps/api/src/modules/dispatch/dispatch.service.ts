@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { PrismaClient, RideClass, OrderStatus, VehicleType } from '@prisma/client';
+import type { PrismaClient, RideClass, VehicleType } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
@@ -14,7 +14,7 @@ import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './sco
 import { algoConfig } from '../algo/algo-config';
 import { foodAgeLimitMinutes, foodAge, retireTooOldOrder, rescueIncentiveGyd, grantRescueIncentive, incentiveKey } from './rescue';
 import { recordDecision } from '../algo/decisions';
-import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
+import { TERMINAL_ORDER_STATUSES, DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
@@ -2249,7 +2249,7 @@ export async function recoverStrandedTaxiRides(
   if (stale.length === 0) return { recovered: [], flagged: [] };
 
   const notifications = new NotificationService(prisma, io);
-  const NOT_ABOARD: OrderStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
+  const NOT_ABOARD = DRIVER_PRE_CUSTODY_STATUSES;
   const TERMINAL = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
   const recovered: string[] = [];
   const flagged: string[] = [];

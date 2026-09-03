@@ -116,11 +116,21 @@ describe('terminal order statuses have ONE definition', () => {
   });
 
   it('the owner derives the list rather than hand-writing it', () => {
-    // The Record is the guarantee: it is what makes a NEW OrderStatus a build
-    // error. If someone replaces it with a plain array, this file stops
-    // protecting anything and the gate must say so.
+    // The Record keyed by OrderStatus is the guarantee: it is what makes a NEW
+    // OrderStatus a build error. If someone replaces it with a plain array,
+    // this file stops protecting anything and the gate must say so.
+    //
+    // [ORD-1] It grades the SHAPE, not the value type's name. Terminality is
+    // no longer a Record of its own — it is derived from the custody
+    // classification, because a status is terminal exactly when nobody holds
+    // the order, and two independent Records would have been the same drift
+    // this file exists to prevent. What must hold is that ONE exhaustive
+    // Record exists and the lists come off it.
     const owner = readFileSync(join(SRC, OWNER), 'utf8');
-    expect(owner).toMatch(/Record<OrderStatus,\s*Terminality>/);
+    expect(owner).toMatch(/Record<OrderStatus,/);
     expect(owner).toMatch(/\.filter\(/);
+    // And the terminal list must stay DERIVED — never a second hand-written
+    // array smuggled back into the owner itself.
+    expect(stripComments(owner)).not.toMatch(/TERMINAL_ORDER_STATUSES[^=\n]*=\s*\[\s*'/);
   });
 });

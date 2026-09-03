@@ -51,7 +51,11 @@ import {
   staleMoverAuthorityError,
 } from '../mover-authority';
 
-import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
+import {
+  TERMINAL_ORDER_STATUSES,
+  RIDER_PRE_CUSTODY_STATUSES,
+  RIDER_IN_CUSTODY_STATUSES,
+} from '../order/order-status';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
@@ -1826,8 +1830,8 @@ export async function riderRoutes(app: FastifyInstance) {
     const rider = await getRider(app, request.user.userId);
     const { reason } = z.object({ reason: z.string().min(3).max(300) }).parse(request.body ?? {});
 
-    const PRE_CUSTODY: OrderStatus[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
-    const IN_CUSTODY: OrderStatus[] = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'];
+    const PRE_CUSTODY = RIDER_PRE_CUSTODY_STATUSES;
+    const IN_CUSTODY = RIDER_IN_CUSTODY_STATUSES;
 
     const outcome = await app.prisma.$transaction(async (tx) => {
       await lockTaxiOrderForCustodyDecision(tx, id);
