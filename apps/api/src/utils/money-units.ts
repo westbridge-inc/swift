@@ -51,6 +51,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   // [A-11] What the payer attested they transferred; same unit as the claim it
   // must equal.
   { model: 'ReimbursementClaim', field: 'paidAmount', unit: 'MAJOR_WHOLE' },
+  // [A-13] What the settler attested they refunded; same unit as refundAmount.
+  { model: 'ReturnRequest', field: 'refundPaidAmount', unit: 'MAJOR_WHOLE' },
   // [W-26] What each side ATTESTED changed hands. Same unit as the amount
   // above by construction: the ledger refuses any figure that is not it.
   { model: 'DeliveryCashSettlement', field: 'riderAttestedAmount', unit: 'MAJOR_WHOLE' },

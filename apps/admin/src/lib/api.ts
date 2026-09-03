@@ -258,8 +258,18 @@ export const resolveSupportTicket = (
   });
 export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
-export const resolveReturn = (id: string, status: 'APPROVED' | 'REJECTED' | 'REFUNDED', note?: string) =>
+// [A-13] "Refund" records an OBLIGATION (REFUND_DUE), not a completed payment.
+// A return only reaches REFUNDED through settleReturnRefund below, with the
+// transfer reference and the amount actually sent.
+export const resolveReturn = (id: string, status: 'APPROVED' | 'REJECTED' | 'REFUND_DUE', note?: string) =>
   apiFetch(`/api/v1/admin/returns/${id}/resolve`, { method: 'PUT', body: JSON.stringify({ status, note }) });
+
+/** The money actually moved: a unique transfer reference and the amount sent. */
+export const settleReturnRefund = (id: string, reference: string, amount: string | number, note?: string) =>
+  apiFetch(`/api/v1/admin/returns/${id}/refund-settled`, {
+    method: 'PUT',
+    body: JSON.stringify({ reference, amount, ...(note ? { note } : {}) }),
+  });
 export const broadcastNotification = (body: { title: string; body: string; role?: string; category: 'service' | 'marketing' }) =>
   apiFetch('/api/v1/admin/notifications/broadcast', { method: 'POST', body: JSON.stringify(body) });
 

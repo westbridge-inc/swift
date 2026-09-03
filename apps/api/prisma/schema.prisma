@@ -2104,6 +2104,14 @@ model ReturnRequest {
   resolutionNote String?
   reviewedBy     String?
   reviewedAt     DateTime?
+  /// [A-13] The refund's evidence, and it is UNIQUE: one transfer settles one
+  /// return. Nullable, so the many unsettled returns do not collide.
+  refundRef        String?    @unique
+  /// What the payer states they actually sent, checked against `refundAmount`.
+  refundPaidAmount Decimal?   @db.Decimal(12, 2)
+  /// WHO settled it — distinct from `reviewedBy`, who decided the refund was owed.
+  refundPaidById   String?
+  refundPaidAt     DateTime?
   /// [ALG-25] What the refund algorithm said when the return was requested:
   /// which of the three cases it is (CASH_PRE_HANDOVER | CASH_POST_HANDOVER |
   /// MMG_BLOCKED), the amount it computed, and the sentence. Recorded, never
@@ -2133,6 +2141,12 @@ enum ReturnStatus {
   REQUESTED
   APPROVED
   REJECTED
+  /// [A-13] The obligation. An operator deciding to refund records that money is
+  /// OWED — it does not assert that money moved. Only reconciled evidence
+  /// (a bank/MMG reference and the amount actually sent) closes this to
+  /// REFUNDED. Before this existed, one click made a return terminally
+  /// "REFUNDED" while the customer was still waiting to be paid.
+  REFUND_DUE
   REFUNDED
 }
 
