@@ -45,18 +45,28 @@ export default function SubscriptionsPage() {
     queryFn: () => fetchSubscriptions(filter === 'ALL' ? 'limit=50' : `limit=50&status=${filter}`),
   });
   const invalidate = () => qc.invalidateQueries({ queryKey: ['subscriptions'] });
-  const waive = useMutation({ mutationFn: (id: string) => waiveSubscriptionFee(id, 'Waived by admin'), onSuccess: invalidate });
+  // [A-12] The reason used to be the constant 'Waived by admin' — a field that
+  // was always filled and never said anything. This is Swift's own revenue
+  // being given away; the operator says why, in their own words, and that is
+  // what is stored.
+  const waive = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => waiveSubscriptionFee(id, reason),
+    onSuccess: invalidate,
+  });
   // [M-08] The idempotency key belongs to the ATTEMPT: minted when the admin
   // confirms an amount, reused if that same top-up is retried after an error
   // or a lost response, and released only once the server has answered. A
   // different amount for the same subscription is a new attempt.
   const attempts = useRef(new Map<string, string>());
   const topup = useMutation({
-    mutationFn: async ({ id, amount }: { id: string; amount: number }) => {
-      const attempt = `${id}:${amount}`;
+    // [A-12] The transfer's reference is part of the attempt, not an optional
+    // note: a different transfer is a different top-up even for the same
+    // subscription and the same amount.
+    mutationFn: async ({ id, amount, reference }: { id: string; amount: number; reference: string }) => {
+      const attempt = `${id}:${amount}:${reference}`;
       const key = attempts.current.get(attempt) ?? crypto.randomUUID();
       attempts.current.set(attempt, key);
-      const res = await topUpSubscription(id, amount, undefined, key);
+      const res = await topUpSubscription(id, amount, reference, key);
       attempts.current.delete(attempt);
       return res;
     },
@@ -136,9 +146,16 @@ export default function SubscriptionsPage() {
                           </button>
                           <button
                             onClick={() => {
-                              const amt = window.prompt(`Record a cash/bank top-up for ${h.name} (GYD):`);
+                              const amt = window.prompt(`Record a cash/bank top-up for ${h.name} (whole GYD):`);
                               const n = Number(amt);
-                              if (amt && Number.isFinite(n) && n > 0) topup.mutate({ id: s.id, amount: n });
+                              if (!amt || !Number.isInteger(n) || n <= 0) return;
+                              const reference = window.prompt(
+                                'Bank or MMG reference for the transfer that arrived (this is the proof, and one transfer credits one account):',
+                              );
+                              if (!reference) return;
+                              // The clause asks for a confirmation naming the TARGET and the DELTA.
+                              if (!window.confirm(`Credit ${h.name} with GY$${n.toLocaleString()} against transfer ${reference}?`)) return;
+                              topup.mutate({ id: s.id, amount: n, reference });
                             }}
                             disabled={topup.isPending}
                             className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
@@ -148,7 +165,11 @@ export default function SubscriptionsPage() {
                           {!s.feeWaived && (
                             <button
                               onClick={() => {
-                                if (window.confirm(`Waive this period's fee for ${h.name}?`)) waive.mutate(s.id);
+                                const reason = window.prompt(
+                                  `Waive this period's fee for ${h.name}? Say why — this is revenue Swift is giving up, and the reason is kept:`,
+                                );
+                                if (!reason || reason.trim().length < 8) return;
+                                waive.mutate({ id: s.id, reason: reason.trim() });
                               }}
                               disabled={waive.isPending}
                               className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"

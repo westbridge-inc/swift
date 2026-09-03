@@ -57,6 +57,12 @@ async function makeCashOrder(opts?: { payment?: 'CASH' | 'MOBILE_MONEY'; total?:
   });
 }
 
+// A reference the shape actually accepts: `nanoid` draws from an alphabet that
+// includes `-` and `_`, and a reference may not END in one. Roughly three runs
+// in a hundred produced a trailing `-` and a 400 that had nothing to do with
+// what the test was grading. Alphanumeric, always.
+const refFor = (prefix: string) => `${prefix}-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}`.toUpperCase();
+
 const cancel = (id: string, body: Record<string, unknown>) =>
   app.inject({
     method: 'PUT', url: `/api/v1/admin/orders/${id}/cancel`,
@@ -152,7 +158,7 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
 
   it('a reference and the amount actually handed back close it to REFUNDED', async () => {
     const order = await owedOrder(1300);
-    const ref = `CASH-${nanoid(8)}`.toUpperCase();
+    const ref = refFor('CASH');
     const res = await settle(order.id, { reference: ref, amount: 1300 });
     expect(res.statusCode).toBe(200);
 
@@ -166,16 +172,16 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
 
   it('a wrong amount is refused in either direction, to the cent', async () => {
     const low = await owedOrder(1300);
-    expect((await settle(low.id, { reference: `CASH-${nanoid(8)}`.toUpperCase(), amount: 1200 })).statusCode).toBe(409);
+    expect((await settle(low.id, { reference: refFor('CASH'), amount: 1200 })).statusCode).toBe(409);
     const high = await owedOrder(1300);
-    expect((await settle(high.id, { reference: `CASH-${nanoid(8)}`.toUpperCase(), amount: 1300.01 })).statusCode).toBe(409);
+    expect((await settle(high.id, { reference: refFor('CASH'), amount: 1300.01 })).statusCode).toBe(409);
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: low.id } })).status).toBe('CANCELLED');
   });
 
   it('one handover settles ONE order — a reused reference is refused', async () => {
     const first = await owedOrder(1300);
     const second = await owedOrder(1300);
-    const ref = `CASH-${nanoid(8)}`.toUpperCase();
+    const ref = refFor('CASH');
     expect((await settle(first.id, { reference: ref, amount: 1300 })).statusCode).toBe(200);
     const dup = await settle(second.id, { reference: ref, amount: 1300 });
     expect(dup.statusCode).toBe(409);
@@ -191,7 +197,7 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
   it('the same reference typed in a different case is the same reference', async () => {
     const first = await owedOrder(1300);
     const second = await owedOrder(1300);
-    const ref = `CASH-${nanoid(8)}`.toUpperCase();
+    const ref = refFor('CASH');
     expect((await settle(first.id, { reference: ref, amount: 1300 })).statusCode).toBe(200);
     expect((await settle(second.id, { reference: ref.toLowerCase(), amount: 1300 })).statusCode).toBe(409);
   });
@@ -205,7 +211,7 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
   it('an order that owes nothing cannot be settled', async () => {
     const order = await makeCashOrder();
     await cancel(order.id, { reason: 'duplicate', refund: false });
-    const res = await settle(order.id, { reference: `CASH-${nanoid(8)}`.toUpperCase(), amount: 1300 });
+    const res = await settle(order.id, { reference: refFor('CASH'), amount: 1300 });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('NO_REFUND_DUE');
   });
@@ -216,7 +222,7 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
     // are legitimate. What must never happen is two settlements, or a
     // settlement whose reference is not the one on the row.
     const order = await owedOrder(1300);
-    const refs = Array.from({ length: 5 }, (_, i) => `CASH-R${i}${nanoid(6)}`.toUpperCase());
+    const refs = Array.from({ length: 5 }, (_, i) => refFor(`CASH-R${i}`));
     const results = await Promise.all(refs.map((reference) => settle(order.id, { reference, amount: 1300 })));
 
     const ok = results.filter((r) => r.statusCode === 200);

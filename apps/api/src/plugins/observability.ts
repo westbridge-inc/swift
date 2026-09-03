@@ -330,6 +330,17 @@ export const billingTopupMissingKeyCounter = new client.Counter({
   help: 'Prepaid top-up attempts refused for lack of an Idempotency-Key',
   registers: [registry],
 });
+/** [A-12] A top-up refused because its PROVIDER TRANSACTION reference had
+ *  already been credited. Distinct from the fingerprint counter below, which
+ *  counts an idempotency key reused for a different request: this one counts a
+ *  second attempt to credit one real-world transfer. A rising number is either
+ *  a reconciliation gap or an operator crediting from a stale list. */
+export const billingTopupDuplicateReferenceCounter = new client.Counter({
+  name: 'swift_billing_topup_duplicate_reference_total',
+  help: 'Top-ups refused because the provider transaction reference was already credited',
+  registers: [registry],
+});
+
 export const billingTopupDuplicateFingerprintCounter = new client.Counter({
   name: 'swift_billing_topup_duplicate_fingerprint_total',
   help: 'Prepaid top-up attempts refused because the key was reused for a different request',

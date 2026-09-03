@@ -238,7 +238,21 @@ model TopUpCommand {
   requestHash    String
   subscriptionId String
   amount         Decimal   @db.Decimal(12, 2)
+  /// A free-text note. It has never been an identity — it was optional and
+  /// unvalidated — so it stays exactly what it was. See `providerRef`.
   reference      String?
+  /// [A-12] THE PROVIDER TRANSACTION IDENTITY: the bank or MMG reference for
+  /// the money that actually arrived, normalised, and UNIQUE. The idempotency
+  /// key above is a CLIENT RETRY token scoped to one admin — it makes the same
+  /// REQUEST safe to repeat and says nothing about the same TRANSFER being
+  /// credited twice under a fresh key, or by a second operator working the same
+  /// statement. This does.
+  ///
+  /// A NEW column rather than a constraint on `reference`: that field has been
+  /// free text since it shipped, so a unique index on it would fail to build on
+  /// any deployment where two notes happen to match — a refused migration for a
+  /// historic typo. Rows written before this carry NULL and do not collide.
+  providerRef    String?   @unique
   billingEventId String    @unique
   result         Json
   tailAttempts   Int       @default(0)
