@@ -10,6 +10,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // [A-14] A CASH ORDER REFUND IS A PROMISE UNTIL SOMEBODY PROVES IT.
@@ -107,7 +108,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.prisma.order.deleteMany({ where: { orderNumber: { startsWith: 'AROB-' } } });
-  await app.prisma.auditLog.deleteMany({ where: { userId: { in: userIds } } });
+  await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:admin-order-refund-obligation');
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
 });

@@ -15,6 +15,7 @@ import { BillingService, type BillingObserver } from '../modules/billing/billing
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { billingTopupMissingKeyCounter, billingTopupDuplicateFingerprintCounter } from '../plugins/observability';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // [M-08 · S0] The prepaid top-up is ONE command.
@@ -118,7 +119,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env['BILLING_TOPUP_HOLD'];
   await app.prisma.topUpCommand.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.auditLog.deleteMany({ where: { entity: 'Subscription', entityId: { in: subIds } } });
+  await purgeAuditLogs(app.prisma, { entity: 'Subscription', entityId: { in: subIds } }, 'test-cleanup:billing-topup-command');
   await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });

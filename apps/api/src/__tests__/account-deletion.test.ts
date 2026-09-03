@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — self-serve DPA rights: export (access + portability) and
@@ -69,7 +70,7 @@ afterAll(async () => {
   await app.prisma.advertiser.deleteMany({ where: { id: { in: advertiserIds } } });
   await app.prisma.adPlacement.deleteMany({ where: { id: { in: placementIds } } });
   await app.prisma.vendorStaff.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.auditLog.deleteMany({ where: { userId: { in: createdUserIds } } });
+  await purgeAuditLogs(app.prisma, { userId: { in: createdUserIds } }, 'test-cleanup:account-deletion');
   await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: createdUserIds } } });
   await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });

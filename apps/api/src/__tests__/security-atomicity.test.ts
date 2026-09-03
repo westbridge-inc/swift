@@ -10,6 +10,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestOtp } from './helpers/otp';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 const ADMIN_PHONE = '+5927009190';
 const RESET_PHONE = '+5927009191';
@@ -111,14 +112,12 @@ async function cleanupFixtures() {
   });
   const userIds = users.map((user) => user.id);
   if (userIds.length > 0) {
-    await app.prisma.auditLog.deleteMany({
-      where: {
+    await purgeAuditLogs(app.prisma, {
         OR: [
           { userId: { in: userIds } },
           { entity: 'User', entityId: { in: userIds } },
         ],
-      },
-    });
+      }, 'test-cleanup:security-atomicity');
     await app.prisma.moverRevocationOutbox.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   }

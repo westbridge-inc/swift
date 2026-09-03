@@ -13,6 +13,7 @@ import { NotificationService, notifyAdmins } from '../modules/notification/notif
 import { luhnCheckDigit } from '../modules/billing/san';
 import { loginWithOtp } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // HTTP proof for the arbitrary-id admin path in SPS-F-0012. An administrator
 // is an operator inside one tenant, not a platform-wide principal. A real id
@@ -409,9 +410,7 @@ afterAll(async () => {
     const userIds = [tenantBUserId, TENANT_B_ADMIN_USER_ID, TENANT_B_RIDER_USER_ID, TENANT_B_DRIVER_USER_ID]
       .filter((id): id is string => Boolean(id));
 
-    await app.prisma.auditLog.deleteMany({
-      where: { OR: [{ entityId: { in: entityIds } }, { userId: { in: userIds } }] },
-    });
+    await purgeAuditLogs(app.prisma, { OR: [{ entityId: { in: entityIds } }, { userId: { in: userIds } }] }, 'test-cleanup:tenant-admin-isolation');
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: TENANT_B_SUBSCRIPTION_ID } });
     await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: TENANT_B_SUBSCRIPTION_ID } });
@@ -737,7 +736,7 @@ describe('tenant-qualified admin access', () => {
     } finally {
       await runWithoutTenant(async () => {
         await app.prisma.rider.updateMany({ where: { id: TENANT_B_RIDER_ID }, data: beforeRider });
-        await app.prisma.auditLog.deleteMany({ where: { entityId: TENANT_B_RIDER_ID } });
+        await purgeAuditLogs(app.prisma, { entityId: TENANT_B_RIDER_ID }, 'test-cleanup:tenant-admin-isolation');
         await app.prisma.notification.deleteMany({ where: { userId: TENANT_B_RIDER_USER_ID } });
       });
     }
@@ -774,7 +773,7 @@ describe('tenant-qualified admin access', () => {
     } finally {
       await runWithoutTenant(async () => {
         await app.prisma.driver.updateMany({ where: { id: TENANT_B_DRIVER_ID }, data: beforeDriver });
-        await app.prisma.auditLog.deleteMany({ where: { entityId: TENANT_B_DRIVER_ID } });
+        await purgeAuditLogs(app.prisma, { entityId: TENANT_B_DRIVER_ID }, 'test-cleanup:tenant-admin-isolation');
         await app.prisma.notification.deleteMany({ where: { userId: TENANT_B_DRIVER_USER_ID } });
       });
     }
@@ -800,7 +799,7 @@ describe('tenant-qualified admin access', () => {
     } finally {
       await runWithoutTenant(async () => {
         await app.prisma.driver.updateMany({ where: { id: TENANT_B_DRIVER_ID }, data: beforeDriver });
-        await app.prisma.auditLog.deleteMany({ where: { entityId: TENANT_B_DRIVER_ID } });
+        await purgeAuditLogs(app.prisma, { entityId: TENANT_B_DRIVER_ID }, 'test-cleanup:tenant-admin-isolation');
       });
     }
   });
@@ -834,7 +833,7 @@ describe('tenant-qualified admin access', () => {
             updatedAt: before.subscription.updatedAt,
           },
         });
-        await app.prisma.auditLog.deleteMany({ where: { entityId: TENANT_B_SUBSCRIPTION_ID } });
+        await purgeAuditLogs(app.prisma, { entityId: TENANT_B_SUBSCRIPTION_ID }, 'test-cleanup:tenant-admin-isolation');
         await app.prisma.notification.deleteMany({ where: { userId: tenantBUserId } });
       });
     }
@@ -853,7 +852,7 @@ describe('tenant-qualified admin access', () => {
       expectNotFound(response);
     } finally {
       await runWithoutTenant(async () => {
-        await app.prisma.auditLog.deleteMany({ where: { entityId: TENANT_B_SUBSCRIPTION_ID } });
+        await purgeAuditLogs(app.prisma, { entityId: TENANT_B_SUBSCRIPTION_ID }, 'test-cleanup:tenant-admin-isolation');
         await app.prisma.notification.deleteMany({ where: { userId: tenantBUserId } });
       });
     }
@@ -884,7 +883,7 @@ describe('tenant-qualified admin access', () => {
           where: { id: TENANT_B_SETTLEMENT_ID },
           data: beforeSettlement,
         });
-        await app.prisma.auditLog.deleteMany({ where: { entityId: TENANT_B_SETTLEMENT_ID } });
+        await purgeAuditLogs(app.prisma, { entityId: TENANT_B_SETTLEMENT_ID }, 'test-cleanup:tenant-admin-isolation');
         await app.prisma.notification.deleteMany({ where: { userId: tenantBUserId } });
       });
     }
@@ -956,7 +955,7 @@ describe('tenant-qualified admin access', () => {
     } finally {
       await runWithoutTenant(async () => {
         await app.prisma.driver.updateMany({ where: { id: TENANT_B_DRIVER_ID }, data: beforeDriver });
-        await app.prisma.auditLog.deleteMany({ where: { entityId: TENANT_B_DRIVER_ID } });
+        await purgeAuditLogs(app.prisma, { entityId: TENANT_B_DRIVER_ID }, 'test-cleanup:tenant-admin-isolation');
       });
     }
   });
@@ -1003,12 +1002,10 @@ describe('tenant-qualified admin access', () => {
         await app.prisma.collectionContact.deleteMany({
           where: { subscriptionId: TENANT_B_SUBSCRIPTION_ID, id: { not: TENANT_B_COLLECTION_CONTACT_ID } },
         });
-        await app.prisma.auditLog.deleteMany({
-          where: {
+        await purgeAuditLogs(app.prisma, {
             action,
             changes: { path: ['params', 'subscriptionId'], equals: TENANT_B_SUBSCRIPTION_ID },
-          },
-        });
+          }, 'test-cleanup:tenant-admin-isolation');
       });
     }
   });
@@ -1374,7 +1371,7 @@ describe('tenant-qualified admin access', () => {
       expect(tenantBOwnView.statusCode).toBe(200);
       expect(tenantBOwnView.json().data.map((row: { id: string }) => row.id)).toContain(TENANT_B_AUDIT_LOG_ID);
     } finally {
-      await runWithoutTenant(() => app.prisma.auditLog.deleteMany({ where: { id: localAuditId } }));
+      await runWithoutTenant(() => purgeAuditLogs(app.prisma, { id: localAuditId }, 'test-cleanup:tenant-admin-isolation'));
     }
   });
 

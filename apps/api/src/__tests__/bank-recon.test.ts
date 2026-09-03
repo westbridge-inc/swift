@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { buildExpectedBatches, confirmDeposit, reconConfig } from '../modules/billing/bank-recon';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
 grantSuiteCapability('unscoped-mutation');
@@ -47,7 +48,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await prisma.depositConfirmation.deleteMany({ where: { batchId: { in: batchIds } } });
-  await prisma.auditLog.deleteMany({ where: { entity: 'SettlementBatch', entityId: { in: batchIds } } });
+  await purgeAuditLogs(prisma, { entity: 'SettlementBatch', entityId: { in: batchIds } }, 'test-cleanup:bank-recon');
   await prisma.settlementBatch.deleteMany({ where: { id: { in: batchIds } } });
   await prisma.mmgAgentPayment.deleteMany({ where: { id: { in: paymentIds } } });
   await prisma.platformConfig.deleteMany({ where: { key: { in: CONFIG_KEYS } } });

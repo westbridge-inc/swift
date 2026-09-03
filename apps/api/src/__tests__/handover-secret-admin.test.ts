@@ -15,6 +15,7 @@ import { grantStepUp } from './helpers/step-up';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { handoverStatus, MAX_HANDOVER_ATTEMPTS } from '../modules/handover/handover-security';
 import { rotatePickupCode } from '../modules/handover/handover-reveal';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // [A-15] The pickup code is a CREDENTIAL, and the rule that makes it worth
@@ -144,7 +145,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await runWithoutTenant(async () => {
-    await app.prisma.auditLog.deleteMany({ where: { entityId: { in: orderIds } } });
+    await purgeAuditLogs(app.prisma, { entityId: { in: orderIds } }, 'test-cleanup:handover-secret-admin');
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
     await app.prisma.cartItem.deleteMany({ where: { cart: { vendorId } } });
     await app.prisma.cart.deleteMany({ where: { vendorId } });

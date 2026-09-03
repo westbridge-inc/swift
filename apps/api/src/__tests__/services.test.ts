@@ -14,6 +14,7 @@ import {
   refreshProviderVerification,
 } from '../modules/services/services.service';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // Services (spec §4.6). Provider profile + qualification badge +
@@ -97,7 +98,7 @@ async function purgeFixtures() {
     await app.prisma.serviceJob.deleteMany({ where: { id: { in: jobIds } } });
     await app.prisma.serviceProvider.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.auditLog.deleteMany({ where: { userId: { in: userIds } } });
+    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:services');
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   });
 }
