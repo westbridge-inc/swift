@@ -6,6 +6,8 @@ import { RefreshCw } from 'lucide-react';
 import NewOrderTakeover from '@/components/NewOrderTakeover';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
+import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
+import { DataUnavailable } from '@/components/data-unavailable';
 import {
   acceptOrder, completePickup, confirmPayment, getItems, getOrder, getOrders,
   markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
@@ -13,16 +15,6 @@ import {
 } from '@/lib/vendor-api';
 
 // Board buckets — same lanes the kitchen thinks in.
-const BUCKETS = [
-  { key: 'new', label: 'New', match: (s: string) => s === 'PENDING' || s === 'PLACED' },
-  { key: 'kitchen', label: 'In progress', match: (s: string) => ['ACCEPTED', 'CONFIRMED', 'PREPARING'].includes(s) },
-  {
-    key: 'handoff', label: 'Ready / handoff',
-    match: (s: string) => ['READY', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(s),
-  },
-  { key: 'moving', label: 'Out for delivery', match: (s: string) => ['PICKED_UP', 'RIDER_EN_ROUTE_DROPOFF'].includes(s) },
-  { key: 'done', label: 'Done', match: (s: string) => ['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(s) },
-] as const;
 
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 const PICKABLE_STATES = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', ...COURIER_ACTIVE];
@@ -372,7 +364,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
 
 export default function OrdersPage() {
   const storeId = useStoreId();
-  const [bucket, setBucket] = useState<(typeof BUCKETS)[number]['key']>('new');
+  const [bucket, setBucket] = useState<BucketKey>('new');
   const [selected, setSelected] = useState<string | null>(null);
 
   // One poll feeds every lane — the queue is the live surface, keep it fresh.
@@ -383,15 +375,11 @@ export default function OrdersPage() {
   });
 
   const all = useMemo(() => orders.data?.orders ?? [], [orders.data]);
-  const byBucket = useMemo(() => {
-    const map = new Map<string, VendorOrder[]>();
-    for (const b of BUCKETS) map.set(b.key, []);
-    for (const o of all) {
-      const b = BUCKETS.find((x) => x.match((o.status || '').toUpperCase()));
-      if (b) map.get(b.key)!.push(o);
-    }
-    return map;
-  }, [all]);
+  // [W-11] Exhaustive: every order lands in exactly one lane, including an
+  // `unknown` lane for a status this build does not recognise. The old loop
+  // pushed only on a match and silently dropped everything else.
+  const byBucket = useMemo(() => groupOrders(all), [all]);
+  const shown = useMemo(() => completeness(all.length, orders.data?.meta), [all.length, orders.data?.meta]);
 
   const list = byBucket.get(bucket) ?? [];
 
@@ -411,6 +399,8 @@ export default function OrdersPage() {
       <div className="flex flex-wrap gap-2">
         {BUCKETS.map((b) => {
           const n = byBucket.get(b.key)?.length ?? 0;
+          // the exception lanes appear the moment they hold anything
+          if ((b.key === 'unknown' || b.key === 'attention') && n === 0) return null;
           return (
             <button
               key={b.key}
@@ -428,7 +418,20 @@ export default function OrdersPage() {
       <div className="grid gap-5 xl:grid-cols-[1fr_1.2fr]">
         <div className="space-y-2">
           {orders.isLoading && <p className="text-sm text-[var(--swift-muted)]">Loading…</p>}
-          {!orders.isLoading && list.length === 0 && (
+          {/* [W-11] A failed read used to render the same calm "Nothing in New"
+              as a genuinely empty queue, so an outage looked like a clear board
+              while orders piled up against the response SLA. */}
+          {orders.isError && (
+            <DataUnavailable what="your orders" error={orders.error} onRetry={() => void orders.refetch()} />
+          )}
+          {/* [W-11] The board asks for 100 and used to ignore `meta` entirely,
+              so a vendor with more than that silently never saw the rest. */}
+          {!orders.isError && !orders.isLoading && shown.missing > 0 && (
+            <p role="status" className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+              Showing {shown.shown} of {shown.total} orders — {shown.missing} not shown on this page.
+            </p>
+          )}
+          {!orders.isLoading && !orders.isError && list.length === 0 && (
             <p className="rounded-2xl border border-dashed border-black/10 p-8 text-center text-sm text-[var(--swift-muted)]">
               Nothing in “{BUCKETS.find((b) => b.key === bucket)?.label}”.
             </p>
