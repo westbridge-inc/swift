@@ -4066,7 +4066,16 @@ export async function adminRoutes(app: FastifyInstance) {
       tenantPrisma.verificationDocument.findMany({
         where,
         include: {
-          user: { select: { id: true, firstName: true, lastName: true, phone: true, countryCode: true } },
+          // [A-19] The reviewer is asked to tick "cross-checked against the
+          // H-plate" — so the plate has to be ON THE SCREEN. It was not sent at
+          // all, which made that checkbox an assertion about something the
+          // operator could not see.
+          user: {
+            select: {
+              id: true, firstName: true, lastName: true, phone: true, countryCode: true,
+              driver: { select: { licensePlate: true, vehicleMake: true, vehicleModel: true, vehicleType: true } },
+            },
+          },
         },
         orderBy: { createdAt: 'asc' }, // oldest first — review in arrival order
         skip,

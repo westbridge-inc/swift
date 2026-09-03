@@ -42,6 +42,61 @@ const AUTO_APPROVE_EXPIRY_DAYS: Record<string, number> = {
   vehicle_registration: 3 * 365,
 };
 
+/**
+ * [A-19] Which document types carry a printed expiry.
+ *
+ * DERIVED from the map above rather than re-listed, so the two cannot drift.
+ * "Absent = non-expiring" was already this file's rule; it was simply never
+ * enforced on the manual path.
+ */
+export const EXPIRING_DOC_TYPES: readonly string[] = Object.freeze(Object.keys(AUTO_APPROVE_EXPIRY_DAYS));
+
+export function docTypeExpires(docType: string): boolean {
+  return Object.prototype.hasOwnProperty.call(AUTO_APPROVE_EXPIRY_DAYS, docType);
+}
+
+/**
+ * [A-19] The expiry an approval will actually store, or a refusal.
+ *
+ * Two defects lived on one line — `expiresAt: expiresAt ?? null`:
+ *
+ *  1. A licence, insurance policy or permit approved with no date became
+ *     PERMANENTLY valid. The readiness query treats a null expiry as
+ *     never-expiring (`OR: [{ expiresAt: null }, { expiresAt: { gt: now } }]`),
+ *     and the daily lapse sweep only looks at rows that HAVE a date, so nothing
+ *     downstream would ever catch it.
+ *  2. Approving a document that already carried an auto-assigned expiry (the
+ *     submission path sets one from the same map) WIPED it back to null. The
+ *     admin UI has never sent an expiry, so this was the normal case.
+ *
+ * A supplied date wins; otherwise the one already on the row stands; and for a
+ * type that expires, one of them must exist and must be in the future.
+ */
+export function resolveApprovalExpiry(
+  docType: string,
+  supplied: Date | undefined,
+  existing: Date | null,
+  now: Date = new Date(),
+): Date | null {
+  const effective = supplied ?? existing ?? null;
+  if (!docTypeExpires(docType)) return effective;
+  if (!effective) {
+    throw new AppError(
+      400,
+      'EXPIRY_REQUIRED',
+      `A ${docType.replace(/_/g, ' ')} carries a printed expiry date. Key the date from the document before approving it.`,
+    );
+  }
+  if (effective.getTime() <= now.getTime()) {
+    throw new AppError(
+      400,
+      'EXPIRY_IN_PAST',
+      `That expiry date has already passed. An expired ${docType.replace(/_/g, ' ')} cannot be approved.`,
+    );
+  }
+  return effective;
+}
+
 /** Insurance 5-point manual check captured during admin review (spec §3.4). */
 export interface InsuranceReview {
   insurerName: string;
@@ -373,11 +428,27 @@ export class VerificationService {
   // -------------------------------------------------------------------------
 
   async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview) {
+    // [A-19] Read the candidate first: the expiry decision needs the document's
+    // TYPE and any date it already carries. This read is not the winner
+    // boundary — the conditional transition below still is.
+    const candidate = await this.prisma.verificationDocument.findUnique({
+      where: { id: docId },
+      select: { docType: true, expiresAt: true, status: true },
+    });
+    if (!candidate) throw new NotFoundError('VerificationDocument', docId);
+    // An already-decided document must report NOT_PENDING, not an expiry
+    // complaint — the transition below owns that refusal, so only a genuine
+    // candidate is asked for its date.
+    const effectiveExpiry =
+      candidate.status === 'PENDING'
+        ? resolveApprovalExpiry(candidate.docType, expiresAt, candidate.expiresAt)
+        : (expiresAt ?? candidate.expiresAt ?? null);
+
     const updated = await this.transitionPendingDocument(docId, 'APPROVED', {
         status: 'APPROVED',
         reviewedBy: adminId,
         reviewedAt: new Date(),
-        expiresAt: expiresAt ?? null,
+        expiresAt: effectiveExpiry,
         ...(insurance && {
           insurerName: insurance.insurerName,
           policyNumber: insurance.policyNumber,

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { prismaPlugin } from '../plugins/prisma';
@@ -10,7 +12,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { VerificationService } from '../modules/verification/verification.service';
+import { VerificationService, docTypeExpires, resolveApprovalExpiry } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
@@ -315,8 +317,13 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
       where: { userId: moverUserId, status: 'PENDING' },
     });
     for (const doc of pending) {
-      const res = await inject('PUT', `/api/v1/admin/verification/${doc.id}/approve`, {}, adminToken);
-      expect(res.statusCode).toBe(200);
+      // [A-19] A reviewer keys the printed expiry; a document type that carries
+      // one can no longer be approved without it.
+      const body = docTypeExpires(doc.docType)
+        ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() }
+        : {};
+      const res = await inject('PUT', `/api/v1/admin/verification/${doc.id}/approve`, body, adminToken);
+      expect(res.statusCode, doc.docType).toBe(200);
     }
 
     const status = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, moverToken);
@@ -1027,5 +1034,96 @@ describe('Lapsed documents force movers offline (daily sweep)', () => {
 
     const bystander = await app.prisma.rider.findFirstOrThrow({ where: { userId: cyclist.id } });
     expect(bystander.isOnline).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [A-19] S0 compliance. Approving a licence, insurance policy or permit used to
+// run through one line:
+//
+//     expiresAt: expiresAt ?? null
+//
+// and the admin console has never sent a date. Two consequences, both live:
+//
+//  1. The approved document became PERMANENTLY valid. The readiness query
+//     treats a null expiry as never-expiring, and the daily lapse sweep only
+//     examines rows that HAVE a date — so nothing downstream would ever catch
+//     it. An expired hire-car permit stays "approved" forever.
+//  2. Approving a document that already carried an auto-assigned expiry (the
+//     submission path sets one from the same map) WIPED it back to null. Since
+//     the console never sent one, that was the normal case.
+//
+// What was already right and is NOT re-fixed here: the readiness gate refuses
+// passenger work unless the insurance is HIRE class with both manual checks, so
+// a PRIVATE-class approval genuinely cannot put a driver on passenger jobs.
+// ---------------------------------------------------------------------------
+
+describe('[A-19] an expiring document cannot be approved without its expiry', () => {
+  const future = new Date(Date.now() + 300 * 24 * 60 * 60 * 1000);
+  const past = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  it('knows which types carry a printed expiry, from the one map', () => {
+    for (const t of ['drivers_licence', 'vehicle_insurance', 'police_clearance', 'hire_car_permit', 'fitness_cert']) {
+      expect(docTypeExpires(t), t).toBe(true);
+    }
+    expect(docTypeExpires('business_registration')).toBe(false);
+  });
+
+  it('refuses an expiring type with no date anywhere', () => {
+    expect(() => resolveApprovalExpiry('drivers_licence', undefined, null)).toThrow(/expiry/i);
+    try {
+      resolveApprovalExpiry('drivers_licence', undefined, null);
+    } catch (e) {
+      expect((e as { code?: string }).code ?? (e as { errorCode?: string }).errorCode).toBeDefined();
+    }
+  });
+
+  it('refuses a date that has already passed', () => {
+    expect(() => resolveApprovalExpiry('vehicle_insurance', past, null)).toThrow(/passed/i);
+    expect(() => resolveApprovalExpiry('vehicle_insurance', undefined, past)).toThrow(/passed/i);
+  });
+
+  it('a supplied date wins, and an existing one is PRESERVED rather than wiped', () => {
+    const existing = new Date(Date.now() + 100 * 24 * 60 * 60 * 1000);
+    expect(resolveApprovalExpiry('drivers_licence', future, existing)).toBe(future);
+    // the wipe: no date supplied, but the row already had one
+    expect(resolveApprovalExpiry('drivers_licence', undefined, existing)).toBe(existing);
+  });
+
+  it('a non-expiring type is unaffected either way', () => {
+    expect(resolveApprovalExpiry('business_registration', undefined, null)).toBeNull();
+    expect(resolveApprovalExpiry('business_registration', future, null)).toBe(future);
+  });
+
+  it('the route refuses the approval, and the document stays PENDING', async () => {
+    const pending = await app.prisma.verificationDocument.findFirst({
+      where: { status: 'PENDING', docType: { in: ['drivers_licence', 'vehicle_insurance', 'police_clearance'] } },
+    });
+    if (!pending) return; // no such candidate in this fixture run
+    const res = await inject('PUT', `/api/v1/admin/verification/${pending.id}/approve`, {}, adminToken);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('EXPIRY_REQUIRED');
+    const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: pending.id } });
+    expect(after.status).toBe('PENDING');
+  });
+});
+
+describe('[A-19] the reviewer can see what they are asked to cross-check', () => {
+  it('the queue sends the driver’s plate and vehicle with each document', async () => {
+    const res = await inject('GET', '/api/v1/admin/verification/queue?status=PENDING&role=operator&limit=100', undefined, adminToken);
+    expect(res.statusCode).toBe(200);
+    const rows = res.json().data as Array<{ user?: { driver?: unknown } }>;
+    // The console shows a "cross-checked against the H-plate" checkbox. If the
+    // plate never reaches the page, that checkbox asserts something the
+    // operator cannot see — so the SHAPE has to be on the wire.
+    const withDriver = rows.find((r) => r.user?.driver);
+    if (withDriver) {
+      expect(withDriver.user!.driver).toHaveProperty('licensePlate');
+      expect(withDriver.user!.driver).toHaveProperty('vehicleMake');
+    } else {
+      // no driver applicant in this fixture run — assert the selection exists
+      const routes = readFileSync(join(__dirname, '../modules/admin/admin.routes.ts'), 'utf8');
+      expect(routes).toMatch(/driver: \{ select: \{ licensePlate: true/);
+    }
   });
 });
