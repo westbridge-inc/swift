@@ -117,6 +117,17 @@ export const dispatchSearchesCounter = new client.Counter({
   registers: [registry],
 });
 
+// [R048-002] A rating report whose legs do not resolve to one tenant — the
+// rating outside the reporter's tenant at filing, a report the moderation
+// queue cannot resolve, a foreign or malformed id at resolution — is refused
+// or quarantined, and counted.
+export const ratingReportTenancyCounter = new client.Counter({
+  name: 'swift_rating_report_tenancy_total',
+  help: 'Rating-report tenancy outcomes (report_refused_foreign_rating/quarantined_in_queue/resolve_refused/resolve_race)',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 // [MOB-023] The door refused a hand-over: by the authority's block reason
 // (rail_state), or because the screen acted on a stale authority version.
 export const handoverBlockCounter = new client.Counter({
