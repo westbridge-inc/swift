@@ -188,3 +188,62 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
     });
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// [W-27] "REFUND" SAID MONEY CAME BACK. NONE EVER LEFT.
+//
+// An out-of-stock line with no substitute was removed with a button reading
+// "No substitute — refund line", and the line then showed "Refunded". On a cash
+// order nothing has been paid yet: the line comes off and the bill at the door
+// is smaller. And an MMG order cannot do this at all — the server refuses with
+// MMG_ADJUSTMENT_UNAVAILABLE, because that money went straight to the store and
+// Swift never held it. So there is no tender here on which a refund is owed,
+// and the words now say what actually happens.
+// ---------------------------------------------------------------------------
+describe('[W-27] removing a line is not a refund', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  const shelf = (over: Record<string, unknown> = {}) => ({
+    vendor: { vendorType: 'SUPERMARKET', selfDeliveryEnabled: false },
+    status: 'PREPARING',
+    ...over,
+  });
+
+  async function openDetail(over: Record<string, unknown>) {
+    const o = shelf(over);
+    mockApi(boardHandler([wireVendorOrder(o)], wireVendorOrderDetail(o)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    // A PREPARING order lives in the "In progress" lane; the board opens on New.
+    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    return { user };
+  }
+
+  it('the action says it REMOVES the line — it never offers to refund one', async () => {
+    const { user } = await openDetail({ paymentMethod: 'CASH' });
+    // The line controls open behind "Out of stock?".
+    await user.click((await screen.findAllByRole('button', { name: 'Out of stock?' }))[0]!);
+    expect(await screen.findByRole('button', { name: /No substitute — remove line/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /refund line/ })).toBeNull();
+  });
+
+  it('a removed line reads "Removed — not charged", never "Refunded"', async () => {
+    const items = [
+      { id: 'line-1', itemId: 'item-1', name: 'Rice', quantity: 2, totalCustomer: '2000.00', specialInstructions: null, picked: false, subStatus: 'REFUNDED' },
+    ];
+    await openDetail({ paymentMethod: 'CASH', items });
+    expect(await screen.findByText('Removed — not charged')).toBeTruthy();
+    expect(screen.queryByText('Refunded')).toBeNull();
+  });
+
+  it('an MMG order cannot change its totals here, and the store is told instead of clicking into a 409', async () => {
+    const { user } = await openDetail({ paymentMethod: 'MOBILE_MONEY' });
+    await user.click((await screen.findAllByRole('button', { name: 'Out of stock?' }))[0]!);
+    const remove = await screen.findByRole('button', { name: /No substitute — remove line/ });
+    expect((remove as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getAllByText(/settle item changes with the customer directly/).length).toBeGreaterThan(0);
+  });
+});
