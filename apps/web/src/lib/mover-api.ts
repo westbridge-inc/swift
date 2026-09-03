@@ -3,17 +3,32 @@
 // The earner portal is a pure client on the existing rider/driver/verification
 // endpoints — account, earnings, history and documents. Live dispatch stays on
 // the phone by design (GPS + push belong in the field).
-import { apiFetch } from './auth';
+import { ApiRequestError, apiFetch } from './auth';
 
-const soft = <T,>(p: Promise<{ data: T }>): Promise<T | null> =>
-  p.then((r) => r.data).catch(() => null);
+// [W-10] This used to be `soft()`: `.catch(() => null)` on every read, so a
+// 500, an offline phone or a schema change was indistinguishable from "you
+// have no debt", "you have no earnings" and "no store owes you anything". A
+// mover decides whether to keep working on exactly those figures.
+//
+// Absence is a fact the SERVER states, and it states it precisely: 404 when the
+// profile does not exist, 403 when the account is not a mover at all (see
+// `throwForMissingProfile` in the API). Those two are knowledge and become
+// `null`. Everything else is ignorance and must reach the page as an error, so
+// the page can say so instead of rendering a confident zero.
+const ABSENCE_STATUSES = new Set([403, 404]);
+
+const absentOrThrow = <T,>(p: Promise<{ data: T }>): Promise<T | null> =>
+  p.then((r) => r.data).catch((err) => {
+    if (err instanceof ApiRequestError && ABSENCE_STATUSES.has(err.status)) return null;
+    throw err;
+  });
 
 // ── Profiles: a mover may be a rider, a driver, or both ─────────────────────
-export const getRiderProfile = () => soft<Record<string, unknown>>(apiFetch('/api/v1/rider/profile'));
-export const getDriverProfile = () => soft<Record<string, unknown>>(apiFetch('/api/v1/driver/profile'));
+export const getRiderProfile = () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/rider/profile'));
+export const getDriverProfile = () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/driver/profile'));
 
 // ── Earnings ────────────────────────────────────────────────────────────────
-export const getRiderSummary = () => soft<{
+export const getRiderSummary = () => absentOrThrow<{
   today: { total: number; count: number };
   thisWeek: { total: number; count: number };
   thisMonth: { total: number; count: number };
@@ -42,9 +57,9 @@ export const getDriverRides = (page = 1) =>
   apiFetch(`/api/v1/driver/rides?page=${page}&limit=25`).then((r) => ({ rows: r.data as Array<Record<string, unknown>>, meta: r.meta }));
 
 // ── Money & subscription ────────────────────────────────────────────────────
-export const getRiderSubscription = () => soft<Record<string, unknown>>(apiFetch('/api/v1/rider/subscription'));
-export const getDriverSubscription = () => soft<Record<string, unknown>>(apiFetch('/api/v1/driver/subscription'));
-export const getRiderCashSettlements = () => soft<{
+export const getRiderSubscription = () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/rider/subscription'));
+export const getDriverSubscription = () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/driver/subscription'));
+export const getRiderCashSettlements = () => absentOrThrow<{
   summary: { owed: number; count: number };
   unsettled: Array<Record<string, unknown>>;
   settled: Array<Record<string, unknown>>;

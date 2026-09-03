@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { MutationNotice } from '@/components/mutation-notice';
+import { DataUnavailable } from '@/components/data-unavailable';
 import {
   confirmRiderSettlement, getDriverEarnings, getDriverProfile, getDriverSubscription,
   getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRiderSummary,
@@ -19,7 +20,16 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
   );
 }
 
-function SubscriptionCard({ title, sub }: { title: string; sub: Record<string, unknown> | null }) {
+function SubscriptionCard({ title, sub, isError, error, onRetry }: {
+  title: string;
+  sub: Record<string, unknown> | null;
+  isError?: boolean;
+  error?: unknown;
+  onRetry?: () => void;
+}) {
+  // [W-10] The card used to vanish on failure, so a mover in arrears saw
+  // nothing at all where their status and weekly rate belong.
+  if (isError) return <DataUnavailable what={title.toLowerCase()} error={error} onRetry={onRetry} />;
   if (!sub) return null;
   const status = String(sub['status'] ?? '');
   const good = status === 'ACTIVE' || status === 'TRIAL';
@@ -61,6 +71,21 @@ export default function PortalHome() {
   const owedRows = settlements.data?.unsettled ?? [];
 
   if (loading) return <p className="text-sm text-[var(--swift-muted)]">Loading…</p>;
+
+  // [W-10] THE WORST ONE. `isRider` is `!!rider.data`, and `soft()` made
+  // `rider.data` null for ANY failure — so a 500 or a dropped connection told a
+  // working mover "No earner profile on this account", i.e. that they are not a
+  // driver. Absence is now only claimed when the server actually said so
+  // (404/403); a failure says we could not check.
+  if (rider.isError || driver.isError) {
+    return (
+      <DataUnavailable
+        what="your earner profile"
+        error={rider.error ?? driver.error}
+        onRetry={() => { void rider.refetch(); void driver.refetch(); }}
+      />
+    );
+  }
   if (!isRider && !isDriver) {
     return (
       <p className="rounded-2xl border border-dashed border-black/10 bg-white p-10 text-center text-sm text-[var(--swift-muted)]">
@@ -73,6 +98,9 @@ export default function PortalHome() {
     <div className="space-y-6">
       <h1 className="text-2xl font-extrabold">Earnings</h1>
 
+      {isRider && summary.isError && (
+        <DataUnavailable what="your earnings" error={summary.error} onRetry={() => void summary.refetch()} />
+      )}
       {isRider && s && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <Stat label="Today" value={money(s.today.total)} sub={`${s.today.count} jobs`} />
@@ -81,10 +109,23 @@ export default function PortalHome() {
           <Stat label="All time" value={money(s.allTime.total)} sub={`${s.allTime.count} jobs`} />
         </div>
       )}
+      {isDriver && driverEarn.isError && (
+        <DataUnavailable what="your taxi earnings" error={driverEarn.error} onRetry={() => void driverEarn.refetch()} />
+      )}
       {isDriver && driverEarn.data && (
         <Stat label="Taxi earnings · all time" value={money(driverEarn.data.totalEarnings)} sub="Full history in the History tab" />
       )}
 
+      {/* [W-10] `settlements.data?.unsettled ?? []` made a failed read look
+          exactly like "no store owes you anything", and the whole card — with
+          the amount and the confirm buttons — simply disappeared. */}
+      {isRider && settlements.isError && (
+        <DataUnavailable
+          what="what stores owe you"
+          error={settlements.error}
+          onRetry={() => void settlements.refetch()}
+        />
+      )}
       {isRider && owedRows.length > 0 && (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5">
           <p className="font-semibold text-amber-800">
@@ -124,8 +165,20 @@ export default function PortalHome() {
       )}
 
       <div className="grid gap-4 md:grid-cols-2">
-        <SubscriptionCard title="Delivery subscription" sub={riderSub.data ?? null} />
-        <SubscriptionCard title="Taxi subscription" sub={driverSub.data ?? null} />
+        <SubscriptionCard
+          title="Delivery subscription"
+          sub={riderSub.data ?? null}
+          isError={isRider && riderSub.isError}
+          error={riderSub.error}
+          onRetry={() => void riderSub.refetch()}
+        />
+        <SubscriptionCard
+          title="Taxi subscription"
+          sub={driverSub.data ?? null}
+          isError={isDriver && driverSub.isError}
+          error={driverSub.error}
+          onRetry={() => void driverSub.refetch()}
+        />
       </div>
 
       <p className="text-xs text-[var(--swift-muted)]">
