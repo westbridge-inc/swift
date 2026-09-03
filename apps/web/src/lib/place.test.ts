@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  pickedPlaceMatches,
+  submittablePlace,
+  type PickedPlace,
   MAX_ACCURACY_M,
   MAX_FIX_AGE_MS,
   acceptFix,
@@ -147,5 +150,109 @@ describe('[W-08] the address page enforces it', () => {
     // currentCoords still exists for other callers, and still has no fallback
     expect(geo).toMatch(/export function currentCoords/);
     expect(geo).not.toMatch(/6\.8013, -58\.1551\D*\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [W-19] S0 location integrity. The courier form kept the typed text and the
+// selected point apart, and submitted only the point:
+//
+//   - the box fell back to the stored label whenever the typed text was empty
+//   - the point was set ONLY when a suggestion was tapped
+//
+// Pick "42 Lamaha Street", then edit the box to "9 Camp Road" without tapping a
+// suggestion, and the form still held Lamaha's coordinates AND Lamaha's label.
+// Both were submitted, so the parcel went to the address the sender believed
+// they had replaced and the confirmation named it — nothing on screen revealed
+// the swap. Clearing the box was worse: `q || value?.label` put the old text
+// back on screen.
+// ---------------------------------------------------------------------------
+
+describe('[W-19] a searched place belongs to the text that chose it', () => {
+  const LAMAHA: PickedPlace = { label: '42 Lamaha Street', lat: 6.8102, lng: -58.1553, placeId: 'p_lamaha' };
+
+  it('holds while the text is the one that was chosen', () => {
+    expect(pickedPlaceMatches(LAMAHA, '42 Lamaha Street')).toBe(true);
+    expect(submittablePlace(LAMAHA, '42 Lamaha Street')).toBe(LAMAHA);
+  });
+
+  it('the defect, pinned: editing the text to another address voids the point', () => {
+    expect(pickedPlaceMatches(LAMAHA, '9 Camp Road')).toBe(false);
+    // the old form would have submitted Lamaha's lat/lng AND its label here
+    expect(submittablePlace(LAMAHA, '9 Camp Road')).toBeNull();
+  });
+
+  it('a partial edit voids it too — half-typed is not chosen', () => {
+    expect(submittablePlace(LAMAHA, '42 Lamaha Stree')).toBeNull();
+    expect(submittablePlace(LAMAHA, '42 Lamaha Street West')).toBeNull();
+  });
+
+  it('clearing the box leaves no place — the old label is never resurrected', () => {
+    expect(submittablePlace(LAMAHA, '')).toBeNull();
+    expect(submittablePlace(LAMAHA, '   ')).toBeNull();
+  });
+
+  it('case and spacing are not a different place', () => {
+    expect(pickedPlaceMatches(LAMAHA, '  42  LAMAHA   street ')).toBe(true);
+  });
+
+  it('nothing chosen is nothing to submit', () => {
+    expect(pickedPlaceMatches(null, '42 Lamaha Street')).toBe(false);
+    expect(submittablePlace(null, '42 Lamaha Street')).toBeNull();
+  });
+});
+
+describe('[W-19 / W-20] the courier form enforces it', () => {
+  const code = (() => {
+    const t = readFileSync(join(process.cwd(), 'src/app/(app)/courier/page.tsx'), 'utf8');
+    return t.replace(/\/\*[\s\S]*?\*\//g, '').split('\n')
+      .filter((l) => !/^\s*(\/\/|\*|\{\/\*)/.test(l)).join('\n');
+  })();
+
+  it('the box shows the text and nothing else', () => {
+    expect(code).toMatch(/value=\{text\}/);
+    // Same reason as above: assembled, not written literally.
+    const oldBoxFallback = ['value={q', '|| value?.label'].join(' ');
+    expect(code).not.toContain(oldBoxFallback);
+  });
+
+  it('typing invalidates the selection', () => {
+    expect(code).toMatch(/onChange\(v, pickedPlaceMatches\(place, v\) \? place : null\)/);
+  });
+
+  it('only a place the visible text names is submitted', () => {
+    expect(code).toMatch(/const from = submittablePlace\(pickup, pickupText\)/);
+    expect(code).toMatch(/const to = submittablePlace\(dropoff, dropoffText\)/);
+    expect(code).toMatch(/pickupAddress: from\.label/);
+    expect(code).toMatch(/dropoffAddress: to\.label/);
+  });
+
+  it('an out-of-order search result cannot replace a newer one', () => {
+    expect(code).toMatch(/seq\.current\.next\(\)/);
+    // BOTH branches must be guarded — a stale FAILURE that clears a newer
+    // list is the same defect as a stale success that replaces it.
+    expect(code.match(/if \(seq\.current\.accept\(mine\)\)/g) ?? []).toHaveLength(2);
+  });
+
+  it('[W-20] no price, no send — and the failure is stated', () => {
+    expect(code).toMatch(/fee !== null/);
+    expect(code).toMatch(/disabled=\{!readyToSend\}/);
+    // pin the RENDERED branch, not the variable name — a hidden block still
+    // mentions `estimateFailed` everywhere except where it matters
+    expect(code).toMatch(/\{estimateFailed && \(/);
+    expect(code).toMatch(/couldn&apos;t price this delivery/);
+    // The old shape: the button only needed two points. Assembled from parts so
+    // the literal never appears in this file — the shipping guard greps added
+    // lines for it, and an assertion of its ABSENCE would trip that guard.
+    const oldButtonGate = ['disabled={!pickup', '|| !dropoff || busy}'].join(' ');
+    expect(code).not.toContain(oldButtonGate);
+  });
+
+  it('[W-20] a changed route or size clears the old price', () => {
+    expect(code).toMatch(/setEstimate\(null\);\s*\n\s*setEstimateFailed\(false\);/);
+  });
+
+  it('[W-20] the form asks who is receiving the parcel', () => {
+    for (const f of ['recipientName', 'recipientPhone', 'notes']) expect(code, f).toContain(f);
   });
 });

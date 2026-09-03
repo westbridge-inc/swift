@@ -118,3 +118,51 @@ export function placeMatches(place: SelectedPlace | null, form: { addressLine1: 
 export function canSave(place: SelectedPlace | null, form: { addressLine1: string; city: string }): boolean {
   return form.addressLine1.trim().length > 0 && form.city.trim().length > 0 && placeMatches(place, form);
 }
+
+// ---------------------------------------------------------------------------
+// [W-19] A PLACE CHOSEN FROM A SEARCH IS BOUND TO THE TEXT THAT CHOSE IT.
+//
+// The courier form kept the typed text and the selected point in two separate
+// places, and only the point was ever submitted:
+//
+//   - the field kept its own copy of the typed text, separate from the point
+//   - the box fell back to the stored label whenever that text was empty
+//   - the point was set ONLY when a suggestion was tapped
+//
+// Pick "42 Lamaha Street", then edit the box to "9 Camp Road" without tapping a
+// suggestion, and the form still holds Lamaha's coordinates AND Lamaha's label.
+// Both are submitted. The parcel goes to the address the sender believes they
+// replaced, and the confirmation names it — so nothing on screen reveals the
+// swap. Clearing the box was worse: `q || value?.label` put the OLD text back.
+//
+// Same law as the address form above, and the same one word: a place belongs to
+// the text it was chosen for. Change the text and there is no place.
+// ---------------------------------------------------------------------------
+
+export interface PickedPlace {
+  /** The exact text the user saw and chose. The box shows this and nothing else. */
+  label: string;
+  lat: number;
+  lng: number;
+  /** The provider's id for the chosen result, so a submission can be traced. */
+  placeId: string;
+}
+
+/** Normalise for comparison only — case and spacing do not change a place. */
+function textKey(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * Is the text in the box still the place that was chosen? Anything else — an
+ * edit, a deletion, a paste — means there is no place until one is chosen again.
+ */
+export function pickedPlaceMatches(place: PickedPlace | null, text: string): boolean {
+  if (!place) return false;
+  return textKey(place.label) === textKey(text);
+}
+
+/** The point to submit, or null. Never a point the visible text does not name. */
+export function submittablePlace(place: PickedPlace | null, text: string): PickedPlace | null {
+  return pickedPlaceMatches(place, text) ? place : null;
+}
