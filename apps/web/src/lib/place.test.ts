@@ -202,36 +202,52 @@ describe('[W-19] a searched place belongs to the text that chose it', () => {
   });
 });
 
-describe('[W-19 / W-20] the courier form enforces it', () => {
-  const code = (() => {
-    const t = readFileSync(join(process.cwd(), 'src/app/(app)/courier/page.tsx'), 'utf8');
-    return t.replace(/\/\*[\s\S]*?\*\//g, '').split('\n')
-      .filter((l) => !/^\s*(\/\/|\*|\{\/\*)/.test(l)).join('\n');
-  })();
+// [W-18] The FIELD moved to a shared component, and the taxi form now uses the
+// same one — it had the identical defect and its own copy of the search box.
+// These assertions follow the code: what the field guarantees is read from the
+// field, and what the courier FORM does with it is read from the form. Pinning
+// the field's behaviour here now covers both pages at once.
+const stripComments = (t: string) => t.replace(/\/\*[\s\S]*?\*\//g, '').split('\n')
+  .filter((l) => !/^\s*(\/\/|\*|\{\/\*)/.test(l)).join('\n');
+
+describe('[W-18 / W-19] the shared location field enforces it', () => {
+  const field = stripComments(readFileSync(join(process.cwd(), 'src/components/location-field.tsx'), 'utf8'));
 
   it('the box shows the text and nothing else', () => {
-    expect(code).toMatch(/value=\{text\}/);
+    expect(field).toMatch(/value=\{text\}/);
     // Same reason as above: assembled, not written literally.
     const oldBoxFallback = ['value={q', '|| value?.label'].join(' ');
-    expect(code).not.toContain(oldBoxFallback);
+    expect(field).not.toContain(oldBoxFallback);
   });
 
   it('typing invalidates the selection', () => {
-    expect(code).toMatch(/onChange\(v, pickedPlaceMatches\(place, v\) \? place : null\)/);
+    expect(field).toMatch(/onChange\(v, pickedPlaceMatches\(place, v\) \? place : null\)/);
   });
+
+  it('an out-of-order search result cannot replace a newer one', () => {
+    expect(field).toMatch(/seq\.current\.next\(\)/);
+    // BOTH branches must be guarded — a stale FAILURE that clears a newer
+    // list is the same defect as a stale success that replaces it.
+    expect(field.match(/if \(seq\.current\.accept\(mine\)\)/g) ?? []).toHaveLength(2);
+  });
+
+  it('[W-18] BOTH forms use it — there is no second copy of the box to drift', () => {
+    for (const page of ['src/app/(app)/courier/page.tsx', 'src/app/(app)/taxi/page.tsx']) {
+      const t = readFileSync(join(process.cwd(), page), 'utf8');
+      expect(t, `${page} must use the shared field`).toMatch(/from '@\/components\/location-field'/);
+      expect(stripComments(t), `${page} must not re-declare the box`).not.toMatch(/placesAutocomplete\(/);
+    }
+  });
+});
+
+describe('[W-19 / W-20] the courier form enforces it', () => {
+  const code = stripComments(readFileSync(join(process.cwd(), 'src/app/(app)/courier/page.tsx'), 'utf8'));
 
   it('only a place the visible text names is submitted', () => {
     expect(code).toMatch(/const from = submittablePlace\(pickup, pickupText\)/);
     expect(code).toMatch(/const to = submittablePlace\(dropoff, dropoffText\)/);
     expect(code).toMatch(/pickupAddress: from\.label/);
     expect(code).toMatch(/dropoffAddress: to\.label/);
-  });
-
-  it('an out-of-order search result cannot replace a newer one', () => {
-    expect(code).toMatch(/seq\.current\.next\(\)/);
-    // BOTH branches must be guarded — a stale FAILURE that clears a newer
-    // list is the same defect as a stale success that replaces it.
-    expect(code.match(/if \(seq\.current\.accept\(mine\)\)/g) ?? []).toHaveLength(2);
   });
 
   it('[W-20] no price, no send — and the failure is stated', () => {
