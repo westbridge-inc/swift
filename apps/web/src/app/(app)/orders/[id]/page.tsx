@@ -350,7 +350,22 @@ export default function OrderDetailPage() {
     ? mmgAction
     : null;
 
-  const openVerifiedMmgPayment = async () => {
+  // [W-32] The refetch is a positive control, and it was only half of one: it
+  // re-verified that SOME payment action was still available and then opened
+  // whatever came back. A link that changed between render and tap — a poisoned
+  // or merely stale server answer — sent the customer to a destination they had
+  // never been shown, having consented to a different recipient and amount.
+  //
+  // Consent is to a SPECIFIC payment. The action that opens must be the one on
+  // screen when the button was pressed, in every field the customer was told.
+  const sameAction = (
+    shown: NonNullable<OrderDetail['paymentAction']>,
+    latest: NonNullable<OrderDetail['paymentAction']>,
+  ) => shown.url === latest.url
+    && shown.recipientName === latest.recipientName
+    && Number(shown.amount) === Number(latest.amount);
+
+  const openVerifiedMmgPayment = async (shown: NonNullable<OrderDetail['paymentAction']>) => {
     if (openingPayment) return;
     const paymentWindow = window.open('about:blank', '_blank');
     if (!paymentWindow) {
@@ -369,6 +384,15 @@ export default function OrderDetailPage() {
       if (!action || latestStopped || latest.paymentStatus !== 'PENDING') {
         paymentWindow.close();
         setError('Swift refreshed this order and no current verified MMG payment action is available. No payment was opened.');
+        return;
+      }
+      // [W-32] It has to be the SAME payment the customer just agreed to.
+      if (!sameAction(shown, action)) {
+        paymentWindow.close();
+        setError(
+          'This payment changed while you were looking at it — the recipient or the amount is no longer what was shown. '
+          + 'Nothing was opened. Check the new details below before paying.',
+        );
         return;
       }
       paymentWindow.location.replace(action.url);
@@ -658,7 +682,7 @@ export default function OrderDetailPage() {
                         : `The server reports ${order.paymentStatus?.toLowerCase() ?? 'an unknown payment state'} for this order.`}
                 </p>
                 {payableMmgAction ? (
-                  <button type="button" className={`${styles.secondaryButton} ${styles.paymentAction}`} disabled={openingPayment} onClick={() => void openVerifiedMmgPayment()}>
+                  <button type="button" className={`${styles.secondaryButton} ${styles.paymentAction}`} disabled={openingPayment} onClick={() => void openVerifiedMmgPayment(payableMmgAction)}>
                     {openingPayment ? 'Rechecking payment…' : `Pay ${payableMmgAction.recipientName} by MMG`}
                     <ExternalLink size={16} aria-hidden="true" />
                   </button>
