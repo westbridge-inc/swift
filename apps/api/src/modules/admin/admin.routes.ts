@@ -2959,7 +2959,10 @@ export async function adminRoutes(app: FastifyInstance) {
           version: 1,
         },
       });
-      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      // [ADM-002] A create has no id in its params, so the row is told which
+      // zone it made — otherwise the trail records `-` and cannot say what was
+      // created. (The legacy `CREATE_ZONE` row carried this; nothing else did.)
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: created.id });
       return created;
     });
 

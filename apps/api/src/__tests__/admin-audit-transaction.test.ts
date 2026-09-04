@@ -285,3 +285,38 @@ describe('[ADM-002] swift_admin_audit_total says which writer produced the row',
       'a route still on the hook must count as backstop').toBeGreaterThan(0);
   });
 });
+
+// ── a create names what it created ──────────────────────────────────────────
+
+describe('[ADM-002] a CREATE route records the id of the row it made', () => {
+  const zoneIds: string[] = [];
+  afterAll(async () => {
+    await runWithoutTenant(
+      () => app.prisma.zone.deleteMany({ where: { id: { in: zoneIds } } }).then(() => undefined),
+      'test-cleanup',
+    ).catch(() => {});
+  });
+
+  // `POST /zones` declares no entity in ADMIN_ROUTE_AUTHORITY — the subject
+  // does not exist when the request is routed — so the hook's row falls back
+  // to entityId `-`. The legacy `CREATE_ZONE` row was the only thing carrying
+  // the new id, and consolidating onto one row would have silently dropped it.
+  it('the audit row names the created zone, not "-"', async () => {
+    const name = `ADM002 ${RUN} zone`;
+    const res = await call('POST', '/api/v1/admin/zones', {
+      name,
+      boundary: { type: 'Polygon', coordinates: [[[-58.2, 6.8], [-58.1, 6.8], [-58.1, 6.9], [-58.2, 6.9], [-58.2, 6.8]]] },
+      priority: 77,
+      reason: REASON,
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const created = (JSON.parse(res.body) as { data: { id: string } }).data;
+    zoneIds.push(created.id);
+
+    const rows = await runWithoutTenant(() => app.prisma.auditLog.findMany({
+      where: { userId: userIds[0]!, action: { contains: '/zones' } },
+    }), 'test-read');
+    const mine = rows.filter((r) => r.entityId === created.id);
+    expect(mine, `the trail must name zone ${created.id}, not "-"`).toHaveLength(1);
+  });
+});

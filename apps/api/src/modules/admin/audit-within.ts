@@ -74,6 +74,10 @@ export interface AdminAuditRowInput {
   readonly entityDeclared: boolean;
   /** [ADM-007] The audited READS file under `integrity`, not the path root. */
   readonly entityOverride?: string | undefined;
+  /** [ADM-002] A CREATE route has no id in its params — the subject did not
+   *  exist when the request was routed. Without this the row says `-` and the
+   *  trail cannot name what was created. */
+  readonly entityIdOverride?: string | undefined;
 }
 
 /**
@@ -92,7 +96,7 @@ export function adminAuditRow(
     userId,
     action: `ADMIN ${request.method} ${input.routeUrl}`,
     entity: input.entityOverride ?? (input.routeUrl.split('/').filter(Boolean)[0] ?? 'admin'),
-    entityId: params['id'] ?? params['key'] ?? params['userId'] ?? '-',
+    entityId: input.entityIdOverride ?? params['id'] ?? params['key'] ?? params['userId'] ?? '-',
     changes: changeRecord({
       params,
       reason: input.reason,
@@ -139,7 +143,13 @@ export async function auditWithin(
   tx: AuditLogWriter,
   request: AuditRequestLike,
   prefix: string,
-  overrides?: { readonly userId?: string | undefined; readonly reason?: string | null | undefined },
+  overrides?: {
+    readonly userId?: string | undefined;
+    readonly reason?: string | null | undefined;
+    /** [ADM-002] The id of a row this action CREATED. A create route has no id
+     *  in its params, so without it the audit row cannot name its subject. */
+    readonly entityId?: string | undefined;
+  },
 ): Promise<void> {
   const userId = overrides?.userId ?? request.user?.userId;
   // No actor, no row worth writing. The hook makes the same call, so this is
@@ -159,6 +169,7 @@ export async function auditWithin(
       before: request.auditBefore ?? ABSENT,
       after,
       entityDeclared: !!entity,
+      entityIdOverride: overrides?.entityId,
     }),
   });
   request.auditWrittenInline = true;
