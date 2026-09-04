@@ -16,7 +16,25 @@
 # published on the host at all so a developer can curl them; in production they
 # should be reachable from the API and nothing else.
 #
+# DISK, because it filled a machine to zero bytes on 4 Sep 2026. Two of these
+# four services are small and two are not, so they are no longer one command.
+# The default brings up the pair the platform actually routes on:
+#
 #   docker compose -f deploy/docker-compose.routing.yml up -d
+#
+# osrm + vroom, both proven on the Guyana extract — OSRM routed 1,917 m in
+# 200 s inside Georgetown, VROOM batched two shipments into 362 s.
+#
+# The geocoders are opt-in, because each one costs more than a laptop has:
+#
+#   docker compose -f deploy/docker-compose.routing.yml --profile geocoding up -d
+#
+# Photon downloads a 6.72 GB index and then EXTRACTS it, which needs roughly
+# the same again while both copies exist; Nominatim imports the extract into
+# its own PostgreSQL. Budget ~20 GB free for Photon before starting it, and
+# treat both as VPS services. `restart: unless-stopped` means Docker brings
+# a started one back on every daemon boot, so a half-finished index resumes
+# filling the disk after a reboot — `docker rm -f` it, do not just stop it.
 #
 # Data is built by ./setup-routing.sh first — see that file.
 
@@ -79,6 +97,7 @@ services:
   photon:
     image: rtuszik/photon-docker:latest
     container_name: swift-photon
+    profiles: ["geocoding"]
     environment:
       - REGION=south-america
     volumes:
@@ -93,6 +112,7 @@ services:
   nominatim:
     image: mediagis/nominatim:4.4
     container_name: swift-nominatim
+    profiles: ["geocoding"]
     environment:
       - PBF_URL=https://download.geofabrik.de/south-america/guyana-latest.osm.pbf
       - IMPORT_WIKIPEDIA=false
