@@ -42,12 +42,25 @@ export default function createNextConfig(phase: string): NextConfig {
         { source: '/for-vendors', destination: '/vendors', permanent: true },
         { source: '/for-drivers', destination: '/drivers', permanent: true },
         { source: '/delete-account', destination: '/account/delete', permanent: true },
-        // [AC-12] Canonical host is the apex. www 301s to it, so the AASA file
-        // and every share link resolve on exactly one origin. Apple requires the
-        // association file to be served with NO redirect, which is why this rule
-        // is scoped to the www host and never touches the apex.
+        // [AC-12] Canonical host is the apex. www 301s to it, so every share
+        // link resolves on exactly one origin.
+        //
+        // ...except the two association files, which must NOT redirect.
+        //
+        // Apple's AASA fetcher and Android's App Links verifier both refuse to
+        // follow redirects, and the app claims BOTH hosts —
+        // `applinks:www.<domain>` in associatedDomains, and a www intent filter
+        // for /s and /store. With the rule below unscoped, iOS and Android
+        // fetched the association from www, got a 301, and silently failed to
+        // verify it. The apex kept working, so nothing looked broken; a www
+        // link just opened a browser tab on a phone that had Swift installed —
+        // which is the exact failure universal links exist to prevent, hiding
+        // inside the redirect that was added to tidy the origins.
+        //
+        // The original comment said the rule "never touches the apex", which
+        // was true and was the wrong half to worry about.
         {
-          source: '/:path*',
+          source: '/:path((?!\\.well-known/).*)',
           has: [{ type: 'host', value: `www.${SITE_DOMAIN}` }],
           destination: `https://${SITE_DOMAIN}/:path*`,
           permanent: true,

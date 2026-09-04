@@ -121,3 +121,37 @@ describe('[deep links] the association covers the links that are actually printe
     expect(APP_CONFIG).toContain('applinks:');
   });
 });
+
+describe('[deep links] the association files must not redirect', () => {
+  const NEXT = read('apps/web/next.config.ts');
+
+  it('the www→apex redirect exempts /.well-known/', () => {
+    // Apple's AASA fetcher and Android's App Links verifier both REFUSE to
+    // follow redirects, and the app claims the www host on both platforms
+    // (`applinks:www.<domain>`, and www intent filters for /s and /store).
+    //
+    // With the canonical-host redirect unscoped, both fetched the association
+    // from www, got a 301, and silently failed to verify. The apex kept
+    // working, so nothing looked broken — a www link just opened a browser tab
+    // on a phone that had Swift installed, which is the exact failure
+    // universal links exist to prevent, hiding inside a tidy-up.
+    // Read the rule that carries the www host condition — from its own opening
+    // brace, not from `has:`, because `source:` is written ABOVE it. An earlier
+    // draft sliced forward from `has:` and never saw the source line at all: the
+    // mutation that removes the exemption walked straight through the test.
+    const hasAt = NEXT.indexOf("has: [{ type: 'host'");
+    expect(hasAt, 'no www host rule found').toBeGreaterThan(-1);
+    const ruleStart = NEXT.lastIndexOf('{', NEXT.lastIndexOf('source:', hasAt));
+    const rule = NEXT.slice(ruleStart, hasAt);
+    expect(rule, 'the www redirect still catches every path').not.toMatch(/source: '\/:path\*'/);
+    expect(rule, 'the www redirect does not exempt the association files').toMatch(/well-known/);
+  });
+
+  it('the app claims www, so www has to serve the file', () => {
+    // The two halves have to agree. Either the app stops claiming www, or www
+    // serves the association — claiming a host whose file 301s is the state
+    // this test exists to prevent returning to.
+    expect(APP_CONFIG).toMatch(/applinks:www\./);
+    expect(APP_CONFIG).toMatch(/host: `www\./);
+  });
+});
