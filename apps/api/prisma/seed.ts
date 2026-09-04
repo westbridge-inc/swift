@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { seedPlatformSpine, guyanaTiers } from './seed-platform';
 import { assertSafeToSeedDemo, ensureEphemeralIdentity } from '../src/utils/seed-guard';
+import { seedRetailCatalogue } from '../src/modules/market/retail-catalogue.seed';
 
 const prisma = new PrismaClient();
 
@@ -743,6 +744,54 @@ async function main() {
     const limit = r.user.trustLevel === 'L3' ? cc.floatL3 : r.user.trustLevel === 'L2' ? cc.floatL2 : cc.floatL1;
     await prisma.rider.update({ where: { id: r.id }, data: { floatLimit: limit } });
   }
+
+  // [MKT G3/G7] The retail catalogue.
+  //
+  // The Market tab draws from STORE vendors, and the platform had exactly one
+  // — City Hardware, five items — which the note above already calls "the
+  // whole catalogue a shopper sees". G7 now hides the tab entirely below 150
+  // items / 2 vendors, which is the correct behaviour and leaves the demo
+  // unable to show its own Market tab. This is the other half: seven more
+  // Georgetown stores, every item filed into the RETAIL taxonomy that shipped
+  // empty, and every photo NULL per M-D5 — the honest name-tile, never stock
+  // imagery nobody has looked at.
+  // The cross-vendor taxonomy is seeded at API BOOT (server.ts), not here, so
+  // a database seeded before the API has ever started has no categories at
+  // all — and the retail pass below files items INTO that taxonomy. Run it
+  // first and the seed stops depending on boot order; it is idempotent, so
+  // this is a no-op wherever the API got there first.
+  const { seedDiscoveryTaxonomy } = await import('../src/modules/discovery/taxonomy.seed');
+  const taxonomy = await seedDiscoveryTaxonomy(prisma);
+  console.warn(`Discovery taxonomy: ${taxonomy.created} categories created`);
+
+  // Vendor.ownerId references VendorOwner, not User — the same row City
+  // Hardware and every other demo storefront already hangs off.
+  const marketUser = await prisma.user.findUniqueOrThrow({ where: { phone: '+5926002000' }, select: { id: true } });
+  const marketOwner = await prisma.vendorOwner.findUniqueOrThrow({ where: { userId: marketUser.id }, select: { id: true } });
+  const retail = await seedRetailCatalogue(prisma, marketOwner.id);
+  console.warn(`Retail catalogue: ${retail.vendors} stores, ${retail.items} items, ${retail.tags} item tags, ${retail.memberships} store categories`);
+
+  // [CAT-G] Turn the category rail ON for the demo.
+  //
+  // `GET /discovery/categories` is gated on PlatformConfig
+  // CATEGORY_DISCOVERY_ENABLED, which defaults to false and which NOTHING has
+  // ever set — not the spine, not a migration, not a script. The rail has
+  // therefore been dark in every database that exists: the flag returns
+  // `{ enabled: false, categories: [] }` and the client renders the pre-rail
+  // Home, pixel-identical, exactly as CAT-G designed the kill-switch to
+  // behave. Nothing looked broken, because the fallback is deliberately
+  // invisible.
+  //
+  // Only the DEMO seed flips it. The kill-switch is real and a production
+  // operator's call to make; a demo that cannot show its own category rail is
+  // not a demo. It goes here rather than in seed-platform.ts for exactly that
+  // reason — the spine is shared with seed-production.ts.
+  await prisma.platformConfig.upsert({
+    where: { key: 'CATEGORY_DISCOVERY_ENABLED' },
+    create: { key: 'CATEGORY_DISCOVERY_ENABLED', value: true },
+    update: { value: true },
+  });
+  console.warn('Category discovery rail: enabled for demo');
 
   console.warn('Seed complete!');
 }
