@@ -4,6 +4,7 @@ import { visibleVendorInTenant } from '../vendor/vendor-visibility';
 import { bindPublicMarketTenant, decodeScopedCursor, encodeScopedCursor } from '../search/search-scope';
 import { ITEM_HIT_SELECT, toItemHit, type ItemHit } from '../search/item-hit';
 import { AppError } from '../../utils/errors';
+import { marketGate, thresholdsFrom } from './launch-depth';
 
 // ---------------------------------------------------------------------------
 // THE MARKET FEED [MKT G1] — items across every store, by category.
@@ -83,6 +84,34 @@ export async function marketRoutes(app: FastifyInstance) {
    * at zero stock and auto-returns it on restock, so the feed inherits live
    * stock for free — and defeating it here would sell things that are gone.
    */
+  /**
+   * [MKT G7 / B5] Catalogue depth — the launch-depth gate the client obeys.
+   *
+   * §5.4: "An empty marketplace is worse than no marketplace." The tab must
+   * not ship with one store in it, which is precisely what it did: the tab was
+   * mounted unconditionally while the comment above claimed it "stays hidden
+   * below ~150 items". This endpoint makes that claim true.
+   *
+   * It counts the SAME population `/items` serves — the shared visibility
+   * predicate, the same vendor type — so the number the gate reads can never
+   * describe a different catalogue than the one the shopper would see.
+   */
+  app.get('/depth', async (request) => {
+    // The preHandler above has already bound the public tenant.
+    const tenantId = request.publicTenantId!;
+    const where = {
+      isAvailable: true,
+      vendor: { ...visibleVendorInTenant(tenantId), vendorType: VERTICAL_VENDOR_TYPE.RETAIL },
+    };
+    const [items, sellers, config] = await Promise.all([
+      app.prisma.item.count({ where }),
+      app.prisma.item.findMany({ where, select: { vendorId: true }, distinct: ['vendorId'] }),
+      app.prisma.platformConfig.findMany({ where: { key: { in: ['MARKET_MIN_ITEMS', 'MARKET_MIN_VENDORS'] } }, select: { key: true, value: true } }),
+    ]);
+    const overrides = Object.fromEntries(config.map((c) => [c.key, c.value]));
+    return { success: true, data: marketGate({ items, vendors: sellers.length }, thresholdsFrom(overrides)) };
+  });
+
   app.get('/items', async (request) => {
     const q = marketQuerySchema.parse(request.query);
     const tenantId = request.publicTenantId!;

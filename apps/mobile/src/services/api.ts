@@ -299,6 +299,8 @@ export const vendorDiscoveryApi = {
 export const marketApi = {
   items: (params?: { category?: string; sort?: string; cursor?: string; limit?: number }) =>
     api.get('/market/items', { params }),
+  /** [MKT G7] Catalogue depth — the server's verdict on whether the tab shows. */
+  depth: () => api.get('/market/depth'),
 };
 
 export const customerApi = {
