@@ -53,20 +53,35 @@ export function PopupTitle({ variant = 'title', ...rest }: Omit<TP, 'accessibili
 }
 
 /** Kit centered popup (voucher applied / delivered / logout confirm):
- *  dim scrim, white rounded-20 sheet, caller supplies content + actions. */
+ *  dim scrim, white rounded-20 sheet, caller supplies content + actions.
+ *
+ *  `onDismissed` fires when the native window is PROVABLY GONE — React
+ *  Native's own post-dismissal callback, not a guess. Navigate from there, not
+ *  from `onClose`: closing starts the dismissal, it does not finish it, and a
+ *  stack transition begun in the same tick lets the modal's window survive
+ *  invisibly above the destination screen and eat every touch. That is the
+ *  frozen-screen P0, and until now the only thing standing against it was
+ *  `InteractionManager.runAfterInteractions` — which React Native 0.85 quietly
+ *  replaced with `InteractionManagerStub`, a bare `setImmediate` that waits
+ *  for nothing at all. The guard read as if it waited and did not.
+ *
+ *  iOS only, per React Native: on Android a Modal is not a separate window and
+ *  the race does not exist, so callers keep a frame-based fallback. */
 export function PopupCard({
   visible,
   onClose,
+  onDismissed,
   children,
 }: {
   visible: boolean;
   onClose: () => void;
+  onDismissed?: () => void;
   children: React.ReactNode;
 }) {
   const insets = useSafeAreaInsets();
 
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} {...(onDismissed ? { onDismiss: onDismissed } : {})}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={{ flex: 1 }}

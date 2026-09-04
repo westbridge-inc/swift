@@ -56,7 +56,14 @@ describe('modal exits close in their own tick — navigation is deferred', () =>
 
   it('the seam is a real deferral, not a rename', () => {
     const seam = stripComments(readFileSync(join(process.cwd(), 'src/kit/after-dismiss.ts'), 'utf8'), 80);
-    expect(seam).toContain('InteractionManager.runAfterInteractions(go)');
+    // This used to assert the API NAME — and that is exactly how the guard was
+    // lost. React Native 0.85 replaced InteractionManager with a stub whose
+    // `runAfterInteractions` is a bare `setImmediate`: the name this test
+    // demanded survived the upgrade, the guarantee behind it did not, and the
+    // frozen-screen P0 came back with the suite still green. Assert the
+    // DEFERRAL, never the identifier.
+    expect(seam).not.toMatch(/InteractionManager\s*\./);
+    expect((seam.match(/requestAnimationFrame/g) ?? []).length).toBeGreaterThanOrEqual(2);
     expect(seam).toMatch(/export function afterDismiss\(go: \(\) => void\): void/);
   });
 });

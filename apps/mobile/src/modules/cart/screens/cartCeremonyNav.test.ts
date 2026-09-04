@@ -41,7 +41,12 @@ describe('order-placed ceremony — dismiss first, navigate after', () => {
 
   it('the deferred effect navigates only after the modal state has flushed false, one frame later', () => {
     expect(src).toMatch(/if \(placeOrder\.isSuccess \|\| !pendingTrackId\) return;/);
-    expect(src).toMatch(/InteractionManager\.runAfterInteractions\([\s\S]{0,90}navigation\.navigate\('Delivery'/);
-    expect(src).toContain('task.cancel()');
+    // The ceremony now navigates from the modal's OWN post-dismissal callback —
+    // the only signal that means "the native window is gone" — with a
+    // two-frame deferral as the fallback. The previous assertion named
+    // InteractionManager, which RN 0.85 hollowed out into a `setImmediate`.
+    expect(src).toContain('onDismissed');
+    expect(src).toMatch(/requestAnimationFrame\([\s\S]{0,200}navigation\.navigate\('Delivery'/);
+    expect(src).toContain('cancelAnimationFrame');
   });
 });
