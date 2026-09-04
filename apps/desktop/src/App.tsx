@@ -16,6 +16,7 @@ import Health from './modules/Health';
 import Home from './modules/Home';
 import LiveOps from './modules/LiveOps';
 import Moderation from './modules/Moderation';
+import Safety from './modules/Safety';
 import Money from './modules/Money';
 import People from './modules/People';
 import ReviewCenter from './modules/ReviewCenter';
@@ -33,6 +34,7 @@ type ModuleKey =
   | 'people'
   | 'vendors'
   | 'agent'
+  | 'safety'
   | 'moderation'
   | 'compliance'
   | 'health';
@@ -47,6 +49,7 @@ const MODULE_META: Record<ModuleKey, { title: string; subtitle: string }> = {
   people: { title: 'People', subtitle: 'Accounts and operating status' },
   vendors: { title: 'Businesses', subtitle: 'Partners, papers and subscriptions' },
   agent: { title: 'Agent desk', subtitle: 'The machine proposes; a person decides' },
+  safety: { title: 'Safety', subtitle: 'Live alerts, cases and the evidence vault' },
   moderation: { title: 'Reports', subtitle: 'Content awaiting a moderation decision' },
   compliance: { title: 'Compliance', subtitle: 'Live gates, evidence and review cases' },
   health: { title: 'System health', subtitle: 'Queues, alerts and service state' },
@@ -76,6 +79,8 @@ const NAV_GROUPS: Array<{
   {
     label: 'Trust & care',
     items: [
+      // First in the group on purpose: a live alert outranks a queued report.
+      { key: 'safety', label: 'Safety', glyph: '◈' },
       { key: 'compliance', label: 'Compliance', glyph: '✓' },
       { key: 'moderation', label: 'Reports', glyph: '△' },
       { key: 'support', label: 'Support', glyph: '?' },
@@ -582,6 +587,7 @@ export default function App() {
           {module === 'stuck' && <StuckOrders />}
           {module === 'money' && <Money />}
           {module === 'support' && <Support />}
+          {module === 'safety' && <Safety />}
           {module === 'moderation' && <Moderation />}
           {module === 'compliance' && <Compliance />}
           {module === 'people' && <People />}

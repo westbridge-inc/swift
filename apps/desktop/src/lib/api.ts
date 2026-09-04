@@ -641,3 +641,96 @@ export const requeueDlqJob = (queue: string, id: string, acknowledgedReconciled 
   );
 export const discardDlqJob = (queue: string, id: string) =>
   apiFetch(`/api/v1/admin/dlq/${queue}/${id}`, { method: 'DELETE' });
+
+// ── Safety operations ────────────────────────────────────────────────────────
+// 23 safety routes shipped with no client of any kind: the whole incident
+// lifecycle and the whole evidence chain of custody. Swift could raise an
+// incident, page ops, seal an evidence bundle, place a legal hold and prepare a
+// police export — and no screen anywhere let a human do it.
+//
+// These are the FIRST calls Mission Control makes outside /api/v1/admin, so the
+// reason is worth stating. Standing order 26 reads: "Mission Control talks ONLY
+// to the admin API over HTTPS/WSS. Never a direct DB connection, never direct
+// object-store access, never a bundled secret." The prohibition is on going
+// around the server, and /api/v1/safety/* IS the server: every route below is
+// gated on `isOps` (ADMIN or SUPER_ADMIN) exactly as the /admin surface is. The
+// alternative — aliasing 23 routes under /admin/safety/* — duplicates surface
+// area on the one subsystem where two definitions of "who may seal evidence"
+// is the worst possible outcome.
+import type {
+  IncidentRow, EvidenceBundleRow, SosRow, DecisionCode, SosResolutionCode,
+} from './safetyView';
+
+export const fetchIncidents = (status: 'open' | 'breached' | 'all' = 'open') =>
+  apiFetch(`/api/v1/safety/incidents?status=${status}&limit=100`).then((r) => r.data as IncidentRow[]);
+
+/** ack · investigate · close · escalate-police · lift-interim · shadow-restrict
+ *  all take no body; `decide` is the one that carries a code. */
+export const incidentAction = (id: string, action: string) =>
+  apiFetch(`/api/v1/safety/incidents/${id}/${action}`, { method: 'POST', body: '{}' })
+    .then((r) => r.data as IncidentRow);
+
+export const decideIncident = (id: string, decisionCode: DecisionCode, notes?: string) =>
+  apiFetch(`/api/v1/safety/incidents/${id}/decide`, {
+    method: 'POST',
+    body: JSON.stringify({ decisionCode, ...(notes ? { notes } : {}) }),
+  }).then((r) => r.data as IncidentRow);
+
+/** Meta only — no content, and deliberately no access-log row. Finding which
+ *  bundle belongs to a case is not "viewing evidence". */
+export const fetchEvidenceForCase = (caseId: string) =>
+  apiFetch(`/api/v1/safety/evidence?caseId=${encodeURIComponent(caseId)}`)
+    .then((r) => r.data as EvidenceBundleRow)
+    .catch(() => null);
+
+/** Every one of these writes a SafetyAccessLog row against the operator's name
+ *  with the reason they typed. The reason is REQUIRED by the server (5–1000
+ *  chars) and further screened by lib/safetyView before we let it be sent. */
+export const evidenceAction = (id: string, action: 'view' | 'seal' | 'legal-hold' | 'export', reason: string) =>
+  apiFetch(`/api/v1/safety/evidence/${id}/${action}`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  }).then((r) => r.data as Record<string, unknown>);
+
+export const fetchSosAlerts = (status: 'open' | 'active' | 'all' = 'open') =>
+  apiFetch(`/api/v1/safety/sos?status=${status}&limit=100`).then((r) => r.data as SosRow[]);
+
+export const ackSosAlert = (id: string) =>
+  apiFetch(`/api/v1/safety/sos/${id}/ack`, { method: 'POST', body: '{}' }).then((r) => r.data);
+
+export const resolveSosAlert = (id: string, resolutionCode: SosResolutionCode, notes?: string) =>
+  apiFetch(`/api/v1/safety/sos/${id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ resolutionCode, ...(notes ? { notes } : {}) }),
+  }).then((r) => r.data);
+
+export interface OpsAlertRow {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  sosAlertId: string | null;
+  ackDeadlineAt: string;
+  escalationLevel: number;
+  createdAt: string;
+  recipients: Array<{ userId: string; deliveredAt: string | null; seenAt: string | null; ackedAt: string | null }>;
+}
+
+export const fetchOpsAlerts = () =>
+  apiFetch('/api/v1/safety/ops-alerts').then((r) => r.data as OpsAlertRow[]);
+
+export const ackOpsAlert = (id: string) =>
+  apiFetch(`/api/v1/safety/ops-alerts/${id}/ack`, { method: 'POST', body: '{}' }).then((r) => r.data);
+
+/** §S-19 — a scheduled or manual rehearsal of the paging path. A paging system
+ *  nobody has ever tested is a paging system nobody knows is broken. */
+export const runOpsAlertDrill = () =>
+  apiFetch('/api/v1/safety/ops-alerts/drill', { method: 'POST', body: '{}' }).then((r) => r.data);
+
+/** §8.1 ops intake — an operator on a phone call raising a case by hand.
+ *  `idempotencyKey` makes a retried submission one case, not two. */
+export const raiseIncident = (body: {
+  subjectUserId: string; category: string; severity?: string; summary: string;
+  orderId?: string; idempotencyKey?: string;
+}) => apiFetch('/api/v1/safety/incidents/ops', { method: 'POST', body: JSON.stringify(body) })
+  .then((r) => r.data as IncidentRow);
