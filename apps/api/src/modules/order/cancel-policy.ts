@@ -115,3 +115,111 @@ export function freeCancellationExpiresAt(order: CancellationSnapshot, now: Date
   // LATER of them — anything else expires the countdown early.
   return candidates.reduce((a, b) => (b.getTime() > a.getTime() ? b : a));
 }
+
+// ---------------------------------------------------------------------------
+// [AF-MOB-001] The no-show, as a policy rather than a button.
+//
+// The handover accepts `no_show` and, in one transaction, writes FAILED, a
+// `Strike` against the customer and a company-guarantee `ReimbursementClaim` —
+// today with nothing standing between the mover's tap and those three facts.
+// A mover can mark ARRIVED and mark NO-SHOW in the same second, from anywhere,
+// and a customer who was home the whole time carries a strike and a money
+// claim on one person's unverified word.
+//
+// Two things were missing, and only two. Arrival evidence is NOT one of them:
+// `rider.routes.ts` already measures the distance from the rider's own
+// location stream (not a request body — the point being that a spoofed arrival
+// must also be spoofed to the customer's map) and names every degraded case.
+// What that evidence has never done is DECIDE anything. It is written into a
+// status-log sentence, and the strike fires regardless of what it says.
+//
+// So: a grace window, and evidence that gates the CUSTOMER's punishment.
+//
+// The asymmetry is deliberate, and it is the whole design. Band F's rule —
+// *"flag into human review, never refuse a money outcome outright"* — protects
+// the MOVER: a rider genuinely at the door under a tin roof with a stale fix
+// must still be able to end the job and still be paid. So the claim always
+// stages. It is the customer's STRIKE that waits for evidence, because a
+// strike is a punishment and a punishment on a weak fix is a wrong one.
+//
+// The grace window is the one refusal, and it refuses only EARLINESS, never
+// the outcome: `NO_SHOW_TOO_EARLY` tells the mover when they may try again.
+// Waiting two more minutes is not a stranding; being unable to close the job
+// at all would be.
+// ---------------------------------------------------------------------------
+
+/** Minutes a mover must wait at the door, after arriving, before a no-show is
+ *  a fact rather than an impatience. Uber's rides equivalent is ~5 minutes of
+ *  verified waiting after grace; deliveries get the same. */
+export const NO_SHOW_GRACE_MIN = 5;
+
+/** How far from the destination a fix may be and still support a punishment.
+ *  Generous on purpose: Georgetown addresses are imprecise, and this number
+ *  decides whether a CUSTOMER is struck, not whether a mover is paid. */
+export const NO_SHOW_EVIDENCE_MAX_M = 250;
+
+/** How old the fix may be. Beyond this the rider's position is a memory. */
+export const NO_SHOW_EVIDENCE_MAX_AGE_MS = 5 * 60_000;
+
+/** What the platform actually knows about where the mover was. */
+export type ArrivalFix = {
+  /** Metres from the delivery point, or null when it could not be computed. */
+  metres: number | null;
+  /** Age of the position fix in ms, or null when there is no fix at all. */
+  ageMs: number | null;
+};
+
+export type EvidenceStrength = 'STRONG' | 'WEAK' | 'ABSENT';
+
+/**
+ * How much weight the arrival evidence can carry. `ABSENT` and `WEAK` differ
+ * for the humans reading a review queue — "we never had a fix" is a different
+ * story from "the fix put them 900 m away" — and both withhold the strike.
+ */
+export function evidenceStrength(fix: ArrivalFix): EvidenceStrength {
+  if (fix.metres == null || fix.ageMs == null) return 'ABSENT';
+  if (fix.ageMs > NO_SHOW_EVIDENCE_MAX_AGE_MS) return 'WEAK';
+  return fix.metres <= NO_SHOW_EVIDENCE_MAX_M ? 'STRONG' : 'WEAK';
+}
+
+/** Everything the no-show decision reads. Structural, like its neighbours. */
+export type NoShowSnapshot = {
+  /** When the mover reported arriving. Null = they never did. */
+  arrivedAt: Date | null;
+  fix: ArrivalFix;
+};
+
+export type NoShowDecision =
+  | { allowed: false; reason: 'NOT_ARRIVED' }
+  | { allowed: false; reason: 'TOO_EARLY'; retryAt: Date; waitedMs: number }
+  | { allowed: true; strikeCustomer: boolean; evidence: EvidenceStrength };
+
+/**
+ * May this no-show close the job, and may it punish the customer for it?
+ *
+ * Note the two answers are separate. `allowed` governs the MOVER's exit;
+ * `strikeCustomer` governs the CUSTOMER's record. A no-show can — and on weak
+ * evidence should — end the job, pay the mover, and leave the customer
+ * untouched pending review.
+ */
+export function noShowDecision(snapshot: NoShowSnapshot, now: Date = new Date()): NoShowDecision {
+  if (!snapshot.arrivedAt) return { allowed: false, reason: 'NOT_ARRIVED' };
+  const waitedMs = now.getTime() - snapshot.arrivedAt.getTime();
+  const graceMs = NO_SHOW_GRACE_MIN * 60_000;
+  if (waitedMs < graceMs) {
+    return {
+      allowed: false,
+      reason: 'TOO_EARLY',
+      retryAt: new Date(snapshot.arrivedAt.getTime() + graceMs),
+      waitedMs,
+    };
+  }
+  const evidence = evidenceStrength(snapshot.fix);
+  return { allowed: true, strikeCustomer: evidence === 'STRONG', evidence };
+}
+
+/** True when the mover may end the job as a no-show. The predicate
+ *  SWIFT_KERB_AND_COCKPIT names by this exact word. */
+export function isNoShowEligible(snapshot: NoShowSnapshot, now: Date = new Date()): boolean {
+  return noShowDecision(snapshot, now).allowed;
+}

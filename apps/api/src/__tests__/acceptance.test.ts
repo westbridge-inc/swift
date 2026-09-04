@@ -129,7 +129,7 @@ async function makeRiderUser() {
 }
 
 async function makeArrivedCashOrder(customerId: string, riderId: string, amount: number) {
-  return app.prisma.order.create({
+  const created = await app.prisma.order.create({
     data: {
       orderNumber: `ACC-${nanoid(10)}`, orderType: 'FOOD_DELIVERY',
       customerId, vendorId, riderId, status: 'ARRIVED',
@@ -141,6 +141,21 @@ async function makeArrivedCashOrder(customerId: string, riderId: string, amount:
       deliveryFee: 500, totalAmount: amount, paymentMethod: 'CASH',
     },
   });
+  // [AF-MOB-001] An order that says ARRIVED must have arrived: the status-log
+  // row the transition writes, and a rider standing at the door. Without both,
+  // the no-show policy withholds the customer's strike — which is the whole
+  // point of it, and would make these conformance cases assert the wrong thing.
+  await app.prisma.orderStatusLog.create({
+    data: {
+      orderId: created.id, status: 'ARRIVED', changedBy: riderId,
+      note: 'fixture arrival', createdAt: new Date(Date.now() - 10 * 60_000),
+    },
+  });
+  await app.prisma.rider.update({
+    where: { id: riderId },
+    data: { currentLat: 7.2007, currentLng: -58.6007, lastLocationUpdate: new Date() },
+  });
+  return created;
 }
 
 async function makeUser(phone: string) {
