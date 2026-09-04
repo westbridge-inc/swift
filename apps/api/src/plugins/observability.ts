@@ -188,6 +188,21 @@ export const adminReasonCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [ADM-002] Which writer produced each admin audit row. `inline` is a row
+ *  written inside its action's transaction, so the action cannot commit
+ *  without it. `backstop` is the onResponse hook writing because nothing else
+ *  did — the shape that used to be the ONLY shape, where a failed write left a
+ *  privileged action with no record and only a log line to say so.
+ *  `backstop` going up on a migrated class is a regression; the clause asks
+ *  for exactly this alert ("backstop-only writes"). `failed` is a write that
+ *  threw: inline it also rolled the action back, backstop it lost the row. */
+export const adminAuditCounter = new client.Counter({
+  name: 'swift_admin_audit_total',
+  help: 'Admin audit rows by writer (inline|backstop|failed) and action class',
+  labelNames: ['writer', 'cls'] as const,
+  registers: [registry],
+});
+
 /** [A-01 / W-01] Browser (cookie-mode) sessions: cookie_issued, cookie_refreshed, cookie_auth, cookie_cleared,
  *  cookie_rejected_header (a cookie without the client header), cookie_rejected_origin (a cookie from an origin
  *  outside the CORS allowlist), body_tokens_refused. */
