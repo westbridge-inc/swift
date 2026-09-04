@@ -80,12 +80,33 @@ async function apiFetch(path: string, options?: RequestInit) {
     const error = new Error(json?.error?.message || `API error: ${res.status}`) as Error & {
       code?: string;
       status?: number;
+      details?: Record<string, unknown>;
     };
     if (json?.error?.code) error.code = json.error.code;
+    // ...and its DETAILS, for the same reason. A money action answers 202
+    // APPROVAL_REQUIRED with the id of the approval it queued; dropping it
+    // means the console can say "a colleague must approve this" and cannot say
+    // which row they are looking for.
+    if (json?.error?.details && typeof json.error.details === 'object') error.details = json.error.details;
     error.status = res.status;
     throw error;
   }
   return json;
+}
+
+/** The HTTP status of a thrown apiFetch error. 202 is not a failure — see
+ *  lib/cashRail `outcomeOfThrown`. */
+export function errorStatus(error: unknown): number | undefined {
+  return error && typeof error === 'object' && 'status' in error
+    ? ((error as { status?: unknown }).status as number | undefined)
+    : undefined;
+}
+
+/** The server's error details for a thrown apiFetch error, when it sent any. */
+export function errorDetails(error: unknown): Record<string, unknown> | undefined {
+  return error && typeof error === 'object' && 'details' in error
+    ? ((error as { details?: unknown }).details as Record<string, unknown> | undefined)
+    : undefined;
 }
 
 /** The server's error code for a thrown apiFetch error, when it sent one. */
@@ -665,4 +686,49 @@ export const decideApproval = (id: string, approve: boolean, note: string) =>
   apiFetch(`/api/v1/admin/approvals/${id}/decide`, {
     method: 'POST',
     body: JSON.stringify({ approve, reason: note, note }),
+  });
+
+// ── The agent-cash rail [SAN spec Part 4] ────────────────────────────────────
+// Partners pay their weekly fee in CASH at an MMG agent, quoting their SAN.
+// Money that resolves to nobody is HELD as UNMATCHED, never rejected — and had
+// no screen, so nothing could be attached and the queue could only grow.
+//
+// Every write below is C4 (money) and answers 202 APPROVAL_REQUIRED: a second
+// admin decides it in /approvals. `note` and `contact` are C2 and apply at once.
+export const fetchUnmatchedPayments = () => apiFetch('/api/v1/admin/billing/agent-payments/unmatched');
+export const fetchCashKpis = (days = 30) => apiFetch(`/api/v1/admin/billing/cash-kpis?days=${days}`);
+export const fetchCashJournal = () => apiFetch('/api/v1/admin/billing/cash-journal?limit=100');
+export const fetchSettlementBatches = () => apiFetch('/api/v1/admin/billing/settlement-batches');
+export const fetchCollections = (tab: string) =>
+  apiFetch(`/api/v1/admin/billing/collections?tab=${encodeURIComponent(tab)}`);
+export const resolveSanLookup = (san: string) =>
+  apiFetch(`/api/v1/admin/billing/san/${encodeURIComponent(san)}`);
+
+export const attachAgentPayment = (id: string, subscriptionId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/agent-payments/${id}/attach`, {
+    method: 'POST',
+    body: JSON.stringify({ subscriptionId, reason }),
+  });
+export const flagAgentPaymentRefund = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/agent-payments/${id}/refund-flag`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+export const noteAgentPayment = (id: string, note: string) =>
+  apiFetch(`/api/v1/admin/billing/agent-payments/${id}/note`, {
+    method: 'POST',
+    body: JSON.stringify({ note }),
+  });
+export const confirmSettlementDeposit = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/settlement-batches/${id}/confirm-deposit`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+export const recordCollectionContact = (
+  subscriptionId: string,
+  body: { outcome: string; note?: string; promisedDate?: string },
+) =>
+  apiFetch(`/api/v1/admin/billing/collections/${subscriptionId}/contact`, {
+    method: 'POST',
+    body: JSON.stringify(body),
   });
