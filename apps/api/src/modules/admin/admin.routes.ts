@@ -3494,7 +3494,14 @@ export async function adminRoutes(app: FastifyInstance) {
       defaultRotationSeconds: z.number().int().min(3).max(60).optional(),
     }).parse(request.body ?? {});
     const tenantId = await adsTenant();
-    const s = await app.prisma.adsSettings.upsert({ where: { tenantId }, create: { tenantId, ...body }, update: body });
+    // [ADM-002] The settings row and the record of who changed it commit
+    // together. This route never wrote a legacy audit row, so the backstop was
+    // the only writer and a refused row lost the change silently.
+    const s = await app.prisma.$transaction(async (tx) => {
+      const row = await tx.adsSettings.upsert({ where: { tenantId }, create: { tenantId, ...body }, update: body });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: row.tenantId });
+      return row;
+    });
     return { success: true, data: s };
   });
 
@@ -3685,12 +3692,21 @@ export async function adminRoutes(app: FastifyInstance) {
         throw new AppError(400, 'FX_NOTICE_WINDOW', `This rate moves payers' amounts by more than 2% — it can take effect no sooner than ${earliest.toISOString().slice(0, 10)} (${FX_NOTICE_WINDOW_DAYS} days' notice). Set effectiveFrom on or after that date.`);
       }
     }
-    const row = await app.prisma.fxRate.create({
-      data: {
-        quote: body.quote, rate: body.rate, source: body.source,
-        setByUserId: request.user.userId,
-        effectiveFrom,
-      },
+    // [ADM-002] This sets the rate every payer is charged at. It had NO audit
+    // row of its own, so the hook was the only writer — and because a create
+    // declares no entity, that row recorded entityId `-` and could not say
+    // which rate was set. Both are fixed here: the row commits inside the
+    // transaction, and it names the rate it created.
+    const row = await app.prisma.$transaction(async (tx) => {
+      const created = await tx.fxRate.create({
+        data: {
+          quote: body.quote, rate: body.rate, source: body.source,
+          setByUserId: request.user.userId,
+          effectiveFrom,
+        },
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: created.id });
+      return created;
     });
     return { success: true, data: { ...row, rate: Number(row.rate) } };
   });
@@ -3713,9 +3729,14 @@ export async function adminRoutes(app: FastifyInstance) {
         where: { role: body.role, tier: body.tier ?? null, active: true },
         data: { active: false },
       });
-      return tx.priceBookEntry.create({
+      const created = await tx.priceBookEntry.create({
         data: { role: body.role, tier: body.tier ?? null, amountUsd: body.amountUsd },
       });
+      // [ADM-002] The route already owned this transaction — the audit row
+      // simply joins it, and names the entry it made (a create declares no
+      // entity, so the row would otherwise say `-`).
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: created.id });
+      return created;
     });
     return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd) } };
   });
@@ -3965,10 +3986,16 @@ export async function adminRoutes(app: FastifyInstance) {
         throw new AppError(400, 'SHADOW_EVIDENCE_REQUIRED', 'Live batching needs at least 14 days of shadow evidence — read /batching/shadow-report first.');
       }
     }
-    const settings = await app.prisma.batchingSettings.upsert({
-      where: { tenantId: 'swift-default' },
-      create: { tenantId: 'swift-default', ...body },
-      update: body,
+    // [ADM-002] Batching settings decide whether live offers go out at all.
+    // The audit row commits with the change.
+    const settings = await app.prisma.$transaction(async (tx) => {
+      const row = await tx.batchingSettings.upsert({
+        where: { tenantId: 'swift-default' },
+        create: { tenantId: 'swift-default', ...body },
+        update: body,
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: row.tenantId });
+      return row;
     });
     return { success: true, data: settings };
   });
@@ -4183,9 +4210,15 @@ export async function adminRoutes(app: FastifyInstance) {
     const row = await tenantPrisma.mmgAgentPayment.findUnique({ where: { id } });
     if (!row) throw new AppError(404, 'NOT_FOUND', 'No such payment');
     if (row.status !== 'UNMATCHED') throw new AppError(409, 'NOT_UNMATCHED', 'Only unmatched payments can be refund-flagged.');
-    const updated = await tenantPrisma.mmgAgentPayment.update({
-      where: { id },
-      data: { status: 'REFUND_FLAGGED', note: body.note, resolvedBy: request.user.userId, resolvedAt: new Date() },
+    // [ADM-002] Flagging a payment for refund is a money decision. Its
+    // subject is in the params, so the row needs no id override.
+    const updated = await tenantPrisma.$transaction(async (tx) => {
+      const row = await tx.mmgAgentPayment.update({
+        where: { id },
+        data: { status: 'REFUND_FLAGGED', note: body.note, resolvedBy: request.user.userId, resolvedAt: new Date() },
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      return row;
     });
     return { success: true, data: updated };
   });
@@ -4238,10 +4271,16 @@ export async function adminRoutes(app: FastifyInstance) {
     if (body.ingestionMode === 'WEBHOOK' && !process.env['AGENT_CASH_WEBHOOK_SECRET']) {
       throw new AppError(400, 'WEBHOOK_NOT_CONFIGURED', 'Set AGENT_CASH_WEBHOOK_SECRET (MMG onboarding) before promising webhook-speed activation.');
     }
-    const row = await app.prisma.platformConfig.upsert({
-      where: { key: 'billing.mmg_agent.ingestion_mode' },
-      create: { key: 'billing.mmg_agent.ingestion_mode', value: body.ingestionMode },
-      update: { value: body.ingestionMode },
+    // [ADM-002] Which rail agent cash arrives on is a money decision; the
+    // audit row commits with it.
+    const row = await app.prisma.$transaction(async (tx) => {
+      const updated = await tx.platformConfig.upsert({
+        where: { key: 'billing.mmg_agent.ingestion_mode' },
+        create: { key: 'billing.mmg_agent.ingestion_mode', value: body.ingestionMode },
+        update: { value: body.ingestionMode },
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: updated.key });
+      return updated;
     });
     return { success: true, data: { ingestionMode: row.value } };
   });
