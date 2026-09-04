@@ -101,7 +101,23 @@ const androidMapsApiKey = process.env['ANDROID_GOOGLE_MAPS_API_KEY'];
 const isDistributableBuild =
   process.env['EAS_BUILD'] === 'true' || process.env['CI'] === 'true';
 
-if (!androidMapsApiKey) {
+/**
+ * ...but only for a build that produces an ANDROID artifact.
+ *
+ * The key is written into the `android` block below and nowhere else. iOS maps
+ * are Apple's; there is no Google Maps dependency on that side at all. Yet the
+ * gate had no platform test, so `eas build --platform ios` failed with
+ * "Android needs ANDROID_GOOGLE_MAPS_API_KEY" — a paid Apple account, a
+ * finished app, and the first TestFlight build refused over a key that could
+ * not have affected it.
+ *
+ * EAS sets EAS_BUILD_PLATFORM to 'ios' or 'android' per build. Anything else —
+ * a plain CI run, a local prebuild — stays STRICT, because CI builds both and
+ * an unknown platform must not be read as "not Android".
+ */
+const buildsAndroidArtifact = process.env['EAS_BUILD_PLATFORM'] !== 'ios';
+
+if (!androidMapsApiKey && buildsAndroidArtifact) {
   const consequence =
     'Android needs ANDROID_GOOGLE_MAPS_API_KEY. Without it react-native-maps ' +
     'throws a NATIVE host exception on first map mount — order tracking, the ' +
