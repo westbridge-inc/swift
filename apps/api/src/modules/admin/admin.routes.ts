@@ -42,6 +42,7 @@ import { assertFounderAccess } from './founder-access';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import { APPROVAL_HEADER, approvalRefusalMessage, decideApproval, requiresApproval, resolveApproval } from './admin-approval';
 import { ABSENT, changeRecord, snapshot, type EntitySnapshot } from './audit-change';
+import { adminAuditRow, auditWithin, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -57,7 +58,7 @@ import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePr
 import { assertNoZoneOverlap } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { createHash } from 'node:crypto';
-import { adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
+import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
@@ -834,6 +835,22 @@ export async function adminRoutes(app: FastifyInstance) {
     if ((request as { approvalPending?: boolean }).approvalPending) return;
     const userId = (request as { user?: { userId?: string } }).user?.userId;
     if (!userId) return;
+    const clsLabel = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeTemplateOf(request, app.prefix)}`]?.cls ?? 'C0';
+    // [ADM-002] THIS HOOK IS NOW A BACKSTOP.
+    //
+    // An action that wrote its own audit row inside its transaction is already
+    // recorded, and recorded atomically — it could not have committed without
+    // it. Writing a second row here would double the trail and hide the very
+    // number this clause asks for. Count it as `inline` and leave.
+    if (wroteAuditInline(request as AuditRequestLike)) {
+      adminAuditCounter.labels('inline', clsLabel).inc();
+      return;
+    }
+    // Reaching here means the backstop is the ONLY writer for this action: the
+    // route has not been migrated, so the row is still written after commit
+    // and a failure below still loses it. That is what `backstop` counts, and
+    // what goes to zero as the migration lands.
+    adminAuditCounter.labels('backstop', clsLabel).inc();
     try {
       const params = (request.params ?? {}) as Record<string, string>;
       // [ADM-006] The reason is recorded as a NAMED field, not left to be dug
@@ -852,18 +869,24 @@ export async function adminRoutes(app: FastifyInstance) {
       const after = authority?.entity
         ? await snapshot(app.prisma, authority.entity, params[authority.entity.param ?? 'id'])
         : ABSENT;
+      // [ADM-002] One builder, both writers — so a route that migrates to
+      // `auditWithin` writes the row it wrote before, at a safer moment.
       await app.prisma.auditLog.create({
-        data: {
-          userId,
-          action: `ADMIN ${request.method} ${routeUrl}`,
-          entity: isAuditedRead ? 'integrity' : (routeUrl.split('/').filter(Boolean)[0] ?? 'admin'),
-          entityId: params['id'] ?? params['key'] ?? params['userId'] ?? '-',
-          changes: changeRecord({ params, reason, before, after, entityDeclared: !!authority?.entity }) as never,
-          ipAddress: request.ip,
-          userAgent: request.headers['user-agent'],
-        },
+        data: adminAuditRow(request as unknown as AuditRequestLike, userId, {
+          routeUrl,
+          reason,
+          before,
+          after,
+          entityDeclared: !!authority?.entity,
+          entityOverride: isAuditedRead ? 'integrity' : undefined,
+        }) as never,
       });
     } catch (err) {
+      // [ADM-002] Still only a log line — because at this point the action has
+      // committed AND responded, and there is nothing left to undo. That is
+      // the defect, and it is why the fix is `auditWithin` at the call site
+      // rather than anything that could be done here.
+      adminAuditCounter.labels('failed', clsLabel).inc();
       app.log.error({ err }, '[admin-audit] failed to write audit log');
     }
   });
@@ -2776,13 +2799,19 @@ export async function adminRoutes(app: FastifyInstance) {
     const key = configKeySchema.parse((request.params as { key: string }).key);
     const { value } = configValueSchema.parse(request.body);
 
-    const config = await app.prisma.platformConfig.upsert({
-      where: { key },
-      update: { value },
-      create: { key, value },
+    // [ADM-002] The config row and its audit row commit together. This used
+    // to be an upsert, then a separate `audit()` write, then a third row from
+    // the onResponse hook — three writes, none of them bound to the others,
+    // so a platform config could change with nothing recording that it had.
+    const config = await app.prisma.$transaction(async (tx) => {
+      const row = await tx.platformConfig.upsert({
+        where: { key },
+        update: { value },
+        create: { key, value },
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      return row;
     });
-
-    await audit(request.user.userId, 'UPDATE_CONFIG', 'PlatformConfig', key, { value }, request);
 
     return { success: true, data: config };
   });
@@ -2914,22 +2943,25 @@ export async function adminRoutes(app: FastifyInstance) {
     // the same priority.
     const market = { tenantId: requireTenantId(), countryCode: body.countryCode ?? 'GY', priority: body.priority ?? 0 };
     await assertNoZoneOverlap(app.prisma, { ...market, boundary: body.boundary, isActive: true });
-    const zone = await app.prisma.zone.create({
-      data: {
-        name: body.name,
-        description: body.description,
-        boundary: body.boundary,
-        deliveryBaseFee: body.deliveryBaseFee,
-        deliveryPerKm: body.deliveryPerKm,
-        surgeMultiplier: body.surgeMultiplier || 1.0,
-        tenantId: market.tenantId,
-        countryCode: market.countryCode,
-        priority: market.priority,
-        version: 1,
-      },
+    // [ADM-002] The zone and the row naming who drew it commit together.
+    const zone = await app.prisma.$transaction(async (tx) => {
+      const created = await tx.zone.create({
+        data: {
+          name: body.name,
+          description: body.description,
+          boundary: body.boundary,
+          deliveryBaseFee: body.deliveryBaseFee,
+          deliveryPerKm: body.deliveryPerKm,
+          surgeMultiplier: body.surgeMultiplier || 1.0,
+          tenantId: market.tenantId,
+          countryCode: market.countryCode,
+          priority: market.priority,
+          version: 1,
+        },
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      return created;
     });
-
-    await audit(request.user.userId, 'CREATE_ZONE', 'Zone', zone.id, { name: zone.name, countryCode: zone.countryCode, priority: zone.priority }, request);
 
     return { success: true, data: zone };
   });
@@ -2953,23 +2985,27 @@ export async function adminRoutes(app: FastifyInstance) {
     };
     await assertNoZoneOverlap(app.prisma, merged, id);
     const termsChanged = (body.boundary !== undefined && JSON.stringify(body.boundary) !== JSON.stringify(existing.boundary)) || (body.priority !== undefined && body.priority !== existing.priority);
-    const zone = await app.prisma.zone.update({
-      where: { id },
-      data: {
-        ...(body.name !== undefined && { name: body.name }),
-        ...(body.description !== undefined && { description: body.description }),
-        ...(body.boundary !== undefined && { boundary: body.boundary }),
-        ...(body.isActive !== undefined && { isActive: body.isActive }),
-        ...(body.deliveryBaseFee !== undefined && { deliveryBaseFee: body.deliveryBaseFee }),
-        ...(body.deliveryPerKm !== undefined && { deliveryPerKm: body.deliveryPerKm }),
-        ...(body.surgeMultiplier !== undefined && { surgeMultiplier: body.surgeMultiplier }),
-        ...(body.countryCode !== undefined && { countryCode: merged.countryCode }),
-        ...(body.priority !== undefined && { priority: body.priority }),
-        ...(termsChanged && { version: { increment: 1 } }),
-      },
+    // [ADM-002] A zone's boundary and fees are pricing. The audit row commits
+    // inside the same transaction as the change it describes.
+    const zone = await app.prisma.$transaction(async (tx) => {
+      const updated = await tx.zone.update({
+        where: { id },
+        data: {
+          ...(body.name !== undefined && { name: body.name }),
+          ...(body.description !== undefined && { description: body.description }),
+          ...(body.boundary !== undefined && { boundary: body.boundary }),
+          ...(body.isActive !== undefined && { isActive: body.isActive }),
+          ...(body.deliveryBaseFee !== undefined && { deliveryBaseFee: body.deliveryBaseFee }),
+          ...(body.deliveryPerKm !== undefined && { deliveryPerKm: body.deliveryPerKm }),
+          ...(body.surgeMultiplier !== undefined && { surgeMultiplier: body.surgeMultiplier }),
+          ...(body.countryCode !== undefined && { countryCode: merged.countryCode }),
+          ...(body.priority !== undefined && { priority: body.priority }),
+          ...(termsChanged && { version: { increment: 1 } }),
+        },
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      return updated;
     });
-
-    await audit(request.user.userId, 'UPDATE_ZONE', 'Zone', id, body as Record<string, unknown>, request);
 
     return { success: true, data: zone };
   });
@@ -2980,13 +3016,16 @@ export async function adminRoutes(app: FastifyInstance) {
     const existing = await app.prisma.zone.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('Zone', id);
 
-    // Soft-delete: deactivate the zone
-    await app.prisma.zone.update({
-      where: { id },
-      data: { isActive: false },
+    // [ADM-002] A deactivated zone stops serving addresses. The record of who
+    // deactivated it commits with the deactivation, or neither happens.
+    await app.prisma.$transaction(async (tx) => {
+      // Soft-delete: deactivate the zone
+      await tx.zone.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
     });
-
-    await audit(request.user.userId, 'DELETE_ZONE', 'Zone', id, { name: existing.name }, request);
 
     return { success: true, message: 'Zone deactivated' };
   });
