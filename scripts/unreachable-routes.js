@@ -71,7 +71,14 @@ for (const file of walk(path.join(ROOT, 'apps/api/src/modules'))) {
 }
 
 // 2. Every path literal the clients contain, as one haystack.
-const haystack = ['apps/mobile/src', 'apps/web/src', 'apps/admin/src']
+//
+// `apps/desktop/src` was missing from this list. Mission Control is a real
+// client — it makes 30 calls of its own — so every admin route ONLY it uses
+// was being counted as having no client at all, and the headline number was
+// overstated by exactly that much. A reachability tool that cannot see one of
+// the four clients reports gaps that are not gaps, which is the fastest way to
+// get a report like this one ignored.
+const haystack = ['apps/mobile/src', 'apps/web/src', 'apps/admin/src', 'apps/desktop/src']
   .flatMap((d) => walk(path.join(ROOT, d)))
   .map((f) => fs.readFileSync(f, 'utf8'))
   .join('\n');
