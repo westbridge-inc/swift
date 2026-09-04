@@ -114,3 +114,33 @@ describe('the blast radius is real, and is why the gate is hard', () => {
     expect(joined).toMatch(/PinConfirmScreen/); // the handover PIN
   });
 });
+
+describe('the gate does not block a build it cannot affect', () => {
+  it('is narrowed to a build that produces an ANDROID artifact', () => {
+    // The key is written into the `android` block and nowhere else — iOS maps
+    // are Apple's. With no platform test, `eas build --platform ios` failed
+    // with "Android needs ANDROID_GOOGLE_MAPS_API_KEY": a paid Apple account,
+    // a finished app, and the first TestFlight build refused over a key that
+    // could not have affected it.
+    expect(configCode).toMatch(/EAS_BUILD_PLATFORM/);
+    expect(configCode).toMatch(/buildsAndroidArtifact/);
+    expect(configCode).toMatch(/!androidMapsApiKey && buildsAndroidArtifact/);
+  });
+
+  it('an UNKNOWN platform stays strict — CI builds both', () => {
+    // The narrowing is expressed as "not ios", never as "is android". A plain
+    // CI run sets no platform, and reading that as "not Android" would let a
+    // keyless Android artifact through the exact gate this file exists for.
+    expect(configCode).toMatch(/EAS_BUILD_PLATFORM'\] !== 'ios'/);
+    expect(configCode).not.toMatch(/EAS_BUILD_PLATFORM'\] === 'android'/);
+  });
+
+  it('the key still only ever reaches the android config', () => {
+    // If it were ever read on the iOS side, narrowing the gate by platform
+    // would become unsafe.
+    const androidBlock = configCode.slice(configCode.indexOf('android:'));
+    expect(androidBlock).toMatch(/googleMaps/);
+    const iosBlock = configCode.slice(configCode.indexOf('ios:'), configCode.indexOf('android:'));
+    expect(iosBlock).not.toMatch(/androidMapsApiKey/);
+  });
+});
