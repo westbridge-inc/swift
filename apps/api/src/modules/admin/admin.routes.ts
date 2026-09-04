@@ -41,7 +41,7 @@ import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import { APPROVAL_HEADER, approvalRefusalMessage, decideApproval, requiresApproval, resolveApproval } from './admin-approval';
-import { ABSENT, changeRecord, snapshot, type EntitySnapshot } from './audit-change';
+import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
