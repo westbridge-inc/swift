@@ -1,0 +1,88 @@
+# Swift — the self-hosted routing and geocoding stack.
+#
+# This lived outside the repository, in a directory on one laptop, with a note
+# at the top saying it was kept out of the public repo deliberately. Two things
+# make that wrong rather than cautious:
+#
+#   • it holds NO secrets — every value here is a public image tag, a public
+#     Geofabrik URL or a port number; and
+#   • deploy/docker-compose.yml already publishes the whole topology anyway.
+#
+# What it cost was reproducibility: if that laptop died, the routing engine
+# every ETA in the platform depends on could not be rebuilt from anything.
+#
+# SECURITY, stated plainly because it is real: none of these services has
+# authentication. Firewall every published port to the API host only. They are
+# published on the host at all so a developer can curl them; in production they
+# should be reachable from the API and nothing else.
+#
+#   docker compose -f deploy/docker-compose.routing.yml up -d
+#
+# Data is built by ./setup-routing.sh first — see that file.
+
+services:
+  # ── Routing and ETA ────────────────────────────────────────────────────
+  # MAPS_PROVIDER=osrm  OSRM_URL=http://<host>:5001
+  #
+  # NOTE THE PORT. The container listens on 5000; the host publishes 5001.
+  # The previous copy of this file documented OSRM_URL as :5000, which is the
+  # CONTAINER port — correct only from inside this compose network, and wrong
+  # for the API, which reaches it across the host. A routing URL that silently
+  # refuses connections degrades every ETA to the haversine fallback, and the
+  # only visible symptom is that distances get slightly worse.
+  osrm:
+    image: osrm/osrm-backend:v5.25.0
+    container_name: swift-osrm
+    command: osrm-routed --algorithm mld --max-table-size 10000 /data/guyana-latest.osrm
+    volumes:
+      - ./routing-data/osrm:/data
+    ports:
+      - "5001:5000"
+    restart: unless-stopped
+
+  # ── Batch planning ─────────────────────────────────────────────────────
+  # BATCH_PLANNER=vroom  VROOM_URL=http://<host>:3010   (container port 3000)
+  # Sits on OSRM for travel times; stateless, so it needs no data build.
+  vroom:
+    image: vroomvrp/vroom-docker:v1.13.0
+    container_name: swift-vroom
+    environment:
+      - VROOM_ROUTER=osrm
+    volumes:
+      - ./routing-conf/vroom:/conf
+    ports:
+      - "3010:3000"
+    depends_on:
+      - osrm
+    restart: unless-stopped
+
+  # ── Address search and geocoding ───────────────────────────────────────
+  # PLACES_PROVIDER=osm  PHOTON_URL=http://<host>:2322
+  # Autocomplete. A country index rather than the global one — Guyana is a few
+  # hundred MB where the planet is ~70 GB.
+  photon:
+    image: rtuszik/photon-docker:latest
+    container_name: swift-photon
+    environment:
+      - COUNTRY_CODE=gy
+    volumes:
+      - ./routing-data/photon:/photon/photon_data
+    ports:
+      - "2322:2322"
+    restart: unless-stopped
+
+  # NOMINATIM_URL=http://<host>:8080 — reverse geocoding (coordinates → address).
+  # The heavy one: it imports the extract into its own PostgreSQL. One-time,
+  # disk- and RAM-hungry, and the only member of this stack that is.
+  nominatim:
+    image: mediagis/nominatim:4.4
+    container_name: swift-nominatim
+    environment:
+      - PBF_URL=https://download.geofabrik.de/south-america/guyana-latest.osm.pbf
+      - IMPORT_WIKIPEDIA=false
+    volumes:
+      - ./routing-data/nominatim:/var/lib/postgresql/14/main
+    ports:
+      - "8080:8080"
+    shm_size: 1g
+    restart: unless-stopped
