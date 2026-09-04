@@ -144,3 +144,30 @@ describe('the gate does not block a build it cannot affect', () => {
     expect(iosBlock).not.toMatch(/androidMapsApiKey/);
   });
 });
+
+describe('what may and may not live in eas.json', () => {
+  const eas = readFileSync(join(MOBILE, 'eas.json'), 'utf8');
+
+  it('carries the Apple Team ID — it is public by design', () => {
+    // A Team ID is published in /.well-known/apple-app-site-association at a
+    // public URL, and authorises nothing on its own: signing needs private
+    // certificates that live only in the Apple account.
+    expect(JSON.parse(eas).submit.production.ios.appleTeamId).toMatch(/^[A-Z0-9]{10}$/);
+  });
+
+  it('carries NO Apple ID login, in a public repository', () => {
+    // The opposite call to the Team ID, for the opposite reason. An Apple ID
+    // is the account LOGIN — for the account that holds the signing
+    // certificates — and this repository is public. `eas submit` prompts for
+    // it, or reads EXPO_APPLE_ID from the environment.
+    expect(eas).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+    expect(JSON.parse(eas).submit.production.ios.appleId).toBeUndefined();
+  });
+
+  it('carries no REPLACE_WITH placeholders', () => {
+    // A placeholder parses as a value, so every check that asks "is it set?"
+    // answers yes. An absent key is honest; a placeholder is a lie that
+    // survives review.
+    expect(eas).not.toMatch(/REPLACE_WITH/);
+  });
+});
