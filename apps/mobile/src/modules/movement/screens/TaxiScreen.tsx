@@ -5,13 +5,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, MarkerAnimated, PROVIDER_DEFAULT } from 'react-native-maps';
 import Reanimated from 'react-native-reanimated';
 import { rideMapProps } from '../../../kit/map-style';
+import { shareMessage, shareStatusLine, failureOf, linkStillWorks, SHARE_FAILURE_COPY, type MintedShare } from '../../../lib/tripShare';
 import { useInterpolatedDriver } from '../map/useInterpolatedDriver';
 import { STALE_AFTER_MS, type DriverPing } from '../map/interpolation';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, motion, radius, space } from '@swift/ui';
-import { useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue } from '../../../hooks';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
@@ -957,6 +958,8 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   const sos = useRideSos();
   // [MOB-018] The signed-in market decides the emergency number the popup names and dials.
   const sosCountry = useAuthStore((st) => st.countryCode);
+  // Named in the share so a relative knows whose ride they are watching.
+  const myFirstName = useAuthStore((st) => st.user?.firstName ?? null);
   const riderLoc = useLocationStore();
   const queryClient = useQueryClient();
   const mapRef = useRef<MapView>(null);
@@ -1175,20 +1178,52 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
     }
   }, [canCancelRide]);
 
+  // [S-16] A LIVE share, not a snapshot.
+  //
+  // This used to compose driver name, vehicle, plate and a Google Maps link to
+  // the driver's position AT THAT INSTANT, and hand the text to the OS share
+  // sheet. The recipient got a photograph of a moving thing: stale on arrival,
+  // never updating, impossible to revoke, and the plate sitting in someone's
+  // chat history permanently.
+  //
+  // The server has carried the real thing all along — an expiring token stored
+  // only as a digest, a public page that follows the ride, revocation, guess
+  // blocking and a kill switch. The button simply never called it. Everything
+  // the old text carried now lives on that page, where it can be taken back.
+  // The link outlives this render, so the sharer can be shown what they gave
+  // away — and can take it back — rather than the app forgetting immediately.
+  const [activeShare, setActiveShare] = useState<MintedShare | null>(null);
+  const [shareError, setShareError] = useState<string | null>(null);
+  const shareMutation = useMutation({
+    mutationFn: async (): Promise<MintedShare> => {
+      const res = await safetyApi.shareTrip(ride.id);
+      return res.data.data as MintedShare;
+    },
+    onError: (e: unknown) => {
+      const code = (e as { response?: { data?: { error?: { code?: string } } } })?.response?.data?.error?.code;
+      const failure = failureOf(code);
+      setShareError(SHARE_FAILURE_COPY[failure]);
+      // An SMS that could not be sent is not a share that failed: the link
+      // exists either way, and hiding it would send someone back to the old
+      // habit of pasting a screenshot.
+      if (!linkStillWorks(failure)) setActiveShare(null);
+    },
+  });
+
+  const revokeMutation = useMutation({
+    mutationFn: (token: string) => safetyApi.revokeTripShare(token),
+    onSuccess: () => { setActiveShare(null); setShareError(null); },
+    onError: () => setShareError('We could not stop the link. Try again — it expires on its own either way.'),
+  });
+
   const shareTrip = () => {
-    const vehicle = [d?.vehicleColor, d?.vehicleMake, d?.vehicleModel].filter(Boolean).join(' ');
-    const message = [
-      status === 'RIDE_IN_PROGRESS' ? 'I’m on a Swift taxi ride.' : 'My Swift taxi ride.',
-      d?.user?.firstName ? `Driver: ${d.user.firstName}${d?.displayRating != null ? ` (★${Number(d.displayRating).toFixed(1)})` : ' (New on Swift)'}` : null,
-      vehicle ? `Vehicle: ${vehicle}` : null,
-      d?.licensePlate ? `Plate: ${d.licensePlate}` : null,
-      ride.pickupAddress ? `From: ${ride.pickupAddress}` : null,
-      ride.deliveryAddress ? `To: ${ride.deliveryAddress}` : null,
-      freshDriverLoc ? `Driver’s latest received position: https://maps.google.com/?q=${freshDriverLoc.latitude.toFixed(5)},${freshDriverLoc.longitude.toFixed(5)}` : null,
-    ]
-      .filter(Boolean)
-      .join('\n');
-    Share.share({ message }).catch(() => {});
+    if (shareMutation.isPending) return;
+    shareMutation.mutate(undefined, {
+      onSuccess: (minted) => {
+        setActiveShare(minted);
+        Share.share({ message: shareMessage(minted, myFirstName) }).catch(() => {});
+      },
+    });
   };
 
   return (
@@ -1363,10 +1398,11 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
           {/* Safety row: let someone you trust follow the trip */}
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.xl }}>
             <PillButton
-              label="Share trip"
+              label={activeShare ? 'Share again' : 'Share trip'}
               variant="soft"
               icon="share-2"
               style={{ flex: 1 }}
+              loading={shareMutation.isPending}
               onPress={shareTrip}
             />
             {canCancelRide ? (
@@ -1382,6 +1418,25 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
               />
             ) : null}
           </View>
+
+          {/* [S-16] What the sharer gave away, and the way back.
+              A live location link with no stated end is one a person forgets
+              they created — so the window and the stop control sit together,
+              because they answer the same worry. */}
+          {activeShare ? (
+            <View style={{ marginTop: space.md, gap: space.sm }}>
+              <T variant="caption" tone="muted">{shareStatusLine(activeShare)}</T>
+              <PillButton
+                label="Stop sharing"
+                variant="outline"
+                loading={revokeMutation.isPending}
+                onPress={() => revokeMutation.mutate(activeShare.token)}
+              />
+            </View>
+          ) : null}
+          {shareError ? (
+            <T variant="caption" tone="error" style={{ marginTop: space.sm }}>{shareError}</T>
+          ) : null}
         </BottomSheetScrollView>
       </BottomSheet>
 
