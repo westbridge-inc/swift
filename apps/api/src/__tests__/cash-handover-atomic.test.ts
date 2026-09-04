@@ -104,7 +104,24 @@ async function makeAtDoorOrder(customerId: string, riderId: string, amount = 200
       paymentMethod: 'CASH',
     },
   });
+  if (status === 'ARRIVED') await arriveAtDoor(order.id, riderId, door);
   return { ...order, door };
+}
+
+/** [AF-MOB-001] A REAL at-door order carries an arrival: the status-log row the
+ *  transition writes, and a rider standing where they say they are. These
+ *  fixtures used to create `status: 'ARRIVED'` with neither, which the no-show
+ *  policy correctly refuses — a mover who never arrived cannot report a no-show.
+ *  Arranging the precondition properly is not weakening the test; it is the
+ *  difference between an order that arrived and one that merely says so. */
+async function arriveAtDoor(orderId: string, riderId: string, door: { lat: number; lng: number }, minutesAgo = 10) {
+  await app.prisma.orderStatusLog.create({
+    data: { orderId, status: 'ARRIVED', changedBy: riderId, note: 'fixture arrival', createdAt: new Date(Date.now() - minutesAgo * 60_000) },
+  });
+  await app.prisma.rider.update({
+    where: { id: riderId },
+    data: { currentLat: door.lat, currentLng: door.lng, lastLocationUpdate: new Date() },
+  });
 }
 
 const facts = async (orderId: string, customerId: string) => {

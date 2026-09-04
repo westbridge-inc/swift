@@ -156,6 +156,9 @@ async function makeOrder(
     taxiFareTotal?: number;
     subtotalBase?: number;
     at?: { lat: number; lng: number };
+    /** [AF-MOB-001] How long ago the mover reported arriving. Default is past
+     *  the grace window; pass 0 to sit inside it. */
+    arrivedMinutesAgo?: number;
   } = {},
 ) {
   const at = opts.at ?? PICKUP;
@@ -185,6 +188,19 @@ async function makeOrder(
     },
   });
   createdOrderIds.push(order.id);
+  // [AF-MOB-001] An order that says ARRIVED must have actually arrived: the
+  // status-log row the transition writes, and a rider standing at the door.
+  // Without it the no-show policy correctly refuses — a mover who never
+  // arrived cannot report a no-show.
+  if (status === 'ARRIVED' && opts.riderId) {
+    await app.prisma.orderStatusLog.create({
+      data: { orderId: order.id, status: 'ARRIVED', changedBy: opts.riderId, note: 'fixture arrival', createdAt: new Date(Date.now() - (opts.arrivedMinutesAgo ?? 10) * 60_000) },
+    });
+    await app.prisma.rider.update({
+      where: { id: opts.riderId },
+      data: { currentLat: at.lat + 0.01, currentLng: at.lng + 0.01, lastLocationUpdate: new Date() },
+    });
+  }
   return order;
 }
 
@@ -252,6 +268,55 @@ describe('handover frees the rider', () => {
     expect(freed.currentOrderId).toBeNull();
     expect(freed.totalDeliveries).toBe(1);
     expect(Number(freed.committedFloat)).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------
+  // [AF-MOB-001] The policy, proven THROUGH THE ROUTE. The pure predicate is
+  // tested in no-show-policy.test.ts; these prove the handover actually calls
+  // it — a policy nothing invokes is the exact defect this fixes.
+  // ---------------------------------------------------------------------
+  it('a no-show in the same second as arriving is refused, and writes nothing', async () => {
+    const vendor = await makeVendor();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider({ committedFloat: 1000 });
+    // Arrived just now — inside the grace window. (The status log is
+    // append-only, so the arrival time is arranged at creation, not patched.)
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'ARRIVED', { riderId: rider.riderId, arrivedMinutesAgo: 0 });
+
+    const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
+      outcome: 'no_show', gps: { lat: PICKUP.lat + 0.01, lng: PICKUP.lng + 0.01 },
+    }, rider.token);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('NO_SHOW_TOO_EARLY');
+    // NOTHING was written — not a terminal status, not a strike, not a claim.
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.status).toBe('ARRIVED');
+    expect(await app.prisma.strike.count({ where: { orderId: order.id } })).toBe(0);
+    expect(await app.prisma.reimbursementClaim.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  it('weak arrival evidence still ends the job and pays the mover, but does not strike the customer', async () => {
+    const vendor = await makeVendor();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider({ committedFloat: 1000 });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'ARRIVED', { riderId: rider.riderId });
+    // Grace has passed, but the rider's fix is stale — where they WERE.
+    await app.prisma.rider.update({
+      where: { id: rider.riderId },
+      data: { lastLocationUpdate: new Date(Date.now() - 60 * 60_000) },
+    });
+
+    const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
+      outcome: 'no_show', gps: { lat: PICKUP.lat + 0.01, lng: PICKUP.lng + 0.01 },
+    }, rider.token);
+
+    // Band F: the mover is never stranded — the job closes and the claim stages.
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe('FAILED');
+    expect(await app.prisma.reimbursementClaim.count({ where: { orderId: order.id } })).toBe(1);
+    // ...but the customer is NOT punished on a fix an hour old.
+    expect(await app.prisma.strike.count({ where: { orderId: order.id } })).toBe(0);
   });
 
   it('failed handover (no_show): order FAILS, rider freed, float released, no delivery counted', async () => {

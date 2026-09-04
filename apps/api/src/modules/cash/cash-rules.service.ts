@@ -6,6 +6,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { OrderService, assertMmgFulfilmentAllowed } from '../order/order.service';
 import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
+import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
 
 // ---------------------------------------------------------------------------
 // Cash rules engine — the golden rule as code. Payment
@@ -224,9 +225,10 @@ export class CashRulesService {
     // [M-29] The mover is a rider (a delivery at the door) or a driver (a ride
     // at the destination): one rail, one golden rule, one claim shape. A user
     // may hold both profiles, so the order decides which one is acting.
+    const MOVER_POSITION = { id: true, currentLat: true, currentLng: true, lastLocationUpdate: true } as const;
     const [rider, driver] = await Promise.all([
-      this.prisma.rider.findUnique({ where: { userId: moverUserId }, select: { id: true } }),
-      this.prisma.driver.findUnique({ where: { userId: moverUserId }, select: { id: true } }),
+      this.prisma.rider.findUnique({ where: { userId: moverUserId }, select: MOVER_POSITION }),
+      this.prisma.driver.findUnique({ where: { userId: moverUserId }, select: MOVER_POSITION }),
     ]);
     if (!rider && !driver) throw new NotFoundError('Rider');
 
@@ -349,24 +351,62 @@ export class CashRulesService {
     // the notification left the order FAILED and the customer struck with no
     // claim for the mover, and the terminal retry was refused.
     const addressKey = `geo:${order.deliveryLat.toFixed(4)}:${order.deliveryLng.toFixed(4)}`;
+
+    // [AF-MOB-001] A no-show may not be instant, and weak evidence may not
+    // punish. Scoped to the delivery rail's no-show: a `refused` customer was
+    // demonstrably present, and a taxi fare settles with the passenger aboard.
+    let strikeCustomer = true;
+    let noShowNote = '';
+    if (input.outcome === 'no_show' && !isRide && !isCourier) {
+      const arrival = await this.prisma.orderStatusLog.findFirst({
+        where: { orderId, status: 'ARRIVED' },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      });
+      const mover2 = rider ?? driver;
+      const now = new Date();
+      const fix: ArrivalFix = mover2?.currentLat != null && mover2.currentLng != null && mover2.lastLocationUpdate
+        ? {
+            metres: Math.round(haversineDistance(mover2.currentLat, mover2.currentLng, order.deliveryLat, order.deliveryLng) * 1000),
+            ageMs: now.getTime() - mover2.lastLocationUpdate.getTime(),
+          }
+        : { metres: null, ageMs: null };
+      const decision = noShowDecision({ arrivedAt: arrival?.createdAt ?? null, fix }, now);
+      if (!decision.allowed) {
+        // Refuses EARLINESS, never the outcome — and says when to try again.
+        // Band F: a mover must never be stranded, only asked to wait.
+        throw decision.reason === 'NOT_ARRIVED'
+          ? new AppError(409, 'NO_SHOW_NOT_ARRIVED', 'Mark that you have arrived before reporting a no-show.')
+          : new AppError(409, 'NO_SHOW_TOO_EARLY', `Wait until ${decision.retryAt.toISOString()} before reporting a no-show — the customer still has time to come to the door.`);
+      }
+      strikeCustomer = decision.strikeCustomer;
+      noShowNote = ` evidence:${decision.evidence}${strikeCustomer ? '' : ' strike:withheld-for-review'}`;
+    }
+
     let staged: StagedClaim = { claim: null, riderNotice: null };
     const failed = await this.orders.updateStatus(
       orderId,
       'FAILED',
       moverUserId,
-      `${input.outcome} — ${gpsNote}${input.photoUrl ? ' photo:yes' : ''}`,
+      `${input.outcome} — ${gpsNote}${input.photoUrl ? ' photo:yes' : ''}${noShowNote}`,
       {
         withinTransaction: async (tx) => {
           await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'FAILED' } });
-          await tx.strike.create({
-            data: {
-              userId: order.customer.id,
-              orderId,
-              reason: `failed_payment_${input.outcome}`,
-              phone: order.customer.phone,
-              addressKey,
-            },
-          });
+          // [AF-MOB-001] The MOVER is always made whole (stageClaim below);
+          // the CUSTOMER's strike waits for evidence that supports it. A
+          // punishment on a stale or distant fix is a wrong punishment, and
+          // unlike a missing payout it cannot be noticed and corrected later.
+          if (strikeCustomer) {
+            await tx.strike.create({
+              data: {
+                userId: order.customer.id,
+                orderId,
+                reason: `failed_payment_${input.outcome}`,
+                phone: order.customer.phone,
+                addressKey,
+              },
+            });
+          }
           staged = await this.stageClaim(tx, order, mover, input, addressKey);
           await this.observer.afterTerminalFacts?.('failed');
         },
