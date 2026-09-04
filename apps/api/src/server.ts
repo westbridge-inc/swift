@@ -27,6 +27,7 @@ import { partnerRoutes } from './modules/partner/partner.routes';
 import { aiRoutes } from './modules/ai/ai.routes';
 import { setAppLogger } from './utils/logger';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
+import { attestationOf, attestationLine, readRlsFacts, assertTenantWall } from './lib/rls-attestation';
 import { evaluateSchedulerHealth, schedulerStallMs, workerCheckStatus } from './utils/scheduler-health';
 import { prismaPlugin, beginRequestTenantContext } from './plugins/prisma';
 import { authPlugin } from './plugins/auth';
@@ -39,7 +40,7 @@ import { registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegra
 import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
 import { loggerRedactConfig } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
-import { observabilityPlugin } from './plugins/observability';
+import { observabilityPlugin, rlsAttestationGauge } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
 import { publicRoutes } from './modules/public/public.routes';
 import { qrResolverRoutes } from './modules/qr/qr-resolver.routes';
@@ -410,6 +411,16 @@ async function start() {
     // SWIFT-010: refuse to serve a production DB with no active market seeded
     // (empty CountryConfig = every signup rejected). Dev/test/CI skip inside.
     await assertProductionData(app.prisma);
+
+    // [TA-S0-003] Say out loud whether the database tenant wall binds THIS
+    // credential, and refuse to serve a second tenant without it. 76 tables
+    // carry a tenant policy; under an owner/BYPASSRLS role none of them bind,
+    // and until now nothing measured which of those two worlds was running.
+    const rls = attestationOf(await readRlsFacts(app.prisma));
+    rlsAttestationGauge.labels(rls.enforced ? 'enforced' : 'bypassed').set(1);
+    app.log[rls.enforced ? 'info' : 'warn']({ rls: rls.facts, bypasses: rls.bypasses }, `tenant wall: ${attestationLine(rls)}`);
+    assertTenantWall(rls, await app.prisma.tenant.count({ where: { isActive: true } }));
+
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);
 
