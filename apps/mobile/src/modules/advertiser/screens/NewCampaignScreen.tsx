@@ -11,7 +11,7 @@ import { Card, LabeledInput, LoadingBlock, PillButton, T } from '../../../kit';
 import { useAdPlacements, useAdAvailability, useMyAdvertisers } from '../../../hooks/advertiser';
 import { adsApi } from '../../../services/api';
 import { errorMessage } from '../../../lib/apiError';
-import { money } from './AdvertiserHomeScreen';
+import { moneyOrDash as money } from '../../../lib/money';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
