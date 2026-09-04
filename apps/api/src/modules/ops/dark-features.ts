@@ -43,6 +43,16 @@ export interface DarkFeature {
   /** What a real person experiences while this is off. Never "feature disabled". */
   whileOff: string;
   impact: DarkFeatureImpact;
+  /**
+   * The code already carries a working default, so this is ON without any env.
+   *
+   * A register that reports a capability OFF when the code defaults it ON is
+   * the same lie it exists to prevent, pointed the other way — it sends an
+   * operator to fix something that is not broken, and the next warning gets
+   * ignored. The env var still overrides; this only records that its absence
+   * is not an absence of the feature.
+   */
+  defaultedInCode?: string;
 }
 
 export const DARK_FEATURES: DarkFeature[] = [
@@ -52,7 +62,13 @@ export const DARK_FEATURES: DarkFeature[] = [
     source: 'env',
     title: 'iOS universal links',
     whileOff:
-      'A printed QR code or a shared storefront link opens Safari instead of the app, even on a phone that has Swift installed. /.well-known/apple-app-site-association returns 404. Needs the Team ID from an Apple Developer account.',
+      'A printed QR code or a shared storefront link opens Safari instead of the app, even on a phone that has Swift installed, and /.well-known/apple-app-site-association returns 404.',
+    // Swift's own Team ID is now the default in the AASA route, so this is on
+    // everywhere without configuration. It is kept in the register because the
+    // env var still overrides it — a fork or a second Apple account needs to
+    // know this switch exists — and because the outage it describes is exactly
+    // what happened while the route had no default.
+    defaultedInCode: 'N3JV22LC84 in apps/web … apple-app-site-association/route.ts',
     impact: 'growth',
   },
   {
@@ -96,7 +112,11 @@ export function darkFeatureStatus(
 ): DarkFeatureStatus[] {
   return DARK_FEATURES.map((f) => ({
     ...f,
-    on: f.source === 'env' ? Boolean(env[f.setting]?.trim()) : configOn[f.setting] === true,
+    on: f.defaultedInCode
+      ? true
+      : f.source === 'env'
+        ? Boolean(env[f.setting]?.trim())
+        : configOn[f.setting] === true,
   }));
 }
 
