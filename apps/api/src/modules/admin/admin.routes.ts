@@ -2872,10 +2872,13 @@ export async function adminRoutes(app: FastifyInstance) {
         },
       });
       await recordPromoTermsVersion(tx, row.id, { createdBy: request.user.userId });
+      // [ADM-002] The route already owned this transaction; the audit row joins
+      // it and names the promo it made. A create declares no entity, so without
+      // the id this row would say `-` — which is how the legacy CREATE_PROMO
+      // row was carrying the only copy of it.
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: row.id });
       return row;
     });
-
-    await audit(request.user.userId, 'CREATE_PROMO', 'PromoCode', promo.id, { code: promo.code, termsVersion: promo.termsVersion }, request);
 
     return { success: true, data: promo };
   });
@@ -2916,13 +2919,17 @@ export async function adminRoutes(app: FastifyInstance) {
     const existing = await app.prisma.promoCode.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('PromoCode', id);
 
-    // Soft-delete: deactivate rather than removing data
-    await app.prisma.promoCode.update({
-      where: { id },
-      data: { isActive: false },
+    // [ADM-002] Deactivating a promo stops it discounting orders; the record
+    // commits with it. `E.promo` is declared for this route, so the subject
+    // comes from the params and needs no id override.
+    await app.prisma.$transaction(async (tx) => {
+      // Soft-delete: deactivate rather than removing data
+      await tx.promoCode.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
     });
-
-    await audit(request.user.userId, 'DELETE_PROMO', 'PromoCode', id, { code: existing.code }, request);
 
     return { success: true, message: 'Promo code deactivated' };
   });
@@ -4756,12 +4763,18 @@ export async function adminRoutes(app: FastifyInstance) {
     if (existing.status !== 'REQUESTED') {
       throw new AppError(400, 'ALREADY_RESOLVED', `This return is already ${existing.status.toLowerCase()}`);
     }
-    const updated = await mutationOrNotFound('ReturnRequest', id, () => tenantPrisma.returnRequest.update({
-      where: { id },
-      data: { status: body.status, resolutionNote: body.note, reviewedBy: request.user.userId, reviewedAt: new Date() },
-    }));
+    // [ADM-002] Resolving a return decides whether money is owed. The decision
+    // and the record of who made it commit together. `E.returnRequest` is
+    // declared, so the subject comes from the params.
+    const updated = await tenantPrisma.$transaction(async (tx) => {
+      const row = await mutationOrNotFound('ReturnRequest', id, () => tx.returnRequest.update({
+        where: { id },
+        data: { status: body.status, resolutionNote: body.note, reviewedBy: request.user.userId, reviewedAt: new Date() },
+      }));
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      return row;
+    });
     if (body.status === 'REFUND_DUE') returnRefundCounter.labels('owed').inc();
-    await audit(request.user.userId, 'RESOLVE_RETURN', 'ReturnRequest', id, { status: body.status }, request);
     return { success: true, data: updated };
   });
 
