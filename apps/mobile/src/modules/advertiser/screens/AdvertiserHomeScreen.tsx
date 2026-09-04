@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, EmptyState, ErrorState, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
+import { moneyOrDash as money } from '../../../lib/money';
 import { useMyAdvertisers, useAdvertiserCampaigns } from '../../../hooks/advertiser';
 
 // §14.1/§14.2 — onboarding status banner (gated-preview pattern) + the
@@ -22,11 +23,6 @@ export const CAMPAIGN_STATUS: Record<string, { label: string; tone: 'brand' | 's
   CANCELLED: { label: 'Cancelled', tone: 'error' },
   REJECTED: { label: 'Not approved', tone: 'error' },
 };
-
-export function money(n: number | null | undefined, currency = 'GYD'): string {
-  if (n == null) return '—';
-  return `${currency === 'GYD' ? 'G$' : currency} ${Math.round(n).toLocaleString('en-US')}`;
-}
 
 export function AdvertiserHomeScreen() {
   const navigation = useNavigation<any>();

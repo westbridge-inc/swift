@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, space } from '@swift/ui';
 import { Card, EmptyState, ErrorState, LoadingBlock, T, TonePill } from '../../../kit';
 import { useMyAdvertisers, useAdvertiserInvoices } from '../../../hooks/advertiser';
-import { money } from './AdvertiserHomeScreen';
+import { moneyOrDash as money } from '../../../lib/money';
 
 // §14.5 — invoices. Every figure is the server's; refunds show against the
 // invoice they refunded.
