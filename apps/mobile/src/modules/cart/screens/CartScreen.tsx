@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useState } from 'react';
-import { InteractionManager, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import { Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
@@ -145,10 +145,24 @@ export function CartScreen() {
     if (placeOrder.isSuccess || !pendingTrackId) return;
     const id = pendingTrackId;
     setPendingTrackId(null);
-    // InteractionManager: after the dismissal's own animation/transition work
-    // has fully drained — the Modal window is gone before the stack moves.
-    const task = InteractionManager.runAfterInteractions(() => navigation.navigate('Delivery', { orderId: id }));
-    return () => task.cancel();
+    // WAS: InteractionManager.runAfterInteractions(...).
+    //
+    // React Native 0.85 turned InteractionManager into a stub whose
+    // `runAfterInteractions` is a bare `setImmediate` — it waits for nothing.
+    // The staged ceremony above still deferred a tick, so the navigation began
+    // while the ceremony Modal's native window was still dismissing, and that
+    // window survived above the tracking screen eating every touch: the exact
+    // P0 this comment block was written about, reopened by an upgrade.
+    //
+    // The Modal's own post-dismissal callback (`onDismissed` below) is the real
+    // signal and does the navigating now. This effect is the FALLBACK for the
+    // platforms and paths that callback does not cover (it is iOS-only), and it
+    // waits two frames instead of pretending.
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => navigation.navigate('Delivery', { orderId: id }));
+    });
+    return () => { cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2); };
   }, [placeOrder.isSuccess, pendingTrackId, navigation]);
 
   const [promo, setPromo] = useState('');
@@ -862,6 +876,17 @@ export function CartScreen() {
           // Stage, dismiss, navigate-after — never all in one tick (see above).
           if (placedOrderId) setPendingTrackId(placedOrderId);
           placeOrder.reset();
+        }}
+        onDismissed={() => {
+          // THE REAL SIGNAL: React Native fires this after the modal's native
+          // window is gone. Navigating here cannot lose the race, because
+          // there is no longer a race — the window we were waiting on has
+          // already been torn down. The staged effect above remains the
+          // fallback for platforms without this callback.
+          setPendingTrackId((id) => {
+            if (id) navigation.navigate('Delivery', { orderId: id });
+            return null;
+          });
         }}
       >
         {/* THE LOCK-IN [100x pass §1c]: a confirmed success is viridian, not

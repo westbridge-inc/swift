@@ -135,6 +135,18 @@ module.exports = {
       files: ['apps/desktop/src/**/*'],
       env: { browser: true },
     },
+    {
+      // React Native ships the browser timing globals — `requestAnimationFrame`
+      // and `cancelAnimationFrame` among them — but the root env declares only
+      // `node`, so a frame-scheduled callback lints as no-undef. That matters
+      // more than it looks: the frozen-screen P0 guard has to defer by FRAMES
+      // (React Native 0.85 hollowed `InteractionManager` into a `setImmediate`
+      // that waits for nothing), and a lint rule that rejects the only correct
+      // primitive pushes the next author back to a timer. Same reason and the
+      // same fix as the desktop override above.
+      files: ['apps/mobile/src/**/*'],
+      env: { browser: true },
+    },
   ],
   rules: {
     'no-unused-vars': 'off',
