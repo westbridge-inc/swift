@@ -101,6 +101,18 @@ const httpDuration = new client.Histogram({
   registers: [registry],
 });
 
+/** [TA-S0-003] The database tenant wall, as the running process measures it —
+ *  `enforced` only when the connected credential is genuinely subject to the
+ *  policies. Alert on `swift_rls_attestation{state="bypassed"} == 1` alongside
+ *  a tenant count above one: that pair is a cross-tenant breach waiting for a
+ *  missed `where` clause. */
+export const rlsAttestationGauge = new client.Gauge({
+  name: 'swift_rls_attestation',
+  help: 'Whether row-level security binds the credential this process authenticated as',
+  labelNames: ['state'] as const,
+  registers: [registry],
+});
+
 export const ordersPlacedCounter = new client.Counter({
   name: 'swift_orders_placed_total',
   help: 'Orders placed, by type',
