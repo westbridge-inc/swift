@@ -112,6 +112,25 @@ describe('[routing] the data is rebuildable and never committed', () => {
     expect(GITIGNORE).toContain('deploy/routing-conf/vroom/access.log');
   });
 
+  it('pins Photon to a REGION, because the missing value is the dangerous one', () => {
+    // Measured by starting the container three ways:
+    //   unset / COUNTRY_CODE  → PLANET, 58.05 GB, no warning at all
+    //   REGION=GY             → refused outright (honest)
+    //   REGION=south-america  → 6.72 GB, which is what Guyana needs
+    //
+    // The first is the trap: the image does not read COUNTRY_CODE, so that
+    // spelling silently becomes "download the planet". A region must be set,
+    // and it must be one this image accepts — continents and a few
+    // sub-regions, of which South America has only Argentina.
+    // Read the CONFIG, not the prose. The comment above the service explains
+    // the COUNTRY_CODE trap by name, so a whole-file search finds it there and
+    // reports a problem that does not exist — the same mistake as matching on
+    // a diagnosis string instead of an error code.
+    const config = COMPOSE.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
+    expect(config, 'Photon has no REGION — it will download the 58 GB planet').toMatch(/REGION=south-america/);
+    expect(config, 'COUNTRY_CODE is not read by this image').not.toMatch(/COUNTRY_CODE/);
+  });
+
   it('says out loud that none of these services has authentication', () => {
     // Bringing this into a public repo without stating that is worse than
     // leaving it out.

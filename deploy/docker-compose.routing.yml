@@ -58,13 +58,29 @@ services:
 
   # ── Address search and geocoding ───────────────────────────────────────
   # PLACES_PROVIDER=osm  PHOTON_URL=http://<host>:2322
-  # Autocomplete. A country index rather than the global one — Guyana is a few
-  # hundred MB where the planet is ~70 GB.
+  #
+  # REGION picks the prebuilt index, and every number here was measured by
+  # starting the container rather than read off a page:
+  #
+  #   unset / COUNTRY_CODE   →  PLANET, 58.05 GB
+  #   REGION=GY              →  refused: "Must be a valid continent,
+  #                             sub-region, or 'planet'"
+  #   REGION=south-america   →  6.72 GB          ← what Guyana needs
+  #
+  # Two traps, and they fail in opposite ways. `COUNTRY_CODE=gy` is what this
+  # file said first; the image does not read that variable AT ALL, so it fell
+  # back to the planet and began a 58 GB download without a warning — it just
+  # logs "Downloading index" and fills the disk. `REGION=GY` looks more
+  # correct and is refused outright, which is the honest failure: Photon's
+  # prebuilt indexes are continents and a handful of sub-regions, and South
+  # America's only sub-region is Argentina. So Guyana takes the continent.
+  #
+  # Set it explicitly. The dangerous value is the one that is missing.
   photon:
     image: rtuszik/photon-docker:latest
     container_name: swift-photon
     environment:
-      - COUNTRY_CODE=gy
+      - REGION=south-america
     volumes:
       - ./routing-data/photon:/photon/photon_data
     ports:
