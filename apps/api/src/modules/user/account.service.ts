@@ -5,6 +5,7 @@ import { AppError } from '../../utils/errors';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
+import { partnerObligations, verdictFor, refusalMessage, windDownPartner } from './partner-wind-down';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
 // ---------------------------------------------------------------------------
@@ -17,19 +18,31 @@ import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 //    de-identify the account. Records the law REQUIRES us to keep (orders, for
 //    disputes/guarantees) stay, but the person behind them is anonymised.
 //
-// Scope: a pure CUSTOMER account. Mover/vendor accounts carry payouts, live
-// listings and staff, so they close through Support where those are wound down
-// correctly — a self-delete would orphan a running catalogue.
+// Scope: EVERY account type the app can create.
 //
-// [LAUNCH-2] That scope sentence was only ever true of the `roles` array, and
+// It used to be "a pure CUSTOMER account" — mover and vendor accounts closed
+// through Support, because they carry payouts, live listings and staff and a
+// self-delete would orphan a running catalogue. That reasoning was right about
+// the risk and wrong about the remedy, and App Review names the remedy
+// specifically: 5.1.1(v) requires in-app deletion for every account type an
+// app can create, and pointing at Support does not satisfy it. The app has a
+// Delete account button, so a driver pressing it was told to write an email.
+//
+// What a partner holds divides cleanly. Money in flight REFUSES — cash they
+// are holding, an unconfirmed settlement, earnings owed — because erasing over
+// any of it loses somebody's money, and each one ends on its own with a next
+// step the person can take themselves. Everything else WINDS DOWN in the purge
+// phase: storefront off sale, staff keys revoked, subscription stopped. See
+// partner-wind-down.ts.
+//
+// [LAUNCH-2] That old scope sentence was only ever true of the `roles` array, and
 // two kinds of authority deliberately live outside it: advertiser membership
 // (AdvertiserMember, ads §4 — "NOT a new UserRole") and vendor staff access
 // (VendorStaff). Both belong to people the role filter sees as plain
 // CUSTOMERs, so both could always self-delete — leaving a LIVE ad campaign
 // with no owner, and staff rows pointing at "Deleted User". Step 0b now winds
-// those down. Closing MOVER and VENDOR_OWNER accounts in-app is the remaining
-// half and is tracked separately: Apple 5.1.1(v) requires it for every account
-// type the app can create, and "contact Support" does not satisfy it.
+// those down. Closing MOVER and VENDOR_OWNER accounts in-app was the remaining
+// half; it is done, above.
 // ---------------------------------------------------------------------------
 
 // A closed order is safe to leave behind; anything else is in-flight and must
@@ -128,14 +141,26 @@ export class AccountService {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
       }
 
-      // Partner accounts (mover/vendor) close through Support — see note above.
+      // [Apple 5.1.1(v)] A partner closes their own account, in the app.
+      //
+      // This used to refuse every non-CUSTOMER role outright and point at
+      // Support. The app has a Delete account button, so a driver pressing it
+      // was told to write an email — which App Review names specifically as
+      // not satisfying the guideline. The comment at the top of this file has
+      // said so all along while nothing acted on it.
+      //
+      // The refusal was right about the risk and wrong about the remedy. What
+      // a partner holds divides cleanly: money in flight BLOCKS (and each
+      // blocker ends on its own, with a next step the person can take), and
+      // everything else — a live storefront, staff keys, a subscription —
+      // WINDS DOWN in the purge phase below, exactly as ad campaigns already
+      // do. See partner-wind-down.ts.
       const partnerRoles = user.roles.filter((role) => role !== 'CUSTOMER');
       if (partnerRoles.length > 0) {
-        throw new AppError(
-          409,
-          'PARTNER_ACCOUNT',
-          'Mover and vendor accounts are closed through Support, so payouts and listings are handled correctly. Please contact support to proceed.',
-        );
+        const verdict = verdictFor(await partnerObligations(tx, userId));
+        if (!verdict.clear) {
+          throw new AppError(409, 'PARTNER_OBLIGATIONS', refusalMessage(verdict.blockers));
+        }
       }
 
       const [inFlightOrders, inFlightServiceJobs] = await Promise.all([
@@ -211,6 +236,20 @@ export class AccountService {
     //     invoices, which are financial records under the same legal-obligation
     //     basis as the rest. This runs in the purge phase so the re-sweep
     //     repairs it, and every step is idempotent.
+    // [Apple 5.1.1(v)] Close what leaving implies: a storefront off sale, staff
+    // keys revoked, the subscription stopped. Taken off sale rather than
+    // deleted — orders, receipts and sales history are financial records under
+    // the same legal-obligation basis as everything else kept here. What must
+    // stop is a customer ordering from a business that no longer has an owner.
+    // Idempotent, so the re-sweep repairs a partial run; moves no money.
+    const wound = await windDownPartner(prisma, userId).catch((error) => {
+      this.app.log.error({ err: error, userId }, '[5.1.1v] partner wind-down failed — re-sweep will retry');
+      return null;
+    });
+    if (wound && (wound.vendorsClosed || wound.itemsWithdrawn || wound.staffRevoked || wound.subscriptionsCancelled)) {
+      this.app.log.info({ userId, ...wound }, '[5.1.1v] partner wound down on account deletion');
+    }
+
     const memberships = await prisma.advertiserMember.findMany({
       where: { userId },
       select: { advertiserId: true, role: true },

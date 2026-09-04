@@ -178,11 +178,21 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(await app.prisma.identityKey.count({ where: { accountId: u.userId } })).toBe(0);
   });
 
-  it('refuses a partner (mover) account — those close through Support', async () => {
+  // [Apple 5.1.1(v)] This used to assert the opposite: a mover was refused and
+  // sent to Support. App Review names that specifically as not satisfying the
+  // guideline — an app that lets you CREATE an account must let you delete it
+  // IN the app — and Swift's app has a Delete account button, so a driver
+  // pressing it was told to write an email.
+  //
+  // What replaced the blanket refusal is a narrow one: money in flight blocks,
+  // everything else winds down.
+  it('a mover with nothing outstanding closes their own account', async () => {
     const u = await makeUser(['CUSTOMER', 'MOVER']);
     const res = await inject('DELETE', '/api/v1/customer/account', u.token);
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error.code).toBe('PARTNER_ACCOUNT');
+    expect(res.statusCode, res.payload).toBe(200);
+    const after = await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId } });
+    expect(after.status).toBe('DEACTIVATED');
+    expect(after.phone.startsWith('deleted:')).toBe(true);
   });
 
   // [LAUNCH-2] The guard above filters `user.roles`. Advertiser membership and
