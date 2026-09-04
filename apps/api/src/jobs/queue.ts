@@ -840,6 +840,32 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const swept = await new EvidenceService(ctx.prisma, ctx.io).retentionSweep();
         if (swept.frozen) ctx.log.error(swept, '[S-09] evidence retention frozen this tick');
         if (swept.deleted > 0) ctx.log.info(swept, 'evidence retention sweep');
+
+        // [AG-XF-013] The outer bound on a safety escrow. Release normally
+        // completes an erasure the moment the last obligation closes; this is
+        // what happens when nothing ever closes it. Indefinite retention is
+        // the other way this defect fails — a privacy breach rather than a
+        // safety one, which does not make it less of a breach — so the escrow
+        // dies at purgeBy whatever the case is doing. Anything still standing
+        // past its review date is surfaced for a human, not silently kept.
+        const { shredExpiredSafetyHolds, safetyHoldsDueForReview } = await import('../modules/safety/deletion-hold');
+        const shred = await shredExpiredSafetyHolds(ctx.prisma).catch((err) => {
+          ctx.log.error({ err }, '[AG-XF-013] safety escrow retention sweep failed');
+          return { shredded: 0 };
+        });
+        if (shred.shredded > 0) ctx.log.info(shred, '[AG-XF-013] safety escrows shredded at deadline');
+        const due = await safetyHoldsDueForReview(ctx.prisma).catch(() => []);
+        if (due.length > 0) {
+          const { notifyAdmins: pageReview, NotificationService: ReviewNS } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'safety-escrow-review', 86400, () =>
+            pageReview(ctx.prisma, new ReviewNS(ctx.prisma, ctx.io), {
+              tenantId: null,
+              title: `Safety escrow: ${due.length} deleted account(s) still held past review`,
+              body: 'A deleted account\u2019s emergency contact details are still escrowed because a safety hold has not closed. Confirm the hold is still real, or close the case so erasure completes.',
+              data: { kind: 'safety_escrow_review', holds: due.slice(0, 10).map((h) => ({ id: h.id, reasons: h.reasons, reviewBy: h.reviewBy, purgeBy: h.purgeBy })) },
+            }),
+          ).catch(() => {});
+        }
       }
 
       if (job.name === 'incident-pattern-scan') {

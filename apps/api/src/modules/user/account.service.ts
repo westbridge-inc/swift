@@ -4,6 +4,7 @@ import type { ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
+import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
 // ---------------------------------------------------------------------------
@@ -121,7 +122,7 @@ export class AccountService {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
         // late write landed — fall through and RE-SWEEP (every purge step is
         // idempotent), instead of short-circuiting on the marker.
-        return { alreadyComplete: false, resweep: true };
+        return { alreadyComplete: false, resweep: true, hold: null };
       }
       if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
@@ -153,12 +154,26 @@ export class AccountService {
         throw new AppError(409, 'ACTIVE_SERVICE_JOBS', 'Finish or cancel your active service jobs before deleting your account.');
       }
 
+      // [AG-XF-013] The safety obligations this person is currently inside.
+      //
+      // Enumerated HERE — inside the transaction, after the FOR UPDATE above —
+      // so an alert raised concurrently with a deletion is either seen or
+      // waits behind the lock, never interleaved with the purge.
+      //
+      // A hold does NOT refuse the deletion. Refusing would hand an abuser a
+      // reason to keep an account alive and a malicious reporter a way to
+      // block someone's erasure indefinitely; both are named in the spec as
+      // the wrong extremes. The deletion proceeds in full and only the minimum
+      // response authority is escrowed, encrypted, with a purge deadline.
+      const holds = await enumerateSafetyHolds(tx, userId);
+      const hold = holds.reasons.length > 0 ? await openSafetyDeletionHold(tx, userId, holds) : null;
+
       // Cut public/action authority before any fallible retention work. The
       // relational ACTIVE check is authoritative; the profile flag is a second
       // fail-closed barrier for old clients and background consumers.
       await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
       await tx.user.update({ where: { id: userId }, data: { status: 'DEACTIVATED' } });
-      return { alreadyComplete: false };
+      return { alreadyComplete: false, hold };
     });
     if (preflight.alreadyComplete) return { deleted: true };
     if ((preflight as { resweep?: boolean }).resweep) {
@@ -332,6 +347,13 @@ export class AccountService {
       },
     });
 
-    return { deleted: true };
+    // [AG-XF-013] The receipt names the hold when there is one. Everything the
+    // person asked to be erased HAS been erased; what remains is an encrypted
+    // escrow of the minimum needed to finish an emergency that was already
+    // open, and it shreds itself when that emergency ends — or at `purgeBy` if
+    // it never does.
+    return preflight.hold
+      ? { deleted: true, status: 'PENDING_SAFETY_HOLD' as const, holdId: preflight.hold.holdId, holdReasons: preflight.hold.reasons }
+      : { deleted: true };
   }
 }

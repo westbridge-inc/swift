@@ -606,7 +606,18 @@ export class IncidentService {
   }
 
   async close(id: string, opsUserId: string) {
-    return this.transition(id, 'CLOSED', { closedAt: new Date(), closedBy: opsUserId });
+    const closed = await this.transition(id, 'CLOSED', { closedAt: new Date(), closedBy: opsUserId });
+    // [AG-XF-013] Closing a case may complete an erasure that was waiting on
+    // it. Both the subject and the reporter can be under a hold. Release
+    // re-enumerates every obligation, so a case closed while a legal hold or
+    // a live alert still stands leaves the escrow exactly where it is.
+    const { releaseSafetyDeletionHold } = await import('./deletion-hold');
+    for (const userId of [...new Set([closed.subjectUserId, closed.reporterUserId].filter((u): u is string => !!u))]) {
+      await releaseSafetyDeletionHold(this.prisma, userId).catch((err) =>
+        log().error({ err, userId, caseId: id }, '[AG-XF-013] safety hold release failed — retention sweep will finish it'),
+      );
+    }
+    return closed;
   }
 
   /** §8.2 parallel flag — any live case; sets legalHold. Idempotent. */

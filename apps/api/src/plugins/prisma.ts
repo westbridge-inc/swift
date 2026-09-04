@@ -79,6 +79,9 @@ const TENANT_QUERY_EXTENSIONS = {
   opsAlert: scoped,
   opsAlertRecipient: scoped,
   livenessCheck: scoped, incidentCase: scoped, evidenceBundle: scoped, safetyAccessLog: scoped,
+  // [AG-XF-013] The deletion escrow holds one tenant's people; the retention
+  // sweep runs without tenant context and is therefore deliberately unscoped.
+  safetyDeletionHold: scoped,
   // Money: settlement, receipts, the agent-cash rail, trials.
   mmgAgentPayment: scoped, settlementBatch: scoped, feeReceipt: scoped, receiptCounter: scoped,
   // [M-22] Immutable bank deposit confirmations and their adjustments.

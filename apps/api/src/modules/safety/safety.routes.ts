@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { SosService } from './sos.service';
+import { SosService, LIVE_SOS_STATUSES } from './sos.service';
 import { GuardianService } from './guardian.service';
 import { LivenessService } from './liveness.service';
 import { IncidentService, DECISION_CODES } from './incident.service';
@@ -40,7 +40,8 @@ const listAlertsQuery = z.object({
   status: z.enum(['open', 'active', 'all']).default('open'),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
-const OPEN_STATUSES = ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] as const;
+/** [AG-XF-013] Imported, not restated — see LIVE_SOS_STATUSES for why. */
+const OPEN_STATUSES = LIVE_SOS_STATUSES;
 
 export async function safetyRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
