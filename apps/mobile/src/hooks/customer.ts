@@ -136,6 +136,28 @@ export type MarketItem = {
  * almost every `totalOrdered` is zero, so "popular" would rank by a tiebreaker
  * while a header called it popular — the UI lying about its own ordering.
  */
+/**
+ * [MKT G7] Is the Market tab allowed to exist yet?
+ *
+ * §5.4: "An empty marketplace is worse than no marketplace." The SERVER
+ * decides — it is the only side that can see the whole catalogue, and a
+ * threshold duplicated here would eventually disagree with the one there.
+ *
+ * Hidden while unknown, on purpose: a tab that pops in after a network round
+ * trip is worse than one that appears on the next launch, and the failure mode
+ * we are avoiding is showing an empty market, not hiding a full one.
+ */
+export function useMarketDepth() {
+  return useQuery({
+    queryKey: ['market', 'depth'],
+    queryFn: async () => {
+      const res = await marketApi.depth();
+      return (res?.data?.data ?? null) as { visible: boolean; items: number; vendors: number } | null;
+    },
+    staleTime: 5 * 60_000,
+  });
+}
+
 export function useMarketItems(params: { category?: string; sort?: string } = {}) {
   const sort = params.sort ?? 'new';
   return useInfiniteQuery({
