@@ -65,7 +65,8 @@ export const TENANT_TABLES = [
   // [M-18] One provider transaction, one identity, one credit.
   'provider_payments', 'qr_codes',
   'rating_reports', 'rating_tag_defs', 'receipt_counters',
-  'ride_queue_entries', 'san_tombstones', 'scan_daily_rollups', 'scan_events',
+  'ride_queue_entries', 'safety_deletion_holds', 'san_tombstones',
+  'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
   'settlement_batches',

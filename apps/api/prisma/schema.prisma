@@ -3813,6 +3813,89 @@ enum LegalHoldVaultStatus {
   FAILED
 }
 
+/// [AG-XF-013] The safety escrow that lets erasure and an emergency coexist.
+///
+/// Account deletion checked in-flight orders and service jobs and nothing
+/// else. A person with a LIVE SOS could erase themselves mid-emergency: their
+/// verified emergency contacts were deleted, their name became "Deleted User"
+/// and their phone became a tombstone — so the ops desk holding a live alert
+/// could no longer name them, call them, or tell the contacts it had already
+/// alarmed that the emergency was over. `fanOutResolved` reads the contact
+/// rows LIVE, finds none, and returns silently.
+///
+/// Both extremes are unsafe. Refusing the deletion until the case closes
+/// hands an abuser a way to keep an account alive, and hands a malicious
+/// reporter a way to block someone's erasure indefinitely. Deleting
+/// regardless severs the emergency.
+///
+/// So the deletion COMPLETES — every commerce, session and public-profile
+/// erasure runs exactly as it does today — and only the minimum response
+/// authority is moved into this escrow: encrypted, purpose-declared,
+/// field-declared, owner-scoped, with a review date and an automatic purge
+/// deadline. Safety resolution reads the SNAPSHOT here, never the mutable
+/// User and contact rows that erasure just took. When the last hold releases,
+/// the final purge crypto-shreds it; if no hold ever releases, `purgeBy`
+/// does. Erasure is honoured now, in full, except for the part that would
+/// abandon someone mid-emergency.
+model SafetyDeletionHold {
+  id       String           @id @default(cuid())
+  tenantId String           @default("swift-default")
+  /// One live escrow per person: a re-requested deletion adopts it rather
+  /// than minting a second copy of the same PII.
+  userId   String           @unique
+  status   SafetyHoldStatus @default(PENDING)
+
+  /// The typed holds enumerated under the User row lock at request time.
+  reasons  String[]
+  /// Exactly which alert / case / bundle each reason came from.
+  holdRefs Json
+
+  // ── The escrow: AES-256-GCM, shredded by nulling the key ────────────────
+  // Same crypto-shred idiom as EncryptedObject: the ciphertext may survive in
+  // a backup, but without the key it is permanently unrecoverable.
+  ciphertext Bytes?
+  iv         Bytes?
+  authTag    Bytes?
+  /// The data key. Wrapped by the master KEK when one is configured — see
+  /// `dekWrapped`, which says which it is rather than leaving a reader to
+  /// guess from a null. Nulling THIS column is the shred.
+  dek        Bytes?
+  dekWrapped Boolean   @default(false)
+  shreddedAt DateTime?
+
+  /// Declared escrow metadata — the record of WHY this PII is still held,
+  /// legible to a privacy owner without decrypting anything.
+  purpose   String
+  fields    String[]
+  ownerRole String
+  reviewBy  DateTime
+  purgeBy   DateTime
+
+  requestedAt DateTime  @default(now())
+  releasedAt  DateTime?
+  purgedAt    DateTime?
+  /// One final purge generation. Release and the retention sweep can both
+  /// fire on the same row; the shred increments this under a conditional
+  /// update, so exactly one of them performs it.
+  purgeGeneration Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, purgeBy])
+  @@index([tenantId, status])
+  @@map("safety_deletion_holds")
+}
+
+enum SafetyHoldStatus {
+  /// Escrow live: at least one safety hold is still open.
+  PENDING
+  /// Every hold released; the final purge is owed and idempotent.
+  RELEASED
+  /// Key destroyed. Terminal.
+  PURGED
+}
+
 /// [S-19] An ops page is a durable obligation with per-recipient delivery
 /// and ACKNOWLEDGEMENT. Room membership and a server emit are not receipt: an
 /// alert nobody acknowledged by its deadline escalates (re-push, on-call SMS,

@@ -42,7 +42,14 @@ const GRACE_SECONDS = parseGraceSeconds(process.env['SOS_CANCEL_GRACE_SECONDS'])
 
 /** The states in which an alert is still someone's live emergency. A POSITIVE
  *  list, so a status added to the enum later is NOT silently treated as live. */
-const LIVE_STATUSES: SosStatus[] = ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'];
+/**
+ * The ONE live-alert predicate. Exported because it was already declared twice
+ * — identically, as `OPEN_STATUSES` in `safety.routes.ts` — with neither copy
+ * importing the other. Two hand-maintained lists that decide whether someone
+ * is still in danger will eventually disagree, and the disagreement is silent.
+ */
+export const LIVE_SOS_STATUSES: SosStatus[] = ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'];
+const LIVE_STATUSES = LIVE_SOS_STATUSES;
 
 const isUniqueViolation = (e: unknown) =>
   e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
@@ -438,6 +445,13 @@ export class SosService {
   async resolve(id: string, opsUserId: string, resolutionCode: SosResolutionCode, notes?: string) {
     const resolved = await this.transition(id, 'RESOLVED', { resolvedAt: new Date(), resolvedBy: opsUserId, resolutionCode, resolutionNotes: notes ?? null });
     await this.fanOutResolved(id).catch(() => {});
+    // [AG-XF-013] Resolving may have been the LAST obligation holding someone's
+    // erasure open. Release re-enumerates rather than trusting this one closure
+    // — the same person can sit inside an open case as well — and shreds the
+    // escrow only when nothing is left. Ordered after the all-clear, which is
+    // the last thing that needs the escrow. Best-effort, like everything else
+    // downstream of the resolve itself.
+    await this.releaseDeletionHolds(resolved.actorUserId, resolved.counterpartyUserId);
     // §8.1 — an SOS ops coded as real harm doesn't end at "resolved": it opens
     // an incident case against the counterparty so investigation, interim
     // action, and pattern intelligence all engage. Best-effort: a case-intake
@@ -482,6 +496,19 @@ export class SosService {
    *  neutral ("closed by our safety team", not "they're safe") so it's accurate
    *  regardless of resolution code. Merges its receipts into deliveryReceipts
    *  without clobbering the original fan-out. Only reached from resolve(). */
+  /** [AG-XF-013] Complete any erasure this alert was holding open. Both sides
+   *  of an alert can be under a hold: the person who asked for help, and the
+   *  person the alert is about. Never throws — an erasure that has waited can
+   *  wait for the retention sweep; a resolve that fails cannot. */
+  private async releaseDeletionHolds(...userIds: Array<string | null | undefined>) {
+    const { releaseSafetyDeletionHold } = await import('./deletion-hold');
+    for (const userId of [...new Set(userIds.filter((u): u is string => !!u))]) {
+      await releaseSafetyDeletionHold(this.prisma, userId).catch((err) =>
+        log().error({ err, userId }, '[AG-XF-013] safety hold release failed — retention sweep will finish it'),
+      );
+    }
+  }
+
   private async fanOutResolved(id: string) {
     const alert = await this.prisma.sosAlert.findUnique({ where: { id } });
     if (!alert || alert.status !== 'RESOLVED') return;
@@ -491,16 +518,19 @@ export class SosService {
     // — confusing, and it confirms the person was involved in SOME safety
     // event. The original receipts already record whether contacts were texted.
     if ((alert.deliveryReceipts as Record<string, unknown> | null)?.['contacts'] === 'skipped:guardian-default') return;
-    const contacts = await this.prisma.emergencyContact.findMany({
-      where: { userId: alert.actorUserId, verifiedAt: { not: null } },
-      orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
-      take: 10,
-    });
+    // [AG-XF-013] Read the response authority, not the raw rows. Account
+    // deletion purges emergency contacts and rewrites the name to "Deleted
+    // User"; this method used to find zero contacts and return in silence,
+    // leaving people who had been texted "someone you know triggered an
+    // emergency" with no word that it ended. The escrow keeps exactly enough
+    // to close that loop.
+    const { responseAuthorityFor } = await import('./deletion-hold');
+    const authority = await responseAuthorityFor(this.prisma, alert.actorUserId);
+    const contacts = authority.contacts;
     if (contacts.length === 0) return;
     const { getChannels } = await import('../../providers/notifications/channels');
     const sms = getChannels().sms;
-    const actor = await this.prisma.user.findUnique({ where: { id: alert.actorUserId }, select: { firstName: true } });
-    const who = actor?.firstName?.trim() || 'the person you were alerted about';
+    const who = authority.who || 'the person you were alerted about';
     const body = `✅ Update from Swift: the emergency alert involving ${who} has been closed by our safety team. If you're still concerned, please reach out to them directly.`;
     const notice: Array<{ id: string; ok: boolean }> = [];
     for (const c of contacts) {

@@ -122,14 +122,20 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
     }
     case 'CONTACT_SMS': {
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };
-      const contact = await prisma.emergencyContact.findUnique({ where: { id: row.targetKey } });
-      if (!contact || !contact.verifiedAt) return { status: 'SKIPPED', receipt: { skipped: 'contact-unverified-or-gone' } };
+      // [AG-XF-013] The live contact row may be gone because the person erased
+      // their account while this page was still queued. That is not a reason to
+      // skip an emergency SMS — the escrow holds the verified numbers exactly
+      // so this send still happens. Live rows win; the escrow only fills a gap
+      // erasure created, and `fromEscrow` puts that on the receipt.
+      const { responseAuthorityFor } = await import('./deletion-hold');
+      const authority = await responseAuthorityFor(prisma, alert.actorUserId);
+      const contact = authority.contacts.find((c) => c.id === row.targetKey) ?? null;
+      if (!contact) return { status: 'SKIPPED', receipt: { skipped: 'contact-unverified-or-gone' } };
       const { getChannels } = await import('../../providers/notifications/channels');
-      const actor = await prisma.user.findUnique({ where: { id: alert.actorUserId }, select: { firstName: true } });
-      const who = actor?.firstName?.trim() || 'Someone you know';
+      const who = authority.who || 'Someone you know';
       const where = alert.triggerLat != null && alert.triggerLng != null ? ` Last known location: https://maps.google.com/?q=${alert.triggerLat},${alert.triggerLng}.` : '';
       await getChannels().sms.sendSms(contact.phoneE164, `🚨 ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`);
-      return { status: 'SENT', receipt: { id: contact.id, ok: true } };
+      return { status: 'SENT', receipt: { id: contact.id, ok: true, ...(authority.fromEscrow ? { source: 'safety-escrow' } : {}) } };
     }
     case 'EVIDENCE': {
       // §9.1 — runs regardless of ack or resolution: acknowledgement never
