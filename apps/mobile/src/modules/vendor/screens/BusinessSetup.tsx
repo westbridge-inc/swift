@@ -149,7 +149,13 @@ export function BusinessSetup() {
           <LabeledInput value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
           <LabeledInput value={addr} onChangeText={setAddr} placeholder="Street address" />
           <LabeledInput value={city} onChangeText={setCity} placeholder="City" />
-          <T variant="caption" tone={hasPin ? 'muted' : 'error'}>
+          {/* [two-reds law] `error` is reserved for genuine failure — the palette
+              says so, and brand is already red, so a second red must mean
+              something. Nothing has failed here: the app is asking for a
+              permission it has not been given yet. That is `warning` (burnt
+              amber, "cautions"), and the sentence carries the meaning anyway,
+              which is the other half of the law — colour never carries it alone. */}
+          <T variant="caption" tone={hasPin ? 'muted' : 'warning'}>
             {hasPin
               ? 'We\u2019ll use your current location as the store pin.'
               : 'We need your location to pin your store on the map \u2014 turn location on for Swift, then come back. Customers are sent to this pin.'}

@@ -101,7 +101,14 @@ export function DocumentChecklist({
             </T>
           ) : null}
         </View>
-        <View style={{ height: TRACK_HEIGHT, overflow: 'hidden', borderRadius: radius.full, backgroundColor: color.surface.subtle }}>
+        {/* The track's ground is `sunken`, which the palette defines for exactly
+            this ("grouped sections / tracks"). It was `subtle` — which the same
+            file defines as "paper — the app background". A track painted in the
+            page's own colour is invisible, and at "0 of 5 approved" the fill is
+            0% wide, so a new mover saw a caption with NOTHING under it and no
+            sense that progress was even being kept. The bar only existed once
+            you had already made progress. */}
+        <View style={{ height: TRACK_HEIGHT, overflow: 'hidden', borderRadius: radius.full, backgroundColor: color.surface.sunken }}>
           <View
             style={{
               height: TRACK_HEIGHT,
