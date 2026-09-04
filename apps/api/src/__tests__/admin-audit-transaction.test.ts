@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { auditWithin, wroteAuditInline, type AuditLogWriter, type AuditRequestLike } from '../modules/admin/audit-within';
+import { adminAuditCounter } from '../plugins/observability';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { withSuiteCapability } from '../lib/test-target-lock';
 
@@ -110,6 +111,7 @@ afterAll(async () => {
   await runWithoutTenant(async () => {
     await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: userIds } } }).catch(() => {});
     await app.prisma.platformConfig.deleteMany({ where: { key: { startsWith: `ADM002_${RUN}` } } }).catch(() => {});
+    await app.prisma.promoCode.deleteMany({ where: { code: { startsWith: `AD2${RUN.toUpperCase()}` } } }).catch(() => {});
     await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'test-cleanup:admin-audit-txn').catch(() => 0);
     await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:admin-audit-txn').catch(() => 0);
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
@@ -229,5 +231,49 @@ describe('[ADM-002] auditWithin binds the row to the caller transaction', () => 
     await auditWithin(ok, req, '/api/v1/admin');
     expect(called).toBe(0);
     expect(wroteAuditInline(req)).toBe(false);
+  });
+});
+
+// ── the observability the clause asks for, proven to MOVE ───────────────────
+
+describe('[ADM-002] swift_admin_audit_total says which writer produced the row', () => {
+  /** Total per `writer` label, across every action class. */
+  const byWriter = async (): Promise<Record<string, number>> => {
+    const metric = await adminAuditCounter.get();
+    const out: Record<string, number> = {};
+    for (const s of metric.values) {
+      const w = String(s.labels['writer']);
+      out[w] = (out[w] ?? 0) + s.value;
+    }
+    return out;
+  };
+
+  // A counter that is declared, imported and never incremented reads exactly
+  // like one that works. These two tests are the difference — the same shape
+  // that left 19 of 21 config fields dead and looking wired.
+  it('a MIGRATED route increments writer=inline', async () => {
+    const key = `ADM002_${RUN}_inline`;
+    await runWithoutTenant(() => app.prisma.platformConfig.create({ data: { key, value: { n: 1 } } }), 'test-seed');
+    const before = await byWriter();
+    const res = await call('PUT', `/api/v1/admin/config/${key}`, { value: { n: 2 }, reason: REASON });
+    expect(res.statusCode, res.body).toBe(200);
+    await new Promise((r) => setTimeout(r, 300));
+    const after = await byWriter();
+    expect((after['inline'] ?? 0) - (before['inline'] ?? 0),
+      'a route that audits inside its transaction must count as inline').toBeGreaterThan(0);
+  });
+
+  it('an UNMIGRATED route increments writer=backstop — the number that must go to zero', async () => {
+    const before = await byWriter();
+    await call('POST', '/api/v1/admin/promos', {
+      code: `AD2${RUN.toUpperCase()}`, discountType: 'PERCENTAGE', discountValue: 5,
+      validFrom: new Date().toISOString(),
+      validUntil: new Date(Date.now() + 86_400_000).toISOString(),
+      reason: REASON,
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    const after = await byWriter();
+    expect((after['backstop'] ?? 0) - (before['backstop'] ?? 0),
+      'a route still on the hook must count as backstop').toBeGreaterThan(0);
   });
 });
