@@ -1,11 +1,12 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import { Platform, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, motion, radius, space, withAlpha } from '@swift/ui';
 import { Card, ErrorState, InfoRow, LinkText, LoadingBlock, PillButton, T } from '../../kit';
 import { money } from '../../lib/money';
 import { copyText } from '../../lib/clipboard';
+import { feeSurfaceFor } from '../../lib/feeSurface';
 import { daysUntil, isBehind, isBlocked, shortDate, walletLine, weeklyFeeGyd, weeksCovered } from '../../lib/billing';
 
 // ---------------------------------------------------------------------------
@@ -229,7 +230,17 @@ export function SwiftNumberView({
       />
     );
   }
-  const steps: string[] = Array.isArray(sub.payCashSteps) ? sub.payCashSteps : [];
+  // [Apple 3.1.1 / 3.1.3(e)] The weekly fee buys the right to run a real
+  // business — orders received, physical goods delivered, 100% of every fare
+  // kept. Services consumed outside the app must use payment methods OTHER
+  // than IAP, so Apple's purchase system is the wrong instrument here rather
+  // than a missing one. What a reviewer can misread is the numbered
+  // send-money-to-this-account instructions, so iOS keeps every FACT — amount,
+  // due date, weeks covered, the account number itself — and drops the steps.
+  // See lib/feeSurface.ts. Branches on the store's published rules, never on
+  // anything about the person looking.
+  const surface = feeSurfaceFor(Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'web');
+  const steps: string[] = surface.showPaymentSteps && Array.isArray(sub.payCashSteps) ? sub.payCashSteps : [];
   const activation: string | undefined = sub.activationCopy;
   return (
     <ScrollView
@@ -245,6 +256,15 @@ export function SwiftNumberView({
             How to pay
           </T>
           <PayStepsList steps={steps} />
+        </Card>
+      ) : surface.alternative ? (
+        // Never a silent removal. A partner who does not know how to pay stops
+        // being a partner, which costs more than the rejection this avoids.
+        <Card style={{ marginTop: space.md }}>
+          <T variant="body" weight="semibold" style={{ marginBottom: space.xs }}>
+            How to pay
+          </T>
+          <T variant="caption" tone="muted">{surface.alternative}</T>
         </Card>
       ) : null}
       {activation ? (
@@ -402,7 +422,12 @@ export function BillingStatusBlock({
   if (isBlocked(sub)) {
     const san = String(sub.san ?? '');
     const formatted = String(sub.sanFormatted ?? san);
-    const steps: string[] = Array.isArray(sub.payCashSteps) ? sub.payCashSteps : [];
+    // Same rule as the main surface, and it matters MORE here: this block is
+    // shown to a suspended partner who has stopped earning. Removing the steps
+    // without replacing them would leave the one person on the screen who most
+    // needs to know how to pay with nothing at all.
+    const blockedSurface = feeSurfaceFor(Platform.OS === 'ios' ? 'ios' : Platform.OS === 'android' ? 'android' : 'web');
+    const steps: string[] = blockedSurface.showPaymentSteps && Array.isArray(sub.payCashSteps) ? sub.payCashSteps : [];
     return (
       <View
         style={[
@@ -449,7 +474,11 @@ export function BillingStatusBlock({
             ) : null}
           </View>
         ) : null}
-        <PayStepsList steps={steps} style={{ marginTop: space.md }} />
+        {steps.length ? (
+          <PayStepsList steps={steps} style={{ marginTop: space.md }} />
+        ) : blockedSurface.alternative ? (
+          <T variant="caption" tone="muted" style={{ marginTop: space.md }}>{blockedSurface.alternative}</T>
+        ) : null}
         {onPay ? (
           <PillButton label="How to pay" size="md" style={{ marginTop: space.md }} onPress={onPay} />
         ) : null}
