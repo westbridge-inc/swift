@@ -647,3 +647,22 @@ export const fetchIntegrityFlags = (params: {
   qs.set('limit', String(params.limit ?? 50));
   return apiFetch(`/api/v1/admin/integrity/flags?${qs.toString()}`);
 };
+
+// ── Privileged approvals [ADM-005] ───────────────────────────────────────────
+// A money (C4) or platform (C5) action takes TWO people. The first admin's
+// request returns 202 APPROVAL_REQUIRED and writes a PENDING row; a second
+// capable admin decides it here. 44 admin routes sit behind that gate, and
+// until this screen existed there was no way to give the second signature —
+// so every one of them could be asked for and none could be completed.
+export const fetchApprovals = (status?: string) =>
+  apiFetch(`/api/v1/admin/approvals?limit=50${status ? `&status=${status}` : ''}`);
+// Deciding is ITSELF a classified action — C3, which requires a stated reason
+// (ADM-006). The server reads `reason` and 400s without it, so the note travels
+// as both: `reason` satisfies the reason law, `note` is kept beside the
+// decision on the record. They are the same sentence; sending one without the
+// other would either fail at the wire or lose the note.
+export const decideApproval = (id: string, approve: boolean, note: string) =>
+  apiFetch(`/api/v1/admin/approvals/${id}/decide`, {
+    method: 'POST',
+    body: JSON.stringify({ approve, reason: note, note }),
+  });

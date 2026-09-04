@@ -16,6 +16,7 @@ import {
   FileText,
   ShieldCheck,
   ShieldAlert,
+  Stamp,
   Flag,
   Fingerprint,
   Megaphone as AdsIcon,
@@ -56,6 +57,9 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
   {
     title: 'Money',
     items: [
+      // [ADM-005] First in Money on purpose: a pending row means a colleague
+      // asked for something and it has not happened yet.
+      { label: 'Approvals', href: '/approvals', icon: Stamp },
       { label: 'Finance', href: '/finance', icon: DollarSign },
       { label: 'Subscriptions', href: '/subscriptions', icon: RefreshCw },
       { label: 'Claims', href: '/claims', icon: ShieldAlert },
