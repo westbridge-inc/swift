@@ -69,6 +69,7 @@ afterAll(async () => {
   await runWithoutTenant(async () => {
     await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: userIds } } }).catch(() => {});
     await app.prisma.fxRate.deleteMany({ where: { quote: QUOTE } }).catch(() => {});
+    await app.prisma.mmgAgentPayment.deleteMany({ where: { externalId: { startsWith: `B2-${RUN}` } } }).catch(() => {});
     await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'b2').catch(() => 0);
     await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'b2').catch(() => 0);
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
@@ -117,5 +118,56 @@ describe('[ADM-002] setting the FX rate is recorded, and names the rate it set',
     }
     const after = await runWithoutTenant(() => app.prisma.fxRate.count({ where: { quote: QUOTE } }), 'read');
     expect(after, 'the rate must not have been written').toBe(before);
+  });
+});
+
+// ── the three routes nothing else exercises ─────────────────────────────────
+//
+// Coverage checked rather than assumed: `admin-authority.test.ts` only LISTS
+// `PUT /batching/settings` in its class census, `tenant-admin-isolation`
+// calls agent-payments `/attach` but never `/refund-flag`, and
+// `PUT /billing/agent-cash-config` had no test anywhere in the repository.
+// Wrapping a money route in a transaction with nothing exercising it is not a
+// change anyone should merge.
+
+const auditedRows = (fragment: string) => runWithoutTenant(() => app.prisma.auditLog.findMany({
+  where: { userId: userIds[0]!, action: { contains: fragment } } }), 'read');
+
+describe('[ADM-002] the migrated routes that no other suite calls', () => {
+  it('PUT /billing/agent-cash-config still works, and now audits inside its transaction', async () => {
+    const res = await call('PUT', '/api/v1/admin/billing/agent-cash-config', {
+      ingestionMode: 'MANUAL', reason: REASON });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(JSON.parse(res.body).data.ingestionMode).toBe('MANUAL');
+    const rows = await auditedRows('/billing/agent-cash-config');
+    expect(rows.length, 'the rail change is audited').toBeGreaterThan(0);
+    expect(rows.some((r) => r.entityId === 'billing.mmg_agent.ingestion_mode'),
+      'the row names the config key it changed').toBe(true);
+  });
+
+  it('PUT /batching/settings still works, and now audits inside its transaction', async () => {
+    const res = await call('PUT', '/api/v1/admin/batching/settings', {
+      shadowMode: true, reason: REASON });
+    expect(res.statusCode, res.body).toBe(200);
+    const rows = await auditedRows('/batching/settings');
+    expect(rows.length, 'the batching change is audited').toBeGreaterThan(0);
+    expect(rows.some((r) => r.entityId === 'swift-default'),
+      'the row names the tenant whose settings moved').toBe(true);
+  });
+
+  it('POST /billing/agent-payments/:id/refund-flag still works, and takes its subject from the params', async () => {
+    const payment = await runWithoutTenant(() => app.prisma.mmgAgentPayment.create({ data: {
+      channel: 'MANUAL_ADMIN', externalId: `B2-${RUN}-1`, sanRaw: '1234567890',
+      amount: '2500.00', currencyCode: 'GYD', paidAt: new Date(), status: 'UNMATCHED', raw: {},
+    } }), 'seed');
+    const res = await call('POST', `/api/v1/admin/billing/agent-payments/${payment.id}/refund-flag`, {
+      note: 'Payer asked for the cash back at the agent counter', reason: REASON });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(JSON.parse(res.body).data.status).toBe('REFUND_FLAGGED');
+    const rows = await auditedRows('/refund-flag');
+    // this route DECLARES its entity, so the id comes from the params — no
+    // override was passed, and the row must still name the payment
+    expect(rows.some((r) => r.entityId === payment.id),
+      'a declared entity takes its id from the params').toBe(true);
   });
 });
