@@ -85,3 +85,10 @@ gitleaks
 # which does not protect fresh clones)
 /design/
 /RESKIN.md
+
+# Routing stack data — built by deploy/setup-routing.sh, never committed.
+# The OSRM extract alone is ~15 MB and the Nominatim import is gigabytes; all
+# of it is reproducible from OpenStreetMap, so none of it belongs in git.
+deploy/routing-data/
+# vroom-express writes its access log into the mounted conf directory.
+deploy/routing-conf/vroom/access.log
