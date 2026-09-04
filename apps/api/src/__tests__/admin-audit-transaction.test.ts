@@ -265,12 +265,20 @@ describe('[ADM-002] swift_admin_audit_total says which writer produced the row',
 
   it('an UNMIGRATED route increments writer=backstop — the number that must go to zero', async () => {
     const before = await byWriter();
-    await call('POST', '/api/v1/admin/promos', {
-      code: `AD2${RUN.toUpperCase()}`, discountType: 'PERCENTAGE', discountValue: 5,
+    const res = await call('POST', '/api/v1/admin/promos', {
+      code: `AD2${RUN.toUpperCase()}`,
+      description: 'Audit writer probe',
+      discountType: 'PERCENTAGE',
+      discountValue: 5,
       validFrom: new Date().toISOString(),
       validUntil: new Date(Date.now() + 86_400_000).toISOString(),
       reason: REASON,
     });
+    // The action MUST have succeeded. A 4xx never reaches the audit hook at
+    // all, so without this line a schema change that starts rejecting the
+    // payload would leave the counter assertion passing on some other
+    // request's increment — green, and measuring nothing.
+    expect(res.statusCode, `the promo write must succeed for this to mean anything: ${res.body}`).toBe(200);
     await new Promise((r) => setTimeout(r, 400));
     const after = await byWriter();
     expect((after['backstop'] ?? 0) - (before['backstop'] ?? 0),
