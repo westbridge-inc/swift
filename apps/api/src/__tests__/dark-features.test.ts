@@ -33,18 +33,48 @@ describe('[dark features] every silent switch is registered', () => {
   });
 
   it('reads env switches, and never reports an unresolved config switch as ON', () => {
-    const off = darkFeatureStatus({}, {});
-    expect(off.every((r) => !r.on)).toBe(true);
-    const on = darkFeatureStatus({ APPLE_TEAM_ID: 'ABCDE12345' }, { CATEGORY_DISCOVERY_ENABLED: true });
-    expect(on.find((r) => r.key === 'ios_universal_links')!.on).toBe(true);
+    const on = darkFeatureStatus({ ANDROID_CERT_SHA256: 'AA:BB' }, { CATEGORY_DISCOVERY_ENABLED: true });
+    expect(on.find((r) => r.key === 'android_app_links')!.on).toBe(true);
     expect(on.find((r) => r.key === 'category_discovery')!.on).toBe(true);
     // A config switch with no answer supplied is NOT on.
-    expect(on.find((r) => r.key === 'android_app_links')!.on).toBe(false);
-    expect(darkFeaturesOff(on).map((r) => r.key)).toContain('android_app_links');
+    expect(darkFeatureStatus({}, {}).find((r) => r.key === 'category_discovery')!.on).toBe(false);
+    expect(darkFeaturesOff(darkFeatureStatus({}, {})).map((r) => r.key)).toContain('android_app_links');
   });
 
-  it('whitespace is not a Team ID', () => {
-    expect(darkFeatureStatus({ APPLE_TEAM_ID: '   ' }).find((r) => r.key === 'ios_universal_links')!.on).toBe(false);
+  it('whitespace is not a fingerprint', () => {
+    expect(darkFeatureStatus({ ANDROID_CERT_SHA256: '   ' }).find((r) => r.key === 'android_app_links')!.on).toBe(false);
+  });
+
+  it('a capability the CODE defaults is reported ON, with or without env', () => {
+    // The mirror-image lie. A register that reports a capability off when the
+    // code defaults it on sends an operator to fix something that is not
+    // broken — and the next warning it prints gets ignored.
+    //
+    // iOS universal links are the live case: Swift's Team ID is now the default
+    // in the AASA route, so the file serves with no configuration at all. The
+    // env var still overrides it, which is why the entry stays registered.
+    const ios = darkFeatureStatus({}, {}).find((r) => r.key === 'ios_universal_links')!;
+    expect(ios.defaultedInCode, 'the entry claims no code default').toBeTruthy();
+    expect(ios.on).toBe(true);
+    expect(darkFeaturesOff(darkFeatureStatus({}, {})).map((r) => r.key)).not.toContain('ios_universal_links');
+  });
+
+  it('every claimed code default names where it lives, and is really there', () => {
+    // A register entry may not simply ASSERT that the code defaults something.
+    // That is the same unverified claim as a comment describing a gate — the
+    // shape of defect this whole file exists to catch.
+    for (const f of DARK_FEATURES.filter((x) => x.defaultedInCode)) {
+      const parts = f.defaultedInCode!.split(' ');
+      const value = parts[0] ?? '';
+      const where = parts.slice(2).join(' ');
+      expect(value, `${f.key} does not name the default value`).toBeTruthy();
+      expect(where, `${f.key} does not say where the default lives`).toBeTruthy();
+      const hay = [
+        read('apps/web/src/app/well-known/apple-app-site-association/route.ts'),
+        read('apps/web/src/app/well-known/assetlinks.json/route.ts'),
+      ].join('\n');
+      expect(hay.includes(value), `${f.key} claims a default of "${value}" that is nowhere in the code`).toBe(true);
+    }
   });
 });
 
