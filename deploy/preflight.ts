@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assertSafeBootConfig } from '../apps/api/src/utils/boot-config';
 import { bucketVersioningStatus, kekEscrowStatus, parseBucketVersioning } from '../apps/api/src/modules/ops/document-durability';
+import { darkFeatureStatus } from '../apps/api/src/modules/ops/dark-features';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const envPath = process.argv[2] ?? path.join(HERE, '.env');
@@ -197,6 +198,34 @@ console.log('─'.repeat(72));
   console.log('  Rehearse once, with a stopwatch. That number is your recovery time.');
 }
 console.log('');
+
+// ── SWITCHED OFF, AND IT WILL NOT TELL YOU ─────────────────────────────────
+// The verdict below covers everything the boot guard REFUSES over. This
+// section covers the opposite failure: capabilities that are configured off,
+// start cleanly, and quietly render a fallback. Nothing here stops a deploy —
+// it is printed because the alternative is finding out from a founder opening
+// the app, which is how both of the examples in dark-features.ts were found.
+{
+  const rows = darkFeatureStatus(production).filter((r) => r.source === 'env');
+  const off = rows.filter((r) => !r.on);
+  console.log('SWITCHED OFF (starts fine; nothing will report these)');
+  console.log('─'.repeat(72));
+  if (off.length === 0) {
+    console.log('  Every env-gated capability in the register is on.');
+  } else {
+    for (const f of off) {
+      console.log(`  ${f.title}  [${f.setting}]`);
+      console.log(`    ${f.whileOff}`);
+    }
+  }
+  const configRows = darkFeatureStatus(production).filter((r) => r.source === 'config');
+  if (configRows.length > 0) {
+    console.log('');
+    console.log('  Database-held switches this file cannot read (check PlatformConfig):');
+    for (const f of configRows) console.log(`    ${f.setting} — ${f.title}`);
+  }
+  console.log('');
+}
 
 // ── THE VERDICT ────────────────────────────────────────────────────────────
 // Computed against the UNMODIFIED env. No stub can influence this line.
