@@ -470,6 +470,15 @@ export const safetyApi = {
    * contact is texted a 6-digit code and relays it to the owner, so a typo
    * cannot silently disable the feature.
    */
+  // [S-16] LIVE trip share — a revocable link that keeps updating, not a text
+  // snapshot. `sendToPhone` also SMSes it, which is how someone shares with a
+  // relative who does not have the app.
+  shareTrip: (orderId: string, sendToPhone?: string) =>
+    api.post(`/safety/trips/${orderId}/share`, sendToPhone ? { sendToPhone } : {}),
+  revokeTripShare: (token: string) => api.delete(`/safety/share/${token}`),
+  /** §5.1 — the "extra safety check-ins on my trips" toggle. The caller's OWN row. */
+  monitoringPreference: () => api.get('/safety/monitoring-preference'),
+  setMonitoringPreference: (enabled: boolean) => api.put('/safety/monitoring-preference', { enabled }),
   listEmergencyContacts: () => api.get('/safety/emergency-contacts'),
   addEmergencyContact: (data: { name: string; phoneE164: string; relationship?: string; priority?: number }) =>
     api.post('/safety/emergency-contacts', data),
