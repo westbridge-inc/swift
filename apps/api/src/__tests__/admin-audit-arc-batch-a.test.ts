@@ -9,7 +9,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
-import { enableModeB } from '../modules/billing/usd-migration';
+import { enableModeB, rollbackModeB } from '../modules/billing/usd-migration';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { refusalName, refuseAuditWhere, allowAuditAgain, dropAuditRefusal } from './helpers/audit-refusal';
 
@@ -198,13 +198,19 @@ describe('[ADM-002] the USD migration mode flip commits with its audit', () => {
     }, 'arca');
   });
 
-  it('the rollback route records the tenant and what it restored', async () => {
-    const res = await call('POST', '/api/v1/admin/billing/usd-migration/mode-b/rollback', {});
-    expect(res.statusCode, res.body).toBe(200);
-    const rows = await rowsFor('swift-default');
-    expect(rows.length).toBe(1);
-    expect(changesOf(rows[0]!)['rollback']).toBe(true);
-    expect(typeof changesOf(rows[0]!)['restored']).toBe('number');
-    expect(rows.some((r) => r.action === 'USD_MIGRATION_ROLLBACK'), 'legacy row retired').toBe(false);
+  it('rollbackModeB: a refused audit leaves the mode flip in place (helper level, throwaway tenant)', async () => {
+    // Both USD routes are exercised at the HELPER level on a throwaway tenant:
+    // the routes act on the caller's tenant, and mutating swift-default's
+    // migration state under every other suite poisoned the M-15 sweep test.
+    // The route→helper wiring is a one-line callback and is held by the
+    // inline census (admin-audit-inline-census.test.ts).
+    await runWithoutTenant(async () => {
+      const tenantId = `t_${RUN}`;
+      await enableModeB(app.prisma, new Date(Date.now() + 45 * 86_400_000), tenantId, async () => undefined);
+      await expect(rollbackModeB(app.prisma, tenantId, new Date(), async () => { throw new Error('injected'); })).rejects.toThrow('injected');
+      expect((await app.prisma.tenantBillingCurrency.findUniqueOrThrow({ where: { tenantId } })).usdMigrationMode, 'the flip stands').toBe('B');
+      await rollbackModeB(app.prisma, tenantId, new Date(), async () => undefined);
+      expect((await app.prisma.tenantBillingCurrency.findUniqueOrThrow({ where: { tenantId } })).usdMigrationMode).toBeNull();
+    }, 'arca');
   });
 });
