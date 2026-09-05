@@ -3403,8 +3403,10 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { manualPayoutRef } = z.object({ manualPayoutRef: z.string().trim().min(3).max(120) }).parse(request.body ?? {});
     const { AdsRefundService } = await import('../ads/refund.service');
-    await new AdsRefundService(tenantPrisma, app.io).settleManual(id, manualPayoutRef, request.user.userId);
-    await audit(request.user.userId, 'SETTLE_AD_REFUND', 'AdRefundIntent', id, { manualPayoutRef }, request);
+    // [ADM-002] The settlement transaction writes the audit row; `E.adRefundIntent`
+    // declares manualPayoutRef, so the payout evidence is the diff.
+    await new AdsRefundService(tenantPrisma, app.io).settleManual(id, manualPayoutRef, request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: { id, status: 'SUCCEEDED' } };
   });
 
@@ -4196,7 +4198,10 @@ export async function adminRoutes(app: FastifyInstance) {
       payerMsisdn: body.payerMsisdn,
       raw: { enteredBy: request.user.userId, receiptNumber: body.receiptNumber, verifiedInPortal: true },
       recordedBy: request.user.userId,
-    });
+    // [ADM-002] The credit transaction writes the audit row and names the
+    // payment it credited. A payment that lands in suspense wrote no credit;
+    // the backstop records that it was received.
+    }, (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: String(facts['paymentId']), extra: facts }));
     return { success: true, data: result };
   });
 
@@ -4246,7 +4251,9 @@ export async function adminRoutes(app: FastifyInstance) {
       // immutable event, receipt, balanced ledger, wallet balance, and final
       // RESOLVED state. Keeping another route transaction open here would
       // reintroduce the nested-connection pool deadlock this boundary removes.
-      const result = await svc.attach(id, body.subscriptionId, request.user.userId);
+      // [ADM-002] `E.agentPayment` is declared; the diff carries the status move.
+      const result = await svc.attach(id, body.subscriptionId, request.user.userId,
+        (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
       return { success: true, data: result };
     } catch (e) {
       if ((e as Error).message === 'NOT_UNMATCHED') {
@@ -4297,7 +4304,10 @@ export async function adminRoutes(app: FastifyInstance) {
     const { AgentCashService } = await import('../billing/agent-cash.service');
     const { importSettlementCsv } = await import('../billing/settlement-import');
     const svc = new AgentCashService(tenantPrisma, billing);
-    const report = await importSettlementCsv(tenantPrisma, svc, body.csv, { source: body.source });
+    // [ADM-002] Staging the file is the action; its audit row commits with the
+    // import row and names it.
+    const report = await importSettlementCsv(tenantPrisma, svc, body.csv, { source: body.source },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: String(facts['importId']), extra: facts }));
     if (report.trailerMismatch) {
       const { notifyAdmins } = await import('../notification/notification.service');
       await notifyAdmins(app.prisma, notifications, {

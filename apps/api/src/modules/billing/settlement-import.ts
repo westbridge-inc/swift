@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import { createHash } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import type { AgentCashService, IngestResult } from './agent-cash.service';
@@ -182,6 +183,7 @@ export async function importSettlementCsv(
   svc: AgentCashService,
   csvText: string,
   opts: { source: string; headerMap?: Partial<SettlementHeaderMap>; tenantId?: string },
+  onAudit?: OnAudit,
 ): Promise<SettlementReport> {
   const configured = await prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_agent.settlement_headers' } });
   const map: SettlementHeaderMap = {
@@ -200,16 +202,24 @@ export async function importSettlementCsv(
   //    every check passed.
   const parsed = parseSettlementCsv(csvText, map);
   const rejected = parsed.rejections.length > 0;
-  const staged = prior ?? await prisma.settlementImport.create({
-    data: {
-      tenantId, source: opts.source, fileHash,
-      rowCount: parsed.rows.length,
-      computedTotal: parsed.totalGyd,
-      controlTotal: parsed.trailerTotalGyd,
-      status: rejected ? 'REJECTED' : 'STAGED',
-      rejectReasons: rejected ? (parsed.rejections as never) : undefined,
-      rows: parsed.rows as never,
-    },
+  // [ADM-002] Staging the file IS the admin action; its audit row commits with
+  // the import row (the per-row credits at publication are their own
+  // idempotent transactions). A replayed file staged nothing new and is
+  // covered by the backstop.
+  const staged = prior ?? await prisma.$transaction(async (tx) => {
+    const created = await tx.settlementImport.create({
+      data: {
+        tenantId, source: opts.source, fileHash,
+        rowCount: parsed.rows.length,
+        computedTotal: parsed.totalGyd,
+        controlTotal: parsed.trailerTotalGyd,
+        status: rejected ? 'REJECTED' : 'STAGED',
+        rejectReasons: rejected ? (parsed.rejections as never) : undefined,
+        rows: parsed.rows as never,
+      },
+    });
+    await onAudit?.(tx, { importId: created.id, fileHash, rowCount: parsed.rows.length, computedTotal: String(parsed.totalGyd), controlTotal: parsed.trailerTotalGyd == null ? null : String(parsed.trailerTotalGyd), status: created.status });
+    return created;
   }).catch(async (err: { code?: string }) => {
     if (err.code !== 'P2002') throw err;
     return prisma.settlementImport.findUniqueOrThrow({ where: { tenantId_fileHash: { tenantId, fileHash } } }); // a concurrent upload of the same file staged it first

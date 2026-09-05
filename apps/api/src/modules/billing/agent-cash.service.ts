@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import type { BillingService } from './billing.service';
 import { resolveSan } from './san.service';
@@ -128,7 +129,7 @@ export class AgentCashService {
     private notifications?: NotificationService,
   ) {}
 
-  async ingest(p: InboundFeePayment): Promise<IngestResult> {
+  async ingest(p: InboundFeePayment, onAudit?: OnAudit): Promise<IngestResult> {
     if (!(p.amount > 0)) throw new Error('ZERO_OR_NEGATIVE_AMOUNT'); // malformed, not money [edge 16]
 
     // Clock skew [edge 20/15]: a future paidAt clamps to now; the original
@@ -190,7 +191,7 @@ export class AgentCashService {
     if (!res.ok) return this.suspense(row.id, res.code);
 
     // 5. Credit through the SAME pipeline every rail uses.
-    return this.credit(row.id, res.subscription.id, p);
+    return this.credit(row.id, res.subscription.id, p, onAudit);
   }
 
   /** [M-18] Resolve (or mint) the provider-transaction identity for an
@@ -249,11 +250,11 @@ export class AgentCashService {
 
   /** The shared credit tail — ingestion and suspense-resolution both end
    *  here, so an attached payment behaves exactly like a matched one. */
-  async credit(paymentId: string, subscriptionId: string, p: { amount: number; channel: string; externalId: string; payerMsisdn?: string; recordedBy?: string }): Promise<IngestResult> {
+  async credit(paymentId: string, subscriptionId: string, p: { amount: number; channel: string; externalId: string; payerMsisdn?: string; recordedBy?: string }, onAudit?: OnAudit): Promise<IngestResult> {
     return this.creditAtomic(paymentId, subscriptionId, p, {
       expectedStatus: 'RECEIVED',
       finalStatus: 'MATCHED',
-    });
+    }, onAudit);
   }
 
   private async creditAtomic(
@@ -265,6 +266,7 @@ export class AgentCashService {
       finalStatus: 'MATCHED' | 'RESOLVED';
       adminId?: string;
     },
+    onAudit?: OnAudit,
   ): Promise<IngestResult> {
     const committed = await this.prisma.$transaction(async (tx) => {
       // A same-value compare-and-set acquires the row lock at the beginning of
@@ -297,6 +299,8 @@ export class AgentCashService {
             where: { id: paymentId, status: resolution.expectedStatus },
             data: { status: 'RECONCILED', note: `duplicate of ${original} (already credited)`, resolvedAt: new Date() },
           });
+          // [ADM-002] The caller's audit row commits with the reconciliation.
+          await onAudit?.(tx, { paymentId, subscriptionId: identity.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original });
           return { paymentId, subscriptionId: identity.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original };
         }
       }
@@ -341,6 +345,8 @@ export class AgentCashService {
       if (payment.providerPaymentId && subscriptionId !== requestedSubscriptionId) {
         await tx.providerPayment.update({ where: { id: payment.providerPaymentId }, data: { subscriptionId } });
       }
+      // [ADM-002] The caller's audit row is the last statement of the credit.
+      await onAudit?.(tx, { paymentId: payment.id, subscriptionId, credited: !legacy, finalStatus: resolution.finalStatus });
       return { paymentId: payment.id, subscriptionId, credited: !legacy, duplicateOf: null as string | null };
     });
 
@@ -395,7 +401,7 @@ export class AgentCashService {
    *  normal pipeline with the original payment linked. [M-18] If the
    *  transaction was credited by another channel meanwhile, the attach is
    *  answered `reconciled` and moves nothing. */
-  async attach(paymentId: string, subscriptionId: string, adminId: string): Promise<IngestResult> {
+  async attach(paymentId: string, subscriptionId: string, adminId: string, onAudit?: OnAudit): Promise<IngestResult> {
     const row = await this.prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
     if (row.status !== 'UNMATCHED') throw new Error('NOT_UNMATCHED');
     return this.creditAtomic(paymentId, subscriptionId, {
@@ -408,7 +414,7 @@ export class AgentCashService {
       expectedStatus: 'UNMATCHED',
       finalStatus: 'RESOLVED',
       adminId,
-    });
+    }, onAudit);
   }
 
   /** The suspense queue with the Luhn diagnosis the founder reads [4.6]:
