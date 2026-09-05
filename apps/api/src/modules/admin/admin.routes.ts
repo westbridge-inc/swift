@@ -2655,18 +2655,22 @@ export async function adminRoutes(app: FastifyInstance) {
     if (settlement.status === 'ACKNOWLEDGED' || settlement.status === 'PAID') {
       throw new AppError(400, 'ALREADY_ACKNOWLEDGED', 'This sales digest has already been acknowledged');
     }
-    const claimed = await app.prisma.settlement.updateManyAndReturn({
-      where: { id, status: { notIn: ['ACKNOWLEDGED', 'PAID'] }, vendor: { tenantId } },
-      data: { status: 'ACKNOWLEDGED', paidAt: null, reference: reference || null },
+    // [ADM-002] The acknowledgement and its audit row commit together; the CAS
+    // is unchanged inside the transaction. `E.settlement` is declared, so the
+    // diff carries status and reference, and the legacy row is retired.
+    const updated = await app.prisma.$transaction(async (tx) => {
+      const claimed = await tx.settlement.updateManyAndReturn({
+        where: { id, status: { notIn: ['ACKNOWLEDGED', 'PAID'] }, vendor: { tenantId } },
+        data: { status: 'ACKNOWLEDGED', paidAt: null, reference: reference || null },
+      });
+      if (claimed.length === 0) {
+        const stillLocal = await tx.settlement.findFirst({ where: { id, vendor: { tenantId } }, select: { id: true } });
+        if (!stillLocal) throw new NotFoundError('Settlement', id);
+        throw new AppError(409, 'ALREADY_ACKNOWLEDGED', 'This sales digest has already been acknowledged');
+      }
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      return claimed[0]!;
     });
-    if (claimed.length === 0) {
-      const stillLocal = await app.prisma.settlement.findFirst({ where: { id, vendor: { tenantId } }, select: { id: true } });
-      if (!stillLocal) throw new NotFoundError('Settlement', id);
-      throw new AppError(409, 'ALREADY_ACKNOWLEDGED', 'This sales digest has already been acknowledged');
-    }
-    const updated = claimed[0]!;
-
-    await audit(request.user.userId, 'ACKNOWLEDGE_SALES_DIGEST', 'Settlement', id, { netSales: settlement.netSales, totalBase: settlement.totalBase, reference }, request);
 
     // SWIFT-031: this is a weekly SALES DIGEST, not a payout. Swift takes no
     // commission and never holds vendor money (cash is customer→vendor direct),
@@ -2693,8 +2697,11 @@ export async function adminRoutes(app: FastifyInstance) {
     const settlement = await app.prisma.settlement.findFirst({ where: { id, vendor: { tenantId } }, select: { id: true } });
     if (!settlement) throw new NotFoundError('Settlement', id);
     const { adjustSalesDigest } = await import('../billing/sales-digest');
-    const result = await adjustSalesDigest(app.prisma, id, reason);
-    await audit(request.user.userId, 'ADJUST_SALES_DIGEST', 'Settlement', result.id, { supersedesId: result.supersedesId, sequence: result.sequence, reason, ...result.totals }, request);
+    // [ADM-002] The helper owns the transaction; the adjustment id, sequence
+    // and supersedes pointer travel as facts. The subject is the digest being
+    // adjusted (params), as `E.settlement` declares.
+    const result = await adjustSalesDigest(app.prisma, id, reason,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: result };
   });
 
@@ -3198,6 +3205,9 @@ export async function adminRoutes(app: FastifyInstance) {
       amount: body.amount,
       reference,
       audit: { ipAddress: request.ip, userAgent: request.headers['user-agent'] },
+      // [ADM-002] The command's transaction writes the canonical audit row; a
+      // replayed command wrote nothing and is covered by the backstop.
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
     });
 
     return { success: true, replayed, data: { balance: result.balance, currencyCode: result.currencyCode } };
@@ -3415,7 +3425,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reference } = z.object({ reference: z.string().trim().min(3).max(200) }).parse(request.body ?? {});
     const { AdCheckoutService } = await import('../ads/checkout.service');
-    const invoice = await new AdCheckoutService(tenantPrisma, app.io).markPaid(id, { adminUserId: request.user.userId, manualReference: reference });
+    // [ADM-002] The settlement transaction writes the canonical audit row.
+    const invoice = await new AdCheckoutService(tenantPrisma, app.io).markPaid(id, { adminUserId: request.user.userId, manualReference: reference,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }) });
     return { success: true, data: { id: invoice.id, number: invoice.number, status: invoice.status, paidAt: invoice.paidAt } };
   });
 
@@ -4905,16 +4917,18 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/cash-rules/claims/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = reasonSchema.parse(request.body ?? {});
-    const claim = await cashRules.approveClaim(id, request.user.userId, body.reason);
-    await audit(request.user.userId, 'APPROVE_CLAIM', 'ReimbursementClaim', id, { amount: Number(claim.amount) }, request);
+    // [ADM-002] The claim transition and its audit row commit together;
+    // `E.claim` declares the diff (status, amount, paidAt, paymentRef, paidAmount).
+    const claim = await cashRules.approveClaim(id, request.user.userId, body.reason,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: claim };
   });
 
   app.put('/cash-rules/claims/:id/reject', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = rejectDocSchema.parse(request.body);
-    const claim = await cashRules.rejectClaim(id, request.user.userId, body.reason);
-    await audit(request.user.userId, 'REJECT_CLAIM', 'ReimbursementClaim', id, { reason: body.reason }, request);
+    const claim = await cashRules.rejectClaim(id, request.user.userId, body.reason,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: claim };
   });
 
@@ -4929,15 +4943,11 @@ export async function adminRoutes(app: FastifyInstance) {
       reference: z.string(),
       amount: z.union([z.number(), z.string()]),
     }).parse(request.body ?? {});
-    const claim = await cashRules.markClaimPaid(id, request.user.userId, body.reference, body.amount);
-    await audit(
-      request.user.userId,
-      'PAY_CLAIM',
-      'ReimbursementClaim',
-      id,
-      { reference: claim.paymentRef, amount: String(claim.paidAmount ?? '') },
-      request,
-    );
+    // [ADM-002] PAID is a money fact on a manual rail; the CAS, the payout
+    // evidence and the audit row commit together. `E.claim` declares paymentRef
+    // and paidAmount, so the diff IS the evidence — the legacy row is retired.
+    const claim = await cashRules.markClaimPaid(id, request.user.userId, body.reference, body.amount,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: claim };
   });
 

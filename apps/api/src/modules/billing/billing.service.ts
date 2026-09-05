@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import type { PrismaClient, Subscription, Prisma, SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
@@ -1879,6 +1880,9 @@ export class BillingService {
     /** [A-12] REQUIRED: the provider transaction this credit is evidence of. */
     reference: string;
     audit?: { ipAddress?: string; userAgent?: string };
+    /** [ADM-002] The caller's audit row, written INSIDE the command transaction
+     *  as its evidence; without it the row this command always wrote stands. */
+    onAudit?: OnAudit;
   }): Promise<{ replayed: boolean; commandId: string; result: TopUpCommandResult }> {
     if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
     if (!isUsableTopUpKey(input.idempotencyKey)) {
@@ -1908,17 +1912,24 @@ export class BillingService {
         });
         const event = await tx.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: eventKey }, select: { id: true } });
         // The operational evidence is part of the command, not a hope after it.
-        await tx.auditLog.create({
-          data: {
-            userId: input.adminId,
-            action: 'PREPAID_TOPUP',
-            entity: 'Subscription',
-            entityId: input.subscriptionId,
-            changes: { amount: input.amount, reference: input.reference ?? null, idempotencyKey: input.idempotencyKey, billingEventId: event.id } as never,
-            ipAddress: input.audit?.ipAddress,
-            userAgent: input.audit?.userAgent,
-          },
-        });
+        // [ADM-002] An admin route supplies the canonical row (reason, digests,
+        // the amount and reference as facts); the command's own row stands
+        // only when nothing upstream audits.
+        if (input.onAudit) {
+          await input.onAudit(tx, { amount: input.amount, reference: input.reference ?? null, idempotencyKey: input.idempotencyKey, billingEventId: event.id });
+        } else {
+          await tx.auditLog.create({
+            data: {
+              userId: input.adminId,
+              action: 'PREPAID_TOPUP',
+              entity: 'Subscription',
+              entityId: input.subscriptionId,
+              changes: { amount: input.amount, reference: input.reference ?? null, idempotencyKey: input.idempotencyKey, billingEventId: event.id } as never,
+              ipAddress: input.audit?.ipAddress,
+              userAgent: input.audit?.userAgent,
+            },
+          });
+        }
         const result: TopUpCommandResult = { balance: Number(balance.balance), currencyCode: balance.currencyCode, billingEventId: event.id };
         const row = await tx.topUpCommand.create({
           data: {
