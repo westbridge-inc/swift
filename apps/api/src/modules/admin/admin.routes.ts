@@ -42,7 +42,7 @@ import { assertFounderAccess } from './founder-access';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import { APPROVAL_HEADER, approvalRefusalMessage, decideApproval, requiresApproval, resolveApproval } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
-import { adminAuditRow, auditWithin, wroteAuditInline, type AuditRequestLike } from './audit-within';
+import { adminAuditRow, auditWithin, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -843,14 +843,25 @@ export async function adminRoutes(app: FastifyInstance) {
     // it. Writing a second row here would double the trail and hide the very
     // number this clause asks for. Count it as `inline` and leave.
     if (wroteAuditInline(request as AuditRequestLike)) {
-      adminAuditCounter.labels('inline', clsLabel).inc();
-      return;
+      // ...once the row it is asked to trust is verified. The marker is set
+      // before COMMIT; a route that swallowed a commit-time failure and still
+      // answered 2xx would arrive here marked, with nothing behind the mark.
+      const verdict = await verifyInlineRow(app.prisma, request as AuditRequestLike);
+      if (verdict !== 'absent') {
+        adminAuditCounter.labels('inline', clsLabel).inc();
+        return;
+      }
+      // The action reported success and its audit row is not there. Write it
+      // here, and count it under its own label: this number should never move,
+      // and if it does, a route is swallowing its own transaction failure.
+      adminAuditCounter.labels('rolled-back', clsLabel).inc();
+    } else {
+      // Reaching here means the backstop is the ONLY writer for this action:
+      // the route has not been migrated, so the row is still written after
+      // commit and a failure below still loses it. That is what `backstop`
+      // counts, and what goes to zero as the migration lands.
+      adminAuditCounter.labels('backstop', clsLabel).inc();
     }
-    // Reaching here means the backstop is the ONLY writer for this action: the
-    // route has not been migrated, so the row is still written after commit
-    // and a failure below still loses it. That is what `backstop` counts, and
-    // what goes to zero as the migration lands.
-    adminAuditCounter.labels('backstop', clsLabel).inc();
     try {
       const params = (request.params ?? {}) as Record<string, string>;
       // [ADM-006] The reason is recorded as a NAMED field, not left to be dug
@@ -874,6 +885,7 @@ export async function adminRoutes(app: FastifyInstance) {
       await app.prisma.auditLog.create({
         data: adminAuditRow(request as unknown as AuditRequestLike, userId, {
           routeUrl,
+          template: routeTemplateOf(request, app.prefix),
           reason,
           before,
           after,

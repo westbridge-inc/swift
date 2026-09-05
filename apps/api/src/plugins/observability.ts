@@ -198,7 +198,7 @@ export const adminReasonCounter = new client.Counter({
  *  threw: inline it also rolled the action back, backstop it lost the row. */
 export const adminAuditCounter = new client.Counter({
   name: 'swift_admin_audit_total',
-  help: 'Admin audit rows by writer (inline|backstop|failed|refused) and action class',
+  help: 'Admin audit rows by writer (inline|backstop|failed|refused|rolled-back) and action class',
   labelNames: ['writer', 'cls'] as const,
   registers: [registry],
 });

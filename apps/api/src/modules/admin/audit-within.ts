@@ -40,6 +40,7 @@
 // ---------------------------------------------------------------------------
 
 import { ABSENT, changeRecord, snapshot, type EntitySnapshot } from './audit-change';
+import type { PrismaClient } from '@prisma/client';
 import { ADMIN_ROUTE_AUTHORITY, reasonOf, routeTemplateOf } from './admin-authority';
 import { adminAuditCounter } from '../../plugins/observability';
 
@@ -67,6 +68,9 @@ export interface AuditRequestLike {
   readonly user?: { readonly userId?: string | undefined } | undefined;
   auditBefore?: EntitySnapshot | undefined;
   auditWrittenInline?: boolean | undefined;
+  /** [ADM-002] The id of the row `auditWithin` wrote, so the hook can verify
+   *  that what it is asked to trust actually committed. */
+  auditInlineRowId?: string | undefined;
 }
 
 /** The keys `changeRecord` owns. `extra` may add to `changes`; it may never
@@ -77,6 +81,12 @@ export const RESERVED_CHANGE_KEYS: ReadonlySet<string> = new Set(['params', 'rea
 export interface AdminAuditRowInput {
   /** The mounted path, as the trail has always recorded it. */
   readonly routeUrl: string;
+  /** [ADM-002] The route TEMPLATE with the mount prefix stripped (`/promos/:id`).
+   *  `entity` is its first segment — the resource the action was aimed at.
+   *  Without it the column was derived from the MOUNTED path, and every admin
+   *  row said `api`: a column that named nothing. Only the audited READS
+   *  override it (`integrity`, ADM-007). */
+  readonly template?: string | undefined;
   readonly reason: string | null;
   readonly before: EntitySnapshot;
   readonly after: EntitySnapshot;
@@ -118,10 +128,11 @@ export function adminAuditRow(
     // route will see it — never a quietly rewritten trail.
     throw new TypeError(`[ADM-002] audit extra may not redefine the canonical field '${collision}'`);
   }
+  const resource = input.template?.split('/').filter(Boolean)[0];
   return {
     userId,
     action: `ADMIN ${request.method} ${input.routeUrl}`,
-    entity: input.entityOverride ?? (input.routeUrl.split('/').filter(Boolean)[0] ?? 'admin'),
+    entity: input.entityOverride ?? resource ?? (input.routeUrl.split('/').filter(Boolean)[0] ?? 'admin'),
     entityId: input.entityIdOverride ?? params['id'] ?? params['key'] ?? params['userId'] ?? '-',
     // Named extras first, the canonical record last: even if the guard above
     // were ever bypassed, the reason and the digests are the ones that stand.
@@ -141,7 +152,7 @@ export function adminAuditRow(
 }
 
 /** Where the audit row for this request came from. */
-export type AuditWriterKind = 'inline' | 'backstop' | 'failed' | 'refused';
+export type AuditWriterKind = 'inline' | 'backstop' | 'failed' | 'refused' | 'rolled-back';
 
 /**
  * Write the audit row through the caller's transaction, and mark the request
@@ -190,16 +201,19 @@ export async function auditWithin(
   // not a new way to lose a row.
   if (!userId) return;
   const routeUrl = request.routeOptions?.url ?? request.url;
-  const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeTemplateOf(request as never, prefix)}`];
+  const template = routeTemplateOf(request as never, prefix);
+  const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${template}`];
   const params = (request.params ?? {}) as Record<string, string>;
   const entity = authority?.entity;
   const after = entity
     ? await snapshot(tx as never, entity, params[entity.param ?? 'id'])
     : ABSENT;
+  let row: unknown;
   try {
-    await tx.auditLog.create({
+    row = await tx.auditLog.create({
       data: adminAuditRow(request, userId, {
         routeUrl,
+        template,
         reason: overrides?.reason !== undefined ? overrides.reason : reasonOf(request.body, request.headers as never),
         before: request.auditBefore ?? ABSENT,
         after,
@@ -217,6 +231,36 @@ export async function auditWithin(
     throw err;
   }
   request.auditWrittenInline = true;
+  const id = (row as { id?: unknown } | null)?.id;
+  request.auditInlineRowId = typeof id === 'string' ? id : undefined;
+}
+
+export type InlineRowVerdict = 'present' | 'absent' | 'unknown';
+
+/**
+ * [ADM-002] Did the row the action says it wrote actually COMMIT?
+ *
+ * `auditWithin` sets its marker inside the transaction, after the INSERT
+ * resolves but before COMMIT. Between those two moments the transaction can
+ * still fail — and if the route catches that failure and answers 2xx anyway,
+ * the request arrives at the hook marked "audited" with no row behind it. A
+ * hook that trusted the marker would then write nothing, and the one action
+ * this clause exists to record would be the one with no record.
+ *
+ * So the hook verifies before it trusts: one primary-key read, after the
+ * response has been sent, so it costs the caller nothing. `absent` is the only
+ * verdict that makes the hook write; a read that FAILED proves nothing about
+ * the row and must not become a duplicate.
+ */
+export async function verifyInlineRow(prisma: PrismaClient, request: AuditRequestLike): Promise<InlineRowVerdict> {
+  const id = request.auditInlineRowId;
+  if (!id) return 'unknown';
+  try {
+    const row = await prisma.auditLog.findUnique({ where: { id }, select: { id: true } });
+    return row ? 'present' : 'absent';
+  } catch {
+    return 'unknown';
+  }
 }
 
 /** Did this request's action write its own audit row inside its transaction? */
