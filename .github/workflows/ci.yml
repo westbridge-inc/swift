@@ -456,14 +456,18 @@ jobs:
         # names the exact table.
         run: |
           DB="postgresql://swift:swift@localhost:5432/swift_migrate"
-          expected=$(awk '/export const TENANT_TABLES = \[/,/\] as const;/' apps/api/src/lib/tenant-rls.ts | grep -o "'[^']*'" | tr -d "'" | sort)
+          # Comment lines are dropped before the quote extraction: an apostrophe in a
+          # comment inside the array once read as a table name (#1149).
+          expected=$(awk '/export const TENANT_TABLES = \[/,/\] as const;/' apps/api/src/lib/tenant-rls.ts | grep -v -E '^\s*//' | grep -o "'[^']*'" | tr -d "'" | sort)
           [ -n "$expected" ] || { echo "::error::Could not extract TENANT_TABLES from tenant-rls.ts — the extraction pattern needs updating"; exit 1; }
-          actual=$(psql "$DB" -tAc "SELECT c.relname FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace JOIN pg_policy p ON p.polrelid=c.oid AND p.polname='tenant_isolation' WHERE ns.nspname='public' AND c.relrowsecurity ORDER BY 1")
+          # [STA-1 4.2] Walled means ENABLED *and* FORCED with the policy present: a fresh
+          # replay is what production looks like, and an unforced table lets its owner through.
+          actual=$(psql "$DB" -tAc "SELECT c.relname FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace JOIN pg_policy p ON p.polrelid=c.oid AND p.polname='tenant_isolation' WHERE ns.nspname='public' AND c.relrowsecurity AND c.relforcerowsecurity ORDER BY 1")
           if ! diff <(echo "$expected") <(echo "$actual"); then
-            echo "::error::Tenant RLS wall drifted from TENANT_TABLES — lines prefixed < are registered but NOT walled; > are walled but NOT registered"
+            echo "::error::Tenant RLS wall drifted from TENANT_TABLES — lines prefixed < are registered but NOT walled (enabled+forced+policy); > are walled but NOT registered"
             exit 1
           fi
-          echo "ok: $(echo "$expected" | grep -c .) tables walled, name-for-name"
+          echo "ok: $(echo "$expected" | grep -c .) tables walled and forced, name-for-name"
       - name: Tenant RLS predicate is the role capability, not the GUC
         # [F-021-11 repair] The check above asks whether a policy EXISTS. It
         # cannot see WHAT the policy says — so `20260828120000_algo_config`,
