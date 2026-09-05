@@ -28,8 +28,8 @@ const CLOSED: ReadonlySet<ReviewSessionStatus> = new Set<ReviewSessionStatus>(['
 
 /** 410: the session is over. The app shows the DL-9 honest screen, never production data. */
 export class ReviewSessionClosedError extends AppError {
-  constructor(sessionId: string, status: ReviewSessionStatus) {
-    super(410, 'REVIEW_SESSION_CLOSED', `Review session ${sessionId} is ${status}`);
+  constructor(sessionId: string | null, status: ReviewSessionStatus) {
+    super(410, 'REVIEW_SESSION_CLOSED', sessionId ? `Review session ${sessionId} is ${status}` : 'This demo session has expired');
     this.name = 'ReviewSessionClosedError';
   }
 }

@@ -104,7 +104,7 @@ export async function authRoutes(app: FastifyInstance) {
 
   /** [A-01] The session bootstrap a browser shell gates on — the server's attestation, never a token's presence. */
   app.get('/me', { preHandler: [app.authenticate] }, async (request) => {
-    const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { id: true, phone: true, firstName: true, lastName: true, roles: true, activeRole: true, status: true } });
+    const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { id: true, phone: true, firstName: true, lastName: true, roles: true, activeRole: true, status: true, tenant: { select: { kind: true } } } });
     if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
     return { success: true, data: { user, sessionId: request.authSessionId, client: browserClientOf(request) } };
   });
