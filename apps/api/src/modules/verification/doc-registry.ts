@@ -11,7 +11,7 @@
  * `legalFactsSourceNote`, to be verified by the founder / attorney and
  * activated by a migration that inserts facts, not by code.
  */
-import type { PrismaClient, DocBucket } from '@prisma/client';
+import type { PrismaClient, DocBucket, ValidatorScope } from '@prisma/client';
 import { AUTO_APPROVE_EXPIRY_DAYS } from './verification.service';
 
 export const REGISTRY_TIER = 'STANDARD';
@@ -41,7 +41,111 @@ export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set(['vehicle
 export const registryCode = (countryCode: string, legacyCode: string) => `${countryCode}.${legacyCode}`;
 const humanize = (code: string) => code.split('_').map((w) => (w === 'id' || w === 'tin' || w === 'gra' || w === 'gei' ? w.toUpperCase() : w[0]!.toUpperCase() + w.slice(1))).join(' ');
 
-export interface RegistrySeedResult { docTypes: number; requirementSets: number; requirementItems: number }
+export interface RegistrySeedResult { docTypes: number; requirementSets: number; requirementItems: number; validators: number }
+
+export interface ValidatorRow {
+  code: string;
+  scope: ValidatorScope;
+  isBlocking: boolean;
+  /** The §8.5 reason a FAIL carries (P8-5 aliases these onto the legacy enum). */
+  detailCode: string;
+  /** Applies to one Guyana document class; absent = every type. */
+  docTypeLegacy?: string;
+  /** Implementation in validators.ts; absent = declared by the spec, not yet implemented. */
+  implRef?: string;
+}
+/**
+ * [DOC-1 §7.2–7.5] The 24 validators as the spec lists them — data. Blocking per the
+ * spec's tables (WARN and routing rows are non-blocking). Only rows with an implRef
+ * judge anything today; the rest wait for their implementation and no ACTIVE type may
+ * depend on them (DOC-INV-2).
+ */
+export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
+  // §7.2 field-level
+  { code: 'V_MRZ_CHECKSUM', scope: 'FIELD', isBlocking: true, detailCode: 'SUSPECTED_ALTERATION' },
+  { code: 'V_DATE_ORDER', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE' },
+  { code: 'V_NOT_EXPIRED', scope: 'FIELD', isBlocking: true, detailCode: 'EXPIRED_DOCUMENT' },
+  { code: 'V_EXPIRY_PLAUSIBLE', scope: 'FIELD', isBlocking: false, detailCode: 'UNREADABLE_CAPTURE' },
+  { code: 'V_DOB_ADULT', scope: 'FIELD', isBlocking: true, detailCode: 'REQUIREMENT_NOT_MET' },
+  { code: 'V_TIN_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE', docTypeLegacy: 'tin_certificate' },
+  { code: 'V_PLATE_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE' },
+  { code: 'V_PLATE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'WRONG_PLATE_CLASS' },
+  { code: 'V_VEHICLE_COLOUR', scope: 'FIELD', isBlocking: true, detailCode: 'VEHICLE_COLOUR_NON_COMPLIANT' },
+  { code: 'V_LICENCE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'LICENCE_CLASS_MISMATCH' },
+  { code: 'V_INSURANCE_SCOPE', scope: 'FIELD', isBlocking: true, detailCode: 'INSURANCE_SCOPE_INSUFFICIENT', docTypeLegacy: 'vehicle_insurance' },
+  { code: 'V_FIELD_CONFIDENCE', scope: 'FIELD', isBlocking: false, detailCode: 'UNREADABLE_CAPTURE' },
+  // §7.3 document-level
+  { code: 'V_TYPE_MATCH', scope: 'DOCUMENT', isBlocking: true, detailCode: 'WRONG_DOCUMENT_TYPE' },
+  { code: 'V_ALL_REQUIRED_PRESENT', scope: 'DOCUMENT', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE', implRef: 'validators#V_ALL_REQUIRED_PRESENT' },
+  { code: 'V_PAGE_COMPLETE', scope: 'DOCUMENT', isBlocking: true, detailCode: 'MISSING_PAGE' },
+  { code: 'V_TAMPER_HEURISTIC', scope: 'DOCUMENT', isBlocking: false, detailCode: 'SUSPECTED_ALTERATION' },
+  // §7.4 subject-level
+  { code: 'V_NAME_CONSISTENCY', scope: 'SUBJECT', isBlocking: false, detailCode: 'NAME_MISMATCH' },
+  { code: 'V_PLATE_CROSS_MATCH', scope: 'SUBJECT', isBlocking: true, detailCode: 'PLATE_CROSS_MISMATCH' },
+  { code: 'V_SELF_REPORTED_MATCH', scope: 'SUBJECT', isBlocking: false, detailCode: 'DETAILS_DO_NOT_MATCH_ACCOUNT' },
+  { code: 'V_REQUIREMENT_COMPLETE', scope: 'SUBJECT', isBlocking: true, detailCode: 'REQUIREMENT_NOT_MET' },
+  // §7.5 cross-subject
+  { code: 'V_SHA_COLLISION', scope: 'CROSS_SUBJECT', isBlocking: false, detailCode: 'DUPLICATE_ACROSS_ACCOUNTS', implRef: 'validators#V_SHA_COLLISION' },
+  { code: 'V_NUMBER_COLLISION', scope: 'CROSS_SUBJECT', isBlocking: false, detailCode: 'DUPLICATE_ACROSS_ACCOUNTS' },
+  { code: 'V_PHASH_NEAR', scope: 'CROSS_SUBJECT', isBlocking: false, detailCode: 'DUPLICATE_ACROSS_ACCOUNTS' },
+  { code: 'V_VELOCITY', scope: 'CROSS_SUBJECT', isBlocking: false, detailCode: 'INTAKE_VELOCITY_EXCEEDED' },
+];
+/** Type-specific validators are declared against the Guyana registry class. */
+export const VALIDATOR_HOME_COUNTRY = 'GY';
+
+/**
+ * Idempotent and RECONCILING: every catalogue row exists with the spec's facts (a
+ * type-specific row waits for its type); a row the catalogue no longer declares is
+ * removed — unless a field still names it, in which case it stays and the
+ * completeness checker reports it as STALE_VALIDATOR. The registry is the catalogue,
+ * not the catalogue plus whatever an older build left behind.
+ */
+export async function seedValidatorRegistry(prisma: PrismaClient): Promise<number> {
+  let n = 0;
+  for (const v of VALIDATOR_CATALOGUE) {
+    const docTypeCode = v.docTypeLegacy ? registryCode(VALIDATOR_HOME_COUNTRY, v.docTypeLegacy) : null;
+    if (docTypeCode && !(await prisma.docType.findUnique({ where: { code: docTypeCode }, select: { code: true } }))) continue;
+    const facts = { scope: v.scope, isBlocking: v.isBlocking, detailCode: v.detailCode, implRef: v.implRef ?? null, docTypeCode };
+    await prisma.validator.upsert({ where: { code: v.code }, create: { code: v.code, ...facts }, update: facts });
+    n += 1;
+  }
+  const declared = VALIDATOR_CATALOGUE.map((v) => v.code);
+  await prisma.validator.deleteMany({ where: { code: { notIn: declared }, fields: { none: {} } } });
+  return n;
+}
+
+export type RegistryGapKind = 'UNPROFILED' | 'NO_FIELDS' | 'REQUIRED_FIELD_WITHOUT_VALIDATOR' | 'VALIDATOR_NOT_IMPLEMENTED' | 'IMPL_MISSING' | 'STALE_VALIDATOR';
+export interface RegistryGap { docTypeCode: string; gap: RegistryGapKind; detail: string | null }
+
+/**
+ * [DOC-INV-2] What stands between the registry and the truth it claims: every ACTIVE
+ * document type has an extraction profile, a field list, a validator on each required
+ * field, and no blocking validator it depends on is a phantom; and no validator row
+ * anywhere names an implementation that does not exist. Empty = complete.
+ */
+export async function registryCompletenessGaps(prisma: PrismaClient, resolves: (implRef: string | null) => boolean): Promise<RegistryGap[]> {
+  const gaps: RegistryGap[] = [];
+  const validators = await prisma.validator.findMany({ select: { code: true, docTypeCode: true, isBlocking: true, implRef: true } });
+  for (const v of validators) if (v.implRef !== null && !resolves(v.implRef)) gaps.push({ docTypeCode: '*', gap: 'IMPL_MISSING', detail: `${v.code} → ${v.implRef}` });
+  const declared = new Set(VALIDATOR_CATALOGUE.map((v) => v.code));
+  for (const v of validators) if (!declared.has(v.code)) gaps.push({ docTypeCode: '*', gap: 'STALE_VALIDATOR', detail: v.code });
+  const byCode = new Map(validators.map((v) => [v.code, v] as const));
+  const active = await prisma.docType.findMany({ where: { isActive: true }, select: { code: true, extractionProfile: true, fields: { select: { fieldCode: true, isRequired: true, validatorRef: true } } } });
+  for (const t of active) {
+    if (t.extractionProfile === 'UNPROFILED') gaps.push({ docTypeCode: t.code, gap: 'UNPROFILED', detail: null });
+    if (t.fields.length === 0) gaps.push({ docTypeCode: t.code, gap: 'NO_FIELDS', detail: null });
+    for (const f of t.fields.filter((x) => x.isRequired)) {
+      if (!f.validatorRef) { gaps.push({ docTypeCode: t.code, gap: 'REQUIRED_FIELD_WITHOUT_VALIDATOR', detail: f.fieldCode }); continue; }
+      const v = byCode.get(f.validatorRef);
+      if (!v || !resolves(v.implRef)) gaps.push({ docTypeCode: t.code, gap: 'VALIDATOR_NOT_IMPLEMENTED', detail: `${f.fieldCode} → ${f.validatorRef}` });
+    }
+    for (const v of validators) {
+      if (!v.isBlocking || (v.docTypeCode !== null && v.docTypeCode !== t.code)) continue;
+      if (!resolves(v.implRef)) gaps.push({ docTypeCode: t.code, gap: 'VALIDATOR_NOT_IMPLEMENTED', detail: v.code });
+    }
+  }
+  return gaps;
+}
 
 /** Idempotent: upserts every document class and requirement set the country checklists describe. */
 export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySeedResult> {
@@ -84,7 +188,8 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
       }
     }
   }
-  return { docTypes, requirementSets, requirementItems };
+  const validators = await seedValidatorRegistry(prisma);
+  return { docTypes, requirementSets, requirementItems, validators };
 }
 
 /**

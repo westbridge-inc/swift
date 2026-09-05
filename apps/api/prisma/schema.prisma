@@ -6016,6 +6016,7 @@ model DocType {
 
   fields           DocField[]
   requirementItems RequirementItem[]
+  validators       Validator[]
 
   @@unique([countryCode, legacyCode])
   @@index([countryCode, isActive])
@@ -6030,7 +6031,9 @@ model DocField {
   isRequired     Boolean
   isPii          Boolean
   isBlindIndexed Boolean  @default(false)
+  /// [DOC-1 §7.1] The validator that proves this field; required fields of an ACTIVE type must name one (DOC-INV-2).
   validatorRef   String?
+  validator      Validator? @relation(fields: [validatorRef], references: [code])
   enumValues     String[]
   displayOrder   Int
 
@@ -6297,4 +6300,30 @@ model DocLegalHold {
   @@index([subjectUserId, releasedAt])
   @@index([tenantId, releasedAt, reviewBy])
   @@map("doc_legal_hold")
+}
+
+enum ValidatorScope {
+  FIELD
+  DOCUMENT
+  SUBJECT
+  CROSS_SUBJECT
+}
+
+/// [DOC-1 §7.1 · P7-1] The validator registry — data, not code. implRef names the
+/// implementation (resolved at boot); NULL = declared by the spec, not yet implemented,
+/// and no ACTIVE document type may depend on it (DOC-INV-2). detailCode is the §8.5
+/// reason emitted on FAIL.
+model Validator {
+  code        String         @id
+  /// NULL = applies to every document type.
+  docTypeCode String?
+  docType     DocType?       @relation(fields: [docTypeCode], references: [code])
+  scope       ValidatorScope
+  isBlocking  Boolean
+  detailCode  String
+  implRef     String?
+  fields      DocField[]
+
+  @@index([docTypeCode])
+  @@map("validator")
 }

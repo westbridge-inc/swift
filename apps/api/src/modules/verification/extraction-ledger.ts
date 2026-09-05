@@ -20,6 +20,8 @@ import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider } from '../..
 import { hashSignal, normalizeDocNumber } from '../integrity/normalize';
 import type { KycEngine } from '../../providers/kyc/kyc-provider';
 import { docExtractionRunCounter, docExtractionSchemaViolationCounter } from '../../plugins/observability';
+import { VALIDATOR_IMPLEMENTATIONS, resolvesImpl, type DeclaredField } from './validators';
+export type { DeclaredField } from './validators';
 
 /**
  * The processor contract's keys → §4.2 field codes. Data, not a case
@@ -34,7 +36,8 @@ export const V_SHA_COLLISION = 'V_SHA_COLLISION';
 /** An adapter that never described itself is recorded as an external unknown — the conservative reading. */
 export const UNKNOWN_ENGINE: KycEngine = { name: 'unknown-adapter', version: 'unversioned', external: true };
 
-export interface DeclaredField { fieldCode: string; isRequired: boolean; isBlindIndexed: boolean }
+/** A row of the validator registry, as the ledger needs it. */
+export interface RegisteredValidator { code: string; isBlocking: boolean; detailCode: string; implRef: string | null }
 export interface PlannedField { fieldCode: string; valueCt: Buffer | null; valueBlind: string | null; isIllegible: boolean }
 export interface PlannedValidation { validatorCode: string; status: ValidationStatus; detailCode: string | null; isBlocking: boolean }
 export interface ExtractionPlan {
@@ -62,6 +65,8 @@ export interface ExtractionPlanInput {
   collided: boolean;
   /** Processor-reported confidence, 0..1; undefined = unknown. */
   confidence?: number;
+  /** The registry's validators applicable to this type (docTypeCode NULL or this type). Only implemented ones judge. */
+  validators: readonly RegisteredValidator[];
 }
 
 /** iv(12) | authTag(16) | ciphertext — the same layout the KEK uses for a wrapped DEK. */
@@ -111,18 +116,19 @@ export async function planExtraction(input: ExtractionPlanInput): Promise<Extrac
     : 'OK';
   const errorClass = noKek ? 'NO_KEK' : outcome === 'FAILED' ? 'NO_REQUIRED_FIELDS' : null;
 
-  const validations: PlannedValidation[] = [
-    input.declared.length === 0
-      ? { validatorCode: V_ALL_REQUIRED_PRESENT, status: 'SKIP', detailCode: 'NO_DECLARED_FIELDS', isBlocking: true }
-      : requiredMissing.length > 0
-        ? { validatorCode: V_ALL_REQUIRED_PRESENT, status: 'FAIL', detailCode: 'MISSING_REQUIRED', isBlocking: true }
-        : { validatorCode: V_ALL_REQUIRED_PRESENT, status: 'PASS', detailCode: null, isBlocking: true },
-    // §7.5: a collision never auto-approves and routes to SECOND_REVIEW (held by the
-    // collision rule itself); the verdict is recorded as a WARN, not a rejection ground.
-    input.collided
-      ? { validatorCode: V_SHA_COLLISION, status: 'WARN', detailCode: 'CROSS_SUBJECT_SHA', isBlocking: false }
-      : { validatorCode: V_SHA_COLLISION, status: 'PASS', detailCode: null, isBlocking: false },
-  ];
+  // [P7-1 · DOC-INV-2] The registry says which validators apply; only the ones with an
+  // implementation judge — a declared-but-unimplemented validator writes nothing, and
+  // the completeness checker is where its absence is named. A FAIL carries the
+  // registry's §8.5 detail code; SKIP and WARN carry the implementation's reason.
+  const validations: PlannedValidation[] = [];
+  for (const v of [...input.validators].sort((a, b) => a.code.localeCompare(b.code))) {
+    if (!resolvesImpl(v.implRef)) continue;
+    const verdict = VALIDATOR_IMPLEMENTATIONS[v.implRef!]!({ declared: input.declared, present, collided: input.collided });
+    validations.push({
+      validatorCode: v.code, status: verdict.status, isBlocking: v.isBlocking,
+      detailCode: verdict.status === 'FAIL' ? v.detailCode : (verdict.detailCode ?? null),
+    });
+  }
 
   return {
     run: {
