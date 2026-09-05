@@ -173,7 +173,8 @@ describe('[R048-006] requests routed while the process was last judged not-ready
 });
 
 describe('[R048-006] the server and the container say it', () => {
-  const server = readFileSync(join(__dirname, '..', 'server.ts'), 'utf8');
+  // The composition root is src/app.ts (server.ts only boots it).
+  const server = readFileSync(join(__dirname, '..', 'app.ts'), 'utf8');
   const dockerfile = readFileSync(join(__dirname, '..', '..', 'Dockerfile'), 'utf8');
 
   it('/health answers 503 when degraded — never a 200 for a known failure', () => {

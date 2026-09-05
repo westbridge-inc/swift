@@ -306,8 +306,10 @@ describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
     expect(missing).toEqual(['/api/v1/loyalty']);
   });
 
-  it('every /api/v1 prefix server.ts registers is enrolled here (or exempt)', () => {
-    const serverSrc = readFileSync(resolve(process.cwd(), 'src/server.ts'), 'utf8');
+  it('every /api/v1 prefix the composition root (app.ts) registers is enrolled here (or exempt)', () => {
+    // The composition root moved to src/app.ts (server.ts only boots it); the
+    // prefixes are registered there.
+    const serverSrc = readFileSync(resolve(process.cwd(), 'src/app.ts'), 'utf8');
     const serverPrefixes = [...new Set([...serverSrc.matchAll(/prefix:\s*'(\/api\/v1[^']*)'/g)].map((m) => m[1]!))];
     // Sanity: the parse actually found the registrations (guards against a regex/path break).
     expect(serverPrefixes.length).toBeGreaterThan(10);
