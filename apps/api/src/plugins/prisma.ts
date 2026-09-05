@@ -141,6 +141,13 @@ const TENANT_QUERY_EXTENSIONS = {
   // [STA-1 §4 lineage] child tables now walled on the row itself.
   item: scoped,
   category: scoped,
+  // [STA-1 §4 lineage · money]
+  transaction: scoped,
+  earning: scoped,
+  settlement: scoped,
+  deliveryCashSettlement: scoped,
+  payoutRequest: scoped,
+  payoutSchedule: scoped,
 };
 
 /** Model names enrolled for tenant scoping. Derived — never hand-written. */

@@ -26,7 +26,8 @@ const scope = () => ({ phonePrefix: SCOPE_PREFIX });
 let priorIdentity: { deploymentId: string; environment: string; note: string | null } | null = null;
 const deletedByCanonicalPath: string[] = [];
 const deleteUser = async (id: string) => { deletedByCanonicalPath.push(id); await prisma.user.delete({ where: { id } }); };
-const phone = () => `${SCOPE_PREFIX}${String(Math.floor(Math.random() * 1e5)).padStart(5, '0')}`; // inside this suite's own range; other suites' +5926009998/9999 fixtures are outside it
+// Eight random digits, not five: a 1e5 space collided with a parallel suite's row in CI (unique phone).
+const phone = () => `${SCOPE_PREFIX}${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`; // inside this suite's own range; other suites' +5926009998/9999 fixtures are outside it
 const otherPhone = () => `+5927${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
 const mk = (data: Record<string, unknown>) => prisma.user.create({ data: { firstName: 'P', lastName: 'U', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', ...data } as never }).then((u) => { userIds.push(u.id); return u; });
 const setIdentity = (environment: string) => prisma.deploymentIdentity.upsert({ where: { id: 'singleton' }, create: { id: 'singleton', deploymentId: 'dep-test', environment }, update: { deploymentId: 'dep-test', environment } });
