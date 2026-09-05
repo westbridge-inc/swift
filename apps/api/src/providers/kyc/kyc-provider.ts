@@ -24,7 +24,21 @@ export interface KycVerificationResult {
   extracted?: { documentNumber?: string };
 }
 
+/**
+ * [DOC-1 §4.4 · P4-4] What the extraction ledger records about the adapter that
+ * produced a result: engine name and version, whether the document LEFT THE
+ * BUILDING (an external processor — its DGP-1 register code in processorRef).
+ */
+export interface KycEngine {
+  name: string;
+  version: string;
+  external: boolean;
+  processorRef?: string;
+}
+
 export interface KycProvider {
+  /** Absent = an adapter that never described itself; the ledger records it as an external unknown. */
+  readonly engine?: KycEngine;
   /** L2 identity check: government ID + selfie. */
   verifyIdentity(input: { userId: string; idDocumentUrl: string; selfieUrl: string }): Promise<KycVerificationResult>;
   /** Single role/business document check. */
@@ -40,6 +54,8 @@ export interface KycProvider {
  *   "auto-approve" -> approved, "auto-reject" -> rejected, else pending_manual.
  */
 export class SandboxKycProvider implements KycProvider {
+  readonly engine: KycEngine = { name: 'sandbox', version: '1', external: false };
+
   private decide(url: string): KycVerificationResult {
     // Deterministic extraction marker so integrity tests can inject document
     // numbers end-to-end: any "docno-XXXX" token in the file reference.

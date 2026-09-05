@@ -151,6 +151,10 @@ const TENANT_QUERY_EXTENSIONS = {
   deletionReceipt: scoped,
   reviewCase: scoped,
   reviewDecision: scoped,
+  // [DOC-1 P4-4] the extraction ledger of a submission
+  extractionRun: scoped,
+  extractedField: scoped,
+  validationResult: scoped,
 };
 
 /** Model names enrolled for tenant scoping. Derived — never hand-written. */

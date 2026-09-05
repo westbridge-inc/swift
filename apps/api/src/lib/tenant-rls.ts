@@ -57,6 +57,10 @@ export const TENANT_TABLES = [
   // [DOC-1 P4-5] human review of a document is about the person: walled like the person.
   'review_case',
   'review_decision',
+  // [DOC-1 P4-4] the extraction ledger of a submission
+  'extraction_run',
+  'extracted_field',
+  'validation_result',
   'sos_retriggers',
   'guardian_checkin_deliveries',
   'legal_holds',
@@ -209,6 +213,12 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'review_case', trigger: 'review_case_tenant_matches_subject', parent: 'users', fk: 'submissionId',
     parentTenantSql: `SELECT u."tenantId" FROM users u JOIN verification_documents d ON d."userId" = u.id WHERE d.id = NEW."submissionId"` },
   { table: 'review_decision', trigger: 'review_decision_tenant_matches_case', parent: 'review_case', fk: 'caseId' },
+  // [DOC-1 P4-4] a run and a validation verdict inherit through the document to the person; a field inherits its run
+  { table: 'extraction_run', trigger: 'extraction_run_tenant_matches_subject', parent: 'users', fk: 'submissionId',
+    parentTenantSql: `SELECT u."tenantId" FROM users u JOIN verification_documents d ON d."userId" = u.id WHERE d.id = NEW."submissionId"` },
+  { table: 'extracted_field', trigger: 'extracted_field_tenant_matches_run', parent: 'extraction_run', fk: 'runId' },
+  { table: 'validation_result', trigger: 'validation_result_tenant_matches_subject', parent: 'users', fk: 'submissionId',
+    parentTenantSql: `SELECT u."tenantId" FROM users u JOIN verification_documents d ON d."userId" = u.id WHERE d.id = NEW."submissionId"` },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.
