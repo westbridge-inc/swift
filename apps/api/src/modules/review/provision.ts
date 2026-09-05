@@ -20,6 +20,7 @@
 import crypto from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { hashReviewCode } from './credentials';
+import { assertTenantWall, attestationOf, readRlsFacts } from '../../lib/rls-attestation';
 
 export const DEFAULT_REVIEW_TTL_DAYS = 14;
 export const DEFAULT_REVIEW_PHONE_PREFIX = '+59200099';
@@ -50,6 +51,12 @@ export async function provisionReviewTenant(prisma: PrismaClient, input: Provisi
   const ttlDays = input.ttlDays ?? DEFAULT_REVIEW_TTL_DAYS;
   const prefix = input.phonePrefix ?? process.env['REVIEW_PHONE_PREFIX'] ?? DEFAULT_REVIEW_PHONE_PREFIX;
   if (!/^review-[a-z0-9-]{2,40}$/.test(input.slug)) throw new Error('slug must match /^review-[a-z0-9-]{2,40}$/ — the fiction is named as such');
+  // [TA-S0-003] Minting a tenant at runtime is exactly the path the boot-only
+  // wall gate cannot see. Assert the wall HERE, for the tenant count this
+  // provisioning produces: in production, a bypassed wall or a missing
+  // app-side setting refuses to create the fiction at all. (Dev/test: no-op.)
+  const activeAfter = (await prisma.tenant.count({ where: { isActive: true, NOT: { id: input.slug } } })) + 1;
+  assertTenantWall(attestationOf(await readRlsFacts(prisma)), activeAfter);
   const tenant = await prisma.tenant.upsert({
     where: { id: input.slug },
     create: { id: input.slug, slug: input.slug, name: input.name ?? `Store review — ${input.slug}`, kind: 'REVIEW', purgeProtected: true, isActive: true },
