@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
+import type { ReviewQueue } from '@prisma/client';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -127,6 +128,25 @@ export const REJECTION_REASON_CODES = [
   'INSURANCE_NOT_HIRE', 'NOT_YELLOW', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
 ] as const;
 export type RejectionReasonCode = (typeof REJECTION_REASON_CODES)[number];
+/** [DOC-1 §13] 24 hours from REVIEW_QUEUED to decision. */
+export const REVIEW_SLA_HOURS = Number(process.env['REVIEW_SLA_HOURS'] ?? 24);
+/**
+ * [DOC-1 §8.5] What the actor is told is a CATEGORY — never the reviewer's
+ * internal note and never the internal reason. The rows are the spec's table:
+ * QUALITY (unreadable / missing page), EXPIRED, REQUIREMENT (the document does
+ * not meet the requirement for the account type — wrong type, class, colour,
+ * insurance scope), ACCOUNT_MISMATCH (details do not match the account), and
+ * UNVERIFIABLE for the fraud class — alteration, duplicate across accounts, not
+ * issued to the submitter (a face mismatch is exactly that) — which must read
+ * IDENTICALLY: never tell a fraudster which signal caught them.
+ */
+export const ACTOR_FACING_CATEGORY: Record<RejectionReasonCode, string> = {
+  UNREADABLE: 'QUALITY', INCOMPLETE: 'QUALITY',
+  EXPIRED: 'EXPIRED',
+  WRONG_DOCUMENT: 'REQUIREMENT', INSURANCE_NOT_HIRE: 'REQUIREMENT', NOT_YELLOW: 'REQUIREMENT',
+  NAME_MISMATCH: 'ACCOUNT_MISMATCH',
+  SUSPECTED_TAMPERING: 'UNVERIFIABLE', DUPLICATE: 'UNVERIFIABLE', FACE_MISMATCH: 'UNVERIFIABLE',
+};
 
 const REJECTION_TEMPLATES: Record<RejectionReasonCode, string> = {
   EXPIRED: 'This document has expired — upload a current one.',
@@ -173,16 +193,30 @@ export class VerificationService {
    *  read of the User row inside the same transaction as a PII insert blocks
    *  against deletion's FOR UPDATE — so a request that observed ACTIVE, then
    *  paused (KYC latency), cannot land new PII after the purge committed. */
-  private async createDocumentLively(data: Prisma.VerificationDocumentUncheckedCreateInput) {
+  private async createDocumentLively(
+    data: Prisma.VerificationDocumentUncheckedCreateInput,
+    review: { queue: ReviewQueue } = { queue: 'STANDARD' },
+  ) {
     return this.prisma.$transaction(async (tx) => {
-      const alive = await tx.$queryRaw<{ status: string }[]>(
-        Prisma.sql`SELECT status FROM users WHERE id = ${data.userId} FOR SHARE`,
+      const alive = await tx.$queryRaw<{ status: string; tenantId: string }[]>(
+        Prisma.sql`SELECT status, "tenantId" FROM users WHERE id = ${data.userId} FOR SHARE`,
       );
       const status = alive[0]?.status;
       if (!status || ['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(status)) {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
       }
-      return tx.verificationDocument.create({ data });
+      const doc = await tx.verificationDocument.create({ data });
+      // [DOC-1 P4-5] A document waiting on a human has ONE open case, with the
+      // SLA clock started here — in the same transaction, so a pending document
+      // without a case cannot exist.
+      if (doc.status === 'PENDING') {
+        const queuedAt = new Date(); // one clock for both: the SLA is exactly REVIEW_SLA_HOURS from queueing
+        await tx.reviewCase.create({ data: {
+          submissionId: doc.id, tenantId: alive[0]!.tenantId, queue: review.queue,
+          createdAt: queuedAt, slaDueAt: new Date(queuedAt.getTime() + REVIEW_SLA_HOURS * 3_600_000),
+        } });
+      }
+      return doc;
     });
   }
 
@@ -286,7 +320,7 @@ export class VerificationService {
           ...(autoExpiryDays && { expiresAt: new Date(Date.now() + autoExpiryDays * 24 * 60 * 60 * 1000) }),
         }),
         ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
-    });
+    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD' });
 
     // Provider listability is the first post-document projection. Everything
     // below (audit, integrity, notifications, trials) may fail independently;
@@ -368,7 +402,7 @@ export class VerificationService {
           : 'PENDING',
         ...(result.status !== 'pending_manual' && { reviewedBy: 'kyc:auto', reviewedAt: new Date() }),
         ...(result.status === 'rejected' && { reviewNote: result.reason }),
-    });
+    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD' });
 
     await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason);
 
@@ -467,7 +501,7 @@ export class VerificationService {
           hireClassConfirmed: insurance.hireClassConfirmed,
           plateCrossChecked: insurance.plateCrossChecked,
         }),
-    });
+    }, { reviewerId: adminId });
 
     if (updated.docType === IDENTITY_DOC_TYPE) {
       await this.promoteToL2(updated.userId);
@@ -498,7 +532,7 @@ export class VerificationService {
         reviewedBy: adminId,
         reviewedAt: new Date(),
         reviewNote: reasonCode ? `[${reasonCode}] ${fullReason}` : fullReason,
-    });
+    }, { reviewerId: adminId, reasonCode, note: fullReason });
 
     await this.notifyRejection(updated.userId, updated.docType, fullReason);
     return updated;
@@ -508,6 +542,7 @@ export class VerificationService {
     docId: string,
     requestedStatus: 'APPROVED' | 'REJECTED',
     data: Prisma.VerificationDocumentUpdateManyMutationInput,
+    review: { reviewerId: string; reasonCode?: RejectionReasonCode; note?: string },
   ): Promise<VerificationDocument> {
     const candidate = await this.prisma.verificationDocument.findUnique({
       where: { id: docId },
@@ -546,6 +581,25 @@ export class VerificationService {
         await this.projectVendorActivation(tx, candidate.userId);
         return { kind: 'NOT_PENDING' as const, status: current.status };
       }
+      // [DOC-1 P4-5] The decision and the case close with the status change or
+      // not at all. A document that predates cases gets one here, so every
+      // decision has a case.
+      const now = new Date();
+      const open = await tx.reviewCase.findFirst({ where: { submissionId: docId, closedAt: null }, orderBy: { createdAt: 'desc' } })
+        ?? await tx.reviewCase.create({ data: {
+          submissionId: docId, queue: 'STANDARD', slaDueAt: now,
+          tenantId: (await tx.user.findUniqueOrThrow({ where: { id: candidate.userId }, select: { tenantId: true } })).tenantId,
+        } });
+      const approve = requestedStatus === 'APPROVED';
+      await tx.reviewDecision.create({ data: {
+        caseId: open.id, tenantId: open.tenantId, reviewerId: review.reviewerId,
+        outcome: approve ? 'APPROVE' : 'REJECT',
+        reasonCode: approve ? 'APPROVED' : (review.reasonCode ?? 'UNSPECIFIED'),
+        actorFacingCategory: approve ? 'APPROVED' : (review.reasonCode ? ACTOR_FACING_CATEGORY[review.reasonCode] : 'OTHER'),
+        internalNote: review.note ?? null,
+        timeOnCaseMs: Math.max(0, now.getTime() - (open.assignedAt ?? open.createdAt).getTime()),
+      } });
+      await tx.reviewCase.update({ where: { id: open.id }, data: { closedAt: now } });
 
       const updated = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
       // The document decision and provider public/hire projection commit as one
@@ -569,23 +623,63 @@ export class VerificationService {
    * SLA_HOURS get surfaced to every admin once per sweep — a queue nobody
    * opens is how "24h review" promises die.
    */
-  async alertReviewSlaBreaches(slaHours = Number(process.env['REVIEW_SLA_HOURS'] ?? 24)): Promise<number> {
-    const cutoff = new Date(Date.now() - slaHours * 3600 * 1000);
-    const [breached, oldest] = await Promise.all([
-      this.prisma.verificationDocument.count({ where: { status: 'PENDING', createdAt: { lt: cutoff } } }),
-      this.prisma.verificationDocument.findFirst({
-        where: { status: 'PENDING' },
-        orderBy: { createdAt: 'asc' },
-        select: { createdAt: true },
-      }),
-    ]);
-    if (breached === 0) return 0;
-    const oldestHours = oldest ? Math.floor((Date.now() - oldest.createdAt.getTime()) / 3600_000) : slaHours;
+  async alertReviewSlaBreaches(slaHours = REVIEW_SLA_HOURS): Promise<number> {
+    // [DOC-1 P4-5 · §13] The case table is the queue of record. A breached case
+    // is escalated (queue ESCALATED, priority raised) and every admin is told
+    // once per sweep — a queue nobody opens is how "24h review" promises die.
+    const now = new Date();
+    // A pending document with no open case is itself an anomaly (a row that
+    // bypassed the submit path, or predates cases): heal it into an ESCALATED
+    // case with the SLA it has had since it was queued, so the case table stays
+    // the queue of record and nothing waits unseen.
+    const caseless = await this.prisma.verificationDocument.findMany({
+      where: { status: 'PENDING', createdAt: { lt: new Date(now.getTime() - slaHours * 3600_000) } },
+      select: { id: true, createdAt: true, user: { select: { tenantId: true } } },
+    });
+    for (const d of caseless) {
+      const hasOpen = await this.prisma.reviewCase.findFirst({ where: { submissionId: d.id, closedAt: null }, select: { id: true } });
+      if (!hasOpen) {
+        await this.prisma.reviewCase.create({ data: {
+          submissionId: d.id, tenantId: d.user.tenantId, queue: 'ESCALATED', priority: 10,
+          createdAt: d.createdAt, slaDueAt: new Date(d.createdAt.getTime() + slaHours * 3600_000),
+        } });
+      }
+    }
+    // The converse anomaly: an open case whose document is no longer PENDING
+    // (decided or purged outside the transition path). Close it — without a
+    // decision, because none was recorded — so the queue of record stays true.
+    const staleOpen = await this.prisma.reviewCase.findMany({
+      where: { closedAt: null },
+      select: { id: true, submissionId: true },
+    });
+    if (staleOpen.length > 0) {
+      const stillPending = new Set((await this.prisma.verificationDocument.findMany({
+        where: { id: { in: staleOpen.map((c) => c.submissionId) }, status: 'PENDING' }, select: { id: true },
+      })).map((d) => d.id));
+      const orphaned = staleOpen.filter((c) => !stillPending.has(c.submissionId)).map((c) => c.id);
+      if (orphaned.length > 0) await this.prisma.reviewCase.updateMany({ where: { id: { in: orphaned } }, data: { closedAt: now } });
+    }
+    const breachedCases = await this.prisma.reviewCase.findMany({
+      where: { closedAt: null, slaDueAt: { lt: now } },
+      select: { id: true, createdAt: true, priority: true, queue: true },
+    });
+    if (breachedCases.length === 0) return 0;
+    await this.prisma.reviewCase.updateMany({
+      where: { id: { in: breachedCases.map((c) => c.id) } },
+      data: { priority: 10 },
+    });
+    await this.prisma.reviewCase.updateMany({
+      where: { id: { in: breachedCases.filter((c) => c.queue === 'STANDARD').map((c) => c.id) } },
+      data: { queue: 'ESCALATED' },
+    });
+    const oldest = breachedCases.reduce((a, c) => (c.createdAt < a ? c.createdAt : a), breachedCases[0]!.createdAt);
+    const oldestHours = Math.floor((now.getTime() - oldest.getTime()) / 3600_000);
+    const breached = breachedCases.length;
     await notifyAdmins(this.prisma, this.notifications, {
       // An aggregate queue-health sweep — platform-wide [NOC-A F45].
       tenantId: null,
       title: 'Verification queue is breaching SLA',
-      body: `${breached} document${breached === 1 ? '' : 's'} have waited over ${slaHours}h for review (oldest ${oldestHours}h). People cannot work until these are decided.`,
+      body: `${breached} review case${breached === 1 ? '' : 's'} ${breached === 1 ? 'has' : 'have'} waited over ${slaHours}h for a decision (oldest ${oldestHours}h). People cannot work until these are decided.`,
       data: { kind: 'verification_sla_breach', breached, slaHours },
     });
     return breached;
@@ -1033,7 +1127,7 @@ export class VerificationService {
     roleKey: string,
     fileKey: string,
     result: T,
-  ): Promise<T> {
+  ): Promise<T & { collided?: boolean }> {
     if (!fileKey) return result;
     const mine = await this.prisma.encryptedObject.findUnique({ where: { fileKey }, select: { sha256: true } });
     if (!mine) return result; // no envelope row (no KEK configured): nothing to compare
@@ -1047,8 +1141,10 @@ export class VerificationService {
     const otherRole = (await this.prisma.user.findUnique({ where: { id: other.createdBy }, select: { activeRole: true } }))?.activeRole ?? 'CUSTOMER';
     await identity.capture({ accountId: userId, actorRole: roleKey, type: 'DOC_CONTENT', normalizedValue: mine.sha256, source: 'ONBOARDING_DOC' });
     await identity.capture({ accountId: other.createdBy, actorRole: otherRole, type: 'DOC_CONTENT', normalizedValue: mine.sha256, source: 'ONBOARDING_DOC' });
-    if (result.status !== 'approved') return result;
-    return { ...result, status: 'pending_manual', reason: 'Duplicate of a document already on another account — second review required' };
+    // The case this document opens goes to the SECOND_REVIEW queue (P4-5).
+    const flagged = { ...result, collided: true };
+    if (result.status !== 'approved') return flagged;
+    return { ...flagged, status: 'pending_manual', reason: 'Duplicate of a document already on another account — second review required' };
   }
 
   /** Purge documents whose retention window elapsed: delete the stored object,

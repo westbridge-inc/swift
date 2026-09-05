@@ -397,6 +397,8 @@ model Tenant {
   payoutRequests    PayoutRequest[]
   payoutSchedules   PayoutSchedule[]
   deletionReceipts  DeletionReceipt[]
+  reviewCases       ReviewCase[]
+  reviewDecisions   ReviewDecision[]
 
   @@index([kind])
   @@map("tenants")
@@ -6074,4 +6076,65 @@ model DeletionReceipt {
   @@index([subjectId])
   @@index([tenantId, deletedAt])
   @@map("deletion_receipt")
+}
+
+// ─── [DOC-1 §4.4 · P4-5] Review cases and decisions ──────────────────────────
+// A document that lands in human review opens ONE case (queue STANDARD, or
+// SECOND_REVIEW when the cross-subject collision rule fired) with a 24h SLA.
+// Every approve or reject writes a decision and closes the case in the same
+// transaction as the status change. The SLA watchdog reads the case table.
+
+enum ReviewQueue {
+  STANDARD
+  SECOND_REVIEW
+  ESCALATED
+  QA_BLIND
+}
+
+enum ReviewOutcome {
+  APPROVE
+  REJECT
+  REQUEST_INFO
+  ESCALATE
+}
+
+model ReviewCase {
+  id           String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String           @default("swift-default")
+  tenant       Tenant           @relation(fields: [tenantId], references: [id])
+  /// The VerificationDocument under review (P4-2's document_submission is not yet split out).
+  submissionId String
+  queue        ReviewQueue      @default(STANDARD)
+  /// Lower is more urgent. 100 = normal; an SLA breach drops it to 10.
+  priority     Int              @default(100)
+  slaDueAt     DateTime
+  assignedTo   String?
+  assignedAt   DateTime?
+  closedAt     DateTime?
+  createdAt    DateTime         @default(now())
+  decisions    ReviewDecision[]
+
+  @@index([submissionId])
+  @@index([tenantId, closedAt, slaDueAt])
+  @@map("review_case")
+}
+
+model ReviewDecision {
+  id                  String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String        @default("swift-default")
+  tenant              Tenant        @relation(fields: [tenantId], references: [id])
+  caseId              String        @db.Uuid
+  case                ReviewCase    @relation(fields: [caseId], references: [id])
+  reviewerId          String
+  outcome             ReviewOutcome
+  /// From the rejection reason-code enum (§8.5), or APPROVED.
+  reasonCode          String
+  internalNote        String?
+  /// Category only — never the internal note (§8.5).
+  actorFacingCategory String
+  decidedAt           DateTime      @default(now())
+  timeOnCaseMs        Int?
+
+  @@index([caseId])
+  @@map("review_decision")
 }
