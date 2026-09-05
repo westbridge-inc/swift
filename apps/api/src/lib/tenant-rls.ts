@@ -246,6 +246,34 @@ export function deletionReceiptAppendOnlyDdl(): string[] {
   ];
 }
 
+/** [STA-1 DL-4] isSynthetic is a FACT of the tenant, not a flag anyone sets:
+ *  a row in a REVIEW or CRAWLER tenant is synthetic (derived on write — the
+ *  default `false` means "unstamped"), and a row in a PRODUCTION tenant can
+ *  never be marked synthetic (refused). Aggregates that read `isSynthetic`
+ *  (lib/production-only.ts) therefore cannot be lied to by a seed that forgot
+ *  the flag, or by a production row that borrowed it. Mirrors migration
+ *  20260905190000_synthetic_derivation; the test installer heals db-push envs. */
+export const SYNTHETIC_TABLES = ['users', 'vendors'] as const;
+export function syntheticDerivationDdl(): string[] {
+  return SYNTHETIC_TABLES.flatMap((table) => [
+    `CREATE OR REPLACE FUNCTION ${table}_synthetic_matches_tenant() RETURNS trigger AS $$
+      DECLARE tenant_kind TEXT;
+      BEGIN
+        SELECT kind::text INTO tenant_kind FROM tenants WHERE id = NEW."tenantId";
+        IF tenant_kind IS NULL THEN RETURN NEW; END IF; -- the FK, not this trigger, judges a missing tenant
+        IF tenant_kind <> 'PRODUCTION' THEN
+          NEW."isSynthetic" := true;
+        ELSIF NEW."isSynthetic" THEN
+          RAISE EXCEPTION '${table} row % is in PRODUCTION tenant % and cannot be synthetic [STA-1 DL-4]', NEW.id, NEW."tenantId"
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`,
+    `DROP TRIGGER IF EXISTS ${table}_synthetic_matches_tenant ON ${table}`,
+    `CREATE TRIGGER ${table}_synthetic_matches_tenant BEFORE INSERT OR UPDATE OF "isSynthetic", "tenantId" ON ${table} FOR EACH ROW EXECUTE FUNCTION ${table}_synthetic_matches_tenant()`,
+  ]);
+}
+
 export function allRlsDdl(): string[] {
   return TENANT_TABLES.flatMap((t) => rlsDdlFor(t));
 }
