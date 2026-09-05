@@ -131,13 +131,19 @@ describe('database tenant wall [W-201 / F-201]', () => {
     expect(dmmfTables).toEqual([...TENANT_TABLES].sort());
   });
 
-  it('RLS is ENABLED with the policy present on all 51 tables', async () => {
-    const rows = await app.prisma.$queryRaw<{ relname: string }[]>(Prisma.sql`
-      SELECT c.relname FROM pg_class c
+  it('RLS is ENABLED, FORCED and carries the policy on every registered table', async () => {
+    // [STA-1 4.2] FORCED too: without it the table OWNER walks through the
+    // policy — the role the app becomes the day pooling is misconfigured.
+    const rows = await app.prisma.$queryRaw<{ relname: string; why: string }[]>(Prisma.sql`
+      SELECT c.relname,
+             CASE WHEN NOT c.relrowsecurity THEN 'not enabled'
+                  WHEN NOT c.relforcerowsecurity THEN 'not forced'
+                  ELSE 'no policy' END AS why
+      FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
       LEFT JOIN pg_policy p ON p.polrelid = c.oid AND p.polname = 'tenant_isolation'
       WHERE n.nspname = 'public' AND c.relname = ANY(${[...TENANT_TABLES]})
-        AND (NOT c.relrowsecurity OR p.oid IS NULL)`);
+        AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity OR p.oid IS NULL)`);
     expect(rows).toEqual([]);
   });
 

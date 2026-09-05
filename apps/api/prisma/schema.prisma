@@ -112,8 +112,13 @@ model User {
   chatParticipants       ChatRoomParticipant[]
   supportTickets         SupportTicket[]
   resolvedTickets        SupportTicket[]       @relation("supportResolver")
+  /// [STA-1 DL-4] Never in analytics, GMV, counts, ratings, identity
+  /// graph or a ledger. Belt to Tenant.kind's braces.
+  isSynthetic Boolean @default(false)
+
 
   @@index([tenantId])
+  @@index([isSynthetic])
   @@map("users")
 }
 
@@ -345,6 +350,16 @@ model Address {
 /// isolated. `countryCode`/CountryConfig are the MARKET dimension WITHIN a
 /// tenant, not the tenant boundary. Multi-tenancy foundation (stage 1): every
 /// tenant-owned root carries `tenantId`; enforcement (RLS) lands in stage 2.
+/// [STA-1 Part 3] What a tenant IS. PRODUCTION carries real people and real
+/// money; REVIEW is the store-reviewer fiction (RLS-walled, purge-protected,
+/// never in metrics — DL-2/DL-4/DL-8); CRAWLER is the read-only Play
+/// pre-launch robot. Aggregations and purges read this, not a per-row flag.
+enum TenantKind {
+  PRODUCTION
+  REVIEW
+  CRAWLER
+}
+
 model Tenant {
   id        String   @id @default(cuid())
   /// Human name ("Swift").
@@ -352,6 +367,11 @@ model Tenant {
   /// URL/route-safe key, unique across operators.
   slug      String   @unique
   isActive  Boolean  @default(true)
+  /// [STA-1 DL-2/DL-4] Every aggregation and every purge reads this.
+  kind      TenantKind @default(PRODUCTION)
+  /// [STA-1 DL-8] The go-live purge and every bulk cleanup skip this tenant;
+  /// tenants_purge_guard (a DB trigger) refuses DELETE while it is set.
+  purgeProtected Boolean @default(false)
   /// Per-tenant branding/config/billing (JSON until it needs columns).
   config    Json?
   createdAt DateTime @default(now())
@@ -365,8 +385,85 @@ model Tenant {
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
   adRefundOutbox   AdRefundOutbox[]
+  reviewSessions    ReviewSession[]
+  reviewCredentials ReviewCredential[]
+  reviewFixtures    ReviewFixture[]
 
+  @@index([kind])
   @@map("tenants")
+}
+
+/// [STA-1 Part 3] A store reviewer's demo session on a REVIEW tenant: the
+/// geographic anchor is bound EXACTLY ONCE (modules/review/anchor.ts is the
+/// only writer) and the session expires (DL-9) — it never falls back to
+/// production data.
+enum ReviewSessionStatus {
+  PROVISIONED
+  ANCHORED
+  EXPIRED
+  REVOKED
+}
+
+model ReviewSession {
+  id           String              @id @default(cuid())
+  tenantId     String
+  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  status       ReviewSessionStatus @default(PROVISIONED)
+  /// Write-once (3.1): "DEVICE_GPS" preferred, "IP_GEO" fallback.
+  anchorLat    Float?
+  anchorLng    Float?
+  anchorSource String?
+  anchoredAt   DateTime?
+  expiresAt    DateTime
+  createdAt    DateTime            @default(now())
+  lastSeenAt   DateTime?
+
+  @@index([tenantId, status])
+  @@index([expiresAt])
+  @@map("review_sessions")
+}
+
+/// [STA-1 Part 3] The reviewer's login: a fictional E.164 identifier and a
+/// static 6-digit code, accepted ONLY when the identifier resolves to a
+/// REVIEW tenant (DL-6: same login screen, no reviewer detection). The code
+/// is stored hashed — a credential at rest is a secret even for a fiction.
+model ReviewCredential {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// "CUSTOMER" | "VENDOR" | "RIDER" | "DRIVER"
+  role          String
+  identifier    String
+  staticOtpHash String
+  rotatedAt     DateTime @default(now())
+
+  @@unique([tenantId, identifier])
+  @@map("review_credentials")
+}
+
+enum FixtureKind {
+  VENDOR
+  RIDER_HOME
+  DRIVER_HOME
+  CUSTOMER_ADDRESS
+  POI
+}
+
+/// [STA-1 Part 3] Positions one real Vendor/User/Address row of the fiction.
+/// Geography is an OFFSET from the fiction origin, never absolute: the whole
+/// synthetic city translates rigidly around the session anchor (3.2).
+model ReviewFixture {
+  id        String      @id @default(cuid())
+  tenantId  String
+  tenant    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  kind      FixtureKind
+  refId     String
+  offsetLat Float
+  offsetLng Float
+  payload   Json?
+
+  @@index([tenantId, kind])
+  @@map("review_fixtures")
 }
 
 model CountryConfig {
@@ -1273,11 +1370,16 @@ model Vendor {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  /// [STA-1 DL-4] Never in analytics, GMV, counts, ratings, identity
+  /// graph or a ledger. Belt to Tenant.kind's braces.
+  isSynthetic Boolean @default(false)
+
 
   @@index([status])
   @@index([vendorType])
   @@index([latitude, longitude])
   @@index([tenantId])
+  @@index([isSynthetic])
   @@index([mmgPayUrlApplyAt])
   @@map("vendors")
 }

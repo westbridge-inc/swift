@@ -37,6 +37,10 @@ export const TENANT_TABLES = [
   'rating_outbox',
   'privileged_approvals',
   'sensitive_read_logs',
+  // [STA-1 Part 4] The reviewer fiction is walled like every other tenant's rows.
+  'review_sessions',
+  'review_credentials',
+  'review_fixtures',
   'sos_retriggers',
   'guardian_checkin_deliveries',
   'legal_holds',
@@ -124,10 +128,35 @@ export function policyPredicateIsCanonical(expression: string | null | undefined
 export function rlsDdlFor(table: string): string[] {
   return [
     `ALTER TABLE "${table}" ENABLE ROW LEVEL SECURITY`,
+    // [STA-1 4.2] FORCE: without it the table OWNER bypasses the policy — the
+    // exact role the app becomes if pooling is misconfigured. Superusers still
+    // bypass (Postgres law), which is why the deploy role must never be one.
+    `ALTER TABLE "${table}" FORCE ROW LEVEL SECURITY`,
     `DROP POLICY IF EXISTS "${TENANT_POLICY_NAME}" ON "${table}"`,
     `CREATE POLICY "${TENANT_POLICY_NAME}" ON "${table}"
       USING (${POLICY_PREDICATE})
       WITH CHECK (${POLICY_PREDICATE})`,
+  ];
+}
+
+/** [STA-1 DL-8] A purge-protected tenant cannot be DELETEd — not by the go-live
+ *  purge, not by a bulk cleanup, not by a cascading mistake. Clearing the flag
+ *  is its own deliberate statement; the trigger refuses everything else.
+ *  Mirrors migration 20260905000000_review_tenant; the test installer heals
+ *  db-push environments with the same text. */
+export const TENANT_PURGE_GUARD = 'tenants_purge_guard';
+export function tenantPurgeGuardDdl(): string[] {
+  return [
+    `CREATE OR REPLACE FUNCTION ${TENANT_PURGE_GUARD}() RETURNS trigger AS $$
+      BEGIN
+        IF OLD."purgeProtected" THEN
+          RAISE EXCEPTION 'tenant % is purge-protected [STA-1 DL-8]: clear purgeProtected in its own statement before deleting it', OLD.id
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN OLD;
+      END $$ LANGUAGE plpgsql`,
+    `DROP TRIGGER IF EXISTS ${TENANT_PURGE_GUARD} ON tenants`,
+    `CREATE TRIGGER ${TENANT_PURGE_GUARD} BEFORE DELETE ON tenants FOR EACH ROW EXECUTE FUNCTION ${TENANT_PURGE_GUARD}()`,
   ];
 }
 
