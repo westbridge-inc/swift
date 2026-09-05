@@ -55,12 +55,20 @@ async function start() {
         if (created > 0 || aliasUpdated > 0) {
           app.log.info({ created, aliasUpdated }, 'discovery: taxonomy seeded');
         }
+        // [DOC-1 §4.2] The document registry mirrors every market's checklist as
+        // INACTIVE, provisional rows; the checklist facade keeps answering from
+        // the JSON until recorded legal facts activate them. Planted here, at
+        // boot after listen, so the rows exist for review and activation and
+        // are never minted lazily on a request path.
+        const { seedDocRegistry } = await import('./modules/verification/doc-registry');
+        const registry = await seedDocRegistry(app.prisma);
+        app.log.info({ docTypes: registry.docTypes, requirementSets: registry.requirementSets }, 'documents: registry seeded');
         // [R048-006] The contract is COMPLETE only here. Readiness answers 503
         // until this line runs, so an orchestrator never routes to a process
         // whose category rail would be empty.
         app.markBootContractsComplete();
       } catch (err) {
-        app.log.warn({ err }, 'discovery: taxonomy seed failed — the category rail will be empty');
+        app.log.warn({ err }, 'boot seeds failed — the category rail or the document registry may be empty; readiness stays 503');
       }
     })();
   } catch (err) {

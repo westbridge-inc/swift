@@ -90,6 +90,16 @@ describe('every seeder is reachable from production code', () => {
       .toMatch(/await seedDiscoveryTaxonomy\(/);
   });
 
+  it('[DOC-1 §4.2] the document registry is planted at BOOT, after listen and before the boot contract is marked complete', () => {
+    const server = readFileSync(join(SRC, 'server.ts'), 'utf8');
+    const afterListen = server.split('app.listen(')[1] ?? '';
+    const seedAt = afterListen.indexOf('await seedDocRegistry(');
+    const markAt = afterListen.indexOf('app.markBootContractsComplete();');
+    expect(seedAt, 'the registry seed is CALLED after listen').toBeGreaterThan(0);
+    expect(markAt, 'the boot contract is marked').toBeGreaterThan(0);
+    expect(seedAt, 'readiness must not turn green before the registry exists').toBeLessThan(markAt);
+  });
+
   it('a failed seed is logged, never fatal', () => {
     // A missing taxonomy degrades the rail. It must not take the API down —
     // the same rule the Meilisearch warm-up follows.
