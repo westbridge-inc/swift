@@ -5,7 +5,7 @@ import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCou
 import { lineTotal, orderTotal, promoDiscount, promoCapacity } from '../../utils/order-total';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
-import { getTenantContext, getTenantId } from '../../plugins/tenant-context';
+import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, expressDeliveryFee, type DeliveryRates } from '../../utils/markup';
 import { CountryConfigService } from '../country/country-config.service';
@@ -557,6 +557,10 @@ export async function customerRoutes(app: FastifyInstance) {
   app.addHook('onRequest', async (request, reply) => {
     if (request.method === 'GET' && PUBLIC_BROWSE.has(request.routeOptions?.url ?? '')) {
       await app.authenticateOptional(request);
+      // [STA-1 DL-7 / 4.1] Nobody bound → a guest. Guest browse is sanctioned
+      // cross-operator system work (allowed and counted under `deny`); the
+      // vendor predicates keep it to PRODUCTION operators.
+      if (!getTenantId()) enterPublicBrowse();
       return;
     }
     await app.authenticate(request, reply);

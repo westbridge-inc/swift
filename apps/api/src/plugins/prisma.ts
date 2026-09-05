@@ -1,4 +1,6 @@
 import { PrismaClient } from '@prisma/client';
+import { unscopedAccessPolicy, rlsBindEnabled } from '../lib/rls-attestation';
+export { unscopedAccessPolicy, rlsBindEnabled };
 import { destructiveGuardExtension, isTestRuntime } from '../lib/test-target-lock';
 import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
@@ -162,12 +164,12 @@ function stampTenant(data: unknown, tenantId: string): Record<string, unknown> {
  *  - `deny`: a request that has not bound a tenant, or an unbound composition
  *    root, is refused before the query; audited system work still runs.
  */
-export const unscopedAccessPolicy = (env: Record<string, string | undefined> = process.env): 'log' | 'deny' => (env['TENANT_UNSCOPED_ACCESS'] === 'deny' ? 'deny' : 'log');
+// (definition lives in lib/rls-attestation.ts so the boot assertion and the query wall read ONE rule; re-exported below)
 /** [TEN-03] Bind the tenant transaction-locally on every tenant-model query
  *  (`set_config('app.current_tenant', …, true)`; system work SETs the bypass
  *  role) so the database wall binds the APP under a NOBYPASSRLS login. Off
  *  until the least-privilege login exists (runbook in TEN-03). */
-export const rlsBindEnabled = (env: Record<string, string | undefined> = process.env): boolean => env['TENANT_RLS_BIND'] === '1';
+// (definition lives in lib/rls-attestation.ts; re-exported below)
 /** [TEN-01 · split clients] Audited system work runs on its OWN client — a
  *  login that is a member of `swift_bypass_rls` — when `SYSTEM_DATABASE_URL`
  *  is set. The request client's login must never be a member of that role

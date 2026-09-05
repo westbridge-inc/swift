@@ -11,6 +11,7 @@ import {
   readRlsFacts,
   assertTenantWall,
   type RlsFacts,
+  appSideWallGaps,
 } from '../lib/rls-attestation';
 
 // This suite creates a throwaway table to prove the owner filter actually
@@ -29,6 +30,8 @@ const ENFORCED: RlsFacts = {
 };
 
 const PROD = { NODE_ENV: 'production' };
+/** The posture that boots with a second tenant: the database wall AND the app's side of it. */
+const PROD_HELD_UP = { ...PROD, TENANT_RLS_BIND: '1', TENANT_UNSCOPED_ACCESS: 'deny' };
 
 describe('[TA-S0-003] the attestation names every way the wall fails to bind', () => {
   it('a fully contracted role is enforced and lists no bypass', () => {
@@ -131,8 +134,8 @@ describe('[TA-S0-003] the tenant-two gate', () => {
     expect(() => assertTenantWall(bypassed, 0, PROD)).not.toThrow();
   });
 
-  it('an enforced wall boots at any tenant count', () => {
-    expect(() => assertTenantWall(attestationOf(ENFORCED), 50, PROD)).not.toThrow();
+  it('an enforced wall, with the app holding up its end, boots at any tenant count', () => {
+    expect(() => assertTenantWall(attestationOf(ENFORCED), 50, PROD_HELD_UP)).not.toThrow();
   });
 
   it('development is never gated — local stacks run owner-mode by design', () => {
@@ -295,5 +298,40 @@ describe('[TA-S0-003] the gate cannot be outflanked by a new tenant-creation pat
       offenders,
       'A new tenant-creation path makes the boot-only wall gate insufficient: call assertTenantWall there, then add the file here.',
     ).toEqual([]);
+  });
+});
+
+describe('[STA-1 4.1 / DL-2] with a second tenant, the APPLICATION side of the wall is required too', () => {
+  const enforced = attestationOf(ENFORCED);
+  const HELD_UP = PROD_HELD_UP;
+
+  it('a bound, denying app in front of an enforced wall boots with two tenants', () => {
+    expect(() => assertTenantWall(enforced, 2, HELD_UP)).not.toThrow();
+    expect(appSideWallGaps(HELD_UP)).toEqual([]);
+  });
+
+  it('an enforced wall the app never binds is refused — by name', () => {
+    expect(() => assertTenantWall(enforced, 2, { ...HELD_UP, TENANT_RLS_BIND: undefined })).toThrow(/TENANT_RLS_BIND/);
+    expect(() => assertTenantWall(enforced, 2, { ...HELD_UP, TENANT_RLS_BIND: '0' })).toThrow(/does not hold up its end/);
+  });
+
+  it('an enforced wall with unscoped access merely logged is refused — by name', () => {
+    expect(() => assertTenantWall(enforced, 2, { ...HELD_UP, TENANT_UNSCOPED_ACCESS: undefined })).toThrow(/TENANT_UNSCOPED_ACCESS/);
+    expect(() => assertTenantWall(enforced, 2, { ...HELD_UP, TENANT_UNSCOPED_ACCESS: 'log' })).toThrow(/merely counted/);
+  });
+
+  it('both gaps are named at once, so one restart fixes both', () => {
+    expect(appSideWallGaps(PROD)).toHaveLength(2);
+    expect(() => assertTenantWall(enforced, 2, PROD)).toThrow(/TENANT_RLS_BIND[\s\S]*TENANT_UNSCOPED_ACCESS/);
+  });
+
+  it('the database side is named first when both sides are missing', () => {
+    const bypassed = attestationOf({ ...ENFORCED, isSuperuser: true });
+    expect(() => assertTenantWall(bypassed, 2, PROD)).toThrow(/tenant wall does not bind/i);
+  });
+
+  it('one tenant is the sanctioned EXPAND state and boots without either; outside production nothing is asserted', () => {
+    expect(() => assertTenantWall(enforced, 1, PROD)).not.toThrow();
+    expect(() => assertTenantWall(enforced, 2, { NODE_ENV: 'development' })).not.toThrow();
   });
 });

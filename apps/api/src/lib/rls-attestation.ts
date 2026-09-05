@@ -1,5 +1,20 @@
 import { runtimeMode } from '../utils/runtime-mode';
 
+type EnvLike = Record<string, string | undefined>;
+
+/** [TEN-01] What the app does with a query that reaches a tenant model with no
+ *  tenant bound. `log` (the default) runs it and counts it — the shadow that
+ *  finds every unnamed caller; `deny` refuses it before the query. Audited
+ *  system work runs either way. */
+export const unscopedAccessPolicy = (env: EnvLike = process.env): 'log' | 'deny' =>
+  (env['TENANT_UNSCOPED_ACCESS'] === 'deny' ? 'deny' : 'log');
+
+/** [TEN-03] Bind the tenant transaction-locally on every tenant-model query
+ *  (`set_config('app.current_tenant', …, true)`; system work SETs the bypass
+ *  role) so the database wall binds the APP under a NOBYPASSRLS login. Off
+ *  until the least-privilege login exists (runbook in TEN-03). */
+export const rlsBindEnabled = (env: EnvLike = process.env): boolean => env['TENANT_RLS_BIND'] === '1';
+
 /**
  * [TA-S0-003 / TEN-03] Does the database tenant wall actually bind THIS process?
  *
@@ -166,16 +181,41 @@ export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
 export function assertTenantWall(
   attestation: RlsAttestation,
   activeTenants: number,
-  env: Record<string, string | undefined> = process.env,
+  env: EnvLike = process.env,
 ): void {
   if (runtimeMode(env) !== 'production') return;
   if (activeTenants <= 1) return;
-  if (attestation.enforced) return;
-  const why = attestation.bypasses.map((b) => `  - ${explainBypass(b, attestation.facts)}`).join('\n');
+  if (!attestation.enforced) {
+    const why = attestation.bypasses.map((b) => `  - ${explainBypass(b, attestation.facts)}`).join('\n');
+    throw new Error(
+      `FATAL: ${activeTenants} active tenants, but the database tenant wall does not bind this connection:\n${why}\n` +
+        'With more than one tenant, row-level security is the only barrier that survives a missed application-layer scope. ' +
+        'Complete the CONTRACT stage — a least-privilege LOGIN that is a member of swift_app (NOBYPASSRLS, not the table owner), ' +
+        'per-request SET LOCAL app.current_tenant, and the FORCE ROW LEVEL SECURITY migration from forceRlsStatements(). Refusing to start.',
+    );
+  }
+  // [STA-1 4.1 / DL-2] The database holds up its end; the application must
+  // hold up its own. A wall the app never binds returns NOTHING to a
+  // NOBYPASSRLS login (an outage), and a request that never bound its tenant
+  // must fail closed, not read every tenant and be counted. Both were the
+  // shape of the 09-03 finding — measured, not assumed.
+  const missing = appSideWallGaps(env);
+  if (missing.length === 0) return;
   throw new Error(
-    `FATAL: ${activeTenants} active tenants, but the database tenant wall does not bind this connection:\n${why}\n` +
-      'With more than one tenant, row-level security is the only barrier that survives a missed application-layer scope. ' +
-      'Complete the CONTRACT stage — a least-privilege LOGIN that is a member of swift_app (NOBYPASSRLS, not the table owner), ' +
-      'per-request SET LOCAL app.current_tenant, and the FORCE ROW LEVEL SECURITY migration from forceRlsStatements(). Refusing to start.',
+    `FATAL: ${activeTenants} active tenants and the database tenant wall binds this connection, but the application does not hold up its end:\n` +
+      missing.map((m) => `  - ${m}`).join('\n') + '\n' +
+      'Set both and restart. Refusing to start.',
   );
+}
+
+/** The application-side requirements of the wall, as the sentences the boot log prints. */
+export function appSideWallGaps(env: EnvLike = process.env): string[] {
+  const gaps: string[] = [];
+  if (!rlsBindEnabled(env)) {
+    gaps.push('TENANT_RLS_BIND is not "1" — the app never SET LOCALs app.current_tenant, so an enforced wall returns nothing to anyone (and a bypassing role would return everything)');
+  }
+  if (unscopedAccessPolicy(env) !== 'deny') {
+    gaps.push('TENANT_UNSCOPED_ACCESS is not "deny" — a request that never bound its tenant reads every tenant and is merely counted');
+  }
+  return gaps;
 }
