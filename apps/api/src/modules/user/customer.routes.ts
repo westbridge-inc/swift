@@ -22,7 +22,7 @@ import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { visibleVendorRelForCaller, VISIBLE_VENDOR } from '../vendor/vendor-visibility';
+import { visibleVendorRelForCaller, visibleVendorForCaller } from '../vendor/vendor-visibility';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -922,7 +922,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // no tenant context, which the Prisma extension defines as an UNSCOPED
         // query — so without the relational predicate a deactivated operator's
         // whole catalog kept serving here after the platform shut them off.
-        where: { ...VISIBLE_VENDOR, items: { some: { isAvailable: true } } },
+        where: { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } },
         include: {
           // imageUrl was NOT selected, so Home had nothing to draw a category
           // chip with and every chip fell back to the same stock photograph —
@@ -1118,7 +1118,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
-    const where: Record<string, unknown> = { ...VISIBLE_VENDOR, items: { some: { isAvailable: true } } };
+    const where: Record<string, unknown> = { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } };
     if (type) where['vendorType'] = type;
 
     // Category feed (#17): membership = chosen + derived rows. A MERGED slug

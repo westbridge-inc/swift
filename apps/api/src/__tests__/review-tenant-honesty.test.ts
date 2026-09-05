@@ -144,6 +144,13 @@ describe('[RLS-N3] the public vendor surfaces show each session its own tenant',
     expect(p.body).not.toContain(ids.reviewVendor);
   });
 
+  it('[DL-7] a GUEST’s home is the truth: every active production operator, never the fiction', async () => {
+    const guest = await app.inject({ method: 'GET', url: `/api/v1/customer/home?lat=6.8&lng=-58.15&g=${RUN}` });
+    expect(guest.statusCode).toBe(200);
+    expect(guest.body).not.toContain(ids.reviewVendor);
+    expect(guest.body).toContain(ids.prodVendor);
+  });
+
   it('[DL-7] browsing by category resolves the CALLER’s taxonomy: the fiction’s slug lists the fiction; production has no such category and is told so honestly', async () => {
     const r = await get(`/api/v1/customer/vendors?category=${SLUG}`, reviewToken);
     expect(r.statusCode).toBe(200);

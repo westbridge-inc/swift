@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { getTenantId } from '../../plugins/tenant-context';
 // ---------------------------------------------------------------------------
 // THE customer-facing vendor-visibility predicate — ONE implementation
@@ -40,8 +41,24 @@ export const VISIBLE_VENDOR_REL = VISIBLE_VENDOR;
  * tenant reaches every tenant's vendors — a reviewer would see real menus and
  * a real customer the fiction's. Anonymous callers get the production tenant.
  */
-export function visibleVendorRelForCaller(): typeof VISIBLE_VENDOR & { tenantId: string } {
-  return { ...VISIBLE_VENDOR, tenantId: getTenantId() ?? 'swift-default' };
+export function visibleVendorRelForCaller(): Prisma.VendorWhereInput {
+  const tenantId = getTenantId();
+  return tenantId ? { ...visibleVendorForCaller(), tenantId } : visibleVendorForCaller();
+}
+
+/**
+ * [STA-1 DL-7] The visible-vendor predicate for the CALLER. A bound caller is
+ * already scoped to its tenant by the wall — the reviewer sees the fiction, a
+ * customer their operator — so the predicate is VISIBLE_VENDOR itself. A guest
+ * is unbound, and unbound means every tenant: the guest sees the truth, every
+ * ACTIVE PRODUCTION operator, never a REVIEW or CRAWLER tenant. Guest browse
+ * is deliberately cross-operator (home-popular-rail.test.ts) — cross-operator,
+ * not cross-kind.
+ */
+export function visibleVendorForCaller(): Prisma.VendorWhereInput {
+  return getTenantId()
+    ? VISIBLE_VENDOR
+    : { ...VISIBLE_VENDOR, tenant: { isActive: true, kind: 'PRODUCTION' } };
 }
 
 /**
