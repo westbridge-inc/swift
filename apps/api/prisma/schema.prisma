@@ -5064,6 +5064,8 @@ model AdsAuditLog {
 
 enum IdentitySignalType {
   ID_DOC_NUMBER
+  /// [DOC-1 DOC-INV-11] sha256 of a document's bytes — the same file on two accounts.
+  DOC_CONTENT
   TIN
   BUSINESS_REG
   PLATE
