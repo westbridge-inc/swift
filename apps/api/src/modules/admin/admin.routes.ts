@@ -67,6 +67,7 @@ import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana
 import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
+import { platformStats } from './platform-stats';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 
 // ---------------------------------------------------------------------------
@@ -933,7 +934,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const subscriptionScope = subscriptionTenantScope(tenantId);
     const today = startOfDayGY(); // DASH-06: Guyana-local "today", not UTC midnight
 
-    const [
+    const {
       totalUsers,
       totalOrders,
       todayOrders,
@@ -947,52 +948,7 @@ export async function adminRoutes(app: FastifyInstance) {
       pendingVendors,
       pastDueSubs,
       unassignedOrders,
-    ] = await Promise.all([
-      app.prisma.user.count(),
-      app.prisma.order.count(),
-      app.prisma.order.count({ where: { placedAt: { gte: today } } }),
-      app.prisma.order.aggregate({
-        where: { placedAt: { gte: today }, status: { in: ['DELIVERED', 'COMPLETED'] } },
-        _sum: { deliveryFee: true, totalAmount: true },
-        _count: true,
-      }),
-      app.prisma.rider.count({ where: { isOnline: true, user: { tenantId } } }),
-      app.prisma.driver.count({ where: { isOnline: true, user: { tenantId } } }),
-      app.prisma.vendor.count({ where: { status: 'ACTIVE' } }),
-      app.prisma.vendor.count(),
-      // DASH-01: real per-type revenue = the SUMMED weeklyRate of ACTIVE subs,
-      // never count × a hardcoded rate table (which undercounted large vendors
-      // 33% and counted TRIAL/PAST_DUE/CANCELLED as revenue). ACTIVE-only so
-      // the per-type lines reconcile with the weeklySubscriptionRevenue total.
-      // [A-07] The rows, not a `_sum`. A database aggregate cannot express
-      // "customRate if set, else weeklyRate, and nothing at all if waived" —
-      // which is exactly what the biller charges. Summing `weeklyRate` reported
-      // every custom-priced subscription at its LIST price and every waived one
-      // as full revenue for a period it will be charged nothing. Active
-      // subscriptions are bounded (hundreds), and this keeps Prisma's tenant
-      // scoping, which raw SQL would not.
-      app.prisma.subscription.findMany({
-        where: { status: 'ACTIVE', ...subscriptionScope },
-        select: { type: true, weeklyRate: true, customRate: true, feeWaived: true },
-      }),
-      app.prisma.user.count({ where: { createdAt: { gte: today } } }),
-      // SWIFT-118: the weeklyTrend raw SQL was removed — it was computed on every
-      // 30s dashboard poll (an UNSCOPED FROM orders, cross-tenant) but never
-      // rendered by any admin component. Deleted (rule 17); re-add scoped + wired
-      // if a trend chart ships.
-      // Operational alerts — real counts for the dashboard AlertsPanel.
-      app.prisma.vendor.count({ where: { status: 'PENDING_APPROVAL' } }),
-      app.prisma.subscription.count({ where: { status: 'PAST_DUE', ...subscriptionScope } }),
-      app.prisma.order.count({
-        where: {
-          riderId: null,
-          status: { in: ['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
-          placedAt: { lt: new Date(Date.now() - 10 * 60 * 1000) },
-          // A held order (LIFECYCLE_V2) is waiting on the customer, not ops.
-          AND: [{ OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] }],
-        },
-      }),
-    ]);
+    } = await platformStats(app.prisma, { tenantId, today, subscriptionScope });
 
     // [A-07] What will actually be billed this week, and — separately — what
     // has been given away. The two are different facts and the founder is shown

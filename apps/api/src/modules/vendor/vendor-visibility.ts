@@ -1,3 +1,4 @@
+import { getTenantId } from '../../plugins/tenant-context';
 // ---------------------------------------------------------------------------
 // THE customer-facing vendor-visibility predicate — ONE implementation
 // [B2/#790]. A store is visible to customers only when all three hold:
@@ -31,6 +32,17 @@ export const VISIBLE_VENDOR = {
 
 /** Spread into an ITEM query's `vendor:` relation filter. */
 export const VISIBLE_VENDOR_REL = VISIBLE_VENDOR;
+
+/**
+ * [STA-1 RLS-N3 / DL-7] The visible-vendor relation filter, pinned to the
+ * CALLER's tenant. Child tables without a tenantId column (items, categories)
+ * are walled only through their vendor, so a relation filter that omits the
+ * tenant reaches every tenant's vendors — a reviewer would see real menus and
+ * a real customer the fiction's. Anonymous callers get the production tenant.
+ */
+export function visibleVendorRelForCaller(): typeof VISIBLE_VENDOR & { tenantId: string } {
+  return { ...VISIBLE_VENDOR, tenantId: getTenantId() ?? 'swift-default' };
+}
 
 /**
  * The SAME predicate, decided in memory on an already-fetched row.

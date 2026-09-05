@@ -169,7 +169,14 @@ describe('[M-08] the key is required — the register’s first red test', () =>
     expect(again.statusCode).toBe(200);
     expect(again.json()).toMatchObject({ success: true, replayed: true, data: { balance: 5000, currencyCode: 'GYD' } });
     expect(await facts(sub.id)).toEqual({ credits: 1, receipts: 1, postings: 1, audits: 1, commands: 1, balance: 5000 });
-    const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entityId: sub.id, action: { in: ['PREPAID_TOPUP', 'ADMIN POST /api/v1/admin/subscriptions/:id/topup'] } } });
+    // The replay above leaves the backstop's row for the same subscription (no
+    // change, so no facts); the command's own row is the one that carries the
+    // key — select it by that, not by whichever the planner returns first.
+    const audit = await app.prisma.auditLog.findFirstOrThrow({ where: {
+      entityId: sub.id,
+      action: { in: ['PREPAID_TOPUP', 'ADMIN POST /api/v1/admin/subscriptions/:id/topup'] },
+      changes: { path: ['idempotencyKey'], equals: key },
+    } });
     // [A-12] Stored upper-cased: normalisation is what makes the unique index
     // work, so the same transfer typed two ways cannot occupy two rows.
     expect(audit.changes).toMatchObject({ amount: 5000, reference: transfer, idempotencyKey: key });
