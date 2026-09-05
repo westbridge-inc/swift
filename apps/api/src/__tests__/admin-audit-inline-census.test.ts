@@ -22,7 +22,7 @@ function handlerOf(key: string): string | null {
   const m = source.match(new RegExp(`app\\.${method.toLowerCase()}(?:<[^>]*>)?\\('${escapeRe(route)}'`));
   if (!m || m.index === undefined) return null;
   const rest = source.slice(m.index + 10);
-  const next = rest.search(/\n  app\.(get|post|put|patch|delete)(<[^>]*>)?\(/);
+  const next = rest.search(/\n {2}app\.(get|post|put|patch|delete)(<[^>]*>)?\(/);
   return source.slice(m.index, next === -1 ? undefined : m.index + 10 + next);
 }
 
