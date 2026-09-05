@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
+import { resolvePublicMarketTenant } from '../search/search-scope';
 import { z } from 'zod';
-import { NotFoundError, AppError } from '../../utils/errors';
+import { NotFoundError } from '../../utils/errors';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { serveEmergencyPolicy } from '../country/emergency-policy';
 import { emergencyPolicyCounter } from '../../plugins/observability';
@@ -101,35 +102,10 @@ const PUBLIC_WHERE = { status: 'ACTIVE' as const, isVerified: true };
  *    that. If profiling ever says otherwise the answer is invalidation on
  *    tenant writes, not a TTL guess.
  */
-async function resolvePublicTenantId(app: FastifyInstance): Promise<string> {
-  const explicit = process.env['PUBLIC_TENANT_ID'];
-  if (explicit) {
-    const configured = await app.prisma.tenant.findUnique({
-      where: { id: explicit },
-      select: { id: true, isActive: true },
-    });
-    if (!configured) {
-      throw new AppError(503, 'PUBLIC_TENANT_UNRESOLVED', 'PUBLIC_TENANT_ID names a tenant that does not exist — the deployment is misconfigured.');
-    }
-    if (!configured.isActive) {
-      throw new AppError(503, 'PUBLIC_TENANT_UNRESOLVED', 'PUBLIC_TENANT_ID names an INACTIVE tenant — its storefronts are not public.');
-    }
-    return configured.id;
-  }
-
-  const active = await app.prisma.tenant.findMany({
-    where: { isActive: true },
-    select: { id: true },
-    take: 2, // two is all it takes to know the rule is needed
-  });
-  if (active.length === 1) return active[0]!.id;
-  if (active.length === 0) throw new NotFoundError('Storefront');
-  throw new AppError(
-    503,
-    'PUBLIC_TENANT_UNRESOLVED',
-    'The public catalog is not configured for a multi-tenant deployment — set PUBLIC_TENANT_ID.',
-  );
-}
+/** One rule for every guest surface: the public catalogue's tenant is
+ *  resolved by search-scope.ts (PUBLIC_TENANT_ID, else the single ACTIVE
+ *  PRODUCTION tenant; a fiction never). This was a second copy of it. */
+const resolvePublicTenantId = resolvePublicMarketTenant;
 
 export async function publicRoutes(app: FastifyInstance) {
   /** GET /storefronts — the public directory. */

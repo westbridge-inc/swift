@@ -123,7 +123,7 @@ export function requireRequestTenant(request?: Pick<FastifyRequest, 'tenantId'>)
 export async function resolvePublicMarketTenant(app: FastifyInstance): Promise<string> {
   const explicit = process.env['PUBLIC_TENANT_ID'];
   if (explicit) {
-    const configured = await app.prisma.tenant.findUnique({ where: { id: explicit }, select: { id: true, isActive: true } });
+    const configured = await app.prisma.tenant.findUnique({ where: { id: explicit }, select: { id: true, isActive: true, kind: true } });
     if (!configured) {
       searchScopeCounter.labels('public_tenant_unresolved').inc();
       throw new AppError(503, 'PUBLIC_TENANT_UNRESOLVED', 'PUBLIC_TENANT_ID names a tenant that does not exist — the deployment is misconfigured.');
@@ -132,9 +132,18 @@ export async function resolvePublicMarketTenant(app: FastifyInstance): Promise<s
       searchScopeCounter.labels('disabled_tenant_hit').inc();
       throw new AppError(503, 'PUBLIC_TENANT_UNRESOLVED', 'PUBLIC_TENANT_ID names an INACTIVE tenant — its catalogue is not public.');
     }
+    if (configured.kind !== 'PRODUCTION') {
+      // [STA-1 DL-7] A fiction is never the public catalogue, however the
+      // deployment is configured.
+      searchScopeCounter.labels('public_tenant_unresolved').inc();
+      throw new AppError(503, 'PUBLIC_TENANT_UNRESOLVED', `PUBLIC_TENANT_ID names a ${configured.kind} tenant — only a PRODUCTION tenant can be the public catalogue.`);
+    }
     return configured.id;
   }
-  const active = await app.prisma.tenant.findMany({ where: { isActive: true }, select: { id: true }, take: 2 });
+  // [STA-1 DL-7] Only PRODUCTION tenants are candidates: provisioning the
+  // store-review fiction (a second ACTIVE tenant) must not make the public
+  // catalogue ambiguous, and must never make it the fiction.
+  const active = await app.prisma.tenant.findMany({ where: { isActive: true, kind: 'PRODUCTION' }, select: { id: true }, take: 2 });
   if (active.length === 1) return active[0]!.id;
   searchScopeCounter.labels('public_tenant_unresolved').inc();
   if (active.length === 0) throw new NotFoundError('Catalogue');
