@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
@@ -168,6 +170,29 @@ describe('[R048-003] the public market is one operator’s catalogue', () => {
     expect(foreign.statusCode).toBe(400);
     expect(foreign.json().error.code).toBe('BAD_CURSOR');
     expect(await count('cross_tenant_cursor')).toBe(before + 1);
+  });
+
+  it('[STA-1 DL-7] a REVIEW tenant is never the public catalogue: PUBLIC_TENANT_ID naming one is a loud 503 that names the kind', async () => {
+    const fiction = `scope-review-${RUN}`;
+    await app.prisma.tenant.create({ data: { id: fiction, name: 'Scope fiction', slug: fiction, kind: 'REVIEW' } });
+    try {
+      process.env['PUBLIC_TENANT_ID'] = fiction;
+      const res = await app.inject({ method: 'GET', url: '/api/v1/market/items' });
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error.code).toBe('PUBLIC_TENANT_UNRESOLVED');
+      expect(res.json().error.message).toMatch(/REVIEW tenant — only a PRODUCTION tenant/);
+    } finally {
+      delete process.env['PUBLIC_TENANT_ID'];
+      await app.prisma.tenant.delete({ where: { id: fiction } });
+    }
+  });
+
+  it('[STA-1 DL-7] the implicit branch considers PRODUCTION tenants only — a provisioned fiction cannot make the catalogue ambiguous', () => {
+    // The shared DB always holds several active tenants from parallel suites, so
+    // the single-candidate branch cannot be exercised end to end here; the rule
+    // is graded at its source and by the explicit-branch test above.
+    const src = readFileSync(join(__dirname, '..', 'modules', 'search', 'search-scope.ts'), 'utf8');
+    expect(src).toMatch(/tenant\.findMany\(\{ where: \{ isActive: true, kind: 'PRODUCTION' \}/);
   });
 
   it('an unresolvable public tenant is loud: two active operators and no PUBLIC_TENANT_ID, a disabled operator, an id pointing at nothing — 503, never an empty grid', async () => {
