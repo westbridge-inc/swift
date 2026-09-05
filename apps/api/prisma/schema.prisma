@@ -5997,6 +5997,9 @@ model DocType {
   legalFactsVerifiedAt      DateTime?      @db.Date
   legalFactsSourceNote      String?
   needsSpecimen             Boolean        @default(false)
+  /// [DOC-1 §6.9] In the always-review set by registry fact (the insurance certificate at launch);
+  /// PERSONAL bucket and needsSpecimen are always-review by rule.
+  alwaysReview              Boolean        @default(false)
   isActive                  Boolean        @default(false)
   registryVersion           Int            @default(1)
 
@@ -6197,6 +6200,9 @@ model ExtractionRun {
   /// Per-run AES-256-GCM DEK for the field values, wrapped by the master KEK.
   /// NULL = no KEK was configured, and no value was stored.
   wrappedDek       Bytes?
+  /// Processor-reported confidence for the extracted set (0..1); NULL = unknown, which
+  /// is never eligible for auto-approval (§6.9).
+  confidence       Decimal?             @db.Decimal(4, 3)
   /// DOC-INV-6: keys the processor returned that the registry does not declare —
   /// counted and dropped, never named.
   schemaViolations Int                  @default(0)

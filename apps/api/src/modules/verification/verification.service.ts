@@ -7,7 +7,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import type { KycProvider, KycVerificationResult } from '../../providers/kyc/kyc-provider';
-import { planExtraction, persistExtraction, recordExtractionMetrics, UNKNOWN_ENGINE, type ExtractionPlan } from './extraction-ledger';
+import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApproval, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
 import { registryCode } from './doc-registry';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
@@ -239,20 +239,25 @@ export class VerificationService {
     docType: string,
     result: KycVerificationResult & { collided?: boolean },
     timing: { startedAt: Date; finishedAt: Date },
-  ): Promise<ExtractionPlan> {
+  ): Promise<{ plan: ExtractionPlan; type: RoutingType | null }> {
     const type = await this.prisma.docType.findUnique({
       where: { code: registryCode(countryCode, docType) },
-      select: { extractionProfile: true, fields: { select: { fieldCode: true, isRequired: true, isBlindIndexed: true } } },
+      select: {
+        extractionProfile: true, isActive: true, bucket: true, needsSpecimen: true, alwaysReview: true, minConfidenceAutoApprove: true,
+        fields: { select: { fieldCode: true, isRequired: true, isBlindIndexed: true } },
+      },
     });
-    return planExtraction({
+    const plan = await planExtraction({
       declared: type?.fields ?? [],
       profileCode: type?.extractionProfile ?? 'UNPROFILED',
       engine: this.kyc.engine ?? UNKNOWN_ENGINE,
       extracted: result.extracted,
+      confidence: result.confidence,
       startedAt: timing.startedAt,
       finishedAt: timing.finishedAt,
       collided: result.collided === true,
     });
+    return { plan, type };
   }
 
   async submitDocument(
@@ -336,13 +341,12 @@ export class VerificationService {
     }
     result = await this.holdOnCrossSubjectCollision(userId, roleKey, fileUrl, result);
 
-    // [DOC-1 P4-4 · §0.5] The result lands as rows; a blocking validator FAIL (a
-    // required field the processor could not read) forbids auto-approval — never
-    // past a FAIL. The human sees the empty field set and keys it (T6).
-    const extraction = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt });
-    if (extraction.blockingFail && result.status === 'approved') {
-      result = { ...result, status: 'pending_manual' as const, reason: 'Required fields could not be read from the document — human review' };
-    }
+    // [DOC-1 P4-4 · P6-4] The result lands as rows, then §0.5 and §6.9 decide
+    // whether the processor's approval may stand: never past a blocking FAIL;
+    // and once the registry speaks for the type, never for the always-review
+    // set, a collision, an unvalidated document, or unknown / low confidence.
+    const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt });
+    result = gateAutoApproval(result, extraction, registryType);
 
     const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
     const doc = await this.createDocumentLively({
@@ -434,11 +438,9 @@ export class VerificationService {
         result = { ...result, status: 'pending_manual' as const };
       }
     }
-    // [DOC-1 P4-4 · §0.5] Ledger rows for the identity check; a blocking FAIL is never auto-approved.
-    const extraction = await this.planExtractionFor(user.countryCode, IDENTITY_DOC_TYPE, result, { startedAt, finishedAt });
-    if (extraction.blockingFail && result.status === 'approved') {
-      result = { ...result, status: 'pending_manual' as const, reason: 'Required fields could not be read from the document — human review' };
-    }
+    // [DOC-1 P4-4 · P6-4] Ledger rows for the identity check; §0.5 / §6.9 decide whether the approval stands.
+    const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, IDENTITY_DOC_TYPE, result, { startedAt, finishedAt });
+    result = gateAutoApproval(result, extraction, registryType);
 
     const doc = await this.createDocumentLively({
         userId,
