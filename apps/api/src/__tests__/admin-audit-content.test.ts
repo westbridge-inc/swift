@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -226,15 +227,23 @@ describe('[ADM-004] the census: every consequential action is accounted for', ()
     }
   });
 
-  it('every declared field list names at least one field, and money routes name their amount', () => {
+  it('every declared field list names at least one field, and money routes name a REAL money column', () => {
+    const lowerFirst = (x: string) => x.charAt(0).toLowerCase() + x.slice(1);
+    const types = new Map(Prisma.dmmf.datamodel.models.map((m) => [lowerFirst(m.name), new Map(m.fields.map((f) => [f.name, f.type]))]));
     for (const [key, a] of Object.entries(ADMIN_ROUTE_AUTHORITY)) {
       if (!a.entity) continue;
       expect(a.entity.fields.length, key).toBeGreaterThan(0);
     }
-    // the settlement, claim and invoice rails all record what moved, not just that it moved
+    // The settlement, claim and invoice rails all record what moved, not just
+    // that it moved — and "what moved" must be a column the model actually
+    // has. This rule used to be a name test (/amount/i), and it was satisfied
+    // for months by `settlement.amount`, a field Settlement never had; the
+    // diff it certified was empty. [ADM-002] It now asks the schema.
     for (const key of ['PUT /finance/settlements/:id/process', 'PUT /cash-rules/claims/:id/paid', 'PUT /ads/invoices/:id/mark-paid']) {
-      expect(ADMIN_ROUTE_AUTHORITY[key]!.entity!.fields, key).toContain('status');
-      expect(ADMIN_ROUTE_AUTHORITY[key]!.entity!.fields.some((f) => /amount/i.test(f)), key).toBe(true);
+      const e = ADMIN_ROUTE_AUTHORITY[key]!.entity!;
+      expect(e.fields, key).toContain('status');
+      const money = e.fields.filter((f) => types.get(e.model)?.get(f) === 'Decimal');
+      expect(money.length, `${key}: ${e.model} must declare a Decimal money column`).toBeGreaterThan(0);
     }
   });
 });
