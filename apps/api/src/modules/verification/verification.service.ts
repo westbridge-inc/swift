@@ -6,7 +6,9 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
-import type { KycProvider } from '../../providers/kyc/kyc-provider';
+import type { KycProvider, KycVerificationResult } from '../../providers/kyc/kyc-provider';
+import { planExtraction, persistExtraction, recordExtractionMetrics, UNKNOWN_ENGINE, type ExtractionPlan } from './extraction-ledger';
+import { registryCode } from './doc-registry';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
@@ -195,9 +197,9 @@ export class VerificationService {
    *  paused (KYC latency), cannot land new PII after the purge committed. */
   private async createDocumentLively(
     data: Prisma.VerificationDocumentUncheckedCreateInput,
-    review: { queue: ReviewQueue } = { queue: 'STANDARD' },
+    review: { queue: ReviewQueue; extraction?: ExtractionPlan } = { queue: 'STANDARD' },
   ) {
-    return this.prisma.$transaction(async (tx) => {
+    const doc = await this.prisma.$transaction(async (tx) => {
       const alive = await tx.$queryRaw<{ status: string; tenantId: string }[]>(
         Prisma.sql`SELECT status, "tenantId" FROM users WHERE id = ${data.userId} FOR SHARE`,
       );
@@ -216,7 +218,40 @@ export class VerificationService {
           createdAt: queuedAt, slaDueAt: new Date(queuedAt.getTime() + REVIEW_SLA_HOURS * 3_600_000),
         } });
       }
+      // [DOC-1 P4-4] The processor result lands as rows in the same transaction:
+      // a submission without its extraction ledger cannot exist.
+      if (review.extraction) {
+        await persistExtraction(tx, { submissionId: doc.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
+      }
       return doc;
+    });
+    if (review.extraction) recordExtractionMetrics(review.extraction);
+    return doc;
+  }
+
+  /**
+   * [DOC-1 P4-4] Plan the ledger rows for a processor result: the registry's
+   * declared fields for this document type, the engine that ran, its timing,
+   * and the cross-subject collision flag. Pure over its inputs (one registry read).
+   */
+  private async planExtractionFor(
+    countryCode: string,
+    docType: string,
+    result: KycVerificationResult & { collided?: boolean },
+    timing: { startedAt: Date; finishedAt: Date },
+  ): Promise<ExtractionPlan> {
+    const type = await this.prisma.docType.findUnique({
+      where: { code: registryCode(countryCode, docType) },
+      select: { extractionProfile: true, fields: { select: { fieldCode: true, isRequired: true, isBlindIndexed: true } } },
+    });
+    return planExtraction({
+      declared: type?.fields ?? [],
+      profileCode: type?.extractionProfile ?? 'UNPROFILED',
+      engine: this.kyc.engine ?? UNKNOWN_ENGINE,
+      extracted: result.extracted,
+      startedAt: timing.startedAt,
+      finishedAt: timing.finishedAt,
+      collided: result.collided === true,
     });
   }
 
@@ -274,6 +309,7 @@ export class VerificationService {
     // Identity documents get the full ID + face-match check against the
     // operator's signup selfie; every other document is a plain doc check.
     let result;
+    const startedAt = new Date();
     // [DOC-1 §0.5 · FD-D5 · CONFLICT-DOC-2] The biometric leg runs only while
     // the kill switch is on (default); off, an identity document is verified
     // like any other document — no face leaves the building.
@@ -285,6 +321,7 @@ export class VerificationService {
     } else {
       result = await this.kyc.verifyDocument({ userId, docType, fileUrl });
     }
+    const finishedAt = new Date();
 
     // Enforcement ladder rung 2/3 (trial-integrity Part 4): a HELD account
     // (velocity REVIEW_FIRST / fraud-tier hold) is never auto-approved — the
@@ -298,6 +335,14 @@ export class VerificationService {
       }
     }
     result = await this.holdOnCrossSubjectCollision(userId, roleKey, fileUrl, result);
+
+    // [DOC-1 P4-4 · §0.5] The result lands as rows; a blocking validator FAIL (a
+    // required field the processor could not read) forbids auto-approval — never
+    // past a FAIL. The human sees the empty field set and keys it (T6).
+    const extraction = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt });
+    if (extraction.blockingFail && result.status === 'approved') {
+      result = { ...result, status: 'pending_manual' as const, reason: 'Required fields could not be read from the document — human review' };
+    }
 
     const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
     const doc = await this.createDocumentLively({
@@ -320,7 +365,7 @@ export class VerificationService {
           ...(autoExpiryDays && { expiresAt: new Date(Date.now() + autoExpiryDays * 24 * 60 * 60 * 1000) }),
         }),
         ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
-    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD' });
+    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction });
 
     // Provider listability is the first post-document projection. Everything
     // below (audit, integrity, notifications, trials) may fail independently;
@@ -368,7 +413,7 @@ export class VerificationService {
     selfieUrl: string,
     privacyNoticeVersion: string,
   ) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, trustLevel: true } });
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, trustLevel: true, countryCode: true } });
     if (!user) throw new NotFoundError('User', userId);
     if (user.trustLevel !== 'L1') {
       throw new AppError(409, 'ALREADY_VERIFIED', 'Identity is already verified');
@@ -376,9 +421,11 @@ export class VerificationService {
 
     // [DOC-1 §0.5 · FD-D5] Biometric off → the L2 identity document is verified
     // document-only; the selfie is not sent anywhere.
+    const startedAt = new Date();
     let result = biometricFaceMatchEnabled()
       ? await this.kyc.verifyIdentity({ userId, idDocumentUrl, selfieUrl })
       : await this.kyc.verifyDocument({ userId, docType: 'national_id', fileUrl: idDocumentUrl });
+    const finishedAt = new Date();
     result = await this.holdOnCrossSubjectCollision(userId, 'MOVER', idDocumentUrl, result);
     // Rung 2/3: held accounts are never auto-approved (see submitDocument).
     if (result.status === 'approved') {
@@ -386,6 +433,11 @@ export class VerificationService {
       if ((await hasActiveHold(this.prisma, userId)).held) {
         result = { ...result, status: 'pending_manual' as const };
       }
+    }
+    // [DOC-1 P4-4 · §0.5] Ledger rows for the identity check; a blocking FAIL is never auto-approved.
+    const extraction = await this.planExtractionFor(user.countryCode, IDENTITY_DOC_TYPE, result, { startedAt, finishedAt });
+    if (extraction.blockingFail && result.status === 'approved') {
+      result = { ...result, status: 'pending_manual' as const, reason: 'Required fields could not be read from the document — human review' };
     }
 
     const doc = await this.createDocumentLively({
@@ -402,7 +454,7 @@ export class VerificationService {
           : 'PENDING',
         ...(result.status !== 'pending_manual' && { reviewedBy: 'kyc:auto', reviewedAt: new Date() }),
         ...(result.status === 'rejected' && { reviewNote: result.reason }),
-    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD' });
+    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction });
 
     await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason);
 

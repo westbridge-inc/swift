@@ -235,6 +235,22 @@ export const integrityCaptureCounter = new client.Counter({
 });
 
 /** [R048-006] Readiness by dependency (1 ready / 0 not) after the last /ready evaluation. */
+// [DOC-1 §4.4 · P4-4] The extraction ledger counts: runs by engine and outcome, and
+// the keys a processor returned that the registry does not declare (DOC-INV-6 —
+// counted and dropped, never named, never logged).
+export const docExtractionRunCounter = new client.Counter({
+  name: 'swift_doc_extraction_runs_total',
+  help: 'Document extraction runs, by engine and outcome',
+  labelNames: ['engine', 'outcome'] as const,
+  registers: [registry],
+});
+export const docExtractionSchemaViolationCounter = new client.Counter({
+  name: 'swift_doc_extraction_schema_violations_total',
+  help: 'Undeclared keys returned by a document processor and dropped (DOC-INV-6)',
+  labelNames: ['engine'] as const,
+  registers: [registry],
+});
+
 export const readinessGauge = new client.Gauge({
   name: 'swift_readiness_dependency',
   help: 'Readiness by dependency after the last /ready evaluation (1 ready, 0 not ready)',

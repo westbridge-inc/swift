@@ -1,4 +1,4 @@
-import type { KycProvider, KycVerificationResult, KycStatus } from './kyc-provider';
+import type { KycEngine, KycProvider, KycVerificationResult, KycStatus } from './kyc-provider';
 
 // ---------------------------------------------------------------------------
 // Didit adapter (https://didit.me) — standalone v3 verification APIs
@@ -38,6 +38,8 @@ interface FaceMatchResponse {
 }
 
 export class DiditKycProvider implements KycProvider {
+  readonly engine: KycEngine = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' };
+
   private readonly apiKey: string;
   private readonly baseUrl: string;
 

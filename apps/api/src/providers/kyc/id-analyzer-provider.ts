@@ -1,4 +1,4 @@
-import type { KycProvider, KycVerificationResult, KycStatus } from './kyc-provider';
+import type { KycEngine, KycProvider, KycVerificationResult, KycStatus } from './kyc-provider';
 
 // ---------------------------------------------------------------------------
 // ID Analyzer adapter (https://idanalyzer.com) — document OCR + biometric face
@@ -33,6 +33,8 @@ interface ScanResponse {
 }
 
 export class IdAnalyzerKycProvider implements KycProvider {
+  readonly engine: KycEngine = { name: 'id-analyzer', version: 'api2', external: true, processorRef: 'ID_ANALYZER' };
+
   private readonly apiKey: string;
   private readonly baseUrl: string;
 

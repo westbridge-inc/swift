@@ -399,6 +399,9 @@ model Tenant {
   deletionReceipts  DeletionReceipt[]
   reviewCases       ReviewCase[]
   reviewDecisions   ReviewDecision[]
+  extractionRuns    ExtractionRun[]
+  extractedFields   ExtractedField[]
+  validationResults ValidationResult[]
 
   @@index([kind])
   @@map("tenants")
@@ -613,6 +616,9 @@ model VerificationDocument {
   purgedAt             DateTime?
   createdAt            DateTime                   @default(now())
   updatedAt            DateTime                   @updatedAt
+  /// [DOC-1 P4-4] the extraction ledger of this submission
+  extractionRuns       ExtractionRun[]
+  validationResults    ValidationResult[]
 
   @@index([status])
   @@index([userId])
@@ -6137,4 +6143,111 @@ model ReviewDecision {
 
   @@index([caseId])
   @@map("review_decision")
+}
+
+/// [DOC-1 §4.1] How a field value was read. PROVIDER is the code-truth extension of
+/// the spec closed enum: the value came from the KYC provider adapter, which does not
+/// disclose its method (CONFLICT-DOC-2: external processors are used by decision).
+enum ExtractionSource {
+  MRZ
+  BARCODE
+  OCR_VLM
+  HUMAN
+  DERIVED
+  PROVIDER
+}
+
+/// [DOC-1 §4.4] OK = every required field read; PARTIAL = some, or values could not be
+/// stored; FAILED = not one required field (T6: the human keys it).
+enum ExtractionOutcome {
+  OK
+  PARTIAL
+  FAILED
+}
+
+enum ValidationStatus {
+  PASS
+  FAIL
+  WARN
+  SKIP
+}
+
+/// [DOC-1 §4.4 · P4-4] One processor call on one submission. The result lands here as
+/// rows — never in a log line (DOC-INV-15).
+model ExtractionRun {
+  id               String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String               @default("swift-default")
+  tenant           Tenant               @relation(fields: [tenantId], references: [id])
+  /// The VerificationDocument (P4-2's document_submission is not yet split out); rows die with it.
+  submissionId     String
+  submission       VerificationDocument @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  /// DocType.extractionProfile of the document type, or UNPROFILED.
+  profileCode      String
+  engineName       String
+  engineVersion    String
+  modelSha256      String?
+  startedAt        DateTime
+  finishedAt       DateTime?
+  durationMs       Int?
+  outcome          ExtractionOutcome
+  errorClass       String?
+  ranExternally    Boolean              @default(false)
+  /// DGP-1 processor register code when the document left the building.
+  processorRef     String?
+  /// Per-run AES-256-GCM DEK for the field values, wrapped by the master KEK.
+  /// NULL = no KEK was configured, and no value was stored.
+  wrappedDek       Bytes?
+  /// DOC-INV-6: keys the processor returned that the registry does not declare —
+  /// counted and dropped, never named.
+  schemaViolations Int                  @default(0)
+  createdAt        DateTime             @default(now())
+  fields           ExtractedField[]
+
+  @@index([submissionId])
+  @@index([tenantId, startedAt])
+  @@map("extraction_run")
+}
+
+/// [DOC-1 §4.4 · P4-4] One DECLARED field (§4.2 doc_field) of one submission.
+/// valueCt NULL = ABSENT (or illegible when isIllegible).
+model ExtractedField {
+  id           String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String           @default("swift-default")
+  tenant       Tenant           @relation(fields: [tenantId], references: [id])
+  runId        String           @db.Uuid
+  run          ExtractionRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  submissionId String
+  fieldCode    String
+  /// iv(12) | authTag(16) | ciphertext — AES-256-GCM under the run DEK.
+  valueCt      Bytes?
+  /// The identity graph's keyed hash of the normalised value, only when doc_field.isBlindIndexed.
+  valueBlind   String?
+  confidence   Decimal?         @db.Decimal(4, 3)
+  source       ExtractionSource
+  bbox         Json?
+  isIllegible  Boolean          @default(false)
+  correctedBy  String?
+  correctedAt  DateTime?
+
+  @@unique([submissionId, fieldCode])
+  @@index([valueBlind])
+  @@map("extracted_field")
+}
+
+/// [DOC-1 §4.4 · P4-4] One validator verdict on one submission (§7). A blocking FAIL
+/// forbids auto-approval (§0.5).
+model ValidationResult {
+  id            String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String               @default("swift-default")
+  tenant        Tenant               @relation(fields: [tenantId], references: [id])
+  submissionId  String
+  submission    VerificationDocument @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  validatorCode String
+  status        ValidationStatus
+  detailCode    String?
+  isBlocking    Boolean
+  evaluatedAt   DateTime             @default(now())
+
+  @@unique([submissionId, validatorCode])
+  @@map("validation_result")
 }
