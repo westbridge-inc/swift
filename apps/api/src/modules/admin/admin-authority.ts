@@ -103,31 +103,39 @@ const c = (cls: AdminActionClass, capability: string, entity?: AdminRouteEntity)
 const E = {
   user: { model: 'user', fields: ['status', 'activeRole', 'roles'] },
   vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured'] },
-  rider: { model: 'rider', fields: ['isVerified', 'isAvailable', 'status'] },
-  driver: { model: 'driver', fields: ['isVerified', 'isAvailable', 'rideClass', 'status'] },
-  order: { model: 'order', fields: ['status', 'total', 'refundStatus', 'cancelledAt'] },
+  // [ADM-002] Rider/Driver never had `isVerified` or `status`; verification
+  // lives in `documentsVerified*`, and a safety suspension is a timestamp.
+  rider: { model: 'rider', fields: ['documentsVerified', 'documentsVerifiedAt', 'isAvailable', 'isOnline', 'safetySuspendedAt'] },
+  driver: { model: 'driver', fields: ['documentsVerified', 'documentsVerifiedAt', 'isAvailable', 'isOnline', 'rideClass', 'safetySuspendedAt'] },
+  // [ADM-002] `total` and `refundStatus` never existed on Order — declared
+  // fields that the schema does not carry are silently skipped, so the diff
+  // for every order route said nothing about money. These are the columns a
+  // refund actually moves; the reference and the amount are the only proof
+  // that a refund happened, and they belong in the trail as a diff.
+  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
-  settlement: { model: 'settlement', fields: ['status', 'amount', 'paidAt', 'reference'] },
+  settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   platformConfig: { model: 'platformConfig', param: 'key', fields: ['value'] },
   promo: { model: 'promoCode', fields: ['isActive', 'discountValue', 'validFrom', 'validUntil'] },
   zone: { model: 'zone', fields: ['isActive', 'name', 'priority'] },
   advertiser: { model: 'advertiser', fields: ['status'] },
   adCampaign: { model: 'adCampaign', fields: ['status'] },
   adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },
-  adRefundIntent: { model: 'adRefundIntent', fields: ['status', 'amount'] },
+  adRefundIntent: { model: 'adRefundIntent', fields: ['status', 'payoutRail', 'manualPayoutRef', 'providerRefundRef', 'completedAt'] },
   agentPayment: { model: 'mmgAgentPayment', fields: ['status', 'amount', 'subscriptionId'] },
-  settlementBatch: { model: 'settlementBatch', fields: ['status', 'depositConfirmedAt', 'expectedAmount'] },
+  settlementBatch: { model: 'settlementBatch', fields: ['status', 'expectedNetGyd', 'depositedGyd', 'depositedAt', 'bankRef'] },
   verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
-  returnRequest: { model: 'returnRequest', fields: ['status', 'refundAmount', 'resolvedAt'] },
+  // [ADM-002] `resolvedAt` does not exist on ReturnRequest (`reviewedAt` does).
+  returnRequest: { model: 'returnRequest', fields: ['status', 'refundAmount', 'reviewedAt', 'refundRef', 'refundPaidAmount', 'refundPaidAt'] },
   claim: { model: 'reimbursementClaim', fields: ['status', 'amount', 'paidAt'] },
   contentReport: { model: 'contentReport', fields: ['status', 'disposition'] },
-  rating: { model: 'rating', fields: ['isPublic', 'moderationState'] },
+  rating: { model: 'rating', fields: ['isPublic', 'state', 'stateReason', 'flagged'] },
   ratingReport: { model: 'ratingReport', fields: ['status'] },
   approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt'] },
   agentRequest: { model: 'agentActionRequest', fields: ['status', 'decidedBy', 'decidedAt'] },
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
-  complianceViolation: { model: 'complianceViolation', fields: ['status', 'resolvedAt'] },
-  discoveryCategory: { model: 'discoveryCategory', fields: ['isActive', 'slug', 'name'] },
+  complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
+  discoveryCategory: { model: 'discoveryCategory', fields: ['status', 'slug', 'name', 'sortWeight'] },
 } as const satisfies Record<string, AdminRouteEntity>;
 
 /**

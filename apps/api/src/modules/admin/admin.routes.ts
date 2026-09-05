@@ -2459,51 +2459,51 @@ export async function adminRoutes(app: FastifyInstance) {
         `This order owes GY$${owed.toLocaleString()}, not GY$${stated.toLocaleString()}. Refund the owed amount, or record the difference as an exception first.`,
     }, 'REFUND_AMOUNT');
 
-    // CAS on the obligation still being open, so two settlers racing produce
-    // one settlement and one honest refusal.
-    const settled = await tenantPrisma.order.updateMany({
-      where: { id, refundOwedAt: { not: null }, refundSettledAt: null },
-      data: {
-        status: 'REFUNDED',
-        refundRef: reference,
-        refundPaidAmount: paid,
-        refundSettledById: request.user.userId,
-        refundSettledAt: new Date(),
-      },
-    }).catch((err: unknown) => {
-      if (isDuplicateOn(err, 'refundRef')) {
-        orderRefundCounter.labels('refused_duplicate').inc();
-        throw new AppError(
-          409,
-          'REFUND_REF_ALREADY_USED',
-          'That reference is already recorded against another order. One handover settles one order.',
-        );
+    // [ADM-002] The settlement, its status-log line and the audit row commit
+    // together. The CAS is unchanged and still does its job inside the
+    // transaction: two settlers racing produce one settlement and one honest
+    // refusal, and a refusal throws out of the callback having written
+    // nothing. The reference and the amount are the only proof the refund
+    // happened; they reach the trail as a before/after diff of the declared
+    // `E.order` fields, so the legacy row that hand-typed them is retired.
+    const updated = await tenantPrisma.$transaction(async (tx) => {
+      const settled = await tx.order.updateMany({
+        where: { id, refundOwedAt: { not: null }, refundSettledAt: null },
+        data: {
+          status: 'REFUNDED',
+          refundRef: reference,
+          refundPaidAmount: paid,
+          refundSettledById: request.user.userId,
+          refundSettledAt: new Date(),
+        },
+      }).catch((err: unknown) => {
+        if (isDuplicateOn(err, 'refundRef')) {
+          orderRefundCounter.labels('refused_duplicate').inc();
+          throw new AppError(
+            409,
+            'REFUND_REF_ALREADY_USED',
+            'That reference is already recorded against another order. One handover settles one order.',
+          );
+        }
+        throw err;
+      });
+      if (settled.count === 0) {
+        orderRefundCounter.labels('refused_not_due').inc();
+        throw new AppError(409, 'ALREADY_SETTLED', 'This refund was settled by someone else just now.');
       }
-      throw err;
+      await tx.orderStatusLog.create({
+        data: {
+          orderId: id,
+          status: 'REFUNDED',
+          changedBy: request.user.userId,
+          note: `Refund settled — reference ${reference}`,
+        },
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      return tx.order.findUniqueOrThrow({ where: { id } });
     });
-    if (settled.count === 0) {
-      orderRefundCounter.labels('refused_not_due').inc();
-      throw new AppError(409, 'ALREADY_SETTLED', 'This refund was settled by someone else just now.');
-    }
-    await tenantPrisma.orderStatusLog.create({
-      data: {
-        orderId: id,
-        status: 'REFUNDED',
-        changedBy: request.user.userId,
-        note: `Refund settled — reference ${reference}`,
-      },
-    });
-    await audit(
-      request.user.userId,
-      'SETTLE_ORDER_REFUND',
-      'Order',
-      id,
-      { reference, amount: String(paid) },
-      request,
-    );
     orderRefundCounter.labels('settled').inc();
     app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'REFUNDED' });
-    const updated = await tenantPrisma.order.findUniqueOrThrow({ where: { id } });
     return { success: true, data: updated };
   });
 
@@ -3091,16 +3091,23 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!subscription) throw new NotFoundError('Subscription', id);
 
-    const updated = await mutationOrNotFound('Subscription', id, () => app.prisma.subscription.update({
-      where: { id, ...tenantScope },
-      data: {
-        feeWaived: true,
-        feeWaivedBy: request.user.userId,
-        feeWaivedReason: reason,
-      },
-    }));
-
-    await audit(request.user.userId, 'WAIVE_SUBSCRIPTION_FEE', 'Subscription', id, { reason }, request);
+    // [ADM-002] Waiving a fee is money. The waiver and its audit row commit
+    // together; the holder is told only after the commit, because a
+    // notification cannot be recalled either. `E.subscription` declares
+    // `feeWaived`, so the diff carries the fact and the stated reason rides in
+    // `changes.reason` — the legacy row that repeated it is retired.
+    const updated = await app.prisma.$transaction(async (tx) => {
+      const row = await mutationOrNotFound('Subscription', id, () => tx.subscription.update({
+        where: { id, ...tenantScope },
+        data: {
+          feeWaived: true,
+          feeWaivedBy: request.user.userId,
+          feeWaivedReason: reason,
+        },
+      }));
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      return row;
+    });
 
     // Notify the subscription holder
     const notifyUserId = subscription.riderId
@@ -4817,39 +4824,36 @@ export async function adminRoutes(app: FastifyInstance) {
         `This return is owed GY$${owed.toLocaleString()}, not GY$${stated.toLocaleString()}. Refund the owed amount, or record the difference as an exception first.`,
     }, 'REFUND_AMOUNT');
 
-    const settled = await tenantPrisma.returnRequest.updateMany({
-      where: { id, status: 'REFUND_DUE' },
-      data: {
-        status: 'REFUNDED',
-        refundRef: reference,
-        refundPaidAmount: paid,
-        refundPaidById: request.user.userId,
-        refundPaidAt: new Date(),
-        ...(body.note ? { resolutionNote: body.note } : {}),
-      },
-    }).catch((err: unknown) => {
-      if (isDuplicateOn(err, 'refundRef')) {
-        returnRefundCounter.labels('refused_duplicate').inc();
-        throw new AppError(
-          409,
-          'REFUND_REF_ALREADY_USED',
-          'That reference is already recorded against another return. One transfer settles one return.',
-        );
-      }
-      throw err;
+    // [ADM-002] Same shape as the order settlement: CAS + audit in one
+    // transaction, the transfer reference carried by the declared
+    // `E.returnRequest` diff, counter and read-back after the commit.
+    const updated = await tenantPrisma.$transaction(async (tx) => {
+      const settled = await tx.returnRequest.updateMany({
+        where: { id, status: 'REFUND_DUE' },
+        data: {
+          status: 'REFUNDED',
+          refundRef: reference,
+          refundPaidAmount: paid,
+          refundPaidById: request.user.userId,
+          refundPaidAt: new Date(),
+          ...(body.note ? { resolutionNote: body.note } : {}),
+        },
+      }).catch((err: unknown) => {
+        if (isDuplicateOn(err, 'refundRef')) {
+          returnRefundCounter.labels('refused_duplicate').inc();
+          throw new AppError(
+            409,
+            'REFUND_REF_ALREADY_USED',
+            'That reference is already recorded against another return. One transfer settles one return.',
+          );
+        }
+        throw err;
+      });
+      if (settled.count === 0) throw new AppError(409, 'ALREADY_SETTLED', 'This return was settled by someone else just now.');
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      return tx.returnRequest.findUniqueOrThrow({ where: { id } });
     });
-    if (settled.count === 0) throw new AppError(409, 'ALREADY_SETTLED', 'This return was settled by someone else just now.');
-
-    await audit(
-      request.user.userId,
-      'SETTLE_RETURN_REFUND',
-      'ReturnRequest',
-      id,
-      { reference, amount: String(paid) },
-      request,
-    );
     returnRefundCounter.labels('settled').inc();
-    const updated = await tenantPrisma.returnRequest.findUniqueOrThrow({ where: { id } });
     return { success: true, data: updated };
   });
 
