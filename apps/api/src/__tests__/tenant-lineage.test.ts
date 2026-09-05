@@ -10,6 +10,7 @@
  * silently again (the /home leak of 2026-09-05 was exactly that).
  *
  * Generated from the DMMF on 2026-09-05; edit the registers, not the rule.
+ * 2026-09-05 (later): Item and Category left the register — they carry tenantId now (the exemplar EXPAND).
  */
 import { describe, it, expect } from 'vitest';
 import { Prisma } from '@prisma/client';
@@ -30,9 +31,10 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
   VendorStaff: ['Vendor', 'User'],
   VendorImage: ['Vendor'],
   OperatingHours: ['Vendor'],
-  Category: ['Vendor'],
-  Item: ['Vendor'],
+  Booking: ['Item'],
+  OptionGroup: ['Item'],
   OrderItem: ['Order'],
+  StockAdjustment: ['Item'],
   OrderStatusLog: ['Order'],
   Rating: ['User'],
   ServiceProvider: ['User'],
@@ -51,6 +53,7 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
   PayoutRequest: ['User'],
   PayoutSchedule: ['User'],
   Cart: ['User', 'Vendor'],
+  CartItem: ['Item'],
   EvidenceItem: ['EvidenceBundle'],
   AdvertiserMember: ['Advertiser'],
   AdInventoryWeek: ['AdPlacement'],
@@ -61,9 +64,6 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
 
 /** Walled through a parent that is itself only walled by lineage — two or more hops from the tenant. */
 export const GRANDCHILD_OF: Record<string, string> = {
-  Booking: 'Item',
-  OptionGroup: 'Item',
-  StockAdjustment: 'Item',
   Option: 'OptionGroup',
   OrderItemOption: 'OrderItem',
   BillingEvent: 'Subscription',
@@ -72,7 +72,6 @@ export const GRANDCHILD_OF: Record<string, string> = {
   SubscriptionRefund: 'Subscription',
   Earning: 'Rider/Driver',
   PromoTerms: 'PromoCode',
-  CartItem: 'Cart',
   ServiceQualification: 'ServiceProvider',
 };
 
