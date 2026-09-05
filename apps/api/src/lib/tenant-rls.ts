@@ -44,7 +44,8 @@ export const TENANT_TABLES = [
   // [STA-1 §4 lineage] Child tables walled on the row itself, not only through their vendor.
   'items',
   'categories',
-  // [STA-1 §4 lineage · money] a person's or operator's money rows, walled on the row itself.
+  // [STA-1 §4 lineage · money] personal and operator money rows, walled on the row itself.
+  // (No apostrophes in comments inside this array: the CI gate extracts the names by quote.)
   'transactions',
   'earnings',
   'settlements',
