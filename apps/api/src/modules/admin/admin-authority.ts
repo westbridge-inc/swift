@@ -312,6 +312,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /verification/:id/approve': c('C3', 'verification.decide', E.verification),
   'PUT /verification/:id/reject': c('C3', 'verification.decide', E.verification),
   'GET /verification/:id/document-url': c('C1', 'verification.document.read'),
+  // [DOC-1 §9.4 · P9-4] Legal holds on a person's documents: placing or releasing
+  // one decides whether evidence survives — consequential, a reason is owed.
+  'GET /verification/legal-holds': c('C1', 'verification.hold.read'),
+  'POST /verification/legal-holds': c('C3', 'verification.hold'),
+  'PUT /verification/legal-holds/:id/release': c('C3', 'verification.hold', { model: 'docLegalHold', fields: ['releasedAt', 'releasedBy', 'releaseReason'] }),
 
   // ── Returns and cash rules ──────────────────────────────────────────────
   'GET /returns': c('C0', 'returns.read'),
@@ -603,6 +608,7 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   'POST /ads/refund-intents/backfill': 'a backfill over many rows, not one subject',
   'POST /integrity/backfill': 'a backfill over many rows, not one subject',
   'POST /integrity/exceptions': 'creates the grant; there is no before state to digest',
+  'POST /verification/legal-holds': 'creates the hold; there is no before state to digest',
   'POST /integrity/appeals/:id/resolve': 'the appeal is founder-scoped and read through the integrity graph, not a tenant row',
   'PUT /rides/drivers/:id/vehicle-identity': 'writes vehicle identity across driver and ride rows; no single subject',
   'DELETE /dlq/:queue/:id': 'a queue job, not a database row',

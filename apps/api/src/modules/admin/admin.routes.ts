@@ -1,25 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import {
-  Prisma,
-  UserRole,
-  UserStatus,
-  VendorStatus,
-  VendorType,
-  RiderType,
-  OrderStatus,
-  OrderType,
-  SettlementStatus,
-  CashSettlementStatus,
-  AgentActionStatus,
-  SubscriptionStatus,
-  SubscriptionType,
-  DiscountType,
-  VerificationDocumentStatus,
-  ClaimStatus,
-  ReturnStatus,
-  RideClass,
-} from '@prisma/client';
+import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, AgentActionStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
@@ -29,6 +10,7 @@ import { AdsLifecycleService } from '../ads/lifecycle.service';
 import { AdsRevenueService } from '../ads/revenue.service';
 import { looksLikeImage } from '../../utils/images';
 import { ComplianceAuditService } from '../verification/compliance-audit.service';
+import { placeDocLegalHold, releaseDocLegalHold, listDocLegalHolds } from '../verification/legal-hold';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
@@ -4717,6 +4699,58 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(request.user.userId, 'REJECT_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason, reasonCode: body.reasonCode ?? null }, request);
 
     return { success: true, data: doc };
+  });
+
+  // ── [DOC-1 §9.4 · P9-4] Legal holds on a person's documents ─────────────
+  // Placed only here (DOC-INV-14), by a C3 actor with a stated reason (ADM-006,
+  // header or body — the header wins, as everywhere). Every hold names an
+  // accountable owner and a review date (DOC-INV-32). Never resurrects purged
+  // bytes: with nothing left to hold the service refuses.
+  const placeHoldSchema = z.object({
+    subjectUserId: z.string().min(1),
+    documentIds: z.array(z.string().min(1)).min(1).max(50).optional(),
+    reason: z.string().trim().min(1).max(2000).optional(),
+    ownerId: z.string().min(1).optional(),
+    reviewBy: z.coerce.date(),
+    incidentCaseId: z.string().min(1).optional(),
+  });
+  const releaseHoldSchema = z.object({ reason: z.string().trim().min(1).max(2000).optional() });
+  const statedReasonOf = (request: any, bodyReason: string | undefined): string => {
+    const fromHeader = request.headers?.['x-swift-reason'];
+    const reason = typeof fromHeader === 'string' && fromHeader.trim() ? fromHeader.trim() : bodyReason;
+    if (!reason) throw new ValidationError('A reason is required');
+    return reason;
+  };
+
+  app.get('/verification/legal-holds', { preHandler: [adminGuard] }, async (request) => {
+    const { active } = (request.query ?? {}) as { active?: string };
+    const holds = await listDocLegalHolds(tenantPrisma, { active: active === undefined ? undefined : active !== 'false' });
+    return { success: true, data: holds };
+  });
+
+  app.post('/verification/legal-holds', { preHandler: [adminGuard] }, async (request, reply) => {
+    const body = placeHoldSchema.parse(request.body);
+    const reason = statedReasonOf(request, body.reason);
+    const result = await placeDocLegalHold(tenantPrisma as unknown as PrismaClient, {
+      subjectUserId: body.subjectUserId, documentIds: body.documentIds, reason,
+      ownerId: body.ownerId ?? request.user.userId, reviewBy: body.reviewBy,
+      placedBy: request.user.userId, incidentCaseId: body.incidentCaseId,
+    });
+    await audit(request.user.userId, 'PLACE_DOC_LEGAL_HOLD', 'DocLegalHold', result.hold.id, {
+      subjectUserId: body.subjectUserId, documents: result.documents, ownerId: result.hold.ownerId,
+      reviewBy: result.hold.reviewBy, reason, incidentCaseId: body.incidentCaseId ?? null,
+    }, request);
+    reply.code(201);
+    return { success: true, data: result };
+  });
+
+  app.put('/verification/legal-holds/:id/release', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = releaseHoldSchema.parse(request.body ?? {});
+    const reason = statedReasonOf(request, body.reason);
+    const result = await releaseDocLegalHold(tenantPrisma as unknown as PrismaClient, { holdId: id, releasedBy: request.user.userId, reason });
+    await audit(request.user.userId, 'RELEASE_DOC_LEGAL_HOLD', 'DocLegalHold', id, { documents: result.documents, reason }, request);
+    return { success: true, data: result };
   });
 
   /**

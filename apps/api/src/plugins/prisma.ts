@@ -155,6 +155,8 @@ const TENANT_QUERY_EXTENSIONS = {
   extractionRun: scoped,
   extractedField: scoped,
   validationResult: scoped,
+  // [DOC-1 P9-4]
+  docLegalHold: scoped,
 };
 
 /** Model names enrolled for tenant scoping. Derived — never hand-written. */

@@ -251,6 +251,14 @@ export const docExtractionSchemaViolationCounter = new client.Counter({
   registers: [registry],
 });
 
+// [DOC-1 §9.4 · P9-4] Document legal holds by state (active, overdue) — DOC-INV-32 alarms on overdue.
+export const docLegalHoldGauge = new client.Gauge({
+  name: 'swift_doc_legal_holds',
+  help: 'Document legal holds by state (active, overdue)',
+  labelNames: ['state'] as const,
+  registers: [registry],
+});
+
 export const readinessGauge = new client.Gauge({
   name: 'swift_readiness_dependency',
   help: 'Readiness by dependency after the last /ready evaluation (1 ready, 0 not ready)',
