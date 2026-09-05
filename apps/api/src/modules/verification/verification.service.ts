@@ -30,7 +30,7 @@ const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
  *  A human reviewer keys the real printed expiry; the automatic path applies a
  *  conservative default so the daily sweep + reminders always have a date.
  *  Days by docType; absent = non-expiring (e.g. business registration). */
-const AUTO_APPROVE_EXPIRY_DAYS: Record<string, number> = {
+export const AUTO_APPROVE_EXPIRY_DAYS: Record<string, number> = {
   police_clearance: 365,   // Certificate of Character — commonly re-issued yearly
   fitness_cert: 365,       // annual fitness
   vehicle_insurance: 365,  // annual policy

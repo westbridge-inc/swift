@@ -5903,3 +5903,117 @@ model RatingOutbox {
   @@index([processedAt, availableAt])
   @@map("rating_outbox")
 }
+
+// ─── [DOC-1 §4.1–4.2] The document registry — data, not code ────────────────
+// Adding a market or a document class is rows, not a code change. Every row
+// seeded from the country checklists starts INACTIVE: `is_active` requires
+// `legal_facts_verified_at` (a CHECK in the migration), and the checklist
+// facade reads the registry only for requirement sets whose every document
+// type is active. Until then behaviour is unchanged and the JSON is the truth.
+
+enum DocBucket {
+  BUSINESS
+  PERSONAL
+  VEHICLE
+}
+
+enum DocSubjectKind {
+  PERSON
+  BUSINESS
+  VEHICLE
+}
+
+enum DocImagePolicy {
+  PERSIST
+  PERSIST_REDACTED
+  PURGE_AFTER_REVIEW
+}
+
+enum AmlRecordClass {
+  NOT_APPLICABLE
+  CDD_IDENTITY
+  CDD_ENTITY
+  TRANSACTION_LINKED
+}
+
+model DocType {
+  /// `<country>.<legacyCode>` — one row per market per document class.
+  code                      String         @id
+  countryCode               String         @db.Char(2)
+  /// The bare checklist key the rest of the system speaks (`national_id`).
+  legacyCode                String
+  displayName               String
+  bucket                    DocBucket
+  subjectKind               DocSubjectKind
+  issuer                    String
+  imagePolicy               DocImagePolicy
+  intakeTtlHours            Int            @default(336)
+  persistRetentionDays      Int?
+  amlRecordClass            AmlRecordClass @default(NOT_APPLICABLE)
+  hasExpiry                 Boolean
+  defaultValidityDays       Int?
+  expirySource              String         @default("PRINTED")
+  /// Spec §4.2 references an `extraction_profile` table it never defines; a
+  /// code without an FK until that table is specified (CONFLICT-DOC-5).
+  extractionProfile         String
+  externalProcessingAllowed Boolean        @default(false)
+  localAuthorityVariant     String?
+  minConfidenceAutoApprove  Decimal        @default(0.97) @db.Decimal(3, 2)
+  legalFactsVerifiedAt      DateTime?      @db.Date
+  legalFactsSourceNote      String?
+  needsSpecimen             Boolean        @default(false)
+  isActive                  Boolean        @default(false)
+  registryVersion           Int            @default(1)
+
+  fields           DocField[]
+  requirementItems RequirementItem[]
+
+  @@unique([countryCode, legacyCode])
+  @@index([countryCode, isActive])
+  @@map("doc_type")
+}
+
+model DocField {
+  docTypeCode    String
+  docType        DocType  @relation(fields: [docTypeCode], references: [code])
+  fieldCode      String
+  dataType       String
+  isRequired     Boolean
+  isPii          Boolean
+  isBlindIndexed Boolean  @default(false)
+  validatorRef   String?
+  enumValues     String[]
+  displayOrder   Int
+
+  @@id([docTypeCode, fieldCode])
+  @@map("doc_field")
+}
+
+model RequirementSet {
+  id            String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  countryCode   String            @db.Char(2)
+  actorRole     String
+  tier          String            @default("STANDARD")
+  effectiveFrom DateTime          @db.Date
+  effectiveTo   DateTime?         @db.Date
+  items         RequirementItem[]
+
+  @@unique([countryCode, actorRole, tier, effectiveFrom])
+  @@map("requirement_set")
+}
+
+model RequirementItem {
+  requirementSetId String         @db.Uuid
+  requirementSet   RequirementSet @relation(fields: [requirementSetId], references: [id])
+  docTypeCode      String
+  docType          DocType        @relation(fields: [docTypeCode], references: [code])
+  isBlocking       Boolean
+  minCount         Int            @default(1)
+  conditionExpr    String?
+  /// Deviation from §4.2 (recorded): the facade must return the checklist in
+  /// its published order, and the spec's table has no order.
+  sortOrder        Int            @default(0)
+
+  @@id([requirementSetId, docTypeCode])
+  @@map("requirement_item")
+}
