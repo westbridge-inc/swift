@@ -41,20 +41,13 @@
 
 import { ABSENT, changeRecord, snapshot, type EntitySnapshot } from './audit-change';
 import type { PrismaClient } from '@prisma/client';
+import type { AuditLogWriter } from '../../lib/audit-writer';
 import { ADMIN_ROUTE_AUTHORITY, reasonOf, routeTemplateOf } from './admin-authority';
 import { adminAuditCounter } from '../../plugins/observability';
 
-/**
- * The narrowest thing that can write the row: satisfied by `PrismaClient` and
- * by the `tx` a `$transaction` callback receives. Typing it structurally is
- * deliberate — the point of this module is that the CALLER decides which of
- * those it is, and a transaction client is not assignable to `PrismaClient`.
- */
-export interface AuditLogWriter {
-  readonly auditLog: {
-    create(args: { data: Record<string, unknown> }): Promise<unknown>;
-  };
-}
+// The writer type lives in `lib/audit-writer.ts` so transaction-owning money
+// helpers can accept an `onAudit` callback without importing this module.
+export type { AuditLogWriter, AuditFacts, OnAudit } from '../../lib/audit-writer';
 
 /** The fields of a Fastify request the audit row is built from. */
 export interface AuditRequestLike {

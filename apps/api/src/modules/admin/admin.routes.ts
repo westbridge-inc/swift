@@ -1956,8 +1956,11 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/countries/:code/pricing/:kind', { preHandler: [platformControlGuard] }, async (request) => {
     const { code, kind } = request.params as { code: string; kind: string };
     if (!(PRICING_KINDS as readonly string[]).includes(kind)) throw new AppError(400, 'INVALID_PRICING_KIND', `Unknown pricing kind ${kind}`);
-    const result = await writePricingConfig(app.prisma, code, kind as PricingKind, request.body, request.user.userId);
-    await audit(request.user.userId, 'UPDATE_PRICING_CONFIG', 'CountryConfig', code, { kind, version: result.version }, request);
+    // [ADM-002] The helper owns the transaction; the route hands it the audit.
+    // The row names the country (no entity is declared for a versioned price
+    // book) and carries the facts only the helper knows — the version it wrote.
+    const result = await writePricingConfig(app.prisma, code, kind as PricingKind, request.body, request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: code, extra: facts }));
     return { success: true, data: { countryCode: code, kind, ...result } };
   });
 
@@ -1967,8 +1970,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const { code, kind } = request.params as { code: string; kind: string };
     if (!(PRICING_KINDS as readonly string[]).includes(kind)) throw new AppError(400, 'INVALID_PRICING_KIND', `Unknown pricing kind ${kind}`);
     const body = z.object({ version: z.number().int().min(1).optional() }).parse(request.body ?? {});
-    const result = await rollbackPricingConfig(app.prisma, code, kind as PricingKind, body.version, request.user.userId);
-    await audit(request.user.userId, 'UPDATE_PRICING_CONFIG', 'CountryConfig', code, { kind, rollback: true, restoredFrom: result.restoredFrom, version: result.version }, request);
+    const result = await rollbackPricingConfig(app.prisma, code, kind as PricingKind, body.version, request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: code, extra: facts }));
     return { success: true, data: { countryCode: code, kind, ...result } };
   });
 

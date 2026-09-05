@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Prisma, PrismaClient } from '@prisma/client';
@@ -206,7 +207,7 @@ export const readCourierRates = (prisma: PrismaClient, countryCode: string) => r
 /** Write under the law: the partial is merged over the defaults, the WHOLE
  *  payload validated, the column set to the merged payload and a version
  *  appended — one transaction; a refused write changes nothing. */
-export async function writePricingConfig(prisma: PrismaClient, countryCode: string, kind: PricingKind, raw: unknown, actor: string | null) {
+export async function writePricingConfig(prisma: PrismaClient, countryCode: string, kind: PricingKind, raw: unknown, actor: string | null, onAudit?: OnAudit) {
   const verdict = validatePricingConfig(kind, raw);
   if (verdict.status !== 'VALID') {
     throw new AppError(400, 'INVALID_PRICING_CONFIG', `${kind} for ${countryCode} is not valid: ${verdict.problems.join('; ') || 'a payload is required'}`, { problems: verdict.problems });
@@ -216,12 +217,15 @@ export async function writePricingConfig(prisma: PrismaClient, countryCode: stri
     if (!exists) throw new AppError(404, 'NOT_FOUND', `CountryConfig ${countryCode} not found`);
     await tx.countryConfig.update({ where: { code: countryCode }, data: { [COLUMN[kind]]: verdict.payload as Prisma.InputJsonValue } });
     const recorded = await appendVersion(tx, countryCode, kind, verdict.payload, { createdBy: actor });
+    // [ADM-002] The caller's audit row is the LAST statement of this
+    // transaction: a refused row rolls the column and the version back with it.
+    await onAudit?.(tx, { kind, version: recorded.version });
     return { payload: verdict.payload, version: recorded.version };
   });
 }
 
 /** Rollback points the column at a recorded version and records a NEW version naming what it restored. */
-export async function rollbackPricingConfig(prisma: PrismaClient, countryCode: string, kind: PricingKind, toVersion: number | undefined, actor: string | null) {
+export async function rollbackPricingConfig(prisma: PrismaClient, countryCode: string, kind: PricingKind, toVersion: number | undefined, actor: string | null, onAudit?: OnAudit) {
   return prisma.$transaction(async (tx) => {
     const latest = await latestVersion(tx, countryCode, kind);
     if (!latest) throw new AppError(404, 'NO_SUCH_VERSION', `${kind} for ${countryCode} has no recorded version to roll back to`);
@@ -233,6 +237,7 @@ export async function rollbackPricingConfig(prisma: PrismaClient, countryCode: s
     if (verdict.status !== 'VALID') throw new AppError(409, 'INVALID_PRICING_CONFIG', `Version ${target} no longer satisfies the schema: ${verdict.problems.join('; ')}`);
     await tx.countryConfig.update({ where: { code: countryCode }, data: { [COLUMN[kind]]: verdict.payload as Prisma.InputJsonValue } });
     const recorded = await appendVersion(tx, countryCode, kind, verdict.payload, { createdBy: actor, restoredFrom: target });
+    await onAudit?.(tx, { kind, rollback: true, restoredFrom: target, version: recorded.version });
     return { payload: verdict.payload, version: recorded.version, restoredFrom: target };
   });
 }
