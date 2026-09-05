@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import type { PrismaClient, AdRefundReason } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -233,7 +234,7 @@ export class AdsRefundService {
   }
 
   /** The human's payout reference is the evidence that settles an executed intent. */
-  async settleManual(intentId: string, manualPayoutRef: string, actor: string): Promise<void> {
+  async settleManual(intentId: string, manualPayoutRef: string, actor: string, onAudit?: OnAudit): Promise<void> {
     const intent = await this.prisma.adRefundIntent.findUnique({ where: { id: intentId }, select: { id: true, status: true, tenantId: true, amountMinor: true, currency: true } });
     if (!intent) throw new NotFoundError('AdRefundIntent', intentId);
     if (intent.status === 'SUCCEEDED') return;
@@ -241,6 +242,8 @@ export class AdsRefundService {
     await this.prisma.$transaction(async (tx) => {
       await tx.adRefundIntent.update({ where: { id: intentId }, data: { status: 'SUCCEEDED', manualPayoutRef, completedAt: new Date() } });
       await tx.adsAuditLog.create({ data: { tenantId: intent.tenantId, actorUserId: actor, action: 'REFUND_SETTLED', entityType: 'AdRefundIntent', entityId: intentId, after: { manualPayoutRef, amountMinor: intent.amountMinor.toString(), currency: intent.currency } as never } });
+      // [ADM-002] The caller's audit row is the last statement of the settlement.
+      await onAudit?.(tx, { manualPayoutRef, amountMinor: intent.amountMinor.toString(), currency: intent.currency });
     });
     adRefundCounter.labels('settled').inc();
   }

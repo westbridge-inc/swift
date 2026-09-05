@@ -127,7 +127,7 @@ const E = {
   verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
   // [ADM-002] `resolvedAt` does not exist on ReturnRequest (`reviewedAt` does).
   returnRequest: { model: 'returnRequest', fields: ['status', 'refundAmount', 'reviewedAt', 'refundRef', 'refundPaidAmount', 'refundPaidAt'] },
-  claim: { model: 'reimbursementClaim', fields: ['status', 'amount', 'paidAt'] },
+  claim: { model: 'reimbursementClaim', fields: ['status', 'amount', 'paidAt', 'paymentRef', 'paidAmount', 'reviewedAt'] },
   contentReport: { model: 'contentReport', fields: ['status', 'disposition'] },
   rating: { model: 'rating', fields: ['isPublic', 'state', 'stateReason', 'flagged'] },
   ratingReport: { model: 'ratingReport', fields: ['status'] },
@@ -612,3 +612,19 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
 export function entityFor(method: string, routeUrl: string): AdminRouteEntity | null {
   return authorityFor(method, routeUrl)?.entity ?? null;
 }
+
+/**
+ * [ADM-002] Routes that stay on the backstop hook BY DESIGN. Each is a
+ * fleet-wide operation — many rows, each in its own transaction, often with a
+ * notification per row — so there is no single transaction for the audit row
+ * to join; the backstop records the run, and `writer="backstop"` for these
+ * four is expected, not a regression. The census test holds this list closed:
+ * every other C4/C5 handler must call `auditWithin`, and a route listed here
+ * must not.
+ */
+export const ADMIN_ROUTES_ON_BACKSTOP: Readonly<Record<AdminRouteKey, string>> = {
+  'POST /billing/usd-migration/mode-a': 'fleet-wide: one 30-day notice per payer, each in its own transaction plus a notification; the run summary is the record',
+  'POST /integrity/backfill': 'fleet-wide backfill over every account in batches; the report is the record',
+  'POST /ads/refund-intents/backfill': 'fleet-wide: one refund intent per terminal campaign, each in its own transaction; dry-run by default',
+  'POST /billing/san-backfill': 'fleet-wide: one SAN per subscription, each its own compare-and-set; no single transaction to join',
+};

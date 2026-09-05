@@ -86,7 +86,13 @@ async function facts(subscriptionId: string) {
     credits: events.length,
     receipts: await app.prisma.feeReceipt.count({ where: { subscriptionId } }),
     postings: await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: { in: events.map((e) => `ledger:${e.idempotencyKey}`) } } }),
-    audits: await app.prisma.auditLog.count({ where: { entity: 'Subscription', entityId: subscriptionId, action: 'PREPAID_TOPUP' } }),
+    // [ADM-002] The admin route writes the canonical row inside the command
+    // transaction (`ADMIN POST …/topup`, carrying billingEventId); the service's
+    // own PREPAID_TOPUP row stands only when nothing upstream audits. A replayed
+    // request is recorded by the backstop as a request that credited nothing —
+    // so `audits` counts rows that carry a credit, which is what it measured.
+    audits: (await app.prisma.auditLog.findMany({ where: { entityId: subscriptionId, action: { in: ['PREPAID_TOPUP', 'ADMIN POST /api/v1/admin/subscriptions/:id/topup'] } }, select: { changes: true } }))
+      .filter((r) => typeof (r.changes as Record<string, unknown> | null)?.['billingEventId'] === 'string').length,
     commands: await app.prisma.topUpCommand.count({ where: { subscriptionId } }),
     balance: Number((await app.prisma.prepaidBalance.findUnique({ where: { subscriptionId } }))?.balance ?? 0),
   };
@@ -163,7 +169,7 @@ describe('[M-08] the key is required — the register’s first red test', () =>
     expect(again.statusCode).toBe(200);
     expect(again.json()).toMatchObject({ success: true, replayed: true, data: { balance: 5000, currencyCode: 'GYD' } });
     expect(await facts(sub.id)).toEqual({ credits: 1, receipts: 1, postings: 1, audits: 1, commands: 1, balance: 5000 });
-    const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entity: 'Subscription', entityId: sub.id, action: 'PREPAID_TOPUP' } });
+    const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entityId: sub.id, action: { in: ['PREPAID_TOPUP', 'ADMIN POST /api/v1/admin/subscriptions/:id/topup'] } } });
     // [A-12] Stored upper-cased: normalisation is what makes the unique index
     // work, so the same transfer typed two ways cannot occupy two rows.
     expect(audit.changes).toMatchObject({ amount: 5000, reference: transfer, idempotencyKey: key });

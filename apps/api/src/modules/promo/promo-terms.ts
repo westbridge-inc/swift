@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { promoFundingGauge } from '../../plugins/observability';
@@ -156,7 +157,7 @@ export async function recordPromoTermsVersion(
 /** Update under the law: lock the row, validate the MERGED record, apply the
  *  patch, and — when any term changed — bump the version and write its
  *  immutable row. One transaction; a refused patch changes nothing. */
-export async function updatePromoTerms(prisma: PrismaClient, promoCodeId: string, patch: PromoTermsPatch, actor: string | null) {
+export async function updatePromoTerms(prisma: PrismaClient, promoCodeId: string, patch: PromoTermsPatch, actor: string | null, onAudit?: OnAudit) {
   return prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "promo_codes" WHERE id = ${promoCodeId} FOR UPDATE`;
     const existing = await tx.promoCode.findUnique({ where: { id: promoCodeId } });
@@ -179,13 +180,15 @@ export async function updatePromoTerms(prisma: PrismaClient, promoCodeId: string
       },
     });
     if (termsChanged) await recordPromoTermsVersion(tx, promoCodeId, { createdBy: actor });
+    // [ADM-002] The caller's audit row is the LAST statement of this transaction.
+    await onAudit?.(tx, { termsChanged, termsVersion: promo.termsVersion });
     return promo;
   });
 }
 
 /** Rollback pins a prior version: the row takes that version's terms and a
  *  NEW version is written naming what it restored. History is never edited. */
-export async function rollbackPromoTerms(prisma: PrismaClient, promoCodeId: string, toVersion: number | undefined, actor: string | null) {
+export async function rollbackPromoTerms(prisma: PrismaClient, promoCodeId: string, toVersion: number | undefined, actor: string | null, onAudit?: OnAudit) {
   return prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "promo_codes" WHERE id = ${promoCodeId} FOR UPDATE`;
     const existing = await tx.promoCode.findUnique({ where: { id: promoCodeId } });
@@ -209,6 +212,7 @@ export async function rollbackPromoTerms(prisma: PrismaClient, promoCodeId: stri
       },
     });
     const recorded = await recordPromoTermsVersion(tx, promoCodeId, { createdBy: actor, restoredFrom: target });
+    await onAudit?.(tx, { rollback: true, restoredFrom: target, termsVersion: recorded.version });
     return { promo, restoredFrom: target, version: recorded.version };
   });
 }

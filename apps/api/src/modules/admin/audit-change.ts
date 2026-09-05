@@ -27,6 +27,12 @@ import type { AdminRouteEntity } from './admin-authority';
  *  strings, keys are ordered, so an equal row always digests equal. */
 function canonical(value: unknown): unknown {
   if (value === null || value === undefined) return null;
+  // [ADM-002] BigInt has no JSON form. Without this branch `JSON.stringify`
+  // threw inside `snapshot()`, which swallowed it and returned ABSENT — so
+  // every model with a BigInt column (AdRefundIntent.amountMinor) recorded a
+  // null digest pair and an empty diff, silently, for as long as ADM-004 has
+  // existed. A money amount is exactly the field the trail is for.
+  if (typeof value === 'bigint') return value.toString();
   if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map(canonical);
   if (typeof value === 'object') {

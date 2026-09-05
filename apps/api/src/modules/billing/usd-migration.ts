@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
@@ -134,7 +135,7 @@ export const modeBKey = (subscriptionId: string, phase: 't30' | 't7' | 'freeze' 
  *  immutable price assignment per payer, stamp the tenant's sunset date.
  *  [M-15] Before, this selected and froze every tenant's payers while the
  *  control row was hardcoded to swift-default. */
-export async function enableModeB(prisma: PrismaClient, sunsetAt: Date, tenantId = 'swift-default'): Promise<{ grandfathered: number; tenantId: string }> {
+export async function enableModeB(prisma: PrismaClient, sunsetAt: Date, tenantId = 'swift-default', onAudit?: OnAudit): Promise<{ grandfathered: number; tenantId: string }> {
   const subs = await prisma.subscription.findMany({
     where: { status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE'] }, customRate: null, ...subscriptionTenantWhere(tenantId) },
     select: { id: true, weeklyRate: true, currencyCode: true },
@@ -144,20 +145,30 @@ export async function enableModeB(prisma: PrismaClient, sunsetAt: Date, tenantId
     await prisma.$transaction(async (tx) => {
       await tx.subscription.update({ where: { id: s.id }, data: { customRate: s.weeklyRate } });
       // The immutable assignment: what this payer was pinned at, and when.
-      await tx.billingEvent.create({
-        data: {
+      // [M-15] `skipDuplicates`, not a swallowed P2002: inside an interactive
+      // transaction a unique violation ABORTS the transaction in Postgres, and
+      // every later statement fails with 25P02 — a payer re-frozen after a
+      // rollback could never be processed again.
+      await tx.billingEvent.createMany({
+        data: [{
           subscriptionId: s.id, type: 'TIER_CHANGE', amount: s.weeklyRate, currencyCode: s.currencyCode,
           idempotencyKey: modeBKey(s.id, 'freeze'),
           note: `Mode B grandfathered at ${formatMoney(Number(s.weeklyRate), s.currencyCode)} (tenant ${tenantId}, sunset ${sunsetAt.toISOString().slice(0, 10)})`,
-        },
-      }).catch((err: { code?: string }) => { if (err.code !== 'P2002') throw err; });
+        }],
+        skipDuplicates: true,
+      });
     });
     grandfathered += 1;
   }
-  await prisma.tenantBillingCurrency.upsert({
-    where: { tenantId },
-    create: { tenantId, usdMigrationMode: 'B', usdSunsetAt: sunsetAt },
-    update: { usdMigrationMode: 'B', usdSunsetAt: sunsetAt },
+  // [ADM-002] The mode flip is the consequential switch; its audit row commits
+  // with it. The per-payer freezes above are idempotent rows that precede it.
+  await prisma.$transaction(async (tx) => {
+    await tx.tenantBillingCurrency.upsert({
+      where: { tenantId },
+      create: { tenantId, usdMigrationMode: 'B', usdSunsetAt: sunsetAt },
+      update: { usdMigrationMode: 'B', usdSunsetAt: sunsetAt },
+    });
+    await onAudit?.(tx, { mode: 'B', grandfathered, sunsetAt: sunsetAt.toISOString(), tenantId });
   });
   log().info({ grandfathered, sunsetAt, tenantId }, 'usd migration Mode B enabled — existing payers grandfathered');
   return { grandfathered, tenantId };
@@ -259,12 +270,16 @@ export async function sweepModeB(
         await prisma.$transaction(async (tx) => {
           // The immutable snapshot rollback points to: the pinned price, now released.
           try {
-            await tx.billingEvent.create({
-              data: {
+            // [M-15] `skipDuplicates`: a payer flipped, rolled back and flipped
+            // again already has this row; a swallowed P2002 here aborted the
+            // transaction and the `customRate: null` below failed with 25P02.
+            await tx.billingEvent.createMany({
+              data: [{
                 subscriptionId: s.id, type: 'TIER_CHANGE', amount: s.customRate!, currencyCode: s.currencyCode,
                 idempotencyKey: modeBKey(s.id, 'flip'),
                 note: `Mode B sunset: ${formatMoney(Number(s.customRate), currency)} released to the USD price book (tenant ${tenant.tenantId})`,
-              },
+              }],
+              skipDuplicates: true,
             });
           } catch (err) {
             if ((err as { code?: string }).code !== 'P2002') throw err;
@@ -295,7 +310,7 @@ export async function sweepModeB(
  *  rewrite: every payer of THIS tenant who was released at sunset is pinned
  *  again at the exact price the flip event recorded, and the return trip is
  *  itself recorded. The tenant leaves Mode B. */
-export async function rollbackModeB(prisma: PrismaClient, tenantId: string, now = new Date()): Promise<{ restored: number; tenantId: string }> {
+export async function rollbackModeB(prisma: PrismaClient, tenantId: string, now = new Date(), onAudit?: OnAudit): Promise<{ restored: number; tenantId: string }> {
   const flips = await prisma.billingEvent.findMany({
     where: { idempotencyKey: { startsWith: 'usdmigB:' }, type: 'TIER_CHANGE', note: { startsWith: 'Mode B sunset:' }, subscription: { ...subscriptionTenantWhere(tenantId), customRate: null } },
     select: { id: true, subscriptionId: true, amount: true, currencyCode: true },
@@ -316,7 +331,10 @@ export async function rollbackModeB(prisma: PrismaClient, tenantId: string, now 
     restored += 1;
     usdMigrationFlipsCounter.labels('rolled_back').inc();
   }
-  await prisma.tenantBillingCurrency.updateMany({ where: { tenantId }, data: { usdMigrationMode: null, usdSunsetAt: null } });
+  await prisma.$transaction(async (tx) => {
+    await tx.tenantBillingCurrency.updateMany({ where: { tenantId }, data: { usdMigrationMode: null, usdSunsetAt: null } });
+    await onAudit?.(tx, { rollback: true, restored, tenantId });
+  });
   log().warn({ restored, tenantId }, '[M-15] usd migration Mode B rolled back — payers pinned again from their snapshots');
   return { restored, tenantId };
 }

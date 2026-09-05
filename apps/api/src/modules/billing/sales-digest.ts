@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import type { PrismaClient } from '@prisma/client';
 import { startOfWeekGY } from '../../utils/time-gy';
 import { salesDigestDeltaGauge, salesComponentsGauge, salesComponentsCounter } from '../../plugins/observability';
@@ -140,15 +141,20 @@ export async function generateSalesDigests(prisma: PrismaClient, now = new Date(
 
 /** A correction is a new, immutable ADJUSTMENT row — the period recomputed
  *  from the ledger now, sequence n+1, naming the row it supersedes. */
-export async function adjustSalesDigest(prisma: PrismaClient, settlementId: string, reason: string): Promise<{ id: string; sequence: number; supersedesId: string; totals: DigestTotals }> {
+export async function adjustSalesDigest(prisma: PrismaClient, settlementId: string, reason: string, onAudit?: OnAudit): Promise<{ id: string; sequence: number; supersedesId: string; totals: DigestTotals }> {
   const latest = await prisma.settlement.findUniqueOrThrow({ where: { id: settlementId } });
   const period = { periodStart: latest.periodStart, periodEnd: latest.periodEnd };
   const totals = await computeDigest(prisma, latest.vendorId, period);
   const head = await prisma.settlement.findFirst({ where: { vendorId: latest.vendorId, periodStart: latest.periodStart }, orderBy: { sequence: 'desc' }, select: { id: true, sequence: true } });
   const sequence = (head?.sequence ?? 0) + 1;
-  const row = await prisma.settlement.create({
-    data: { vendorId: latest.vendorId, periodStart: period.periodStart, periodEnd: period.periodEnd, kind: 'ADJUSTMENT', sequence, supersedesId: head?.id ?? latest.id, reason, ...totals, status: 'PENDING' },
-    select: { id: true, sequence: true, supersedesId: true },
+  // [ADM-002] The adjustment row and the caller's audit row commit together.
+  const row = await prisma.$transaction(async (tx) => {
+    const created = await tx.settlement.create({
+      data: { vendorId: latest.vendorId, periodStart: period.periodStart, periodEnd: period.periodEnd, kind: 'ADJUSTMENT', sequence, supersedesId: head?.id ?? latest.id, reason, ...totals, status: 'PENDING' },
+      select: { id: true, sequence: true, supersedesId: true },
+    });
+    await onAudit?.(tx, { adjustmentId: created.id, sequence: created.sequence, supersedesId: created.supersedesId ?? null, netSales: String(totals.netSales) });
+    return created;
   });
   return { id: row.id, sequence: row.sequence, supersedesId: row.supersedesId!, totals };
 }

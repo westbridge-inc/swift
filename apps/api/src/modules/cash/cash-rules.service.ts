@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import type { Prisma, PrismaClient, ReimbursementClaim } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { assertClaimAmountAttested, isDuplicateReferenceError, normaliseClaimPaymentRef } from './claim-payout';
@@ -634,23 +635,23 @@ export class CashRulesService {
   // Claim review (admin) — beyond-cap/flagged claims are reviewed, not auto-paid
   // -------------------------------------------------------------------------
 
-  async approveClaim(claimId: string, adminId: string, note?: string) {
+  async approveClaim(claimId: string, adminId: string, note?: string, onAudit?: OnAudit) {
     const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW'], {
       status: 'APPROVED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
-    });
+    }, onAudit);
     await this.notifyClaim(updated, 'Claim approved', `Your $${Number(updated.amount).toLocaleString()} claim was approved and will be paid out.`, claimId);
     return updated;
   }
 
-  async rejectClaim(claimId: string, adminId: string, note: string) {
+  async rejectClaim(claimId: string, adminId: string, note: string, onAudit?: OnAudit) {
     const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW'], {
       status: 'REJECTED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
-    });
+    }, onAudit);
     await this.notifyClaim(updated, 'Claim rejected', `Your claim was rejected: ${note}`, claimId);
     return updated;
   }
 
-  async markClaimPaid(claimId: string, adminId: string, paymentRef: string, paidAmount: unknown) {
+  async markClaimPaid(claimId: string, adminId: string, paymentRef: string, paidAmount: unknown, onAudit?: OnAudit) {
     // [WR-004] PAID is a money fact on a manual rail — the reference (bank/MMG
     // ref, receipt number) IS the evidence. Without it the record attests a
     // payout nobody can trace, so it is required, not optional.
@@ -672,7 +673,7 @@ export class CashRulesService {
     const updated = await this.transitionClaim(claimId, ['AUTO_APPROVED', 'APPROVED'], {
       status: 'PAID', paidAt: new Date(), paymentRef: reference, paidAmount: attested,
       paidById: adminId, reviewedBy: existing?.reviewedBy ?? adminId,
-    }).catch((err) => {
+    }, onAudit).catch((err) => {
       if (isDuplicateReferenceError(err)) {
         throw new AppError(
           409,
@@ -693,17 +694,23 @@ export class CashRulesService {
    * AUTO_APPROVED and both writing PAID would pay the rider twice. updateMany
    * with the status in the WHERE matches at most once; the loser sees count===0.
    */
-  private async transitionClaim(claimId: string, from: string[], data: Record<string, unknown>) {
-    const res = await this.prisma.reimbursementClaim.updateMany({
-      where: { id: claimId, status: { in: from as never } },
-      data: data as never,
+  private async transitionClaim(claimId: string, from: string[], data: Record<string, unknown>, onAudit?: OnAudit) {
+    // [ADM-002] The compare-and-set and the caller's audit row commit together;
+    // a refused row leaves the claim exactly where it was.
+    return this.prisma.$transaction(async (tx) => {
+      const res = await tx.reimbursementClaim.updateMany({
+        where: { id: claimId, status: { in: from as never } },
+        data: data as never,
+      });
+      if (res.count === 0) {
+        const exists = await tx.reimbursementClaim.findUnique({ where: { id: claimId }, select: { status: true } });
+        if (!exists) throw new NotFoundError('Claim', claimId);
+        throw new AppError(400, 'INVALID_CLAIM_STATE', `Claim is ${exists.status}; expected ${from.join('/')}`);
+      }
+      const updated = await tx.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } });
+      await onAudit?.(tx, { status: updated.status, amount: String(updated.amount) });
+      return updated;
     });
-    if (res.count === 0) {
-      const exists = await this.prisma.reimbursementClaim.findUnique({ where: { id: claimId }, select: { status: true } });
-      if (!exists) throw new NotFoundError('Claim', claimId);
-      throw new AppError(400, 'INVALID_CLAIM_STATE', `Claim is ${exists.status}; expected ${from.join('/')}`);
-    }
-    return this.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } });
   }
 
   private async notifyClaim(claim: { riderId: string | null; driverId: string | null }, title: string, body: string, claimId: string) {

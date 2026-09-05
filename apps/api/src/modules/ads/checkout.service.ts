@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import type { PrismaClient, AdInvoice } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -131,7 +132,7 @@ export class AdCheckoutService {
    *  providerRef: a replayed callback returns the already-paid invoice. Moves
    *  the campaign PENDING_PAYMENT → PENDING_REVIEW and confirms every booking.
    *  manualReference is required on the admin path (audit). */
-  async markPaid(invoiceId: string, opts: { providerRef?: string; adminUserId?: string; manualReference?: string }): Promise<AdInvoice> {
+  async markPaid(invoiceId: string, opts: { providerRef?: string; adminUserId?: string; manualReference?: string; onAudit?: OnAudit }): Promise<AdInvoice> {
     const head = await this.prisma.adInvoice.findUnique({ where: { id: invoiceId } });
     if (!head) throw new NotFoundError('AdInvoice', invoiceId);
     if (head.status === 'PAID') {
@@ -181,6 +182,8 @@ export class AdCheckoutService {
             reason: opts.manualReference ?? opts.providerRef ?? null,
           },
         });
+        // [ADM-002] The caller's audit row is the last statement of the settlement.
+        await opts.onAudit?.(tx, { outcome: 'settled', confirmedBookings: confirmed.count });
         return;
       }
       // [R045-ADS-05] The hold expired (inventory released, invoice VOID or the
@@ -206,6 +209,7 @@ export class AdCheckoutService {
         });
         lateCapture = true;
         adCheckoutCounter.labels('late_capture').inc();
+        await opts.onAudit?.(tx, { outcome: 'late_capture' });
         return;
       }
       throw new AppError(409, 'INVOICE_NOT_PAYABLE', `A ${invoice.status} invoice cannot be marked paid.`);
