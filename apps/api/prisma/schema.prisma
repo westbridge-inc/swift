@@ -79,6 +79,10 @@ model User {
   walletBalance Decimal @default(0) @db.Decimal(12, 2)
 
   verificationDocuments VerificationDocument[]
+
+  /// [DOC-1 P9-4] legal holds on this person's documents
+
+  docLegalHolds        DocLegalHold[]         @relation("DocLegalHoldSubject")
   complianceViolations  ComplianceViolation[]
   complianceReviews     ComplianceReviewCase[]
   strikes               Strike[]
@@ -402,6 +406,7 @@ model Tenant {
   extractionRuns    ExtractionRun[]
   extractedFields   ExtractedField[]
   validationResults ValidationResult[]
+  docLegalHolds     DocLegalHold[]
 
   @@index([kind])
   @@map("tenants")
@@ -619,11 +624,15 @@ model VerificationDocument {
   /// [DOC-1 P4-4] the extraction ledger of this submission
   extractionRuns       ExtractionRun[]
   validationResults    ValidationResult[]
+  /// [DOC-1 §9.4 P9-4] while set, this document cannot be purged; release clears it (T22: the state is untouched)
+  legalHoldId          String?                    @db.Uuid
+  legalHold            DocLegalHold?              @relation(fields: [legalHoldId], references: [id], onDelete: Restrict)
 
   @@index([status])
   @@index([userId])
   @@index([expiresAt])
   @@index([retentionExpiresAt])
+  @@index([legalHoldId])
   @@map("verification_documents")
 }
 
@@ -4487,6 +4496,8 @@ model IncidentCase {
   replayCount       Int     @default(0)
   /// [S-09] The one transactional authority behind this case's legal hold.
   legalHoldRecord   LegalHold?
+  /// [DOC-1 P9-4] document holds raised from this case
+  docLegalHolds     DocLegalHold[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -6256,4 +6267,34 @@ model ValidationResult {
 
   @@unique([submissionId, validatorCode])
   @@map("validation_result")
+}
+
+/// [DOC-1 §9.4 · P9-4] A legal hold on one person's document submissions. While a
+/// document carries the hold it cannot be purged — by the reaper or by account
+/// erasure (DOC-INV-14). Every hold has an owner and a review date; overdue holds
+/// alarm (DOC-INV-32). Created only through the admin endpoint, logged. A hold never
+/// resurrects purged bytes: it attaches only to unpurged documents.
+model DocLegalHold {
+  id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String                 @default("swift-default")
+  tenant         Tenant                 @relation(fields: [tenantId], references: [id])
+  subjectUserId  String
+  subject        User                   @relation("DocLegalHoldSubject", fields: [subjectUserId], references: [id], onDelete: Restrict)
+  reason         String
+  /// The admin accountable for reviewing the hold by reviewBy.
+  ownerId        String
+  reviewBy       DateTime
+  placedBy       String
+  placedAt       DateTime               @default(now())
+  releasedAt     DateTime?
+  releasedBy     String?
+  releaseReason  String?
+  /// The safety case the hold was raised from, when there is one.
+  incidentCaseId String?
+  incidentCase   IncidentCase?          @relation(fields: [incidentCaseId], references: [id], onDelete: Restrict)
+  documents      VerificationDocument[]
+
+  @@index([subjectUserId, releasedAt])
+  @@index([tenantId, releasedAt, reviewBy])
+  @@map("doc_legal_hold")
 }

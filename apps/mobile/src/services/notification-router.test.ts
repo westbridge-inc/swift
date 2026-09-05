@@ -367,6 +367,7 @@ const CENSUS: Case[] = [
   { k: 'compliance_violation', d: { runId: 'r1' }, to: null, why: 'admins' },
   { k: 'verification_pending', d: { docId: 'd1' }, to: null, why: 'admins — review queue' },
   { k: 'verification_sla_breach', d: { slaHours: 24 }, to: null, why: 'admins' },
+  { k: 'verification_legal_hold_overdue', d: { overdue: 1, holdIds: ['h1'] }, to: null, why: 'admins — a document legal hold past its review date (DOC-1 §9.4)' },
   { k: 'integrity_appeal', d: { enforcementId: 'e1' }, to: null, why: 'admins' },
   { k: 'dup_doc', d: { sha256: 'x' }, to: null, why: 'admins' },
   { k: 'vendor_pending', d: { vendorId: 'v1' }, to: null, why: 'admins — approve the store' },

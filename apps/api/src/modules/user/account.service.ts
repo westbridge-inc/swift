@@ -289,8 +289,22 @@ export class AccountService {
     // 1. Crypto-shred every verification document: delete the object, null the
     //    wrapped DEK (unrecoverable even from a ciphertext backup), mark purged.
     const storage = getStorageProvider();
+    // [DOC-1 §9.4 · DOC-INV-14] A document under a legal hold is NOT purged by
+    // erasure: it stays, due for purge the moment the hold is released (its
+    // retention clock is set to now), and the deferral is written to the audit
+    // trail — erasure deferred by a legal obligation is recorded, never silent.
+    const deferred = await prisma.verificationDocument.updateMany({
+      where: { userId, purgedAt: null, legalHoldId: { not: null } },
+      data: { retentionExpiresAt: new Date() },
+    });
+    if (deferred.count > 0) {
+      await prisma.auditLog.create({ data: {
+        userId, action: 'ERASURE_DEFERRED_LEGAL_HOLD', entity: 'User', entityId: userId,
+        changes: { heldDocuments: deferred.count, reason: 'DOC-1 §9.4: a legal hold blocks purge until released' },
+      } });
+    }
     const docs = await prisma.verificationDocument.findMany({
-      where: { userId, purgedAt: null },
+      where: { userId, purgedAt: null, legalHoldId: null },
       select: { id: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
     for (const doc of docs) {

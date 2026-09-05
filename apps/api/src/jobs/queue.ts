@@ -771,6 +771,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const purged = await verification.purgeExpiredDocuments();
         // Review-SLA watchdog: docs waiting >24h on a human get escalated.
         await verification.alertReviewSlaBreaches();
+        // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.
+        const { alertOverdueDocLegalHolds } = await import('../modules/verification/legal-hold');
+        await alertOverdueDocLegalHolds(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
 
         // Liability shield: after enforcement, AUDIT — verify nobody is on the
         // road with a broken checklist, and leave an evidence row either way.

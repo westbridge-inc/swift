@@ -107,7 +107,8 @@ export async function classify(prisma: PrismaClient, scope?: PlanScope): Promise
     SELECT DISTINCT u."id" FROM "users" u
     WHERE u."id" = ANY(${ids})
       AND (EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."legalHold" = true AND (c."subjectUserId" = u."id" OR c."reporterUserId" = u."id"))
-        OR EXISTS (SELECT 1 FROM "EvidenceBundle" b WHERE b."legalHold" = true AND b."subjectUserId" = u."id"))`;
+        OR EXISTS (SELECT 1 FROM "EvidenceBundle" b WHERE b."legalHold" = true AND b."subjectUserId" = u."id")
+        OR EXISTS (SELECT 1 FROM "doc_legal_hold" h WHERE h."releasedAt" IS NULL AND h."subjectUserId" = u."id"))`;
   const heldIds = new Set(held.map((h) => h.id));
   const free = candidates.filter((u) => !heldIds.has(u.id));
   return {

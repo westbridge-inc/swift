@@ -1205,8 +1205,11 @@ export class VerificationService {
    *  clear the fileKey, and leave an auditable purgedAt marker. Daily job. */
   async purgeExpiredDocuments(): Promise<number> {
     const now = new Date();
+    // [DOC-1 §9.4 · DOC-INV-14] A document under a legal hold is never selected —
+    // and the compare-and-set below re-checks it under the person's row lock,
+    // so a hold placed between this read and the purge still wins.
     const due = await this.prisma.verificationDocument.findMany({
-      where: { retentionExpiresAt: { lt: now }, purgedAt: null },
+      where: { retentionExpiresAt: { lt: now }, purgedAt: null, legalHoldId: null },
       select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
     if (due.length === 0) return 0;
@@ -1233,7 +1236,7 @@ export class VerificationService {
         `;
         if (!users[0]) return false;
         const won = await tx.verificationDocument.updateMany({
-          where: { id: doc.id, userId: doc.userId, purgedAt: null, retentionExpiresAt: { lt: now } },
+          where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, retentionExpiresAt: { lt: now } },
           data: { purgedAt: new Date(), fileUrl: '' },
         });
         if (won.count !== 1) return false;

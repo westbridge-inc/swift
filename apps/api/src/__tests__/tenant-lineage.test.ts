@@ -20,7 +20,7 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
   Session: ['User'],
   DeviceToken: ['User'],
   Address: ['User'],
-  VerificationDocument: ['User'],
+  VerificationDocument: ['User', 'DocLegalHold'],
   ComplianceViolation: ['User'],
   ComplianceReviewCase: ['User'],
   Strike: ['User'],
