@@ -9,7 +9,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
-import { withSuiteCapability } from '../lib/test-target-lock';
+import { refusalName, refuseAuditWhere, dropAuditRefusal } from './helpers/audit-refusal';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
@@ -39,10 +39,8 @@ const call = (m: string, u: string, p?: unknown) => injectWithApproval(app, {
   headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
   ...(p === undefined ? {} : { payload: p as Record<string, unknown> }) });
 
-const allowAudit = () => withSuiteCapability('ddl', () => runWithoutTenant(async () => {
-  await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS swift_b2_refuse_${RUN} ON audit_logs;`);
-  await app.prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS swift_b2_refuse_${RUN}();`);
-}, 'cleanup'));
+const REFUSAL = refusalName('b2');
+const allowAudit = () => dropAuditRefusal(app, REFUSAL);
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
@@ -97,18 +95,7 @@ describe('[ADM-002] setting the FX rate is recorded, and names the rate it set',
   it('a refused audit row rolls the RATE back — no rate, no record, together', async () => {
     const before = await runWithoutTenant(() => app.prisma.fxRate.count({ where: { quote: QUOTE } }), 'read');
     // refuse every audit row this route would write, whatever id it invents
-    await withSuiteCapability('ddl', () => runWithoutTenant(async () => {
-      await app.prisma.$executeRawUnsafe(`
-        CREATE OR REPLACE FUNCTION swift_b2_refuse_${RUN}() RETURNS trigger AS $fn$
-        BEGIN
-          IF NEW."action" LIKE '%/billing/fx-rates%' THEN RAISE EXCEPTION 'injected'; END IF;
-          RETURN NEW;
-        END; $fn$ LANGUAGE plpgsql;`);
-      await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS swift_b2_refuse_${RUN} ON audit_logs;`);
-      await app.prisma.$executeRawUnsafe(`
-        CREATE TRIGGER swift_b2_refuse_${RUN} BEFORE INSERT ON audit_logs
-        FOR EACH ROW EXECUTE FUNCTION swift_b2_refuse_${RUN}();`);
-    }, 'inject'));
+    await refuseAuditWhere(app, REFUSAL, { actionLike: '%/billing/fx-rates%' });
     try {
       const res = await call('POST', '/api/v1/admin/billing/fx-rates', {
         quote: QUOTE, rate: 211.5, source: 'FOUNDER_MANUAL', reason: REASON });

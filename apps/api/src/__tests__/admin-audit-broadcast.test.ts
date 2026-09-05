@@ -9,7 +9,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
-import { withSuiteCapability } from '../lib/test-target-lock';
+import { refusalName, refuseAuditWhere, allowAuditAgain, dropAuditRefusal } from './helpers/audit-refusal';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { adminAuditCounter } from '../plugins/observability';
 
@@ -30,6 +30,7 @@ import { adminAuditCounter } from '../plugins/observability';
 
 let app: FastifyInstance;
 const RUN = nanoid(6).toLowerCase();
+const REFUSAL = refusalName('bc');
 const userIds: string[] = [];
 const recipientIds: string[] = [];
 let token = '';
@@ -84,10 +85,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await withSuiteCapability('ddl', () => runWithoutTenant(async () => {
-    await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS swift_bc_refuse_${RUN} ON audit_logs;`);
-    await app.prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS swift_bc_refuse_${RUN}();`);
-  }, 'cleanup')).catch(() => {});
+  await dropAuditRefusal(app, REFUSAL);
   await cleanupSecondApprovers(app);
   const all = [...userIds, ...recipientIds];
   await runWithoutTenant(async () => {
@@ -125,27 +123,14 @@ describe('[ADM-002] a broadcast records how far it reached', () => {
       where: { userId: { in: recipientIds } } }), 'read');
     const refusedBefore = await refusedC5();
 
-    await withSuiteCapability('ddl', () => runWithoutTenant(async () => {
-      await app.prisma.$executeRawUnsafe(`
-        CREATE OR REPLACE FUNCTION swift_bc_refuse_${RUN}() RETURNS trigger AS $fn$
-        BEGIN
-          IF NEW."entityId" = 'broadcast' THEN RAISE EXCEPTION 'injected'; END IF;
-          RETURN NEW;
-        END; $fn$ LANGUAGE plpgsql;`);
-      await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS swift_bc_refuse_${RUN} ON audit_logs;`);
-      await app.prisma.$executeRawUnsafe(`
-        CREATE TRIGGER swift_bc_refuse_${RUN} BEFORE INSERT ON audit_logs
-        FOR EACH ROW EXECUTE FUNCTION swift_bc_refuse_${RUN}();`);
-    }, 'inject'));
+    await refuseAuditWhere(app, REFUSAL, { entityId: 'broadcast' });
     try {
       const res = await call('POST', '/api/v1/admin/notifications/broadcast', {
         title: `${TITLE} refused`, body: 'Should not land.', role: 'RIDER',
         category: 'service', reason: REASON });
       expect(res.statusCode, 'a broadcast whose audit was refused must not report success').not.toBe(200);
     } finally {
-      await withSuiteCapability('ddl', () => runWithoutTenant(async () => {
-        await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS swift_bc_refuse_${RUN} ON audit_logs;`);
-      }, 'cleanup'));
+      await allowAuditAgain(app, REFUSAL);
     }
 
     const after = await runWithoutTenant(() => app.prisma.notification.count({
