@@ -700,6 +700,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'audit-chain-verify') {
+        // [DOC-1 §20.1 · DOC-INV-35] A chain nobody verifies is decoration.
+        const { verifyAuditChainAndAlarm } = await import('../lib/audit-chain');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const verdict = await verifyAuditChainAndAlarm(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
+        ctx.log.info({ ok: verdict.ok, entries: verdict.entries, breakAt: verdict.breakAt === null ? null : String(verdict.breakAt) }, 'audit chain verified');
+      }
+      if (job.name === 'audit-chain-anchor') {
+        const { anchorAuditChain } = await import('../lib/audit-chain');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const anchor = await anchorAuditChain(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
+        ctx.log.info({ headSeq: anchor ? String(anchor.headSeq) : null }, 'audit chain anchored');
+      }
       if (job.name === 'backup-freshness') {
         const { checkBackupFreshness } = await import('../modules/ops/backup-freshness');
         const result = await checkBackupFreshness(ctx.prisma);
@@ -2013,6 +2026,17 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '25 * * * *' },
     removeOnComplete: 24,
     removeOnFail: 24,
+  });
+  // [DOC-1 §20.1] Audit chain: verified hourly at :15, anchored daily at 23:45.
+  await queues.verificationQueue.add('audit-chain-verify', {}, {
+    repeat: { pattern: '15 * * * *' },
+    removeOnComplete: 24,
+    removeOnFail: 24,
+  });
+  await queues.verificationQueue.add('audit-chain-anchor', {}, {
+    repeat: { pattern: '45 23 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
   });
 
   // Backup freshness: daily at 05:30, before the working day. Reads the

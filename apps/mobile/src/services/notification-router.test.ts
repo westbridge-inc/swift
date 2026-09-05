@@ -369,6 +369,8 @@ const CENSUS: Case[] = [
   { k: 'compliance_violation', d: { runId: 'r1' }, to: null, why: 'admins' },
   { k: 'verification_pending', d: { docId: 'd1' }, to: null, why: 'admins — review queue' },
   { k: 'verification_sla_breach', d: { slaHours: 24 }, to: null, why: 'admins' },
+  { k: 'audit_chain_broken', d: { breakAt: '12', reason: 'HASH' }, to: null, why: 'admins — the tamper-evident audit chain failed verification (DOC-1 §20.1)' },
+  { k: 'audit_chain_anchor', d: { headSeq: '12', headHash: 'ab', verified: true }, to: null, why: 'admins — the daily audit-chain head to keep outside Swift' },
   { k: 'verification_legal_hold_overdue', d: { overdue: 1, holdIds: ['h1'] }, to: null, why: 'admins — a document legal hold past its review date (DOC-1 §9.4)' },
   { k: 'integrity_appeal', d: { enforcementId: 'e1' }, to: null, why: 'admins' },
   { k: 'dup_doc', d: { sha256: 'x' }, to: null, why: 'admins' },

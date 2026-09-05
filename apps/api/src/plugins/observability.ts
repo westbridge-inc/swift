@@ -267,6 +267,14 @@ export const reaperGauge = new client.Gauge({
   registers: [registry],
 });
 
+// [DOC-1 §20.1 · P20-1] The audit chain: ok / broken / entries — verified hourly (DOC-INV-35).
+export const auditChainGauge = new client.Gauge({
+  name: 'swift_audit_chain',
+  help: 'Tamper-evident audit chain state (ok, broken, entries)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+
 export const readinessGauge = new client.Gauge({
   name: 'swift_readiness_dependency',
   help: 'Readiness by dependency after the last /ready evaluation (1 ready, 0 not ready)',

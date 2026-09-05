@@ -6382,3 +6382,37 @@ model FraudCase {
   @@index([tenantId, createdAt])
   @@map("fraud_case")
 }
+
+/// [DOC-1 §20.1 · P20-1] One append-only, hash-chained sequence for the whole platform:
+/// digests of audit-bearing writes, never the bodies. Appended by database triggers
+/// (audit_logs, review_decision, deletion_receipt) through audit_chain_append();
+/// UPDATE / DELETE / TRUNCATE refused. Verified hourly, anchored daily (DOC-INV-35).
+model AuditChainEntry {
+  seq           BigInt   @id @default(autoincrement())
+  occurredAt    DateTime @db.Timestamptz(3)
+  actorId       String?
+  actorRole     String
+  eventType     String
+  subjectRef    String?
+  submissionRef String?
+  /// sha256 of the canonicalised event row — NEVER the row itself.
+  payloadDigest Bytes
+  prevHash      Bytes
+  /// sha256(prevHash || seq || occurredAt(ms, UTC ISO) || payloadDigest)
+  entryHash     Bytes
+
+  @@index([occurredAt])
+  @@index([submissionRef])
+  @@map("audit_chain")
+}
+
+/// [DOC-1 §20.1] The daily head, in its own append-only table — the digest to compare against.
+model AuditChainAnchor {
+  id         BigInt   @id @default(autoincrement())
+  headSeq    BigInt
+  headHash   Bytes
+  verified   Boolean
+  anchoredAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@map("audit_chain_anchor")
+}

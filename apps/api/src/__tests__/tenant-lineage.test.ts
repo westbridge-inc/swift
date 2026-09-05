@@ -74,6 +74,8 @@ export const PLATFORM_WIDE: Record<string, string> = {
   DocType: 'the document registry (DOC-1 §4.2) — data keyed by country, like CountryConfig',
   DocField: 'fields of a registry document class',
   Validator: 'the validator registry (DOC-1 §7.1) — global data like the document registry it proves',
+  AuditChainEntry: 'the tamper-evident audit chain (DOC-1 §20.1) — one platform-wide sequence of digests, never bodies',
+  AuditChainAnchor: 'the daily head of the audit chain — a digest, platform-wide',
   RequirementSet: 'a market’s checklist for an actor role — country-keyed registry data',
   RequirementItem: 'items of a requirement set',
   ChatMessage: 'messages of participant-addressed rooms (ChatRoom is platform-wide)',
