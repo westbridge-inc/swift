@@ -132,6 +132,10 @@ const TENANT_QUERY_EXTENSIONS = {
   // [MKT-2] The stock ledger is tenant-owned: one operator's inventory
   // history must never be readable through another's session.
   stockMovement: scoped,
+  // [STA-1 Part 4] the reviewer fiction: one tenant's sessions, credentials, fixtures.
+  reviewSession: scoped,
+  reviewCredential: scoped,
+  reviewFixture: scoped,
 };
 
 /** Model names enrolled for tenant scoping. Derived — never hand-written. */
