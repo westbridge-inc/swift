@@ -1,4 +1,5 @@
 import type { PrismaClient, LivenessOutcome, LivenessPurpose } from '@prisma/client';
+import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getKycProvider, type KycProvider } from '../../providers/kyc/kyc-provider';
@@ -129,6 +130,11 @@ export class LivenessService {
 
     let outcome: LivenessOutcome;
     try {
+      // [DOC-1 §0.5 · FD-D5] A liveness check IS a face-match. With the biometric
+      // switch off it cannot run; say so, never fall through to a guess.
+      if (!biometricFaceMatchEnabled()) {
+        throw new AppError(409, 'BIOMETRIC_DISABLED', 'Liveness needs face-match, which FEATURE_BIOMETRIC_FACE_MATCH=0 has turned off');
+      }
       const res = await this.kyc.verifyIdentity({
         userId: input.userId,
         idDocumentUrl: user.avatar, // the reference face (already ID-proven at L2)

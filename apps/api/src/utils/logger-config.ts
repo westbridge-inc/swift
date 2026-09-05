@@ -27,6 +27,16 @@ export const loggerRedactConfig = {
     '*.msecret',
     'req.body.code',
     'req.body.otp',
+    // [DOC-1 §0.5] Raw extracted document PII and the signed URLs of PERSONAL
+    // images never appear in a log line, at any level. pino's `*.key` matches
+    // ONLY a nested key, so each path is listed bare (top level) and nested.
+    'documentNumber', '*.documentNumber',
+    'extracted', '*.extracted',
+    'dateOfBirth', '*.dateOfBirth',
+    'dob', '*.dob',
+    'idDocumentUrl', '*.idDocumentUrl',
+    'selfieUrl', '*.selfieUrl',
+    'fileUrl', '*.fileUrl',
   ],
   censor: '[redacted]',
 };

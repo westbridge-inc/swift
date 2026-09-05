@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
+import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
@@ -238,7 +239,10 @@ export class VerificationService {
     // Identity documents get the full ID + face-match check against the
     // operator's signup selfie; every other document is a plain doc check.
     let result;
-    if (IDENTITY_FACE_MATCH_DOCS.has(docType)) {
+    // [DOC-1 §0.5 · FD-D5 · CONFLICT-DOC-2] The biometric leg runs only while
+    // the kill switch is on (default); off, an identity document is verified
+    // like any other document — no face leaves the building.
+    if (IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled()) {
       if (!user.avatar || !user.selfieCapturedAt) {
         throw new AppError(400, 'SELFIE_REQUIRED', 'Take your profile selfie before submitting your ID — we match the two faces.');
       }
@@ -334,7 +338,11 @@ export class VerificationService {
       throw new AppError(409, 'ALREADY_VERIFIED', 'Identity is already verified');
     }
 
-    let result = await this.kyc.verifyIdentity({ userId, idDocumentUrl, selfieUrl });
+    // [DOC-1 §0.5 · FD-D5] Biometric off → the L2 identity document is verified
+    // document-only; the selfie is not sent anywhere.
+    let result = biometricFaceMatchEnabled()
+      ? await this.kyc.verifyIdentity({ userId, idDocumentUrl, selfieUrl })
+      : await this.kyc.verifyDocument({ userId, docType: 'national_id', fileUrl: idDocumentUrl });
     // Rung 2/3: held accounts are never auto-approved (see submitDocument).
     if (result.status === 'approved') {
       const { hasActiveHold } = await import('../integrity/enforcement');
