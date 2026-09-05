@@ -44,6 +44,13 @@ export const TENANT_TABLES = [
   // [STA-1 §4 lineage] Child tables walled on the row itself, not only through their vendor.
   'items',
   'categories',
+  // [STA-1 §4 lineage · money] a person's or operator's money rows, walled on the row itself.
+  'transactions',
+  'earnings',
+  'settlements',
+  'delivery_cash_settlements',
+  'payout_requests',
+  'payout_schedules',
   'sos_retriggers',
   'guardian_checkin_deliveries',
   'legal_holds',
@@ -171,16 +178,36 @@ export function tenantPurgeGuardDdl(): string[] {
  *  parent is REFUSED, and so is a parent that is not visible from this tenant
  *  (under RLS a vendor of another tenant is invisible — fail closed). Mirrors
  *  the migration text; the test installer heals db-push environments. */
-export const TENANT_LINEAGE_TABLES = [
+export interface TenantLineageRule {
+  table: string;
+  trigger: string;
+  /** The parent whose tenant the row inherits (one hop), or a SQL expression yielding it. */
+  parent: string;
+  fk: string;
+  /** For two-hop lineage: a SELECT returning the parent's tenant for NEW. Defaults to `SELECT "tenantId" FROM <parent> WHERE id = NEW."<fk>"`. */
+  parentTenantSql?: string;
+  /** Columns whose UPDATE re-checks lineage (the fk by default). */
+  watch?: readonly string[];
+}
+export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'items', trigger: 'items_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'categories', trigger: 'categories_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
-] as const;
+  // [money] one hop through the owner
+  { table: 'transactions', trigger: 'transactions_tenant_matches_user', parent: 'users', fk: 'userId' },
+  { table: 'payout_requests', trigger: 'payout_requests_tenant_matches_user', parent: 'users', fk: 'userId' },
+  { table: 'payout_schedules', trigger: 'payout_schedules_tenant_matches_user', parent: 'users', fk: 'userId' },
+  { table: 'settlements', trigger: 'settlements_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
+  { table: 'delivery_cash_settlements', trigger: 'delivery_cash_settlements_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [money] two hops: an earning belongs to its mover (rider OR driver), who belongs to a user, who belongs to a tenant
+  { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'riderId', watch: ['riderId', 'driverId'],
+    parentTenantSql: `SELECT u."tenantId" FROM users u WHERE u.id = COALESCE((SELECT r."userId" FROM riders r WHERE r.id = NEW."riderId"), (SELECT d."userId" FROM drivers d WHERE d.id = NEW."driverId"))` },
+];
 export function tenantLineageDdl(): string[] {
-  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk }) => [
+  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch }) => [
     `CREATE OR REPLACE FUNCTION ${trigger}() RETURNS trigger AS $$
       DECLARE parent_tenant TEXT;
       BEGIN
-        SELECT "tenantId" INTO parent_tenant FROM ${parent} WHERE id = NEW."${fk}";
+        ${parentTenantSql ?? `SELECT "tenantId" FROM ${parent} WHERE id = NEW."${fk}"`} INTO parent_tenant;
         IF parent_tenant IS NULL THEN
           RAISE EXCEPTION '${table} row % names ${parent} row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
             NEW.id, NEW."${fk}" USING ERRCODE = 'check_violation';
@@ -195,7 +222,7 @@ export function tenantLineageDdl(): string[] {
         RETURN NEW;
       END $$ LANGUAGE plpgsql`,
     `DROP TRIGGER IF EXISTS ${trigger} ON ${table}`,
-    `CREATE TRIGGER ${trigger} BEFORE INSERT OR UPDATE OF "tenantId", "${fk}" ON ${table} FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
+    `CREATE TRIGGER ${trigger} BEFORE INSERT OR UPDATE OF "tenantId", ${(watch ?? [fk]).map((c) => `"${c}"`).join(', ')} ON ${table} FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
   ]);
 }
 

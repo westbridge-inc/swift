@@ -85,7 +85,7 @@ describe('[STA-1 §4 lineage] items and categories carry their tenant on the row
   it('both tables are in BOTH walls and are FORCED', async () => {
     for (const t of ['items', 'categories']) expect(TENANT_TABLES).toContain(t);
     for (const m of ['item', 'category']) expect(TENANT_MODEL_NAMES).toContain(m);
-    expect(TENANT_LINEAGE_TABLES.map((t) => t.table)).toEqual(['items', 'categories']);
+    for (const t of ['items', 'categories']) expect(TENANT_LINEAGE_TABLES.map((r) => r.table)).toContain(t);
     const rows = await app.prisma.$queryRaw<{ relname: string }[]>(Prisma.sql`
       SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'public' AND c.relname IN ('items', 'categories') AND c.relrowsecurity AND c.relforcerowsecurity`);

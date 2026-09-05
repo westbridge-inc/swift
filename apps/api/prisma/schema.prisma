@@ -390,6 +390,12 @@ model Tenant {
   reviewFixtures    ReviewFixture[]
   items             Item[]
   categories        Category[]
+  transactions      Transaction[]
+  earnings          Earning[]
+  settlements       Settlement[]
+  deliveryCashSettlements DeliveryCashSettlement[]
+  payoutRequests    PayoutRequest[]
+  payoutSchedules   PayoutSchedule[]
 
   @@index([kind])
   @@map("tenants")
@@ -2898,6 +2904,8 @@ model Earning {
   rider     Rider?        @relation(fields: [riderId], references: [id])
   driverId  String?
   driver    Driver?       @relation(fields: [driverId], references: [id])
+  tenantId String @default("swift-default")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
   orderId   String
   type      EarningType
   amount    Decimal       @db.Decimal(10, 2)
@@ -2907,6 +2915,7 @@ model Earning {
   // One earning per (order, type): a mover's fee/fare/tip for an order is a
   // single fact. This makes createEarnings idempotent — two concurrent order
   // completions can't double-pay (createMany skipDuplicates relies on it).
+  @@index([tenantId])
   @@unique([orderId, type])
   @@index([status])
   @@index([riderId])
@@ -3000,6 +3009,8 @@ model Settlement {
   id            String           @id @default(cuid())
   vendorId      String
   vendor        Vendor           @relation(fields: [vendorId], references: [id])
+  tenantId String @default("swift-default")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
   periodStart   DateTime
   periodEnd     DateTime
   /// DIGEST | ADJUSTMENT
@@ -3033,6 +3044,7 @@ model Settlement {
   paidAt        DateTime?
   reference     String?
   createdAt     DateTime         @default(now())
+  @@index([tenantId])
 
   @@unique([vendorId, periodStart, sequence])
   @@index([vendorId, periodStart])
@@ -3067,6 +3079,8 @@ model DeliveryCashSettlement {
   rider            Rider                @relation(fields: [riderId], references: [id])
   vendorId         String
   vendor           Vendor               @relation(fields: [vendorId], references: [id])
+  tenantId String @default("swift-default")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
   /// Delivery pay the store owes the rider (GYD): delivery fee PLUS any
   /// prepaid tip — the customer's MMG payment landed both in the store's
   /// wallet [REPORT-005/006 carryover: "fee" alone under-describes the debt].
@@ -3084,6 +3098,7 @@ model DeliveryCashSettlement {
   riderAttestedAmount Decimal?             @db.Decimal(10, 2)
   storeAttestedAmount Decimal?             @db.Decimal(10, 2)
   createdAt        DateTime             @default(now())
+  @@index([tenantId])
 
   @@index([riderId, status])
   @@index([vendorId, status])
@@ -3101,6 +3116,8 @@ model Transaction {
   id           String          @id @default(cuid())
   userId       String
   user         User            @relation(fields: [userId], references: [id])
+  tenantId String @default("swift-default")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
   type         TransactionType
   amount       Decimal         @db.Decimal(12, 2)
   direction    String
@@ -3109,6 +3126,7 @@ model Transaction {
   externalRef  String?
   balanceAfter Decimal         @db.Decimal(12, 2)
   createdAt    DateTime        @default(now())
+  @@index([tenantId])
 
   @@index([userId])
   @@index([createdAt])
@@ -3619,6 +3637,8 @@ model PayoutRequest {
   id           String       @id @default(cuid())
   userId       String
   user         User         @relation(fields: [userId], references: [id])
+  tenantId String @default("swift-default")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
   amount       Decimal      @db.Decimal(12, 2)
   method       PayoutMethod
   status       PayoutStatus @default(PENDING)
@@ -3629,6 +3649,7 @@ model PayoutRequest {
   processedAt  DateTime?
   failedReason String?
   createdAt    DateTime     @default(now())
+  @@index([tenantId])
 
   @@map("payout_requests")
 }
@@ -3637,6 +3658,8 @@ model PayoutSchedule {
   id           String       @id @default(cuid())
   userId       String       @unique
   user         User         @relation(fields: [userId], references: [id])
+  tenantId String @default("swift-default")
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
   frequency    String
   dayOfWeek    Int?
   method       PayoutMethod
@@ -3646,6 +3669,7 @@ model PayoutSchedule {
   nextPayoutAt DateTime?
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
+  @@index([tenantId])
 
   @@map("payout_schedules")
 }
