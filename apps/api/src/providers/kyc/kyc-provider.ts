@@ -22,6 +22,8 @@ export interface KycVerificationResult {
    *  hook, which HMAC-hashes and discards them immediately (trial-integrity
    *  spec §2.1 hashing law). Raw values are never persisted anywhere. */
   extracted?: { documentNumber?: string };
+  /** Processor-reported confidence for the extracted set, 0..1. Absent = unknown — never eligible for auto-approval (DOC-1 §6.9). */
+  confidence?: number;
 }
 
 /**

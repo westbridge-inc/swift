@@ -15,7 +15,7 @@
  * Without a KEK no value is stored at all: the row says ABSENT and the run says
  * NO_KEK. Plaintext PII in a column is not an option, in any environment.
  */
-import type { Prisma, ExtractionOutcome, ValidationStatus } from '@prisma/client';
+import type { Prisma, DocBucket, ExtractionOutcome, ValidationStatus } from '@prisma/client';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider } from '../../providers/storage/envelope';
 import { hashSignal, normalizeDocNumber } from '../integrity/normalize';
 import type { KycEngine } from '../../providers/kyc/kyc-provider';
@@ -44,6 +44,8 @@ export interface ExtractionPlan {
     outcome: ExtractionOutcome; errorClass: string | null;
     ranExternally: boolean; processorRef: string | null;
     wrappedDek: Buffer | null; schemaViolations: number;
+    /** Processor-reported confidence for the set, 0..1; null = unknown. */
+    confidence: number | null;
   };
   fields: PlannedField[];
   validations: PlannedValidation[];
@@ -58,6 +60,8 @@ export interface ExtractionPlanInput {
   startedAt: Date;
   finishedAt: Date;
   collided: boolean;
+  /** Processor-reported confidence, 0..1; undefined = unknown. */
+  confidence?: number;
 }
 
 /** iv(12) | authTag(16) | ciphertext — the same layout the KEK uses for a wrapped DEK. */
@@ -127,6 +131,9 @@ export async function planExtraction(input: ExtractionPlanInput): Promise<Extrac
       durationMs: Math.max(0, input.finishedAt.getTime() - input.startedAt.getTime()),
       outcome, errorClass, ranExternally: input.engine.external, processorRef: input.engine.processorRef ?? null,
       wrappedDek, schemaViolations,
+      confidence: typeof input.confidence === 'number' && Number.isFinite(input.confidence)
+        ? Math.round(Math.min(1, Math.max(0, input.confidence)) * 1000) / 1000
+        : null,
     },
     fields,
     validations,
@@ -155,4 +162,76 @@ export async function persistExtraction(
 export function recordExtractionMetrics(plan: ExtractionPlan): void {
   docExtractionRunCounter.inc({ engine: plan.run.engineName, outcome: plan.run.outcome });
   if (plan.run.schemaViolations > 0) docExtractionSchemaViolationCounter.inc({ engine: plan.run.engineName }, plan.run.schemaViolations);
+}
+
+// ---------------------------------------------------------------------------
+// [DOC-1 §6.9 · P6-4] Routing after extraction. The registry speaks for a
+// document type once it is ACTIVE (legal facts verified); until then the
+// legacy behaviour holds — the processor verdict, minus the §0.5 gate above.
+// ---------------------------------------------------------------------------
+
+/**
+ * The always_review_set at launch (§6.9): every PERSONAL-bucket document and
+ * anything that still needs a specimen — by rule; plus whatever the registry
+ * marks alwaysReview by fact (the insurance certificate: covers_hire_and_reward
+ * is a wording judgement a model must not make alone — FD-DOC-6). The fact
+ * lives in the registry seed, never as a document-type literal here (DOC-INV-2).
+ */
+export interface RoutingType {
+  isActive: boolean;
+  bucket: DocBucket;
+  needsSpecimen: boolean;
+  alwaysReview: boolean;
+  minConfidenceAutoApprove: { toString(): string } | number;
+}
+export function alwaysReview(type: Pick<RoutingType, 'bucket' | 'needsSpecimen' | 'alwaysReview'>): boolean {
+  return type.bucket === 'PERSONAL' || type.needsSpecimen || type.alwaysReview;
+}
+
+export type IneligibleReason =
+  | 'BLOCKING_FAIL' | 'ALWAYS_REVIEW' | 'COLLISION' | 'NOT_VALIDATED' | 'CONFIDENCE_UNKNOWN' | 'CONFIDENCE_BELOW_THRESHOLD';
+
+/**
+ * auto_approve_eligible (§6.9): every blocking validator PASS (a SKIP is not a
+ * PASS — nothing was checked), confidence known and at or above the type's
+ * threshold, no cross-subject collision, type not in the always-review set.
+ * Evaluated only when the registry speaks for the type; the §0.5 gate applies
+ * regardless.
+ */
+export function autoApproveEligible(
+  plan: ExtractionPlan,
+  type: RoutingType | null,
+  collided: boolean,
+): { eligible: boolean; reason: IneligibleReason | null } {
+  if (plan.blockingFail) return { eligible: false, reason: 'BLOCKING_FAIL' };
+  if (!type?.isActive) return { eligible: true, reason: null }; // the registry is silent: legacy behaviour
+  if (alwaysReview(type)) return { eligible: false, reason: 'ALWAYS_REVIEW' };
+  if (collided) return { eligible: false, reason: 'COLLISION' };
+  if (!plan.validations.some((v) => v.isBlocking) || plan.validations.some((v) => v.isBlocking && v.status !== 'PASS')) {
+    return { eligible: false, reason: 'NOT_VALIDATED' };
+  }
+  if (plan.run.confidence === null) return { eligible: false, reason: 'CONFIDENCE_UNKNOWN' };
+  if (plan.run.confidence < Number(type.minConfidenceAutoApprove)) return { eligible: false, reason: 'CONFIDENCE_BELOW_THRESHOLD' };
+  return { eligible: true, reason: null };
+}
+
+const INELIGIBLE_TEXT: Record<IneligibleReason, string> = {
+  BLOCKING_FAIL: 'Required fields could not be read from the document — human review',
+  ALWAYS_REVIEW: 'This document type is always reviewed by a person (DOC-1 §6.9)',
+  COLLISION: 'Duplicate of a document already on another account — second review required',
+  NOT_VALIDATED: 'Nothing was validated for this document type — human review',
+  CONFIDENCE_UNKNOWN: 'The processor reported no confidence — human review',
+  CONFIDENCE_BELOW_THRESHOLD: 'Processor confidence is below the auto-approval threshold — human review',
+};
+
+/** A processor approval becomes human review whenever §6.9 / §0.5 say it is not eligible. Anything else passes through untouched. */
+export function gateAutoApproval<T extends { status: string; reason?: string; collided?: boolean }>(
+  result: T,
+  plan: ExtractionPlan,
+  type: RoutingType | null,
+): T {
+  if (result.status !== 'approved') return result;
+  const verdict = autoApproveEligible(plan, type, result.collided === true);
+  if (verdict.eligible) return result;
+  return { ...result, status: 'pending_manual', reason: INELIGIBLE_TEXT[verdict.reason!] };
 }

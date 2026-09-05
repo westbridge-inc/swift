@@ -31,6 +31,12 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   vehicle_exterior_photo: 'VEHICLE', fitness_cert: 'VEHICLE', road_service_licence: 'VEHICLE',
 };
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
+/**
+ * [DOC-1 §6.9 · FD-DOC-6] Types in the always-review set by registry FACT (not by bucket rule):
+ * the insurance certificate — covers_hire_and_reward is a wording judgement a model must not
+ * make alone. PERSONAL types and anything needing a specimen are always-review by rule.
+ */
+export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set(['vehicle_insurance']);
 
 export const registryCode = (countryCode: string, legacyCode: string) => `${countryCode}.${legacyCode}`;
 const humanize = (code: string) => code.split('_').map((w) => (w === 'id' || w === 'tin' || w === 'gra' || w === 'gei' ? w.toUpperCase() : w[0]!.toUpperCase() + w.slice(1))).join(' ');
@@ -55,8 +61,9 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
           imagePolicy: 'PERSIST', persistRetentionDays: PROVISIONAL_RETENTION_DAYS,
           hasExpiry: validity !== undefined, defaultValidityDays: validity ?? null, expirySource: validity !== undefined ? 'PRINTED' : 'NONE',
           extractionProfile: 'UNPROFILED', externalProcessingAllowed: false, legalFactsSourceNote: PROVISIONAL_NOTE, isActive: false,
+          alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(legacyCode),
         },
-        update: { legacyCode, hasExpiry: validity !== undefined, defaultValidityDays: validity ?? null },
+        update: { legacyCode, hasExpiry: validity !== undefined, defaultValidityDays: validity ?? null, alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(legacyCode) },
       });
       docTypes += 1;
     }
