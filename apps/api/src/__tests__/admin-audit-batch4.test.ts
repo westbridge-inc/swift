@@ -30,7 +30,9 @@ import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-appr
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = nanoid(6).toLowerCase();
+// SQL identifiers: `nanoid` draws from an alphabet with `-` and `_`; a dash breaks
+// the trigger DDL and two dashes start a comment. Alphanumeric only, always.
+const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 const ownerIds: string[] = [];
