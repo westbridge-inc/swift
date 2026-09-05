@@ -68,7 +68,7 @@ async function start() {
         // whose category rail would be empty.
         app.markBootContractsComplete();
       } catch (err) {
-        app.log.warn({ err }, 'boot seeds failed — the category rail or the document registry may be empty; readiness stays 503');
+        app.log.warn({ err }, 'discovery: taxonomy seed failed — the category rail will be empty (or the document registry seed failed); readiness stays 503');
       }
     })();
   } catch (err) {
