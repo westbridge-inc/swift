@@ -1,4 +1,5 @@
 import type { PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
+import { registryChecklist } from '../verification/doc-registry';
 import { NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
 import { readDeliveryRates } from './pricing-config';
@@ -170,6 +171,12 @@ export class CountryConfigService {
 
   /** Required-document checklist for a role key (drives verification). */
   async getDocumentChecklist(code: string, roleKey: string): Promise<string[]> {
+    // [DOC-1 §4.2] The registry speaks first — but only for a requirement set
+    // whose every document type is ACTIVE (legal facts verified). Until then
+    // the answer is the JSON these lists have always come from: same
+    // signature, same lists, no behaviour change (test_checklist_facade_unchanged).
+    const fromRegistry = await registryChecklist(this.prisma, code, roleKey);
+    if (fromRegistry) return fromRegistry;
     const config = await this.getByCode(code);
     const lists = config.documentChecklists as Record<string, string[]>;
     return lists[roleKey] ?? [];
