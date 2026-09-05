@@ -263,6 +263,7 @@ export class VerificationService {
         result = { ...result, status: 'pending_manual' as const };
       }
     }
+    result = await this.holdOnCrossSubjectCollision(userId, roleKey, fileUrl, result);
 
     const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
     const doc = await this.createDocumentLively({
@@ -344,6 +345,7 @@ export class VerificationService {
     let result = biometricFaceMatchEnabled()
       ? await this.kyc.verifyIdentity({ userId, idDocumentUrl, selfieUrl })
       : await this.kyc.verifyDocument({ userId, docType: 'national_id', fileUrl: idDocumentUrl });
+    result = await this.holdOnCrossSubjectCollision(userId, 'MOVER', idDocumentUrl, result);
     // Rung 2/3: held accounts are never auto-approved (see submitDocument).
     if (result.status === 'approved') {
       const { hasActiveHold } = await import('../integrity/enforcement');
@@ -1015,6 +1017,38 @@ export class VerificationService {
       data: { retentionExpiresAt: deleteAt },
     });
     return res.count;
+  }
+
+  /**
+   * [DOC-1 §7 V_SHA_COLLISION · DOC-INV-11] The SAME bytes already on ANOTHER
+   * account never auto-approve: one person opening several accounts, or a
+   * reused/forged document. The upload route already tells the reviewers
+   * (SWIFT-078); this is the rule at the decision — the provider's verdict is
+   * overruled to a human review, and both accounts are linked in the identity
+   * graph with a HARD signal (the file's hash — never the document). A bad
+   * document is still a bad document: an auto-reject stands.
+   */
+  private async holdOnCrossSubjectCollision<T extends { status: string; reason?: string }>(
+    userId: string,
+    roleKey: string,
+    fileKey: string,
+    result: T,
+  ): Promise<T> {
+    if (!fileKey) return result;
+    const mine = await this.prisma.encryptedObject.findUnique({ where: { fileKey }, select: { sha256: true } });
+    if (!mine) return result; // no envelope row (no KEK configured): nothing to compare
+    const other = await this.prisma.encryptedObject.findFirst({
+      where: { sha256: mine.sha256, createdBy: { not: userId } },
+      select: { createdBy: true },
+    });
+    if (!other) return result;
+    const { IdentityService } = await import('../integrity/identity.service');
+    const identity = new IdentityService(this.prisma);
+    const otherRole = (await this.prisma.user.findUnique({ where: { id: other.createdBy }, select: { activeRole: true } }))?.activeRole ?? 'CUSTOMER';
+    await identity.capture({ accountId: userId, actorRole: roleKey, type: 'DOC_CONTENT', normalizedValue: mine.sha256, source: 'ONBOARDING_DOC' });
+    await identity.capture({ accountId: other.createdBy, actorRole: otherRole, type: 'DOC_CONTENT', normalizedValue: mine.sha256, source: 'ONBOARDING_DOC' });
+    if (result.status !== 'approved') return result;
+    return { ...result, status: 'pending_manual', reason: 'Duplicate of a document already on another account — second review required' };
   }
 
   /** Purge documents whose retention window elapsed: delete the stored object,

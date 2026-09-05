@@ -18,6 +18,7 @@ import { runWithoutTenant } from '../../plugins/tenant-context';
 
 export const SIGNAL_STRENGTH: Record<IdentitySignalType, SignalStrength> = {
   ID_DOC_NUMBER: 'HARD',
+  DOC_CONTENT: 'HARD', // [DOC-INV-11] the same bytes on two accounts is one person, or one forged document
   TIN: 'HARD',
   BUSINESS_REG: 'HARD',
   PLATE: 'HARD',
