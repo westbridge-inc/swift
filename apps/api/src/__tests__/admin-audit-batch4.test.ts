@@ -34,6 +34,7 @@ const RUN = nanoid(6).toLowerCase();
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 const ownerIds: string[] = [];
+const orderIds: string[] = [];
 let token = '';
 let vendorId = '';
 const REASON = 'Refund handed back at the counter, receipt on file, ticket GY-5511';
@@ -83,11 +84,13 @@ async function customer() {
 }
 async function owedOrder(total = 1300) {
   const c = await customer();
-  return app.prisma.order.create({ data: {
+  const order = await app.prisma.order.create({ data: {
     orderNumber: `B4-${RUN}-${nanoid(6)}`, orderType: 'FOOD_DELIVERY', customerId: c.id, vendorId,
     status: 'CANCELLED', deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
     subtotalBase: total - 300, subtotalMarkup: 0, subtotalCustomer: total - 300, deliveryFee: 300, totalAmount: total,
     paymentMethod: 'CASH', cancelledAt: new Date(), refundOwedAmount: total, refundOwedAt: new Date(), refundOwedById: userIds[0]! } });
+  orderIds.push(order.id);
+  return order;
 }
 async function dueReturn(refundAmount = 4500) {
   const order = await owedOrder(refundAmount);
@@ -147,9 +150,9 @@ afterAll(async () => {
   await runWithoutTenant(async () => {
     await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: userIds } } }).catch(() => {});
     await app.prisma.subscription.deleteMany({ where: { vendorId: { in: vendorIds } } }).catch(() => {});
-    await app.prisma.returnRequest.deleteMany({ where: { order: { orderNumber: { startsWith: `B4-${RUN}-` } } } }).catch(() => {});
-    await app.prisma.orderStatusLog.deleteMany({ where: { order: { orderNumber: { startsWith: `B4-${RUN}-` } } } }).catch(() => {});
-    await app.prisma.order.deleteMany({ where: { orderNumber: { startsWith: `B4-${RUN}-` } } }).catch(() => {});
+    await app.prisma.returnRequest.deleteMany({ where: { orderId: { in: orderIds } } }).catch(() => {});
+    await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: orderIds } } }).catch(() => {});
+    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } }).catch(() => {});
     await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } }).catch(() => {});
     await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds } } }).catch(() => {});
     await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'b4').catch(() => 0);
