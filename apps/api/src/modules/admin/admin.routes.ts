@@ -3243,18 +3243,33 @@ export async function adminRoutes(app: FastifyInstance) {
       return { success: true, data: { sent: 0 } };
     }
 
-    // Batch create notifications
-    await app.prisma.notification.createMany({
-      data: userIds.map((userId) => ({
-        userId,
-        type: 'SYSTEM_ANNOUNCEMENT' as const,
-        title,
-        body,
-        data: (data ?? undefined) as any,
-      })),
+    // [ADM-002] The notifications and the record of who sent them commit
+    // together. The audit row keeps what the legacy one carried: this route's
+    // subject is the AUDIENCE, not a row ("addresses every user" is its stated
+    // reason for declaring no entity), so a trail that cannot say how many
+    // people a broadcast reached has not recorded the broadcast.
+    await app.prisma.$transaction(async (tx) => {
+      // Batch create notifications
+      await tx.notification.createMany({
+        data: userIds.map((userId) => ({
+          userId,
+          type: 'SYSTEM_ANNOUNCEMENT' as const,
+          title,
+          body,
+          data: (data ?? undefined) as any,
+        })),
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        entityId: 'broadcast',
+        extra: { title, role: role || 'ALL', recipientCount: userIds.length },
+      });
     });
 
-    // Push via Socket.IO to each user's room
+    // Push via Socket.IO to each user's room — AFTER the commit, deliberately.
+    // An emit cannot be recalled. Announcing a broadcast whose rows then rolled
+    // back would leave every recipient holding a notification the database has
+    // no record of, and the previous order did exactly that: create, emit,
+    // then audit, with the audit free to fail on its own.
     const payload = {
       type: 'SYSTEM_ANNOUNCEMENT',
       title,
@@ -3266,15 +3281,6 @@ export async function adminRoutes(app: FastifyInstance) {
     for (const userId of userIds) {
       app.io.to(`user:${userId}`).emit('notification', payload);
     }
-
-    await audit(
-      request.user.userId,
-      'BROADCAST_NOTIFICATION',
-      'Notification',
-      'broadcast',
-      { title, role: role || 'ALL', recipientCount: userIds.length },
-      request,
-    );
 
     return { success: true, data: { sent: userIds.length, role: role || 'ALL' } };
   });

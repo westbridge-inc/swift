@@ -30,7 +30,10 @@
 // row inside its action's transaction, `backstop` for one the hook wrote
 // because nothing else did. "Backstop is the only writer" is the observability
 // the clause asks for, and it is a number, not a guess — it goes to zero as
-// the migration lands, and a route that regresses puts it back up.
+// the migration lands, and a route that regresses puts it back up. A fourth
+// label, `refused`, counts an INLINE row the database would not take — the
+// action rolled back with it, which is the fix working, but it must still be
+// a number someone can alert on rather than an anonymous 500.
 //
 // The row is built by ONE function for both writers. The trail does not change
 // shape when a route migrates; only the moment it is written does.
@@ -38,6 +41,7 @@
 
 import { ABSENT, changeRecord, snapshot, type EntitySnapshot } from './audit-change';
 import { ADMIN_ROUTE_AUTHORITY, reasonOf, routeTemplateOf } from './admin-authority';
+import { adminAuditCounter } from '../../plugins/observability';
 
 /**
  * The narrowest thing that can write the row: satisfied by `PrismaClient` and
@@ -65,6 +69,11 @@ export interface AuditRequestLike {
   auditWrittenInline?: boolean | undefined;
 }
 
+/** The keys `changeRecord` owns. `extra` may add to `changes`; it may never
+ *  redefine one of these, because a route that did so would silently replace
+ *  the stated reason, or the before/after digests, with its own idea of them. */
+export const RESERVED_CHANGE_KEYS: ReadonlySet<string> = new Set(['params', 'reason', 'subject', 'before', 'after', 'changed']);
+
 export interface AdminAuditRowInput {
   /** The mounted path, as the trail has always recorded it. */
   readonly routeUrl: string;
@@ -78,6 +87,16 @@ export interface AdminAuditRowInput {
    *  exist when the request was routed. Without this the row says `-` and the
    *  trail cannot name what was created. */
   readonly entityIdOverride?: string | undefined;
+  /** [ADM-002] NAMED facts a route's own audit row carried that the generic
+   *  one cannot derive — `POST /notifications/broadcast` records how many
+   *  people it reached, and its whole subject IS the audience.
+   *
+   *  Explicit fields ONLY. ADM-004 stripped the raw request body out of
+   *  `changes` because it carried document numbers, phone numbers and
+   *  addresses into a table with no privacy shaping; spreading a payload
+   *  through here would put it straight back. A count, a role, a version — not
+   *  `...body`. */
+  readonly extra?: Readonly<Record<string, string | number | boolean | null>> | undefined;
 }
 
 /**
@@ -92,25 +111,37 @@ export function adminAuditRow(
 ): Record<string, unknown> {
   const params = (request.params ?? {}) as Record<string, string>;
   const headers = request.headers ?? {};
+  const extra = input.extra ?? {};
+  const collision = Object.keys(extra).find((key) => RESERVED_CHANGE_KEYS.has(key));
+  if (collision) {
+    // A programming error at the call site, surfaced where the test for that
+    // route will see it — never a quietly rewritten trail.
+    throw new TypeError(`[ADM-002] audit extra may not redefine the canonical field '${collision}'`);
+  }
   return {
     userId,
     action: `ADMIN ${request.method} ${input.routeUrl}`,
     entity: input.entityOverride ?? (input.routeUrl.split('/').filter(Boolean)[0] ?? 'admin'),
     entityId: input.entityIdOverride ?? params['id'] ?? params['key'] ?? params['userId'] ?? '-',
-    changes: changeRecord({
-      params,
-      reason: input.reason,
-      before: input.before,
-      after: input.after,
-      entityDeclared: input.entityDeclared,
-    }),
+    // Named extras first, the canonical record last: even if the guard above
+    // were ever bypassed, the reason and the digests are the ones that stand.
+    changes: {
+      ...extra,
+      ...changeRecord({
+        params,
+        reason: input.reason,
+        before: input.before,
+        after: input.after,
+        entityDeclared: input.entityDeclared,
+      }),
+    },
     ipAddress: request.ip,
     userAgent: headers['user-agent'],
   };
 }
 
 /** Where the audit row for this request came from. */
-export type AuditWriterKind = 'inline' | 'backstop';
+export type AuditWriterKind = 'inline' | 'backstop' | 'failed' | 'refused';
 
 /**
  * Write the audit row through the caller's transaction, and mark the request
@@ -149,6 +180,9 @@ export async function auditWithin(
     /** [ADM-002] The id of a row this action CREATED. A create route has no id
      *  in its params, so without it the audit row cannot name its subject. */
     readonly entityId?: string | undefined;
+    /** [ADM-002] Named facts the generic row cannot derive. Explicit fields
+     *  only — never a request-body spread (see `AdminAuditRowInput.extra`). */
+    readonly extra?: Readonly<Record<string, string | number | boolean | null>> | undefined;
   },
 ): Promise<void> {
   const userId = overrides?.userId ?? request.user?.userId;
@@ -162,16 +196,26 @@ export async function auditWithin(
   const after = entity
     ? await snapshot(tx as never, entity, params[entity.param ?? 'id'])
     : ABSENT;
-  await tx.auditLog.create({
-    data: adminAuditRow(request, userId, {
-      routeUrl,
-      reason: overrides?.reason !== undefined ? overrides.reason : reasonOf(request.body, request.headers as never),
-      before: request.auditBefore ?? ABSENT,
-      after,
-      entityDeclared: !!entity,
-      entityIdOverride: overrides?.entityId,
-    }),
-  });
+  try {
+    await tx.auditLog.create({
+      data: adminAuditRow(request, userId, {
+        routeUrl,
+        reason: overrides?.reason !== undefined ? overrides.reason : reasonOf(request.body, request.headers as never),
+        before: request.auditBefore ?? ABSENT,
+        after,
+        entityDeclared: !!entity,
+        entityIdOverride: overrides?.entityId,
+        extra: overrides?.extra,
+      }),
+    });
+  } catch (err) {
+    // The transaction is about to roll back — that is the clause working. But
+    // an inline refusal surfaces to the client as a 500 with nothing naming
+    // the audit write as the cause, and the hook never sees it (it leaves on
+    // any 4xx/5xx). Count it here or it is invisible.
+    adminAuditCounter.labels('refused', authority?.cls ?? 'C0').inc();
+    throw err;
+  }
   request.auditWrittenInline = true;
 }
 
