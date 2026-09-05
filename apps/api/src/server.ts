@@ -6,6 +6,7 @@ import { buildApp } from './app';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
 import { attestationOf, attestationLine, readRlsFacts, assertTenantWall } from './lib/rls-attestation';
 import { rlsAttestationGauge } from './plugins/observability';
+import { isProduction } from './utils/runtime-mode';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
@@ -62,7 +63,21 @@ async function start() {
         // are never minted lazily on a request path.
         const { seedDocRegistry } = await import('./modules/verification/doc-registry');
         const registry = await seedDocRegistry(app.prisma);
-        app.log.info({ docTypes: registry.docTypes, requirementSets: registry.requirementSets }, 'documents: registry seeded');
+        app.log.info({ docTypes: registry.docTypes, requirementSets: registry.requirementSets, validators: registry.validators }, 'documents: registry seeded');
+        // [DOC-INV-2] An ACTIVE document type the registry cannot validate — no
+        // profile, no fields, a required field without a validator, a blocking
+        // validator with no implementation — is a lie about verification. In
+        // production the boot contract stays incomplete (readiness 503); elsewhere
+        // the gaps are named so the seed that closes them can be written.
+        const { registryCompletenessGaps } = await import('./modules/verification/doc-registry');
+        const { resolvesImpl } = await import('./modules/verification/validators');
+        const gaps = await registryCompletenessGaps(app.prisma, resolvesImpl);
+        if (gaps.length > 0) {
+          if (isProduction()) {
+            throw new Error(`document registry incomplete for active types: ${gaps.slice(0, 8).map((g) => `${g.docTypeCode}:${g.gap}${g.detail ? `(${g.detail})` : ''}`).join(', ')}`);
+          }
+          app.log.warn({ gaps }, 'documents: registry incomplete for active types — production refuses to boot like this');
+        }
         // [R048-006] The contract is COMPLETE only here. Readiness answers 503
         // until this line runs, so an orchestrator never routes to a process
         // whose category rail would be empty.

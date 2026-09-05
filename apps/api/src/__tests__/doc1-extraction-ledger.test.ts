@@ -146,7 +146,7 @@ describe('[DOC-1 P4-4] the extraction ledger', () => {
     expect(run!.fields.map((f) => [f.fieldCode, f.valueCt, f.valueBlind, f.isIllegible])).toEqual([
       ['doc_number', null, null, false], ['expiry_date', null, null, false],
     ]);
-    expect(validations.find((v) => v.validatorCode === V_ALL_REQUIRED_PRESENT)).toMatchObject({ status: 'FAIL', detailCode: 'MISSING_REQUIRED', isBlocking: true });
+    expect(validations.find((v) => v.validatorCode === V_ALL_REQUIRED_PRESENT)).toMatchObject({ status: 'FAIL', detailCode: 'UNREADABLE_CAPTURE', isBlocking: true }); // the registry's §8.5 code for a field that could not be read
     expect(await system(() => app.prisma.reviewCase.count({ where: { submissionId: doc.id, closedAt: null, queue: 'STANDARD' } }))).toBe(1);
   });
 

@@ -247,7 +247,12 @@ export class VerificationService {
         fields: { select: { fieldCode: true, isRequired: true, isBlindIndexed: true } },
       },
     });
+    const validators = await this.prisma.validator.findMany({
+      where: { OR: [{ docTypeCode: null }, { docTypeCode: registryCode(countryCode, docType) }] },
+      select: { code: true, isBlocking: true, detailCode: true, implRef: true },
+    });
     const plan = await planExtraction({
+      validators,
       declared: type?.fields ?? [],
       profileCode: type?.extractionProfile ?? 'UNPROFILED',
       engine: this.kyc.engine ?? UNKNOWN_ENGINE,
