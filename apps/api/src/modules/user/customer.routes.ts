@@ -5,7 +5,7 @@ import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCou
 import { lineTotal, orderTotal, promoDiscount, promoCapacity } from '../../utils/order-total';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
-import { getTenantContext } from '../../plugins/tenant-context';
+import { getTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, expressDeliveryFee, type DeliveryRates } from '../../utils/markup';
 import { CountryConfigService } from '../country/country-config.service';
@@ -22,7 +22,7 @@ import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL } from '../vendor/vendor-visibility';
+import { visibleVendorRelForCaller, visibleVendorForCaller } from '../vendor/vendor-visibility';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -922,7 +922,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // no tenant context, which the Prisma extension defines as an UNSCOPED
         // query — so without the relational predicate a deactivated operator's
         // whole catalog kept serving here after the platform shut them off.
-        where: { ...VISIBLE_VENDOR, items: { some: { isAvailable: true } } },
+        where: { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } },
         include: {
           // imageUrl was NOT selected, so Home had nothing to draw a category
           // chip with and every chip fell back to the same stock photograph —
@@ -1007,7 +1007,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // DISH sat above the fold ([F-028-07] applies here identically: a
         // guest request is unscoped, so the relational predicate is the only
         // thing standing between a shut-off operator and the Home rail).
-        where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL },
+        where: { isAvailable: true, vendor: visibleVendorRelForCaller() },
         orderBy: { totalOrdered: 'desc' },
         take: 10,
         select: {
@@ -1118,7 +1118,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
-    const where: Record<string, unknown> = { ...VISIBLE_VENDOR, items: { some: { isAvailable: true } } };
+    const where: Record<string, unknown> = { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } };
     if (type) where['vendorType'] = type;
 
     // Category feed (#17): membership = chosen + derived rows. A MERGED slug
@@ -1127,7 +1127,9 @@ export async function customerRoutes(app: FastifyInstance) {
     let categoryRow: { id: string; kind: string } | null = null;
     if (category) {
       let cat = await app.prisma.discoveryCategory.findUnique({
-        where: { tenantId_slug: { tenantId: 'swift-default', slug: category } },
+        // [STA-1 RLS-N3 / DL-7] the caller's tenant's taxonomy — a reviewer browsing
+        // by category sees the fiction's categories, not production's.
+        where: { tenantId_slug: { tenantId: getTenantId() ?? 'swift-default', slug: category } },
         select: { id: true, kind: true, status: true, mergedIntoId: true },
       });
       if (cat?.status === 'MERGED' && cat.mergedIntoId) {
@@ -2583,9 +2585,10 @@ export async function customerRoutes(app: FastifyInstance) {
    *  Lazy-seeds on first read (idempotent, tiny) so no boot-time write. */
   app.get('/rating-tags', async () => {
     // [R048-008] every seed row exists — a deployment seeded before the safety tags were added gets them (once per process)
-    await ensureRatingTagsSeeded(app.prisma).catch(() => undefined);
+    const tenantId = getTenantId() ?? 'swift-default';
+    await ensureRatingTagsSeeded(app.prisma, tenantId).catch(() => undefined);
     const rows = await app.prisma.ratingTagDef.findMany({
-      where: { tenantId: 'swift-default' },
+      where: { tenantId },
       orderBy: [{ role: 'asc' }, { sentiment: 'asc' }, { slug: 'asc' }],
       select: { role: true, slug: true, label: true, sentiment: true },
     });
