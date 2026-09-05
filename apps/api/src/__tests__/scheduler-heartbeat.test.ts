@@ -112,7 +112,8 @@ describe('schedulerStallMs — junk cannot disable the pager [R037-27]', () => {
   });
 
   it('the server reads it through the parser, not through a bare Number()', () => {
-    const server = readFileSync(join(process.cwd(), 'src/server.ts'), 'utf8')
+    // the /health route lives in the composition root, src/app.ts (server.ts only boots it)
+    const server = readFileSync(join(process.cwd(), 'src/app.ts'), 'utf8')
       .split('\n')
       .filter((l) => { const t = l.trim(); return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*'); })
       .join('\n');

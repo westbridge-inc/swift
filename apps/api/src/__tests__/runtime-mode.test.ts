@@ -67,7 +67,8 @@ const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'
 const EXACT = /NODE_ENV'\]\s*[!=]==\s*'(production|development|test|loadtest)'/;
 /** The sanctioned pass-throughs of the raw value: CORS origin resolution
  *  receives NODE_ENV as data (server + socket) and never decides posture from it. */
-const ALLOWED_RAW_READS = new Set(['server.ts', 'plugins/socket.ts']);
+// app.ts is the composition root (server.ts only boots it): both read the raw value where sanctioned.
+const ALLOWED_RAW_READS = new Set(['server.ts', 'app.ts', 'plugins/socket.ts']);
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
