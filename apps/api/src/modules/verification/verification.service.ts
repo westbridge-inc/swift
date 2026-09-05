@@ -2,6 +2,7 @@ import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, ty
 import type { ReviewQueue } from '@prisma/client';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
+import { assertNotRecused } from './recusal';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
@@ -592,6 +593,36 @@ export class VerificationService {
     return updated;
   }
 
+  /**
+   * [DOC-1 §8.6 · P8-6] Claim an open review case. Recusal is enforced HERE,
+   * server-side: a reviewer who shares an identity-graph node with the subject
+   * is refused. A case another reviewer holds is not taken over (compare-and-set).
+   */
+  async claimReviewCase(caseId: string, reviewerId: string) {
+    const kase = await this.prisma.reviewCase.findUnique({ where: { id: caseId }, select: { id: true, submissionId: true, closedAt: true } });
+    if (!kase) throw new NotFoundError('ReviewCase', caseId);
+    if (kase.closedAt) throw new AppError(409, 'CASE_CLOSED', 'This case is already decided');
+    const doc = await this.prisma.verificationDocument.findUnique({ where: { id: kase.submissionId }, select: { userId: true } });
+    if (!doc) throw new NotFoundError('VerificationDocument', kase.submissionId);
+    await assertNotRecused(this.prisma, reviewerId, doc.userId);
+    const won = await this.prisma.reviewCase.updateMany({
+      where: { id: caseId, closedAt: null, OR: [{ assignedTo: null }, { assignedTo: reviewerId }] },
+      data: { assignedTo: reviewerId, assignedAt: new Date() },
+    });
+    if (won.count !== 1) throw new AppError(409, 'CASE_CLAIMED', 'Another reviewer holds this case');
+    return this.prisma.reviewCase.findUniqueOrThrow({ where: { id: caseId } });
+  }
+
+  /** Only the reviewer holding a case may hand it back to the queue. */
+  async releaseReviewCase(caseId: string, reviewerId: string) {
+    const won = await this.prisma.reviewCase.updateMany({
+      where: { id: caseId, closedAt: null, assignedTo: reviewerId },
+      data: { assignedTo: null, assignedAt: null },
+    });
+    if (won.count !== 1) throw new AppError(409, 'NOT_CASE_HOLDER', 'Only the reviewer holding this case can release it');
+    return this.prisma.reviewCase.findUniqueOrThrow({ where: { id: caseId } });
+  }
+
   private async transitionPendingDocument(
     docId: string,
     requestedStatus: 'APPROVED' | 'REJECTED',
@@ -603,6 +634,9 @@ export class VerificationService {
       select: { userId: true },
     });
     if (!candidate) throw new NotFoundError('VerificationDocument', docId);
+    // [DOC-1 §8.6 · DOC-INV-8] The decision is where recusal bites hardest: a
+    // reviewer who shares an identity-graph node with the subject decides nothing.
+    await assertNotRecused(this.prisma, review.reviewerId, candidate.userId);
     await this.reviewObserver?.afterPendingRead?.({ docId, userId: candidate.userId, requestedStatus });
 
     const outcome = await this.prisma.$transaction(async (tx) => {

@@ -4753,6 +4753,23 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: result };
   });
 
+  // ── [DOC-1 §8.6 · P8-6] Review cases: claim and release ────────────────
+  // Recusal (DOC-INV-8) is decided in the service from the identity graph —
+  // here, server-side — never in the UI; the decision routes re-check it.
+  app.post('/verification/cases/:id/claim', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const kase = await verification.claimReviewCase(id, request.user.userId);
+    await audit(request.user.userId, 'CLAIM_REVIEW_CASE', 'ReviewCase', id, { submissionId: kase.submissionId }, request);
+    return { success: true, data: kase };
+  });
+
+  app.post('/verification/cases/:id/release', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const kase = await verification.releaseReviewCase(id, request.user.userId);
+    await audit(request.user.userId, 'RELEASE_REVIEW_CASE', 'ReviewCase', id, { submissionId: kase.submissionId }, request);
+    return { success: true, data: kase };
+  });
+
   /**
    * Short-lived signed URL to view a verification document. Never a public link
    * (DPA §3.5); every issuance is audit-logged as the document access trail
