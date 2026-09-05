@@ -200,8 +200,10 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'settlements', trigger: 'settlements_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'delivery_cash_settlements', trigger: 'delivery_cash_settlements_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [money] two hops: an earning belongs to its mover (rider OR driver), who belongs to a user, who belongs to a tenant
-  { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'riderId', watch: ['riderId', 'driverId'],
-    parentTenantSql: `SELECT u."tenantId" FROM users u WHERE u.id = COALESCE((SELECT r."userId" FROM riders r WHERE r.id = NEW."riderId"), (SELECT d."userId" FROM drivers d WHERE d.id = NEW."driverId"))` },
+  { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
+    // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
+    // rows at placement), so the order is the owner of last resort; an earning with none is refused.
+    parentTenantSql: `SELECT COALESCE((SELECT u."tenantId" FROM users u JOIN riders r ON r."userId" = u.id WHERE r.id = NEW."riderId"), (SELECT u."tenantId" FROM users u JOIN drivers d ON d."userId" = u.id WHERE d.id = NEW."driverId"), (SELECT o."tenantId" FROM orders o WHERE o.id = NEW."orderId"))` },
 ];
 export function tenantLineageDdl(): string[] {
   return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch }) => [
@@ -210,6 +212,9 @@ export function tenantLineageDdl(): string[] {
       BEGIN
         ${parentTenantSql ?? `SELECT "tenantId" FROM ${parent} WHERE id = NEW."${fk}"`} INTO parent_tenant;
         IF parent_tenant IS NULL THEN
+          -- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
+          -- deleted) leaves the row's tenant as it was; only a NEW row with no owner is refused.
+          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
           RAISE EXCEPTION '${table} row % names ${parent} row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
             NEW.id, NEW."${fk}" USING ERRCODE = 'check_violation';
         END IF;

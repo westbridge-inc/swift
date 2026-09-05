@@ -101,6 +101,9 @@ CREATE OR REPLACE FUNCTION transactions_tenant_matches_user() RETURNS trigger AS
       BEGIN
         SELECT "tenantId" FROM users WHERE id = NEW."userId" INTO parent_tenant;
         IF parent_tenant IS NULL THEN
+          -- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
+          -- deleted) leaves the row's tenant as it was; only a NEW row with no owner is refused.
+          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
           RAISE EXCEPTION 'transactions row % names users row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
             NEW.id, NEW."userId" USING ERRCODE = 'check_violation';
         END IF;
@@ -120,6 +123,9 @@ CREATE OR REPLACE FUNCTION payout_requests_tenant_matches_user() RETURNS trigger
       BEGIN
         SELECT "tenantId" FROM users WHERE id = NEW."userId" INTO parent_tenant;
         IF parent_tenant IS NULL THEN
+          -- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
+          -- deleted) leaves the row's tenant as it was; only a NEW row with no owner is refused.
+          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
           RAISE EXCEPTION 'payout_requests row % names users row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
             NEW.id, NEW."userId" USING ERRCODE = 'check_violation';
         END IF;
@@ -139,6 +145,9 @@ CREATE OR REPLACE FUNCTION payout_schedules_tenant_matches_user() RETURNS trigge
       BEGIN
         SELECT "tenantId" FROM users WHERE id = NEW."userId" INTO parent_tenant;
         IF parent_tenant IS NULL THEN
+          -- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
+          -- deleted) leaves the row's tenant as it was; only a NEW row with no owner is refused.
+          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
           RAISE EXCEPTION 'payout_schedules row % names users row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
             NEW.id, NEW."userId" USING ERRCODE = 'check_violation';
         END IF;
@@ -158,6 +167,9 @@ CREATE OR REPLACE FUNCTION settlements_tenant_matches_vendor() RETURNS trigger A
       BEGIN
         SELECT "tenantId" FROM vendors WHERE id = NEW."vendorId" INTO parent_tenant;
         IF parent_tenant IS NULL THEN
+          -- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
+          -- deleted) leaves the row's tenant as it was; only a NEW row with no owner is refused.
+          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
           RAISE EXCEPTION 'settlements row % names vendors row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
             NEW.id, NEW."vendorId" USING ERRCODE = 'check_violation';
         END IF;
@@ -177,6 +189,9 @@ CREATE OR REPLACE FUNCTION delivery_cash_settlements_tenant_matches_order() RETU
       BEGIN
         SELECT "tenantId" FROM orders WHERE id = NEW."orderId" INTO parent_tenant;
         IF parent_tenant IS NULL THEN
+          -- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
+          -- deleted) leaves the row's tenant as it was; only a NEW row with no owner is refused.
+          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
           RAISE EXCEPTION 'delivery_cash_settlements row % names orders row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
             NEW.id, NEW."orderId" USING ERRCODE = 'check_violation';
         END IF;
@@ -194,19 +209,22 @@ CREATE TRIGGER delivery_cash_settlements_tenant_matches_order BEFORE INSERT OR U
 CREATE OR REPLACE FUNCTION earnings_tenant_matches_mover() RETURNS trigger AS $$
       DECLARE parent_tenant TEXT;
       BEGIN
-        SELECT u."tenantId" FROM users u WHERE u.id = COALESCE((SELECT r."userId" FROM riders r WHERE r.id = NEW."riderId"), (SELECT d."userId" FROM drivers d WHERE d.id = NEW."driverId")) INTO parent_tenant;
+        SELECT COALESCE((SELECT u."tenantId" FROM users u JOIN riders r ON r."userId" = u.id WHERE r.id = NEW."riderId"), (SELECT u."tenantId" FROM users u JOIN drivers d ON d."userId" = u.id WHERE d.id = NEW."driverId"), (SELECT o."tenantId" FROM orders o WHERE o.id = NEW."orderId")) INTO parent_tenant;
         IF parent_tenant IS NULL THEN
+          -- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
+          -- deleted) leaves the row's tenant as it was; only a NEW row with no owner is refused.
+          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
           RAISE EXCEPTION 'earnings row % names users row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
-            NEW.id, NEW."riderId" USING ERRCODE = 'check_violation';
+            NEW.id, NEW."orderId" USING ERRCODE = 'check_violation';
         END IF;
         -- The default means "unstamped": derive the truth from the parent.
         IF NEW."tenantId" = 'swift-default' AND parent_tenant <> 'swift-default' THEN
           NEW."tenantId" := parent_tenant;
         ELSIF parent_tenant <> NEW."tenantId" THEN
           RAISE EXCEPTION 'earnings row % names tenant % but its users row % is in tenant % [STA-1 lineage]',
-            NEW.id, NEW."tenantId", NEW."riderId", parent_tenant USING ERRCODE = 'check_violation';
+            NEW.id, NEW."tenantId", NEW."orderId", parent_tenant USING ERRCODE = 'check_violation';
         END IF;
         RETURN NEW;
       END $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS earnings_tenant_matches_mover ON earnings;
-CREATE TRIGGER earnings_tenant_matches_mover BEFORE INSERT OR UPDATE OF "tenantId", "riderId", "driverId" ON earnings FOR EACH ROW EXECUTE FUNCTION earnings_tenant_matches_mover();
+CREATE TRIGGER earnings_tenant_matches_mover BEFORE INSERT OR UPDATE OF "tenantId", "riderId", "driverId", "orderId" ON earnings FOR EACH ROW EXECUTE FUNCTION earnings_tenant_matches_mover();

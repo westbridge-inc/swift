@@ -106,8 +106,22 @@ describe('[STA-1 §4 lineage · money] six money tables carry their tenant on th
     const e = await system(() => app.prisma.earning.create({ data: { orderId: `order-${RUN}-a`, type: 'DELIVERY_FEE', amount: 500, riderId: ids.reviewRider } }));
     expect(e.tenantId).toBe(REVIEW);
     await expect(runWithTenant(REVIEW, () => app.prisma.earning.create({ data: { orderId: `order-${RUN}-b`, type: 'DELIVERY_FEE', amount: 500, riderId: ids.prodRider } }))).rejects.toThrow(/STA-1 lineage/);
-    // an earning with neither rider nor driver has no owner: refused, never stored as production
+    // no mover yet: the ORDER is the owner of last resort (order.service creates earnings at placement)
+    const order = await system(() => app.prisma.order.create({ data: {
+      tenantId: REVIEW, orderNumber: `MN-${RUN}`, orderType: 'FOOD_DELIVERY', customerId: ids.reviewUser, deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+      subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 300, totalAmount: 1300, paymentMethod: 'CASH',
+    } }));
+    const viaOrder = await system(() => app.prisma.earning.create({ data: { orderId: order.id, type: 'TIP', amount: 100 } }));
+    expect(viaOrder.tenantId).toBe(REVIEW);
+    // no mover AND no such order: nothing owns it — refused, never stored as production
     await expect(system(() => app.prisma.earning.create({ data: { orderId: `order-${RUN}-c`, type: 'TIP', amount: 100 } }))).rejects.toThrow(/STA-1 lineage/);
+    // deleting the mover unlinks the owner (FK SET NULL) — the row keeps its tenant instead of refusing the delete
+    const rider2 = await system(async () => { const u = await app.prisma.user.create({ data: { phone: `+59274${NUM}3`, firstName: 'T', lastName: 'M', activeRole: 'RIDER', tenantId: REVIEW, isSynthetic: true } }); return app.prisma.rider.create({ data: { userId: u.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } }); });
+    const owned = await system(() => app.prisma.earning.create({ data: { orderId: order.id, type: 'DELIVERY_FEE', amount: 50, riderId: rider2.id } }));
+    await system(() => app.prisma.rider.delete({ where: { id: rider2.id } }));
+    const after = await system(() => app.prisma.earning.findUniqueOrThrow({ where: { id: owned.id } }));
+    expect([after.riderId, after.tenantId]).toEqual([null, REVIEW]);
+    await system(async () => { await app.prisma.earning.deleteMany({ where: { orderId: order.id } }); await app.prisma.order.delete({ where: { id: order.id } }); await app.prisma.user.deleteMany({ where: { phone: `+59274${NUM}3` } }); });
   });
 
   it('payout requests and schedules follow their owner too', async () => {
