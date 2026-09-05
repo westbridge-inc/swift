@@ -52,6 +52,8 @@ export const TENANT_TABLES = [
   'delivery_cash_settlements',
   'payout_requests',
   'payout_schedules',
+  // [DOC-1 DOC-INV-7] proof of purge is evidence about a person: walled like the person.
+  'deletion_receipt',
   'sos_retriggers',
   'guardian_checkin_deliveries',
   'legal_holds',
@@ -230,6 +232,18 @@ export function tenantLineageDdl(): string[] {
     `DROP TRIGGER IF EXISTS ${trigger} ON ${table}`,
     `CREATE TRIGGER ${trigger} BEFORE INSERT OR UPDATE OF "tenantId", ${(watch ?? [fk]).map((c) => `"${c}"`).join(', ')} ON ${table} FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
   ]);
+}
+
+/** [DOC-INV-7] A receipt that can be edited proves nothing. Mirrors migration 20260905180000. */
+export function deletionReceiptAppendOnlyDdl(): string[] {
+  return [
+    `CREATE OR REPLACE FUNCTION deletion_receipt_append_only() RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'deletion_receipt is append-only [DOC-INV-7]' USING ERRCODE = 'check_violation';
+      END $$ LANGUAGE plpgsql`,
+    `DROP TRIGGER IF EXISTS deletion_receipt_append_only ON deletion_receipt`,
+    `CREATE TRIGGER deletion_receipt_append_only BEFORE UPDATE OR DELETE ON deletion_receipt FOR EACH ROW EXECUTE FUNCTION deletion_receipt_append_only()`,
+  ];
 }
 
 export function allRlsDdl(): string[] {
