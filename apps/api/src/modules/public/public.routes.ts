@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { resolvePublicMarketTenant } from '../search/search-scope';
+import { enterTenant } from '../../plugins/tenant-context';
 import { z } from 'zod';
 import { NotFoundError } from '../../utils/errors';
 import { ratingSurfaces } from '../rating/rating-surface';
@@ -128,12 +129,20 @@ export async function publicRoutes(app: FastifyInstance) {
     return { success: true, data: { version: 1, country: served.country, numbers: null, reason: served.status === 'invalid' ? 'INVALID_POLICY' : 'NO_POLICY' } };
   });
 
+  // [STA-1 4.1] Resolving the public tenant is not binding it: under `deny` an
+  // unbound vendor query is refused. Bind what was resolved, as the market does.
+  const bindPublicTenant = async (): Promise<string> => {
+    const tenantId = await resolvePublicTenantId(app);
+    enterTenant(tenantId);
+    return tenantId;
+  };
+
   app.get('/storefronts', async (request) => {
     const query = listQuerySchema.parse(request.query);
     // Empty stores stay out of the public directory (a direct /storefronts/:slug link still resolves).
     const where: Record<string, unknown> = {
       ...PUBLIC_WHERE,
-      tenantId: await resolvePublicTenantId(app),
+      tenantId: await bindPublicTenant(),
       items: { some: { isAvailable: true } },
     };
     if (query.type) where['vendorType'] = query.type;
@@ -169,7 +178,7 @@ export async function publicRoutes(app: FastifyInstance) {
   /** GET /storefronts/:slug — one store's public page: profile + hours + menu. */
   app.get<{ Params: { slug: string } }>('/storefronts/:slug', async (request) => {
     const vendor = await app.prisma.vendor.findFirst({
-      where: { slug: request.params.slug, ...PUBLIC_WHERE, tenantId: await resolvePublicTenantId(app), tenant: { isActive: true } },
+      where: { slug: request.params.slug, ...PUBLIC_WHERE, tenantId: await bindPublicTenant(), tenant: { isActive: true } },
       select: {
         ...PUBLIC_VENDOR_SELECT,
         // The app already shows guests the street address (pickup needs it);

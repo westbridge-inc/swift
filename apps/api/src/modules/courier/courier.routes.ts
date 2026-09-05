@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
@@ -274,7 +275,10 @@ export default async function courierRoutes(app: FastifyInstance) {
   /** GET /track/:token — public recipient tracking link (no auth, opaque token). */
   app.get('/track/:token', async (request) => {
     const { token } = request.params as { token: string };
-    const order = await app.prisma.order.findUnique({
+    // [STA-1 4.1] An unauthenticated recipient has no tenant; the token IS the
+    // authority. Audited system work under a named capability, so `deny` allows
+    // it and counts it — never an unbound read that `log` quietly widens.
+    const order = await runAsSystem('public-track', () => app.prisma.order.findUnique({
       where: { courierTrackingToken: token },
       select: {
         orderNumber: true,
@@ -287,7 +291,7 @@ export default async function courierRoutes(app: FastifyInstance) {
         // show the age of its own fetch, so a ten-minute-old point read "just now"
         rider: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true, user: { select: { firstName: true } } } },
       },
-    });
+    }));
     if (!order) throw new NotFoundError('CourierOrder', token);
     // [F-028-11] The token is opaque but it never expires and it is
     // unauthenticated, so it outlives the parcel. Rider.currentLat/currentLng

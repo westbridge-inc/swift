@@ -307,7 +307,9 @@ describe('over HTTP: a row for the reviewer, nothing for the rider', () => {
     const res = await put(`/api/v1/rider/orders/${order.id}/delivered`, r.token, { ridePin: '123456' });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('DELIVERED');
-    expect(JSON.stringify(res.json())).not.toMatch(/fake|suspect|flag|ALG-30/i);
+    // Generated ids are random base36 and can spell anything (a CI run minted
+    // `cmto4fake…`); grade the words the rider could read, not the ids.
+    expect(JSON.stringify(res.json()).replace(/\bc[a-z0-9]{24}\b/g, '')).not.toMatch(/fake|suspect|flag|ALG-30/i);
     const [row] = await rows(r.riderId);
     expect(row?.outcome).toBe(FAKE_COMPLETION_OUTCOME);
     const inputs = row!.inputs as Record<string, unknown>;

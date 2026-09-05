@@ -173,7 +173,10 @@ describe('[R048-006] requests routed while the process was last judged not-ready
 });
 
 describe('[R048-006] the server and the container say it', () => {
-  const server = readFileSync(join(__dirname, '..', 'server.ts'), 'utf8');
+  // The composition root is src/app.ts (server.ts only boots it).
+  const server = readFileSync(join(__dirname, '..', 'app.ts'), 'utf8');
+  // The boot sequence (start(): listen, then the seeds and the boot-contract mark) stays in server.ts.
+  const boot = readFileSync(join(__dirname, '..', 'server.ts'), 'utf8');
   const dockerfile = readFileSync(join(__dirname, '..', '..', 'Dockerfile'), 'utf8');
 
   it('/health answers 503 when degraded — never a 200 for a known failure', () => {
@@ -201,7 +204,7 @@ describe('[R048-006] the server and the container say it', () => {
     // success, and /ready and /health answer 503 until then. A failed seed
     // leaves a process that is alive and never sent traffic — better than a
     // crash loop, and better than a green container with an empty rail.
-    const start = server.slice(server.indexOf('async function start()'));
+    const start = boot.slice(boot.indexOf('async function start()'));
     const seedAt = start.indexOf('await seedDiscoveryTaxonomy(app.prisma)');
     const markAt = start.indexOf('app.markBootContractsComplete();');
     expect(seedAt).toBeGreaterThan(0);

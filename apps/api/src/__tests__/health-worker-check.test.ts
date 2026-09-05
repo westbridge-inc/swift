@@ -64,7 +64,8 @@ describe('the three words, each true', () => {
 });
 
 describe('/health actually says it', () => {
-  const src = readFileSync(path.join(__dirname, '..', 'server.ts'), 'utf8');
+  // The composition root is src/app.ts (server.ts only boots it).
+  const src = readFileSync(path.join(__dirname, '..', 'app.ts'), 'utf8');
   const stripped = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
   const health = stripped.slice(stripped.indexOf("app.get('/health'"), stripped.indexOf('registerReadinessRoute('));
 
