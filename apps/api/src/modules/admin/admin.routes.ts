@@ -2908,9 +2908,11 @@ export async function adminRoutes(app: FastifyInstance) {
     // [M-32] The MERGED record is validated — never the patch alone — and a
     // change of terms writes an immutable new version. A refused patch
     // changes nothing.
-    const promo = await updatePromoTerms(app.prisma, id, body, request.user.userId);
-
-    await audit(request.user.userId, 'UPDATE_PROMO', 'PromoCode', id, { ...(body as Record<string, unknown>), termsVersion: promo.termsVersion }, request);
+    // [ADM-002] The helper owns the transaction; the route hands it the audit.
+    // `E.promo` is declared, so the diff carries the changed terms — and the
+    // legacy row that spread the whole request BODY into `changes` is retired.
+    const promo = await updatePromoTerms(app.prisma, id, body, request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
 
     return { success: true, data: promo };
   });
@@ -2923,8 +2925,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = z.object({ version: z.number().int().min(1).optional() }).parse(request.body ?? {});
     const existing = await app.prisma.promoCode.findUnique({ where: { id }, select: { id: true } });
     if (!existing) throw new NotFoundError('PromoCode', id);
-    const result = await rollbackPromoTerms(app.prisma, id, body.version, request.user.userId);
-    await audit(request.user.userId, 'UPDATE_PROMO', 'PromoCode', id, { rollback: true, restoredFrom: result.restoredFrom, termsVersion: result.version }, request);
+    const result = await rollbackPromoTerms(app.prisma, id, body.version, request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: { ...result.promo, restoredFrom: result.restoredFrom } };
   });
 
@@ -3844,15 +3846,20 @@ export async function adminRoutes(app: FastifyInstance) {
     }
     const { enableModeB } = await import('../billing/usd-migration');
     // [M-15] The migration is this tenant's, never every tenant's.
-    return { success: true, data: await enableModeB(tenantPrisma, sunset, requireTenantId()) };
+    // [ADM-002] The mode flip and its audit row commit together; the row
+    // names the tenant (a fleet-wide migration declares no single subject).
+    const tenantId = requireTenantId();
+    return { success: true, data: await enableModeB(tenantPrisma, sunset, tenantId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: tenantId, extra: facts })) };
   });
 
   /** [M-15] Rollback is a pointer back to each payer's sunset snapshot —
    *  never a destructive rewrite — for THIS tenant. */
   app.post('/billing/usd-migration/mode-b/rollback', { preHandler: [adminGuard] }, async (request) => {
     const { rollbackModeB } = await import('../billing/usd-migration');
-    const result = await rollbackModeB(tenantPrisma, requireTenantId());
-    await audit(request.user.userId, 'USD_MIGRATION_ROLLBACK', 'TenantBillingCurrency', requireTenantId(), result, request);
+    const tenantId = requireTenantId();
+    const result = await rollbackModeB(tenantPrisma, tenantId, new Date(),
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: tenantId, extra: facts }));
     return { success: true, data: result };
   });
 
@@ -4484,7 +4491,9 @@ export async function adminRoutes(app: FastifyInstance) {
       depositedGyd: body.depositedGyd,
       depositedAt: new Date(body.depositedAt),
       bankRef: body.bankRef,
-    }, { userId: request.user.userId, tenantId: requireTenantId(), ipAddress: request.ip, userAgent: request.headers['user-agent'] });
+    }, { userId: request.user.userId, tenantId: requireTenantId(), ipAddress: request.ip, userAgent: request.headers['user-agent'] },
+    // [ADM-002] `E.settlementBatch` is declared: the diff carries the deposit; the helper's own row is replaced by this one.
+    (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     if (result.status === 'MISMATCH') {
       const { notifyAdmins } = await import('../notification/notification.service');
       await notifyAdmins(app.prisma, notifications, {
@@ -4514,7 +4523,9 @@ export async function adminRoutes(app: FastifyInstance) {
       depositedAt: new Date(body.depositedAt),
       bankRef: body.bankRef,
       reason: body.reason,
-    }, { userId: request.user.userId, tenantId: requireTenantId(), ipAddress: request.ip, userAgent: request.headers['user-agent'] });
+    }, { userId: request.user.userId, tenantId: requireTenantId(), ipAddress: request.ip, userAgent: request.headers['user-agent'] },
+    // [ADM-002] `E.settlementBatch` is declared: the diff carries the deposit; the helper's own row is replaced by this one.
+    (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: result };
   });
 

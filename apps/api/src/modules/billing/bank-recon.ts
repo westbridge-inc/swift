@@ -1,3 +1,4 @@
+import type { OnAudit } from '../../lib/audit-writer';
 import type { PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { bankReconRefusalsCounter } from '../../plugins/observability';
@@ -120,6 +121,7 @@ export async function confirmDeposit(
   batchId: string,
   deposit: { depositedGyd: number; depositedAt: Date; bankRef: string },
   actor: DepositActor,
+  onAudit?: OnAudit,
 ): Promise<{ status: string; deltaGyd: number; confirmationId: string }> {
   assertWritable();
   const bankRef = deposit.bankRef.trim();
@@ -158,13 +160,22 @@ export async function confirmDeposit(
       }
       throw err;
     }
-    await tx.auditLog.create({
-      data: {
-        userId: actor.userId, action: 'CONFIRM_DEPOSIT', entity: 'SettlementBatch', entityId: batchId,
-        changes: { confirmationId: row.id, depositedGyd: deposit.depositedGyd, bankRef, status, deltaGyd: delta } as never,
-        ipAddress: actor.ipAddress, userAgent: actor.userAgent,
-      },
-    });
+    // [ADM-002] The caller's audit row joins this transaction as its last
+    // statement — the admin route hands it in, and the row carries the reason,
+    // the before/after digests and the deposit as a diff. Without a caller
+    // (no admin route in the stack) the row this helper always wrote stands,
+    // so a deposit is never confirmed unrecorded either way.
+    if (onAudit) {
+      await onAudit(tx, { confirmationId: row.id, status, deltaGyd: delta });
+    } else {
+      await tx.auditLog.create({
+        data: {
+          userId: actor.userId, action: 'CONFIRM_DEPOSIT', entity: 'SettlementBatch', entityId: batchId,
+          changes: { confirmationId: row.id, depositedGyd: deposit.depositedGyd, bankRef, status, deltaGyd: delta } as never,
+          ipAddress: actor.ipAddress, userAgent: actor.userAgent,
+        },
+      });
+    }
     return row;
   });
   if (status === 'MISMATCH') {
@@ -181,6 +192,7 @@ export async function adjustDeposit(
   batchId: string,
   adjustment: { depositedGyd: number; depositedAt: Date; bankRef: string; reason: string },
   actor: DepositActor,
+  onAudit?: OnAudit,
 ): Promise<{ status: string; deltaGyd: number; adjustmentId: string; supersedesId: string }> {
   assertWritable();
   const bankRef = adjustment.bankRef.trim();
@@ -216,13 +228,17 @@ export async function adjustDeposit(
       where: { id: batchId, tenantId: actor.tenantId },
       data: { depositedGyd: adjustment.depositedGyd, depositedAt: adjustment.depositedAt, bankRef, status, notes: status === 'MISMATCH' ? `deposit off expected net by GY$${delta} (adjusted)` : `adjusted: ${adjustment.reason.trim()}` },
     });
-    await tx.auditLog.create({
-      data: {
-        userId: actor.userId, action: 'ADJUST_DEPOSIT', entity: 'SettlementBatch', entityId: batchId,
-        changes: { adjustmentId: created.id, supersedesId: latest.id, depositedGyd: adjustment.depositedGyd, bankRef, status, deltaGyd: delta, reason: adjustment.reason.trim() } as never,
-        ipAddress: actor.ipAddress, userAgent: actor.userAgent,
-      },
-    });
+    if (onAudit) {
+      await onAudit(tx, { adjustmentId: created.id, supersedesId: latest.id, status, deltaGyd: delta });
+    } else {
+      await tx.auditLog.create({
+        data: {
+          userId: actor.userId, action: 'ADJUST_DEPOSIT', entity: 'SettlementBatch', entityId: batchId,
+          changes: { adjustmentId: created.id, supersedesId: latest.id, depositedGyd: adjustment.depositedGyd, bankRef, status, deltaGyd: delta, reason: adjustment.reason.trim() } as never,
+          ipAddress: actor.ipAddress, userAgent: actor.userAgent,
+        },
+      });
+    }
     return created;
   });
   if (status === 'MISMATCH') log().error({ batchId, expected, deposited: adjustment.depositedGyd, delta, tenantId: actor.tenantId }, 'settlement deposit MISMATCH (adjusted)');
