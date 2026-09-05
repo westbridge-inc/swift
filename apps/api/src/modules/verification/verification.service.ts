@@ -3,6 +3,9 @@ import type { ReviewQueue } from '@prisma/client';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { assertNotRecused } from './recusal';
+import { placeDocLegalHoldIn } from './legal-hold';
+import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
+import { clusterMemberIds } from '../integrity/identity.service';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
@@ -151,16 +154,28 @@ export const ACTOR_FACING_CATEGORY: Record<RejectionReasonCode, string> = {
   SUSPECTED_TAMPERING: 'UNVERIFIABLE', DUPLICATE: 'UNVERIFIABLE', FACE_MISMATCH: 'UNVERIFIABLE',
 };
 
+/** [DOC-1 §24.1 · §8.5] One generic message for the whole fraud class — and the human-review route (DOC-INV-33). */
+export const FRAUD_GENERIC_TEXT = "We're unable to verify this document. If you think this is a mistake, ask for a review in the app and a person will look at it.";
+/** [DOC-1 §24 · P24] Reason codes of the fraud class: suspicion, never an automatic reject — SECOND_REVIEW first. */
+export const FRAUD_CLASS_CODES: ReadonlySet<RejectionReasonCode> = new Set<RejectionReasonCode>(['SUSPECTED_TAMPERING', 'DUPLICATE', 'FACE_MISMATCH']);
+/** [DOC-1 §24 · DOC-INV-32] A fraud hold is reviewed within 90 days (ruling; the spec sets no figure). */
+export const FRAUD_HOLD_REVIEW_DAYS = 90;
+export const FRAUD_HOLD_PRIORITY = 20;
+
 const REJECTION_TEMPLATES: Record<RejectionReasonCode, string> = {
   EXPIRED: 'This document has expired — upload a current one.',
   UNREADABLE: 'The photo is too blurry or dark to read — retake it in good light.',
   WRONG_DOCUMENT: 'This is not the document we asked for.',
-  FACE_MISMATCH: 'The photo does not match your selfie — upload your own document.',
+  FACE_MISMATCH: FRAUD_GENERIC_TEXT,
   NAME_MISMATCH: 'The name on this document does not match your account.',
   INSURANCE_NOT_HIRE: 'This policy does not cover hire/passenger use — taxi work needs HIRE-class insurance.',
   NOT_YELLOW: 'The vehicle must be Corporate Yellow with the H plate visible.',
-  SUSPECTED_TAMPERING: 'This document appears edited or altered.',
-  DUPLICATE: 'This document is already registered to another account.',
+  // [DOC-1 §24.1 · §8.5] The fraud class reads IDENTICALLY and never names the
+  // signal: Swift does not tell a person its system believes their document is
+  // forged, duplicated or not theirs — it is often wrong, and it teaches a
+  // fraudster which signal caught them. A human-review route is always offered.
+  SUSPECTED_TAMPERING: FRAUD_GENERIC_TEXT,
+  DUPLICATE: FRAUD_GENERIC_TEXT,
   INCOMPLETE: 'Part of the document is cut off — capture the whole page.',
 };
 
@@ -587,14 +602,35 @@ export class VerificationService {
     const template = reasonCode ? REJECTION_TEMPLATES[reasonCode] : null;
     const fullReason = template ? (reason ? `${template} ${reason}` : template) : reason;
 
+    // [DOC-1 §24.2 · P24] A fraud-class reason is SUSPICION: never an automatic
+    // reject. The first reviewer's verdict escalates the case to SECOND_REVIEW
+    // and the document stays pending; a DIFFERENT reviewer confirming on that
+    // queue is the rejection — and, in the same transaction, the fraud case,
+    // the legal hold on the person's documents and the founder-pending hold.
+    let fraud: { reasonCode: RejectionReasonCode } | undefined;
+    if (reasonCode && FRAUD_CLASS_CODES.has(reasonCode)) {
+      const open = await this.prisma.reviewCase.findFirst({
+        where: { submissionId: docId, closedAt: null }, orderBy: { createdAt: 'desc' },
+        include: { decisions: { where: { outcome: 'ESCALATE' }, orderBy: { decidedAt: 'desc' }, take: 1 } },
+      });
+      if (!open || open.queue !== 'SECOND_REVIEW') {
+        return this.escalateToSecondReview(docId, adminId, reasonCode, reason);
+      }
+      if (open.decisions[0]?.reviewerId === adminId) {
+        throw new AppError(403, 'SECOND_REVIEWER_REQUIRED', 'You raised this suspicion — a different reviewer must confirm it (DOC-1 §24.2)');
+      }
+      fraud = { reasonCode };
+    }
+
     const updated = await this.transitionPendingDocument(docId, 'REJECTED', {
         status: 'REJECTED',
         reviewedBy: adminId,
         reviewedAt: new Date(),
         reviewNote: reasonCode ? `[${reasonCode}] ${fullReason}` : fullReason,
-    }, { reviewerId: adminId, reasonCode, note: fullReason });
+    }, { reviewerId: adminId, reasonCode, note: fullReason, fraud });
 
-    await this.notifyRejection(updated.userId, updated.docType, fullReason);
+    // The actor hears the category's text only; for the fraud class that is the generic message.
+    await this.notifyRejection(updated.userId, updated.docType, fraud ? FRAUD_GENERIC_TEXT : fullReason);
     return updated;
   }
 
@@ -628,11 +664,73 @@ export class VerificationService {
     return this.prisma.reviewCase.findUniqueOrThrow({ where: { id: caseId } });
   }
 
+  /**
+   * [DOC-1 §24.2] Suspicion goes to SECOND_REVIEW, never to an automatic reject:
+   * the case is re-queued at raised priority and unassigned, the reviewer's
+   * verdict is recorded as an ESCALATE decision, and the document stays PENDING.
+   */
+  private async escalateToSecondReview(docId: string, adminId: string, reasonCode: RejectionReasonCode, note?: string): Promise<VerificationDocument> {
+    return this.prisma.$transaction(async (tx) => {
+      const doc = await tx.verificationDocument.findUnique({ where: { id: docId } });
+      if (!doc) throw new NotFoundError('VerificationDocument', docId);
+      if (doc.status !== 'PENDING') throw new AppError(409, 'NOT_PENDING', 'Only a pending document can be escalated');
+      // [DOC-1 §8.6] Raising the suspicion is a decision too: a recused reviewer may not make it.
+      await assertNotRecused(this.prisma, adminId, doc.userId);
+      const now = new Date();
+      let open = await tx.reviewCase.findFirst({ where: { submissionId: docId, closedAt: null }, orderBy: { createdAt: 'desc' } });
+      if (!open) {
+        const tenantId = (await tx.user.findUniqueOrThrow({ where: { id: doc.userId }, select: { tenantId: true } })).tenantId;
+        open = await tx.reviewCase.create({ data: { submissionId: docId, tenantId, queue: 'SECOND_REVIEW', priority: FRAUD_HOLD_PRIORITY, createdAt: now, slaDueAt: new Date(now.getTime() + REVIEW_SLA_HOURS * 3_600_000) } });
+      }
+      await tx.reviewDecision.create({ data: {
+        caseId: open.id, tenantId: open.tenantId, reviewerId: adminId, outcome: 'ESCALATE', reasonCode,
+        actorFacingCategory: ACTOR_FACING_CATEGORY[reasonCode], internalNote: note ?? null,
+        timeOnCaseMs: Math.max(0, now.getTime() - (open.assignedAt ?? open.createdAt).getTime()),
+      } });
+      await tx.reviewCase.update({ where: { id: open.id }, data: { queue: 'SECOND_REVIEW', priority: Math.min(open.priority, FRAUD_HOLD_PRIORITY), assignedTo: null, assignedAt: null } });
+      return doc;
+    });
+  }
+
+  /**
+   * [DOC-1 §24.2] Confirmed by a second reviewer — inside the rejection's
+   * transaction: the fraud case, the legal hold on every unpurged document of
+   * the person (bytes preserved, purge suspended), the founder-pending
+   * enforcement hold with the generic message, and the identity-cluster members
+   * recorded on the case for a human. Linked accounts are NOT auto-suspended
+   * (ruling: the other side of a duplicate may be the victim); referral to law
+   * enforcement is never set here (FD-DOC-16).
+   */
+  private async confirmFraudIn(
+    tx: Prisma.TransactionClient,
+    args: { docId: string; subjectUserId: string; tenantId: string; caseId: string; reviewerId: string; reasonCode: RejectionReasonCode; now: Date },
+  ): Promise<void> {
+    const { docId, subjectUserId, tenantId, caseId, reviewerId, reasonCode, now } = args;
+    const hold = await placeDocLegalHoldIn(tx, {
+      subjectUserId, reason: `Fraud confirmed on second review (${reasonCode}) — evidence preserved for a founder decision`,
+      ownerId: reviewerId, placedBy: reviewerId, reviewBy: new Date(now.getTime() + FRAUD_HOLD_REVIEW_DAYS * 86_400_000),
+    }, now).catch((err: unknown) => {
+      // NOTHING_TO_HOLD cannot happen here — the document being rejected is unpurged — but a hold is never the thing that loses the rejection.
+      if (err instanceof AppError && err.code === 'NOTHING_TO_HOLD') return null;
+      throw err;
+    });
+    const linked = await clusterMemberIds(tx as unknown as PrismaClient, subjectUserId);
+    const enforcement = await tx.enforcementAction.create({ data: {
+      accountId: subjectUserId, level: 'BLOCK_PENDING_FOUNDER', reasonCode: DOC_FRAUD_REASON_CODE,
+      signalsFired: [{ type: 'DOC_FRAUD', reasonCode, submissionId: docId, caseId, at: now.toISOString() }] as never,
+      decidedBy: reviewerId,
+    } });
+    await tx.fraudCase.create({ data: {
+      tenantId, subjectUserId, submissionId: docId, caseId, reasonCode, confirmedBy: reviewerId, confirmedAt: now,
+      legalHoldId: hold?.hold.id ?? null, enforcementId: enforcement.id, linkedAccountIds: linked as never,
+    } });
+  }
+
   private async transitionPendingDocument(
     docId: string,
     requestedStatus: 'APPROVED' | 'REJECTED',
     data: Prisma.VerificationDocumentUpdateManyMutationInput,
-    review: { reviewerId: string; reasonCode?: RejectionReasonCode; note?: string },
+    review: { reviewerId: string; reasonCode?: RejectionReasonCode; note?: string; fraud?: { reasonCode: RejectionReasonCode } },
   ): Promise<VerificationDocument> {
     const candidate = await this.prisma.verificationDocument.findUnique({
       where: { id: docId },
@@ -693,6 +791,9 @@ export class VerificationService {
         timeOnCaseMs: Math.max(0, now.getTime() - (open.assignedAt ?? open.createdAt).getTime()),
       } });
       await tx.reviewCase.update({ where: { id: open.id }, data: { closedAt: now } });
+      if (review.fraud && requestedStatus === 'REJECTED') {
+        await this.confirmFraudIn(tx, { docId, subjectUserId: candidate.userId, tenantId: open.tenantId, caseId: open.id, reviewerId: review.reviewerId, reasonCode: review.fraud.reasonCode, now });
+      }
 
       const updated = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
       // The document decision and provider public/hire projection commit as one

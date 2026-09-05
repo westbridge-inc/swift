@@ -408,6 +408,7 @@ model Tenant {
   validationResults ValidationResult[]
   docLegalHolds     DocLegalHold[]
   rectifications    RectificationRequest[]
+  fraudCases        FraudCase[]
 
   @@index([kind])
   @@map("tenants")
@@ -6297,6 +6298,7 @@ model DocLegalHold {
   incidentCaseId String?
   incidentCase   IncidentCase?          @relation(fields: [incidentCaseId], references: [id], onDelete: Restrict)
   documents      VerificationDocument[]
+  fraudCases     FraudCase[]
 
   @@index([subjectUserId, releasedAt])
   @@index([tenantId, releasedAt, reviewBy])
@@ -6348,4 +6350,35 @@ model RectificationRequest {
   @@index([submissionId, resolvedAt])
   @@index([caseId])
   @@map("rectification_request")
+}
+
+/// [DOC-1 §24.2 · P24] A fraud case: suspicion confirmed by a SECOND reviewer. Its
+/// creation is one transaction with the rejection, the legal hold on the person's
+/// documents and the founder-pending enforcement hold. Linked accounts are recorded
+/// for a human, never auto-suspended. Referral to law enforcement is a founder
+/// decision only (FD-DOC-16) — nothing here ever sets it.
+model FraudCase {
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String        @default("swift-default")
+  tenant           Tenant        @relation(fields: [tenantId], references: [id])
+  subjectUserId    String
+  submissionId     String
+  caseId           String        @db.Uuid
+  reasonCode       String
+  confirmedBy      String
+  confirmedAt      DateTime      @default(now())
+  /// The hold placed on the person's documents in the same transaction.
+  legalHoldId      String?       @db.Uuid
+  legalHold        DocLegalHold? @relation(fields: [legalHoldId], references: [id])
+  /// The BLOCK_PENDING_FOUNDER enforcement action placed in the same transaction.
+  enforcementId    String?
+  /// Every account in the subject's identity cluster at confirmation — the explainability record.
+  linkedAccountIds Json
+  /// FD-DOC-16: NONE until the founder decides. No code path sets anything else.
+  referral         String        @default("NONE")
+  createdAt        DateTime      @default(now())
+
+  @@index([subjectUserId])
+  @@index([tenantId, createdAt])
+  @@map("fraud_case")
 }

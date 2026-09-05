@@ -137,7 +137,8 @@ describe('[DOC-1 P4-5] review cases and decisions', () => {
   });
 
   it('reject writes a REJECT decision whose actor-facing category is the mapped category — never the internal note', async () => {
-    for (const [i, code] of (['UNREADABLE', 'FACE_MISMATCH', 'DUPLICATE'] as const).entries()) {
+    // Non-fraud codes: a fraud-class verdict from the first reviewer ESCALATES instead of closing the case (DOC-1 §24.2, graded in doc1-fraud-escalation).
+    for (const [i, code] of (['UNREADABLE', 'WRONG_DOCUMENT', 'NAME_MISMATCH'] as const).entries()) {
       const u = await owner(50 + i);
       const doc = await submit(u, 'business_registration');
       const note = `internal-${RUN}-${code}`;

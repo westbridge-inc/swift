@@ -4696,7 +4696,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = rejectDocSchema.parse(request.body);
 
     const doc = await verification.rejectDocument(id, request.user.userId, body.reason, body.reasonCode);
-    await audit(request.user.userId, 'REJECT_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason, reasonCode: body.reasonCode ?? null }, request);
+    // [DOC-1 §24.2] A fraud-class verdict from the first reviewer escalates instead of rejecting — the trail says which happened.
+    const action = doc.status === 'PENDING' ? 'ESCALATE_VERIFICATION_DOC' : 'REJECT_VERIFICATION_DOC';
+    await audit(request.user.userId, action, 'VerificationDocument', id, { docType: doc.docType, reason: body.reason, reasonCode: body.reasonCode ?? null }, request);
 
     return { success: true, data: doc };
   });
