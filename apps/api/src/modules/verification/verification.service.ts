@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
+import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
@@ -1022,25 +1023,23 @@ export class VerificationService {
     const now = new Date();
     const due = await this.prisma.verificationDocument.findMany({
       where: { retentionExpiresAt: { lt: now }, purgedAt: null },
-      select: { id: true, userId: true, fileUrl: true },
+      select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
     if (due.length === 0) return 0;
 
     const storage = getStorageProvider();
     let purged = 0;
     for (const doc of due) {
-      // Never mark a row purged while the stored object may still exist — a
-      // failed delete stays due and retries on tomorrow's sweep (DPA §3.5).
-      if (doc.fileUrl) {
-        const deleted = await storage.delete(doc.fileUrl).then(() => true).catch(() => false);
-        if (!deleted) continue;
-        // Crypto-shred (spec §5.5): null the wrapped DEK so even a backup of
-        // the ciphertext is permanently unrecoverable. Shred FIRST-class —
-        // the object delete above is belt, this is braces.
-        await this.prisma.encryptedObject.updateMany({
-          where: { fileKey: doc.fileUrl },
-          data: { wrappedDek: null, shreddedAt: new Date() },
-        });
+      // [DOC-INV-7] Delete the bytes, shred the key, then PROBE — a real read
+      // attempt. Never mark a row purged while the object may still be
+      // readable: a FAILED probe is recorded as such and the row stays due for
+      // tomorrow's sweep (DPA §3.5). A receipt without a passing probe is not
+      // a receipt.
+      const evidence = doc.fileUrl ? await shredAndProbe(this.prisma, storage, doc.fileUrl) : NOTHING_STORED;
+      const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: 'reaper', evidence };
+      if (evidence.probe === 'FAILED') {
+        await writeDeletionReceipt(this.prisma, receipt);
+        continue;
       }
       const transitioned = await this.prisma.$transaction(async (tx) => {
         const users = await tx.$queryRaw<Array<{ id: string }>>`
@@ -1054,6 +1053,8 @@ export class VerificationService {
           data: { purgedAt: new Date(), fileUrl: '' },
         });
         if (won.count !== 1) return false;
+        // The receipt commits with the purge or not at all.
+        await writeDeletionReceipt(tx, receipt);
         await projectProviderVerificationLocked(tx, doc.userId);
         // [REPORT-012 F-012-05] Purge invalidates evidence — the vendor
         // projection must land in the same transaction, not never.

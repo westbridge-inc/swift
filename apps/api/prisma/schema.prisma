@@ -396,6 +396,7 @@ model Tenant {
   deliveryCashSettlements DeliveryCashSettlement[]
   payoutRequests    PayoutRequest[]
   payoutSchedules   PayoutSchedule[]
+  deletionReceipts  DeletionReceipt[]
 
   @@index([kind])
   @@map("tenants")
@@ -6040,4 +6041,35 @@ model RequirementItem {
 
   @@id([requirementSetId, docTypeCode])
   @@map("requirement_item")
+}
+
+// ─── [DOC-1 §4.4 · DOC-INV-7] Deletion receipts ──────────────────────────────
+// Every purge of a PERSONAL document writes one, with a verification probe: a
+// real read attempt against every named store, recorded CONFIRMED_ABSENT or
+// FAILED. A receipt without a passing probe is not a receipt — the reaper
+// leaves the document due and retries. No FK to the document or the person:
+// the receipt must outlive both (it is what a regulator is shown).
+model DeletionReceipt {
+  id                      String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                String   @default("swift-default")
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id])
+  /// The purged VerificationDocument id (P4-2's document_submission is not yet split out).
+  submissionId            String
+  /// The person the document belonged to, as an id — outlives the account.
+  subjectId               String
+  docTypeCode             String
+  /// sha256 of the CIPHERTEXT as stored, read before deletion; null when the bytes were already gone (recorded deviation from the spec's NOT NULL).
+  contentSha256           Bytes?
+  bytesDeleted            BigInt
+  deletedAt               DateTime @default(now())
+  /// 'reaper' | the account id that requested erasure
+  deletedBy               String
+  storeLocations          String[]
+  /// CONFIRMED_ABSENT | FAILED
+  verificationProbeResult String
+
+  @@index([submissionId])
+  @@index([subjectId])
+  @@index([tenantId, deletedAt])
+  @@map("deletion_receipt")
 }

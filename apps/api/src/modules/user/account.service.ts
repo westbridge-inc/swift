@@ -1,4 +1,5 @@
 import { recordStorageOrphan, retryStorageOrphans } from '../../lib/storage-orphans';
+import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
 import type { ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -290,17 +291,21 @@ export class AccountService {
     const storage = getStorageProvider();
     const docs = await prisma.verificationDocument.findMany({
       where: { userId, purgedAt: null },
-      select: { id: true, fileUrl: true },
+      select: { id: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
     for (const doc of docs) {
-      if (doc.fileUrl) {
-        await storage.delete(doc.fileUrl).catch(() => {});
-        await prisma.encryptedObject.updateMany({
-          where: { fileKey: doc.fileUrl },
-          data: { wrappedDek: null, shreddedAt: new Date() },
-        });
+      // [DOC-INV-7] Delete, shred, PROBE, and write the receipt with the purge
+      // mark in one transaction. Erasure must complete for the person, so a
+      // FAILED probe is recorded as FAILED and the bytes are filed as a
+      // storage orphan for the retry sweep — never silently swallowed.
+      const evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, doc.fileUrl) : NOTHING_STORED;
+      if (evidence.probe === 'FAILED' && doc.fileUrl) {
+        await recordStorageOrphan(prisma, this.app.log, { key: doc.fileUrl, reason: 'ERASURE_PURGE_PROBE_FAILED', userId, tenantId: doc.user.tenantId });
       }
-      await prisma.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
+      await prisma.$transaction(async (tx) => {
+        await tx.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
+        await writeDeletionReceipt(tx, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
+      });
     }
 
     // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
