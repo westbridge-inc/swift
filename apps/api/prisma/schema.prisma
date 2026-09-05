@@ -388,6 +388,8 @@ model Tenant {
   reviewSessions    ReviewSession[]
   reviewCredentials ReviewCredential[]
   reviewFixtures    ReviewFixture[]
+  items             Item[]
+  categories        Category[]
 
   @@index([kind])
   @@map("tenants")
@@ -1430,6 +1432,9 @@ model Category {
   id          String   @id @default(cuid())
   vendorId    String
   vendor      Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  /// [STA-1 §4 lineage] The vendor's tenant — see Item.tenantId.
+  tenantId    String   @default("swift-default")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
   name        String
   description String?
   imageUrl    String?
@@ -1439,6 +1444,7 @@ model Category {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  @@index([tenantId])
   @@map("categories")
 }
 
@@ -1450,6 +1456,12 @@ model Item {
   vendor            Vendor            @relation(fields: [vendorId], references: [id], onDelete: Cascade)
   categoryId        String
   category          Category          @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  /// [STA-1 §4 lineage] The vendor's tenant: stamped by the wall on create and
+  /// held equal to the vendor's by items_tenant_matches_vendor (a DB trigger).
+  /// A child table walled only through its parent leaks through any relation
+  /// filter that forgets the tenant — this column is the wall on the row itself.
+  tenantId          String            @default("swift-default")
+  tenant            Tenant            @relation(fields: [tenantId], references: [id])
   name              String
   description       String?
   imageUrl          String?
@@ -1505,6 +1517,7 @@ model Item {
   /// reference makes the hero of the tab — and the price sorts were full scans.
   @@index([isAvailable, createdAt])
   @@index([isAvailable, basePrice])
+  @@index([tenantId])
   @@map("items")
 }
 

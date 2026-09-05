@@ -41,6 +41,9 @@ export const TENANT_TABLES = [
   'review_sessions',
   'review_credentials',
   'review_fixtures',
+  // [STA-1 §4 lineage] Child tables walled on the row itself, not only through their vendor.
+  'items',
+  'categories',
   'sos_retriggers',
   'guardian_checkin_deliveries',
   'legal_holds',
@@ -158,6 +161,42 @@ export function tenantPurgeGuardDdl(): string[] {
     `DROP TRIGGER IF EXISTS ${TENANT_PURGE_GUARD} ON tenants`,
     `CREATE TRIGGER ${TENANT_PURGE_GUARD} BEFORE DELETE ON tenants FOR EACH ROW EXECUTE FUNCTION ${TENANT_PURGE_GUARD}()`,
   ];
+}
+
+/** [STA-1 §4 lineage] A child row's tenant IS its parent's tenant — always.
+ *  The wall stamps tenantId from the request context; this holds it equal to
+ *  the vendor's on the row itself. A row left at the DEFAULT tenant (created in
+ *  system mode, unstamped) is DERIVED from its parent — the default means
+ *  "unstamped", never "production". An explicit tenant that disagrees with the
+ *  parent is REFUSED, and so is a parent that is not visible from this tenant
+ *  (under RLS a vendor of another tenant is invisible — fail closed). Mirrors
+ *  the migration text; the test installer heals db-push environments. */
+export const TENANT_LINEAGE_TABLES = [
+  { table: 'items', trigger: 'items_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
+  { table: 'categories', trigger: 'categories_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
+] as const;
+export function tenantLineageDdl(): string[] {
+  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk }) => [
+    `CREATE OR REPLACE FUNCTION ${trigger}() RETURNS trigger AS $$
+      DECLARE parent_tenant TEXT;
+      BEGIN
+        SELECT "tenantId" INTO parent_tenant FROM ${parent} WHERE id = NEW."${fk}";
+        IF parent_tenant IS NULL THEN
+          RAISE EXCEPTION '${table} row % names ${parent} row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
+            NEW.id, NEW."${fk}" USING ERRCODE = 'check_violation';
+        END IF;
+        -- The default means "unstamped": derive the truth from the parent.
+        IF NEW."tenantId" = 'swift-default' AND parent_tenant <> 'swift-default' THEN
+          NEW."tenantId" := parent_tenant;
+        ELSIF parent_tenant <> NEW."tenantId" THEN
+          RAISE EXCEPTION '${table} row % names tenant % but its ${parent} row % is in tenant % [STA-1 lineage]',
+            NEW.id, NEW."tenantId", NEW."${fk}", parent_tenant USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`,
+    `DROP TRIGGER IF EXISTS ${trigger} ON ${table}`,
+    `CREATE TRIGGER ${trigger} BEFORE INSERT OR UPDATE OF "tenantId", "${fk}" ON ${table} FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
+  ]);
 }
 
 export function allRlsDdl(): string[] {

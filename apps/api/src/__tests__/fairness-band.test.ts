@@ -148,7 +148,9 @@ describe('three riders at equal ETA, twenty offers', () => {
     const counts = await twentyOffers();
     const sorted = [...counts.values()].sort((a, b) => b - a);
     expect(sorted[0]).toBe(20);
-    const rows = await app.prisma.algoDecision.findMany({ where: { algo: 'ALG-01', outcome: 'WOULD_REORDER', shadow: true } });
+    // Oldest first: `rows[0]` below means "the first shadow decision of this
+    // run", which heap order does not promise once the table has churned.
+    const rows = await app.prisma.algoDecision.findMany({ where: { algo: 'ALG-01', outcome: 'WOULD_REORDER', shadow: true }, orderBy: { createdAt: 'asc' } });
     // The first offer finds nobody with an offer yet — nothing to reorder; from the second on the band would have moved it.
     expect(rows.length).toBeGreaterThanOrEqual(18);
     const inputs = rows[0]!.inputs as Record<string, unknown>;

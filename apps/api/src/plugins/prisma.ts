@@ -138,6 +138,9 @@ const TENANT_QUERY_EXTENSIONS = {
   reviewSession: scoped,
   reviewCredential: scoped,
   reviewFixture: scoped,
+  // [STA-1 §4 lineage] child tables now walled on the row itself.
+  item: scoped,
+  category: scoped,
 };
 
 /** Model names enrolled for tenant scoping. Derived — never hand-written. */
