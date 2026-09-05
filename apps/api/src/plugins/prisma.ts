@@ -149,6 +149,8 @@ const TENANT_QUERY_EXTENSIONS = {
   payoutRequest: scoped,
   payoutSchedule: scoped,
   deletionReceipt: scoped,
+  reviewCase: scoped,
+  reviewDecision: scoped,
 };
 
 /** Model names enrolled for tenant scoping. Derived — never hand-written. */

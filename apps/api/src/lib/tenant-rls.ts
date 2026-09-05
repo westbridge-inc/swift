@@ -54,6 +54,9 @@ export const TENANT_TABLES = [
   'payout_schedules',
   // [DOC-1 DOC-INV-7] proof of purge is evidence about a person: walled like the person.
   'deletion_receipt',
+  // [DOC-1 P4-5] human review of a document is about the person: walled like the person.
+  'review_case',
+  'review_decision',
   'sos_retriggers',
   'guardian_checkin_deliveries',
   'legal_holds',
@@ -202,6 +205,10 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'settlements', trigger: 'settlements_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'delivery_cash_settlements', trigger: 'delivery_cash_settlements_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [money] two hops: an earning belongs to its mover (rider OR driver), who belongs to a user, who belongs to a tenant
+  // [DOC-1 P4-5] a review case inherits through the document to the person; a decision inherits its case
+  { table: 'review_case', trigger: 'review_case_tenant_matches_subject', parent: 'users', fk: 'submissionId',
+    parentTenantSql: `SELECT u."tenantId" FROM users u JOIN verification_documents d ON d."userId" = u.id WHERE d.id = NEW."submissionId"` },
+  { table: 'review_decision', trigger: 'review_decision_tenant_matches_case', parent: 'review_case', fk: 'caseId' },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.
