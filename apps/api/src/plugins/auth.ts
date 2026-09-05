@@ -1,4 +1,5 @@
 import fp from 'fastify-plugin';
+import { reviewGate } from '../modules/review/gate';
 import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { enterTenant } from './prisma';
@@ -71,6 +72,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   const authService = new AuthService(app);
 
   app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
+    let reviewTenant = false;
     try {
       adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
       await request.jwtVerify();
@@ -89,6 +91,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
             select: {
               id: true,
               tenantId: true,
+              tenant: { select: { kind: true } },
               status: true,
               roles: true,
               activeRole: true,
@@ -127,6 +130,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       enterTenant(session.user.tenantId);
       // [R048-003] and on the request itself, so a route can name the caller's tenant without depending on async-context propagation
       request.tenantId = session.user.tenantId;
+      reviewTenant = session.user.tenant.kind === 'REVIEW';
     } catch (err) {
       request.authSessionId = null;
       // [F-250] "I could not REACH the session store" is not "your token is
@@ -152,13 +156,18 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         success: false,
         error: { code: 'AUTH_UNAVAILABLE', message: 'We could not verify your session right now. Please try again in a moment — you have not been signed out.' },
       });
+      return;
     }
+    // [STA-1 DL-9] Outside the try: a dead review session is a 410 through the
+    // normal error path — never a 401, never a 503.
+    if (reviewTenant) await reviewGate(app.prisma, request);
   });
 
   // Optional auth for public-but-personalizable routes (browsing). Attaches the
   // user when a valid token + live session is present, otherwise proceeds as a
   // guest — never 401s. Action routes keep using `authenticate`.
   app.decorate('authenticateOptional', async (request: FastifyRequest) => {
+    let reviewTenant = false;
     try {
       adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
       await request.jwtVerify();
@@ -173,6 +182,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
             select: {
               id: true,
               tenantId: true,
+              tenant: { select: { kind: true } },
               status: true,
               roles: true,
               activeRole: true,
@@ -202,6 +212,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         request.authSessionId = session.id;
         enterTenant(session.user.tenantId);
         request.tenantId = session.user.tenantId;
+        reviewTenant = session.user.tenant.kind === 'REVIEW';
       }
     } catch (err) {
       // Falling back to guest is correct here — this decorator never 401s, and
@@ -215,5 +226,8 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       request.authSessionId = null;
       (request as { user?: unknown }).user = undefined;
     }
+    // [STA-1 DL-9] A reviewer whose session died is told so even on a public
+    // surface — production data is never the fallback.
+    if (reviewTenant) await reviewGate(app.prisma, request);
   });
 });

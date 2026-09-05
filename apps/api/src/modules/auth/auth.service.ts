@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
 import { countryFromPhone } from '../../utils/phone-country';
 import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
@@ -79,6 +80,15 @@ export class AuthService {
       throw new AppError(429, 'RATE_LIMITED', 'Please wait before requesting another OTP');
     }
 
+    // [STA-1 DL-6] A store reviewer's identifier is a fiction: no SMS can
+    // reach it and none is sent. The response is the production response —
+    // the login screen must not be able to tell, and neither can anyone else.
+    const review = await reviewCredentialFor(this.app.prisma, phone);
+    if (review) {
+      await armReviewCode(this.app.redis, phone, review.id);
+      return { message: 'OTP sent successfully', expiresIn: 300 };
+    }
+
     // Trial-integrity §5: the hourly cap (config, not code — a legit user
     // with flaky SMS retries 3–4×; a flooder burns through 5). The cooldown
     // is honest about when to try again.
@@ -132,11 +142,22 @@ export class AuthService {
     // Dev-only master code: there is no SMS locally. Requires an EXPLICIT opt-in
     // (DEV_OTP_BYPASS=1) AND non-production NODE_ENV, so it is inert in tests, CI,
     // staging and prod — only active when a developer deliberately enables it locally.
+    // [STA-1 Part 3] A review credential's static code is accepted ONLY when
+    // the identifier resolves to a REVIEW tenant — and, below, only for a user
+    // IN that tenant. Same shape as a real code: armed by send-otp, five
+    // minutes, five attempts, single use, the same error strings.
+    const review = await reviewCredentialFor(this.app.prisma, phone);
     const devBypass =
+      !review &&
       !isProduction() &&
       process.env['DEV_OTP_BYPASS'] === '1' &&
       code === '000000';
-    if (!devBypass) {
+    if (review) {
+      const result = await verifyReviewCode(this.app.redis, phone, code, review);
+      if (!result.valid) {
+        throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
+      }
+    } else if (!devBypass) {
       const result = await verifyOtp(this.app.redis, phone, code);
       if (!result.valid) {
         throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
@@ -146,8 +167,17 @@ export class AuthService {
     // Find existing user
     const user = await this.app.prisma.user.findUnique({
       where: { phone },
-      include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true },
+      // tenant.kind rides the login response: the app's "Demo environment"
+      // chip (STA-1 DL-1) reads it, and nothing else about the response differs.
+      include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } } },
     });
+
+    // [STA-1] A static code opens nothing but the fiction: never a registration
+    // window, never a production account — even if a credential row were ever
+    // written with a real subscriber's number.
+    if (review && (!user || user.tenantId !== review.tenantId)) {
+      throw new AppError(400, 'INVALID_OTP', 'Invalid OTP code');
+    }
 
     if (!user) {
       // Phone ownership proven — open a short registration window.
