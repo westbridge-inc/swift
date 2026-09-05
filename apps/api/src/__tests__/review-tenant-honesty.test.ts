@@ -151,6 +151,23 @@ describe('[RLS-N3] the public vendor surfaces show each session its own tenant',
     expect(guest.body).toContain(ids.prodVendor);
   });
 
+  it('[4.1] under TENANT_UNSCOPED_ACCESS=deny a guest still browses (as audited public-browse work) and still never sees the fiction; the reviewer still sees only the fiction', async () => {
+    const prior = process.env['TENANT_UNSCOPED_ACCESS'];
+    process.env['TENANT_UNSCOPED_ACCESS'] = 'deny';
+    try {
+      const guest = await app.inject({ method: 'GET', url: `/api/v1/customer/vendors?d=${RUN}` });
+      expect(guest.statusCode).toBe(200);
+      expect(guest.body).toContain(ids.prodVendor);
+      expect(guest.body).not.toContain(ids.reviewVendor);
+      const reviewer = await get(`/api/v1/customer/vendors?d=${RUN}`, reviewToken);
+      expect(reviewer.statusCode).toBe(200);
+      expect(reviewer.body).toContain(ids.reviewVendor);
+      expect(reviewer.body).not.toContain(ids.prodVendor);
+    } finally {
+      if (prior === undefined) delete process.env['TENANT_UNSCOPED_ACCESS']; else process.env['TENANT_UNSCOPED_ACCESS'] = prior;
+    }
+  });
+
   it('[DL-7] browsing by category resolves the CALLER’s taxonomy: the fiction’s slug lists the fiction; production has no such category and is told so honestly', async () => {
     const r = await get(`/api/v1/customer/vendors?category=${SLUG}`, reviewToken);
     expect(r.statusCode).toBe(200);

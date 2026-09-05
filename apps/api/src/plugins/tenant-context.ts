@@ -76,6 +76,27 @@ export function enterTenant(tenantId: string | null): void {
 /** [TEN-01] Audited cross-tenant SYSTEM work. Every caller is a capability;
  *  the legacy name stays callable and is counted under `legacy-unscoped` so
  *  the remaining unnamed callers can be found and named (TEN-05). */
+/**
+ * [STA-1 DL-7 / 4.1] An UNAUTHENTICATED browse of the public surfaces is
+ * sanctioned cross-operator work — a guest sees every active PRODUCTION
+ * operator (home-popular-rail.test.ts), never the fiction. It runs as audited
+ * system work under this capability so `TENANT_UNSCOPED_ACCESS=deny` allows it
+ * and counts it, instead of refusing every guest with a 500; the vendor
+ * predicates on those surfaces say `kind = PRODUCTION` (visibleVendorForCaller).
+ * Called by the public-browse hook ONLY after optional auth bound nobody.
+ */
+export const PUBLIC_BROWSE_CAPABILITY = 'public-browse';
+export function enterPublicBrowse(): void {
+  const store = tenantContext.getStore();
+  if (store) {
+    store.tenantId = null;
+    store.mode = 'system';
+    store.capability = PUBLIC_BROWSE_CAPABILITY;
+  } else {
+    tenantContext.enterWith({ tenantId: null, mode: 'system', capability: PUBLIC_BROWSE_CAPABILITY });
+  }
+}
+
 export async function runWithoutTenant<T>(fn: () => Promise<T>, capability = 'legacy-unscoped'): Promise<T> {
   return tenantContext.run({ tenantId: null, mode: 'system', capability }, async () => await fn());
 }
