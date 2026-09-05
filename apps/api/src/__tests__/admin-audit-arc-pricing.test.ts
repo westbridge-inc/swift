@@ -9,7 +9,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
-import { withSuiteCapability } from '../lib/test-target-lock';
+import { refusalName, refuseAuditWhere, allowAuditAgain as allowAuditAgainShared, dropAuditRefusal } from './helpers/audit-refusal';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
@@ -47,21 +47,9 @@ const rows = () => runWithoutTenant(() => app.prisma.auditLog.findMany({
 const versions = () => app.prisma.pricingConfigVersion.count({ where: { countryCode: ZY, kind: 'TAXI_RATES' } });
 const taxiRates = async () => (await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: ZY } })).taxiRates;
 
-const refuseAuditFor = (entityId: string) => withSuiteCapability('ddl', () => runWithoutTenant(async () => {
-  await app.prisma.$executeRawUnsafe(`
-    CREATE OR REPLACE FUNCTION swift_arc_refuse_${RUN}() RETURNS trigger AS $fn$
-    BEGIN
-      IF NEW."entityId" = '${entityId}' THEN RAISE EXCEPTION 'injected'; END IF;
-      RETURN NEW;
-    END; $fn$ LANGUAGE plpgsql;`);
-  await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS swift_arc_refuse_${RUN} ON audit_logs;`);
-  await app.prisma.$executeRawUnsafe(`
-    CREATE TRIGGER swift_arc_refuse_${RUN} BEFORE INSERT ON audit_logs
-    FOR EACH ROW EXECUTE FUNCTION swift_arc_refuse_${RUN}();`);
-}, 'inject'));
-const allowAuditAgain = () => withSuiteCapability('ddl', () => runWithoutTenant(async () => {
-  await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS swift_arc_refuse_${RUN} ON audit_logs;`);
-}, 'cleanup'));
+const REFUSAL = refusalName('arc');
+const refuseAuditFor = (entityId: string) => refuseAuditWhere(app, REFUSAL, { entityId });
+const allowAuditAgain = () => allowAuditAgainShared(app, REFUSAL);
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
@@ -88,10 +76,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await allowAuditAgain().catch(() => {});
-  await withSuiteCapability('ddl', () => runWithoutTenant(async () => {
-    await app.prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS swift_arc_refuse_${RUN}();`);
-  }, 'cleanup')).catch(() => {});
+  await dropAuditRefusal(app, REFUSAL);
   await cleanupSecondApprovers(app);
   await runWithoutTenant(async () => {
     await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: userIds } } }).catch(() => {});
