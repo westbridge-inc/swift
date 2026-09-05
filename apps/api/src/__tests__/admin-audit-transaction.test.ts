@@ -12,7 +12,7 @@ import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutabilit
 import { auditWithin, wroteAuditInline, type AuditLogWriter, type AuditRequestLike } from '../modules/admin/audit-within';
 import { adminAuditCounter } from '../plugins/observability';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
-import { withSuiteCapability } from '../lib/test-target-lock';
+import { refusalName, refuseAuditWhere, dropAuditRefusal } from './helpers/audit-refusal';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] THE AUDIT ROW IS WRITTEN AFTER COMMIT AND MAY FAIL SILENTLY.
@@ -55,28 +55,9 @@ const configValue = async (key: string) => runWithoutTenant(
 );
 
 /** Refuse the audit row for ONE subject, at the database, inside the tx. */
-const refuseAuditFor = (entityId: string) => withSuiteCapability('ddl', () => runWithoutTenant(async () => {
-  await app.prisma.$executeRawUnsafe(`
-    CREATE OR REPLACE FUNCTION swift_test_refuse_audit_${RUN}() RETURNS trigger AS $fn$
-    BEGIN
-      IF NEW."entityId" = '${entityId}' THEN
-        RAISE EXCEPTION 'injected audit failure for %', NEW."entityId";
-      END IF;
-      RETURN NEW;
-    END; $fn$ LANGUAGE plpgsql;`);
-  await app.prisma.$executeRawUnsafe(
-    `DROP TRIGGER IF EXISTS swift_test_refuse_audit_${RUN} ON audit_logs;`);
-  await app.prisma.$executeRawUnsafe(`
-    CREATE TRIGGER swift_test_refuse_audit_${RUN} BEFORE INSERT ON audit_logs
-    FOR EACH ROW EXECUTE FUNCTION swift_test_refuse_audit_${RUN}();`);
-}, 'test-inject'));
-
-const allowAuditAgain = () => withSuiteCapability('ddl', () => runWithoutTenant(async () => {
-  await app.prisma.$executeRawUnsafe(
-    `DROP TRIGGER IF EXISTS swift_test_refuse_audit_${RUN} ON audit_logs;`);
-  await app.prisma.$executeRawUnsafe(
-    `DROP FUNCTION IF EXISTS swift_test_refuse_audit_${RUN}();`);
-}, 'test-cleanup'));
+const REFUSAL = refusalName('tx');
+const refuseAuditFor = (entityId: string) => refuseAuditWhere(app, REFUSAL, { entityId });
+const allowAuditAgain = () => dropAuditRefusal(app, REFUSAL);
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
