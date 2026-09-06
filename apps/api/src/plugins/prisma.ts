@@ -164,6 +164,8 @@ const TENANT_QUERY_EXTENSIONS = {
   personProfile: scoped,
   businessProfile: scoped,
   vehicleProfile: scoped,
+  // [DOC-1 P4-2]
+  documentRecord: scoped,
   rectificationRequest: scoped,
   fraudCase: scoped,
 };

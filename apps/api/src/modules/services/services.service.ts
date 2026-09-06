@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient, type QualificationType } from '@prisma/client';
+import { approvedEvidenceFor } from '../verification/evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
 
 /** The verification projection is used both on the root client and inside
@@ -253,20 +254,8 @@ export async function isProviderVerified(
   const checklist = await providerChecklist(prisma, userId);
   if (checklist.length === 0) return false;
 
-  const approved = await prisma.verificationDocument.findMany({
-    where: {
-      userId,
-      docType: { in: checklist },
-      status: 'APPROVED',
-      purgedAt: null,
-      fileUrl: { not: '' },
-      AND: [
-        { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
-        { OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] },
-      ],
-    },
-    select: { docType: true },
-  });
+  // [DOC-1 P4-2] One evidence rule for every projection: records, not image rows.
+  const approved = await approvedEvidenceFor(prisma, userId, checklist, now);
   const have = new Set(approved.map((d) => d.docType));
   return checklist.every((docType) => have.has(docType));
 }

@@ -71,6 +71,8 @@ export const TENANT_TABLES = [
   'person_profile',
   'business_profile',
   'vehicle_profile',
+  // [DOC-1 P4-2] the durable document record
+  'document_record',
   // [DOC-1 P25] a request to correct an extracted field
   'rectification_request',
   // [DOC-1 P24] a fraud case confirmed on second review
@@ -242,6 +244,8 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'person_profile', trigger: 'person_profile_tenant_matches_subject', parent: 'subject', fk: 'subjectId' },
   { table: 'business_profile', trigger: 'business_profile_tenant_matches_subject', parent: 'subject', fk: 'subjectId' },
   { table: 'vehicle_profile', trigger: 'vehicle_profile_tenant_matches_subject', parent: 'subject', fk: 'subjectId' },
+  // [DOC-1 P4-2] a record inherits the tenant of the account that submitted the evidence
+  { table: 'document_record', trigger: 'document_record_tenant_matches_account', parent: 'users', fk: 'accountId' },
   { table: 'rectification_request', trigger: 'rectification_request_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'fraud_case', trigger: 'fraud_case_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
