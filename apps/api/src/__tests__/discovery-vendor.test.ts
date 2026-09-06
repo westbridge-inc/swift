@@ -50,6 +50,14 @@ async function makeOwnerWithVendor() {
     },
   });
   const owner = await app.prisma.vendorOwner.upsert({ where: { userId: user.id }, create: { userId: user.id }, update: {} });
+  // [DOC-1 §18.3] A verified restaurant HOLDS its checklist — the prepared-food gate asks for the licence and a
+  // food-handler permit before a food tag lands, and the vendor projection counts only approved documents with a stored file.
+  for (const docType of ['owner_national_id', 'business_registration', 'tin_certificate', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo']) {
+    await app.prisma.verificationDocument.create({ data: {
+      userId: user.id, role: 'VENDOR_OWNER', docType, fileUrl: `verification/${user.id}/${docType}.enc`, status: 'APPROVED', reviewedBy: 'test', reviewedAt: new Date(),
+      consentAt: new Date(), privacyNoticeVersion: 'v1', expiresAt: docType === 'gra_restaurant_licence' || docType === 'food_handler_cert' ? new Date(Date.now() + 365 * 86_400_000) : null,
+    } });
+  }
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: owner.id,

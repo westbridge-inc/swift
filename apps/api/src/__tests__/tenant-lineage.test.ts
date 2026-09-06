@@ -73,6 +73,7 @@ export const GRANDCHILD_OF: Record<string, string> = {
 export const PLATFORM_WIDE: Record<string, string> = {
   DocType: 'the document registry (DOC-1 §4.2) — data keyed by country, like CountryConfig',
   DocField: 'fields of a registry document class',
+  CategoryDocumentGate: 'the category document gate (DOC-1 §18.3) — country-keyed registry data like doc_type',
   Validator: 'the validator registry (DOC-1 §7.1) — global data like the document registry it proves',
   AuditChainEntry: 'the tamper-evident audit chain (DOC-1 §20.1) — one platform-wide sequence of digests, never bodies',
   AuditChainAnchor: 'the daily head of the audit chain — a digest, platform-wide',

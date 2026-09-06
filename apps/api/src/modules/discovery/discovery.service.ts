@@ -106,6 +106,12 @@ export class DiscoveryService {
 
   async addItemTag(itemId: string, slug: string, source: 'VENDOR' | 'ADMIN', tenantId = 'swift-default') {
     const category = await this.requireActiveCategory(slug, tenantId);
+    // [DOC-1 §18.3] Documents control what can be sold: a gated category needs the
+    // vendor's licence VALID before the tag lands — a human tag by an admin too.
+    const item = await this.prisma.item.findUnique({ where: { id: itemId }, select: { vendorId: true } });
+    if (!item) throw new AppError(404, 'NOT_FOUND', 'Item not found');
+    const { assertTaggable } = await import('../verification/category-gate');
+    await assertTaggable(this.prisma, item.vendorId, { id: category.id, slug: category.slug, kind: category.kind });
     try {
       await this.prisma.$transaction(async (tx) => {
         const count = await tx.itemDiscoveryCategory.count({ where: { itemId } });

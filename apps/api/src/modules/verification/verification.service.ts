@@ -48,6 +48,10 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Record<string, number> = {
   road_service_licence: 365, // annual commercial road-service licence
   food_handler_cert: 365,  // annual health cert
   gra_restaurant_licence: 365,
+  // [DOC-1 §18.1] the addendum's annual Guyana licences (submittable through a category gate)
+  liquor_licence: 365,
+  sanitary_certificate: 365,
+  trade_licence: 365,
   drivers_licence: 3 * 365,
   vehicle_registration: 3 * 365,
 };
@@ -311,7 +315,15 @@ export class VerificationService {
       ? await this.moverSubmittableChecklist(user.countryCode, userId)
       : await this.checklistFor(userId, user.countryCode, roleKey);
     if (!checklist.includes(docType)) {
-      throw new AppError(400, 'INVALID_DOC_TYPE', `${docType} is not required for ${roleKey} in your country`);
+      // [DOC-1 §18.3] A document type a category gate names in this country is
+      // submittable by a vendor even when no checklist lists it — a shop that wants
+      // to sell alcohol uploads its liquor licence. Never a type that still needs
+      // a specimen (FD-DOC-15).
+      const { submittableGateDocTypes } = await import('./category-gate');
+      const gateTypes = roleKey === 'MOVER' ? [] : await submittableGateDocTypes(this.prisma, user.countryCode);
+      if (!gateTypes.includes(docType)) {
+        throw new AppError(400, 'INVALID_DOC_TYPE', `${docType} is not required for ${roleKey} in your country`);
+      }
     }
 
     // A document valid beyond the renewal window can't be re-submitted; once it
