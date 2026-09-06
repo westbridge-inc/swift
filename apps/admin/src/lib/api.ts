@@ -294,6 +294,14 @@ export const rejectClaim = (id: string, reason: string) =>
 export const payClaim = (id: string, reference: string, amount: string | number) =>
   apiFetch(`/api/v1/admin/cash-rules/claims/${id}/paid`, { method: 'PUT', body: JSON.stringify({ reference, amount }) });
 export const fetchCashMetrics = () => apiFetch('/api/v1/admin/cash-rules/metrics');
+// [DOC-1 §31.4 · P31-1] The loss-protection reserve line and the mover's protection.
+export const fetchRlpReserve = (country = 'GY') => apiFetch(`/api/v1/admin/cash-rules/rlp/reserve?country=${encodeURIComponent(country)}`);
+export const adjustRlpReserve = (countryCode: string, amount: number, note: string) =>
+  apiFetch('/api/v1/admin/cash-rules/rlp/reserve/adjust', { method: 'POST', body: JSON.stringify({ countryCode, amount, note }) });
+export const suspendLossProtection = (userId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/cash-rules/rlp/movers/${userId}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const reinstateLossProtection = (userId: string, note?: string) =>
+  apiFetch(`/api/v1/admin/cash-rules/rlp/movers/${userId}/reinstate`, { method: 'PUT', body: JSON.stringify({ note }) });
 
 // ─── Support & comms ─────────────────────────────────────────────
 export const fetchSupportTickets = (status?: string) =>

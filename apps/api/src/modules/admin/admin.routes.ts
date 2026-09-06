@@ -5019,6 +5019,43 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: metrics };
   });
 
+  // ─── [DOC-1 §31.4 · P31-1] Rider loss protection: the reserve line and suspension ──
+
+  /** The named reserve line for a country: balance, floor, this month's provisioning, latest entries. */
+  app.get('/cash-rules/rlp/reserve', { preHandler: [adminGuard] }, async (request) => {
+    const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
+    return { success: true, data: await cashRules.lossProtectionReserve(country.toUpperCase()) };
+  });
+
+  /** A manual entry on the reserve line — a top-up or a correction. Money: audited with the resulting balance. */
+  app.post('/cash-rules/rlp/reserve/adjust', { preHandler: [adminGuard] }, async (request) => {
+    const body = z.object({
+      countryCode: z.string().length(2),
+      amount: z.number().finite(),
+      note: z.string().min(3).max(500),
+    }).parse(request.body ?? {});
+    const entry = await cashRules.adjustLossProtectionReserve(body.countryCode.toUpperCase(), body.amount, request.user.userId, body.note,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+    return { success: true, data: entry };
+  });
+
+  /** Suspend a mover's loss protection on a confirmed abuse finding — stated, audited, and told to the mover. */
+  app.put('/cash-rules/rlp/movers/:userId/suspend', { preHandler: [adminGuard] }, async (request) => {
+    const { userId } = request.params as { userId: string };
+    const body = z.object({ reason: z.string().min(5).max(500) }).parse(request.body ?? {});
+    const user = await cashRules.suspendLossProtection(userId, body.reason,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+    return { success: true, data: user };
+  });
+
+  app.put('/cash-rules/rlp/movers/:userId/reinstate', { preHandler: [adminGuard] }, async (request) => {
+    const { userId } = request.params as { userId: string };
+    const body = z.object({ note: z.string().max(500).optional() }).parse(request.body ?? {});
+    const user = await cashRules.reinstateLossProtection(userId, body.note,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+    return { success: true, data: user };
+  });
+
   // ─── Dual control (ADM-005) ────────────────────────────────────────────
   //
   // The queue a second admin works. A pending approval carries what was asked,

@@ -283,8 +283,8 @@ const CENSUS: Case[] = [
   { k: 'trial_fee_education', d: { subscriptionId: 's1', stage: 'MID' }, to: null, why: 'GAP: same' },
   { k: 'fx_change_notice', d: { subscriptionId: 's1', fxRateId: 'f1' }, to: null, why: 'GAP: same' },
   { k: 'usd_migration_notice', d: { subscriptionId: 's1', mode: 'A' }, to: null, why: 'GAP: same' },
-  { k: 'claim', d: { claimId: 'c1' }, to: null, why: 'GAP: rider cash-guarantee claim — no claims screen' },
-  { k: 'claim_update', d: { claimId: 'c1' }, to: null, why: 'GAP: same' },
+  { k: 'claim', d: { claimId: 'c1' }, to: { screen: 'Claims' }, why: 'rider — the guarantee claims screen (DOC-1 §31.4)' },
+  { k: 'claim_update', d: { claimId: 'c1' }, to: { screen: 'Claims' }, why: 'rider — same screen' },
 
   // ── Verification / liveness / safety of the person receiving it [GAPS].
   { k: 'verification_approved', d: { docId: 'd1' }, to: null, why: 'GAP: IdentityVerification screen exists and is unrouted' },
@@ -339,6 +339,11 @@ const CENSUS: Case[] = [
   { k: 'ops_extraction_breaker_open', d: { profileCode: 'GY_ID', rate: 0.2 }, to: null, why: 'GAP: ops page, admin only' },
   { k: 'mmg_claim_mismatch', d: { orderId: 'o1' }, to: { screen: 'Delivery', params: { orderId: 'o1' } }, why: 'GAP: admin only — two payment claims disagree' },
   { k: 'handover_claims_unmatched', d: { unmatched: 3, date: '2026-09-06' }, to: null, why: 'GAP: admin only — the nightly handover-claims report' },
+  { k: 'rlp_suspended', d: {}, to: { screen: 'Claims' }, why: 'rider — the claims screen shows the suspension and the help route' },
+  { k: 'rlp_reinstated', d: {}, to: { screen: 'Claims' }, why: 'rider — same screen' },
+  { k: 'rlp_sla_breached', d: { breached: 2, date: '2026-09-06' }, to: null, why: 'GAP: admin only — approved payouts past the SLA' },
+  { k: 'rlp_reserve_low', d: { countries: ['GY'], date: '2026-09-06' }, to: null, why: 'GAP: admin only — the reserve line is below its floor' },
+  { k: 'rlp_reserve_provisioned', d: { countryCode: 'GY', periodKey: '2026-08' }, to: null, why: 'GAP: admin only — the monthly provisioning notice' },
   // Its sibling from the same heartbeat: a background job exhausted its retries
   // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web
   // console's Background jobs page — there is no mobile admin surface, so the

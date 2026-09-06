@@ -85,6 +85,8 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'expiry-sweep': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'image-policy-sweep': { policy: 'SAFE_REPLAY', why: 'Purges the images of committed, extracted PERSONAL documents of active types through purgeImageAfterReview, which refuses an already-purged, held or uncommitted submission; a replay finds nothing left to purge. Receipts append.' },
   'handover-claims-reconcile': { policy: 'SAFE_REPLAY', why: 'Reads settlements older than the claim window and reports the unmatched pairs: one audit row per run and at most one admin notice per day. It settles nothing and fails nothing; a replay reports the same pairs.' },
+  'rlp-sweep': { policy: 'SAFE_REPLAY', why: 'Flags approved-but-unpaid claims past the pay-out SLA (a flag pushed at most once, guarded by the WHERE), lists the countries whose reserve is below its floor, writes one audit row per run and at most one admin notice per day per finding; it pays nothing and changes no status.' },
+  'rlp-reserve-provision': { policy: 'SAFE_REPLAY', why: 'Provisions the PREVIOUS month once per country: the PROVISION row is unique on (country, kind, periodKey), so a replay inserts nothing and the balance cannot be provisioned twice.' },
   'flag-ratings': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'guardian-sweep': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'incident-pattern-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -146,6 +148,8 @@ export type JobName =
   | 'expiry-sweep'
   | 'image-policy-sweep'
   | 'handover-claims-reconcile'
+  | 'rlp-sweep'
+  | 'rlp-reserve-provision'
   | 'flag-ratings'
   | 'guardian-sweep'
   | 'incident-pattern-scan'

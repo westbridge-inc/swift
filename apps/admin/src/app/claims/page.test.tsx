@@ -45,6 +45,9 @@ function claimsHandler(
         },
       };
     }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/cash-rules/rlp/reserve') {
+      return { body: { success: true, data: { countryCode: 'GY', balance: 12000, floor: 52250, low: true, provisionedThisPeriod: false, entries: [{ id: 'e1', kind: 'ADJUSTMENT', amount: '12000', periodKey: null, claimId: null, note: 'seed', createdAt: '2026-09-01T00:00:00.000Z' }] } } };
+    }
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/cash-rules/metrics') {
       return {
         body: {
@@ -199,3 +202,30 @@ describe('claim payout mutation', () => {
     await waitFor(() => expect(claimReads(fetchMock)).toHaveLength(3));
   });
 });
+
+describe('[DOC-1 §31.4] the reserve line and the evidence bundle', () => {
+  it('shows the reserve balance, its floor and the below-floor warning; a claim renders its bundle with the missing item named', async () => {
+    const withBundle = {
+      ...targetClaim,
+      id: 'claim-bundle',
+      evidenceComplete: false,
+      evidence: { complete: false, missing: ['door_photo'], items: [
+        { key: 'rider_at_door', present: true, required: true },
+        { key: 'door_photo', present: false, required: true },
+        { key: 'customer_contacted', present: false, required: false },
+      ] },
+    };
+    mockApi(claimsHandler(() => ({ body: { success: true, data: {} } }), [withBundle]));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    const reserve = await screen.findByTestId('rlp-reserve');
+    await waitFor(() => expect(reserve.textContent).toContain('12,000'));
+    expect(reserve.textContent).toContain('BELOW FLOOR');
+    await user.click(await screen.findByRole('button', { name: 'approved' }));
+    const bundle = await screen.findByTestId('evidence-claim-bundle');
+    expect(bundle.textContent).toContain('door photo — missing');
+    expect(bundle.textContent).toContain('rider at door ✓');
+    expect(bundle.textContent).toContain('customer contacted (optional)');
+    expect(bundle.textContent).toContain('bundle incomplete');
+  });
+});
+

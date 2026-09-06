@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchClaims, approveClaim, rejectClaim, payClaim, fetchCashMetrics } from '@/lib/api';
+import { fetchClaims, approveClaim, rejectClaim, payClaim, fetchCashMetrics, fetchRlpReserve, adjustRlpReserve } from '@/lib/api';
 import { StatusPill, gyd } from '@/components/detail';
 import { MutationError } from '@/components/MutationError';
 
@@ -33,6 +33,14 @@ export default function ClaimsPage() {
       payClaim(id, reference, amount),
     onSuccess: invalidate,
   });
+
+  // [DOC-1 §31.4 · P31-1] The reserve line every payout is drawn from: balance, floor, this month's provisioning.
+  const reserveQ = useQuery({ queryKey: ['rlp-reserve'], queryFn: () => fetchRlpReserve('GY') });
+  const adjust = useMutation({
+    mutationFn: ({ amount, note }: { amount: number; note: string }) => adjustRlpReserve('GY', amount, note),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['rlp-reserve'] }); },
+  });
+  const reserve: any = reserveQ.data?.data ?? null;
 
   const rows: any[] = data?.data ?? [];
   const m: any = metricsQ.data?.data ?? {};
@@ -73,6 +81,44 @@ export default function ClaimsPage() {
           <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : Number((m.claimsByRider ?? []).length).toLocaleString()}</p>
           <p className="text-[var(--muted)] text-xs mt-1">repeat filers surface first</p>
         </div>
+      </div>
+
+      {/* [DOC-1 §31.4] The reserve line: a claim is paid from it or not at all. */}
+      <div className={`rounded-xl border p-5 mb-6 ${reserve?.low ? 'border-amber-500/60 bg-amber-500/5' : 'border-[var(--border)] bg-[var(--panel)]'}`} data-testid="rlp-reserve">
+        <div className="flex flex-wrap items-center gap-4">
+          <div>
+            <p className="text-[var(--muted)] text-sm">Loss-protection reserve (GY)</p>
+            <p className="text-2xl font-bold">{reserveQ.isLoading ? '—' : reserve ? gyd(reserve.balance) : '—'}</p>
+            {reserve ? (
+              <p className="text-xs text-[var(--muted)]">
+                floor {gyd(reserve.floor)} · {reserve.provisionedThisPeriod ? 'provisioned this month' : 'not yet provisioned this month'}
+                {reserve.low ? ' · BELOW FLOOR — payouts refuse once the line is empty' : ''}
+              </p>
+            ) : null}
+          </div>
+          <button
+            onClick={() => {
+              const raw = window.prompt('Adjust the reserve by (GYD, negative to correct downwards):')?.trim();
+              const amount = Number(raw);
+              if (!raw || !Number.isFinite(amount) || amount === 0) return;
+              const note = window.prompt('Why (recorded with the entry):')?.trim();
+              if (!note || note.length < 3) return;
+              if (window.confirm(`Record a ${gyd(amount)} entry on the GY reserve line?`)) adjust.mutate({ amount, note });
+            }}
+            disabled={adjust.isPending}
+            className="ml-auto px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+          >
+            Adjust reserve
+          </button>
+        </div>
+        {adjust.error ? <div className="mt-3"><MutationError error={adjust.error} label="Reserve entry did not record" /></div> : null}
+        {reserve?.entries?.length ? (
+          <ul className="mt-3 text-xs text-[var(--muted)] space-y-1">
+            {reserve.entries.slice(0, 5).map((e: any) => (
+              <li key={e.id}>{new Date(e.createdAt).toLocaleString()} · {String(e.kind).toLowerCase()} · {gyd(e.amount)}{e.note ? ` · ${e.note}` : ''}</li>
+            ))}
+          </ul>
+        ) : null}
       </div>
 
       <div className="flex gap-1 mb-4">
@@ -127,6 +173,22 @@ export default function ClaimsPage() {
                 {c.photoUrl ? <span>photo attached</span> : <span>no photo</span>}
                 {c.reviewNote ? <span className="italic">“{c.reviewNote}”</span> : null}
               </div>
+              {/* [DOC-1 §31.4 · DOC-INV-47] The evidence bundle as filed — a payout needs every required item. */}
+              {c.evidence?.items?.length ? (
+                <div className="mt-3 flex flex-wrap gap-2" data-testid={`evidence-${c.id}`}>
+                  {c.evidence.items.map((it: { key: string; present: boolean; required: boolean }) => (
+                    <span
+                      key={it.key}
+                      className={`px-2 py-0.5 rounded text-xs ${it.present ? 'bg-emerald-500/15 text-emerald-300' : it.required ? 'bg-red-500/15 text-red-300' : 'bg-white/5 text-[var(--muted)]'}`}
+                    >
+                      {it.key.replaceAll('_', ' ')}{it.present ? ' ✓' : it.required ? ' — missing' : ' (optional)'}
+                    </span>
+                  ))}
+                  {c.evidenceComplete ? null : (
+                    <span className="text-xs text-red-300">bundle incomplete — a payout is refused until a person approves with the missing items on record</span>
+                  )}
+                </div>
+              ) : null}
               {(c.status === 'PENDING_REVIEW' || c.status === 'AUTO_APPROVED' || c.status === 'APPROVED') && (
                 <div className="flex gap-2 mt-4">
                   {c.status === 'PENDING_REVIEW' && (

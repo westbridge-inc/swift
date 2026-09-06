@@ -811,6 +811,8 @@ export const riderApi = {
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/rider/earnings', { params }),
+  /** [DOC-1 §31.4] The rider's guarantee claims with the evidence bundle and the pay-out SLA. */
+  claims: () => api.get('/rider/claims'),
   earningsDaily: (days = 7) => api.get('/rider/earnings/daily', { params: { days } }),
   earningsStatement: (session?: AuthSessionSnapshot) =>
     api.get('/rider/earnings/statement', capturedAuthConfig(session, { params: { link: 1 } })),
@@ -865,6 +867,7 @@ export const driverApi = {
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/driver/earnings', { params }),
+  claims: () => api.get('/driver/claims'),
   earningsDaily: (days = 7) => api.get('/driver/earnings/daily', { params: { days } }),
   earningsStatement: (session?: AuthSessionSnapshot) =>
     api.get('/driver/earnings/statement', capturedAuthConfig(session, { params: { link: 1 } })),
