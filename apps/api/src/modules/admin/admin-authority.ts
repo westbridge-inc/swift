@@ -309,6 +309,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
 
   // ── Verification ────────────────────────────────────────────────────────
   'GET /verification/queue': c('C0', 'verification.read'),
+  // [DOC-1 §8.4 · P8-4] SUPPORT sees status counts, never a document, a name or a phone (DOC-INV-19).
+  'GET /verification/queue/counts': c('C0', 'verification.counts'),
   'PUT /verification/:id/approve': c('C3', 'verification.decide', E.verification),
   'PUT /verification/:id/reject': c('C3', 'verification.decide', E.verification),
   'GET /verification/:id/document-url': c('C1', 'verification.document.read'),
@@ -388,10 +390,35 @@ export const ROLE_DEFAULT_CAPABILITIES: Readonly<Record<string, readonly string[
   ADMIN: ['*'],
 };
 
-/** A worked example, and the shape the red test uses: a support operator. */
+/** A worked example, and the shape the red test uses: a support operator. Counts only on the review queue (DOC-1 §8.4). */
 export const SUPPORT_OPERATOR_CAPABILITIES: readonly string[] = [
   'dashboard.read', 'support.read', 'support.resolve', 'order.read', 'user.read', 'moderation.read',
+  'verification.counts',
 ];
+
+/**
+ * [DOC-1 §8.4 · P8-4] The review console's roles, as capability PRESETS an admin
+ * grant is made from — not user roles: an operator is an ADMIN whose grant is
+ * one of these, and the server honours the narrowing. Registry administration
+ * and legal holds belong to DOC_ADMIN alone; the clearance outcome to DOC_SENIOR
+ * and above; SUPPORT never reads a document, a case's fields, or a PERSONAL
+ * value (DOC-INV-19) — it reads counts.
+ */
+export const DOC_REVIEWER_CAPABILITIES: readonly string[] = [
+  'dashboard.read', 'verification.read', 'verification.counts', 'verification.document.read', 'verification.decide', 'verification.case.claim',
+];
+export const DOC_SENIOR_CAPABILITIES: readonly string[] = [
+  ...DOC_REVIEWER_CAPABILITIES, 'verification.clearance.read',
+];
+export const DOC_ADMIN_CAPABILITIES: readonly string[] = [
+  'dashboard.read', 'verification.*',
+];
+export const REVIEW_CONSOLE_PRESETS: Readonly<Record<'DOC_REVIEWER' | 'DOC_SENIOR' | 'DOC_ADMIN' | 'SUPPORT', readonly string[]>> = {
+  DOC_REVIEWER: DOC_REVIEWER_CAPABILITIES,
+  DOC_SENIOR: DOC_SENIOR_CAPABILITIES,
+  DOC_ADMIN: DOC_ADMIN_CAPABILITIES,
+  SUPPORT: SUPPORT_OPERATOR_CAPABILITIES,
+};
 
 /** Does a held pattern cover a needed capability? `*`, `finance.*`, or exact. */
 export function capabilityMatches(held: string, needed: string): boolean {

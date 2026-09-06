@@ -4639,6 +4639,22 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: row };
   });
 
+  // [DOC-1 §8.4 · P8-4] Counts only: what a SUPPORT operator may know about the
+  // review queue — how many, by status and lane — and nothing about anyone.
+  app.get('/verification/queue/counts', { preHandler: [adminGuard] }, async () => {
+    const rows = await tenantPrisma.verificationDocument.groupBy({ by: ['status', 'role'], _count: { _all: true } });
+    const byStatus: Record<string, number> = {};
+    const byLane: Record<string, { customer: number; operator: number }> = {};
+    for (const r of rows) {
+      byStatus[r.status] = (byStatus[r.status] ?? 0) + r._count._all;
+      const lane = byLane[r.status] ?? (byLane[r.status] = { customer: 0, operator: 0 });
+      if (r.role === 'CUSTOMER') lane.customer += r._count._all; else lane.operator += r._count._all;
+    }
+    const openCases = await tenantPrisma.reviewCase.count({ where: { closedAt: null } });
+    const breached = await tenantPrisma.reviewCase.count({ where: { closedAt: null, slaDueAt: { lt: new Date() } } });
+    return { success: true, data: { byStatus, byLane, openCases, breachedSla: breached } };
+  });
+
   app.get('/verification/queue', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, role } = verificationQueueQuerySchema.parse(request.query);
