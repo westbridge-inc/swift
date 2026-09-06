@@ -23,7 +23,9 @@ export type ConsentDocumentType =
   | 'driver_agreement'
   | 'vendor_agreement'
   | 'marketing_consent'
-  | 'location_bg_consent';
+  | 'location_bg_consent'
+  /** [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — versioned, hashed, a row in this ledger */
+  | 'unregistered_trader_declaration';
 export type ConsentAction = 'granted' | 'withdrawn' | 're_granted';
 /** 'mobile' = the RN app when the platform isn't client-attested (signup). */
 export type ConsentSurface = 'ios' | 'android' | 'mobile' | 'web' | 'vendor_web' | 'admin' | 'support_ticket';

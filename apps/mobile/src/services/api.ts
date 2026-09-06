@@ -901,6 +901,8 @@ export interface VendorItemInput {
 
 export const vendorApi = {
   profile: () => api.get('/vendor/profile'),
+  /** [DOC-1 §3.6] The store's tier: caps, usage, what lifts the limits. */
+  tier: () => api.get('/vendor/tier'),
   toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
   toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
