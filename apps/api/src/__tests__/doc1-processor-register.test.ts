@@ -44,7 +44,8 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
   });
 
   it('test_external_kyc_engines_are_registered: every external engine names an entry that carries the PERSONAL image classes', () => {
-    process.env['DIDIT_API_KEY'] ??= 'test'; process.env['ID_ANALYZER_API_KEY'] ??= 'test';
+    // a local .env may carry the keys as EMPTY strings; the adapters need any non-empty value to construct
+    for (const k of ['DIDIT_API_KEY', 'ID_ANALYZER_API_KEY']) if (!process.env[k]) process.env[k] = 'test';
     for (const engine of [new DiditKycProvider().engine, new IdAnalyzerKycProvider().engine]) {
       expect(engine.external).toBe(true);
       const entry = processorByRef(engine.processorRef);

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { IdAnalyzerKycProvider } from './id-analyzer-provider';
 import { DiditKycProvider } from './didit-provider';
@@ -87,6 +88,19 @@ export class SandboxKycProvider implements KycProvider {
   }
 }
 
+/**
+ * [FD-DOC-3b · founder decision 2026-09-07 · option (b) ON SHORE] No document image ever leaves
+ * Swift's infrastructure: nothing is read automatically, every submission lands PENDING for a
+ * human reviewer who keys the fields and decides. This provider approves NOTHING — which is
+ * exactly why production accepts it where `sandbox` (self-approving test identities) is refused.
+ */
+export class ManualReviewKycProvider implements KycProvider {
+  readonly engine: KycEngine = { name: 'manual-review', version: '1', external: false };
+  async verifyIdentity(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `manual_${randomUUID()}` }; }
+  async verifyDocument(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `manual_${randomUUID()}` }; }
+  async getStatus(): Promise<KycStatus> { return 'pending_manual'; }
+}
+
 /** Provider selection is config, not code. */
 export function getKycProvider(): KycProvider {
   const provider = process.env['KYC_PROVIDER'] ?? 'sandbox';
@@ -96,6 +110,8 @@ export function getKycProvider(): KycProvider {
   switch (provider) {
     case 'sandbox':
       return new SandboxKycProvider();
+    case 'manual':
+      return new ManualReviewKycProvider();
     case 'idanalyzer':
       return new IdAnalyzerKycProvider();
     case 'didit':

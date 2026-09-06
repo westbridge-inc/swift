@@ -126,17 +126,17 @@ describe('[DOC-1 §0.5] hard limits', () => {
     }
   });
 
-  it('[3] no biometric operation without the recorded decision: the kill switch exists, defaults ON, and OFF turns the identity leg into a document-only check', async () => {
-    expect(biometricFaceMatchEnabled({})).toBe(true);
+  it('[3] no biometric operation without the recorded decision: the kill switch exists, defaults OFF (FD-D5 not approved), and only an explicit 1 sends the selfie', async () => {
+    expect(biometricFaceMatchEnabled({})).toBe(false);
     expect(biometricFaceMatchEnabled({ FEATURE_BIOMETRIC_FACE_MATCH: '1' })).toBe(true);
     expect(biometricFaceMatchEnabled({ FEATURE_BIOMETRIC_FACE_MATCH: '0' })).toBe(false);
     const on = new SpyKyc();
-    delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
+    process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
     await submitOwnerId(on, 'on');
     expect(on.calls).toEqual(['verifyIdentity']);
     await runWithTenant('swift-default', () => app.prisma.verificationDocument.deleteMany({ where: { userId } }));
     const off = new SpyKyc();
-    process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '0';
+    delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
     try {
       await submitOwnerId(off, 'off');
       expect(off.calls).toEqual(['verifyDocument']);
