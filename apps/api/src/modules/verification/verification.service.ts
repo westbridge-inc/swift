@@ -7,6 +7,7 @@ import type { ValidatorContext } from './validators';
 import { approvedEvidenceFor } from './evidence';
 import { compileStorefrontDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
+import { retentionDaysFor } from './retention-policy';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -1515,13 +1516,17 @@ export class VerificationService {
     if (!user) return 0;
 
     const config = await this.countryConfig.getByCode(user.countryCode);
-    const deleteAt = new Date(Date.now() + config.dataRetentionDays * 24 * 60 * 60 * 1000);
-
-    const res = await this.prisma.verificationDocument.updateMany({
-      where: { userId, purgedAt: null },
-      data: { retentionExpiresAt: deleteAt },
-    });
-    return res.count;
+    // [DOC-1 §9.1 · P1-1] One clock per document, from its (country, type, role) policy row —
+    // the registry's persistRetentionDays, the AML switch's seven years, or the country
+    // default — never one flat date for everything the person ever submitted.
+    const docs = await this.prisma.verificationDocument.findMany({ where: { userId, purgedAt: null }, select: { id: true, docType: true, role: true } });
+    let count = 0;
+    for (const d of docs) {
+      const ruling = await retentionDaysFor(this.prisma, { countryCode: user.countryCode, docType: d.docType, role: d.role, countryDefaultDays: config.dataRetentionDays });
+      const res = await this.prisma.verificationDocument.updateMany({ where: { id: d.id, purgedAt: null }, data: { retentionExpiresAt: new Date(Date.now() + ruling.days * 24 * 60 * 60 * 1000) } });
+      count += res.count;
+    }
+    return count;
   }
 
   /**
