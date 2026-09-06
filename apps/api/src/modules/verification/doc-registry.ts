@@ -123,14 +123,21 @@ export interface RegistryGap { docTypeCode: string; gap: RegistryGapKind; detail
  * field, and no blocking validator it depends on is a phantom; and no validator row
  * anywhere names an implementation that does not exist. Empty = complete.
  */
-export async function registryCompletenessGaps(prisma: PrismaClient, resolves: (implRef: string | null) => boolean): Promise<RegistryGap[]> {
+export async function registryCompletenessGaps(
+  prisma: PrismaClient,
+  resolves: (implRef: string | null) => boolean,
+  opts: { /** P10-4: judge these codes as if they were active — a rehearsal, not a write */ treatActive?: readonly string[] } = {},
+): Promise<RegistryGap[]> {
   const gaps: RegistryGap[] = [];
   const validators = await prisma.validator.findMany({ select: { code: true, docTypeCode: true, isBlocking: true, implRef: true } });
   for (const v of validators) if (v.implRef !== null && !resolves(v.implRef)) gaps.push({ docTypeCode: '*', gap: 'IMPL_MISSING', detail: `${v.code} → ${v.implRef}` });
   const declared = new Set(VALIDATOR_CATALOGUE.map((v) => v.code));
   for (const v of validators) if (!declared.has(v.code)) gaps.push({ docTypeCode: '*', gap: 'STALE_VALIDATOR', detail: v.code });
   const byCode = new Map(validators.map((v) => [v.code, v] as const));
-  const active = await prisma.docType.findMany({ where: { isActive: true }, select: { code: true, extractionProfile: true, fields: { select: { fieldCode: true, isRequired: true, validatorRef: true } } } });
+  const active = await prisma.docType.findMany({
+    where: opts.treatActive && opts.treatActive.length > 0 ? { OR: [{ isActive: true }, { code: { in: [...opts.treatActive] } }] } : { isActive: true },
+    select: { code: true, extractionProfile: true, fields: { select: { fieldCode: true, isRequired: true, validatorRef: true } } },
+  });
   for (const t of active) {
     if (t.extractionProfile === 'UNPROFILED') gaps.push({ docTypeCode: t.code, gap: 'UNPROFILED', detail: null });
     if (t.fields.length === 0) gaps.push({ docTypeCode: t.code, gap: 'NO_FIELDS', detail: null });
