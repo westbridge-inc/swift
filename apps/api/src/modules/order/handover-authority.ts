@@ -73,7 +73,8 @@ export function handoverAuthorityFor(order: HandoverOrderLike): HandoverAuthorit
     currency: order.currencyCode ?? 'GYD',
     version: handoverVersionFor(order),
   };
-  if (order.paymentStatus === 'CAPTURED') return { ...base, permitted: 'DELIVER_NO_CASH', blockReason: null };
+  // CAPTURED (provider evidence) or CLAIMED (the store's own word on its own wallet, §31.5): the door opens without cash.
+  if (order.paymentStatus === 'CAPTURED' || order.paymentStatus === 'CLAIMED') return { ...base, permitted: 'DELIVER_NO_CASH', blockReason: null };
   if (rail === 'CASH') return { ...base, permitted: 'COLLECT_CASH_THEN_DELIVER', blockReason: null };
   // A non-cash rail whose money has not landed: the door is closed until it does.
   return { ...base, permitted: 'BLOCKED', blockReason: `${rail}_${order.paymentStatus}` };

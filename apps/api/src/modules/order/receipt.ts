@@ -56,7 +56,9 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
     order.paymentMethod === 'MOBILE_MONEY'
       ? (order.paymentStatus === 'CAPTURED'
         ? 'Paid by MMG — directly to the store'
-        : 'MMG payment to the store — confirmation pending')
+        : order.paymentStatus === 'CLAIMED'
+          ? 'MMG payment reported received by the store — not confirmed by the provider'
+          : 'MMG payment to the store — confirmation pending')
       : order.fulfillment === 'PICKUP'
         ? (cashCaptured ? 'Paid in cash at the store' : 'Cash due at the store')
         : order.fulfillment === 'APPOINTMENT'

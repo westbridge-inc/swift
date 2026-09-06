@@ -184,6 +184,8 @@ export { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus };
 // open, and the store's confirm-payment action never passes through here — it
 // IS the capture. TAXI is out of scope: fares settle driver-direct at the kerb.
 // ---------------------------------------------------------------------------
+/** [DOC-1 §31.5 · P31-2] On the store's own wallet, money "moved" is either the provider's capture or the store's claim. */
+export const MMG_MONEY_MOVED: ReadonlySet<string> = new Set(['CAPTURED', 'CLAIMED']);
 const MMG_GATED_TARGETS: ReadonlySet<OrderStatus> = new Set([
   'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
   'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
@@ -218,13 +220,17 @@ export function assertCashDiscountSponsored(args: {
 }
 
 export function assertMmgFulfilmentAllowed(
-  order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null },
+  order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt?: Date | null },
   target: OrderStatus,
 ): void {
   if (order.paymentMethod !== 'MOBILE_MONEY') return;
   if (order.orderType === 'TAXI') return;
   if (!MMG_GATED_TARGETS.has(target)) return;
-  if (order.paymentStatus !== 'CAPTURED') {
+  // [DOC-1 §31.5] Two claims that disagree open a case BEFORE the rider is dispatched, not after.
+  if (order.mmgClaimMismatchAt) {
+    throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim. A person must resolve it before the order moves.');
+  }
+  if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
       409,
       'MMG_PAYMENT_PENDING',
@@ -1685,7 +1691,7 @@ export class OrderService {
     if (
       operationalCancellation
       && source.paymentMethod === 'MOBILE_MONEY'
-      && source.paymentStatus === 'CAPTURED'
+      && MMG_MONEY_MOVED.has(source.paymentStatus)
     ) {
       throw new AppError(
         409,
@@ -1941,7 +1947,7 @@ export class OrderService {
           // exit from an unpaid MMG order); if external money landed
           // unattested, the capture path's closed-order refusal directs the
           // store to refund directly.
-          if (order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED') {
+          if (order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus)) {
             throw new AppError(
               409,
               'MMG_CANCEL_UNAVAILABLE',
@@ -2590,7 +2596,7 @@ export async function reconcileMissingEarnings(
     WHERE o."status" IN ('DELIVERED', 'COMPLETED')
       AND o."deliveredAt" <= ${cutoff}
       AND (o."riderId" IS NOT NULL OR o."driverId" IS NOT NULL)
-      AND (o."paymentMethod" <> 'MOBILE_MONEY' OR o."orderType" = 'TAXI' OR o."paymentStatus" = 'CAPTURED')
+      AND (o."paymentMethod" <> 'MOBILE_MONEY' OR o."orderType" = 'TAXI' OR o."paymentStatus" IN ('CAPTURED', 'CLAIMED'))
       AND NOT (o."orderType" IN ('TAXI', 'COURIER') AND o."paymentMethod" = 'CASH' AND o."paymentStatus" <> 'CAPTURED')
       AND (
         NOT EXISTS (SELECT 1 FROM "earnings" e WHERE e."orderId" = o."id" AND e."type" IN ('DELIVERY_FEE', 'COURIER_FEE', 'TAXI_FARE'))

@@ -68,7 +68,7 @@ export function doorFor(job: JobLike | null | undefined): Door {
   // No authority on the payload (an older server): derive, and never say "paid" for a state that is not captured.
   const method = job?.paymentMethod ?? null;
   const state = job?.paymentStatus ?? 'UNKNOWN';
-  if (state === 'CAPTURED') return { kind: 'no-cash', version: null, source: 'derived' };
+  if (state === 'CAPTURED' || state === 'CLAIMED') return { kind: 'no-cash', version: null, source: 'derived' }; // CLAIMED = the store's own word on its own wallet (DOC-1 §31.5)
   if (method === 'CASH') return { kind: 'collect-cash', version: null, source: 'derived' };
   return { kind: 'blocked', reason: `${method ?? 'UNKNOWN_RAIL'}_${state}`, version: null, source: 'derived' };
 }

@@ -112,7 +112,8 @@ const E = {
   // for every order route said nothing about money. These are the columns a
   // refund actually moves; the reference and the amount are the only proof
   // that a refund happened, and they belong in the trail as a diff.
-  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt'] },
+  // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
+  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   platformConfig: { model: 'platformConfig', param: 'key', fields: ['value'] },
@@ -181,6 +182,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders/:id': c('C1', 'order.read'),
   'GET /ops/live': c('C1', 'ops.live.read'),
   'POST /orders/:id/retry-dispatch': c('C2', 'order.dispatch'),
+  'POST /orders/:id/payment-claim/resolve': c('C3', 'order.dispatch', E.order),
   'POST /orders/:id/food-age-hold/release': c('C2', 'order.hold.release'),
   'GET /orders/:id/handover-secret': c('C1', 'order.handover.read'),
   'POST /orders/:id/handover-secret/rotate': c('C2', 'order.handover.rotate'),

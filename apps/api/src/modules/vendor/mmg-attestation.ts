@@ -53,7 +53,7 @@ export interface AttestableOrder {
  */
 export function assertMmgAttestable(order: AttestableOrder): void {
   const status = order.paymentStatus;
-  if (ATTESTABLE_PAYMENT_STATUSES.includes(status) || status === 'CAPTURED') return;
+  if (ATTESTABLE_PAYMENT_STATUSES.includes(status) || status === 'CAPTURED' || status === 'CLAIMED') return;
 
   switch (status) {
     case 'REFUNDED':

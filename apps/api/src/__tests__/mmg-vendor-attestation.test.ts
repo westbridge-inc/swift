@@ -217,7 +217,7 @@ describe('[W-25] the attestation carries evidence', () => {
     expect(res.statusCode).toBe(200);
 
     const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(after.paymentStatus).toBe('CAPTURED');
+    expect(after.paymentStatus).toBe('CLAIMED'); // [DOC-1 §31.5 · DOC-INV-48] the store's word is a claim, never a capture
     expect(after.mmgAttestedRef).toBe(reference); // stored upper-cased, however it was typed
     expect(after.mmgAttestedAt).not.toBeNull();
     expect(after.mmgAttestedById).not.toBeNull();

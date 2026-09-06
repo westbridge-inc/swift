@@ -337,6 +337,7 @@ const CENSUS: Case[] = [
   { k: 'ops_reaper_failed', d: { error: 'x' }, to: null, why: 'admins — the document reaper threw (DOC-1 §9.2)' },
   { k: 'ops_image_policy_failed', d: { error: 'boom' }, to: null, why: 'GAP: ops page, admin only' },
   { k: 'ops_extraction_breaker_open', d: { profileCode: 'GY_ID', rate: 0.2 }, to: null, why: 'GAP: ops page, admin only' },
+  { k: 'mmg_claim_mismatch', d: { orderId: 'o1' }, to: { screen: 'Delivery', params: { orderId: 'o1' } }, why: 'GAP: admin only — two payment claims disagree' },
   // Its sibling from the same heartbeat: a background job exhausted its retries
   // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web
   // console's Background jobs page — there is no mobile admin surface, so the
