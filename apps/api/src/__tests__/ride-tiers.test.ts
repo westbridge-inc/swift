@@ -20,7 +20,7 @@ import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 
 // ---------------------------------------------------------------------------
-// Ride tiers (Economy/Comfort/XL) — deterministic per-tier pricing + vehicle
+// Ride tiers (Economy/Comfort/GROUP offered; XL hidden until a vehicle serves it) — deterministic per-tier pricing + vehicle
 // matching. Re-introduced WITH a real driver-class assignment (the #112 gap was
 // that every driver was STANDARD, so tiers dispatched to nobody). Failure paths
 // first: capacity rejection and the dispatch class filter.
@@ -172,13 +172,13 @@ describe('Pure fare helpers', () => {
 });
 
 describe('FareService.estimateTiers', () => {
-  it('returns four tiers, strictly ascending in fare, GROUP the priciest', async () => {
+  it('returns the OFFERED tiers — three today, XL hidden until a vehicle class serves it — strictly ascending, GROUP the priciest', async () => {
+    // [Ruling 2026-09-06] Nothing in the fleet maps to XL, so it is not sold (ride-tier-availability.test.ts).
     const { tiers } = await fare.estimateTiers(CENTRAL, { lat: 6.755, lng: -58.155 }, 'GY');
-    expect(tiers.map((t) => t.rideClass)).toEqual(['ECONOMY', 'COMFORT', 'XL', 'GROUP']);
+    expect(tiers.map((t) => t.rideClass)).toEqual(['ECONOMY', 'COMFORT', 'GROUP']);
     expect(tiers[0]!.fare).toBeLessThan(tiers[1]!.fare);
     expect(tiers[1]!.fare).toBeLessThan(tiers[2]!.fare);
-    expect(tiers[2]!.fare).toBeLessThan(tiers[3]!.fare);
-    expect(tiers[3]!.fare).toBeGreaterThan(tiers[0]!.fare * 2); // GROUP ×2.5 economy
+    expect(tiers[2]!.fare).toBeGreaterThan(tiers[0]!.fare * 2); // GROUP ×2.5 economy
   });
 });
 
@@ -189,7 +189,7 @@ describe('POST /rides/estimate — tiered shape', () => {
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
     expect(Array.isArray(data.tiers)).toBe(true);
-    expect(data.tiers).toHaveLength(4);
+    expect(data.tiers).toHaveLength(3); // ECONOMY, COMFORT, GROUP — XL is not offered (no vehicle serves it)
     expect(data.fare).toBeUndefined();
   });
 });
@@ -206,15 +206,17 @@ describe('POST /rides/request — capacity guard (failure path)', () => {
     expect(res.json().error.code).toBe('TOO_MANY_PASSENGERS');
   });
 
-  it('accepts a 10-passenger group on GROUP but rejects it on XL', async () => {
+  it('accepts a 10-passenger group on GROUP; an XL request is refused because the tier is not offered', async () => {
     const { token } = await makeCustomer();
     const base = {
       pickup: CENTRAL, dropoff: { lat: 6.755, lng: -58.155 },
       pickupAddress: 'Central GT', dropoffAddress: 'South GT', passengerCount: 10,
     };
+    // [Ruling 2026-09-06] XL is hidden until a vehicle class serves it — a request for it is
+    // an unavailable tier, not a capacity question.
     const onXl = await inject('POST', '/api/v1/rides/request', { ...base, rideClass: 'XL' }, token);
     expect(onXl.statusCode).toBe(400);
-    expect(onXl.json().error.code).toBe('TOO_MANY_PASSENGERS'); // XL seats 6
+    expect(onXl.json().error.code).toBe('INVALID_RIDE_CLASS');
 
     await makeDriver('GROUP'); // a minibus to dispatch to
     const onGroup = await inject('POST', '/api/v1/rides/request', { ...base, rideClass: 'GROUP' }, token);
@@ -222,18 +224,18 @@ describe('POST /rides/request — capacity guard (failure path)', () => {
   });
 
   it('persists the chosen tier and its fare on a valid request', async () => {
-    await makeDriver('XL'); // someone to dispatch to
+    await makeDriver('COMFORT'); // someone to dispatch to
     const { token } = await makeCustomer();
     const res = await inject('POST', '/api/v1/rides/request', {
       pickup: CENTRAL, dropoff: { lat: 6.755, lng: -58.155 },
       pickupAddress: 'Central GT', dropoffAddress: 'South GT',
-      passengerCount: 5, rideClass: 'XL',
+      passengerCount: 3, rideClass: 'COMFORT',
     }, token);
     expect(res.statusCode).toBe(201);
     const ride = res.json().data.ride;
-    expect(ride.rideClass).toBe('XL');
+    expect(ride.rideClass).toBe('COMFORT');
     const order = await app.prisma.order.findUnique({ where: { id: ride.id } });
-    expect(order?.rideClass).toBe('XL');
+    expect(order?.rideClass).toBe('COMFORT');
     expect(Number(order?.taxiFareTotal)).toBe(ride.fare);
   });
 });
@@ -262,24 +264,25 @@ describe('Ride-class gate on the board + accept [SWIFT-063]', () => {
     expect(classesAtOrBelow('XL')).toEqual(['ECONOMY', 'COMFORT', 'XL']);
   });
 
-  it('an Economy driver can neither SEE nor CLAIM an XL ride', async () => {
-    const xlDriver = await makeDriver('XL'); // supply so the request isn't no-driver-rejected
+  it('an Economy driver can neither SEE nor CLAIM a Comfort ride', async () => {
+    // [Ruling 2026-09-06] XL is not offered, so the gate is proven on the next tier up — the law is the same.
+    const comfortDriver = await makeDriver('COMFORT'); // supply so the request isn't no-driver-rejected
     const econDriver = await makeDriver('ECONOMY');
     const { token: cust } = await makeCustomer();
 
     const req = await inject('POST', '/api/v1/rides/request', {
       pickup: CENTRAL, dropoff: { lat: 6.755, lng: -58.155 },
       pickupAddress: 'Central GT', dropoffAddress: 'South GT',
-      passengerCount: 5, rideClass: 'XL',
+      passengerCount: 3, rideClass: 'COMFORT',
     }, cust);
     expect(req.statusCode).toBe(201);
     const rideId = req.json().data.ride.id;
 
-    // Board: the XL ride is on the XL driver's board, NOT the Economy driver's.
+    // Board: the Comfort ride is on the Comfort driver's board, NOT the Economy driver's.
     const econBoard = await inject('GET', '/api/v1/driver/rides/available', undefined, econDriver.token);
     expect(econBoard.json().data.some((r: { id: string }) => r.id === rideId)).toBe(false);
-    const xlBoard = await inject('GET', '/api/v1/driver/rides/available', undefined, xlDriver.token);
-    expect(xlBoard.json().data.some((r: { id: string }) => r.id === rideId)).toBe(true);
+    const comfortBoard = await inject('GET', '/api/v1/driver/rides/available', undefined, comfortDriver.token);
+    expect(comfortBoard.json().data.some((r: { id: string }) => r.id === rideId)).toBe(true);
 
     // Accept: the Economy driver is refused; the ride stays unassigned.
     const econAccept = await inject('POST', `/api/v1/driver/rides/${rideId}/accept`, {}, econDriver.token);
