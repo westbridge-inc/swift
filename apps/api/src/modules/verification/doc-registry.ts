@@ -11,7 +11,7 @@
  * `legalFactsSourceNote`, to be verified by the founder / attorney and
  * activated by a migration that inserts facts, not by code.
  */
-import type { PrismaClient, DocBucket, ValidatorScope } from '@prisma/client';
+import type { PrismaClient, DocBucket, ValidatorScope, GateEnforcement, DiscoveryCategoryKind } from '@prisma/client';
 import { AUTO_APPROVE_EXPIRY_DAYS } from './verification.service';
 
 export const REGISTRY_TIER = 'STANDARD';
@@ -29,6 +29,9 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   business_registration: 'BUSINESS', tin_certificate: 'BUSINESS', gra_restaurant_licence: 'BUSINESS', storefront_photo: 'BUSINESS',
   vehicle_registration: 'VEHICLE', vehicle_insurance: 'VEHICLE', hire_car_permit: 'VEHICLE', vehicle_plate_photo: 'VEHICLE',
   vehicle_exterior_photo: 'VEHICLE', fitness_cert: 'VEHICLE', road_service_licence: 'VEHICLE',
+  // [DOC-1 §18.1] the addendum's Guyana types (seeded by EXTRA_DOC_TYPES, not by any checklist)
+  liquor_licence: 'BUSINESS', sanitary_certificate: 'BUSINESS', trade_licence: 'BUSINESS', pharmacy_authorisation: 'BUSINESS',
+  nis_employer_reg: 'BUSINESS', digital_id: 'PERSONAL',
 };
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
 /**
@@ -41,7 +44,7 @@ export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set(['vehicle
 export const registryCode = (countryCode: string, legacyCode: string) => `${countryCode}.${legacyCode}`;
 const humanize = (code: string) => code.split('_').map((w) => (w === 'id' || w === 'tin' || w === 'gra' || w === 'gei' ? w.toUpperCase() : w[0]!.toUpperCase() + w.slice(1))).join(' ');
 
-export interface RegistrySeedResult { docTypes: number; requirementSets: number; requirementItems: number; validators: number }
+export interface RegistrySeedResult { docTypes: number; requirementSets: number; requirementItems: number; validators: number; extraDocTypes: number; categoryGates: number }
 
 export interface ValidatorRow {
   code: string;
@@ -92,6 +95,93 @@ export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
 ];
 /** Type-specific validators are declared against the Guyana registry class. */
 export const VALIDATOR_HOME_COUNTRY = 'GY';
+
+export interface ExtraDocType {
+  legacyCode: string; displayName: string; bucket: DocBucket; issuer: string;
+  hasExpiry: boolean; defaultValidityDays: number | null; expirySource: string; needsSpecimen: boolean; note: string;
+}
+/**
+ * [DOC-1 §18.1] The addendum's Guyana document types — data. Inactive until a
+ * specimen / legal facts are reviewed, like every registry row; NEEDS_RESEARCH
+ * types carry needsSpecimen so nothing can be submitted against them (FD-DOC-15).
+ */
+export const EXTRA_DOC_TYPES: readonly ExtraDocType[] = [
+  { legacyCode: 'liquor_licence', displayName: 'Liquor licence', bucket: 'BUSINESS', issuer: 'GRA / District Licensing Board', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: annual; licence_class decides the permitted sale mode' },
+  { legacyCode: 'sanitary_certificate', displayName: 'Sanitary certificate', bucket: 'BUSINESS', issuer: 'Public health / local authority', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: printed expiry, else 365 days' },
+  { legacyCode: 'trade_licence', displayName: 'Trade licence', bucket: 'BUSINESS', issuer: 'GRA', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: annual; licence_type per the GRA schedule' },
+  { legacyCode: 'pharmacy_authorisation', displayName: 'Pharmacy authorisation', bucket: 'BUSINESS', issuer: 'Pharmacy regulator (NEEDS_RESEARCH)', hasExpiry: false, defaultValidityDays: null, expirySource: 'NONE', needsSpecimen: true, note: 'FD-DOC-15: regime not researched — do not guess' },
+  { legacyCode: 'nis_employer_reg', displayName: 'NIS employer registration', bucket: 'BUSINESS', issuer: 'National Insurance Scheme', hasExpiry: false, defaultValidityDays: null, expirySource: 'NONE', needsSpecimen: false, note: '§18.1: non-blocking; relevant only where the vendor has staff' },
+  { legacyCode: 'digital_id', displayName: 'Guyana digital ID', bucket: 'PERSONAL', issuer: 'Government of Guyana', hasExpiry: false, defaultValidityDays: null, expirySource: 'NONE', needsSpecimen: true, note: '§18.1: stub until a specimen is reviewed (Digital Identity Card Act 2023, commenced 31 Mar 2026)' },
+];
+export const EXTRA_DOC_TYPES_COUNTRY = 'GY';
+
+export interface GateSeed {
+  code: string; categorySlug?: string; categoryKind?: DiscoveryCategoryKind; docType: string;
+  enforcement: GateEnforcement; requiredField?: string; requiredValues?: string[]; note: string;
+}
+/**
+ * [DOC-1 §18.3] Seed rules, mapped onto the discovery taxonomy: a slug for one
+ * category, a kind for a family. Alcohol gets both listing and ordering.
+ * Rulings: grocery / general shop is WARN until the vendor tier signal (P3-2)
+ * can make it BLOCK_LISTING at the registered tier; the `alcohol` slug is not
+ * in the seeded taxonomy yet — the gate binds the moment it is; the
+ * licence_class check waits for the field to be extracted or corrected by a
+ * reviewer (recorded gap) — until then any VALID liquor licence satisfies it.
+ */
+export const CATEGORY_GATES: readonly GateSeed[] = [
+  { code: 'GY:slug:alcohol:liquor_licence', categorySlug: 'alcohol', docType: 'liquor_licence', enforcement: 'BLOCK_ORDER', requiredField: 'licence_class', requiredValues: ['LIQUOR_RESTAURANT', 'OFF_LICENCE', 'SPIRIT_SHOP', 'MEMBERS_CLUB', 'HOTEL', 'MALT_AND_WINE', 'TAVERN'], note: '§18.3: alcohol gets both — when the licence expires at midnight, alcohol stops being orderable' },
+  { code: 'GY:slug:pharmacy:pharmacy_authorisation', categorySlug: 'pharmacy', docType: 'pharmacy_authorisation', enforcement: 'BLOCK_LISTING', note: 'FD-DOC-15: disabled platform-wide — no valid authorisation can exist while the type needs a specimen' },
+  { code: 'GY:slug:meat-poultry:sanitary_certificate', categorySlug: 'meat-poultry', docType: 'sanitary_certificate', enforcement: 'BLOCK_LISTING', note: '§18.3: meat / butcher' },
+  { code: 'GY:kind:CUISINE:gra_restaurant_licence', categoryKind: 'CUISINE', docType: 'gra_restaurant_licence', enforcement: 'BLOCK_LISTING', note: '§18.3: prepared food' },
+  { code: 'GY:kind:DISH:gra_restaurant_licence', categoryKind: 'DISH', docType: 'gra_restaurant_licence', enforcement: 'BLOCK_LISTING', note: '§18.3: prepared food' },
+  { code: 'GY:kind:CUISINE:food_handler_cert', categoryKind: 'CUISINE', docType: 'food_handler_cert', enforcement: 'BLOCK_LISTING', note: '§18.3: prepared food — at least one food handler permit' },
+  { code: 'GY:kind:DISH:food_handler_cert', categoryKind: 'DISH', docType: 'food_handler_cert', enforcement: 'BLOCK_LISTING', note: '§18.3: prepared food — at least one food handler permit' },
+  { code: 'GY:kind:AISLE:trade_licence', categoryKind: 'AISLE', docType: 'trade_licence', enforcement: 'WARN', note: '§18.3: grocery — WARN at micro tier; registered tier BLOCK_LISTING awaits the tier signal (ruling)' },
+  { code: 'GY:kind:RETAIL:trade_licence', categoryKind: 'RETAIL', docType: 'trade_licence', enforcement: 'WARN', note: '§18.3: general shop — WARN at micro tier; registered tier BLOCK_LISTING awaits the tier signal (ruling)' },
+];
+
+/** Idempotent: the §18.1 types for Guyana, inactive and provisional like every seeded row. */
+export async function seedExtraDocTypes(prisma: PrismaClient): Promise<number> {
+  const c = EXTRA_DOC_TYPES_COUNTRY;
+  if (!(await prisma.countryConfig.findUnique({ where: { code: c }, select: { code: true } }))) return 0;
+  let n = 0;
+  for (const t of EXTRA_DOC_TYPES) {
+    const bucket = t.bucket;
+    await prisma.docType.upsert({
+      where: { code: registryCode(c, t.legacyCode) },
+      create: {
+        code: registryCode(c, t.legacyCode), countryCode: c, legacyCode: t.legacyCode, displayName: t.displayName,
+        bucket, subjectKind: SUBJECT_OF[bucket], issuer: t.issuer,
+        imagePolicy: 'PERSIST', persistRetentionDays: PROVISIONAL_RETENTION_DAYS,
+        hasExpiry: t.hasExpiry, defaultValidityDays: t.defaultValidityDays, expirySource: t.expirySource,
+        extractionProfile: 'UNPROFILED', externalProcessingAllowed: false, needsSpecimen: t.needsSpecimen,
+        legalFactsSourceNote: `${PROVISIONAL_NOTE} ${t.note}`, isActive: false,
+        alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(t.legacyCode),
+      },
+      update: { displayName: t.displayName, issuer: t.issuer, hasExpiry: t.hasExpiry, defaultValidityDays: t.defaultValidityDays, expirySource: t.expirySource, needsSpecimen: t.needsSpecimen },
+    });
+    n += 1;
+  }
+  return n;
+}
+
+/** Idempotent and reconciling: the §18.3 rows exist with their facts; a row the seed no longer declares is removed. */
+export async function seedCategoryGates(prisma: PrismaClient): Promise<number> {
+  const c = EXTRA_DOC_TYPES_COUNTRY;
+  let n = 0;
+  for (const g of CATEGORY_GATES) {
+    const requiredDocTypeCode = registryCode(c, g.docType);
+    if (!(await prisma.docType.findUnique({ where: { code: requiredDocTypeCode }, select: { code: true } }))) continue;
+    const facts = {
+      countryCode: c, categorySlug: g.categorySlug ?? null, categoryKind: g.categoryKind ?? null, requiredDocTypeCode,
+      requiredField: g.requiredField ?? null, requiredValues: g.requiredValues ?? [], enforcement: g.enforcement, note: g.note,
+    };
+    await prisma.categoryDocumentGate.upsert({ where: { code: g.code }, create: { code: g.code, ...facts }, update: facts });
+    n += 1;
+  }
+  await prisma.categoryDocumentGate.deleteMany({ where: { code: { notIn: CATEGORY_GATES.map((g) => g.code) } } });
+  return n;
+}
 
 /**
  * Idempotent and RECONCILING: every catalogue row exists with the spec's facts (a
@@ -188,8 +278,10 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
       }
     }
   }
+  const extraDocTypes = await seedExtraDocTypes(prisma);
   const validators = await seedValidatorRegistry(prisma);
-  return { docTypes, requirementSets, requirementItems, validators };
+  const categoryGates = await seedCategoryGates(prisma);
+  return { docTypes, requirementSets, requirementItems, validators, extraDocTypes, categoryGates };
 }
 
 /**

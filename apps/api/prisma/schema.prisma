@@ -6019,6 +6019,7 @@ model DocType {
   fields           DocField[]
   requirementItems RequirementItem[]
   validators       Validator[]
+  categoryGates    CategoryDocumentGate[]
 
   @@unique([countryCode, legacyCode])
   @@index([countryCode, isActive])
@@ -6415,4 +6416,33 @@ model AuditChainAnchor {
   anchoredAt DateTime @default(now()) @db.Timestamptz(3)
 
   @@map("audit_chain_anchor")
+}
+
+/// [DOC-1 §18.3] BLOCK_ORDER also hides the listing; WARN flags and allows.
+enum GateEnforcement {
+  BLOCK_LISTING
+  BLOCK_ORDER
+  WARN
+}
+
+/// [DOC-1 §18.3 · P18-2] Documents control what can be sold. A gate names a category
+/// (by slug, or by kind for a family) in a country and the document type a vendor must
+/// hold VALID — approved and unexpired — to list in it, and whether a lapse also fails
+/// the order at checkout. Registry data, country-keyed, like doc_type. enforcedFrom NULL
+/// = enforced now; a future date announces before it bites.
+model CategoryDocumentGate {
+  code                String                  @id
+  countryCode         String                  @db.Char(2)
+  categorySlug        String?
+  categoryKind        DiscoveryCategoryKind?
+  requiredDocTypeCode String
+  requiredDocType     DocType                 @relation(fields: [requiredDocTypeCode], references: [code])
+  requiredField       String?
+  requiredValues      String[]
+  enforcement         GateEnforcement
+  enforcedFrom        DateTime?
+  note                String?
+
+  @@index([countryCode])
+  @@map("category_document_gate")
 }

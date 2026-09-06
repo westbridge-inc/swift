@@ -23,6 +23,8 @@ const EXPIRING_DOC_TYPES = [
   'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
   'road_service_licence', 'food_handler_cert', 'gra_restaurant_licence',
   'drivers_licence', 'vehicle_registration',
+  // [DOC-1 §18.1] the addendum's annual licences, submittable through a category gate
+  'liquor_licence', 'sanitary_certificate', 'trade_licence',
 ] as const;
 
 const EMPTY_INSURANCE: InsuranceCheck = {

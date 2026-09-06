@@ -694,6 +694,13 @@ export class OrderService {
         requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
       }
 
+      // [DOC-1 §18.3 · DOC-INV-26] A line in a BLOCK_ORDER category whose licence
+      // is not valid fails the order — the lapse-after-publish case.
+      {
+        const { assertOrderable } = await import('../verification/category-gate');
+        await assertOrderable(this.prisma, vendorId, items.map((ci) => ({ id: ci.item.id, name: ci.item.name })), input.now ?? new Date());
+      }
+
       // Inventory (§4.2): a tracked item can't be ordered beyond the shelf.
       // The race-proof guard is the conditional decrement in the transaction
       // below — this is the friendly early error for the common case.
