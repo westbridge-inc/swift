@@ -317,6 +317,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /verification/legal-holds': c('C1', 'verification.hold.read'),
   'POST /verification/legal-holds': c('C3', 'verification.hold'),
   'PUT /verification/legal-holds/:id/release': c('C3', 'verification.hold', { model: 'docLegalHold', fields: ['releasedAt', 'releasedBy', 'releaseReason'] }),
+  // [DOC-1 §8.6 · P8-6] Claiming a review case is workflow state; recusal is enforced in the service, server-side.
+  'POST /verification/cases/:id/claim': c('C2', 'verification.case.claim', { model: 'reviewCase', fields: ['assignedTo', 'assignedAt'] }),
+  'POST /verification/cases/:id/release': c('C2', 'verification.case.claim', { model: 'reviewCase', fields: ['assignedTo', 'assignedAt'] }),
 
   // ── Returns and cash rules ──────────────────────────────────────────────
   'GET /returns': c('C0', 'returns.read'),
