@@ -10,6 +10,8 @@
  * Nothing here is skipped, and nothing here pretends.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { recordExternalProcessingDecision } from '../modules/verification/external-processing';
+import { assertExternalProcessingPermitted } from '../modules/legal/processor-register';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { nanoid } from 'nanoid';
@@ -20,7 +22,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { socketPlugin } from '../plugins/socket';
 import { redisPlugin } from '../plugins/redis';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { runWithTenant } from '../plugins/tenant-context';
+import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
@@ -88,21 +90,53 @@ describe('[DOC-1 §0.5] hard limits', () => {
     expect(ttlFields.length).toBeGreaterThan(0);
   });
 
-  it.fails('[2] PERSONAL images reach an external processor only if allowed, registered and covered by a transfer basis — VIOLATED BY DECISION (CONFLICT-DOC-2): Didit/ID Analyzer receive them and no code-level processor register exists yet', () => {
-    expect(existsSync(join(API_SRC, 'lib', 'processor-register.ts'))).toBe(true);
+  it('[2] PERSONAL images reach an external processor only if allowed, registered and covered by a transfer basis — the DGP-1 register exists and the gate is fail-closed (CONFLICT-DOC-2 is now a recorded decision, not a leak)', () => {
+    expect(existsSync(join(API_SRC, 'modules', 'legal', 'processor-register.ts'))).toBe(true);
+    const external = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' };
+    expect(() => assertExternalProcessingPermitted({ code: 'owner_national_id', externalProcessingAllowed: false }, external, { PROCESSOR_CONTRACT_DIDIT: 'x' })).toThrow(/PROCESSOR_NOT_PERMITTED|externally/);
+    expect(() => assertExternalProcessingPermitted({ code: 'owner_national_id', externalProcessingAllowed: true }, external, {})).toThrow(/PROCESSOR_NO_TRANSFER_BASIS|externally/);
+    expect(() => assertExternalProcessingPermitted({ code: 'owner_national_id', externalProcessingAllowed: true }, external, { PROCESSOR_CONTRACT_DIDIT: 'DPA-ref' })).not.toThrow();
   });
 
-  it('[3] no biometric operation without the recorded decision: the kill switch exists, defaults ON, and OFF turns the identity leg into a document-only check', async () => {
-    expect(biometricFaceMatchEnabled({})).toBe(true);
+  it('[2b] the gate is live in the submission path: an EXTERNAL engine is refused for a PERSONAL type until the decision is recorded and the processor is contracted — then the document goes, document-only', async () => {
+    class ExternalSpyKyc extends SpyKyc { readonly engine = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' }; }
+    const cleanup = () => runWithTenant('swift-default', () => app.prisma.verificationDocument.deleteMany({ where: { userId } }));
+    const row = { where: { countryCode_legacyCode: { countryCode: 'GY', legacyCode: 'owner_national_id' } } };
+    process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '0';
+    try {
+      // 1. registry forbids (default) → refused before the adapter is called
+      const closed = new ExternalSpyKyc();
+      await expect(submitOwnerId(closed, 'ext-closed')).rejects.toMatchObject({ statusCode: 503, code: 'PROCESSOR_NOT_PERMITTED' });
+      expect(closed.calls).toEqual([]);
+      // 2. decision recorded, but no contract reference for the processor → still refused
+      await runWithoutTenant(() => recordExternalProcessingDecision(app.prisma, { code: 'GY.owner_national_id', allowed: true, decisionRef: 'FD-DOC-3b test', reason: 'test' }, async () => undefined), 'hard-limits-test');
+      delete process.env['PROCESSOR_CONTRACT_DIDIT'];
+      const uncontracted = new ExternalSpyKyc();
+      await expect(submitOwnerId(uncontracted, 'ext-nocontract')).rejects.toMatchObject({ statusCode: 503, code: 'PROCESSOR_NO_TRANSFER_BASIS' });
+      expect(uncontracted.calls).toEqual([]);
+      // 3. decision + contract → the document goes to the external engine, document-only (biometrics off)
+      process.env['PROCESSOR_CONTRACT_DIDIT'] = 'DPA-test';
+      const open = new ExternalSpyKyc();
+      await submitOwnerId(open, 'ext-open');
+      expect(open.calls).toEqual(['verifyDocument']);
+    } finally {
+      delete process.env['FEATURE_BIOMETRIC_FACE_MATCH']; delete process.env['PROCESSOR_CONTRACT_DIDIT'];
+      await runWithoutTenant(() => app.prisma.docType.update({ ...row, data: { externalProcessingAllowed: false, externalProcessingDecisionRef: null, externalProcessingDecidedAt: null } }), 'hard-limits-test');
+      await cleanup();
+    }
+  });
+
+  it('[3] no biometric operation without the recorded decision: the kill switch exists, defaults OFF (FD-D5 not approved), and only an explicit 1 sends the selfie', async () => {
+    expect(biometricFaceMatchEnabled({})).toBe(false);
     expect(biometricFaceMatchEnabled({ FEATURE_BIOMETRIC_FACE_MATCH: '1' })).toBe(true);
     expect(biometricFaceMatchEnabled({ FEATURE_BIOMETRIC_FACE_MATCH: '0' })).toBe(false);
     const on = new SpyKyc();
-    delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
+    process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
     await submitOwnerId(on, 'on');
     expect(on.calls).toEqual(['verifyIdentity']);
     await runWithTenant('swift-default', () => app.prisma.verificationDocument.deleteMany({ where: { userId } }));
     const off = new SpyKyc();
-    process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '0';
+    delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
     try {
       await submitOwnerId(off, 'off');
       expect(off.calls).toEqual(['verifyDocument']);

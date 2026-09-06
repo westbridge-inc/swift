@@ -1,3 +1,5 @@
+import { processorRegisterView } from '../legal/processor-register';
+import { recordExternalProcessingDecision } from '../verification/external-processing';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, AgentActionStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
@@ -909,6 +911,20 @@ export async function adminRoutes(app: FastifyInstance) {
   }
 
   // ─── Dashboard ─────────────────────────────────────────────────────────
+
+  // [DGP-1 · CONFLICT-DOC-2] Record the decision that lets a document type be processed externally.
+  // A PERSONAL type needs the founder's decision reference (the DB CHECK refuses otherwise); the
+  // runtime gate at the KYC send sites reads the same row. C4: platform control, audited in-tx.
+  app.put('/verification/doc-types/:code/external-processing', { preHandler: [platformControlGuard] }, async (request) => {
+    const { code } = request.params as { code: string };
+    const body = z.object({ allowed: z.boolean(), decisionRef: z.string().trim().min(3).max(120).optional(), reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
+    const result = await recordExternalProcessingDecision(app.prisma, { code, allowed: body.allowed, decisionRef: body.decisionRef ?? null, reason: body.reason },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: code, reason: body.reason, extra: facts }));
+    return { success: true, data: result.after };
+  });
+
+  // [DGP-1 · self-test N] The processor + transfer register, status resolved from env; no secrets.
+  app.get('/legal/processors', { preHandler: [adminGuard] }, async () => ({ processors: processorRegisterView() }));
 
   app.get('/dashboard/overview', { preHandler: [adminGuard] }, async () => {
     const tenantId = getTenantId();

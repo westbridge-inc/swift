@@ -21,6 +21,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
+import { assertExternalProcessingPermitted } from '../legal/processor-register';
 import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApproval, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
 import { registryCode } from './doc-registry';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -454,6 +455,9 @@ export class VerificationService {
     // like any other document — no face leaves the building.
     // [DOC-1 §21.1 · P21] No new intake without the key service (production): fail closed, never plaintext.
     assertKeyServiceForAccess('intake');
+    // [DGP-1 · DOC-1 §2] No PERSONAL image leaves for an external engine unless the doc type allows
+    // it, the processor is registered and a transfer basis is recorded. Local engines pass through.
+    assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, docType), this.kyc.engine);
     if (IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled()) {
       if (!user.avatar || !user.selfieCapturedAt) {
         throw new AppError(400, 'SELFIE_REQUIRED', 'Take your profile selfie before submitting your ID — we match the two faces.');
@@ -562,6 +566,8 @@ export class VerificationService {
 
     // [DOC-1 §0.5 · FD-D5] Biometric off → the L2 identity document is verified
     // document-only; the selfie is not sent anywhere.
+    // [DGP-1 · DOC-1 §2] the identity check sends the national ID (and selfie) — same gate as any document.
+    assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, 'national_id'), this.kyc.engine);
     const startedAt = new Date();
     // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
     let result: DegradedResult = await extractWithLadder(() => (biometricFaceMatchEnabled()
@@ -1859,5 +1865,13 @@ export class VerificationService {
     // surface where this onboarding is actually executable.
     if (roleKey === 'SERVICE_PROVIDER') return 'CUSTOMER';
     return 'VENDOR_OWNER';
+  }
+
+  /** [DGP-1] The doc registry's word on external processing; an unknown type is treated as forbidden. */
+  private async externalProcessingSubject(countryCode: string, legacyCode: string): Promise<{ code: string; externalProcessingAllowed: boolean | null }> {
+    // The service speaks legacy codes (`national_id`); the registry row is `<CC>.<code>` keyed by
+    // (countryCode, legacyCode). No row → null → the gate treats the type as forbidden.
+    const row = await this.prisma.docType.findUnique({ where: { countryCode_legacyCode: { countryCode, legacyCode } }, select: { code: true, externalProcessingAllowed: true } });
+    return { code: row?.code ?? `${countryCode}.${legacyCode}`, externalProcessingAllowed: row?.externalProcessingAllowed ?? null };
   }
 }

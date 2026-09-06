@@ -116,6 +116,7 @@ const E = {
   order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
+  docType: { model: 'docType', param: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
   platformConfig: { model: 'platformConfig', param: 'key', fields: ['value'] },
   promo: { model: 'promoCode', fields: ['isActive', 'discountValue', 'validFrom', 'validUntil'] },
   zone: { model: 'zone', fields: ['isActive', 'name', 'priority'] },
@@ -150,6 +151,8 @@ const E = {
 export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAuthority>> = {
   // ── Dashboard and search ────────────────────────────────────────────────
   'GET /dashboard/overview': c('C0', 'dashboard.read'),
+  'GET /legal/processors': c('C0', 'legal.processors.read'),
+  'PUT /verification/doc-types/:code/external-processing': c('C4', 'verification.doctype.external', E.docType),
   'GET /search': c('C1', 'search.read'),
 
   // ── People ──────────────────────────────────────────────────────────────
@@ -629,6 +632,7 @@ export function reasonOf(body: unknown, headers?: Record<string, unknown>): stri
  *  holds this list closed: a C3-C5 route is either declared with an entity or
  *  named here with a reason a reviewer can check. */
 export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>> = {
+  'GET /legal/processors': 'code-declared register (DGP-1); no row to name',
   'POST /promos': 'creates the row; there is no before state to digest',
   // [DOC-1 §31.4 · P31-1] a reserve adjustment creates a ledger entry; the audit row carries the entry id and the resulting balance as facts
   'POST /cash-rules/rlp/reserve/adjust': 'creates a ledger entry; the audit facts carry the entry id and the resulting balance',
