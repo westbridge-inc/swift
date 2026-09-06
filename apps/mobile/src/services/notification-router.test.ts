@@ -332,6 +332,8 @@ const CENSUS: Case[] = [
   // Backups are stale, or are running but never leaving the machine they
   // protect. Admin-only and acted on from the server, not the phone.
   { k: 'ops_backup_stale', to: null, why: 'admins' },
+  { k: 'ops_reaper_stale', d: { ageHours: 50 }, to: null, why: 'admins — the document reaper is behind by two cycles (DOC-1 §9.2)' },
+  { k: 'ops_reaper_failed', d: { error: 'x' }, to: null, why: 'admins — the document reaper threw (DOC-1 §9.2)' },
   // Its sibling from the same heartbeat: a background job exhausted its retries
   // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web
   // console's Background jobs page — there is no mobile admin surface, so the

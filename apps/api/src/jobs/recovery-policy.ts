@@ -63,6 +63,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'algo-decision-retention': { policy: 'SAFE_REPLAY', why: 'Purges decision-log rows past their retention. A second run finds nothing left to purge.' },
   'auto-cancel': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'auto-complete': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'reaper-lag': { policy: 'SAFE_REPLAY', why: 'Reads the reaper heartbeat, sets a gauge and pages through opsPageOnce, which dedupes. It writes no business rows.' },
   'backup-freshness': { policy: 'SAFE_REPLAY', why: 'Reads backup state and pages through opsPageOnce, which is explicitly deduped. It writes no business rows.' },
   'batching-shadow-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'billing-fx-notices': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -120,6 +121,7 @@ export type JobName =
   | 'auto-cancel'
   | 'auto-complete'
   | 'backup-freshness'
+  | 'reaper-lag'
   | 'batching-shadow-scan'
   | 'billing-fx-notices'
   | 'billing-invariants'

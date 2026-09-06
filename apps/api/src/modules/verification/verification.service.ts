@@ -2,6 +2,7 @@ import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, ty
 import type { ReviewQueue } from '@prisma/client';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
+import { recordReaperRun } from '../ops/reaper-freshness';
 import { assertNotRecused } from './recusal';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
@@ -1256,13 +1257,15 @@ export class VerificationService {
       where: { retentionExpiresAt: { lt: now }, purgedAt: null, legalHoldId: null },
       select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
-    if (due.length === 0) return 0;
+    if (due.length === 0) { await recordReaperRun(this.prisma, now); return 0; }
 
     let purged = 0;
     for (const doc of due) {
       const outcome = await this.purgeDocumentNow(doc, 'reaper', { requireRetentionElapsed: true, shredFields: false, now });
       if (outcome === 'PURGED') purged += 1;
     }
+    // [DOC-1 §9.2 · P9-2] The heartbeat the lag check reads — written only here, only after a completed sweep.
+    await recordReaperRun(this.prisma, now);
     return purged;
   }
 
