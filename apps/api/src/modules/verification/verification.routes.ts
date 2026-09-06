@@ -74,6 +74,29 @@ export async function verificationRoutes(app: FastifyInstance) {
     return { success: true, data: { appealed: true, reference: opened.id } };
   });
 
+  // ── [DOC-1 Part XXV · P25] Data-subject rights against documents ─────────
+  /** GET /dsar/documents — everything Swift holds about the caller's documents (their data, categories only for decisions). */
+  app.get('/dsar/documents', auth, async (request) => {
+    const { exportDocumentsFor } = await import('./dsar');
+    return { success: true, data: await exportDocumentsFor(app.prisma, request.user.userId) };
+  });
+
+  /** POST /dsar/documents/erase — destroy what can be destroyed now; refuse the rest with the ground stated. */
+  app.post('/dsar/documents/erase', auth, async (request) => {
+    const { documentIds } = z.object({ documentIds: z.array(z.string().min(1)).min(1).max(50).optional() }).parse(request.body ?? {});
+    const { eraseDocumentsFor } = await import('./dsar');
+    return { success: true, data: await eraseDocumentsFor(app.prisma, verification, request.user.userId, documentIds) };
+  });
+
+  /** POST /dsar/documents/rectify — re-open a review case; the correction is a reviewer action (DOC-INV-34). */
+  app.post('/dsar/documents/rectify', auth, async (request, reply) => {
+    const body = z.object({ documentId: z.string().min(1), fieldCode: z.string().trim().min(1).max(64), note: z.string().trim().min(3).max(1000) }).parse(request.body);
+    const { requestRectification } = await import('./dsar');
+    const result = await requestRectification(app.prisma, new NotificationService(app.prisma, app.io), request.user.userId, body);
+    reply.code(201);
+    return { success: true, data: result };
+  });
+
   /** POST /documents — submit one checklist document for a role. */
   app.post('/documents', auth, async (request, reply) => {
     const body = submitDocumentSchema.parse(request.body);

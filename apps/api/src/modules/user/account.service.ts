@@ -318,6 +318,9 @@ export class AccountService {
       }
       await prisma.$transaction(async (tx) => {
         await tx.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
+        // [DOC-1 Part XXV] Erasure takes the extracted VALUES with the image: shred the run DEKs (rows stay as the custody record).
+        await tx.extractionRun.updateMany({ where: { submissionId: doc.id }, data: { wrappedDek: null } });
+        await tx.extractedField.updateMany({ where: { submissionId: doc.id }, data: { valueCt: null } });
         await writeDeletionReceipt(tx, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
       });
     }

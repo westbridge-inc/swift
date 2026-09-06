@@ -407,6 +407,7 @@ model Tenant {
   extractedFields   ExtractedField[]
   validationResults ValidationResult[]
   docLegalHolds     DocLegalHold[]
+  rectifications    RectificationRequest[]
 
   @@index([kind])
   @@map("tenants")
@@ -6326,4 +6327,25 @@ model Validator {
 
   @@index([docTypeCode])
   @@map("validator")
+}
+
+/// [DOC-1 Part XXV · P25] A person's request to correct an extracted field. It re-opens
+/// a review case; the correction is a reviewer action with provenance or it is not a
+/// correction — nothing here edits the record (DOC-INV-34).
+model RectificationRequest {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String    @default("swift-default")
+  tenant       Tenant    @relation(fields: [tenantId], references: [id])
+  userId       String
+  submissionId String
+  caseId       String    @db.Uuid
+  fieldCode    String
+  note         String
+  resolvedAt   DateTime?
+  resolvedBy   String?
+  createdAt    DateTime  @default(now())
+
+  @@index([submissionId, resolvedAt])
+  @@index([caseId])
+  @@map("rectification_request")
 }
