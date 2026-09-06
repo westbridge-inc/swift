@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { applySeedPlan, buildSeedPlan, type ApplyOptions, type DesiredConfig, type SeedPlan } from './seed-plan';
+import { isProduction } from '../../utils/runtime-mode';
 
 /**
  * The platform SPINE — the rows a Swift database cannot function without,
@@ -68,6 +69,31 @@ export function desiredPlatformConfig(): DesiredConfig {
     SERVICE_PROVIDER_TRADE_ELECTRICAL: ['gei_electrical_licence'],
     CUSTOMER_L2: ['national_id', 'selfie'],
   };
+ * (`SEED_FX_GYD_PER_USD`, a dated observation the operator sets). Production refuses
+ * to seed without it; outside production the April-2026 observation stands in so
+ * dev and test carry the same numbers they always did. Runtime never reads this —
+ * every conversion reads `CountryConfig.usdExchangeRate` (the row).
+ */
+export const SEED_FX_ENV = 'SEED_FX_GYD_PER_USD';
+export function seedFxRate(env: Record<string, string | undefined> = process.env): number {
+  const raw = env[SEED_FX_ENV];
+  if (raw !== undefined && raw !== '') {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`[DOC-INV-43] ${SEED_FX_ENV} must be a positive number (GYD per USD); got ${JSON.stringify(raw)}`);
+    return n;
+  }
+  if (isProduction(env)) {
+    throw new Error(`[DOC-INV-43] ${SEED_FX_ENV} is required to seed production — the GYD/USD rate is an observation the operator records, never a constant in code.`);
+  }
+  return 209; // DOC-INV-43 fallback: the April-2026 observation, dev/test only (the census test allowlists this line)
+}
+
+/** The desired platform spine, as data. */
+export function desiredPlatformConfig(): DesiredConfig {
+  const gydPerUsd = seedFxRate();
+  // Document checklists are the LAUNCH default. The GEI-licensed electrician
+  // entry is the one trade-specific requirement; every other trade falls back
+  // to the SERVICE_PROVIDER checklist.
   const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
   const taxiClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 };
   const guyanaCashRules = {
@@ -95,7 +121,7 @@ export function desiredPlatformConfig(): DesiredConfig {
   };
   const guyanaPolicy = {
     isActive: true,
-    usdExchangeRate: 209.0,
+    usdExchangeRate: gydPerUsd,
     idGateThresholdUsd: 50,
     floatL1: 8000,
     floatL2: 20000,
@@ -112,15 +138,15 @@ export function desiredPlatformConfig(): DesiredConfig {
   // Every other Caribbean market is USD-pegged off the Guyana numbers until a
   // local business/legal pass refines it — and says so in its notes.
   const USD = {
-    mover: guyanaTiers.mover / 209,
-    moverHeavy: guyanaTiers.moverHeavy / 209,
-    serviceVendor: guyanaTiers.serviceVendor / 209,
-    smallVendor: guyanaTiers.smallVendor / 209,
-    largeVendor: guyanaTiers.largeVendor / 209,
-    departmentVendor: guyanaTiers.departmentVendor / 209,
+    mover: guyanaTiers.mover / gydPerUsd,
+    moverHeavy: guyanaTiers.moverHeavy / gydPerUsd,
+    serviceVendor: guyanaTiers.serviceVendor / gydPerUsd,
+    smallVendor: guyanaTiers.smallVendor / gydPerUsd,
+    largeVendor: guyanaTiers.largeVendor / gydPerUsd,
+    departmentVendor: guyanaTiers.departmentVendor / gydPerUsd,
   };
-  const USD_TAXI = { base: 1000 / 209, perKm: 300 / 209, perMin: 25 / 209, minimum: 1500 / 209 };
-  const USD_FLOAT = { l1: 8000 / 209, l2: 20000 / 209, l3: 40000 / 209 };
+  const USD_TAXI = { base: 1000 / gydPerUsd, perKm: 300 / gydPerUsd, perMin: 25 / gydPerUsd, minimum: 1500 / gydPerUsd };
+  const USD_FLOAT = { l1: 8000 / gydPerUsd, l2: 20000 / gydPerUsd, l3: 40000 / gydPerUsd };
   const niceRound = (n: number) => {
     if (n >= 1000) return Math.round(n / 100) * 100;
     if (n >= 100) return Math.round(n / 10) * 10;

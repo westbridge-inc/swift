@@ -16,6 +16,7 @@
  * NO_KEK. Plaintext PII in a column is not an option, in any environment.
  */
 import type { Prisma, DocBucket, ExtractionOutcome, ValidationStatus } from '@prisma/client';
+import { identifierFieldOf } from './doc-registry';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider } from '../../providers/storage/envelope';
 import { hashSignal, normalizeDocNumber } from '../integrity/normalize';
 import type { KycEngine } from '../../providers/kyc/kyc-provider';
@@ -56,6 +57,8 @@ export interface ExtractionPlan {
   blockingFail: boolean;
 }
 export interface ExtractionPlanInput {
+  /** The submission's document type (legacy code) — decides where `documentNumber` lands. */
+  legacyCode?: string;
   declared: readonly DeclaredField[];
   /** [P21] The ladder rung that pre-empted extraction (EXTRACTION_UNAVAILABLE, L3_DISABLED): the run is FAILED with this errorClass and no field is taken from the processor. */
   degraded?: string | null;
@@ -86,9 +89,12 @@ export async function planExtraction(input: ExtractionPlanInput): Promise<Extrac
   const present = new Map<string, string>();
   const extractedIn = input.degraded ? undefined : input.extracted;
   let schemaViolations = 0;
+  // The processor's generic `documentNumber` lands in the type's identifier field (a declared
+  // `doc_number` first, else the catalogue's identifier for the type) — never in an undeclared one.
+  const identifier = input.legacyCode ? identifierFieldOf(input.legacyCode, input.declared) : (declaredByCode.has('doc_number') ? 'doc_number' : null);
   for (const [key, raw] of Object.entries(extractedIn ?? {})) {
     if (raw === undefined || raw === null || raw === '') continue; // absent, not a violation
-    const code = PROVIDER_KEY_TO_FIELD_CODE[key];
+    const code = key === 'documentNumber' ? identifier : PROVIDER_KEY_TO_FIELD_CODE[key];
     // DOC-INV-6: undeclared for this document type, or not the declared shape — dropped, counted, never named.
     if (!code || !declaredByCode.has(code) || typeof raw !== 'string') { schemaViolations += 1; continue; }
     present.set(code, raw);
