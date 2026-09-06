@@ -995,13 +995,26 @@ export class VerificationService {
     if (!user) return false;
 
     const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
+    return this.isVerifiedForList(userId, checklist, db);
+  }
+
+  /**
+   * The ONE verification predicate over an explicit checklist: every listed type
+   * has an approved, unexpired, still-stored document. Public so the activation
+   * rehearsal (P10-4) judges a would-be checklist exactly as activation will.
+   */
+  async isVerifiedForList(
+    userId: string,
+    checklist: readonly string[],
+    db: Prisma.TransactionClient | PrismaClient = this.prisma,
+  ): Promise<boolean> {
     if (checklist.length === 0) return false;
 
     const now = new Date();
     const approvedDocs = await db.verificationDocument.findMany({
       where: {
         userId,
-        docType: { in: checklist },
+        docType: { in: [...checklist] },
         status: 'APPROVED',
         purgedAt: null,
         fileUrl: { not: '' },
@@ -1038,7 +1051,7 @@ export class VerificationService {
    *  bounded by its furthest-out valid approval (a renewal extends it, an
    *  unbounded approval unbinds the type); the role's bound is the tightest
    *  type. Null = nothing expiring bounds the authority. */
-  private async checklistEvidenceValidUntil(
+  async checklistEvidenceValidUntil(
     userId: string,
     roleKey: ChecklistRole,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
@@ -1046,11 +1059,25 @@ export class VerificationService {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return null;
     const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
+    return this.evidenceValidUntilForList(userId, checklist, db);
+  }
+
+  /**
+   * The ONE evidence rule, over an explicit checklist: every listed type has an
+   * approved, unexpired, still-stored document; the bound is the earliest end.
+   * Public so the activation rehearsal (P10-4) judges a would-be checklist
+   * exactly as activation will.
+   */
+  async evidenceValidUntilForList(
+    userId: string,
+    checklist: readonly string[],
+    db: Prisma.TransactionClient | PrismaClient = this.prisma,
+  ): Promise<Date | null> {
     if (checklist.length === 0) return null;
     const now = new Date();
     const docs = await db.verificationDocument.findMany({
       where: {
-        userId, docType: { in: checklist }, status: 'APPROVED', purgedAt: null, fileUrl: { not: '' },
+        userId, docType: { in: [...checklist] }, status: 'APPROVED', purgedAt: null, fileUrl: { not: '' },
         AND: [
           { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
           { OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] },
