@@ -789,6 +789,34 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         );
         return;
       }
+      if (job.name === 'image-policy-sweep') {
+        const { VerificationService } = await import('../modules/verification/verification.service');
+        const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
+        const { getKycProvider } = await import('../providers/kyc/kyc-provider');
+        const { applyImagePolicy } = await import('../modules/verification/image-policy');
+        const { docImagePolicyCounter } = await import('../plugins/observability');
+        const verification = new VerificationService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), getKycProvider());
+        let run;
+        try {
+          run = await applyImagePolicy(ctx.prisma, verification);
+        } catch (err) {
+          await opsPageOnce(ctx, 'image-policy-failure', 6 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              tenantId: null,
+              title: 'Image-policy sweep failed',
+              body: 'The image-policy sweep threw. Personal-document images due for purge are being kept until it runs clean. Treat as an incident.',
+              data: { kind: 'ops_image_policy_failed', error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) },
+            }),
+          );
+          throw err;
+        }
+        docImagePolicyCounter.inc({ outcome: 'purged' }, run.purged);
+        docImagePolicyCounter.inc({ outcome: 'probe_failed' }, run.probeFailed);
+        docImagePolicyCounter.inc({ outcome: 'skipped' }, run.skipped);
+        ctx.log.info(`Image-policy sweep: ${run.candidates} candidates, ${run.purged} purged, ${run.probeFailed} probe failures, ${run.skipped} skipped`);
+        return;
+      }
+
       if (job.name === 'expiry-sweep') {
         const { VerificationService } = await import('../modules/verification/verification.service');
         const { NotificationService } = await import('../modules/notification/notification.service');
@@ -2051,6 +2079,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Verification document expiry sweep + reminders: daily at 06:00
   await queues.verificationQueue.add('expiry-sweep', {}, {
     repeat: { pattern: '0 6 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // [DOC-1 §1.3 · P1-3] The image-policy sweep: after the expiry sweep, purge the images of
+  // committed PERSONAL documents whose type is active and whose extraction succeeded.
+  await queues.verificationQueue.add('image-policy-sweep', {}, {
+    repeat: { pattern: '20 6 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });

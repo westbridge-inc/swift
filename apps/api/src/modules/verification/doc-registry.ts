@@ -11,7 +11,7 @@
  * `legalFactsSourceNote`, to be verified by the founder / attorney and
  * activated by a migration that inserts facts, not by code.
  */
-import type { PrismaClient, DocBucket, ValidatorScope, GateEnforcement, DiscoveryCategoryKind } from '@prisma/client';
+import type { PrismaClient, DocBucket, ValidatorScope, GateEnforcement, DiscoveryCategoryKind, DocImagePolicy } from '@prisma/client';
 import { AUTO_APPROVE_EXPIRY_DAYS } from './verification.service';
 
 export const REGISTRY_TIER = 'STANDARD';
@@ -19,6 +19,34 @@ export const REGISTRY_TIER = 'STANDARD';
 export const REGISTRY_EFFECTIVE_FROM = new Date('2026-06-01T00:00:00.000Z');
 /** Provisional (FD-DOC-4: 7 years from relationship end, recorded for BUSINESS; applied to all pending a PERSONAL ruling). */
 export const PROVISIONAL_RETENTION_DAYS = 2555;
+
+/**
+ * [DOC-1 §1.3 · P1-3] The bucket decides what happens to the image: PERSONAL images are
+ * purged after review (verify → extract → hash → destroy → receipt), VEHICLE images
+ * persist redacted, BUSINESS images persist. Seeded onto every PROVISIONAL registry row
+ * (legal facts not yet verified); a row whose legal facts were verified keeps whatever
+ * they set. `persist_needs_retention` (CHECK): a purge policy carries no retention days.
+ */
+export const IMAGE_POLICY_OF_BUCKET: Readonly<Record<DocBucket, DocImagePolicy>> = {
+  PERSONAL: 'PURGE_AFTER_REVIEW',
+  BUSINESS: 'PERSIST',
+  VEHICLE: 'PERSIST_REDACTED',
+};
+export const retentionFor = (policy: DocImagePolicy): number | null => (policy === 'PURGE_AFTER_REVIEW' ? null : PROVISIONAL_RETENTION_DAYS);
+
+/** Reconcile provisional rows to the bucket doctrine — never a row whose legal facts were verified. */
+export async function reconcileImagePolicy(prisma: PrismaClient, countryCode?: string): Promise<number> {
+  let changed = 0;
+  for (const bucket of Object.keys(IMAGE_POLICY_OF_BUCKET) as DocBucket[]) {
+    const imagePolicy = IMAGE_POLICY_OF_BUCKET[bucket];
+    const r = await prisma.docType.updateMany({
+      where: { ...(countryCode ? { countryCode } : {}), bucket, legalFactsVerifiedAt: null, imagePolicy: { not: imagePolicy } },
+      data: { imagePolicy, persistRetentionDays: retentionFor(imagePolicy) },
+    });
+    changed += r.count;
+  }
+  return changed;
+}
 export const PROVISIONAL_NOTE =
   'PROVISIONAL — seeded from CountryConfig.documentChecklists by the agent; bucket/issuer/retention/AML are unverified readings. Activate only by a migration that records legal facts (DOC-1 §4.2, founder-inputs FD-DOC-3b/4).';
 
@@ -152,7 +180,7 @@ export async function seedExtraDocTypes(prisma: PrismaClient): Promise<number> {
       create: {
         code: registryCode(c, t.legacyCode), countryCode: c, legacyCode: t.legacyCode, displayName: t.displayName,
         bucket, subjectKind: SUBJECT_OF[bucket], issuer: t.issuer,
-        imagePolicy: 'PERSIST', persistRetentionDays: PROVISIONAL_RETENTION_DAYS,
+        imagePolicy: IMAGE_POLICY_OF_BUCKET[bucket], persistRetentionDays: retentionFor(IMAGE_POLICY_OF_BUCKET[bucket]),
         hasExpiry: t.hasExpiry, defaultValidityDays: t.defaultValidityDays, expirySource: t.expirySource,
         extractionProfile: 'UNPROFILED', externalProcessingAllowed: false, needsSpecimen: t.needsSpecimen,
         legalFactsSourceNote: `${PROVISIONAL_NOTE} ${t.note}`, isActive: false,
@@ -259,7 +287,7 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
         create: {
           code: registryCode(c.code, legacyCode), countryCode: c.code, legacyCode, displayName: humanize(legacyCode),
           bucket, subjectKind: SUBJECT_OF[bucket], issuer: 'UNVERIFIED (legal facts pending)',
-          imagePolicy: 'PERSIST', persistRetentionDays: PROVISIONAL_RETENTION_DAYS,
+          imagePolicy: IMAGE_POLICY_OF_BUCKET[bucket], persistRetentionDays: retentionFor(IMAGE_POLICY_OF_BUCKET[bucket]),
           hasExpiry: validity !== undefined, defaultValidityDays: validity ?? null, expirySource: validity !== undefined ? 'PRINTED' : 'NONE',
           extractionProfile: 'UNPROFILED', externalProcessingAllowed: false, legalFactsSourceNote: PROVISIONAL_NOTE, isActive: false,
           alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(legacyCode),
@@ -288,6 +316,8 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
   const extraDocTypes = await seedExtraDocTypes(prisma);
   const validators = await seedValidatorRegistry(prisma);
   const categoryGates = await seedCategoryGates(prisma);
+  // [DOC-1 §1.3 · P1-3] provisional rows follow the bucket doctrine for the image
+  await reconcileImagePolicy(prisma);
   return { docTypes, requirementSets, requirementItems, validators, extraDocTypes, categoryGates };
 }
 
