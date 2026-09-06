@@ -1,7 +1,9 @@
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
-import { resolveSubject, linkedAccountIds } from './subjects';
+import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf } from './subjects';
+import { BUCKET_OF } from './doc-registry';
+import type { ValidatorContext } from './validators';
 import { approvedEvidenceFor } from './evidence';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
@@ -141,6 +143,7 @@ const REMINDER_WINDOW_DAYS = 30;
 export const REJECTION_REASON_CODES = [
   'EXPIRED', 'UNREADABLE', 'WRONG_DOCUMENT', 'FACE_MISMATCH', 'NAME_MISMATCH',
   'INSURANCE_NOT_HIRE', 'NOT_YELLOW', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
+  'WRONG_PLATE_CLASS',
 ] as const;
 export type RejectionReasonCode = (typeof REJECTION_REASON_CODES)[number];
 /** [DOC-1 §13] 24 hours from REVIEW_QUEUED to decision. */
@@ -158,7 +161,7 @@ export const REVIEW_SLA_HOURS = Number(process.env['REVIEW_SLA_HOURS'] ?? 24);
 export const ACTOR_FACING_CATEGORY: Record<RejectionReasonCode, string> = {
   UNREADABLE: 'QUALITY', INCOMPLETE: 'QUALITY',
   EXPIRED: 'EXPIRED',
-  WRONG_DOCUMENT: 'REQUIREMENT', INSURANCE_NOT_HIRE: 'REQUIREMENT', NOT_YELLOW: 'REQUIREMENT',
+  WRONG_DOCUMENT: 'REQUIREMENT', INSURANCE_NOT_HIRE: 'REQUIREMENT', NOT_YELLOW: 'REQUIREMENT', WRONG_PLATE_CLASS: 'REQUIREMENT',
   NAME_MISMATCH: 'ACCOUNT_MISMATCH',
   SUSPECTED_TAMPERING: 'UNVERIFIABLE', DUPLICATE: 'UNVERIFIABLE', FACE_MISMATCH: 'UNVERIFIABLE',
 };
@@ -179,6 +182,7 @@ const REJECTION_TEMPLATES: Record<RejectionReasonCode, string> = {
   NAME_MISMATCH: 'The name on this document does not match your account.',
   INSURANCE_NOT_HIRE: 'This policy does not cover hire/passenger use — taxi work needs HIRE-class insurance.',
   NOT_YELLOW: 'The vehicle must be Corporate Yellow with the H plate visible.',
+  WRONG_PLATE_CLASS: 'A taxi must carry an H registration mark — this vehicle is not registered as a hire car.',
   // [DOC-1 §24.1 · §8.5] The fraud class reads IDENTICALLY and never names the
   // signal: Swift does not tell a person its system believes their document is
   // forged, duplicated or not theirs — it is often wrong, and it teaches a
@@ -310,11 +314,21 @@ export class VerificationService {
    * declared fields for this document type, the engine that ran, its timing,
    * and the cross-subject collision flag. Pure over its inputs (one registry read).
    */
+  /** [DOC-1 §3 · P3-3] A Driver profile = taxi work; its plate anchors the cross-match. A Rider is delivery (exempt). */
+  private async validatorContextFor(userId: string, docType: string): Promise<ValidatorContext> {
+    const bucket = BUCKET_OF[docType] ?? null;
+    const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { licensePlate: true } });
+    if (driver) return { taxi: true, registrationMark: driver.licensePlate ? normalizeRegistrationMark(driver.licensePlate) : null, docType, bucket };
+    const rider = await this.prisma.rider.findUnique({ where: { userId }, select: { licensePlate: true } });
+    return { taxi: false, registrationMark: rider?.licensePlate ? normalizeRegistrationMark(rider.licensePlate) : null, docType, bucket };
+  }
+
   private async planExtractionFor(
     countryCode: string,
     docType: string,
     result: KycVerificationResult & { collided?: boolean },
     timing: { startedAt: Date; finishedAt: Date },
+    context: ValidatorContext = { taxi: false, registrationMark: null, docType: null, bucket: null },
   ): Promise<{ plan: ExtractionPlan; type: RoutingType | null }> {
     const type = await this.prisma.docType.findUnique({
       where: { code: registryCode(countryCode, docType) },
@@ -329,6 +343,7 @@ export class VerificationService {
     });
     const plan = await planExtraction({
       validators,
+      context,
       declared: type?.fields ?? [],
       profileCode: type?.extractionProfile ?? 'UNPROFILED',
       engine: this.kyc.engine ?? UNKNOWN_ENGINE,
@@ -434,7 +449,7 @@ export class VerificationService {
     // whether the processor's approval may stand: never past a blocking FAIL;
     // and once the registry speaks for the type, never for the always-review
     // set, a collision, an unvalidated document, or unknown / low confidence.
-    const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt });
+    const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt }, await this.validatorContextFor(userId, docType));
     result = gateAutoApproval(result, extraction, registryType);
 
     const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
@@ -629,6 +644,15 @@ export class VerificationService {
     // (no 5-point check supplied) or PRIVATE is never approved — it is rejected with
     // INSURANCE_NOT_HIRE (the spec's INSURANCE_SCOPE_INSUFFICIENT) so the actor is told the
     // category, not waved through to fail at go-online.
+    // [DOC-1 §3.7 · LEGAL-CONFLICT-1 · E2E-DOC-2 · P3-3] A taxi's vehicle documents are approved only for an
+    // H-plate vehicle: the one plate rule both sources corroborate. The reviewer rejects with WRONG_PLATE_CLASS;
+    // the driver fixes the plate on the profile and resubmits. Delivery movers are exempt (§3.8).
+    if (candidate.status === 'PENDING' && candidate.role === 'MOVER' && BUCKET_OF[candidate.docType] === 'VEHICLE') {
+      const driver = await this.prisma.driver.findUnique({ where: { userId: candidate.userId }, select: { licensePlate: true } });
+      if (driver && driver.licensePlate && plateClassOf(driver.licensePlate) !== 'H') {
+        throw new AppError(400, 'WRONG_PLATE_CLASS', `A taxi must carry an H registration mark; this vehicle is registered as ${normalizeRegistrationMark(driver.licensePlate)}. Reject the document as WRONG_PLATE_CLASS.`);
+      }
+    }
     if (candidate.status === 'PENDING' && candidate.docType === 'vehicle_insurance' && candidate.role === 'MOVER') {
       const vehicleType = await this.getMoverVehicleType(candidate.userId);
       if (vehicleType && isPassengerVehicle(vehicleType) && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
