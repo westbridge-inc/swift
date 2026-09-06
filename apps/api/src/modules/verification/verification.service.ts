@@ -749,7 +749,12 @@ export class VerificationService {
       const stillPending = new Set((await this.prisma.verificationDocument.findMany({
         where: { id: { in: staleOpen.map((c) => c.submissionId) }, status: 'PENDING' }, select: { id: true },
       })).map((d) => d.id));
-      const orphaned = staleOpen.filter((c) => !stillPending.has(c.submissionId)).map((c) => c.id);
+      // [DOC-1 Part XXV] A case re-opened by a rectification request lives on a
+      // document that is not pending; it closes when a reviewer resolves the request.
+      const rectifying = new Set((await this.prisma.rectificationRequest.findMany({
+        where: { caseId: { in: staleOpen.map((c) => c.id) }, resolvedAt: null }, select: { caseId: true },
+      })).map((r) => r.caseId));
+      const orphaned = staleOpen.filter((c) => !stillPending.has(c.submissionId) && !rectifying.has(c.id)).map((c) => c.id);
       if (orphaned.length > 0) await this.prisma.reviewCase.updateMany({ where: { id: { in: orphaned } }, data: { closedAt: now } });
     }
     const breachedCases = await this.prisma.reviewCase.findMany({
@@ -1253,44 +1258,63 @@ export class VerificationService {
     });
     if (due.length === 0) return 0;
 
-    const storage = getStorageProvider();
     let purged = 0;
     for (const doc of due) {
-      // [DOC-INV-7] Delete the bytes, shred the key, then PROBE — a real read
-      // attempt. Never mark a row purged while the object may still be
-      // readable: a FAILED probe is recorded as such and the row stays due for
-      // tomorrow's sweep (DPA §3.5). A receipt without a passing probe is not
-      // a receipt.
-      const evidence = doc.fileUrl ? await shredAndProbe(this.prisma, storage, doc.fileUrl) : NOTHING_STORED;
-      const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: 'reaper', evidence };
-      if (evidence.probe === 'FAILED') {
-        await writeDeletionReceipt(this.prisma, receipt);
-        continue;
-      }
-      const transitioned = await this.prisma.$transaction(async (tx) => {
-        const users = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT "id" FROM "users"
-          WHERE "id" = ${doc.userId}
-          FOR UPDATE /* verification-document-purge-authority */
-        `;
-        if (!users[0]) return false;
-        const won = await tx.verificationDocument.updateMany({
-          where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, retentionExpiresAt: { lt: now } },
-          data: { purgedAt: new Date(), fileUrl: '' },
-        });
-        if (won.count !== 1) return false;
-        // The receipt commits with the purge or not at all.
-        await writeDeletionReceipt(tx, receipt);
-        await projectProviderVerificationLocked(tx, doc.userId);
-        // [REPORT-012 F-012-05] Purge invalidates evidence — the vendor
-        // projection must land in the same transaction, not never.
-        await this.projectVendorActivation(tx, doc.userId);
-        return true;
-      });
-      if (!transitioned) continue;
-      purged += 1;
+      const outcome = await this.purgeDocumentNow(doc, 'reaper', { requireRetentionElapsed: true, shredFields: false, now });
+      if (outcome === 'PURGED') purged += 1;
     }
     return purged;
+  }
+
+  /**
+   * The one purge of one document: delete the bytes, shred the key, PROBE
+   * (DOC-INV-7 — a receipt without a passing probe is not a receipt), then the
+   * compare-and-set under the person's row lock, the receipt in the same
+   * transaction, and the projections. The reaper calls it at retention; a
+   * data-subject erasure (Part XXV) calls it on request and also crypto-shreds
+   * the extracted field VALUES (the run DEKs) — the reaper never does, because
+   * §9 keeps extracted fields to the record's lifecycle, not the image's.
+   */
+  async purgeDocumentNow(
+    doc: { id: string; userId: string; fileUrl: string; docType: string; user: { tenantId: string } },
+    deletedBy: string,
+    opts: { requireRetentionElapsed: boolean; shredFields: boolean; now?: Date },
+  ): Promise<'PURGED' | 'PROBE_FAILED' | 'NOT_PURGED'> {
+    const now = opts.now ?? new Date();
+    const storage = getStorageProvider();
+    const evidence = doc.fileUrl ? await shredAndProbe(this.prisma, storage, doc.fileUrl) : NOTHING_STORED;
+    const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
+    if (evidence.probe === 'FAILED') {
+      await writeDeletionReceipt(this.prisma, receipt);
+      return 'PROBE_FAILED';
+    }
+    const transitioned = await this.prisma.$transaction(async (tx) => {
+      const users = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "users"
+        WHERE "id" = ${doc.userId}
+        FOR UPDATE /* verification-document-purge-authority */
+      `;
+      if (!users[0]) return false;
+      const won = await tx.verificationDocument.updateMany({
+        where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}) },
+        data: { purgedAt: new Date(), fileUrl: '' },
+      });
+      if (won.count !== 1) return false;
+      // The receipt commits with the purge or not at all.
+      await writeDeletionReceipt(tx, receipt);
+      if (opts.shredFields) {
+        // Crypto-shred: without the run DEK every stored value is unrecoverable; the rows
+        // (field codes, verdicts, blind indexes) remain as the custody record (§20.3).
+        await tx.extractionRun.updateMany({ where: { submissionId: doc.id }, data: { wrappedDek: null } });
+        await tx.extractedField.updateMany({ where: { submissionId: doc.id }, data: { valueCt: null } });
+      }
+      await projectProviderVerificationLocked(tx, doc.userId);
+      // [REPORT-012 F-012-05] Purge invalidates evidence — the vendor
+      // projection must land in the same transaction, not never.
+      await this.projectVendorActivation(tx, doc.userId);
+      return true;
+    });
+    return transitioned ? 'PURGED' : 'NOT_PURGED';
   }
 
   // -------------------------------------------------------------------------

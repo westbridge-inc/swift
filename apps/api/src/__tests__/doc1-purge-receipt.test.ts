@@ -117,7 +117,8 @@ describe('[DOC-INV-7] proof of purge', () => {
 
   it('the reaper leaves a FAILED row due (never marks it purged), and every purge writer writes a receipt — a census', () => {
     const service = readFileSync(join(API_SRC, 'modules', 'verification', 'verification.service.ts'), 'utf8');
-    expect(service).toMatch(/if \(evidence\.probe === 'FAILED'\) \{\s*await writeDeletionReceipt\(this\.prisma, receipt\);\s*continue;/);
+    // [P25] The one purge of one document is purgeDocumentNow: a FAILED probe writes its receipt and returns before anything is marked purged.
+    expect(service).toMatch(/if \(evidence\.probe === 'FAILED'\) \{\s*await writeDeletionReceipt\(this\.prisma, receipt\);\s*return 'PROBE_FAILED';/);
     const walk = (dir: string, out: string[] = []): string[] => {
       for (const name of readdirSync(dir)) {
         const p = join(dir, name);
