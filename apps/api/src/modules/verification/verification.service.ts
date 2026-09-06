@@ -457,7 +457,7 @@ export class VerificationService {
     assertKeyServiceForAccess('intake');
     // [DGP-1 · DOC-1 §2] No PERSONAL image leaves for an external engine unless the doc type allows
     // it, the processor is registered and a transfer basis is recorded. Local engines pass through.
-    assertExternalProcessingPermitted(await this.externalProcessingSubject(docType), this.kyc.engine);
+    assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, docType), this.kyc.engine);
     if (IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled()) {
       if (!user.avatar || !user.selfieCapturedAt) {
         throw new AppError(400, 'SELFIE_REQUIRED', 'Take your profile selfie before submitting your ID — we match the two faces.');
@@ -567,7 +567,7 @@ export class VerificationService {
     // [DOC-1 §0.5 · FD-D5] Biometric off → the L2 identity document is verified
     // document-only; the selfie is not sent anywhere.
     // [DGP-1 · DOC-1 §2] the identity check sends the national ID (and selfie) — same gate as any document.
-    assertExternalProcessingPermitted(await this.externalProcessingSubject('national_id'), this.kyc.engine);
+    assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, 'national_id'), this.kyc.engine);
     const startedAt = new Date();
     // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
     let result: DegradedResult = await extractWithLadder(() => (biometricFaceMatchEnabled()
@@ -1868,8 +1868,10 @@ export class VerificationService {
   }
 
   /** [DGP-1] The doc registry's word on external processing; an unknown type is treated as forbidden. */
-  private async externalProcessingSubject(code: string): Promise<{ code: string; externalProcessingAllowed: boolean | null }> {
-    const row = await this.prisma.docType.findFirst({ where: { code }, select: { externalProcessingAllowed: true } });
-    return { code, externalProcessingAllowed: row?.externalProcessingAllowed ?? null };
+  private async externalProcessingSubject(countryCode: string, legacyCode: string): Promise<{ code: string; externalProcessingAllowed: boolean | null }> {
+    // The service speaks legacy codes (`national_id`); the registry row is `<CC>.<code>` keyed by
+    // (countryCode, legacyCode). No row → null → the gate treats the type as forbidden.
+    const row = await this.prisma.docType.findUnique({ where: { countryCode_legacyCode: { countryCode, legacyCode } }, select: { code: true, externalProcessingAllowed: true } });
+    return { code: row?.code ?? `${countryCode}.${legacyCode}`, externalProcessingAllowed: row?.externalProcessingAllowed ?? null };
   }
 }

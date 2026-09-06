@@ -116,6 +116,7 @@ const E = {
   order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
+  docType: { model: 'docType', param: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
   platformConfig: { model: 'platformConfig', param: 'key', fields: ['value'] },
   promo: { model: 'promoCode', fields: ['isActive', 'discountValue', 'validFrom', 'validUntil'] },
   zone: { model: 'zone', fields: ['isActive', 'name', 'priority'] },
@@ -149,6 +150,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // ── Dashboard and search ────────────────────────────────────────────────
   'GET /dashboard/overview': c('C0', 'dashboard.read'),
   'GET /legal/processors': c('C0', 'legal.processors.read'),
+  'PUT /verification/doc-types/:code/external-processing': c('C4', 'verification.doctype.external', E.docType),
   'GET /search': c('C1', 'search.read'),
 
   // ── People ──────────────────────────────────────────────────────────────

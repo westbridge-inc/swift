@@ -6070,6 +6070,9 @@ model DocType {
   /// code without an FK until that table is specified (CONFLICT-DOC-5).
   extractionProfile         String
   externalProcessingAllowed Boolean        @default(false)
+  /// [DGP-1 · CONFLICT-DOC-2] a PERSONAL type may be sent externally only under a recorded founder decision (the DB CHECK enforces it)
+  externalProcessingDecisionRef String?
+  externalProcessingDecidedAt DateTime?
   localAuthorityVariant     String?
   minConfidenceAutoApprove  Decimal        @default(0.97) @db.Decimal(3, 2)
   legalFactsVerifiedAt      DateTime?      @db.Date
