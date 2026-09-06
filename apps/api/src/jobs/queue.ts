@@ -797,6 +797,25 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'rlp-sweep' || job.name === 'rlp-reserve-provision') {
+        // [DOC-1 §31.4 · P31-1] Loss protection: the daily SLA/reserve sweep, and the monthly provisioning.
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { CountryConfigService } = await import('../modules/country/country-config.service');
+        const { cashRulesFor } = await import('../modules/cash/cash-rules.service');
+        const { sweepLossProtection, provisionReserveForPreviousMonth } = await import('../modules/cash/rlp');
+        const countryConfig = new CountryConfigService(ctx.prisma);
+        const notifications = new NotificationService(ctx.prisma, ctx.io);
+        const rulesFor = (code: string) => cashRulesFor(countryConfig, code);
+        if (job.name === 'rlp-sweep') {
+          const run = await sweepLossProtection(ctx.prisma, { notifications, rulesFor, gateFor: (code) => countryConfig.getIdGateThresholdLocal(code) });
+          ctx.log.info(`Loss protection sweep: ${run.breached.length} past SLA (${run.newlyFlagged} newly flagged), ${run.lowReserve.length} reserve(s) low`);
+        } else {
+          const rows = await provisionReserveForPreviousMonth(ctx.prisma, { notifications, rulesFor });
+          ctx.log.info(`Loss protection reserve: ${rows.filter((r) => r.created).length} provisioned of ${rows.length} countries with revenue`);
+        }
+        return;
+      }
+
       if (job.name === 'image-policy-sweep') {
         const { VerificationService } = await import('../modules/verification/verification.service');
         const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
@@ -2105,6 +2124,19 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '30 2 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
+  });
+
+  // [DOC-1 §31.4 · P31-1] Loss protection: SLA breaches and a low reserve, daily at 03:00; the
+  // reserve line provisioned from the previous month's fee revenue on the 1st at 05:00.
+  await queues.verificationQueue.add('rlp-sweep', {}, {
+    repeat: { pattern: '0 3 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+  await queues.verificationQueue.add('rlp-reserve-provision', {}, {
+    repeat: { pattern: '0 5 1 * *' },
+    removeOnComplete: 12,
+    removeOnFail: 12,
   });
 
   await queues.verificationQueue.add('retention-sweep', {}, {

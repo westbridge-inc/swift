@@ -129,6 +129,8 @@ const E = {
   // [ADM-002] `resolvedAt` does not exist on ReturnRequest (`reviewedAt` does).
   returnRequest: { model: 'returnRequest', fields: ['status', 'refundAmount', 'reviewedAt', 'refundRef', 'refundPaidAmount', 'refundPaidAt'] },
   claim: { model: 'reimbursementClaim', fields: ['status', 'amount', 'paidAt', 'paymentRef', 'paidAmount', 'reviewedAt'] },
+  // [DOC-1 §31.4 · P31-1] Loss protection suspension is a stated, reversible fact on the account.
+  lossProtection: { model: 'user', param: 'userId', fields: ['lossProtectionSuspendedAt', 'lossProtectionSuspendedReason'] },
   contentReport: { model: 'contentReport', fields: ['status', 'disposition'] },
   rating: { model: 'rating', fields: ['isPublic', 'state', 'stateReason', 'flagged'] },
   ratingReport: { model: 'ratingReport', fields: ['status'] },
@@ -335,6 +337,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /cash-rules/claims/:id/approve': c('C4', 'cashrules.claim.decide', E.claim),
   'PUT /cash-rules/claims/:id/reject': c('C4', 'cashrules.claim.decide', E.claim),
   'PUT /cash-rules/claims/:id/paid': c('C4', 'cashrules.claim.pay', E.claim),
+  // [DOC-1 §31.4 · P31-1] The reserve line is money (C4, like a payout); suspension is a stated act (C3).
+  'GET /cash-rules/rlp/reserve': c('C0', 'cashrules.read'),
+  'POST /cash-rules/rlp/reserve/adjust': c('C4', 'cashrules.reserve.adjust'),
+  'PUT /cash-rules/rlp/movers/:userId/suspend': c('C3', 'cashrules.rlp.suspend', E.lossProtection),
+  'PUT /cash-rules/rlp/movers/:userId/reinstate': c('C3', 'cashrules.rlp.suspend', E.lossProtection),
 
   // ── Dual control (ADM-005) ──────────────────────────────────────────────
   // The queue is a read; the decision is consequential and owes a reason, but
@@ -623,6 +630,8 @@ export function reasonOf(body: unknown, headers?: Record<string, unknown>): stri
  *  named here with a reason a reviewer can check. */
 export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>> = {
   'POST /promos': 'creates the row; there is no before state to digest',
+  // [DOC-1 §31.4 · P31-1] a reserve adjustment creates a ledger entry; the audit row carries the entry id and the resulting balance as facts
+  'POST /cash-rules/rlp/reserve/adjust': 'creates a ledger entry; the audit facts carry the entry id and the resulting balance',
   'POST /zones': 'creates the row; there is no before state to digest',
   'POST /notifications/broadcast': 'addresses every user; the subject is the audience, not a row',
   'PUT /countries/:code/pricing/:kind': 'writes a versioned price book, which keeps its own before/after by version',

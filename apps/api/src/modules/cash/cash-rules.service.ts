@@ -7,7 +7,12 @@ import { CountryConfigService } from '../country/country-config.service';
 import { OrderService, assertMmgFulfilmentAllowed } from '../order/order.service';
 import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
+import { clusterMemberIds } from '../integrity/identity.service';
 import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
+import {
+  LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, adjustReserve, assembleClaimEvidence, assertEvidenceComplete, coveredAmountFor,
+  drawReserveForPayout, reserveStatement, rollingClaimTotal, type LossProtectionRules,
+} from './rlp';
 
 // ---------------------------------------------------------------------------
 // Cash rules engine — the golden rule as code. Payment
@@ -18,7 +23,7 @@ import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
 // depends on this; no AI ever decides a money outcome.
 // ---------------------------------------------------------------------------
 
-export interface CashRulesConfig {
+export interface CashRulesConfig extends LossProtectionRules {
   maxClaimsPerRiderPerMonth: number;
   strikeRestrictThreshold: number;
   strikeBanThreshold: number;
@@ -33,6 +38,8 @@ export interface CashRulesConfig {
 }
 
 export const DEFAULT_CASH_RULES: CashRulesConfig = {
+  // [DOC-1 §31.4 · P31-1] The loss-protection policy tunables, relative to the ID gate.
+  ...LOSS_PROTECTION_DEFAULTS,
   maxClaimsPerRiderPerMonth: 3,
   strikeRestrictThreshold: 2,
   strikeBanThreshold: 4,
@@ -493,16 +500,21 @@ export class CashRulesService {
     tx: Prisma.TransactionClient,
     order: {
       id: string;
+      orderType: string;
+      subtotalBase: unknown;
       totalAmount: unknown;
       deliveryLat: number | null;
       deliveryLng: number | null;
       customer: { id: string; phone: string; countryCode: string };
     },
     mover: ClaimMover,
-    input: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
+    input: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; courierProofPhotoUrl?: string },
     addressKey: string,
   ): Promise<StagedClaim> {
-    const amount = Number(order.totalAmount);
+    // [DOC-1 §31.3/§31.4 · P31-1] The policy covers what the rider FRONTED — the food
+    // cost on a delivery, never the delivery fee — and the cap per claim is the ID gate,
+    // measured on that same figure: above it the ID is on file instead.
+    const amount = coveredAmountFor(order);
     const moverUserId = (await this.moverUser(mover)).userId;
     const gateLocal = await this.countryConfig.getIdGateThresholdLocal(order.customer.countryCode);
     if (amount >= gateLocal) {
@@ -523,6 +535,25 @@ export class CashRulesService {
       const km = haversineDistance(input.gps.lat, input.gps.lng, order.deliveryLat, order.deliveryLng);
       if (km > rules.maxHandoverDistanceKm) flags.push('gps_far');
     }
+    // [DOC-1 §31.4 · P31-1] The policy's own guardrails: the rolling 30-day cap per
+    // mover, the human-review threshold, a suspended protection, and — DOC-INV-47 — the
+    // evidence bundle, assembled here from the artefacts and stored for the reviewer.
+    // Each routes the claim to a person; none refuses it. The evidence is kept either way.
+    const now = new Date();
+    const already = await rollingClaimTotal(tx, mover, now);
+    if (already + amount > gateLocal * rules.rlpMonthlyCapMultiple) flags.push(LOSS_PROTECTION_FLAGS.overMonthlyCap);
+    if (amount > gateLocal * rules.rlpReviewFraction) flags.push(LOSS_PROTECTION_FLAGS.overReviewThreshold);
+    const moverAccount = await tx.user.findUnique({ where: { id: moverUserId }, select: { lossProtectionSuspendedAt: true } });
+    const suspended = Boolean(moverAccount?.lossProtectionSuspendedAt);
+    if (suspended) flags.push(LOSS_PROTECTION_FLAGS.protectionSuspended);
+    // The photo at the door: the delivery app sends `photoUrl`; the courier app sends its proof photo.
+    const doorPhoto = input.photoUrl ?? input.courierProofPhotoUrl ?? null;
+    const evidence = await assembleClaimEvidence(
+      tx,
+      { orderId: order.id, riderId: mover.riderId, driverId: mover.driverId, gpsLat: input.gps.lat, gpsLng: input.gps.lng, photoUrl: doorPhoto, createdAt: now },
+      { maxHandoverDistanceKm: rules.maxHandoverDistanceKm },
+    );
+    if (!evidence.complete) flags.push(LOSS_PROTECTION_FLAGS.evidenceIncomplete);
     const claim = await tx.reimbursementClaim.create({
       data: {
         orderId: order.id,
@@ -533,9 +564,12 @@ export class CashRulesService {
         reason: input.outcome,
         gpsLat: input.gps.lat,
         gpsLng: input.gps.lng,
-        photoUrl: input.photoUrl,
+        photoUrl: doorPhoto,
         flags,
         status: flags.length === 0 ? 'AUTO_APPROVED' : 'PENDING_REVIEW',
+        evidence: evidence as unknown as Prisma.InputJsonValue,
+        evidenceComplete: evidence.complete,
+        createdAt: now,
       },
     });
     return {
@@ -546,7 +580,9 @@ export class CashRulesService {
         title: claim.status === 'AUTO_APPROVED' ? 'Guarantee approved' : 'Claim under review',
         body: claim.status === 'AUTO_APPROVED'
           ? `$${amount.toLocaleString()} is covered by the Swift guarantee and will be paid out.`
-          : 'Your claim needs a quick manual review — we will get back to you.',
+          : suspended
+            ? 'Your loss protection is suspended, so this claim goes to a human review. Support has the reason and the review route.'
+            : 'Your claim needs a quick manual review — we will get back to you.',
         data: { kind: 'claim', claimId: claim.id },
       },
     };
@@ -608,6 +644,23 @@ export class CashRulesService {
     distinctMovers.add(moverKey(mover));
     if (sameTarget.length > 0 && distinctMovers.size >= 2) flags.push('collusion_customer');
 
+    // [DOC-1 §31.4 · P31-1 follow-up] "Repeat pairings → route to the identity graph": the same
+    // PERSON behind several customer accounts is the signature the single-account check misses.
+    // The customer's identity cluster (identity/identity.service, resolved by the graph's own
+    // rules — never by claim behaviour) widens the two collusion reads to every account it holds.
+    // An advisory, not a merge: it flags, a person decides.
+    const cluster = (await clusterMemberIds(this.prisma, customerId)).filter((id) => id !== customerId);
+    if (cluster.length > 0) {
+      const clusterClaims = await db.reimbursementClaim.findMany({
+        where: { createdAt: { gte: window90 }, customerId: { in: cluster } },
+        select: { riderId: true, driverId: true },
+      });
+      if (clusterClaims.length > 0) {
+        flags.push('collusion_customer_cluster');
+        if (clusterClaims.some((c) => moverKey(c) === moverKey(mover))) flags.push('collusion_pair_cluster');
+      }
+    }
+
     // One mover repeatedly against one customer
     const pairCount = await db.reimbursementClaim.count({
       where: { ...mine, customerId, createdAt: { gte: window90 } },
@@ -665,15 +718,37 @@ export class CashRulesService {
     // reviewedBy: keep the original reviewer if there was one; else stamp the payer.
     const existing = await this.prisma.reimbursementClaim.findUnique({
       where: { id: claimId },
-      select: { reviewedBy: true, amount: true },
+      select: { reviewedBy: true, amount: true, status: true, orderId: true, riderId: true, driverId: true, gpsLat: true, gpsLng: true, photoUrl: true, createdAt: true },
     });
     if (!existing) throw new NotFoundError('ReimbursementClaim', claimId);
     const attested = assertClaimAmountAttested(existing.amount, paidAmount);
+    const claimOrder = await this.prisma.order.findUnique({ where: { id: existing.orderId }, select: { customer: { select: { countryCode: true } } } });
+    if (!claimOrder) throw new NotFoundError('Order', existing.orderId);
 
+    // [DOC-1 §31.4 · DOC-INV-47 · P31-1] Nobody pays without the bundle, and nobody
+    // auto-pays a suspended mover. The bundle is re-derived from the artefacts NOW —
+    // the stored copy is the reviewer's record, not the gate — and an AUTO_APPROVED
+    // claim of a suspended mover must first be APPROVED by a person.
+    const countryCode = claimOrder.customer.countryCode;
+    if (existing.status === 'AUTO_APPROVED') {
+      const mover = await this.moverUser(existing);
+      const account = await this.prisma.user.findUnique({ where: { id: mover.userId }, select: { lossProtectionSuspendedAt: true } });
+      if (account?.lossProtectionSuspendedAt) {
+        throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'This mover\'s loss protection is suspended; an auto-approved claim must be reviewed and approved by a person before it is paid.');
+      }
+    }
+    const rules = await this.configFor(countryCode);
+    assertEvidenceComplete(await assembleClaimEvidence(this.prisma, existing, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm }));
+
+    // The payout is DRAWN from the reserve line inside the same transaction as the
+    // CAS and the audit row: a claim is paid from a funded line or not at all.
     const updated = await this.transitionClaim(claimId, ['AUTO_APPROVED', 'APPROVED'], {
       status: 'PAID', paidAt: new Date(), paymentRef: reference, paidAmount: attested,
       paidById: adminId, reviewedBy: existing?.reviewedBy ?? adminId,
-    }, onAudit).catch((err) => {
+    }, onAudit, async (tx) => {
+      const drawn = await drawReserveForPayout(tx, { countryCode, claimId, amount: Number(existing.amount), byId: adminId });
+      return { reserveBalanceAfter: drawn.balanceAfter };
+    }).catch((err) => {
       if (isDuplicateReferenceError(err)) {
         throw new AppError(
           409,
@@ -694,7 +769,14 @@ export class CashRulesService {
    * AUTO_APPROVED and both writing PAID would pay the rider twice. updateMany
    * with the status in the WHERE matches at most once; the loser sees count===0.
    */
-  private async transitionClaim(claimId: string, from: string[], data: Record<string, unknown>, onAudit?: OnAudit) {
+  private async transitionClaim(
+    claimId: string,
+    from: string[],
+    data: Record<string, unknown>,
+    onAudit?: OnAudit,
+    /** [P31-1] Money moved by the same transaction as the CAS (the reserve draw); its facts join the audit row. */
+    within?: (tx: Prisma.TransactionClient) => Promise<Record<string, unknown>>,
+  ) {
     // [ADM-002] The compare-and-set and the caller's audit row commit together;
     // a refused row leaves the claim exactly where it was.
     return this.prisma.$transaction(async (tx) => {
@@ -707,9 +789,76 @@ export class CashRulesService {
         if (!exists) throw new NotFoundError('Claim', claimId);
         throw new AppError(400, 'INVALID_CLAIM_STATE', `Claim is ${exists.status}; expected ${from.join('/')}`);
       }
+      const facts = within ? await within(tx) : {};
       const updated = await tx.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } });
-      await onAudit?.(tx, { status: updated.status, amount: String(updated.amount) });
+      await onAudit?.(tx, { status: updated.status, amount: String(updated.amount), ...facts });
       return updated;
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // [DOC-1 §31.4 · P31-1] Loss protection: suspension and the reserve line
+  // -------------------------------------------------------------------------
+
+  /** Suspension is a stated, audited, reversible act — never silent. The mover is told. */
+  async suspendLossProtection(userId: string, reason: string, onAudit?: OnAudit) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, lossProtectionSuspendedAt: true, lossProtectionSuspendedReason: true } });
+    if (!user) throw new NotFoundError('User', userId);
+    if (user.lossProtectionSuspendedAt) return user; // already suspended — the fact stands, nothing is re-announced
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.user.update({
+        where: { id: userId },
+        data: { lossProtectionSuspendedAt: new Date(), lossProtectionSuspendedReason: reason },
+        select: { id: true, lossProtectionSuspendedAt: true, lossProtectionSuspendedReason: true },
+      });
+      await onAudit?.(tx, { lossProtectionSuspendedAt: row.lossProtectionSuspendedAt?.toISOString() ?? null, reason });
+      return row;
+    });
+    await this.notifications.send({
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Loss protection suspended',
+      body: 'Your loss protection has been suspended following a review. Claims you file will be reviewed by a person before any payout; contact support to request a review of this decision.',
+      data: { kind: 'rlp_suspended' },
+    }).catch(() => {});
+    return updated;
+  }
+
+  async reinstateLossProtection(userId: string, note: string | undefined, onAudit?: OnAudit) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, lossProtectionSuspendedAt: true, lossProtectionSuspendedReason: true } });
+    if (!user) throw new NotFoundError('User', userId);
+    if (!user.lossProtectionSuspendedAt) return user;
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.user.update({
+        where: { id: userId },
+        data: { lossProtectionSuspendedAt: null, lossProtectionSuspendedReason: null },
+        select: { id: true, lossProtectionSuspendedAt: true, lossProtectionSuspendedReason: true },
+      });
+      await onAudit?.(tx, { reinstated: true, note: note ?? null });
+      return row;
+    });
+    await this.notifications.send({
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Loss protection reinstated',
+      body: 'Your loss protection is active again. Claims below the gate are covered as before.',
+      data: { kind: 'rlp_reinstated' },
+    }).catch(() => {});
+    return updated;
+  }
+
+  /** The reserve line as the operator sees it: balance, floor, this month's provisioning, the latest entries. */
+  async lossProtectionReserve(countryCode: string) {
+    const [gateLocal, rules] = await Promise.all([this.countryConfig.getIdGateThresholdLocal(countryCode), this.configFor(countryCode)]);
+    return reserveStatement(this.prisma, countryCode, { gateLocal, rules });
+  }
+
+  /** An audited manual entry on the reserve line: a top-up or a correction. */
+  async adjustLossProtectionReserve(countryCode: string, amount: number, adminId: string, note: string, onAudit?: OnAudit) {
+    return this.prisma.$transaction(async (tx) => {
+      const entry = await adjustReserve(tx, { countryCode, amount, byId: adminId, note });
+      await onAudit?.(tx, { countryCode, amount, entryId: entry.id, reserveBalanceAfter: entry.balanceAfter });
+      return entry;
     });
   }
 

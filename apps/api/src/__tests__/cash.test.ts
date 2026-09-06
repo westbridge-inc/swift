@@ -43,6 +43,9 @@ let vendorId: string;
 
 const createdUserIds: string[] = [];
 
+const RESERVE_NOTE = 'cash.test fixture reserve';
+let itemId = '';
+
 async function purgeFixtures() {
   const users = await app.prisma.user.findMany({
     where: { phone: { startsWith: '+59200133' } },
@@ -52,6 +55,11 @@ async function purgeFixtures() {
   if (ids.length === 0) return;
   const riders = await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } });
   const riderIds = riders.map((r) => r.id);
+  // [P31-1] The reserve draws of this suite's payouts go first (a draw outlives its claim as an
+  // orphan otherwise, and the suite's funding entry with it), then the funding, then the claims.
+  await app.prisma.rlpReserveEntry.deleteMany({
+    where: { OR: [{ claim: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] } }, { note: RESERVE_NOTE }] },
+  });
   await app.prisma.reimbursementClaim.deleteMany({
     where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
   });
@@ -130,9 +138,16 @@ async function makeAtDoorOrder(
       subtotalBase: amount, subtotalMarkup: 0, subtotalCustomer: amount,
       deliveryFee: 500, totalAmount: amount,
       paymentMethod: 'CASH',
+      // [P31-1] The cart the rider paid for at pickup — part of the claim's evidence bundle.
+      items: { create: { itemId, name: 'Plate', quantity: 1, basePrice: amount, markedUpPrice: amount, markupAmount: 0, totalBase: amount, totalMarkup: 0, totalCustomer: amount, selectedOptions: {} } },
     },
   });
-  if (status === 'ARRIVED') await arriveAtDoor(created.id, riderId, delivery);
+  // [P31-1] The rider took custody at pickup (having paid the vendor) — the PICKED_UP row is
+  // the bundle's pickup proof. An order at the door, or failed after it, has both artefacts.
+  await app.prisma.orderStatusLog.create({
+    data: { orderId: created.id, status: 'PICKED_UP', changedBy: riderId, note: 'fixture pickup', createdAt: new Date(Date.now() - 40 * 60_000) },
+  });
+  if (status === 'ARRIVED' || status === 'FAILED') await arriveAtDoor(created.id, riderId, delivery);
   return created;
 }
 
@@ -153,7 +168,7 @@ async function arriveAtDoor(orderId: string, riderId: string, door: { lat: numbe
 }
 
 /** A prior failed-handover claim, backdated, for synthetic patterns. */
-async function plantClaim(riderId: string, customerId: string, daysAgo: number) {
+async function plantClaim(riderId: string, customerId: string, daysAgo: number, status: 'AUTO_APPROVED' | 'PENDING_REVIEW' = 'AUTO_APPROVED') {
   const order = await makeAtDoorOrder(customerId, riderId, 2000, 'FAILED');
   return app.prisma.reimbursementClaim.create({
     data: {
@@ -164,8 +179,9 @@ async function plantClaim(riderId: string, customerId: string, daysAgo: number) 
       reason: 'no_show',
       gpsLat: GPS.lat,
       gpsLng: GPS.lng,
-      status: 'AUTO_APPROVED',
-      flags: [],
+      photoUrl: 'storage://t/door.jpg', // [P31-1] the photo at the door — no payout without it
+      status,
+      flags: status === 'PENDING_REVIEW' ? ['over_cap'] : [],
       createdAt: new Date(Date.now() - daysAgo * DAY),
     },
   });
@@ -221,6 +237,11 @@ beforeAll(async () => {
     },
   });
   vendorId = vendor.id;
+  // [DOC-1 §31.4 · P31-1] A real cash order has a cart; a real claim's bundle cites it.
+  const category = await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } });
+  itemId = (await app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Plate', basePrice: 1000 } as never })).id;
+  // [DOC-1 §31.4 · P31-1] Payouts are drawn from the loss-protection reserve line: fund it for the suite.
+  await app.prisma.rlpReserveEntry.create({ data: { countryCode: 'GY', kind: 'ADJUSTMENT', amount: 1_000_000, note: RESERVE_NOTE } });
 });
 
 afterAll(async () => {
@@ -318,7 +339,8 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('FAILED'); // the order still fails through the machine
     expect(res.json().data.claim.status).toBe('PENDING_REVIEW'); // caused solely by proximity
-    expect(res.json().data.claim.flags).toEqual(['gps_far']);
+    // [P31-1] A far GPS also fails the bundle's rider-at-door artefact, so the evidence flag rides along.
+    expect(res.json().data.claim.flags).toEqual(['gps_far', 'evidence_incomplete']);
 
     // The customer is still struck — a far GPS doesn't erase the failed handover.
     const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
@@ -538,12 +560,19 @@ describe('L3 — earned trust', () => {
 
 describe('Admin review + founder metrics', () => {
   it('flagged claims queue through review -> approve -> paid', async () => {
-    const queue = await inject('GET', '/api/v1/admin/cash-rules/claims?limit=50', undefined, adminToken);
+    // [P31-1] A flagged claim WITH its evidence bundle: the queue holds other suites' claims too,
+    // some filed without a bundle (a far GPS, no photo) — those are refused at payout by design.
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const flagged = await plantClaim(rider.riderId, customer.userId, 0, 'PENDING_REVIEW');
+    const queue = await inject('GET', '/api/v1/admin/cash-rules/claims?limit=200', undefined, adminToken);
     expect(queue.statusCode).toBe(200);
     const pending = queue.json().data as Array<{ id: string; status: string; amount: string | number }>;
     expect(pending.length).toBeGreaterThan(0);
+    const mine = pending.find((c) => c.id === flagged.id);
+    expect(mine, 'the planted flagged claim is in the review queue').toBeTruthy();
 
-    const claimId = pending[0]!.id;
+    const claimId = flagged.id;
     const approve = await inject('PUT', `/api/v1/admin/cash-rules/claims/${claimId}/approve`, { reason: 'Verified with photos' }, adminToken);
     expect(approve.statusCode).toBe(200);
     expect(approve.json().data.status).toBe('APPROVED');
@@ -553,7 +582,7 @@ describe('Admin review + founder metrics', () => {
     const paid = await inject(
       'PUT',
       `/api/v1/admin/cash-rules/claims/${claimId}/paid`,
-      { reference: `CASHPAYOUT-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}`, amount: pending[0]!.amount },
+      { reference: `CASHPAYOUT-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}`, amount: mine!.amount },
       adminToken,
     );
     expect(paid.statusCode).toBe(200);

@@ -104,6 +104,13 @@ async function makeAtDoorOrder(customerId: string, riderId: string, amount = 200
       paymentMethod: 'CASH',
     },
   });
+  // [DOC-1 §31.4 · P31-1] The claim's evidence bundle cites the pickup and the cart.
+  await app.prisma.orderStatusLog.create({
+    data: { orderId: order.id, status: 'PICKED_UP', changedBy: riderId, note: 'fixture pickup', createdAt: new Date(Date.now() - 40 * 60_000) },
+  });
+  const item = await app.prisma.item.findFirst({ where: { vendorId }, select: { id: true } })
+    ?? await app.prisma.item.create({ data: { vendorId, categoryId: (await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } })).id, name: 'Plate', basePrice: amount } as never, select: { id: true } });
+  await app.prisma.orderItem.create({ data: { orderId: order.id, itemId: item.id, name: 'Plate', quantity: 1, basePrice: amount, markedUpPrice: amount, markupAmount: 0, totalBase: amount, totalMarkup: 0, totalCustomer: amount, selectedOptions: {} } as never });
   if (status === 'ARRIVED') await arriveAtDoor(order.id, riderId, door);
   return { ...order, door };
 }
@@ -175,10 +182,10 @@ describe('the failed handover is one generation', () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const order = await makeAtDoorOrder(customer.userId, rider.riderId);
     armed = 'failed';
-    await expect(cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door })).rejects.toThrow('failpoint');
+    await expect(cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl: 'storage://t/door.jpg' })).rejects.toThrow('failpoint');
     expect(await facts(order.id, customer.userId)).toEqual({ status: 'ARRIVED', payment: 'PENDING', strikes: 0, claims: 0, earnings: 0 });
 
-    const retry = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door });
+    const retry = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl: 'storage://t/door.jpg' });
     expect(retry.claim?.status).toBe('AUTO_APPROVED');
     expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0 });
     // The notices left after the commit: the customer's strike notice and the rider's claim notice, once each.
@@ -192,7 +199,7 @@ describe('the failed handover is one generation', () => {
     const order = await makeAtDoorOrder(customer.userId, rider.riderId);
     const spy = vi.spyOn(notifications, 'send').mockRejectedValue(new Error('push provider down'));
     try {
-      const res = await cash.handover(order.id, rider.userId, { outcome: 'refused', gps: order.door });
+      const res = await cash.handover(order.id, rider.userId, { outcome: 'refused', gps: order.door, photoUrl: 'storage://t/door.jpg' });
       expect(res.claim?.status, JSON.stringify(res.claim?.flags)).toBe('AUTO_APPROVED');
       expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0 });
     } finally {
@@ -204,8 +211,8 @@ describe('the failed handover is one generation', () => {
     const rider = await makeRider();
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const order = await makeAtDoorOrder(customer.userId, rider.riderId);
-    const first = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door });
-    const again = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door });
+    const first = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl: 'storage://t/door.jpg' });
+    const again = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl: 'storage://t/door.jpg' });
     expect(again.claim?.id).toBe(first.claim?.id);
     expect(again.order.status).toBe('FAILED');
     expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0 });

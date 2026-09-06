@@ -160,6 +160,11 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   if (kind === 'incident_interim_suspension') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } };
   }
+  // [DOC-1 §31.4] A guarantee claim and everything about it lands on the claims screen — filed,
+  // updated, paid, protection suspended or reinstated. MoverStack mounts it.
+  if (kind === 'claim' || kind === 'claim_update' || kind === 'rlp_suspended' || kind === 'rlp_reinstated') {
+    return { screen: 'Claims' };
+  }
   if (kind === 'claim_over_gate') {
     // The body says "Support will follow up" — this is the door for the person
     // who would rather not wait. PAYMENT, not the orderId default of

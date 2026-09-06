@@ -1626,6 +1626,17 @@ export async function riderRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /earnings — Paginated earnings, filterable by date range and type. */
+  /** [DOC-1 §31.4 · P31-1] The rider's guarantee claims: status, the evidence bundle as filed, the pay-out SLA, and whether their protection is suspended. */
+  app.get('/claims', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId);
+    const { moverClaims } = await import('../cash/rlp');
+    const { cashRulesFor } = await import('../cash/cash-rules.service');
+    const { CountryConfigService } = await import('../country/country-config.service');
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { id: request.user.userId }, select: { countryCode: true } });
+    const rules = await cashRulesFor(new CountryConfigService(app.prisma), user.countryCode);
+    return { success: true, data: await moverClaims(app.prisma, { riderId: rider.id, driverId: null }, rules) };
+  });
+
   app.get('/earnings', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
     const query = request.query as Record<string, string | undefined>;

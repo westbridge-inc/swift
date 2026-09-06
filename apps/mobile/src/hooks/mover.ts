@@ -208,6 +208,16 @@ export function useEarnings<T = any>(kind: MoverKind | null) {
   });
   return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS) : q;
 }
+/** [DOC-1 §31.4] The mover's guarantee claims — status, the evidence bundle as filed, the pay-out SLA, suspension. */
+export function useMoverClaims<T = any>(kind: MoverKind | null) {
+  const pv = usePreview();
+  const q = useQuery<T>({
+    queryKey: ['mover', 'claims', kind],
+    queryFn: () => unwrap<T>(svc(kind as MoverKind).claims()),
+    enabled: !!kind && !pv,
+  });
+  return pv ? PV.previewQuery({ claims: [], suspended: false, suspendedAt: null } as never) : q;
+}
 /** Movement R9: the daily-folded Standing view (RAT-G — never same-day). */
 export function useMoverStanding<T = any>(kind: MoverKind | null) {
   const pv = usePreview();

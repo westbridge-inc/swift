@@ -67,6 +67,7 @@ async function subscription(vendorId: string) {
     vendorId, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 2100, billingMethod: 'CASH',
     currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * 86_400_000), nextBillingDate: new Date(Date.now() + 7 * 86_400_000) } });
 }
+const RESERVE_NOTE = 'arc-batch-b fixture reserve';
 async function claim(status: 'PENDING_REVIEW' | 'APPROVED', vendorId: string) {
   const customer = await person('CUSTOMER', 'Cust');
   const riderUser = await person('RIDER', 'Rider');
@@ -77,8 +78,18 @@ async function claim(status: 'PENDING_REVIEW' | 'APPROVED', vendorId: string) {
     status: 'CANCELLED', deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
     subtotalBase: 1700, subtotalMarkup: 0, subtotalCustomer: 1700, deliveryFee: 300, totalAmount: 2000, paymentMethod: 'CASH' } });
   orderIds.push(order.id);
+  // [DOC-1 §31.4 · P31-1] A payable claim carries its evidence bundle — arrival, pickup, cart, door
+  // photo — and is drawn from a funded reserve line. Each fixture claim funds its own payout.
+  await app.prisma.orderStatusLog.createMany({ data: [
+    { orderId: order.id, status: 'PICKED_UP', changedBy: rider.id, note: 'fixture pickup', createdAt: new Date(Date.now() - 40 * 60_000) },
+    { orderId: order.id, status: 'ARRIVED', changedBy: rider.id, note: 'fixture arrival', createdAt: new Date(Date.now() - 10 * 60_000) },
+  ] });
+  const item = await app.prisma.item.findFirst({ where: { vendorId }, select: { id: true } })
+    ?? await app.prisma.item.create({ data: { vendorId, categoryId: (await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } })).id, name: 'Plate', basePrice: 1700 } as never, select: { id: true } });
+  await app.prisma.orderItem.create({ data: { orderId: order.id, itemId: item.id, name: 'Plate', quantity: 1, basePrice: 1700, markedUpPrice: 1700, markupAmount: 0, totalBase: 1700, totalMarkup: 0, totalCustomer: 1700, selectedOptions: {} } as never });
+  await app.prisma.rlpReserveEntry.create({ data: { countryCode: 'GY', kind: 'ADJUSTMENT', amount: 2000, note: RESERVE_NOTE } });
   return app.prisma.reimbursementClaim.create({ data: {
-    orderId: order.id, riderId: rider.id, customerId: customer.id, amount: 2000, reason: 'no_show', gpsLat: 6.8, gpsLng: -58.15, status, flags: [] } });
+    orderId: order.id, riderId: rider.id, customerId: customer.id, amount: 2000, reason: 'no_show', gpsLat: 6.8, gpsLng: -58.15, photoUrl: 'storage://t/door.jpg', status, flags: [] } });
 }
 async function unpaidInvoice() {
   const a = await app.prisma.advertiser.create({ data: { companyName: `ArcB ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000001', createdByUserId: `u-${nanoid(6)}`, status: 'APPROVED' } });
@@ -112,6 +123,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // [P31-1] reserve draws of this suite's payouts first, then its funding entries
+  await app.prisma.rlpReserveEntry.deleteMany({ where: { OR: [{ claim: { orderId: { in: orderIds } } }, { note: RESERVE_NOTE }] } });
   await dropAuditRefusal(app, REFUSAL);
   await cleanupSecondApprovers(app);
   await runWithoutTenant(async () => {

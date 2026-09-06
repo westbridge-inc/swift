@@ -1415,6 +1415,17 @@ export async function driverRoutes(app: FastifyInstance) {
 
   // ─── Earnings ──────────────────────────────────────────────────────────
 
+  /** [DOC-1 §31.4 · P31-1] The driver's guarantee claims — same view as the rider's. */
+  app.get('/claims', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await getDriver(request.user.userId);
+    const { moverClaims } = await import('../cash/rlp');
+    const { cashRulesFor } = await import('../cash/cash-rules.service');
+    const { CountryConfigService } = await import('../country/country-config.service');
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { id: request.user.userId }, select: { countryCode: true } });
+    const rules = await cashRulesFor(new CountryConfigService(app.prisma), user.countryCode);
+    return { success: true, data: await moverClaims(app.prisma, { riderId: null, driverId: driver.id }, rules) };
+  });
+
   app.get('/earnings', { preHandler: [app.authenticate] }, async (request) => {
     const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId } });
     if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');

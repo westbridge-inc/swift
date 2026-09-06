@@ -155,6 +155,14 @@ async function makeArrivedCashOrder(customerId: string, riderId: string, amount:
     where: { id: riderId },
     data: { currentLat: 7.2007, currentLng: -58.6007, lastLocationUpdate: new Date() },
   });
+  // [DOC-1 §31.4 · P31-1] The claim's evidence bundle cites the pickup (custody taken, vendor
+  // paid) and the cart; a real at-door order carries both.
+  await app.prisma.orderStatusLog.create({
+    data: { orderId: created.id, status: 'PICKED_UP', changedBy: riderId, note: 'fixture pickup', createdAt: new Date(Date.now() - 40 * 60_000) },
+  });
+  const item = await app.prisma.item.findFirst({ where: { vendorId }, select: { id: true } })
+    ?? await app.prisma.item.create({ data: { vendorId, categoryId: (await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } })).id, name: 'Plate', basePrice: amount } as never, select: { id: true } });
+  await app.prisma.orderItem.create({ data: { orderId: created.id, itemId: item.id, name: 'Plate', quantity: 1, basePrice: amount, markedUpPrice: amount, markupAmount: 0, totalBase: amount, totalMarkup: 0, totalCustomer: amount, selectedOptions: {} } as never });
   return created;
 }
 
@@ -306,7 +314,7 @@ describe('Spec §I — acceptance conformance baseline', () => {
     const customer = await makeCustomerUser('L1');
     const rider = await makeRiderUser();
     const order = await makeArrivedCashOrder(customer.id, rider.riderId, 3500); // under the ~$50 gate
-    const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS });
+    const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS, photoUrl: 'storage://t/door.jpg' });
     expect(result.claim?.status).toBe('AUTO_APPROVED');
     const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
     expect(strike).not.toBeNull();

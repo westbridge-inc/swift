@@ -51,6 +51,13 @@ model User {
   /// (required for orders >= the CountryConfig USD-equivalent gate), L3 earned.
   trustLevel TrustLevel @default(L1)
 
+  /// [DOC-1 §31.4 · P31-1] Rider loss protection is SUSPENDED, never revoked silently,
+  /// on a confirmed abuse finding. A suspended mover's claims are still filed and go
+  /// to a human; none is auto-paid. Set and cleared only through the audited admin
+  /// route, and the mover is told both times.
+  lossProtectionSuspendedAt     DateTime?
+  lossProtectionSuspendedReason String?
+
   /// ISO-3166 alpha-2; picked at signup from active CountryConfigs.
   countryCode String @default("GY")
   /// SaaS tenant (operator instance). DB-defaulted to the single current tenant
@@ -1055,7 +1062,14 @@ model ReimbursementClaim {
   /// person who approved the claim. The two are often different people and the
   /// record could not tell them apart.
   paidById   String?
+  /// [DOC-1 §31.4 · DOC-INV-47 · P31-1] The evidence bundle as assembled at filing —
+  /// from artefacts the platform already holds (arrival, GPS, photo, pickup, cart),
+  /// never typed by the rider. Re-derived at payout; the stored copy is the review
+  /// record. `evidenceComplete` false means the claim is never auto-paid.
+  evidence         Json?
+  evidenceComplete Boolean     @default(false)
   createdAt  DateTime    @default(now())
+  reserveEntry RlpReserveEntry?
 
   @@index([riderId])
   @@index([driverId])
@@ -1065,12 +1079,44 @@ model ReimbursementClaim {
   @@map("reimbursement_claims")
 }
 
+/// [DOC-1 §31.4 · P31-1] Rider loss protection reserve ledger — see RlpReserveEntryKind.
+model RlpReserveEntry {
+  id          String              @id @default(cuid())
+  countryCode String
+  kind        RlpReserveEntryKind
+  /// Signed, major units: provisioning and top-ups positive, a payout negative.
+  amount      Decimal             @db.Decimal(12, 2)
+  /// PROVISION idempotency: one provisioning row per country per calendar month (YYYY-MM).
+  periodKey   String?
+  /// PAYOUT idempotency: one reserve draw per claim.
+  claimId     String?             @unique
+  claim       ReimbursementClaim? @relation(fields: [claimId], references: [id])
+  createdById String?
+  note        String?
+  createdAt   DateTime            @default(now())
+
+  @@unique([countryCode, kind, periodKey])
+  @@index([countryCode, createdAt])
+  @@map("rlp_reserve_entries")
+}
+
 enum ClaimStatus {
   AUTO_APPROVED
   PENDING_REVIEW
   APPROVED
   REJECTED
   PAID
+}
+
+/// [DOC-1 §31.4 · P31-1] The rider loss protection reserve: a named liability line,
+/// per country. PROVISION is the monthly provisioning from fee revenue, PAYOUT is one
+/// claim drawn from it (negative), ADJUSTMENT an audited manual top-up or correction.
+/// The balance is the sum, and the database refuses a sum below zero — a claim is paid
+/// from the reserve or not at all, never ad hoc from operating cash.
+enum RlpReserveEntryKind {
+  PROVISION
+  PAYOUT
+  ADJUSTMENT
 }
 
 /// Customer strike for cash no-shows / refusals.

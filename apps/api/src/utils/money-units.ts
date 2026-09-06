@@ -113,6 +113,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'PromoTerms', field: 'minOrderAmount', unit: 'MAJOR_WHOLE' },
   { model: 'ProviderPayment', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'ReimbursementClaim', field: 'amount', unit: 'MAJOR_WHOLE' },
+  // [DOC-1 §31.4 · P31-1] The loss-protection reserve line: signed entries, 2 dp (a percentage of revenue).
+  { model: 'RlpReserveEntry', field: 'amount', unit: 'MAJOR_2DP' },
   { model: 'ReturnRequest', field: 'refundAmount', unit: 'MAJOR_WHOLE' },
   { model: 'ReturnRequest', field: 'refundInferredAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Rider', field: 'committedFloat', unit: 'MAJOR_WHOLE' },
