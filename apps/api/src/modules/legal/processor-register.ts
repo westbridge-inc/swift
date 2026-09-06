@@ -113,7 +113,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
     providerDirs: ['maps', 'places'], hosts: ['maps.googleapis.com', 'googleapis.com'],
     payload: ['LOCATION'], lawfulBasis: 'CONTRACT',
     country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
-    note: 'Only when MAPS_PROVIDER=google / PLACES_PROVIDER=google (GOOGLE_MAPS_API_KEY_BACKEND). Coordinates and typed addresses, no identity.',
+    note: 'DORMANT BY FOUNDER DECISION (2026-09-07: maps self-hosted, all engines). Adapter kept behind MAPS_PROVIDER=google / PLACES_PROVIDER=google; no key is provisioned. Coordinates and typed addresses, no identity.',
   },
   {
     ref: 'OSRM', party: 'Swift (self-hosted OSRM)', service: 'Routing and ETAs',
