@@ -415,6 +415,7 @@ model Tenant {
   personProfiles    PersonProfile[]
   businessProfiles  BusinessProfile[]
   vehicleProfiles   VehicleProfile[]
+  documentRecords   DocumentRecord[]
   rectifications    RectificationRequest[]
   fraudCases        FraudCase[]
 
@@ -646,6 +647,12 @@ model VerificationDocument {
   /// on rows that predate subjects; `pnpm doc1:backfill-subjects` fills them.
   subjectId            String?                    @db.Uuid
   subject              Subject?                   @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  /// [DOC-1 §4.4 · P4-2] The image was purged under the bucket's image policy (§1.3) — the
+  /// bytes are gone, the record below still answers. Distinct from `purgedAt`, which retires
+  /// the submission itself (retention elapsed / erasure) and ends its evidence.
+  imagePurgedAt        DateTime?
+  /// [DOC-1 §4.4 · P4-2] The durable, post-purge truth of this submission (kept by trigger).
+  record               DocumentRecord?
   /// [DOC-1 §9.3 P4-7] the renewal schedule the database keeps for an approved document with an expiry
   renewalSchedule      RenewalSchedule?
 
@@ -6561,6 +6568,7 @@ model Subject {
   createdAt    DateTime       @default(now())
   links        SubjectLink[]
   documents    VerificationDocument[]
+  records      DocumentRecord[]
   person       PersonProfile?
   business     BusinessProfile?
   vehicle      VehicleProfile?
@@ -6640,4 +6648,45 @@ model VehicleProfile {
 
   @@unique([registrationMark, countryCode])
   @@map("vehicle_profile")
+}
+
+/// [DOC-1 §4.4 · P4-2] `document_record` — the durable, post-purge truth. Written by the
+/// database when a submission COMMITS (T17), moved by the same trigger when the submission
+/// expires, is revoked, or is superseded by a newer commit of the same type; never edited by
+/// hand. Verification verdicts read records, so an image purged under its bucket's policy
+/// (E2E-DOC-5) no longer ends evidence — only the submission's retention purge does.
+enum DocumentRecordStatus {
+  VALID
+  EXPIRED
+  REVOKED
+  SUPERSEDED
+}
+
+model DocumentRecord {
+  id            String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String               @default("swift-default")
+  tenant        Tenant               @relation(fields: [tenantId], references: [id])
+  /// The account that submitted the evidence — the tenant-lineage parent, and the fallback
+  /// owner of a record whose submission carries no subject (a plate-less vehicle document).
+  accountId     String
+  subjectId     String?              @db.Uuid
+  subject       Subject?             @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  docType       String
+  submissionId  String               @unique
+  submission    VerificationDocument @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  status        DocumentRecordStatus @default(VALID)
+  issuedOn      DateTime?
+  expiresOn     DateTime?
+  /// §10.3 grandfather: a pre-existing approval carried forward gets a recheck date 90 days out.
+  recheckBy     DateTime?
+  approvedBy    String
+  approvedAt    DateTime
+  contentSha256 String?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  @@index([tenantId, accountId, docType, status])
+  @@index([subjectId, docType, status])
+  @@index([expiresOn])
+  @@map("document_record")
 }

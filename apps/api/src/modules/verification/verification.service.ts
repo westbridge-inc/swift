@@ -2,6 +2,7 @@ import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, ty
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { resolveSubject, linkedAccountIds } from './subjects';
+import { approvedEvidenceFor } from './evidence';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -929,6 +930,38 @@ export class VerificationService {
   }
 
   /**
+   * [DOC-1 §1.3 · §4.4 · E2E-DOC-5 · P4-2] The image-policy purge: after review, the bytes
+   * of a PURGE_AFTER_REVIEW bucket go — shredded, probed, receipted — while the
+   * document RECORD stays and keeps answering "is this actor verified?". Distinct from
+   * `purgeDocumentNow` (retention elapsed / erasure), which retires the submission and
+   * ends its evidence. Never under a legal hold. P1-3 decides WHEN per bucket; this is the HOW.
+   */
+  async purgeImageAfterReview(docId: string, deletedBy: string, now = new Date()): Promise<'PURGED' | 'PROBE_FAILED' | 'NOT_PURGED'> {
+    const doc = await this.prisma.verificationDocument.findUnique({
+      where: { id: docId },
+      select: { id: true, userId: true, fileUrl: true, docType: true, state: true, legalHoldId: true, imagePurgedAt: true, user: { select: { tenantId: true } } },
+    });
+    if (!doc || doc.state !== 'COMMITTED' || doc.legalHoldId || doc.imagePurgedAt || !doc.fileUrl) return 'NOT_PURGED';
+    const storage = getStorageProvider();
+    const evidence = await shredAndProbe(this.prisma, storage, doc.fileUrl);
+    const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
+    if (evidence.probe === 'FAILED') {
+      await writeDeletionReceipt(this.prisma, receipt);
+      return 'PROBE_FAILED';
+    }
+    const done = await this.prisma.$transaction(async (tx) => {
+      const won = await tx.verificationDocument.updateMany({
+        where: { id: doc.id, imagePurgedAt: null, legalHoldId: null, state: 'COMMITTED' },
+        data: { imagePurgedAt: now, fileUrl: '' },
+      });
+      if (won.count !== 1) return false;
+      await writeDeletionReceipt(tx, receipt);
+      return true;
+    });
+    return done ? 'PURGED' : 'NOT_PURGED';
+  }
+
+  /**
    * Review-SLA watchdog (spec §13): documents waiting on a human for more than
    * SLA_HOURS get surfaced to every admin once per sweep — a queue nobody
    * opens is how "24h review" promises die.
@@ -1130,38 +1163,11 @@ export class VerificationService {
   }
 
   /**
-   * [DOC-1 §1.2 / §3.11 · P3-4] THE evidence query — the one place that says which
-   * approved documents count for an account: its own rows, plus the rows of every
-   * VEHICLE subject the account is currently linked to (a fleet's insurance belongs
-   * to the car and serves every assigned driver; when it lapses, it lapses for all of
-   * them at once). Same fail-closed filters everywhere: approved, unpurged, still
-   * stored, unexpired, retention not elapsed.
+   * [DOC-1 P3-4 / P4-2] The evidence query lives in evidence.ts (records, not images);
+   * every verdict in this service goes through it.
    */
-  private async approvedEvidence(
-    db: Prisma.TransactionClient | PrismaClient,
-    userId: string,
-    checklist: readonly string[],
-    now: Date,
-  ) {
-    const vehicles = await db.subjectLink.findMany({
-      where: { accountId: userId, validTo: null, subject: { kind: 'VEHICLE' } },
-      select: { subjectId: true },
-    });
-    const vehicleIds = vehicles.map((v) => v.subjectId);
-    return db.verificationDocument.findMany({
-      where: {
-        docType: { in: [...checklist] },
-        status: 'APPROVED',
-        purgedAt: null,
-        fileUrl: { not: '' },
-        AND: [
-          { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
-          { OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] },
-          { OR: [{ userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])] },
-        ],
-      },
-      select: { docType: true, expiresAt: true, retentionExpiresAt: true, userId: true, subjectId: true, coverageClass: true, hireClassConfirmed: true, plateCrossChecked: true, reviewedAt: true },
-    });
+  private approvedEvidence(db: Prisma.TransactionClient | PrismaClient, userId: string, checklist: readonly string[], now: Date) {
+    return approvedEvidenceFor(db, userId, checklist, now);
   }
 
   /**
