@@ -1,7 +1,7 @@
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
-import { resolveSubject } from './subjects';
+import { resolveSubject, linkedAccountIds } from './subjects';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -922,6 +922,8 @@ export class VerificationService {
     });
     await this.forceMoverOfflineIfNotLive(doc.userId);
     await this.suspendListingsIfUnverified(doc.userId);
+    // [DOC-1 §3.11 · P3-4] A revoked vehicle document reaches every driver assigned to the vehicle.
+    await this.propagateVehicleLapse({ id: doc.id, userId: doc.userId, docType: doc.docType, subjectId: revoked.subjectId }, 'was revoked');
     await this.notifyRejection(doc.userId, doc.docType, 'the approval was withdrawn');
     return revoked;
   }
@@ -1122,11 +1124,32 @@ export class VerificationService {
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
   ): Promise<boolean> {
     if (checklist.length === 0) return false;
+    const approvedDocs = await this.approvedEvidence(db, userId, checklist, new Date());
+    const approved = new Set(approvedDocs.map((d) => d.docType));
+    return checklist.every((docType) => approved.has(docType));
+  }
 
-    const now = new Date();
-    const approvedDocs = await db.verificationDocument.findMany({
+  /**
+   * [DOC-1 §1.2 / §3.11 · P3-4] THE evidence query — the one place that says which
+   * approved documents count for an account: its own rows, plus the rows of every
+   * VEHICLE subject the account is currently linked to (a fleet's insurance belongs
+   * to the car and serves every assigned driver; when it lapses, it lapses for all of
+   * them at once). Same fail-closed filters everywhere: approved, unpurged, still
+   * stored, unexpired, retention not elapsed.
+   */
+  private async approvedEvidence(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    checklist: readonly string[],
+    now: Date,
+  ) {
+    const vehicles = await db.subjectLink.findMany({
+      where: { accountId: userId, validTo: null, subject: { kind: 'VEHICLE' } },
+      select: { subjectId: true },
+    });
+    const vehicleIds = vehicles.map((v) => v.subjectId);
+    return db.verificationDocument.findMany({
       where: {
-        userId,
         docType: { in: [...checklist] },
         status: 'APPROVED',
         purgedAt: null,
@@ -1134,12 +1157,11 @@ export class VerificationService {
         AND: [
           { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
           { OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] },
+          { OR: [{ userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])] },
         ],
       },
-      select: { docType: true },
+      select: { docType: true, expiresAt: true, retentionExpiresAt: true, userId: true, subjectId: true, coverageClass: true, hireClassConfirmed: true, plateCrossChecked: true, reviewedAt: true },
     });
-    const approved = new Set(approvedDocs.map((d) => d.docType));
-    return checklist.every((docType) => approved.has(docType));
   }
 
   /**
@@ -1187,17 +1209,7 @@ export class VerificationService {
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
   ): Promise<Date | null> {
     if (checklist.length === 0) return null;
-    const now = new Date();
-    const docs = await db.verificationDocument.findMany({
-      where: {
-        userId, docType: { in: [...checklist] }, status: 'APPROVED', purgedAt: null, fileUrl: { not: '' },
-        AND: [
-          { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
-          { OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] },
-        ],
-      },
-      select: { docType: true, expiresAt: true, retentionExpiresAt: true },
-    });
+    const docs = await this.approvedEvidence(db, userId, checklist, new Date());
     const docEnd = (d: { expiresAt: Date | null; retentionExpiresAt: Date | null }): Date | null => {
       if (d.expiresAt == null) return d.retentionExpiresAt;
       if (d.retentionExpiresAt == null) return d.expiresAt;
@@ -1278,20 +1290,7 @@ export class VerificationService {
       if (required.length === 0) {
         baseOk = true;
       } else {
-        const approvedDocs = await db.verificationDocument.findMany({
-          where: {
-            userId,
-            docType: { in: required },
-            status: 'APPROVED',
-            purgedAt: null,
-            fileUrl: { not: '' },
-            AND: [
-              { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
-              { OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] },
-            ],
-          },
-          select: { docType: true },
-        });
+        const approvedDocs = await this.approvedEvidence(db, userId, required, now);
         const approved = new Set(approvedDocs.map((d) => d.docType));
         baseOk = required.every((docType) => approved.has(docType));
       }
@@ -1304,17 +1303,9 @@ export class VerificationService {
     // registration + photos. PRIVATE insurance never qualifies. Cargo-only movers
     // (bike/motorbike/canter/box-truck) are not gated on hire insurance.
     if (isPassengerVehicle(opts.vehicleType)) {
-      const insurance = await db.verificationDocument.findFirst({
-        where: {
-          userId,
-          docType: 'vehicle_insurance',
-          status: 'APPROVED',
-          purgedAt: null,
-          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-        },
-        select: { coverageClass: true, hireClassConfirmed: true, plateCrossChecked: true },
-        orderBy: { reviewedAt: 'desc' },
-      });
+      // The policy may belong to the vehicle's subject (a fleet car) rather than this account.
+      const insurance = (await this.approvedEvidence(db, userId, ['vehicle_insurance'], now))
+        .sort((a, b) => (b.reviewedAt?.getTime() ?? 0) - (a.reviewedAt?.getTime() ?? 0))[0];
       if (
         !insurance ||
         insurance.coverageClass !== 'HIRE' ||
@@ -1386,6 +1377,8 @@ export class VerificationService {
       } else {
         await this.suspendListingsIfUnverified(doc.userId);
       }
+      // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
+      await this.propagateVehicleLapse(doc, 'expired');
       await this.notifications.send({
         userId: doc.userId,
         type: 'SYSTEM_ANNOUNCEMENT',
@@ -1632,7 +1625,7 @@ export class VerificationService {
    */
   /** Public: the compliance audit reuses the exact same force-offline the
    *  expiry sweep applies — one behavior, one notification copy. */
-  async forceMoverOfflineIfNotLive(userId: string) {
+  async forceMoverOfflineIfNotLive(userId: string, reason?: string): Promise<boolean> {
     // [EV-ACT-18] BOTH profiles' legacy grandfather flags count — the same
     // authority GO honours. The old shape read only the driver's flag, so a
     // legacy-verified RIDER could be forced offline for checklist evidence
@@ -1648,28 +1641,65 @@ export class VerificationService {
       }),
     ]);
     const vehicleType = driver?.vehicleType ?? rider?.vehicleType ?? (await this.getMoverVehicleType(userId));
-    if (!vehicleType) return;
+    if (!vehicleType) return false;
 
     const live = await this.getLiveOperationStatus(userId, {
       vehicleType,
       legacyVerified: driver?.documentsVerified || rider?.documentsVerified,
     });
-    if (live.allowed) return;
+    if (live.allowed) return false;
 
     const [driverOff, riderOff] = await Promise.all([
       this.prisma.driver.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } }),
       this.prisma.rider.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } }),
     ]);
-    if (driverOff.count + riderOff.count === 0) return;
+    if (driverOff.count + riderOff.count === 0) return false;
 
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'You have been taken offline',
-      body: 'A required document has expired, so you can no longer take jobs. Renew it to go back online.',
+      body: reason ?? 'A required document has expired, so you can no longer take jobs. Renew it to go back online.',
       audience: 'earner',
       data: { kind: 'verification_forced_offline' },
     });
+    return true;
+  }
+
+  /**
+   * [DOC-1 §3.11 · P3-4 · E2E-DOC-3] The propagation rule: when a VEHICLE-subject
+   * document expires or is revoked, EVERY account currently linked to that vehicle
+   * is suspended from dispatch — each told the specific reason — and the vehicle's
+   * owner(s) told once. The uploader was handled by the caller. Idempotent within a
+   * sweep: an account already offline is not told twice.
+   */
+  private async propagateVehicleLapse(doc: { id: string; userId: string; docType: string; subjectId: string | null }, what: 'expired' | 'was revoked') {
+    if (!doc.subjectId) return { suspended: 0, ownersTold: 0 };
+    const subject = await this.prisma.subject.findUnique({ where: { id: doc.subjectId }, select: { kind: true, vehicle: { select: { registrationMark: true } } } });
+    if (!subject || subject.kind !== 'VEHICLE') return { suspended: 0, ownersTold: 0 };
+    const plate = subject.vehicle?.registrationMark ?? 'this vehicle';
+    const label = doc.docType.replace(/_/g, ' ');
+    const accounts = (await linkedAccountIds(this.prisma, doc.subjectId)).filter((a) => a !== doc.userId);
+    const links = await this.prisma.subjectLink.findMany({ where: { subjectId: doc.subjectId, validTo: null }, select: { accountId: true, relation: true } });
+    let suspended = 0;
+    for (const accountId of accounts) {
+      const bit = await this.forceMoverOfflineIfNotLive(accountId, `The ${label} for vehicle ${plate} ${what}, so you can no longer take jobs with it. You are back online once the owner renews it.`);
+      if (bit) suspended += 1;
+    }
+    const owners = [...new Set(links.filter((l) => l.relation === 'OWNER').map((l) => l.accountId))];
+    let ownersTold = 0;
+    for (const ownerId of owners) {
+      await this.notifications.send({
+        userId: ownerId,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: `Vehicle ${plate}: ${label} ${what}`,
+        body: `${suspended} driver${suspended === 1 ? '' : 's'} assigned to ${plate} can no longer take jobs until the ${label} is renewed.`,
+        audience: 'earner',
+        data: { kind: 'verification_vehicle_lapsed', docId: doc.id, subjectId: doc.subjectId, suspended },
+      });
+      ownersTold += 1;
+    }
+    return { suspended, ownersTold };
   }
 
   /** When a lapsed doc breaks a vendor-type checklist, listings go dark. */
