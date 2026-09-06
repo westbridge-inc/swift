@@ -218,15 +218,17 @@ describe('MMG pay link — taxi driver', () => {
 });
 
 describe('MMG payment — vendor confirms received', () => {
-  it('marks an MMG order paid (CAPTURED) and is idempotent', async () => {
+  it("records the store's word as CLAIMED — never CAPTURED (DOC-INV-48) — and is idempotent", async () => {
+    // [DOC-1 §31.5 · P31-2] The store tapping "payment received" is a claim about its own wallet, not a
+    // provider capture; the order may proceed on it, but nothing may read it as confirmed.
     const id = await makeOrder('MOBILE_MONEY');
     const res = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(res.statusCode).toBe(200);
-    expect(res.json().data.paymentStatus).toBe('CAPTURED');
+    expect(res.json().data.paymentStatus).toBe('CLAIMED');
     // double-tap safe
     const again = await inject('POST', `/api/v1/vendor/orders/${id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(again.statusCode).toBe(200);
-    expect(again.json().data.paymentStatus).toBe('CAPTURED');
+    expect(again.json().data.paymentStatus).toBe('CLAIMED');
   });
 
   it('refuses to "confirm payment" on a cash order (cash is settled at handover)', async () => {
