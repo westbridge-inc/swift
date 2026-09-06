@@ -148,6 +148,7 @@ const E = {
 export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAuthority>> = {
   // ── Dashboard and search ────────────────────────────────────────────────
   'GET /dashboard/overview': c('C0', 'dashboard.read'),
+  'GET /legal/processors': c('C0', 'legal.processors.read'),
   'GET /search': c('C1', 'search.read'),
 
   // ── People ──────────────────────────────────────────────────────────────
@@ -622,6 +623,7 @@ export function reasonOf(body: unknown, headers?: Record<string, unknown>): stri
  *  holds this list closed: a C3-C5 route is either declared with an entity or
  *  named here with a reason a reviewer can check. */
 export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>> = {
+  'GET /legal/processors': 'code-declared register (DGP-1); no row to name',
   'POST /promos': 'creates the row; there is no before state to digest',
   'POST /zones': 'creates the row; there is no before state to digest',
   'POST /notifications/broadcast': 'addresses every user; the subject is the audience, not a row',
