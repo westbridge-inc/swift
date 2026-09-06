@@ -21,7 +21,7 @@ import { planExtraction, type RegisteredValidator } from '../modules/verificatio
 
 /** §7.2–7.5, pinned FROM the spec as literals: [code, scope, blocking]. WARN and routing rows are non-blocking. */
 const SPEC_VALIDATORS: ReadonlyArray<readonly [string, string, boolean]> = [
-  ['V_MRZ_CHECKSUM', 'FIELD', true], ['V_DATE_ORDER', 'FIELD', true], ['V_NOT_EXPIRED', 'FIELD', true], ['V_EXPIRY_PLAUSIBLE', 'FIELD', false],
+  ['V_MRZ_CHECKSUM', 'FIELD', true], ['V_DATE_ORDER', 'FIELD', true], ['V_NOT_EXPIRED', 'FIELD', true], ['V_EXPIRY_PLAUSIBLE', 'FIELD', true] /* ruling 2026-09-06: blocking = review, see the catalogue */,
   ['V_DOB_ADULT', 'FIELD', true], ['V_TIN_FORMAT', 'FIELD', true], ['V_PLATE_FORMAT', 'FIELD', true], ['V_PLATE_CLASS', 'FIELD', true],
   ['V_VEHICLE_COLOUR', 'FIELD', true], ['V_LICENCE_CLASS', 'FIELD', true], ['V_INSURANCE_SCOPE', 'FIELD', true], ['V_FIELD_CONFIDENCE', 'FIELD', false],
   ['V_TYPE_MATCH', 'DOCUMENT', true], ['V_ALL_REQUIRED_PRESENT', 'DOCUMENT', true], ['V_PAGE_COMPLETE', 'DOCUMENT', true], ['V_TAMPER_HEURISTIC', 'DOCUMENT', false],

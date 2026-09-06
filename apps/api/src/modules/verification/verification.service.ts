@@ -4,6 +4,7 @@ import { hopDocState } from './doc-state';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf } from './subjects';
 import { BUCKET_OF } from './doc-registry';
 import type { ValidatorContext } from './validators';
+import { plausibleExpiryCeiling, startOfToday } from './validators';
 import { approvedEvidenceFor } from './evidence';
 import { compileStorefrontDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
@@ -115,6 +116,17 @@ export function resolveApprovalExpiry(
       400,
       'EXPIRY_IN_PAST',
       `That expiry date has already passed. An expired ${docType.replace(/_/g, ' ')} cannot be approved.`,
+    );
+  }
+  // [self-test C · ruling 2026-09-06] The other direction: a date beyond the longest validity
+  // this type is issued for is a typo or a forgery (2036 keyed for 2026), not a long licence.
+  // Refused here — the one place the manual expiry is resolved — so it is never discovered at renewal.
+  const maxValidityDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
+  if (maxValidityDays && effective.getTime() > plausibleExpiryCeiling(startOfToday(now), maxValidityDays).getTime()) {
+    throw new AppError(
+      400,
+      'IMPLAUSIBLE_EXPIRY',
+      `That expiry is beyond the longest validity a ${docType.replace(/_/g, ' ')} is issued for (${maxValidityDays} days). Check the date on the document.`,
     );
   }
   return effective;
@@ -321,9 +333,10 @@ export class VerificationService {
   private async validatorContextFor(userId: string, docType: string): Promise<ValidatorContext> {
     const bucket = BUCKET_OF[docType] ?? null;
     const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { licensePlate: true } });
-    if (driver) return { taxi: true, registrationMark: driver.licensePlate ? normalizeRegistrationMark(driver.licensePlate) : null, docType, bucket };
+    const maxValidityDays = AUTO_APPROVE_EXPIRY_DAYS[docType] ?? null;
+    if (driver) return { taxi: true, registrationMark: driver.licensePlate ? normalizeRegistrationMark(driver.licensePlate) : null, docType, bucket, maxValidityDays };
     const rider = await this.prisma.rider.findUnique({ where: { userId }, select: { licensePlate: true } });
-    return { taxi: false, registrationMark: rider?.licensePlate ? normalizeRegistrationMark(rider.licensePlate) : null, docType, bucket };
+    return { taxi: false, registrationMark: rider?.licensePlate ? normalizeRegistrationMark(rider.licensePlate) : null, docType, bucket, maxValidityDays };
   }
 
   /** One admin page per profile per six hours when the breaker opens — an alarm, not a drumbeat. */
@@ -375,6 +388,7 @@ export class VerificationService {
       context,
       degraded,
       declared: type?.fields ?? [],
+      legacyCode: docType,
       profileCode,
       engine: this.kyc.engine ?? UNKNOWN_ENGINE,
       extracted: result.extracted,

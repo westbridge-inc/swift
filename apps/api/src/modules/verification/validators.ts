@@ -17,8 +17,10 @@ export interface ValidatorContext {
   /** The submission's document type and its bucket — the vehicle rules apply to VEHICLE documents, the licence rule to the licence. */
   docType: string | null;
   bucket: 'PERSONAL' | 'BUSINESS' | 'VEHICLE' | null;
+  /** [self-test C] The longest validity this type is ever issued for (AUTO_APPROVE_EXPIRY_DAYS); null = the rule cannot judge plausibility. */
+  maxValidityDays?: number | null;
 }
-export const NO_CONTEXT: ValidatorContext = { taxi: false, registrationMark: null, docType: null, bucket: null };
+export const NO_CONTEXT: ValidatorContext = { taxi: false, registrationMark: null, docType: null, bucket: null, maxValidityDays: null };
 /** A verdict the ledger does not record: the rule has nothing to say about this document. */
 export const NOT_APPLICABLE: ValidatorVerdict = { status: 'SKIP', detailCode: 'NOT_APPLICABLE' };
 export interface ValidatorInput {
@@ -75,6 +77,26 @@ export const VALIDATOR_IMPLEMENTATIONS: Readonly<Record<string, ValidatorImpl>> 
     const set = new Set(classes.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean));
     return set.has('H') || set.has('HIRE') ? { status: 'PASS' } : { status: 'FAIL' };
   },
+  // §7.2 V_NOT_EXPIRED: a printed expiry in the past is a blocking FAIL (EXPIRED_DOCUMENT).
+  'validators#V_NOT_EXPIRED': ({ declared, present }) => {
+    if (!declared.some((f) => f.fieldCode === 'expiry_date')) return NOT_APPLICABLE; // the type declares no expiry: nothing to say
+    const expiry = parseIsoDate(present.get('expiry_date'));
+    if (!expiry) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
+    return expiry.getTime() < startOfToday().getTime() ? { status: 'FAIL' } : { status: 'PASS' };
+  },
+  // §7.2 V_EXPIRY_PLAUSIBLE [self-test C · ruling 2026-09-06]: a confident, plausible-looking, WRONG
+  // expiry must not auto-commit. The printed expiry has to sit inside the type's longest validity
+  // from today (or from the printed issue date when read), with a 30-day tolerance for issuing
+  // offices that round. Beyond it is a blocking FAIL → a person keys the date; never a rejection.
+  'validators#V_EXPIRY_PLAUSIBLE': ({ declared, present, context }) => {
+    if (!declared.some((f) => f.fieldCode === 'expiry_date')) return NOT_APPLICABLE;
+    const expiry = parseIsoDate(present.get('expiry_date'));
+    const max = context?.maxValidityDays ?? null;
+    if (!expiry || max === null) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
+    const issue = parseIsoDate(present.get('issue_date'));
+    const from = issue ?? startOfToday();
+    return expiry.getTime() <= plausibleExpiryCeiling(from, max).getTime() ? { status: 'PASS' } : { status: 'FAIL' };
+  },
   'validators#V_INSURANCE_SCOPE': ({ present }) => {
     const raw = present.get('covers_hire_and_reward');
     if (raw === undefined) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
@@ -87,4 +109,23 @@ export const VALIDATOR_IMPLEMENTATIONS: Readonly<Record<string, ValidatorImpl>> 
 
 export function resolvesImpl(implRef: string | null | undefined): boolean {
   return typeof implRef === 'string' && Object.hasOwn(VALIDATOR_IMPLEMENTATIONS, implRef);
+}
+
+// ---------------------------------------------------------------------------
+// Expiry plausibility — shared by the field validator and the manual approval path.
+// ---------------------------------------------------------------------------
+export const EXPIRY_TOLERANCE_DAYS = 30;
+const DAY = 86_400_000;
+export function startOfToday(now = new Date()): Date { return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())); }
+/** The latest expiry a document of this validity can honestly carry, counted from `from`. */
+export function plausibleExpiryCeiling(from: Date, maxValidityDays: number): Date {
+  return new Date(from.getTime() + (maxValidityDays + EXPIRY_TOLERANCE_DAYS) * DAY);
+}
+/** ISO date (YYYY-MM-DD or a full timestamp) → Date, else null. */
+export function parseIsoDate(raw: string | undefined): Date | null {
+  if (!raw) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw.trim());
+  if (!m) return null;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return Number.isNaN(d.getTime()) ? null : d;
 }

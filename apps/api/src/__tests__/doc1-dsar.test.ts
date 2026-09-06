@@ -189,7 +189,7 @@ describe('[DOC-1 P25] data-subject rights against documents', () => {
     expect([request.userId, request.fieldCode, request.resolvedAt]).toEqual([me, 'doc_number', null]);
     expect(await system(() => app.prisma.auditLog.count({ where: { action: 'DSAR_RECTIFICATION_REQUESTED', entityId: approved } }))).toBe(1);
     const after = await docRow(approved);
-    expect(after.extractionRuns.map((r) => r.fields.map((f) => [f.fieldCode, Buffer.from(f.valueCt!).toString('hex')]))).toEqual(before.extractionRuns.map((r) => r.fields.map((f) => [f.fieldCode, Buffer.from(f.valueCt!).toString('hex')])));
+    expect(after.extractionRuns.map((r) => r.fields.map((f) => [f.fieldCode, (f.valueCt ? Buffer.from(f.valueCt).toString('hex') : null)]))).toEqual(before.extractionRuns.map((r) => r.fields.map((f) => [f.fieldCode, (f.valueCt ? Buffer.from(f.valueCt).toString('hex') : null)])));
     expect(after.status).toBe('APPROVED');
     await service.alertReviewSlaBreaches();
     expect((await system(() => app.prisma.reviewCase.findUniqueOrThrow({ where: { id: caseId } }))).closedAt).toBeNull();
