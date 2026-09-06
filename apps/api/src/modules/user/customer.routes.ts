@@ -30,7 +30,7 @@ import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
 import { RatingService } from '../rating/rating.service';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, tenantOfUser } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { AccountService } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
@@ -2504,6 +2504,38 @@ export async function customerRoutes(app: FastifyInstance) {
       select: { id: true, fulfillment: true, pickupCode: true, totalAmount: true, deliveryFee: true, tipAmount: true },
     });
     return { success: true, data: updated };
+  });
+
+  // [DOC-1 §31.5 · §31.6 · P31-2] The customer's OWN claim, from their device. "I paid" (with
+  // the MMG reference) is a second, independent claim beside the store's; a dispute after the
+  // store claimed receipt is a mismatch that holds dispatch until a person resolves it.
+  app.post('/orders/:id/payment-claim', async (request: AuthRequest) => {
+    if (!request.user?.userId) throw new AppError(401, 'UNAUTHENTICATED', 'Sign in first');
+    const { id } = request.params as { id: string };
+    const body = z.object({ paid: z.boolean(), reference: z.string().trim().min(3).max(64).optional() }).parse(request.body ?? {});
+    const order = await app.prisma.order.findFirst({ where: { id, customerId: request.user.userId }, select: { id: true, paymentMethod: true, paymentStatus: true, customerClaimedPaidAt: true, mmgClaimMismatchAt: true } });
+    if (!order) throw new NotFoundError('Order', id);
+    if (order.paymentMethod !== 'MOBILE_MONEY') throw new AppError(409, 'NOT_A_WALLET_ORDER', 'Only an MMG order carries a payment claim');
+    const now = new Date();
+    if (body.paid) {
+      const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: now, customerPaymentRef: body.reference ?? null } });
+      await app.prisma.auditLog.create({ data: { userId: request.user.userId, action: 'CUSTOMER_CLAIMED_PAID', entity: 'Order', entityId: id, changes: { reference: body.reference ?? null, claim: 'customer_claimed_paid' } } });
+      return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, customerClaimedPaidAt: updated.customerClaimedPaidAt, storeClaimed: updated.paymentStatus === 'CLAIMED' } };
+    }
+    // a dispute: the store says received, the customer says not — a mismatch, before dispatch
+    const mismatch = order.paymentStatus === 'CLAIMED' && !order.mmgClaimMismatchAt;
+    const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: null, customerPaymentRef: null, ...(mismatch ? { mmgClaimMismatchAt: now } : {}) } });
+    await app.prisma.auditLog.create({ data: { userId: request.user.userId, action: mismatch ? 'MMG_CLAIM_MISMATCH' : 'CUSTOMER_CLAIMED_NOT_PAID', entity: 'Order', entityId: id, changes: { claim: 'customer_claimed_not_paid', storeStatus: order.paymentStatus } } });
+    if (mismatch) {
+      const { notifyAdmins } = await import('../notification/notification.service');
+      await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+        tenantId: await tenantOfUser(app.prisma, request.user.userId),
+        title: 'MMG payment claims disagree',
+        body: `Order ${id}: the store reported the MMG payment received; the customer says they did not pay. Dispatch is held until someone resolves it.`,
+        data: { kind: 'mmg_claim_mismatch', orderId: id },
+      });
+    }
+    return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, mismatch: Boolean(updated.mmgClaimMismatchAt) } };
   });
 
   app.post('/orders/:id/cancel', async (request: AuthRequest) => {

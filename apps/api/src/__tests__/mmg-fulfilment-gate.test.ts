@@ -174,7 +174,7 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
     const confirm = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(confirm.statusCode).toBe(200);
     const paid = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(paid.paymentStatus).toBe('CAPTURED');
+    expect(paid.paymentStatus).toBe('CLAIMED'); // [DOC-1 §31.5 · DOC-INV-48] the store's word is a claim, never a capture
 
     const accept = await inject('PUT', `/api/v1/vendor/orders/${order.id}/accept`, vendorOwner.token, {}, vendorId);
     expect(accept.statusCode).toBe(200);
@@ -494,7 +494,7 @@ describe('capture responses never leak verifier secrets [REPORT-005 F-005-04]', 
     const wBody = JSON.stringify(winner.json());
     expect(wBody).not.toContain('123456');
     expect(wBody).not.toContain('9876');
-    expect(winner.json().data.paymentStatus).toBe('CAPTURED');
+    expect(winner.json().data.paymentStatus).toBe('CLAIMED');
 
     const loser = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(loser.statusCode).toBe(200);

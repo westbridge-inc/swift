@@ -1679,16 +1679,19 @@ export async function vendorRoutes(app: FastifyInstance) {
       // [W-25] the preview above is UX; THIS is the authority — a payment that
       // failed or was reversed between the tap and the lock is refused here
       assertMmgAttestable(locked);
-      if (locked.paymentStatus === 'CAPTURED') {
+      if (locked.paymentStatus === 'CAPTURED' || locked.paymentStatus === 'CLAIMED') {
         return { won: false, order: locked }; // idempotent under the lock
       }
+      // [DOC-1 §31.5 · DOC-INV-48 · P31-2] The store's word is a CLAIM. It lands as CLAIMED —
+      // never CAPTURED, which is reserved for a provider's own evidence — so nothing
+      // downstream can read a person's attestation as a settled fact.
       const cas = await tx.order.updateMany({
         where: {
           id: order.id,
-          paymentStatus: { not: 'CAPTURED' },
+          paymentStatus: { notIn: ['CAPTURED', 'CLAIMED'] },
           status: { notIn: ORDER_CLOSED_STATUSES as OrderStatus[] },
         },
-        data: { paymentStatus: 'CAPTURED' },
+        data: { paymentStatus: 'CLAIMED' },
       });
       // [LB-015 / REPORT-004 F-004-08] The capture and its evidence row commit
       // or vanish together, the evidence records the FRESH lifecycle status
@@ -1722,13 +1725,18 @@ export async function vendorRoutes(app: FastifyInstance) {
         await tx.orderStatusLog.create({
           data: { orderId: order.id, status: fresh.status, changedBy: request.user.userId, note: `MMG payment attested by the store (ref ${reference})` },
         });
+        // [DOC-1 §31.6] Every money event is somebody's assertion: who claimed what, when, on what evidence.
+        await tx.auditLog.create({ data: {
+          userId: request.user.userId, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED', entity: 'Order', entityId: order.id,
+          changes: { reference, amount: String(fresh.totalAmount), claim: 'payment_claimed_by_vendor' },
+        } });
       }
       return { won: cas.count > 0, order: fresh };
     });
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
     const updated = capture.order;
-    app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: updated.status, paymentStatus: 'CAPTURED' });
+    app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED' });
     // The socket covers an open order screen; the notification survives it.
     await notifications.send({
       userId: order.customerId,

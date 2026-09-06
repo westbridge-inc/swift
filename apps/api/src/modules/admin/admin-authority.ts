@@ -181,6 +181,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders/:id': c('C1', 'order.read'),
   'GET /ops/live': c('C1', 'ops.live.read'),
   'POST /orders/:id/retry-dispatch': c('C2', 'order.dispatch'),
+  'POST /orders/:id/payment-claim/resolve': c('C3', 'order.dispatch'),
   'POST /orders/:id/food-age-hold/release': c('C2', 'order.hold.release'),
   'GET /orders/:id/handover-secret': c('C1', 'order.handover.read'),
   'POST /orders/:id/handover-secret/rotate': c('C2', 'order.handover.rotate'),

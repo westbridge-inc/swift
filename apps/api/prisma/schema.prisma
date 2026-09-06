@@ -1804,6 +1804,12 @@ model Order {
   mmgAttestedRef           String?   @unique
   mmgAttestedById          String?
   mmgAttestedAt            DateTime?
+  /// [DOC-1 §31.5 · P31-2] The customer's own claim, from their device: "I paid" with the
+  /// reference they entered — a second, independent claim; a dispute after the store's
+  /// claim is a mismatch that holds dispatch until a human looks.
+  customerClaimedPaidAt    DateTime?
+  customerPaymentRef       String?
+  mmgClaimMismatchAt       DateTime?
 
   estimatedPrepTime     Int?
   estimatedDeliveryTime Int?
@@ -1998,6 +2004,11 @@ enum PaymentStatus {
   PENDING
   AUTHORIZED
   CAPTURED
+  /// [DOC-1 §31.5 · DOC-INV-48] The store attested receipt on its OWN wallet (VENDOR_COLLECTS):
+  /// a person's word with a provider reference, never a provider capture. Operationally the
+  /// store took the risk, so the order may proceed; every surface says "reported by the
+  /// store", and nothing downstream may read it as confirmed.
+  CLAIMED
   FAILED
   REFUNDED
   PARTIALLY_REFUNDED

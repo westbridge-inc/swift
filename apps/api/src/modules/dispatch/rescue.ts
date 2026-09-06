@@ -81,7 +81,7 @@ async function cursorSet(redis: Redis, key: string, at: Date | null): Promise<vo
  *  rail. Cancelling it would mint CANCELLED+CAPTURED — the state the canonical
  *  cancel seam refuses (`MMG_CANCEL_UNAVAILABLE`, order.service). */
 export function isCapturedMmg(order: { paymentMethod: string; paymentStatus: string }): boolean {
-  return order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED';
+  return order.paymentMethod === 'MOBILE_MONEY' && (order.paymentStatus === 'CAPTURED' || order.paymentStatus === 'CLAIMED');
 }
 
 /** What one cutoff call did to the order. */
@@ -162,7 +162,7 @@ export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder
       // [TA-S0-001] The guard lives in the CAS, not only in the caller's
       // snapshot: money captured between the caller's read and this write is
       // respected by the database, not by luck.
-      NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' },
+      NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
     },
     data: { status: 'CANCELLED', cancelledAt: now, cancelledBy: 'system', cancellationReason: FOOD_TOO_OLD_REASON },
   });
@@ -259,7 +259,7 @@ async function holdPaidTooOldOrder(deps: RescueDeps, order: RetireableOrder, age
       where: {
         id: order.id, tenantId: order.tenantId, riderId: null, status: { in: [...WAITING_STATUSES] },
         fulfillment: 'DELIVERY', AND: [notSelfDeliveredFilter()],
-        paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED',
+        paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] },
         foodAgeHeldAt: null, foodAgeWaivedAt: null,
       },
       data: { foodAgeHeldAt: now },

@@ -40,6 +40,7 @@ describe('without an authority the derivation is conservative', () => {
       expect(doorFor({ paymentMethod: 'CASH', paymentStatus: state }), String(state)).toMatchObject({ kind: 'collect-cash', source: 'derived' });
     }
     expect(doorFor({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' })).toEqual({ kind: 'no-cash', version: null, source: 'derived' });
+    expect(doorFor({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' })).toEqual({ kind: 'no-cash', version: null, source: 'derived' });
     expect(doorFor({ paymentMethod: 'CASH', paymentStatus: 'CAPTURED' })).toEqual({ kind: 'no-cash', version: null, source: 'derived' });
     expect(doorFor(null)).toMatchObject({ kind: 'blocked', reason: 'UNKNOWN_RAIL_UNKNOWN' });
     expect(doorFor(undefined).kind).toBe('blocked');

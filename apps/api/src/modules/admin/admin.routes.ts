@@ -4722,6 +4722,20 @@ export async function adminRoutes(app: FastifyInstance) {
   // [DOC-1 §5.1 T23 · P5-1] revoke(): withdraw a COMMITTED approval with a reason. C3 —
   // the same authority as a decision; the state machine refuses anything not committed.
   const revokeDocSchema = z.object({ reason: z.string().min(3).max(500) });
+  // [DOC-1 §31.5 · P31-2] A human resolves a payment-claim mismatch: the hold clears, the order moves.
+  app.post('/orders/:id/payment-claim/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ resolution: z.enum(['CUSTOMER_PAID', 'CUSTOMER_DID_NOT_PAY']), note: z.string().min(3).max(500) }).parse(request.body);
+    const order = await app.prisma.order.findUnique({ where: { id }, select: { id: true, mmgClaimMismatchAt: true, paymentStatus: true } });
+    if (!order) throw new NotFoundError('Order', id);
+    const updated = await app.prisma.order.update({ where: { id }, data: {
+      mmgClaimMismatchAt: null,
+      ...(body.resolution === 'CUSTOMER_DID_NOT_PAY' ? { paymentStatus: 'PENDING', customerClaimedPaidAt: null } : { customerClaimedPaidAt: new Date() }),
+    } });
+    await audit(request.user.userId, 'MMG_CLAIM_MISMATCH_RESOLVED', 'Order', id, { resolution: body.resolution, note: body.note, wasStatus: order.paymentStatus }, request);
+    return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, mismatch: false } };
+  });
+
   app.put('/verification/:id/revoke', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = revokeDocSchema.parse(request.body);
