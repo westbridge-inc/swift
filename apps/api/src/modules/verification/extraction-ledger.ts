@@ -57,6 +57,8 @@ export interface ExtractionPlan {
 }
 export interface ExtractionPlanInput {
   declared: readonly DeclaredField[];
+  /** [P21] The ladder rung that pre-empted extraction (EXTRACTION_UNAVAILABLE, L3_DISABLED): the run is FAILED with this errorClass and no field is taken from the processor. */
+  degraded?: string | null;
   /** [P3-3] who the submitter is, for the taxi rules; absent = not a taxi, no plate. */
   context?: ValidatorContext;
   profileCode: string;
@@ -82,8 +84,9 @@ export function unpackAndDecrypt(blob: Buffer, dek: Buffer): Buffer {
 export async function planExtraction(input: ExtractionPlanInput): Promise<ExtractionPlan> {
   const declaredByCode = new Map(input.declared.map((f) => [f.fieldCode, f] as const));
   const present = new Map<string, string>();
+  const extractedIn = input.degraded ? undefined : input.extracted;
   let schemaViolations = 0;
-  for (const [key, raw] of Object.entries(input.extracted ?? {})) {
+  for (const [key, raw] of Object.entries(extractedIn ?? {})) {
     if (raw === undefined || raw === null || raw === '') continue; // absent, not a violation
     const code = PROVIDER_KEY_TO_FIELD_CODE[key];
     // DOC-INV-6: undeclared for this document type, or not the declared shape — dropped, counted, never named.
@@ -113,10 +116,11 @@ export async function planExtraction(input: ExtractionPlanInput): Promise<Extrac
   const required = input.declared.filter((f) => f.isRequired);
   const requiredMissing = required.filter((f) => !present.has(f.fieldCode));
   const outcome: ExtractionOutcome =
-    required.length > 0 && requiredMissing.length === required.length ? 'FAILED' // T6: not one required field — the human keys it
+    input.degraded ? 'FAILED' // [P21] the ladder pre-empted extraction: a human keys it (T6)
+    : required.length > 0 && requiredMissing.length === required.length ? 'FAILED' // T6: not one required field — the human keys it
     : requiredMissing.length > 0 || noKek ? 'PARTIAL'
     : 'OK';
-  const errorClass = noKek ? 'NO_KEK' : outcome === 'FAILED' ? 'NO_REQUIRED_FIELDS' : null;
+  const errorClass = input.degraded ? input.degraded : noKek ? 'NO_KEK' : outcome === 'FAILED' ? 'NO_REQUIRED_FIELDS' : null;
 
   // [P7-1 · DOC-INV-2] The registry says which validators apply; only the ones with an
   // implementation judge — a declared-but-unimplemented validator writes nothing, and

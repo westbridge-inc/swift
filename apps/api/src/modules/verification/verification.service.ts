@@ -6,6 +6,7 @@ import { BUCKET_OF } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { approvedEvidenceFor } from './evidence';
 import { compileStorefrontDisclosure, disclosureGateEngaged } from './storefront-disclosure';
+import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -18,7 +19,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
-import type { KycProvider, KycVerificationResult } from '../../providers/kyc/kyc-provider';
+import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApproval, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
 import { registryCode } from './doc-registry';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -324,10 +325,25 @@ export class VerificationService {
     return { taxi: false, registrationMark: rider?.licensePlate ? normalizeRegistrationMark(rider.licensePlate) : null, docType, bucket };
   }
 
+  /** One admin page per profile per six hours when the breaker opens — an alarm, not a drumbeat. */
+  private async pageBreakerOnce(profileCode: string, rate: number): Promise<void> {
+    const recent = await this.prisma.notification.findFirst({
+      where: { data: { path: ['kind'], equals: 'ops_extraction_breaker_open' }, createdAt: { gt: new Date(Date.now() - 6 * 3_600_000) }, body: { contains: profileCode } },
+      select: { id: true },
+    });
+    if (recent) return;
+    await notifyAdmins(this.prisma, this.notifications, {
+      tenantId: null,
+      title: 'Extraction circuit breaker open',
+      body: `Profile ${profileCode}: ${Math.round(rate * 100)}% of the last 100 extraction runs violated the schema. The model leg is disabled for this type; submissions go to manual keying until the rate recovers.`,
+      data: { kind: 'ops_extraction_breaker_open', profileCode, rate },
+    });
+  }
+
   private async planExtractionFor(
     countryCode: string,
     docType: string,
-    result: KycVerificationResult & { collided?: boolean },
+    result: DegradedResult & { collided?: boolean },
     timing: { startedAt: Date; finishedAt: Date },
     context: ValidatorContext = { taxi: false, registrationMark: null, docType: null, bucket: null },
   ): Promise<{ plan: ExtractionPlan; type: RoutingType | null }> {
@@ -342,11 +358,23 @@ export class VerificationService {
       where: { OR: [{ docTypeCode: null }, { docTypeCode: registryCode(countryCode, docType) }] },
       select: { code: true, isBlocking: true, detailCode: true, implRef: true },
     });
+    // [DOC-1 §21.1 · P21] The model leg is disabled for a type whose recent runs violated the
+    // schema too often: everything routes to manual keying, and the admins are told once.
+    const profileCode = type?.extractionProfile ?? 'UNPROFILED';
+    let degraded = result.degraded ?? null;
+    if (!degraded && result.extracted) {
+      const breaker = await l3BreakerOpen(this.prisma, profileCode);
+      if (breaker.open) {
+        degraded = L3_DISABLED;
+        await this.pageBreakerOnce(profileCode, breaker.rate);
+      }
+    }
     const plan = await planExtraction({
       validators,
       context,
+      degraded,
       declared: type?.fields ?? [],
-      profileCode: type?.extractionProfile ?? 'UNPROFILED',
+      profileCode,
       engine: this.kyc.engine ?? UNKNOWN_ENGINE,
       extracted: result.extracted,
       confidence: result.confidence,
@@ -423,13 +451,16 @@ export class VerificationService {
     // [DOC-1 §0.5 · FD-D5 · CONFLICT-DOC-2] The biometric leg runs only while
     // the kill switch is on (default); off, an identity document is verified
     // like any other document — no face leaves the building.
+    // [DOC-1 §21.1 · P21] No new intake without the key service (production): fail closed, never plaintext.
+    assertKeyServiceForAccess('intake');
     if (IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled()) {
       if (!user.avatar || !user.selfieCapturedAt) {
         throw new AppError(400, 'SELFIE_REQUIRED', 'Take your profile selfie before submitting your ID — we match the two faces.');
       }
-      result = await this.kyc.verifyIdentity({ userId, idDocumentUrl: fileUrl, selfieUrl: user.avatar });
+      // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
+      result = await extractWithLadder(() => this.kyc.verifyIdentity({ userId, idDocumentUrl: fileUrl, selfieUrl: user.avatar! }));
     } else {
-      result = await this.kyc.verifyDocument({ userId, docType, fileUrl });
+      result = await extractWithLadder(() => this.kyc.verifyDocument({ userId, docType, fileUrl }));
     }
     const finishedAt = new Date();
 
@@ -531,9 +562,10 @@ export class VerificationService {
     // [DOC-1 §0.5 · FD-D5] Biometric off → the L2 identity document is verified
     // document-only; the selfie is not sent anywhere.
     const startedAt = new Date();
-    let result = biometricFaceMatchEnabled()
-      ? await this.kyc.verifyIdentity({ userId, idDocumentUrl, selfieUrl })
-      : await this.kyc.verifyDocument({ userId, docType: 'national_id', fileUrl: idDocumentUrl });
+    // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
+    let result: DegradedResult = await extractWithLadder(() => (biometricFaceMatchEnabled()
+      ? this.kyc.verifyIdentity({ userId, idDocumentUrl, selfieUrl })
+      : this.kyc.verifyDocument({ userId, docType: 'national_id', fileUrl: idDocumentUrl })));
     const finishedAt = new Date();
     result = await this.holdOnCrossSubjectCollision(userId, 'MOVER', idDocumentUrl, result);
     // Rung 2/3: held accounts are never auto-approved (see submitDocument).
@@ -632,6 +664,8 @@ export class VerificationService {
   // -------------------------------------------------------------------------
 
   async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview) {
+    // [DOC-1 §21.1 · P21] No approvals without the key service (production): fail closed.
+    assertKeyServiceForAccess('approval');
     // [A-19] Read the candidate first: the expiry decision needs the document's
     // TYPE and any date it already carries. This read is not the winner
     // boundary — the conditional transition below still is.
