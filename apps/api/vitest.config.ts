@@ -6,7 +6,12 @@ export default defineConfig({
     root: '.',
     include: ['src/**/*.test.ts'],
     testTimeout: 30000,
-    hookTimeout: 30000,
+    // The tenant-wall heal a DDL suite installs in beforeAll is O(walled tables) —
+    // 96 tables, ~384 statements, each an ACCESS EXCLUSIVE lock behind one advisory
+    // lock — and on the CI runner it now crosses 30s (hook timeouts in
+    // tenant-lineage-money / review-tenant-contract on 09-05). Setup is not the
+    // behaviour under test: give it room; testTimeout stays where it is.
+    hookTimeout: 120000,
     // SWIFT-165: measure coverage (v8) and publish the number in CI. No
     // thresholds yet — measure first, ratchet later (the suite is case-rich but
     // its blind spots were never quantified). Excludes tests, generated Prisma
