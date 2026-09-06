@@ -93,7 +93,7 @@ describe('[DOC-1 P21] the ladder', () => {
     expect(await docOf(doc.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING', record: null });
     const run = await runOf(doc.id);
     expect(run).toMatchObject({ outcome: 'FAILED', errorClass: EXTRACTION_UNAVAILABLE });
-    expect(run.fields).toHaveLength(0);
+    expect(run.fields.every((f) => f.valueCt === null)).toBe(true); // declared rows exist (P4-1), but the outage took no value
     expect(await system(() => app.prisma.reviewCase.count({ where: { submissionId: doc.id, closedAt: null } }))).toBe(1);
   });
 
@@ -123,8 +123,8 @@ describe('[DOC-1 P21] the ladder', () => {
     await system(() => app.prisma.docField.create({ data: { docTypeCode: code, fieldCode: 'doc_number', dataType: 'text', isRequired: false, isPii: true, isBlindIndexed: false, displayOrder: 1 } }));
     const seed = await submit(svc(new ApprovingKyc()), u, 'tin_certificate'); // establishes a run on the profile
     const healthy = await runOf(seed.id);
-    expect(healthy.fields.map((f) => f.fieldCode)).toEqual(['doc_number']);
-    expect(healthy.fields[0]!.valueCt).not.toBeNull(); // the healthy path stores the value (encrypted)
+    expect(healthy.fields.map((f) => f.fieldCode).filter((c) => c === 'doc_number')).toEqual(['doc_number']) // the suite's own declared field; the registry seeds the type's others (P4-1);
+    expect(healthy.fields.find((f) => f.fieldCode === 'doc_number')!.valueCt).not.toBeNull(); // the healthy path stores the value (encrypted)
     const tenantId = 'swift-default';
     await system(() => app.prisma.extractionRun.createMany({ data: Array.from({ length: BREAKER_WINDOW }, (_, i) => ({
       submissionId: seed.id, tenantId, profileCode, engineName: 'approving', engineVersion: 'test', startedAt: new Date(Date.now() - (i + 1) * 1000), outcome: 'OK' as const, schemaViolations: i < 12 ? 1 : 0,

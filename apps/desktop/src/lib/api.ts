@@ -734,3 +734,8 @@ export const raiseIncident = (body: {
   orderId?: string; idempotencyKey?: string;
 }) => apiFetch('/api/v1/safety/incidents/ops', { method: 'POST', body: JSON.stringify(body) })
   .then((r) => r.data as IncidentRow);
+
+/** [DOC-1 §20.2 · P20-2] The per-document chain of custody (metadata only — never a field value, never the reviewer's note). A logged read. */
+export const custodyNarrative = (docId: string) =>
+  apiFetch(`/api/v1/admin/verification/${docId}/custody`).then((r) => r.data);
+
