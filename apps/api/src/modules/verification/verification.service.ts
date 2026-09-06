@@ -1,6 +1,7 @@
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
+import { resolveSubject } from './subjects';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -264,8 +265,8 @@ export class VerificationService {
     review: { queue: ReviewQueue; extraction?: ExtractionPlan } = { queue: 'STANDARD' },
   ) {
     const doc = await this.prisma.$transaction(async (tx) => {
-      const alive = await tx.$queryRaw<{ status: string; tenantId: string }[]>(
-        Prisma.sql`SELECT status, "tenantId" FROM users WHERE id = ${data.userId} FOR SHARE`,
+      const alive = await tx.$queryRaw<{ status: string; tenantId: string; countryCode: string }[]>(
+        Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} FOR SHARE`,
       );
       const status = alive[0]?.status;
       if (!status || ['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(status)) {
@@ -276,7 +277,11 @@ export class VerificationService {
       // judges. The ledger lands first, so T8's guard (no blocking FAIL) and T17's
       // provenance (the AUTO_APPROVED ledger) are facts before the hops that need them.
       const { status: verdict, ...born } = data;
-      const created = await tx.verificationDocument.create({ data: { ...born, status: 'PENDING', state: 'CAPTURED' } });
+      // [DOC-1 §4.3 · P1-2] Every new submission names its subject (person / business /
+      // vehicle) and links the account to it — in the same transaction, so a submission
+      // without a subject cannot exist (a mover without a plate has no vehicle subject).
+      const subject = await resolveSubject(tx, { userId: data.userId, countryCode: alive[0]!.countryCode, docType: data.docType, tenantId: alive[0]!.tenantId });
+      const created = await tx.verificationDocument.create({ data: { ...born, status: 'PENDING', state: 'CAPTURED', subjectId: subject?.subjectId ?? null } });
       // [DOC-1 P4-4] The processor result lands as rows in the same transaction:
       // a submission without its extraction ledger cannot exist.
       if (review.extraction) {

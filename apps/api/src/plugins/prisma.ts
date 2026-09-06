@@ -158,6 +158,12 @@ const TENANT_QUERY_EXTENSIONS = {
   // [DOC-1 P9-4]
   docLegalHold: scoped,
   renewalSchedule: scoped,
+  // [DOC-1 P1-2] subjects, links, profiles
+  subject: scoped,
+  subjectLink: scoped,
+  personProfile: scoped,
+  businessProfile: scoped,
+  vehicleProfile: scoped,
   rectificationRequest: scoped,
   fraudCase: scoped,
 };

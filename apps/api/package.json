@@ -11,6 +11,7 @@
     "worker": "tsx watch src/worker.ts",
     "dpa:readiness": "tsx scripts/dpa-readiness.ts",
     "doc1:rehearse": "tsx scripts/doc1-rehearse-activation.ts",
+    "doc1:backfill-subjects": "tsx scripts/doc1-backfill-subjects.ts",
     "review:provision": "tsx scripts/review-provision.ts provision",
     "review:status": "tsx scripts/review-provision.ts status",
     "review:rotate": "tsx scripts/review-provision.ts rotate",
