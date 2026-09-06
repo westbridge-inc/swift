@@ -259,6 +259,14 @@ export const docLegalHoldGauge = new client.Gauge({
   registers: [registry],
 });
 
+// [DOC-1 §1.3 · P1-3] The image-policy sweep: images purged after review, by outcome.
+export const docImagePolicyCounter = new client.Counter({
+  name: 'swift_doc_image_policy_total',
+  help: 'Image-policy sweep outcomes (purged, probe_failed, skipped)',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 // [DOC-1 §9.2 · P9-2] The retention reaper's heartbeat: fresh / stale / age (LB-0 alarm beyond two cycles).
 export const reaperGauge = new client.Gauge({
   name: 'swift_document_reaper',
