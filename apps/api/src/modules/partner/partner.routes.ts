@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { AppError } from '../../utils/errors';
 import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { PartnerService } from './partner.service';
@@ -32,11 +33,14 @@ const becomeSchema = z.object({
   vehicleType: z.nativeEnum(VehicleType).optional(),
   vehicle: vehicleSchema.optional(),
   business: businessSchema.optional(),
-  // [DCR-1] The role-agreement checkbox. Optional so builds that predate the
-  // control keep working — consent is recorded when the checkbox rode the
-  // request, exactly as ticked. Never fabricated for old clients.
+  // [DCR-1 · TA-S1-008] The role-agreement checkbox. It used to be optional "so builds that
+  // predate the control keep working" — which made acceptance optional AT THE AUTHORITY: a
+  // client that never showed the agreement could provision a partner with no consent row.
+  // No released build predates the control, so the API now refuses without it (below); the
+  // consent row is still written exactly as ticked, never fabricated.
   acceptAgreement: z.boolean().optional(),
 });
+export const AGREEMENT_REQUIRED = 'AGREEMENT_REQUIRED';
 
 export async function partnerRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
@@ -45,6 +49,10 @@ export async function partnerRoutes(app: FastifyInstance) {
   /** POST /become — self-serve provisioning of a Rider/Driver/Vendor entity. */
   app.post('/become', auth, async (request, reply) => {
     const body = becomeSchema.parse(request.body);
+    // [TA-S1-008] Acceptance is a precondition of the authority, not a courtesy of the client.
+    if (body.acceptAgreement !== true) {
+      throw new AppError(400, AGREEMENT_REQUIRED, `Accept the ${body.role === 'VENDOR' ? 'vendor' : 'driver'} agreement to continue — Swift records that you agreed, and cannot record what you did not.`);
+    }
     const { result, authorityCleanup } = await service.becomePartnerWithAuthority(
       request.user.userId,
       body,

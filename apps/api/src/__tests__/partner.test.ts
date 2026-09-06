@@ -97,7 +97,7 @@ afterAll(async () => {
 
 describe('partner provisioning — failure paths', () => {
   it('rejects unauthenticated /become', async () => {
-    const res = await post('/api/v1/partner/become', { role: 'MOVER', vehicleType: 'BICYCLE' });
+    const res = await post('/api/v1/partner/become', { acceptAgreement: true, role: 'MOVER', vehicleType: 'BICYCLE' });
     expect(res.statusCode).toBe(401);
   });
 
@@ -110,7 +110,7 @@ describe('partner provisioning — failure paths', () => {
   });
 
   it('rejects a car driver with no vehicle details', async () => {
-    const res = await post('/api/v1/partner/become', { role: 'MOVER', vehicleType: 'CAR' }, carToken);
+    const res = await post('/api/v1/partner/become', { acceptAgreement: true, role: 'MOVER', vehicleType: 'CAR' }, carToken);
     expect(res.statusCode).toBe(400);
   });
 });
@@ -119,7 +119,7 @@ describe('partner provisioning — happy paths', () => {
   it('provisions a Driver with vehicle details and unblocks /driver', async () => {
     const res = await post(
       '/api/v1/partner/become',
-      { role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'PXX 1234' } },
+      { acceptAgreement: true, role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'PXX 1234' } },
       carToken,
     );
     expect(res.statusCode).toBe(201);
@@ -131,7 +131,7 @@ describe('partner provisioning — happy paths', () => {
   it('is idempotent — re-provisioning a Driver returns 200, no duplicate', async () => {
     const res = await post(
       '/api/v1/partner/become',
-      { role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'PXX 1234' } },
+      { acceptAgreement: true, role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'PXX 1234' } },
       carToken,
     );
     expect(res.statusCode).toBe(200);
@@ -141,7 +141,7 @@ describe('partner provisioning — happy paths', () => {
   });
 
   it('provisions a Rider for a bike mover and unblocks /rider', async () => {
-    const res = await post('/api/v1/partner/become', { role: 'MOVER', vehicleType: 'BICYCLE' }, bikeToken);
+    const res = await post('/api/v1/partner/become', { acceptAgreement: true, role: 'MOVER', vehicleType: 'BICYCLE' }, bikeToken);
     expect(res.statusCode).toBe(201);
     expect(JSON.parse(res.body).data.kind).toBe('RIDER');
     const profile = await get('/api/v1/rider/profile', bikeToken);
@@ -151,7 +151,7 @@ describe('partner provisioning — happy paths', () => {
   it('provisions a GROUP Driver for a bus mover — passenger runs', async () => {
     const res = await post(
       '/api/v1/partner/become',
-      { role: 'MOVER', vehicleType: 'BUS_15', vehicle: { make: 'Toyota', model: 'Coaster', year: 2019, color: 'White', licensePlate: 'BXX 5150' } },
+      { acceptAgreement: true, role: 'MOVER', vehicleType: 'BUS_15', vehicle: { make: 'Toyota', model: 'Coaster', year: 2019, color: 'White', licensePlate: 'BXX 5150' } },
       busToken,
     );
     expect(res.statusCode).toBe(201);
@@ -164,7 +164,7 @@ describe('partner provisioning — happy paths', () => {
   it('provisions a COMFORT Driver for a wagon mover', async () => {
     const res = await post(
       '/api/v1/partner/become',
-      { role: 'MOVER', vehicleType: 'WAGON_CAR', vehicle: { make: 'Toyota', model: 'Fielder', year: 2017, color: 'Grey', licensePlate: 'WXX 7777' } },
+      { acceptAgreement: true, role: 'MOVER', vehicleType: 'WAGON_CAR', vehicle: { make: 'Toyota', model: 'Fielder', year: 2017, color: 'Grey', licensePlate: 'WXX 7777' } },
       wagonToken,
     );
     expect(res.statusCode).toBe(201);
@@ -175,7 +175,7 @@ describe('partner provisioning — happy paths', () => {
   });
 
   it('appends MOVER + RIDER roles exactly once', async () => {
-    await post('/api/v1/partner/become', { role: 'MOVER', vehicleType: 'BICYCLE' }, bikeToken);
+    await post('/api/v1/partner/become', { acceptAgreement: true, role: 'MOVER', vehicleType: 'BICYCLE' }, bikeToken);
     const user = await app.prisma.user.findUnique({ where: { phone: BIKE_PHONE }, select: { roles: true, activeRole: true } });
     expect(user?.roles.filter((r) => r === 'MOVER')).toHaveLength(1);
     expect(user?.roles).toContain('RIDER');
@@ -186,7 +186,7 @@ describe('partner provisioning — happy paths', () => {
     const bicycleResponses = await Promise.all(
       Array.from({ length: 8 }, () => post(
         '/api/v1/partner/become',
-        { role: 'MOVER', vehicleType: 'BICYCLE' },
+        { acceptAgreement: true, role: 'MOVER', vehicleType: 'BICYCLE' },
         raceToken,
       )),
     );
@@ -196,9 +196,9 @@ describe('partner provisioning — happy paths', () => {
       .toEqual(Array(8).fill(JSON.parse(bicycleResponses[0]!.body).data.id));
 
     const mixed = await Promise.all([
-      post('/api/v1/partner/become', { role: 'MOVER', vehicleType: 'BICYCLE' }, raceToken),
+      post('/api/v1/partner/become', { acceptAgreement: true, role: 'MOVER', vehicleType: 'BICYCLE' }, raceToken),
       post('/api/v1/partner/become', {
-        role: 'MOVER',
+        acceptAgreement: true, role: 'MOVER',
         vehicleType: 'CAR',
         vehicle: { make: 'Toyota', model: 'Axio', year: 2020, color: 'White', licensePlate: 'RACE 100' },
       }, raceToken),
@@ -217,7 +217,7 @@ describe('partner provisioning — happy paths', () => {
     const vendorResponses = await Promise.all(
       Array.from({ length: 8 }, () => post(
         '/api/v1/partner/become',
-        { role: 'VENDOR', business },
+        { acceptAgreement: true, role: 'VENDOR', business },
         raceToken,
       )),
     );
@@ -271,7 +271,7 @@ describe('partner provisioning — happy paths', () => {
       data: { isOnline: true, isAvailable: false, currentOrderId: 'partner-active-job', locationSessionId: syntheticLocationOwner('partner') },
     });
     const blocked = await post('/api/v1/partner/become', {
-      role: 'VENDOR',
+      acceptAgreement: true, role: 'VENDOR',
       business: {
         name: 'Mover Side Store',
         vendorType: 'STORE',
@@ -311,12 +311,12 @@ describe('vendor provisioning', () => {
   };
 
   it('rejects a vendor with no business details', async () => {
-    const res = await post('/api/v1/partner/become', { role: 'VENDOR' }, vendorToken);
+    const res = await post('/api/v1/partner/become', { acceptAgreement: true, role: 'VENDOR' }, vendorToken);
     expect(res.statusCode).toBe(400);
   });
 
   it('provisions a Vendor store (PENDING_APPROVAL) + VENDOR_OWNER role', async () => {
-    const res = await post('/api/v1/partner/become', { role: 'VENDOR', business }, vendorToken);
+    const res = await post('/api/v1/partner/become', { acceptAgreement: true, role: 'VENDOR', business }, vendorToken);
     expect(res.statusCode).toBe(201);
     expect(JSON.parse(res.body).data.kind).toBe('VENDOR');
     const vendor = await app.prisma.vendor.findFirst({ where: { owner: { user: { phone: VENDOR_PHONE } } } });
@@ -327,7 +327,7 @@ describe('vendor provisioning', () => {
   });
 
   it('is idempotent — one store per owner', async () => {
-    const res = await post('/api/v1/partner/become', { role: 'VENDOR', business }, vendorToken);
+    const res = await post('/api/v1/partner/become', { acceptAgreement: true, role: 'VENDOR', business }, vendorToken);
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).data.created).toBe(false);
     const count = await app.prisma.vendor.count({ where: { owner: { user: { phone: VENDOR_PHONE } } } });
