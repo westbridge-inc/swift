@@ -81,11 +81,11 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
     note: 'Receives ciphertext only: boot-config refuses production without MASTER_KEK (envelope encryption).',
   },
   {
-    ref: 'SENTRY', party: 'Functional Software, Inc. (Sentry)', service: 'Error and performance telemetry',
-    providerDirs: [], hosts: ['sentry.io'],
+    ref: 'ERROR_TRACKING', party: 'Swift (self-hosted GlitchTip, Sentry-SDK compatible)', service: 'Error and performance telemetry',
+    providerDirs: [], hosts: [],
     payload: ['DIAGNOSTIC'], lawfulBasis: 'LEGITIMATE_INTEREST',
-    country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
-    note: 'Events are scrubbed by the observability plugin; a document byte in an event is a bug, not a flow.',
+    country: 'Swift infrastructure', leavesCountry: false, transferBasis: 'SELF_HOSTED', contractEnv: null,
+    note: 'Founder decision 2026-09-07: self-hosted (swift-infra/docker-compose.glitchtip.yml); SENTRY_DSN points at it. A sentry.io DSN would make this a third-party processor — not permitted by decision; events are scrubbed by the observability plugin either way.',
   },
   {
     ref: 'TWILIO', party: 'Twilio Inc.', service: 'SMS one-time codes and notices',
