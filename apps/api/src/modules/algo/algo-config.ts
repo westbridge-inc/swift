@@ -170,6 +170,11 @@ export const ALGO_DEFAULTS = {
    * the founder sets an amount.
    */
   'rescue.foodAgeMaxMinutes': { FOOD_DELIVERY: 45, GROCERY_DELIVERY: 90 } as Record<string, number>,
+  // [F-07 · delegated ruling 2026-09-06] 0 BY DECISION, not by omission: the rescuer's
+  // incentive is the FULL delivery fee — the abandoner forfeits it (a handback creates no
+  // earning; the fee is earned at DELIVERED by whoever delivers), so every re-offer already
+  // carries the whole fee and the food-age cutoff stays live. Swift's own money is granted
+  // only if the founder sets an amount here.
   'rescue.incentiveGyd': 0,
   'rescue.incentiveFromCascade': 2,
 } as const;
