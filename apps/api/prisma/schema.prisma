@@ -79,6 +79,8 @@ model User {
   walletBalance Decimal @default(0) @db.Decimal(12, 2)
 
   verificationDocuments VerificationDocument[]
+  subjectsCreated       Subject[]              @relation("SubjectCreatedBy")
+  subjectLinks          SubjectLink[]          @relation("SubjectLinkAccount")
 
   /// [DOC-1 P9-4] legal holds on this person's documents
 
@@ -408,6 +410,11 @@ model Tenant {
   validationResults ValidationResult[]
   docLegalHolds     DocLegalHold[]
   renewalSchedules  RenewalSchedule[]
+  subjects          Subject[]
+  subjectLinks      SubjectLink[]
+  personProfiles    PersonProfile[]
+  businessProfiles  BusinessProfile[]
+  vehicleProfiles   VehicleProfile[]
   rectifications    RectificationRequest[]
   fraudCases        FraudCase[]
 
@@ -634,6 +641,11 @@ model VerificationDocument {
   /// [DOC-1 §9.4 P9-4] while set, this document cannot be purged; release clears it (T22: the state is untouched)
   legalHoldId          String?                    @db.Uuid
   legalHold            DocLegalHold?              @relation(fields: [legalHoldId], references: [id], onDelete: Restrict)
+  /// [DOC-1 §4.3 · P1-2] The subject this document is evidence ABOUT (a person, a business,
+  /// a vehicle) — EXPAND beside userId, which stays the account that uploaded it. Null only
+  /// on rows that predate subjects; `pnpm doc1:backfill-subjects` fills them.
+  subjectId            String?                    @db.Uuid
+  subject              Subject?                   @relation(fields: [subjectId], references: [id], onDelete: SetNull)
   /// [DOC-1 §9.3 P4-7] the renewal schedule the database keeps for an approved document with an expiry
   renewalSchedule      RenewalSchedule?
 
@@ -643,6 +655,7 @@ model VerificationDocument {
   @@index([retentionExpiresAt])
   @@index([legalHoldId])
   @@index([state])
+  @@index([subjectId])
   @@map("verification_documents")
 }
 
@@ -6517,4 +6530,114 @@ model DocStateTransition {
 
   @@id([fromState, toState])
   @@map("doc_state_transition")
+}
+
+/// [DOC-1 §4.3 · P1-2] The account is a join, not an owner: documents are evidence about a
+/// SUBJECT — a person, a business, or a vehicle — and an account is LINKED to subjects with
+/// a relation and a validity window. One person record serves every role the person holds;
+/// a vehicle's documents stay valid when its driver changes; a business's registration
+/// follows the business, not the previous owner's login. `mergedIntoId` records an
+/// identity-graph merge (never a delete); resolvers follow it to the root.
+enum SubjectRelation {
+  SELF
+  OWNER
+  DIRECTOR
+  ASSIGNED_DRIVER
+  OPERATOR
+}
+
+model Subject {
+  id           String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String         @default("swift-default")
+  tenant       Tenant         @relation(fields: [tenantId], references: [id])
+  kind         DocSubjectKind
+  countryCode  String
+  /// The account that first registered the subject — the tenant-lineage parent (STA-1 §4).
+  createdById  String
+  createdBy    User           @relation("SubjectCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  mergedIntoId String?        @db.Uuid
+  mergedInto   Subject?       @relation("SubjectMerge", fields: [mergedIntoId], references: [id])
+  mergedFrom   Subject[]      @relation("SubjectMerge")
+  createdAt    DateTime       @default(now())
+  links        SubjectLink[]
+  documents    VerificationDocument[]
+  person       PersonProfile?
+  business     BusinessProfile?
+  vehicle      VehicleProfile?
+
+  @@index([tenantId, kind, countryCode])
+  @@index([createdById])
+  @@index([mergedIntoId])
+  @@map("subject")
+}
+
+model SubjectLink {
+  id        String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String          @default("swift-default")
+  tenant    Tenant          @relation(fields: [tenantId], references: [id])
+  accountId String
+  account   User            @relation("SubjectLinkAccount", fields: [accountId], references: [id], onDelete: Cascade)
+  subjectId String          @db.Uuid
+  subject   Subject         @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  relation  SubjectRelation
+  validFrom DateTime        @default(now())
+  validTo   DateTime?
+
+  @@unique([accountId, subjectId, relation, validFrom])
+  @@index([subjectId])
+  @@index([tenantId, accountId])
+  @@map("subject_link")
+}
+
+/// One PERSON subject per account today (the account IS the person until the identity
+/// graph merges two). Name / date-of-birth facts live in the extraction ledger, not here.
+model PersonProfile {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String   @default("swift-default")
+  tenant            Tenant   @relation(fields: [tenantId], references: [id])
+  subjectId         String   @unique @db.Uuid
+  subject           Subject  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  accountId         String   @unique
+  verificationLevel String   @default("NONE")
+  verifiedAt        DateTime?
+
+  @@map("person_profile")
+}
+
+/// One BUSINESS subject per owner account (ruling 2026-09-06: today's documents are per
+/// owner, not per store; a per-store split is a merge-aware EXPAND when a franchise needs it).
+model BusinessProfile {
+  id             String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String  @default("swift-default")
+  tenant         Tenant  @relation(fields: [tenantId], references: [id])
+  subjectId      String  @unique @db.Uuid
+  subject        Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  ownerAccountId String  @unique
+  tradingName    String?
+  entityForm     String  @default("UNREGISTERED")
+  tier           String  @default("TIER_UNREGISTERED")
+
+  @@map("business_profile")
+}
+
+/// One VEHICLE subject per registration mark and country; every driver assigned to it is a
+/// link. The mark is stored normalised (upper case, no spaces); the plate class is its first
+/// letter (H = hire), computed by the resolver — never a second copy.
+model VehicleProfile {
+  id               String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String  @default("swift-default")
+  tenant           Tenant  @relation(fields: [tenantId], references: [id])
+  subjectId        String  @unique @db.Uuid
+  subject          Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  registrationMark String
+  countryCode      String
+  vehicleKind      String
+  make             String?
+  model            String?
+  year             Int?
+  colour           String?
+  registeredById   String
+
+  @@unique([registrationMark, countryCode])
+  @@map("vehicle_profile")
 }

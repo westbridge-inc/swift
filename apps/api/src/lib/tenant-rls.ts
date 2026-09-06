@@ -65,6 +65,12 @@ export const TENANT_TABLES = [
   'doc_legal_hold',
   // [DOC-1 P4-7] the renewal schedule of an approved document
   'renewal_schedule',
+  // [DOC-1 P1-2] subjects (person / business / vehicle), their links and profiles
+  'subject',
+  'subject_link',
+  'person_profile',
+  'business_profile',
+  'vehicle_profile',
   // [DOC-1 P25] a request to correct an extracted field
   'rectification_request',
   // [DOC-1 P24] a fraud case confirmed on second review
@@ -230,6 +236,12 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   // [DOC-1 P9-4] a legal hold inherits the tenant of the person whose documents it holds
   { table: 'doc_legal_hold', trigger: 'doc_legal_hold_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
   { table: 'renewal_schedule', trigger: 'renewal_schedule_tenant_matches_subject', parent: 'users', fk: 'subjectId' },
+  // [DOC-1 P1-2] a subject inherits the tenant of the account that registered it; a link that of its account; a profile that of its subject
+  { table: 'subject', trigger: 'subject_tenant_matches_creator', parent: 'users', fk: 'createdById' },
+  { table: 'subject_link', trigger: 'subject_link_tenant_matches_account', parent: 'users', fk: 'accountId' },
+  { table: 'person_profile', trigger: 'person_profile_tenant_matches_subject', parent: 'subject', fk: 'subjectId' },
+  { table: 'business_profile', trigger: 'business_profile_tenant_matches_subject', parent: 'subject', fk: 'subjectId' },
+  { table: 'vehicle_profile', trigger: 'vehicle_profile_tenant_matches_subject', parent: 'subject', fk: 'subjectId' },
   { table: 'rectification_request', trigger: 'rectification_request_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'fraud_case', trigger: 'fraud_case_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
