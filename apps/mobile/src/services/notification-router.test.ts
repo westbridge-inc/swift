@@ -292,6 +292,7 @@ const CENSUS: Case[] = [
   { k: 'verification_expired', d: { docId: 'd1' }, to: null, why: 'GAP: same' },
   { k: 'verification_expiry_reminder', d: { docId: 'd1' }, to: null, why: 'GAP: same' },
   { k: 'verification_forced_offline', d: { audience: 'earner' }, to: null, why: 'GAP: they were put offline' },
+  { k: 'verification_vehicle_lapsed', d: { docId: 'd1', subjectId: 's1', suspended: 3 }, to: null, why: 'GAP: a fleet owner learns their vehicle document lapsed' },
   { k: 'verification_l2', d: { audience: 'customer' }, to: null, why: 'GAP: assurance level raised' },
   { k: 'trust_l3', to: null, why: 'GAP: rider trust tier raised' },
   { k: 'liveness_midshift_prompt', d: { respondBy: '2026-01-01T00:00:00.000Z', profile: 'DRIVER' }, to: { screen: 'LivenessCheck', params: { profile: 'DRIVER', respondBy: '2026-01-01T00:00:00.000Z' } }, why: 'E12: the timed selfie check, deadline riding along' },
