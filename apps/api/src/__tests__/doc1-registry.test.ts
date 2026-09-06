@@ -17,7 +17,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { CountryConfigService } from '../modules/country/country-config.service';
-import { seedDocRegistry, registryChecklist, registryCode, REGISTRY_TIER, REGISTRY_EFFECTIVE_FROM } from '../modules/verification/doc-registry';
+import { seedDocRegistry, registryChecklist, registryCode, REGISTRY_TIER, REGISTRY_EFFECTIVE_FROM, splitChecklistKey } from '../modules/verification/doc-registry';
 
 let app: FastifyInstance;
 let countries: Array<{ code: string; lists: Record<string, string[]> }> = [];
@@ -51,8 +51,10 @@ describe('[DOC-1 §4.2] the registry', () => {
   it('every checklist of every country is mirrored exactly, in order, by an inactive provisional requirement set', async () => {
     for (const c of countries) {
       for (const [role, codes] of Object.entries(c.lists)) {
+        // [P3-2] a `<ROLE>_UNREGISTERED` list is the role's set at the UNREGISTERED tier — the registry's own tier column
+        const key = splitChecklistKey(role);
         const set = await app.prisma.requirementSet.findUnique({
-          where: { countryCode_actorRole_tier_effectiveFrom: { countryCode: c.code, actorRole: role, tier: REGISTRY_TIER, effectiveFrom: REGISTRY_EFFECTIVE_FROM } },
+          where: { countryCode_actorRole_tier_effectiveFrom: { countryCode: c.code, actorRole: key.actorRole, tier: key.tier, effectiveFrom: REGISTRY_EFFECTIVE_FROM } },
           include: { items: { include: { docType: true }, orderBy: { sortOrder: 'asc' } } },
         });
         expect(set, `${c.code}/${role}`).not.toBeNull();

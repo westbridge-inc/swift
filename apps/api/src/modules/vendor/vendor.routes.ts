@@ -19,6 +19,13 @@ import { fmtSlotTime } from '../booking/availability';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { encryptBuffer, generateDek, getKeyProvider } from '../../providers/storage/envelope';
+import { createHash } from 'node:crypto';
+import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
+import { LEGAL_VERSION } from '../legal/legal.routes';
+import { ACTIVITY_CLASSES, DECLARATION_CONSENT_TYPE, DECLARATION_VERSION, UNREGISTERED_TRADER_DECLARATION_V1, renderDeclarationPdf } from './unregistered-declaration';
+import { DECLARATION_DOC_TYPE } from '../verification/doc-registry';
+import { validRegistrationRecord } from './vendor-tier';
 import { parseCsvWithHeader } from '../../utils/csv';
 import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
@@ -969,6 +976,106 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /profile — Update vendor profile details */
+  /**
+   * [DOC-1 §3.2/§3.6 · P3-2] POST /onboarding/declaration — the unregistered trader signs the
+   * versioned self-declaration. One call does the whole thing, in this order: refuse if a
+   * registration is already on file (then the tier is REGISTERED and the declaration is
+   * moot); put the store on the UNREGISTERED tier; write the signature to the consent
+   * ledger (words hashed, version pinned); render the signed declaration as a PDF and file
+   * it as the BUSINESS document the tier's checklist requires. Owner only.
+   */
+  app.post('/onboarding/declaration', auth, async (request, reply) => {
+    const access = await requireVendor(app, request, 'OWNER');
+    const { vendorId } = access;
+    const userId = request.user.userId;
+    const body = z.object({
+      tradingName: z.string().trim().min(2).max(80),
+      activityClass: z.enum(ACTIVITY_CLASSES),
+      declaredAddress: z.string().trim().min(5).max(200),
+      attestationVersion: z.literal(DECLARATION_VERSION),
+      privacyNoticeVersion: z.string().min(1).max(20).default(LEGAL_VERSION),
+    }).parse(request.body ?? {});
+    const [vendor, user, registered, existing] = await Promise.all([
+      app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true } }),
+      app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true, countryCode: true } }),
+      validRegistrationRecord(app.prisma, userId),
+      app.prisma.verificationDocument.findFirst({ where: { userId, docType: DECLARATION_DOC_TYPE, status: { in: ['PENDING', 'APPROVED'] } }, select: { id: true, status: true } }),
+    ]);
+    if (registered) throw new AppError(409, 'ALREADY_REGISTERED', 'A business registration is on file for this store, so it is a registered seller — no declaration is needed.');
+    if (existing) throw new AppError(409, 'DECLARATION_EXISTS', `A self-declaration is already ${existing.status === 'APPROVED' ? 'on file' : 'under review'} for this store.`);
+
+    await publishLegalDocumentOnce(app.prisma, { documentType: DECLARATION_CONSENT_TYPE, version: DECLARATION_VERSION, renderedText: UNREGISTERED_TRADER_DECLARATION_V1 });
+    const signedAt = new Date();
+    const platform = String(request.headers['x-client-platform'] ?? '').toLowerCase();
+    const surface: ConsentSurface = platform === 'ios' || platform === 'android' ? platform : 'vendor_web';
+    await app.prisma.$transaction(async (tx) => {
+      await tx.vendor.update({ where: { id: vendorId }, data: { tier: 'UNREGISTERED', tierChangedAt: signedAt, tierNote: `self-declared unregistered trader (${body.activityClass}) — declaration ${DECLARATION_VERSION}` } });
+      await recordConsent(tx, {
+        subjectType: 'vendor_user', subjectId: userId, documentType: DECLARATION_CONSENT_TYPE, version: DECLARATION_VERSION,
+        action: 'granted', surface, ip: request.ip,
+        evidence: { vendorId, tradingName: body.tradingName, activityClass: body.activityClass, declaredAddress: body.declaredAddress, signedAt: signedAt.toISOString() },
+      });
+    });
+
+    // The signed words, filed as the document the tier's checklist requires — encrypted like every upload.
+    const pdf = await renderDeclarationPdf({
+      tradingName: body.tradingName, activityClass: body.activityClass, declaredAddress: body.declaredAddress,
+      legalName: `${user.firstName} ${user.lastName}`.trim(), signedAt, storeName: vendor.name,
+    });
+    const storage = getStorageProvider();
+    const keys = getKeyProvider();
+    let fileUrl: string;
+    if (keys) {
+      const dek = generateDek();
+      const { ciphertext, iv, authTag } = encryptBuffer(pdf, dek);
+      const up = await storage.upload({ buffer: ciphertext, filename: `declaration-${DECLARATION_VERSION}.pdf.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
+      fileUrl = up.url;
+      await app.prisma.encryptedObject.create({ data: {
+        fileKey: fileUrl, iv: new Uint8Array(iv), authTag: new Uint8Array(authTag), wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
+        mimeType: 'application/pdf', sizeBytes: pdf.length, sha256: createHash('sha256').update(pdf).digest('hex'), createdBy: userId,
+      } });
+    } else {
+      fileUrl = (await storage.upload({ buffer: pdf, filename: `declaration-${DECLARATION_VERSION}.pdf`, mimeType: 'application/pdf', folder: `verification/${userId}` })).url;
+    }
+    const doc = await verification.submitDocument(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE', DECLARATION_DOC_TYPE, fileUrl, body.privacyNoticeVersion);
+    reply.code(201);
+    return { success: true, data: { tier: 'UNREGISTERED', declaration: { id: doc.id, status: doc.status, docType: doc.docType }, status: await verification.getStatus(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE') } };
+  });
+
+  /**
+   * [DOC-1 §3.6 · P3-2] GET /tier — the store's tier as the owner sees it: caps, today's and this
+   * week's usage, whether promoted placement is open, what would promote the store, and the
+   * declaration on file. Everything is the server's; the screen decides nothing.
+   */
+  app.get('/tier', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const userId = request.user.userId;
+    const { tierUsage, vendorTierCapsFor, judgeTierCap, validRegistrationRecord } = await import('./vendor-tier');
+    const { CountryConfigService } = await import('../country/country-config.service');
+    const { DECLARATION_DOC_TYPE, REGISTRATION_DOC_TYPES } = await import('../verification/doc-registry');
+    const [vendor, user] = await Promise.all([
+      app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, tierChangedAt: true, isFeatured: true } }),
+      app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { countryCode: true } }),
+    ]);
+    const now = new Date();
+    const [caps, usage, registration, declaration, registrationDoc] = await Promise.all([
+      vendorTierCapsFor(new CountryConfigService(app.prisma), user.countryCode),
+      tierUsage(app.prisma, vendorId, now),
+      validRegistrationRecord(app.prisma, userId, now),
+      app.prisma.verificationDocument.findFirst({ where: { userId, docType: DECLARATION_DOC_TYPE }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true, expiresAt: true } }),
+      app.prisma.verificationDocument.findFirst({ where: { userId, docType: { in: [...REGISTRATION_DOC_TYPES] } }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true } }),
+    ]);
+    const verdict = judgeTierCap(usage, caps, 0);
+    return { success: true, data: {
+      tier: vendor.tier, tierChangedAt: vendor.tierChangedAt?.toISOString() ?? null, capped: vendor.tier === 'UNREGISTERED',
+      caps, usage: { ordersToday: usage.ordersToday, grossThisWeek: usage.grossThisWeek },
+      nearCap: vendor.tier === 'UNREGISTERED' && verdict.nudge,
+      promotedPlacement: vendor.tier !== 'UNREGISTERED',
+      registration: registration ? { onFile: true, recordId: registration.id } : { onFile: false, submission: registrationDoc ? { status: registrationDoc.status, submittedAt: registrationDoc.createdAt.toISOString() } : null },
+      declaration: declaration ? { status: declaration.status, signedAt: declaration.createdAt.toISOString(), expiresAt: declaration.expiresAt?.toISOString() ?? null } : null,
+    } };
+  });
+
   app.put('/profile', auth, async (request) => {
     const access = await requireVendor(app, request, 'MANAGER');
     const { vendorId } = access;

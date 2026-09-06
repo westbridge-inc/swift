@@ -146,6 +146,7 @@ export function VendorAccountScreen() {
         </Card>
 
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
+          <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — orders, billing, account" onPress={() => navigation.navigate('GetHelp')} />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Driver" onPress={() => setSwitcherOpen(true)} />
         </Card>

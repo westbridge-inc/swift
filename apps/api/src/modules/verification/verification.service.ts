@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
+import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf } from './subjects';
@@ -63,6 +64,8 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Record<string, number> = {
   trade_licence: 365,
   drivers_licence: 3 * 365,
   vehicle_registration: 3 * 365,
+  // [DOC-1 §3.2 · P3-2] the unregistered trader's self-declaration is valid 365 days from signing
+  self_declaration_unregistered: 365,
 };
 
 /**
@@ -1146,7 +1149,15 @@ export class VerificationService {
       const { providerChecklist } = await import('../services/services.service');
       return providerChecklist(this.prisma, userId);
     }
-    return this.countryConfig.getDocumentChecklist(countryCode, roleKey);
+    // [DOC-1 §3.6 · P3-2] A store owner on the UNREGISTERED tier reads the role's
+    // unregistered requirement set; everyone else the standard one.
+    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId));
+  }
+
+  /** UNREGISTERED when any store the owner holds is on that tier; otherwise undefined (standard). */
+  private async vendorTierOf(userId: string): Promise<string | undefined> {
+    const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { where: { tier: 'UNREGISTERED' }, select: { id: true }, take: 1 } } });
+    return owner && owner.vendors.length > 0 ? 'UNREGISTERED' : undefined;
   }
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
@@ -1314,6 +1325,18 @@ export class VerificationService {
       include: { vendors: { select: { id: true, vendorType: true, isVerified: true } } },
     });
     if (!owner) return;
+    // [DOC-1 §3.6 · P3-2] A VALID registration record promotes every UNREGISTERED store the
+    // owner holds — automatic, audited, once. Runs before the activation projection so the
+    // promoted store's checklist is read at its new tier.
+    await promoteIfRegistered(db, userId, new Date(), async (vendorId, ownerUserId) => {
+      await this.notifications.send({
+        userId: ownerUserId,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'Your store is now a registered seller',
+        body: 'Your business registration is on file. The unregistered-seller limits on orders and weekly sales are lifted, and promoted placement is open to you.',
+        data: { kind: 'vendor_tier_promoted', vendorId },
+      });
+    });
     // [DOC-1 Part XIX · DOC-INV-27 · P19] Once the country's BUSINESS-bucket types are active, a
     // store cannot go live with an incomplete disclosure block: it joins the checklist as a
     // go-live gate. Before activation the block is compiled and shown, but does not gate.

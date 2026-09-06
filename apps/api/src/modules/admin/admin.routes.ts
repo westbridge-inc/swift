@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { assertPromotable } from '../vendor/vendor-tier';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, AgentActionStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
@@ -1316,6 +1317,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!vendor) throw new NotFoundError('Vendor', id);
 
     const isFeatured = featured !== undefined ? featured : !vendor.isFeatured;
+    // [DOC-1 §3.6 · P3-2] No promoted placement at the unregistered tier.
+    if (isFeatured) assertPromotable(vendor);
 
     const updated = await app.prisma.vendor.update({
       where: { id },

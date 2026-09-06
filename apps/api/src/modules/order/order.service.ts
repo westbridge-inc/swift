@@ -706,6 +706,17 @@ export class OrderService {
         const { assertOrderable } = await import('../verification/category-gate');
         await assertOrderable(this.prisma, vendorId, items.map((ci) => ({ id: ci.item.id, name: ci.item.name })), input.now ?? new Date());
       }
+      // [DOC-1 §3.6 · P3-2] An UNREGISTERED micro-vendor trades under caps: orders a day and
+      // gross a week. The order's food cost is what the cap counts (the same figure the rider
+      // fronts); a REGISTERED store is never judged here.
+      if (vendor.tier === 'UNREGISTERED') {
+        const { assertWithinTierCaps, vendorTierCapsFor, nudgeOwnerOnce } = await import('../vendor/vendor-tier');
+        const caps = await vendorTierCapsFor(this.countryConfig, (await this.prisma.user.findUniqueOrThrow({ where: { id: input.userId }, select: { countryCode: true } })).countryCode);
+        const gross = items.reduce((sum, ci) => sum + Number(ci.item.basePrice) * ci.quantity, 0);
+        const verdict = await assertWithinTierCaps(this.prisma, vendor, caps, gross, input.now ?? new Date());
+        // The 60% nudge: told once a day, never on a refused order.
+        if (verdict) await nudgeOwnerOnce(this.prisma, this.notifications, vendor, verdict, caps, input.now ?? new Date()).catch(() => false);
+      }
 
       // Inventory (§4.2): a tracked item can't be ordered beyond the shelf.
       // The race-proof guard is the conditional decrement in the transaction

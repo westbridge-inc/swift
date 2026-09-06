@@ -133,6 +133,8 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // so the one action that fills the marketplace arrived as a push that opened
   // the app on whatever screen was last shown.
   if (kind === 'category_backfill_review') return { screen: 'VendorCategoryReview' };
+  // [DOC-1 §3.6] The store's tier moved, or is near a cap — the seller-status screen says what lifts it.
+  if (kind === 'vendor_tier_promoted' || kind === 'vendor_tier_nudge') return { screen: 'VendorTier' };
   // [ALG-34] The MMG pay link change notices land on Account, where the
   // pending change (and its cancel) lives — vendor and mover stacks both
   // name that screen Account.
