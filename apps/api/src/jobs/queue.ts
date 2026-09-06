@@ -680,6 +680,26 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       // verified dump. Pages once a day at most — a missing backup is a
       // standing condition, not an event, and repeating it hourly would train
       // the founder to ignore it.
+      if (job.name === 'reaper-lag') {
+        // [DOC-1 §9.2 · P9-2] Silence is not success: no heartbeat, or one older than two cycles, pages.
+        const { checkReaperFreshness, publishReaperFreshness } = await import('../modules/ops/reaper-freshness');
+        const result = await checkReaperFreshness(ctx.prisma);
+        publishReaperFreshness(result);
+        if (result.stale) {
+          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'reaper-lag', 20 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              tenantId: null,
+              title: 'Document reaper is behind',
+              body: result.reason,
+              data: { kind: 'ops_reaper_stale', ageHours: result.ageHours },
+            }),
+          );
+        }
+        ctx.log.info({ ...result }, 'reaper freshness checked');
+        return;
+      }
+
       if (job.name === 'backup-freshness') {
         const { checkBackupFreshness } = await import('../modules/ops/backup-freshness');
         const result = await checkBackupFreshness(ctx.prisma);
@@ -768,7 +788,22 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         );
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
-        const purged = await verification.purgeExpiredDocuments();
+        // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
+        let purged: number;
+        try {
+          purged = await verification.purgeExpiredDocuments();
+        } catch (err) {
+          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'reaper-failure', 6 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              tenantId: null,
+              title: 'Document reaper failed',
+              body: 'The retention reaper threw during its sweep. Documents past retention are not being purged until it runs clean. Treat as an incident.',
+              data: { kind: 'ops_reaper_failed', error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) },
+            }),
+          );
+          throw err;
+        }
         // Review-SLA watchdog: docs waiting >24h on a human get escalated.
         await verification.alertReviewSlaBreaches();
         // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.
@@ -1971,6 +2006,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '0 0 * * 0' }, // Sunday midnight
     removeOnComplete: 10,
     removeOnFail: 10,
+  });
+
+  // [DOC-1 §9.2] Reaper lag: hourly at :25 — no heartbeat or two cycles of silence pages.
+  await queues.verificationQueue.add('reaper-lag', {}, {
+    repeat: { pattern: '25 * * * *' },
+    removeOnComplete: 24,
+    removeOnFail: 24,
   });
 
   // Backup freshness: daily at 05:30, before the working day. Reads the

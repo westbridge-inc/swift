@@ -259,6 +259,14 @@ export const docLegalHoldGauge = new client.Gauge({
   registers: [registry],
 });
 
+// [DOC-1 §9.2 · P9-2] The retention reaper's heartbeat: fresh / stale / age (LB-0 alarm beyond two cycles).
+export const reaperGauge = new client.Gauge({
+  name: 'swift_document_reaper',
+  help: 'Retention reaper freshness (fresh, stale, age_hours)',
+  labelNames: ['check'] as const,
+  registers: [registry],
+});
+
 export const readinessGauge = new client.Gauge({
   name: 'swift_readiness_dependency',
   help: 'Readiness by dependency after the last /ready evaluation (1 ready, 0 not ready)',
