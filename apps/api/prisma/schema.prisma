@@ -407,6 +407,7 @@ model Tenant {
   extractedFields   ExtractedField[]
   validationResults ValidationResult[]
   docLegalHolds     DocLegalHold[]
+  renewalSchedules  RenewalSchedule[]
   rectifications    RectificationRequest[]
   fraudCases        FraudCase[]
 
@@ -629,6 +630,8 @@ model VerificationDocument {
   /// [DOC-1 §9.4 P9-4] while set, this document cannot be purged; release clears it (T22: the state is untouched)
   legalHoldId          String?                    @db.Uuid
   legalHold            DocLegalHold?              @relation(fields: [legalHoldId], references: [id], onDelete: Restrict)
+  /// [DOC-1 §9.3 P4-7] the renewal schedule the database keeps for an approved document with an expiry
+  renewalSchedule      RenewalSchedule?
 
   @@index([status])
   @@index([userId])
@@ -6445,4 +6448,28 @@ model CategoryDocumentGate {
 
   @@index([countryCode])
   @@map("category_document_gate")
+}
+
+/// [DOC-1 §9.3 · P4-7] The renewal schedule for an approved document with an expiry:
+/// notices at T-30 / T-14 / T-7 / T-1 and suspension at expiry. Kept by a database
+/// trigger on the document (DOC-INV-4: every such document has one), read by the daily
+/// sweep, which sends at most one notice per run and advances lastNotified.
+model RenewalSchedule {
+  id           String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String               @default("swift-default")
+  tenant       Tenant               @relation(fields: [tenantId], references: [id])
+  documentId   String               @unique
+  document     VerificationDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  subjectId    String
+  expiresOn    DateTime
+  notifyAt     DateTime[]
+  suspendAt    DateTime
+  lastNotified DateTime?
+  suspendedAt  DateTime?
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+
+  @@index([subjectId])
+  @@index([tenantId, suspendedAt, expiresOn])
+  @@map("renewal_schedule")
 }
