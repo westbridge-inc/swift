@@ -9,12 +9,26 @@
 import type { ValidationStatus } from '@prisma/client';
 
 export interface DeclaredField { fieldCode: string; isRequired: boolean; isBlindIndexed: boolean }
+/** [DOC-1 §3 · P3-3] What the submitter IS, for the taxi rules: a Driver profile = taxi work (H plate, Corporate Yellow); a Rider = delivery (exempt, §3.8). */
+export interface ValidatorContext {
+  taxi: boolean;
+  /** The registration mark on the submitter's mover profile, normalised — the cross-match anchor. */
+  registrationMark: string | null;
+  /** The submission's document type and its bucket — the vehicle rules apply to VEHICLE documents, the licence rule to the licence. */
+  docType: string | null;
+  bucket: 'PERSONAL' | 'BUSINESS' | 'VEHICLE' | null;
+}
+export const NO_CONTEXT: ValidatorContext = { taxi: false, registrationMark: null, docType: null, bucket: null };
+/** A verdict the ledger does not record: the rule has nothing to say about this document. */
+export const NOT_APPLICABLE: ValidatorVerdict = { status: 'SKIP', detailCode: 'NOT_APPLICABLE' };
 export interface ValidatorInput {
   declared: readonly DeclaredField[];
   /** field code → value the processor read (declared fields only) */
   present: ReadonlyMap<string, string>;
   collided: boolean;
+  context?: ValidatorContext;
 }
+const normMark = (m: string) => m.toUpperCase().replace(/[\s-]+/g, '');
 /** A FAIL carries the registry's detailCode; SKIP and WARN may say why here. */
 export interface ValidatorVerdict { status: ValidationStatus; detailCode?: string | null }
 export type ValidatorImpl = (input: ValidatorInput) => ValidatorVerdict;
@@ -30,6 +44,37 @@ export const VALIDATOR_IMPLEMENTATIONS: Readonly<Record<string, ValidatorImpl>> 
   'validators#V_SHA_COLLISION': ({ collided }) => (collided ? { status: 'WARN', detailCode: 'CROSS_SUBJECT_SHA' } : { status: 'PASS' }),
   // [DOC-1 §3.4 · FD-DOC-6 · P2-2] covers_hire_and_reward: a private policy does not cover carriage for hire
   // or reward. Read → PASS / FAIL; not read → SKIP (undeterminable routes to a human — never a vacuous PASS).
+  // [DOC-1 §3.7 · LEGAL-CONFLICT-1 · DOC-INV-44] Only the corroborated rule: a TAXI vehicle carries an H mark.
+  // Every other prefix letter is a disputed fact and is never judged. Delivery movers are exempt (§3.8).
+  'validators#V_PLATE_CLASS': ({ present, context }) => {
+    if (!context?.taxi || context.bucket !== 'VEHICLE') return NOT_APPLICABLE;
+    const mark = present.get('registration_mark');
+    if (!mark) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
+    return normMark(mark).startsWith('H') ? { status: 'PASS' } : { status: 'FAIL' };
+  },
+  // [DOC-1 §3.7] Hire cars are Corporate Yellow; read colour judged, unread → a human.
+  'validators#V_VEHICLE_COLOUR': ({ present, context }) => {
+    if (!context?.taxi || context.bucket !== 'VEHICLE') return NOT_APPLICABLE;
+    const colour = present.get('colour');
+    if (!colour) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
+    return /yellow/i.test(colour) ? { status: 'PASS' } : { status: 'FAIL' };
+  },
+  // [DOC-1 §3.7] The mark on the document must be the mark on the vehicle — any mismatch is a hard review.
+  'validators#V_PLATE_CROSS_MATCH': ({ present, context }) => {
+    if (context?.bucket !== 'VEHICLE') return NOT_APPLICABLE;
+    const mark = present.get('registration_mark');
+    if (!mark || !context?.registrationMark) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
+    return normMark(mark) === normMark(context.registrationMark) ? { status: 'PASS' } : { status: 'FAIL' };
+  },
+  // [DOC-1 §3.7] A taxi driver's licence classes must include the hire-car class; delivery is not gated here.
+  // Which document this judges is the REGISTRY's say (the catalogue row is scoped to the licence — DOC-INV-2).
+  'validators#V_LICENCE_CLASS': ({ present, context }) => {
+    if (!context?.taxi) return NOT_APPLICABLE;
+    const classes = present.get('classes');
+    if (!classes) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
+    const set = new Set(classes.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean));
+    return set.has('H') || set.has('HIRE') ? { status: 'PASS' } : { status: 'FAIL' };
+  },
   'validators#V_INSURANCE_SCOPE': ({ present }) => {
     const raw = present.get('covers_hire_and_reward');
     if (raw === undefined) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };

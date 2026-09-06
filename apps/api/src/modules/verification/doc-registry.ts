@@ -100,9 +100,9 @@ export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
   { code: 'V_DOB_ADULT', scope: 'FIELD', isBlocking: true, detailCode: 'REQUIREMENT_NOT_MET' },
   { code: 'V_TIN_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE', docTypeLegacy: 'tin_certificate' },
   { code: 'V_PLATE_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE' },
-  { code: 'V_PLATE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'WRONG_PLATE_CLASS' },
-  { code: 'V_VEHICLE_COLOUR', scope: 'FIELD', isBlocking: true, detailCode: 'VEHICLE_COLOUR_NON_COMPLIANT' },
-  { code: 'V_LICENCE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'LICENCE_CLASS_MISMATCH' },
+  { code: 'V_PLATE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'WRONG_PLATE_CLASS' , implRef: 'validators#V_PLATE_CLASS' },
+  { code: 'V_VEHICLE_COLOUR', scope: 'FIELD', isBlocking: true, detailCode: 'VEHICLE_COLOUR_NON_COMPLIANT' , implRef: 'validators#V_VEHICLE_COLOUR' },
+  { code: 'V_LICENCE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'LICENCE_CLASS_MISMATCH', docTypeLegacy: 'drivers_licence' , implRef: 'validators#V_LICENCE_CLASS' },
   { code: 'V_INSURANCE_SCOPE', scope: 'FIELD', isBlocking: true, detailCode: 'INSURANCE_SCOPE_INSUFFICIENT', docTypeLegacy: 'vehicle_insurance', implRef: 'validators#V_INSURANCE_SCOPE' },
   { code: 'V_FIELD_CONFIDENCE', scope: 'FIELD', isBlocking: false, detailCode: 'UNREADABLE_CAPTURE' },
   // §7.3 document-level
@@ -112,7 +112,7 @@ export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
   { code: 'V_TAMPER_HEURISTIC', scope: 'DOCUMENT', isBlocking: false, detailCode: 'SUSPECTED_ALTERATION' },
   // §7.4 subject-level
   { code: 'V_NAME_CONSISTENCY', scope: 'SUBJECT', isBlocking: false, detailCode: 'NAME_MISMATCH' },
-  { code: 'V_PLATE_CROSS_MATCH', scope: 'SUBJECT', isBlocking: true, detailCode: 'PLATE_CROSS_MISMATCH' },
+  { code: 'V_PLATE_CROSS_MATCH', scope: 'SUBJECT', isBlocking: true, detailCode: 'PLATE_CROSS_MISMATCH' , implRef: 'validators#V_PLATE_CROSS_MATCH' },
   { code: 'V_SELF_REPORTED_MATCH', scope: 'SUBJECT', isBlocking: false, detailCode: 'DETAILS_DO_NOT_MATCH_ACCOUNT' },
   { code: 'V_REQUIREMENT_COMPLETE', scope: 'SUBJECT', isBlocking: true, detailCode: 'REQUIREMENT_NOT_MET' },
   // §7.5 cross-subject

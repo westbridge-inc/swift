@@ -29,7 +29,9 @@ const SPEC_VALIDATORS: ReadonlyArray<readonly [string, string, boolean]> = [
   ['V_SHA_COLLISION', 'CROSS_SUBJECT', false], ['V_NUMBER_COLLISION', 'CROSS_SUBJECT', false], ['V_PHASH_NEAR', 'CROSS_SUBJECT', false], ['V_VELOCITY', 'CROSS_SUBJECT', false],
 ];
 /** §7.2: the two Guyana-specific validators name their class. */
-const SPEC_TYPE_SPECIFIC: Record<string, string> = { V_TIN_FORMAT: registryCode('GY', 'tin_certificate'), V_INSURANCE_SCOPE: registryCode('GY', 'vehicle_insurance') };
+const SPEC_TYPE_SPECIFIC: Record<string, string> = { V_TIN_FORMAT: registryCode('GY', 'tin_certificate'), V_INSURANCE_SCOPE: registryCode('GY', 'vehicle_insurance'),
+  V_LICENCE_CLASS: registryCode('GY', 'drivers_licence'), // [P3-3] the licence-class rule is the licence's — scoped by the registry (DOC-INV-2)
+};
 const PROBE = registryCode('GY', 'storefront_photo');
 
 let app: FastifyInstance;

@@ -20,7 +20,7 @@ import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider } from '../..
 import { hashSignal, normalizeDocNumber } from '../integrity/normalize';
 import type { KycEngine } from '../../providers/kyc/kyc-provider';
 import { docExtractionRunCounter, docExtractionSchemaViolationCounter } from '../../plugins/observability';
-import { VALIDATOR_IMPLEMENTATIONS, resolvesImpl, type DeclaredField } from './validators';
+import { VALIDATOR_IMPLEMENTATIONS, resolvesImpl, NO_CONTEXT, type DeclaredField, type ValidatorContext } from './validators';
 export type { DeclaredField } from './validators';
 
 /**
@@ -57,6 +57,8 @@ export interface ExtractionPlan {
 }
 export interface ExtractionPlanInput {
   declared: readonly DeclaredField[];
+  /** [P3-3] who the submitter is, for the taxi rules; absent = not a taxi, no plate. */
+  context?: ValidatorContext;
   profileCode: string;
   engine: KycEngine;
   extracted: Readonly<Record<string, unknown>> | undefined;
@@ -123,7 +125,9 @@ export async function planExtraction(input: ExtractionPlanInput): Promise<Extrac
   const validations: PlannedValidation[] = [];
   for (const v of [...input.validators].sort((a, b) => a.code.localeCompare(b.code))) {
     if (!resolvesImpl(v.implRef)) continue;
-    const verdict = VALIDATOR_IMPLEMENTATIONS[v.implRef!]!({ declared: input.declared, present, collided: input.collided });
+    const verdict = VALIDATOR_IMPLEMENTATIONS[v.implRef!]!({ declared: input.declared, present, collided: input.collided, context: input.context ?? NO_CONTEXT });
+    // A rule with nothing to say about this document leaves no verdict (the ledger records judgements, not silence).
+    if (verdict.status === 'SKIP' && verdict.detailCode === 'NOT_APPLICABLE') continue;
     validations.push({
       validatorCode: v.code, status: verdict.status, isBlocking: v.isBlocking,
       detailCode: verdict.status === 'FAIL' ? v.detailCode : (verdict.detailCode ?? null),
