@@ -63,6 +63,8 @@ export const TENANT_TABLES = [
   'validation_result',
   // [DOC-1 P9-4] a legal hold on a person s documents
   'doc_legal_hold',
+  // [DOC-1 P4-7] the renewal schedule of an approved document
+  'renewal_schedule',
   // [DOC-1 P25] a request to correct an extracted field
   'rectification_request',
   // [DOC-1 P24] a fraud case confirmed on second review
@@ -227,6 +229,7 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
     parentTenantSql: `SELECT u."tenantId" FROM users u JOIN verification_documents d ON d."userId" = u.id WHERE d.id = NEW."submissionId"` },
   // [DOC-1 P9-4] a legal hold inherits the tenant of the person whose documents it holds
   { table: 'doc_legal_hold', trigger: 'doc_legal_hold_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
+  { table: 'renewal_schedule', trigger: 'renewal_schedule_tenant_matches_subject', parent: 'users', fk: 'subjectId' },
   { table: 'rectification_request', trigger: 'rectification_request_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'fraud_case', trigger: 'fraud_case_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],

@@ -3,6 +3,7 @@ import type { ReviewQueue } from '@prisma/client';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
+import { dueRenewalNotices } from './renewal-schedule';
 import { assertNotRecused } from './recusal';
 import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
@@ -1261,6 +1262,8 @@ export class VerificationService {
           },
           data: { status: 'EXPIRED' },
         });
+        // [DOC-1 §9.3 · P4-7] The schedule records the suspension with the expiry.
+        if (won.count === 1) await tx.renewalSchedule.updateMany({ where: { documentId: doc.id, suspendedAt: null }, data: { suspendedAt: now } });
         if (won.count !== 1) return false;
         await projectProviderVerificationLocked(tx, doc.userId);
         // [REPORT-012 F-012-05] The vendor projection rides the SAME expiry
@@ -1297,35 +1300,28 @@ export class VerificationService {
   }
 
   /** One reminder per document, 30 days before expiry. */
-  async sendExpiryReminders(): Promise<number> {
-    const soon = new Date(Date.now() + REMINDER_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-    const expiring = await this.prisma.verificationDocument.findMany({
-      where: { status: 'APPROVED', expiresAt: { gt: new Date(), lte: soon } },
-    });
-
+  /**
+   * [DOC-1 §9.3 · P4-7] Renewal notices from the schedule the database keeps:
+   * T-30, T-14, T-7, T-1 — at most ONE per document per run (the latest due),
+   * and lastNotified advances so a missed day never becomes a burst.
+   */
+  async sendExpiryReminders(now = new Date()): Promise<number> {
+    const due = await dueRenewalNotices(this.prisma, now);
     let sent = 0;
-    for (const doc of expiring) {
-      const alreadyReminded = await this.prisma.notification.findFirst({
-        where: {
-          userId: doc.userId,
-          data: { path: ['docId'], equals: doc.id },
-          AND: { data: { path: ['kind'], equals: 'verification_expiry_reminder' } },
-        },
-        select: { id: true },
-      });
-      if (alreadyReminded) continue;
-
+    for (const n of due) {
+      const doc = await this.prisma.verificationDocument.findUnique({ where: { id: n.documentId }, select: { docType: true, role: true } });
+      if (!doc) continue;
       await this.notifications.send({
-        userId: doc.userId,
+        userId: n.subjectId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Document expiring soon',
-        body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${doc.expiresAt!.toISOString().slice(0, 10)}. Renew it to avoid suspension.`,
+        title: n.daysLeft <= 1 ? 'Document expires tomorrow' : 'Document expiring soon',
+        body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${n.expiresOn.toISOString().slice(0, 10)} — ${n.daysLeft} day${n.daysLeft === 1 ? '' : 's'} left. Renew it to avoid suspension.`,
         audience: audienceForRole(doc.role),
-        data: { kind: 'verification_expiry_reminder', docId: doc.id },
+        data: { kind: 'verification_expiry_reminder', docId: n.documentId, daysLeft: n.daysLeft },
       });
+      await this.prisma.renewalSchedule.update({ where: { id: n.scheduleId }, data: { lastNotified: n.noticeAt } });
       sent += 1;
     }
-
     return sent;
   }
 
