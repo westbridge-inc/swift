@@ -84,6 +84,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'evidence-retention': { policy: 'SAFE_REPLAY', why: 'Repairs holds, drains the legal-hold VAULT OUTBOX (idempotent by construction) and deletes only unsealed, case-less bundles past their window; the database triggers refuse anything else.' },
   'expiry-sweep': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'image-policy-sweep': { policy: 'SAFE_REPLAY', why: 'Purges the images of committed, extracted PERSONAL documents of active types through purgeImageAfterReview, which refuses an already-purged, held or uncommitted submission; a replay finds nothing left to purge. Receipts append.' },
+  'handover-claims-reconcile': { policy: 'SAFE_REPLAY', why: 'Reads settlements older than the claim window and reports the unmatched pairs: one audit row per run and at most one admin notice per day. It settles nothing and fails nothing; a replay reports the same pairs.' },
   'flag-ratings': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'guardian-sweep': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'incident-pattern-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -144,6 +145,7 @@ export type JobName =
   | 'evidence-retention'
   | 'expiry-sweep'
   | 'image-policy-sweep'
+  | 'handover-claims-reconcile'
   | 'flag-ratings'
   | 'guardian-sweep'
   | 'incident-pattern-scan'

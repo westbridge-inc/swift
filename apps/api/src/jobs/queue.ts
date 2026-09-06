@@ -789,6 +789,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         );
         return;
       }
+      if (job.name === 'handover-claims-reconcile') {
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { reconcileHandoverClaims } = await import('../modules/cash/handover-claims');
+        const report = await reconcileHandoverClaims(ctx.prisma, { notifications: new NotificationService(ctx.prisma, ctx.io) });
+        ctx.log.info(`Handover claims: ${report.checked} checked, ${report.matched} matched, ${report.unmatched.length} unmatched`);
+        return;
+      }
+
       if (job.name === 'image-policy-sweep') {
         const { VerificationService } = await import('../modules/verification/verification.service');
         const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
@@ -2092,6 +2100,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   });
 
   // [DCR-1 NR-2] Retention clocks: daily at 04:10, before the day starts.
+  // [DOC-1 §31.6 · DOC-INV-49 · P31-3] Nightly: every handover has two claim rows or is reported unmatched.
+  await queues.verificationQueue.add('handover-claims-reconcile', {}, {
+    repeat: { pattern: '30 2 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
   await queues.verificationQueue.add('retention-sweep', {}, {
     repeat: { pattern: '10 4 * * *' },
     removeOnComplete: 30,

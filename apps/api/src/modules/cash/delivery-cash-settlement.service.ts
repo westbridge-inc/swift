@@ -205,7 +205,17 @@ export class DeliveryCashSettlementService {
     if (!row) throw new NotFoundError('Settlement', settlementId);
 
     // No CAS hit on an unsettled row = this side already confirmed → no-op.
-    if (hit.count > 0) await this.notifyCounterpart(row);
+    if (hit.count > 0) {
+      // [DOC-1 §31.6 · P31-3] Both sides of every handover, always: the confirmation is an audited
+      // assertion in the spec's words — the rider claims the fee was received, the store claims it paid.
+      await this.prisma.auditLog.create({ data: {
+        userId: attestation.actorId,
+        action: side === 'RIDER' ? 'RIDER_CLAIMED_FEE_RECEIVED' : 'VENDOR_CLAIMED_RIDER_PAID_FEE',
+        entity: 'DeliveryCashSettlement', entityId: settlementId,
+        changes: { orderId: row.orderId, amount: String(attested), status: row.status },
+      } });
+      await this.notifyCounterpart(row);
+    }
 
     return toWire(row);
   }
