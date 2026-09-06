@@ -6,7 +6,7 @@ export type ClaimView = {
   id: string; orderId: string; amount: string; status: string; reason: string; flags: string[];
   filedAt: string; paidAt: string | null; paymentRef: string | null;
   evidence: { complete: boolean; missing: string[]; items: Array<{ key: string; present: boolean; required: boolean }> } | null;
-  payoutDueBy: string | null; underReview: boolean;
+  settleBy: string | null; underReview: boolean;
 };
 
 export function claimStatus(status: string): { label: string; tone: 'brand' | 'success' | 'neutral' | 'error' } {

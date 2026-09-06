@@ -47,7 +47,7 @@ export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: str
                 <TonePill label={st.label} tone={st.tone} />
               </View>
               <T variant="caption" style={{ color: color.text.secondary }}>{reasonLabel(c.reason)} · filed {dateLabel(c.filedAt)}</T>
-              {c.payoutDueBy && c.status !== 'PAID' ? <T variant="caption">Swift pays you by {dateLabel(c.payoutDueBy)}</T> : null}
+              {c.settleBy && c.status !== 'PAID' ? <T variant="caption">Swift pays you by {dateLabel(c.settleBy)}</T> : null}
               {c.paidAt ? <T variant="caption">Paid {dateLabel(c.paidAt)}{c.paymentRef ? ` · ref ${c.paymentRef}` : ''}</T> : null}
               {c.evidence ? (
                 <View style={{ marginTop: space.sm, gap: 4 }}>

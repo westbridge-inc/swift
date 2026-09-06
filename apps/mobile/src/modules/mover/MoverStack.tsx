@@ -112,7 +112,7 @@ export function MoverStack() {
         <Stack.Screen name="MoverRoot" component={MoverRoot} />
         <Stack.Screen name="ActiveJob" component={ActiveJobScreen} />
         <Stack.Screen name="Earnings" component={EarningsScreen} />
-        {/* [DOC-1 §31.4] The guarantee claims a mover filed — status, evidence, payout SLA. */}
+        {/* [DOC-1 §31.4] The guarantee claims a mover filed — status, evidence, settlement SLA. */}
         <Stack.Screen name="Claims" component={ClaimsScreen} />
         <Stack.Screen name="JobHistory" component={JobHistoryScreen} />
         <Stack.Screen name="Account" component={MoverAccountScreen} />
