@@ -23,6 +23,7 @@ import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { visibleVendorRelForCaller, visibleVendorForCaller } from '../vendor/vendor-visibility';
+import { compileStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -1405,6 +1406,9 @@ export async function customerRoutes(app: FastifyInstance) {
         operatingHours: vendor.operatingHours,
         categories,
         isFavorite,
+        // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
+        // records on every read — never hand-written prose; incomplete blocks say what is missing.
+        disclosure: await compileStorefrontDisclosure(app.prisma, id),
         distanceKm,
         deliveryFee,
         etaMin,
