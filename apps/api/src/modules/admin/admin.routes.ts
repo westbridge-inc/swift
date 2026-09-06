@@ -1,3 +1,4 @@
+import { processorRegisterView } from '../legal/processor-register';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, AgentActionStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
@@ -909,6 +910,9 @@ export async function adminRoutes(app: FastifyInstance) {
   }
 
   // ─── Dashboard ─────────────────────────────────────────────────────────
+
+  // [DGP-1 · self-test N] The processor + transfer register, status resolved from env; no secrets.
+  app.get('/legal/processors', { preHandler: [adminGuard] }, async () => ({ processors: processorRegisterView() }));
 
   app.get('/dashboard/overview', { preHandler: [adminGuard] }, async () => {
     const tenantId = getTenantId();
