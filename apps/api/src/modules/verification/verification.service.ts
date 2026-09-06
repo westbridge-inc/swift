@@ -19,7 +19,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
-import type { KycProvider, KycVerificationResult } from '../../providers/kyc/kyc-provider';
+import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApproval, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
 import { registryCode } from './doc-registry';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
