@@ -33,8 +33,10 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // marker URLs can approve a user, so a missing production variable is a
   // security failure, not a reasonable default.
   const kycProvider = env['KYC_PROVIDER'];
-  if (kycProvider !== 'didit' && kycProvider !== 'idanalyzer') {
-    throw new Error('FATAL: KYC_PROVIDER must be didit or idanalyzer in production; sandbox/unset can self-approve test identities. Refusing to start.');
+  // [FD-DOC-3b (b) · 2026-09-07] `manual` = on-shore human review; it approves nothing, so it is
+  // as safe as a real provider here. `sandbox` self-approves and stays forbidden.
+  if (kycProvider !== 'didit' && kycProvider !== 'idanalyzer' && kycProvider !== 'manual') {
+    throw new Error('FATAL: KYC_PROVIDER must be didit, idanalyzer or manual in production; sandbox/unset can self-approve test identities. Refusing to start.');
   }
   if (kycProvider === 'didit' && !env['DIDIT_API_KEY']) {
     throw new Error('FATAL: DIDIT_API_KEY is required when KYC_PROVIDER=didit. Refusing to start.');

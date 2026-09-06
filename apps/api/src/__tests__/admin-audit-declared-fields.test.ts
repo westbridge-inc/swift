@@ -33,7 +33,10 @@ describe('[ADM-002] every declared audit field exists on its model', () => {
       for (const f of entity.fields) {
         if (!fields.has(f)) problems.push(`${route}: ${entity.model}.${f} does not exist`);
       }
-      if (entity.param === 'key' ? !fields.has('key') : !fields.has('id')) {
+      // The entity's row is addressed by its @id — `id` by default, or whatever `param` names
+      // (`key` for keyed config, `code` for the doc registry).
+      const idField = entity.param ?? 'id';
+      if (!fields.has(idField)) {
         problems.push(`${route}: ${entity.model} has no '${entity.param ?? 'id'}' selector`);
       }
     }
