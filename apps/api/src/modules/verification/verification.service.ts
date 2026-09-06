@@ -5,6 +5,7 @@ import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClass
 import { BUCKET_OF } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { approvedEvidenceFor } from './evidence';
+import { compileStorefrontDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -1278,8 +1279,14 @@ export class VerificationService {
       include: { vendors: { select: { id: true, vendorType: true, isVerified: true } } },
     });
     if (!owner) return;
+    // [DOC-1 Part XIX · DOC-INV-27 · P19] Once the country's BUSINESS-bucket types are active, a
+    // store cannot go live with an incomplete disclosure block: it joins the checklist as a
+    // go-live gate. Before activation the block is compiled and shown, but does not gate.
+    const country = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+    const disclosureGate = country ? await disclosureGateEngaged(db, country.countryCode) : false;
     for (const vendor of owner.vendors) {
-      const verified = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
+      const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
+      const verified = checklistOk && (!disclosureGate || (await compileStorefrontDisclosure(db, vendor.id)).complete);
       if (verified) {
         const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db);
         await db.vendor.update({

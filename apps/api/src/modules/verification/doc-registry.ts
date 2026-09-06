@@ -341,3 +341,8 @@ export async function registryChecklist(prisma: PrismaClient, countryCode: strin
   if (!set.items.every((i) => i.docType.isActive)) return null;
   return set.items.map((i) => i.docType.legacyCode);
 }
+
+/** [DOC-1 Part XIX · P19] The identity types whose VALID record lets a proprietor's verified name stand in for a business name ("trading as"). Registry text (DOC-INV-2). */
+export const IDENTITY_DOC_TYPES: readonly string[] = ['owner_national_id', 'national_id', 'passport'];
+/** [DOC-1 Part XIX · P19] Licence-class types disclosed on the storefront while VALID (number when read, else "on file"). Registry text (DOC-INV-2). */
+export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];
