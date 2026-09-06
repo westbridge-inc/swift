@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { isProduction } from '../../utils/runtime-mode';
+import { SmtpEmailProvider } from './smtp-email';
 
 export interface SmsProvider {
   sendSms(to: string, body: string): Promise<{ ref: string }>;
@@ -275,14 +276,32 @@ export function withPushRetry(inner: PushProvider, delays: number[] = PUSH_RETRY
   };
 }
 
+/**
+ * Email is chosen on its own axis: `EMAIL_PROVIDER=smtp` sends through the
+ * founder's mailbox (GoDaddy / Microsoft 365 over SMTP, see smtp-email.ts);
+ * unset or `dev` keeps DevEmail, which REFUSES in production so a missing
+ * sender is loud at the first send rather than silent forever.
+ */
+function getEmailProvider(): EmailProvider {
+  const provider = process.env['EMAIL_PROVIDER'] ?? 'dev';
+  switch (provider) {
+    case 'dev':
+      return new DevEmail();
+    case 'smtp':
+      return new SmtpEmailProvider();
+    default:
+      throw new Error(`Unknown EMAIL_PROVIDER: ${provider}`);
+  }
+}
+
 /** Provider selection is config, not code. */
 export function getChannels(): NotificationChannels {
   const provider = process.env['NOTIFICATION_PROVIDER'] ?? 'dev';
   switch (provider) {
     case 'dev':
-      return { sms: devChannels.sms, push: withPushRetry(getPushProvider()), email: devChannels.email };
+      return { sms: devChannels.sms, push: withPushRetry(getPushProvider()), email: getEmailProvider() };
     case 'twilio':
-      return { sms: new TwilioSmsProvider(), push: withPushRetry(getPushProvider()), email: new DevEmail() };
+      return { sms: new TwilioSmsProvider(), push: withPushRetry(getPushProvider()), email: getEmailProvider() };
     default:
       throw new Error(`Unknown NOTIFICATION_PROVIDER: ${provider}`);
   }

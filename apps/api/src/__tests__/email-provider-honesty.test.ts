@@ -50,6 +50,11 @@ afterEach(() => {
   else process.env['NODE_ENV'] = originalEnv;
 });
 
+function restoreEnv(key: string, previous: string | undefined) {
+  if (previous === undefined) delete process.env[key];
+  else process.env[key] = previous;
+}
+
 describe('email refuses production rather than discarding it', () => {
   it('sending in production throws instead of silently succeeding', async () => {
     const email = getChannels().email;
@@ -130,26 +135,22 @@ describe('the guard is on the SEND, not the constructor', () => {
   });
 });
 
-describe('the production branch still has no real email provider', () => {
-  it('getChannels() twilio branch returns DevEmail — the gap is real, and now loud', () => {
-    // This does NOT assert the gap is fixed; it asserts it is HONEST. When a
-    // real provider lands, this test is the one that must be updated — which is
-    // the point: it makes the substitution a deliberate act.
+describe('the production branch now has a real email provider, chosen by config', () => {
+  const code = readFileSync(join(__dirname, '..', 'providers', 'notifications', 'channels.ts'), 'utf8');
+  it('both NOTIFICATION_PROVIDER branches take their email from getEmailProvider(), never a hard-wired DevEmail', () => {
     const factory = code.split('export function getChannels')[1] ?? '';
     expect(factory.length).toBeGreaterThan(50);
     expect(factory).toMatch(/case 'twilio'/);
-    expect(factory).toMatch(/email:\s*new DevEmail\(\)/);
+    expect(factory).not.toMatch(/email:\s*new DevEmail\(\)/);
+    expect((factory.match(/email:\s*getEmailProvider\(\)/g) ?? []).length).toBe(2);
   });
-
-  it('no real email adapter exists in the tree yet', () => {
-    // If one is added and this fails, delete this test and wire it in.
-    expect(code).not.toMatch(/class (Ses|Postmark|Resend|Sendgrid|Mailgun)Email/i);
+  it('EMAIL_PROVIDER=smtp without its env fails at construction, naming what is missing', () => {
+    const prev = { p: process.env['EMAIL_PROVIDER'], h: process.env['SMTP_HOST'] };
+    process.env['EMAIL_PROVIDER'] = 'smtp'; delete process.env['SMTP_HOST'];
+    try {
+      expect(() => getChannels()).toThrow(/EMAIL_PROVIDER=smtp needs .*SMTP_HOST/);
+    } finally {
+      restoreEnv('EMAIL_PROVIDER', prev.p); restoreEnv('SMTP_HOST', prev.h);
+    }
   });
 });
-
-/** Put an env var back exactly as it was — deleting it if it was unset,
- *  because assigning `undefined` stores the string "undefined". */
-function restoreEnv(key: string, previous: string | undefined) {
-  if (previous === undefined) delete process.env[key];
-  else process.env[key] = previous;
-}
