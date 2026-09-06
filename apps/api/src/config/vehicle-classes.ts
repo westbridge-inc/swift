@@ -152,3 +152,21 @@ export function feeBandFor(vehicleType: VehicleType): MoverFeeBand {
 export function isPassengerVehicle(vehicleType: VehicleType): boolean {
   return VEHICLE_CLASSES[vehicleType]?.rideClass != null;
 }
+
+/**
+ * [Founder decision XL-vehicle-gap · delegated ruling 2026-09-06] A ride tier is
+ * OFFERED only when some vehicle class in the fleet serves it. Nothing maps to XL
+ * today (CAR→ECONOMY, WAGON_CAR→COMFORT, BUS_9/BUS_15→GROUP), so selling XL meant
+ * either a 15-seater at XL price or a request no driver could ever take. The tier
+ * appears the day a vehicle class maps to it — no other change is needed.
+ */
+export function servedRideClassesOf(table: Record<string, Pick<VehicleClass, 'rideClass'>>): ReadonlySet<RideClass> {
+  const set = new Set<RideClass>();
+  for (const v of Object.values(table)) if (v.rideClass) set.add(v.rideClass);
+  return set;
+}
+export const SERVED_RIDE_CLASSES: ReadonlySet<RideClass> = servedRideClassesOf(VEHICLE_CLASSES);
+export function isRideClassServed(rideClass: RideClass): boolean {
+  return SERVED_RIDE_CLASSES.has(rideClass);
+}
+

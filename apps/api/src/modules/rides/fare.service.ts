@@ -1,4 +1,5 @@
 import type { PrismaClient, RideClass } from '@prisma/client';
+import { isRideClassServed } from '../../config/vehicle-classes';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { type GeoPoint } from '../../utils/geo';
@@ -27,6 +28,17 @@ export const CLASS_CAPACITY: Record<RideClass, number> = { ECONOMY: 4, COMFORT: 
 
 /** Tiers cheapest → priciest. Index also encodes "serves all classes <= it". */
 export const RIDE_CLASS_ORDER: RideClass[] = ['ECONOMY', 'COMFORT', 'XL', 'GROUP'];
+
+/**
+ * The tiers a customer is OFFERED: the ordered ladder, minus any class no vehicle
+ * in the fleet serves (`SERVED_RIDE_CLASSES`, config/vehicle-classes.ts). Today
+ * that hides XL. The eligibility ladder below keeps every class — a GROUP driver
+ * still serves an XL request in the abstract — so nothing else moves when a
+ * vehicle class is mapped to XL later.
+ */
+export function offeredRideClasses(): RideClass[] {
+  return RIDE_CLASS_ORDER.filter((c) => isRideClassServed(c));
+}
 
 /**
  * Driver classes eligible for an order of `orderClass`. A driver's rideClass is
@@ -176,7 +188,7 @@ export class FareService {
     const rates = (await readTaxiRates(this.prisma, countryCode)).payload;
     const classRates = (await readClassRates(this.prisma, countryCode)).payload;
 
-    const tiers: TierEstimate[] = RIDE_CLASS_ORDER.map((rideClass) => {
+    const tiers: TierEstimate[] = offeredRideClasses().map((rideClass) => {
       const multiplier = classRates[rideClass];
       return {
         rideClass,
