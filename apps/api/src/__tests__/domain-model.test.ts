@@ -184,13 +184,25 @@ describe('Trust levels, verification documents, strikes', () => {
     });
     expect(doc.status).toBe('PENDING');
 
-    for (const status of ['APPROVED', 'REJECTED', 'EXPIRED'] as const) {
-      const updated = await prisma.verificationDocument.update({
-        where: { id: doc.id },
-        data: { status, reviewedBy: 'smoke-test', reviewedAt: new Date() },
-      });
-      expect(updated.status).toBe(status);
-    }
+    // [DOC-1 P5-1] Every status is reached by a transition the state machine allows:
+    // queued → claimed → APPROVED (with its decision) → COMMITTED → EXPIRED; a second
+    // document is claimed and REJECTED. A bare status rewrite is refused by the trigger.
+    await prisma.verificationDocument.update({ where: { id: doc.id }, data: { state: 'IN_REVIEW' } });
+    await prisma.verificationDocument.update({ where: { id: doc.id }, data: { state: 'APPROVED', reviewedBy: 'smoke-test', reviewedAt: new Date() } });
+    const kase = await prisma.reviewCase.create({ data: { submissionId: doc.id, tenantId: 'swift-default', queue: 'STANDARD', slaDueAt: new Date() } });
+    await prisma.reviewDecision.create({ data: { caseId: kase.id, tenantId: 'swift-default', reviewerId: 'smoke-test', outcome: 'APPROVE', reasonCode: 'APPROVED', actorFacingCategory: 'APPROVED' } });
+    const committed = await prisma.verificationDocument.update({ where: { id: doc.id }, data: { state: 'COMMITTED' } });
+    expect(committed.status).toBe('APPROVED');
+    const expired = await prisma.verificationDocument.update({ where: { id: doc.id }, data: { status: 'EXPIRED' } });
+    expect(expired).toMatchObject({ status: 'EXPIRED', state: 'EXPIRED' });
+    await expect(prisma.verificationDocument.update({ where: { id: doc.id }, data: { status: 'APPROVED' } })).rejects.toThrow(/DOC_STATE_ILLEGAL/);
+
+    const second = await prisma.verificationDocument.create({
+      data: { userId: customerId, role: 'CUSTOMER', docType: 'national_id', fileUrl: 'storage://smoke/national_id-2.jpg' },
+    });
+    await prisma.verificationDocument.update({ where: { id: second.id }, data: { state: 'IN_REVIEW' } });
+    const rejected = await prisma.verificationDocument.update({ where: { id: second.id }, data: { state: 'REJECTED', reviewedBy: 'smoke-test', reviewedAt: new Date() } });
+    expect(rejected.status).toBe('REJECTED');
   });
 
   it('records strikes with phone and address fingerprint for collusion checks', async () => {

@@ -1,5 +1,6 @@
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
-import type { ReviewQueue } from '@prisma/client';
+import type { DocState, ReviewQueue } from '@prisma/client';
+import { hopDocState } from './doc-state';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -194,6 +195,47 @@ function audienceForRole(role: string): 'customer' | 'earner' | 'business' {
   return 'business';
 }
 
+/**
+ * [DOC-1 P5-1] The submission's path through the machine, one CAS hop per §5.1 row.
+ * The verdict is what the (gated) processor said; the ledger's outcome decides the
+ * extraction branch:
+ *  - nothing extracted + REJECTED → T3 (unreadable capture) straight from CAPTURED;
+ *  - nothing extracted + any other verdict → T6, a human keys it (an approval with no
+ *    evidence is a model-only decision and never auto-commits);
+ *  - extracted → T5/T7, then T8+T17 (auto-approve and commit), X-AUTO-REJECT, or T9.
+ */
+async function walkSubmission(
+  tx: Prisma.TransactionClient,
+  id: string,
+  verdict: 'APPROVED' | 'REJECTED' | 'PENDING',
+  plan: ExtractionPlan | undefined,
+): Promise<VerificationDocument> {
+  const hop = (from: DocState, to: DocState, extra: Prisma.VerificationDocumentUpdateManyMutationInput = {}) =>
+    hopDocState(tx, { id }, from, to, extra);
+  const extracted = plan !== undefined && plan.run.outcome !== 'FAILED';
+  if (!extracted && verdict === 'REJECTED') {
+    await hop('CAPTURED', 'REJECTED', { status: 'REJECTED' });
+  } else {
+    await hop('CAPTURED', 'PREPROCESSED');
+    await hop('PREPROCESSED', 'EXTRACTING');
+    if (!extracted) {
+      await hop('EXTRACTING', 'REVIEW_QUEUED');
+    } else {
+      await hop('EXTRACTING', 'EXTRACTED');
+      await hop('EXTRACTED', 'VALIDATED');
+      if (verdict === 'APPROVED') {
+        await hop('VALIDATED', 'AUTO_APPROVED');
+        await hop('AUTO_APPROVED', 'COMMITTED', { status: 'APPROVED' });
+      } else if (verdict === 'REJECTED') {
+        await hop('VALIDATED', 'REJECTED', { status: 'REJECTED' });
+      } else {
+        await hop('VALIDATED', 'REVIEW_QUEUED');
+      }
+    }
+  }
+  return tx.verificationDocument.findUniqueOrThrow({ where: { id } });
+}
+
 export class VerificationService {
   private countryConfig: CountryConfigService;
   private subscriptions: SubscriptionService;
@@ -229,7 +271,18 @@ export class VerificationService {
       if (!status || ['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(status)) {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
       }
-      const doc = await tx.verificationDocument.create({ data });
+      // [DOC-1 P5-1] Every submission walks the machine from CAPTURED (T1): the row
+      // is born PENDING/CAPTURED and the verdict is REACHED by transitions the trigger
+      // judges. The ledger lands first, so T8's guard (no blocking FAIL) and T17's
+      // provenance (the AUTO_APPROVED ledger) are facts before the hops that need them.
+      const { status: verdict, ...born } = data;
+      const created = await tx.verificationDocument.create({ data: { ...born, status: 'PENDING', state: 'CAPTURED' } });
+      // [DOC-1 P4-4] The processor result lands as rows in the same transaction:
+      // a submission without its extraction ledger cannot exist.
+      if (review.extraction) {
+        await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
+      }
+      const doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
       // [DOC-1 P4-5] A document waiting on a human has ONE open case, with the
       // SLA clock started here — in the same transaction, so a pending document
       // without a case cannot exist.
@@ -239,11 +292,6 @@ export class VerificationService {
           submissionId: doc.id, tenantId: alive[0]!.tenantId, queue: review.queue,
           createdAt: queuedAt, slaDueAt: new Date(queuedAt.getTime() + REVIEW_SLA_HOURS * 3_600_000),
         } });
-      }
-      // [DOC-1 P4-4] The processor result lands as rows in the same transaction:
-      // a submission without its extraction ledger cannot exist.
-      if (review.extraction) {
-        await persistExtraction(tx, { submissionId: doc.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
       return doc;
     });
@@ -660,22 +708,31 @@ export class VerificationService {
     const doc = await this.prisma.verificationDocument.findUnique({ where: { id: kase.submissionId }, select: { userId: true } });
     if (!doc) throw new NotFoundError('VerificationDocument', kase.submissionId);
     await assertNotRecused(this.prisma, reviewerId, doc.userId);
-    const won = await this.prisma.reviewCase.updateMany({
-      where: { id: caseId, closedAt: null, OR: [{ assignedTo: null }, { assignedTo: reviewerId }] },
-      data: { assignedTo: reviewerId, assignedAt: new Date() },
+    return this.prisma.$transaction(async (tx) => {
+      const won = await tx.reviewCase.updateMany({
+        where: { id: caseId, closedAt: null, OR: [{ assignedTo: null }, { assignedTo: reviewerId }] },
+        data: { assignedTo: reviewerId, assignedAt: new Date() },
+      });
+      if (won.count !== 1) throw new AppError(409, 'CASE_CLAIMED', 'Another reviewer holds this case');
+      // [DOC-1 P5-1] T11 claim(): the document follows the case into IN_REVIEW.
+      await hopDocState(tx, { id: kase.submissionId }, 'REVIEW_QUEUED', 'IN_REVIEW');
+      return tx.reviewCase.findUniqueOrThrow({ where: { id: caseId } });
     });
-    if (won.count !== 1) throw new AppError(409, 'CASE_CLAIMED', 'Another reviewer holds this case');
-    return this.prisma.reviewCase.findUniqueOrThrow({ where: { id: caseId } });
   }
 
   /** Only the reviewer holding a case may hand it back to the queue. */
   async releaseReviewCase(caseId: string, reviewerId: string) {
-    const won = await this.prisma.reviewCase.updateMany({
-      where: { id: caseId, closedAt: null, assignedTo: reviewerId },
-      data: { assignedTo: null, assignedAt: null },
+    return this.prisma.$transaction(async (tx) => {
+      const won = await tx.reviewCase.updateMany({
+        where: { id: caseId, closedAt: null, assignedTo: reviewerId },
+        data: { assignedTo: null, assignedAt: null },
+      });
+      if (won.count !== 1) throw new AppError(409, 'NOT_CASE_HOLDER', 'Only the reviewer holding this case can release it');
+      // [DOC-1 P5-1] X-RELEASE: handing the case back is IN_REVIEW → REVIEW_QUEUED.
+      const kase = await tx.reviewCase.findUniqueOrThrow({ where: { id: caseId } });
+      await hopDocState(tx, { id: kase.submissionId }, 'IN_REVIEW', 'REVIEW_QUEUED');
+      return kase;
     });
-    if (won.count !== 1) throw new AppError(409, 'NOT_CASE_HOLDER', 'Only the reviewer holding this case can release it');
-    return this.prisma.reviewCase.findUniqueOrThrow({ where: { id: caseId } });
   }
 
   /**
@@ -702,6 +759,8 @@ export class VerificationService {
         timeOnCaseMs: Math.max(0, now.getTime() - (open.assignedAt ?? open.createdAt).getTime()),
       } });
       await tx.reviewCase.update({ where: { id: open.id }, data: { queue: 'SECOND_REVIEW', priority: Math.min(open.priority, FRAUD_HOLD_PRIORITY), assignedTo: null, assignedAt: null } });
+      // [DOC-1 P5-1] T15 decide(ESCALATE): back to the queue (a claimed document leaves IN_REVIEW).
+      await hopDocState(tx, { id: docId }, 'IN_REVIEW', 'REVIEW_QUEUED');
       return doc;
     });
   }
@@ -767,9 +826,12 @@ export class VerificationService {
       // This conditional write, not the earlier read, is the decision point.
       // At most one competing approve/reject can transition PENDING. Losers
       // preserve NOT_PENDING and may only reconcile already-committed evidence.
+      // [DOC-1 P5-1] T11 implicit claim: a decision on an unclaimed document passes
+      // through IN_REVIEW — the table never allows REVIEW_QUEUED → APPROVED/REJECTED.
+      await hopDocState(tx, { id: docId, userId: candidate.userId }, 'REVIEW_QUEUED', 'IN_REVIEW');
       const won = await tx.verificationDocument.updateMany({
-        where: { id: docId, userId: candidate.userId, status: 'PENDING' },
-        data,
+        where: { id: docId, userId: candidate.userId, status: 'PENDING', OR: [{ state: 'IN_REVIEW' }, { state: null }] },
+        data: { ...data, state: requestedStatus === 'APPROVED' ? 'APPROVED' : 'REJECTED' },
       });
       if (won.count !== 1) {
         const current = await tx.verificationDocument.findUnique({
@@ -809,6 +871,13 @@ export class VerificationService {
         await this.confirmFraudIn(tx, { docId, subjectUserId: candidate.userId, tenantId: open.tenantId, caseId: open.id, reviewerId: review.reviewerId, reasonCode: review.fraud.reasonCode, now });
       }
 
+      if (approve) {
+        // [DOC-1 P5-1] T17 commit(): the APPROVE decision above is the provenance the
+        // trigger demands (test_commit_requires_provenance); without it this hop is refused.
+        const committed = await hopDocState(tx, { id: docId, userId: candidate.userId }, 'APPROVED', 'COMMITTED');
+        if (!committed) throw new AppError(500, 'DOC_STATE_COMMIT_FAILED', 'The approval could not be committed');
+      }
+
       const updated = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
       // The document decision and provider public/hire projection commit as one
       // authority transition under the same User lock used by hire/profile.
@@ -824,6 +893,32 @@ export class VerificationService {
       throw new AppError(400, 'NOT_PENDING', `Document is ${outcome.status}, only PENDING documents can be reviewed`);
     }
     return outcome.document;
+  }
+
+  /**
+   * [DOC-1 §5.1 T23 · P5-1] revoke(): an admin withdraws a committed approval with a
+   * reason. COMMITTED → REVOKED (legacy status REJECTED, so every reader sees "not
+   * approved"), eligibility recomputed in the same transaction (§3.11 propagation:
+   * the projection, then the mover goes offline / listings suspend like an expiry),
+   * and the actor is told the category only.
+   */
+  async revokeDocument(docId: string, adminId: string, reason: string): Promise<VerificationDocument> {
+    const doc = await this.prisma.verificationDocument.findUnique({ where: { id: docId }, select: { id: true, userId: true, docType: true } });
+    if (!doc) throw new NotFoundError('VerificationDocument', docId);
+    const revoked = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${doc.userId} FOR UPDATE /* verification-document-decision-authority */`;
+      const won = await hopDocState(tx, { id: docId, userId: doc.userId }, 'COMMITTED', 'REVOKED', {
+        status: 'REJECTED', reviewedBy: adminId, reviewedAt: new Date(), reviewNote: `REVOKED: ${reason}`,
+      });
+      if (!won) throw new AppError(409, 'NOT_COMMITTED', 'Only a committed (approved) document can be revoked');
+      await projectProviderVerificationLocked(tx, doc.userId);
+      await this.projectVendorActivation(tx, doc.userId);
+      return tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
+    });
+    await this.forceMoverOfflineIfNotLive(doc.userId);
+    await this.suspendListingsIfUnverified(doc.userId);
+    await this.notifyRejection(doc.userId, doc.docType, 'the approval was withdrawn');
+    return revoked;
   }
 
   /**
