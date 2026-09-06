@@ -313,6 +313,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /verification/queue/counts': c('C0', 'verification.counts'),
   'PUT /verification/:id/approve': c('C3', 'verification.decide', E.verification),
   'PUT /verification/:id/reject': c('C3', 'verification.decide', E.verification),
+  'PUT /verification/:id/revoke': c('C3', 'verification.decide', E.verification),
   'GET /verification/:id/document-url': c('C1', 'verification.document.read'),
   // [DOC-1 §9.4 · P9-4] Legal holds on a person's documents: placing or releasing
   // one decides whether evidence survives — consequential, a reason is owed.

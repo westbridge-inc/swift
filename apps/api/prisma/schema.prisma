@@ -603,6 +603,10 @@ model VerificationDocument {
   /// Provider case reference — the only provider-side artifact we keep
   kycRef               String?
   status               VerificationDocumentStatus @default(PENDING)
+  /// [DOC-1 P5-1] Machine state; null only for a row a legacy writer inserted before the
+  /// trigger derived it (never null after the trigger runs). Every transition is a CAS on
+  /// this column and the trigger refuses any pair that is not in `doc_state_transition`.
+  state                DocState?
   /// OCR'd / manually entered expiry; lapse of a critical doc auto-suspends listings
   expiresAt            DateTime?
   reviewedBy           String?
@@ -638,6 +642,7 @@ model VerificationDocument {
   @@index([expiresAt])
   @@index([retentionExpiresAt])
   @@index([legalHoldId])
+  @@index([state])
   @@map("verification_documents")
 }
 
@@ -958,6 +963,32 @@ enum VerificationDocumentStatus {
   APPROVED
   REJECTED
   EXPIRED
+}
+
+/// [DOC-1 Part V · P5-1] The document state machine (§4.1 `doc_state`, 17 states).
+/// `VerificationDocument.status` is its LEGACY PROJECTION, kept by the trigger in
+/// `doc-state.ts` (`docStateMachineDdl`): pre-decision → PENDING; APPROVED /
+/// AUTO_APPROVED / COMMITTED → APPROVED; REJECTED and REVOKED → REJECTED; EXPIRED →
+/// EXPIRED; PURGED and SUPERSEDED keep the status they had. LEGAL_HOLD is an overlay
+/// (`legalHoldId`) and is never stored in the column — the trigger refuses it.
+enum DocState {
+  CAPTURED
+  PREPROCESSED
+  EXTRACTING
+  EXTRACTED
+  VALIDATED
+  AUTO_APPROVED
+  REVIEW_QUEUED
+  IN_REVIEW
+  INFO_REQUESTED
+  APPROVED
+  REJECTED
+  COMMITTED
+  PURGED
+  EXPIRED
+  SUPERSEDED
+  REVOKED
+  LEGAL_HOLD
 }
 
 /// Motor-insurance class for taxi drivers (spec §3.4). HIRE = fare-paying
@@ -6472,4 +6503,18 @@ model RenewalSchedule {
   @@index([subjectId])
   @@index([tenantId, suspendedAt, expiresOn])
   @@map("renewal_schedule")
+}
+
+/// [DOC-1 Part V · P5-1] The state machine's transition table (§5.1 T1–T24 plus the named
+/// extensions), mirrored from `doc-state.ts` (`DOC_TRANSITIONS`) by migration and read by
+/// the trigger on verification_documents: a pair that is not a row here cannot be written.
+/// Global data like the document registry — no tenant.
+model DocStateTransition {
+  fromState DocState
+  toState   DocState
+  event     String
+  spec      String
+
+  @@id([fromState, toState])
+  @@map("doc_state_transition")
 }

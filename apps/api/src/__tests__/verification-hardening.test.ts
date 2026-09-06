@@ -243,7 +243,9 @@ describe('review-SLA watchdog (spec §13)', () => {
     // Resolving the stale doc removes it from the breach count. (Other suites
     // may leave their own stale rows in the shared DB — assert strictly fewer,
     // not zero.)
-    await app.prisma.verificationDocument.update({ where: { id: stale.id }, data: { status: 'REJECTED' } });
+    // [DOC-1 P5-1] A queued document is decided the way the machine allows: claimed (T11), then rejected (T13).
+    await app.prisma.verificationDocument.update({ where: { id: stale.id }, data: { state: 'IN_REVIEW' } });
+    await app.prisma.verificationDocument.update({ where: { id: stale.id }, data: { state: 'REJECTED' } });
     const clean = await svc.alertReviewSlaBreaches(24);
     expect(clean).toBeLessThan(breached);
   });

@@ -4719,6 +4719,19 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: doc };
   });
 
+  // [DOC-1 §5.1 T23 · P5-1] revoke(): withdraw a COMMITTED approval with a reason. C3 —
+  // the same authority as a decision; the state machine refuses anything not committed.
+  const revokeDocSchema = z.object({ reason: z.string().min(3).max(500) });
+  app.put('/verification/:id/revoke', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = revokeDocSchema.parse(request.body);
+
+    const doc = await verification.revokeDocument(id, request.user.userId, body.reason);
+    await audit(request.user.userId, 'REVOKE_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
+
+    return { success: true, data: doc };
+  });
+
   // ── [DOC-1 §9.4 · P9-4] Legal holds on a person's documents ─────────────
   // Placed only here (DOC-INV-14), by a C3 actor with a stated reason (ADM-006,
   // header or body — the header wins, as everywhere). Every hold names an

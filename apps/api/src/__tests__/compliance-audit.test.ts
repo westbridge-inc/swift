@@ -247,11 +247,13 @@ describe('resolveViolation', () => {
 
     await expect(svc.resolveViolation(violation.id)).rejects.toThrow(/still fails/i);
 
-    // Documents renewed → resolvable
-    await app.prisma.verificationDocument.updateMany({
-      where: { userId: mover.id },
-      data: { status: 'APPROVED', expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000) },
-    });
+    // Documents renewed → resolvable. [DOC-1 P5-1] A renewal is a NEW approved submission;
+    // an EXPIRED document never returns to APPROVED (the machine refuses EXPIRED → APPROVED).
+    const lapsed = await app.prisma.verificationDocument.findMany({ where: { userId: mover.id } });
+    await app.prisma.verificationDocument.createMany({ data: lapsed.map((d) => ({
+      userId: d.userId, role: d.role, docType: d.docType, fileUrl: `${d.fileUrl}-renewed`,
+      status: 'APPROVED' as const, expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000),
+    })) });
     const resolved = await svc.resolveViolation(violation.id);
     expect(resolved.resolvedAt).toBeTruthy();
   });

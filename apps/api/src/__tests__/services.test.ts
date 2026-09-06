@@ -740,7 +740,8 @@ describe('P-24 the provider is told a customer wants to hire them', () => {
       app.prisma.serviceProvider.update({ where: { id: provider.providerId }, data: { isVerified: false } }),
     );
     await runWithoutTenant(() =>
-      app.prisma.verificationDocument.updateMany({ where: { userId: provider.userId }, data: { status: 'REJECTED' } }),
+      // [DOC-1 P5-1] De-verifying approved evidence is a revocation (T23), never a rewrite to REJECTED.
+      app.prisma.verificationDocument.updateMany({ where: { userId: provider.userId }, data: { state: 'REVOKED' } }),
     );
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
 
