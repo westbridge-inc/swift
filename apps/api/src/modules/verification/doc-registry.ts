@@ -98,8 +98,10 @@ export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
   // §7.2 field-level
   { code: 'V_MRZ_CHECKSUM', scope: 'FIELD', isBlocking: true, detailCode: 'SUSPECTED_ALTERATION' },
   { code: 'V_DATE_ORDER', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE' },
-  { code: 'V_NOT_EXPIRED', scope: 'FIELD', isBlocking: true, detailCode: 'EXPIRED_DOCUMENT' },
-  { code: 'V_EXPIRY_PLAUSIBLE', scope: 'FIELD', isBlocking: false, detailCode: 'UNREADABLE_CAPTURE' },
+  { code: 'V_NOT_EXPIRED', scope: 'FIELD', isBlocking: true, detailCode: 'EXPIRED_DOCUMENT', implRef: 'validators#V_NOT_EXPIRED' },
+  // [self-test C · ruling 2026-09-06] §7.2 listed this as non-blocking; a non-blocking FAIL still auto-approves, which is
+  // exactly the confident-wrong-expiry hole the self-test names. BLOCKING here means review by a person, never a rejection.
+  { code: 'V_EXPIRY_PLAUSIBLE', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE', implRef: 'validators#V_EXPIRY_PLAUSIBLE' },
   { code: 'V_DOB_ADULT', scope: 'FIELD', isBlocking: true, detailCode: 'REQUIREMENT_NOT_MET' },
   { code: 'V_TIN_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE', docTypeLegacy: 'tin_certificate' },
   { code: 'V_PLATE_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE' },
@@ -324,11 +326,41 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
   const extraDocTypes = await seedExtraDocTypes(prisma);
   const validators = await seedValidatorRegistry(prisma);
   const categoryGates = await seedCategoryGates(prisma);
+  // [P4-1 EXPAND] the declared fields, after the validators they reference exist
+  await seedDocFields(prisma);
   // [DOC-1 §1.3 · P1-3] provisional rows follow the bucket doctrine for the image
   await reconcileImagePolicy(prisma);
   return { docTypes, requirementSets, requirementItems, validators, extraDocTypes, categoryGates };
 }
 
+
+// ---------------------------------------------------------------------------
+// [DOC-1 §3 · §18.1 · DOC-INV-2 · P4-1 EXPAND] The field catalogue — what each document type
+// DECLARES. A processor key that is not declared is dropped and counted (DOC-INV-6); a
+// declared field the processor did not return is an ABSENT row. Every field ships
+// `isRequired: false` (ruling 2026-09-07): required-ness is the switch that ends auto-approval
+// for a type until its extraction profile actually reads the field, and no profile is built
+// yet (UNPROFILED) — flipping a field to required is a per-type policy step, recorded when
+// the profile lands. `identifier` names the field a processor's `documentNumber` lands in.
+// ---------------------------------------------------------------------------
+export interface FieldRow { fieldCode: string; dataType: 'text' | 'date' | 'enum' | 'number' | 'geo' | 'bool'; isPii?: boolean; blind?: boolean; validatorRef?: string; identifier?: boolean; enumValues?: string[] }
+const DATES = (issue = 'issue_date', expiry = 'expiry_date'): FieldRow[] => [
+  { fieldCode: issue, dataType: 'date', validatorRef: 'V_DATE_ORDER' },
+  { fieldCode: expiry, dataType: 'date', validatorRef: 'V_EXPIRY_PLAUSIBLE' },
+];
+const IDENTITY: FieldRow[] = [
+  { fieldCode: 'doc_number', dataType: 'text', isPii: true, blind: true, identifier: true, validatorRef: 'V_MRZ_CHECKSUM' },
+  { fieldCode: 'full_name', dataType: 'text', isPii: true },
+  { fieldCode: 'dob', dataType: 'date', isPii: true, validatorRef: 'V_DOB_ADULT' },
+  { fieldCode: 'sex', dataType: 'enum', isPii: true, enumValues: ['M', 'F', 'X'] },
+  ...DATES(),
+  { fieldCode: 'nationality', dataType: 'text', isPii: true },
+];
+export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
+  national_id: IDENTITY,
+  owner_national_id: IDENTITY,
+  passport: IDENTITY,
+  digital_id: IDENTITY,
   self_declaration_unregistered: [
     { fieldCode: 'trading_name', dataType: 'text', identifier: true },
     { fieldCode: 'activity_class', dataType: 'enum' },
@@ -442,13 +474,39 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
 };
 
 /** The field a processor's generic `documentNumber` lands in for a type: a declared `doc_number` first (the legacy convention), else the type's identifier. */
+export function identifierFieldOf(legacyCode: string, declared: ReadonlyArray<{ fieldCode: string }>): string | null {
+  if (declared.some((f) => f.fieldCode === 'doc_number')) return 'doc_number';
+  const id = FIELD_CATALOGUE[legacyCode]?.find((f) => f.identifier)?.fieldCode ?? null;
+  return id && declared.some((f) => f.fieldCode === id) ? id : null;
+}
+
+/** Seed the declared fields of every seeded document type. Expand-only: rows are upserted, never removed (a type's own test may add fields for a run). */
+export async function seedDocFields(prisma: PrismaClient): Promise<number> {
+  const types = await prisma.docType.findMany({ select: { code: true, legacyCode: true } });
+  const validators = new Set((await prisma.validator.findMany({ select: { code: true } })).map((v) => v.code));
+  let n = 0;
+  for (const t of types) {
+    const rows = FIELD_CATALOGUE[t.legacyCode] ?? [];
+    for (const [i, f] of rows.entries()) {
+      const validatorRef = f.validatorRef && validators.has(f.validatorRef) ? f.validatorRef : null;
+      const facts = { dataType: f.dataType, isPii: f.isPii ?? false, isBlindIndexed: f.blind ?? false, validatorRef, enumValues: f.enumValues ?? [], displayOrder: i + 1 };
+      await prisma.docField.upsert({
+        where: { docTypeCode_fieldCode: { docTypeCode: t.code, fieldCode: f.fieldCode } },
+        create: { docTypeCode: t.code, fieldCode: f.fieldCode, isRequired: false, ...facts },
+        update: facts, // isRequired is a policy flag another step may have set; the seed never lowers or raises it
+      });
+      n += 1;
+    }
+  }
+  return n;
+}
+
 /**
  * The registry's answer for (country, role) — or null when the registry does
  * not yet speak for it: no requirement set in effect today, or any of its
  * document types still inactive (legal facts unverified). The facade falls
  * back to the JSON on null, so behaviour is unchanged until activation.
  */
-export async function registryChecklist(prisma: PrismaClient, countryCode: string, actorRole: string, now = new Date()): Promise<string[] | null> {
 export const UNREGISTERED_TIER = 'UNREGISTERED';
 export const UNREGISTERED_LIST_SUFFIX = '_UNREGISTERED';
 /** RESTAURANT_UNREGISTERED → { actorRole: 'RESTAURANT', tier: 'UNREGISTERED' }; anything else is the STANDARD tier. */
