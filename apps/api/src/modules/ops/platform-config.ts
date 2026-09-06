@@ -49,12 +49,13 @@ export const guyanaTiers = {
   franchiseDiscountPct: 50,
 };
 
-/** The desired platform spine, as data. */
-export function desiredPlatformConfig(): DesiredConfig {
-  // Document checklists are the LAUNCH default. The GEI-licensed electrician
-  // entry is the one trade-specific requirement; every other trade falls back
-  // to the SERVICE_PROVIDER checklist.
-  const guyanaChecklists = {
+/**
+ * The LAUNCH document checklists, as code. The CountryConfig row carries a copy the
+ * founder may edit; readers merge these defaults UNDER the stored JSON so a key added
+ * here (the UNREGISTERED tier lists, P3-2) exists on every environment without a reseed,
+ * while an edited stored list still wins.
+ */
+export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     MOVER: ['national_id', 'police_clearance'],
     MOVER_MOTOR: ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
     MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'],
@@ -62,12 +63,24 @@ export function desiredPlatformConfig(): DesiredConfig {
     RESTAURANT: ['owner_national_id', 'business_registration', 'tin_certificate', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
     SUPERMARKET: ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'],
     STORE: ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'],
+    // [DOC-1 §3.2/§3.6 · FD-DOC-1 · P3-2] The UNREGISTERED tier of the same roles: identity, the signed
+    // self-declaration, the storefront photo, and — never waived — the food handler permit for food.
+    // TIN is optional at this tier (not blocking); the restaurant licence is a nudge, not a requirement.
+    RESTAURANT_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo', 'food_handler_cert'],
+    SUPERMARKET_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
+    STORE_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
     SERVICE: ['owner_national_id', 'police_clearance'],
     SERVICE_PROVIDER: ['national_id', 'police_clearance'],
     SERVICE_PROVIDER_TRADE_ELECTRICIAN: ['gei_electrical_licence'],
     SERVICE_PROVIDER_TRADE_ELECTRICAL: ['gei_electrical_licence'],
     CUSTOMER_L2: ['national_id', 'selfie'],
-  };
+};
+
+/**
+ * [DOC-1 §30 · DOC-INV-43] No GYD/USD constant in code. The seed needs ONE anchor to
+ * derive every USD-pegged market's local figures and to record the launch market's
+ * rate on its CountryConfig row; that anchor comes from the environment
+  const guyanaChecklists = DEFAULT_DOCUMENT_CHECKLISTS;
   const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
   const taxiClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 };
   const guyanaCashRules = {

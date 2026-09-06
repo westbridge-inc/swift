@@ -892,3 +892,15 @@ export function useImportItems() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }
+
+/** [DOC-1 §3.6 · P3-2] The store's tier — caps, today's and this week's usage, what lifts the limits. */
+export function useVendorTier<T = any>() {
+  const pv = usePreviewDataset();
+  return useQuery<T>({
+    queryKey: ['vendor', 'tier'],
+    queryFn: async () => (await vendorApi.tier()).data?.data as T,
+    enabled: !pv,
+    refetchInterval: 60000,
+  });
+}
+

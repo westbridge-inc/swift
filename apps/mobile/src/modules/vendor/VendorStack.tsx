@@ -10,6 +10,7 @@ import { VendorOrderDetailScreen } from './screens/VendorOrderDetailScreen';
 import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { VendorCategoryReviewScreen } from './screens/VendorCategoryReviewScreen';
+import { VendorTierScreen } from './screens/VendorTierScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 import { disconnectSocket } from '../../services/socket';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
@@ -240,6 +241,8 @@ export function VendorStack() {
           Accepting a suggestion is what writes the tag the Market feed reads. */}
       <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
       <Stack.Screen name="VendorMySwiftNumber" component={VendorSwiftNumberScreen} />
+      {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
+      <Stack.Screen name="VendorTier" component={VendorTierScreen} />
       {/* [B-support] Role-agnostic ticket screen — the vendor stack had NO
           route to a human. Registration, not a rewrite. */}
       <Stack.Screen name="GetHelp" component={GetHelpScreen} />
