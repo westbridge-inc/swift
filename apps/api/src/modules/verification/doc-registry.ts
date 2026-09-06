@@ -12,6 +12,7 @@
  * activated by a migration that inserts facts, not by code.
  */
 import type { PrismaClient, DocBucket, ValidatorScope, GateEnforcement, DiscoveryCategoryKind, DocImagePolicy } from '@prisma/client';
+import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
 import { AUTO_APPROVE_EXPIRY_DAYS } from './verification.service';
 
 export const REGISTRY_TIER = 'STANDARD';
@@ -60,6 +61,8 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   // [DOC-1 §18.1] the addendum's Guyana types (seeded by EXTRA_DOC_TYPES, not by any checklist)
   liquor_licence: 'BUSINESS', sanitary_certificate: 'BUSINESS', trade_licence: 'BUSINESS', pharmacy_authorisation: 'BUSINESS',
   nis_employer_reg: 'BUSINESS', digital_id: 'PERSONAL',
+  // [DOC-1 §3.2 · P3-2] the unregistered trader's signed self-declaration (versioned, hashed, consent-ledger row)
+  self_declaration_unregistered: 'BUSINESS',
 };
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
 /**
@@ -136,6 +139,7 @@ export interface ExtraDocType {
  * types carry needsSpecimen so nothing can be submitted against them (FD-DOC-15).
  */
 export const EXTRA_DOC_TYPES: readonly ExtraDocType[] = [
+  { legacyCode: 'self_declaration_unregistered', displayName: 'Unregistered trader self-declaration', bucket: 'BUSINESS', issuer: 'The trader (signed in-app; attestation version + content hash in the consent ledger)', hasExpiry: true, defaultValidityDays: 365, expirySource: 'DEFAULT', needsSpecimen: false, note: '§3.2/§3.6 · P3-2: blocking for the MICRO_VENDOR set; 365 d; fields trading_name, activity_class, declared_address, signed_at, attestation_version' },
   { legacyCode: 'liquor_licence', displayName: 'Liquor licence', bucket: 'BUSINESS', issuer: 'GRA / District Licensing Board', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: annual; licence_class decides the permitted sale mode' },
   { legacyCode: 'sanitary_certificate', displayName: 'Sanitary certificate', bucket: 'BUSINESS', issuer: 'Public health / local authority', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: printed expiry, else 365 days' },
   { legacyCode: 'trade_licence', displayName: 'Trade licence', bucket: 'BUSINESS', issuer: 'GRA', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: annual; licence_type per the GRA schedule' },
@@ -279,7 +283,8 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
   const countries = await prisma.countryConfig.findMany({ select: { code: true, documentChecklists: true } });
   let docTypes = 0; let requirementSets = 0; let requirementItems = 0;
   for (const c of countries) {
-    const lists = (c.documentChecklists ?? {}) as Record<string, string[]>;
+    // Code defaults under the stored JSON (P3-2): a list added in code is seeded everywhere; an edited stored list wins.
+    const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((c.documentChecklists ?? {}) as Record<string, string[]>) };
     const legacyCodes = [...new Set(Object.values(lists).flat())];
     for (const legacyCode of legacyCodes) {
       const bucket = BUCKET_OF[legacyCode] ?? 'PERSONAL';
@@ -298,10 +303,13 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
       });
       docTypes += 1;
     }
-    for (const [actorRole, codes] of Object.entries(lists)) {
+    for (const [listKey, codes] of Object.entries(lists)) {
+      // [DOC-1 §3.6 · P3-2] A <ROLE>_UNREGISTERED list is the same role's requirement set at the
+      // UNREGISTERED tier — the registry's own tier column, not a second role.
+      const { actorRole, tier } = splitChecklistKey(listKey);
       const set = await prisma.requirementSet.upsert({
-        where: { countryCode_actorRole_tier_effectiveFrom: { countryCode: c.code, actorRole, tier: REGISTRY_TIER, effectiveFrom: REGISTRY_EFFECTIVE_FROM } },
-        create: { countryCode: c.code, actorRole, tier: REGISTRY_TIER, effectiveFrom: REGISTRY_EFFECTIVE_FROM },
+        where: { countryCode_actorRole_tier_effectiveFrom: { countryCode: c.code, actorRole, tier, effectiveFrom: REGISTRY_EFFECTIVE_FROM } },
+        create: { countryCode: c.code, actorRole, tier, effectiveFrom: REGISTRY_EFFECTIVE_FROM },
         update: {},
       });
       requirementSets += 1;
@@ -353,6 +361,119 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   owner_national_id: IDENTITY,
   passport: IDENTITY,
   digital_id: IDENTITY,
+  self_declaration_unregistered: [
+    { fieldCode: 'trading_name', dataType: 'text', identifier: true },
+    { fieldCode: 'activity_class', dataType: 'enum' },
+    { fieldCode: 'declared_address', dataType: 'text', isPii: true },
+    { fieldCode: 'signed_at', dataType: 'date' },
+    { fieldCode: 'attestation_version', dataType: 'text' },
+  ],
+  // A photo declares no EXTRACTED fields: its capture metadata (captured_at, geo_point, device_attestation —
+  // §3.2) is recorded by the capture attestation (P22), not read from the image. Photo types stay field-less.
+  storefront_photo: [],
+  food_handler_cert: [
+    { fieldCode: 'permit_number', dataType: 'text', isPii: true, blind: true, identifier: true },
+    { fieldCode: 'holder_name', dataType: 'text', isPii: true },
+    ...DATES(),
+    { fieldCode: 'issuing_office', dataType: 'text' },
+  ],
+  tin_certificate: [
+    { fieldCode: 'tin', dataType: 'text', isPii: true, blind: true, identifier: true, validatorRef: 'V_TIN_FORMAT' },
+    { fieldCode: 'registered_name', dataType: 'text' },
+  ],
+  business_registration: [
+    { fieldCode: 'registration_number', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'business_name', dataType: 'text' },
+    { fieldCode: 'proprietor_name', dataType: 'text', isPii: true },
+    { fieldCode: 'nature_of_business', dataType: 'text' },
+    { fieldCode: 'principal_place', dataType: 'text' },
+    { fieldCode: 'registration_date', dataType: 'date' },
+  ],
+  gra_restaurant_licence: [
+    { fieldCode: 'licence_number', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'premises_name', dataType: 'text' },
+    { fieldCode: 'premises_address', dataType: 'text' },
+    ...DATES(),
+    { fieldCode: 'issuing_body', dataType: 'text' },
+  ],
+  drivers_licence: [
+    { fieldCode: 'licence_number', dataType: 'text', isPii: true, blind: true, identifier: true },
+    { fieldCode: 'holder_name', dataType: 'text', isPii: true },
+    { fieldCode: 'dob', dataType: 'date', isPii: true, validatorRef: 'V_DOB_ADULT' },
+    { fieldCode: 'classes', dataType: 'text', validatorRef: 'V_LICENCE_CLASS' },
+    ...DATES(),
+  ],
+  hire_car_permit: [
+    { fieldCode: 'licence_number', dataType: 'text', isPii: true, blind: true, identifier: true },
+    { fieldCode: 'holder_name', dataType: 'text', isPii: true },
+    ...DATES(),
+  ],
+  police_clearance: [], // routed by IDV-1; DOC-1 declares nothing (§3.7)
+  vehicle_registration: [
+    { fieldCode: 'registration_mark', dataType: 'text', blind: true, identifier: true, validatorRef: 'V_PLATE_CLASS' },
+    { fieldCode: 'chassis', dataType: 'text', blind: true },
+    { fieldCode: 'make', dataType: 'text' },
+    { fieldCode: 'model', dataType: 'text' },
+    { fieldCode: 'year', dataType: 'number' },
+    { fieldCode: 'colour', dataType: 'text', validatorRef: 'V_VEHICLE_COLOUR' },
+    { fieldCode: 'owner_name', dataType: 'text', isPii: true },
+  ],
+  road_service_licence: [
+    { fieldCode: 'licence_number', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'registration_mark', dataType: 'text', validatorRef: 'V_PLATE_CROSS_MATCH' },
+    { fieldCode: 'class', dataType: 'text' },
+    ...DATES(),
+  ],
+  fitness_cert: [
+    { fieldCode: 'certificate_number', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'registration_mark', dataType: 'text', validatorRef: 'V_PLATE_CROSS_MATCH' },
+    ...DATES(),
+  ],
+  vehicle_insurance: [
+    { fieldCode: 'policy_number', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'insurer', dataType: 'text' },
+    { fieldCode: 'registration_mark', dataType: 'text', validatorRef: 'V_PLATE_CROSS_MATCH' },
+    { fieldCode: 'cover_type', dataType: 'text' },
+    { fieldCode: 'covers_hire_and_reward', dataType: 'bool', validatorRef: 'V_INSURANCE_SCOPE' },
+    ...DATES('effective_date', 'expiry_date'),
+  ],
+  vehicle_plate_photo: [],
+  vehicle_exterior_photo: [],
+  selfie: [],
+  liquor_licence: [
+    { fieldCode: 'licence_number', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'licence_class', dataType: 'enum', enumValues: ['LIQUOR_RESTAURANT', 'OFF_LICENCE', 'SPIRIT_SHOP', 'MEMBERS_CLUB', 'HOTEL', 'MALT_AND_WINE', 'TAVERN'] },
+    { fieldCode: 'licensee_name', dataType: 'text', isPii: true },
+    { fieldCode: 'premises_address', dataType: 'text' },
+    { fieldCode: 'year', dataType: 'number' },
+    { fieldCode: 'district', dataType: 'text' },
+  ],
+  sanitary_certificate: [
+    { fieldCode: 'certificate_ref', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'premises_address', dataType: 'text' },
+    ...DATES(),
+    { fieldCode: 'inspecting_officer', dataType: 'text', isPii: true },
+  ],
+  trade_licence: [
+    { fieldCode: 'licence_number', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'licence_type', dataType: 'enum', enumValues: ['GENERAL_SHOP', 'BUTCHER', 'PHARMACY', 'INTERNET_CAFE', 'CINEMA', 'LUMBER_YARD', 'OTHER'] },
+    { fieldCode: 'holder_name', dataType: 'text', isPii: true },
+    { fieldCode: 'premises_address', dataType: 'text' },
+    { fieldCode: 'year', dataType: 'number' },
+  ],
+  pharmacy_authorisation: [], // NEEDS_SPECIMEN — do not guess (§18.1)
+  nis_employer_reg: [
+    { fieldCode: 'employer_number', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'registered_name', dataType: 'text' },
+  ],
+  gei_electrical_licence: [
+    { fieldCode: 'licence_number', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'holder_name', dataType: 'text', isPii: true },
+    ...DATES(),
+  ],
+};
+
+/** The field a processor's generic `documentNumber` lands in for a type: a declared `doc_number` first (the legacy convention), else the type's identifier. */
 export function identifierFieldOf(legacyCode: string, declared: ReadonlyArray<{ fieldCode: string }>): string | null {
   if (declared.some((f) => f.fieldCode === 'doc_number')) return 'doc_number';
   const id = FIELD_CATALOGUE[legacyCode]?.find((f) => f.identifier)?.fieldCode ?? null;
@@ -386,9 +507,19 @@ export async function seedDocFields(prisma: PrismaClient): Promise<number> {
  * document types still inactive (legal facts unverified). The facade falls
  * back to the JSON on null, so behaviour is unchanged until activation.
  */
+export const UNREGISTERED_TIER = 'UNREGISTERED';
+export const UNREGISTERED_LIST_SUFFIX = '_UNREGISTERED';
+/** RESTAURANT_UNREGISTERED → { actorRole: 'RESTAURANT', tier: 'UNREGISTERED' }; anything else is the STANDARD tier. */
+export function splitChecklistKey(listKey: string): { actorRole: string; tier: string } {
+  return listKey.endsWith(UNREGISTERED_LIST_SUFFIX)
+    ? { actorRole: listKey.slice(0, -UNREGISTERED_LIST_SUFFIX.length), tier: UNREGISTERED_TIER }
+    : { actorRole: listKey, tier: REGISTRY_TIER };
+}
+
+export async function registryChecklist(prisma: PrismaClient, countryCode: string, actorRole: string, now = new Date(), tier: string = REGISTRY_TIER): Promise<string[] | null> {
   const set = await prisma.requirementSet.findFirst({
     where: {
-      countryCode, actorRole, tier: REGISTRY_TIER,
+      countryCode, actorRole, tier,
       effectiveFrom: { lte: now },
       OR: [{ effectiveTo: null }, { effectiveTo: { gt: now } }],
     },
@@ -403,4 +534,8 @@ export async function seedDocFields(prisma: PrismaClient): Promise<number> {
 /** [DOC-1 Part XIX · P19] The identity types whose VALID record lets a proprietor's verified name stand in for a business name ("trading as"). Registry text (DOC-INV-2). */
 export const IDENTITY_DOC_TYPES: readonly string[] = ['owner_national_id', 'national_id', 'passport'];
 /** [DOC-1 Part XIX · P19] Licence-class types disclosed on the storefront while VALID (number when read, else "on file"). Registry text (DOC-INV-2). */
+/** [DOC-1 §3.6 · P3-2] The registration records that promote an UNREGISTERED store, and the declaration that puts it there. */
+export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration'];
+export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
+
 export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];
