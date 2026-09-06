@@ -46,7 +46,12 @@ export async function placeDocLegalHold(prisma: PrismaClient, input: PlaceDocLeg
   if (!(input.reviewBy >= window.min && input.reviewBy <= window.max)) {
     throw new AppError(400, 'REVIEW_DATE_OUT_OF_WINDOW', `The review date must be between ${DOC_LEGAL_HOLD_MIN_REVIEW_DAYS} and ${DOC_LEGAL_HOLD_MAX_REVIEW_DAYS} days from now`);
   }
-  return prisma.$transaction(async (tx) => {
+  return prisma.$transaction((tx) => placeDocLegalHoldIn(tx, input, now));
+}
+
+/** The hold itself, inside a caller's transaction (the fraud confirmation places one beside the rejection). */
+export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: PlaceDocLegalHoldInput, now = new Date()) {
+  {
     const locked = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "users" WHERE "id" = ${input.subjectUserId} FOR UPDATE /* verification-document-purge-authority */
     `;
@@ -70,7 +75,7 @@ export async function placeDocLegalHold(prisma: PrismaClient, input: PlaceDocLeg
       data: { legalHoldId: hold.id },
     });
     return { hold, documents: stamped.count };
-  });
+  }
 }
 
 export async function releaseDocLegalHold(prisma: PrismaClient, input: { holdId: string; releasedBy: string; reason: string }, now = new Date()) {

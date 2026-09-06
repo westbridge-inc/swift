@@ -65,6 +65,8 @@ export const TENANT_TABLES = [
   'doc_legal_hold',
   // [DOC-1 P25] a request to correct an extracted field
   'rectification_request',
+  // [DOC-1 P24] a fraud case confirmed on second review
+  'fraud_case',
   'sos_retriggers',
   'guardian_checkin_deliveries',
   'legal_holds',
@@ -226,6 +228,7 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   // [DOC-1 P9-4] a legal hold inherits the tenant of the person whose documents it holds
   { table: 'doc_legal_hold', trigger: 'doc_legal_hold_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
   { table: 'rectification_request', trigger: 'rectification_request_tenant_matches_user', parent: 'users', fk: 'userId' },
+  { table: 'fraud_case', trigger: 'fraud_case_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.

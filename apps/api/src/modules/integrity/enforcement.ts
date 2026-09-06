@@ -93,9 +93,20 @@ export async function previewTrial(
  *  appealable enforcement. Fraud-tier holds (copy #4) are NOT user-appealable
  *  — the message they saw carries no appeal path, and the founder queue
  *  already holds them. */
+/** [DOC-1 §24 · P24] The reason code of a document-fraud hold — the one fraud-tier hold a person MAY appeal (DOC-INV-33). */
+export const DOC_FRAUD_REASON_CODE = 'DOC_FRAUD_CONFIRMED';
+
 export async function openAppeal(prisma: PrismaClient, accountId: string, note: string) {
+  // Trial-integrity fraud-cluster holds stay non-appealable (their message carries
+  // no appeal path — the abuser learns nothing). A DOCUMENT-fraud hold is different:
+  // §24.1 says the system is often wrong and the accusation is defamatory in tone,
+  // so every such suspension exposes a human-review route — this one. The founder
+  // resolves it (resolveAppeal), consistent with FD-DOC-16: preserve and refer.
   const action = await prisma.enforcementAction.findFirst({
-    where: { accountId, level: { in: ['DENY_TRIAL', 'REVIEW_FIRST'] }, appeal: 'NONE' },
+    where: {
+      accountId, appeal: 'NONE',
+      OR: [{ level: { in: ['DENY_TRIAL', 'REVIEW_FIRST'] } }, { level: 'BLOCK_PENDING_FOUNDER', reasonCode: DOC_FRAUD_REASON_CODE }],
+    },
     orderBy: { createdAt: 'desc' },
   });
   if (!action) return null;
