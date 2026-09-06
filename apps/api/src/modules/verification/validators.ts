@@ -28,6 +28,16 @@ export const VALIDATOR_IMPLEMENTATIONS: Readonly<Record<string, ValidatorImpl>> 
   },
   // §7.5: identical content already on another subject — routes to SECOND_REVIEW (held by the collision rule); recorded as a WARN.
   'validators#V_SHA_COLLISION': ({ collided }) => (collided ? { status: 'WARN', detailCode: 'CROSS_SUBJECT_SHA' } : { status: 'PASS' }),
+  // [DOC-1 §3.4 · FD-DOC-6 · P2-2] covers_hire_and_reward: a private policy does not cover carriage for hire
+  // or reward. Read → PASS / FAIL; not read → SKIP (undeterminable routes to a human — never a vacuous PASS).
+  'validators#V_INSURANCE_SCOPE': ({ present }) => {
+    const raw = present.get('covers_hire_and_reward');
+    if (raw === undefined) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
+    const v = raw.trim().toLowerCase();
+    if (['true', 'yes', 'y', '1', 'hire', 'hire_and_reward'].includes(v)) return { status: 'PASS' };
+    if (['false', 'no', 'n', '0', 'private'].includes(v)) return { status: 'FAIL' };
+    return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
+  },
 };
 
 export function resolvesImpl(implRef: string | null | undefined): boolean {

@@ -621,9 +621,21 @@ export class VerificationService {
     // boundary — the conditional transition below still is.
     const candidate = await this.prisma.verificationDocument.findUnique({
       where: { id: docId },
-      select: { docType: true, expiresAt: true, status: true },
+      select: { docType: true, expiresAt: true, status: true, userId: true, role: true },
     });
     if (!candidate) throw new NotFoundError('VerificationDocument', docId);
+    // [DOC-1 §3.4 · FD-DOC-6 · P2-2] covers_hire_and_reward is BLOCKING: a passenger-vehicle
+    // mover's insurance is approved only with the reviewer's confirmed HIRE class. Undeterminable
+    // (no 5-point check supplied) or PRIVATE is never approved — it is rejected with
+    // INSURANCE_NOT_HIRE (the spec's INSURANCE_SCOPE_INSUFFICIENT) so the actor is told the
+    // category, not waved through to fail at go-online.
+    if (candidate.status === 'PENDING' && candidate.docType === 'vehicle_insurance' && candidate.role === 'MOVER') {
+      const vehicleType = await this.getMoverVehicleType(candidate.userId);
+      if (vehicleType && isPassengerVehicle(vehicleType) && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
+        throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT',
+          'A passenger vehicle needs HIRE-class insurance with the hire class confirmed by the reviewer. Confirm it, or reject the document as INSURANCE_NOT_HIRE.');
+      }
+    }
     // An already-decided document must report NOT_PENDING, not an expiry
     // complaint — the transition below owns that refusal, so only a genuine
     // candidate is asked for its date.
