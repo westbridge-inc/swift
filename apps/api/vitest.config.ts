@@ -28,6 +28,10 @@ export default defineConfig({
     // process (no-override, so setting it here first wins) and turns 2 auth
     // security tests into false negatives. Pin it off + force NODE_ENV=test.
     env: {
+      // [FD-DOC-3b · 2026-09-07] Production is on-shore manual review (KYC_PROVIDER=manual in the dev
+      // .env). The suites characterise the SANDBOX auto-approval path; pin it here so a local run
+      // does not inherit the dev provider through Prisma's dotenv.
+      KYC_PROVIDER: 'sandbox',
       DEV_OTP_BYPASS: '0',
       NODE_ENV: 'test',
       // Auth fails fast without a JWT secret — and a suite that crashes at

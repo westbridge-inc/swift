@@ -20,6 +20,9 @@ import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
 
+// [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
+process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
+
 // ---------------------------------------------------------------------------
 // verification behind KycProvider: checklists from config, the
 // manual review queue, the L2 identity flow, listing/online gates, and the
