@@ -126,14 +126,17 @@ describe('[DOC-1 §0.5] hard limits', () => {
     }
   });
 
-  it('[3] no biometric operation without the recorded decision: the kill switch exists, defaults OFF (FD-D5 not approved), and only an explicit 1 sends the selfie', async () => {
-    expect(biometricFaceMatchEnabled({})).toBe(false);
-    expect(biometricFaceMatchEnabled({ FEATURE_BIOMETRIC_FACE_MATCH: '1' })).toBe(true);
-    expect(biometricFaceMatchEnabled({ FEATURE_BIOMETRIC_FACE_MATCH: '0' })).toBe(false);
-    const on = new SpyKyc();
+  it('[3] no biometric operation, full stop: face-match was REMOVED, so no environment variable can turn it on', async () => {
+    // [NO-AI] This used to assert a kill switch defaulting OFF. Both providers
+    // that could face-match are deleted, so there is no implementation left for
+    // a flag to enable — and a switch claiming to enable a capability the
+    // codebase does not contain is a lie waiting for an operator to believe it.
+    expect(biometricFaceMatchEnabled()).toBe(false);
     process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
+    expect(biometricFaceMatchEnabled(), 'the variable is ignored, not honoured').toBe(false);
+    const on = new SpyKyc();
     await submitOwnerId(on, 'on');
-    expect(on.calls).toEqual(['verifyIdentity']);
+    expect(on.calls, 'the selfie is never sent for a face-match').toEqual(['verifyDocument']);
     await runWithTenant('swift-default', () => app.prisma.verificationDocument.deleteMany({ where: { userId } }));
     const off = new SpyKyc();
     delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
@@ -141,11 +144,14 @@ describe('[DOC-1 §0.5] hard limits', () => {
       await submitOwnerId(off, 'off');
       expect(off.calls).toEqual(['verifyDocument']);
     } finally {
-      delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
       await runWithTenant('swift-default', () => app.prisma.verificationDocument.deleteMany({ where: { userId } }));
     }
-    // The shift-selfie liveness check is a face-match too: it must consult the same switch.
+    // The shift-selfie liveness check is a face-match too: it must consult the same guard.
     expect(readFileSync(join(API_SRC, 'modules', 'safety', 'liveness.service.ts'), 'utf8')).toMatch(/biometricFaceMatchEnabled\(\)/);
+    // …and no adapter that could perform one is left in the tree.
+    for (const gone of ['didit-provider.ts', 'id-analyzer-provider.ts']) {
+      expect(existsSync(join(API_SRC, 'providers', 'kyc', gone)), `${gone} must not exist`).toBe(false);
+    }
   });
 
   it('[4] a document that failed the processor is never auto-approved, whatever the confidence', async () => {

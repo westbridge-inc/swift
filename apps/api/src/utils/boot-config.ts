@@ -33,16 +33,16 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // marker URLs can approve a user, so a missing production variable is a
   // security failure, not a reasonable default.
   const kycProvider = env['KYC_PROVIDER'];
-  // [FD-DOC-3b (b) · 2026-09-07] `manual` = on-shore human review; it approves nothing, so it is
-  // as safe as a real provider here. `sandbox` self-approves and stays forbidden.
-  if (kycProvider !== 'didit' && kycProvider !== 'idanalyzer' && kycProvider !== 'manual') {
-    throw new Error('FATAL: KYC_PROVIDER must be didit, idanalyzer or manual in production; sandbox/unset can self-approve test identities. Refusing to start.');
-  }
-  if (kycProvider === 'didit' && !env['DIDIT_API_KEY']) {
-    throw new Error('FATAL: DIDIT_API_KEY is required when KYC_PROVIDER=didit. Refusing to start.');
-  }
-  if (kycProvider === 'idanalyzer' && !env['ID_ANALYZER_API_KEY']) {
-    throw new Error('FATAL: ID_ANALYZER_API_KEY is required when KYC_PROVIDER=idanalyzer. Refusing to start.');
+  // [FD-DOC-3b (b) · NO-AI 2026-09-07] `manual` is now the ONLY production
+  // provider: on-shore human review, which approves nothing automatically.
+  // `didit` and `idanalyzer` were removed with the rest of the model runtime;
+  // naming either is a configuration that no longer has an implementation, and
+  // the boot must say so rather than fall through to something else.
+  if (kycProvider !== 'manual') {
+    const removed = kycProvider === 'didit' || kycProvider === 'idanalyzer'
+      ? ` '${kycProvider}' was removed with the AI runtime and no longer exists.`
+      : '';
+    throw new Error(`FATAL: KYC_PROVIDER must be 'manual' in production — on-shore human review.${removed} sandbox/unset can self-approve test identities. Refusing to start.`);
   }
 
   // Subscription charges are real platform revenue. The sandbox succeeds for
