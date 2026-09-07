@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { handoverAuthorityFor, handoverVersionFor, handoverVersionMatches, paymentRailOf } from '../modules/order/handover-authority';
+import { handoverAuthorityFor, handoverVersionFor, handoverVersionMatches, paymentRailOf, HANDOVER_POLICY } from '../modules/order/handover-authority';
 
 // [MOB-023] The door's authority as a pure table: every rail × every payment state.
 const base = { id: 'o1', status: 'ARRIVED', totalAmount: '1250.00', currencyCode: 'GYD', updatedAt: new Date('2026-09-02T10:00:00.000Z'), mmgClaimMismatchAt: null };
@@ -107,5 +107,57 @@ describe('[F-103-01] a disputed MMG claim closes the door', () => {
     // this can only pass if the generation is genuinely in the digest.
     const afterDispute = { ...beforeDispute, mmgClaimMismatchAt: DISPUTED };
     expect(handoverVersionMatches(afterDispute, echoed)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [F-106-04] THE MISMATCH BRANCH WAS NOT RAIL-SCOPED.
+//
+// Codex ran it: a CASH order carrying a mismatch marker was refused with
+// blockReason MMG_CLAIM_MISMATCH — a customer MMG dispute, on an order that
+// has no MMG payment to dispute. The canonical fulfilment gate returns early
+// for non-MMG orders (order.service.ts:241-243), so the two gates were saying
+// different things about the same row, and the rider was being told a story
+// they could not act on.
+//
+// A marker on a rail that cannot carry one is a CORRUPT state. Still refused —
+// never hand over on a payment row that makes no sense — but named as what it
+// is, and an UNPROJECTED column must not close a cash door that never depended
+// on it.
+// ---------------------------------------------------------------------------
+describe('[F-106-04] the dispute reason belongs to the rail that can have one', () => {
+  for (const paymentMethod of ['CASH', 'CARD'] as const) {
+    it(`${paymentMethod}: a present marker is an inconsistent state, not a customer dispute`, () => {
+      const a = handoverAuthorityFor({ ...base, paymentMethod, paymentStatus: 'PENDING', mmgClaimMismatchAt: DISPUTED });
+      expect(a.permitted, 'still refused — the row makes no sense').toBe('BLOCKED');
+      expect(a.blockReason).toBe('PAYMENT_STATE_INCONSISTENT');
+    });
+
+    it(`${paymentMethod}: an UNPROJECTED column does not close a door that never used it`, () => {
+      const a = handoverAuthorityFor({ ...base, paymentMethod, paymentStatus: 'PENDING', mmgClaimMismatchAt: undefined as never });
+      expect(a.permitted).toBe(paymentMethod === 'CASH' ? 'COLLECT_CASH_THEN_DELIVER' : 'BLOCKED');
+      if (paymentMethod === 'CASH') expect(a.blockReason).toBeNull();
+    });
+
+    it(`${paymentMethod}: null behaves exactly as it always did`, () => {
+      const a = handoverAuthorityFor({ ...base, paymentMethod, paymentStatus: 'CLAIMED', mmgClaimMismatchAt: null });
+      expect(a.permitted, 'CLAIMED is money landed on any rail').toBe('DELIVER_NO_CASH');
+    });
+  }
+
+  it('MMG keeps its own reasons', () => {
+    expect(handoverAuthorityFor({ ...base, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', mmgClaimMismatchAt: DISPUTED }).blockReason).toBe('MMG_CLAIM_MISMATCH');
+    expect(handoverAuthorityFor({ ...base, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', mmgClaimMismatchAt: undefined as never }).blockReason).toBe('MMG_MISMATCH_UNKNOWN');
+  });
+});
+
+describe('[F-106-01] the authority names the policy that produced it', () => {
+  it('every answer carries the current policy, so a client can refuse an older one', () => {
+    for (const paymentStatus of ['PENDING', 'CLAIMED', 'CAPTURED']) {
+      for (const paymentMethod of ['CASH', 'MOBILE_MONEY', 'CARD']) {
+        expect(handoverAuthorityFor({ ...base, paymentMethod, paymentStatus, mmgClaimMismatchAt: null }).policy).toBe(HANDOVER_POLICY);
+      }
+    }
+    expect(handoverAuthorityFor({ ...base, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', mmgClaimMismatchAt: DISPUTED }).policy).toBe(HANDOVER_POLICY);
   });
 });
