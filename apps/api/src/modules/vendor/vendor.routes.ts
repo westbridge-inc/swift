@@ -1500,7 +1500,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     order: {
       id: string; status: OrderStatus; vendorId: string | null; riderId: string | null;
       orderNumber: string; preparingAt: Date | null; paymentMethod: string | null;
-      paymentStatus: string; orderType: string | null;
+      paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null;
     },
     phase: 'PREPARING' | 'READY',
     userId: string,

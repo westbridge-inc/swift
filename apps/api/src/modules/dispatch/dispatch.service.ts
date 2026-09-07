@@ -1624,8 +1624,9 @@ export class DispatchService {
         subtotalBase: Prisma.Decimal;
         deliveryFee: Prisma.Decimal;
         taxiPassengerCount: number | null;
+        mmgClaimMismatchAt: Date | null;
       }>>`
-        SELECT "customerId", "taxiFareTotal",
+        SELECT "customerId", "taxiFareTotal", "mmgClaimMismatchAt",
                "paymentMethod"::text AS "paymentMethod",
                "paymentStatus"::text AS "paymentStatus",
                "orderType"::text AS "orderType",

@@ -114,7 +114,7 @@ export class PickingService {
       where: { id: lineId, orderId },
       include: { order: { select: {
         id: true, status: true, customerId: true, orderNumber: true, vendorId: true,
-        paymentMethod: true, paymentStatus: true, orderType: true,
+        paymentMethod: true, paymentStatus: true, orderType: true, mmgClaimMismatchAt: true,
       } } },
     });
     if (!line) throw new NotFoundError('Order line', lineId);
@@ -311,7 +311,7 @@ export class PickingService {
         where: { id: orderId, customerId },
         select: {
           id: true, status: true, paymentMethod: true, paymentStatus: true,
-          orderType: true, riderId: true, totalAmount: true, vendorId: true,
+          orderType: true, riderId: true, totalAmount: true, vendorId: true, mmgClaimMismatchAt: true,
         },
       });
       if (!order) throw new NotFoundError('Order', orderId);
