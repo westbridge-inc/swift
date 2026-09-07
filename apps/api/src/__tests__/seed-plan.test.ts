@@ -41,7 +41,15 @@ const count = async (outcome: string) => (await seedPlanCounter.get()).values.fi
 
 /** A small desired config the suite owns outright: one platform key. */
 const desiredFor = (value: number): DesiredConfig => ({ version: `test-${value}`, platformConfig: [{ key: KEY, value }], countries: [], zones: [], algoConfig: [], zoneFares: [] });
-const auditEvents = (digest: string) => prisma.privilegedChangeAudit.findMany({ where: { planDigest: digest }, orderBy: { createdAt: 'asc' } }).then((r) => r.map((a) => a.event));
+// [09-07] Ordered by (createdAt, id), not createdAt alone. `createdAt` is
+// `DateTime @default(now())` — timestamp(3), millisecond resolution — and the last two
+// events of a purge are written ~1 ms apart locally. On a loaded CI runner they land in
+// the SAME millisecond, the tie is unresolved, and `.pop()` returned USER_DELETED instead
+// of COMPLETED. That turned main red at 81da7f97. cuid ids are monotonic within a process,
+// so they break the tie by insertion order. Production never reads these by order — the
+// resume path filters on `event: 'USER_DELETED'` (ops/purge-plan.ts:208) — so this
+// ambiguity was only ever visible to the tests, and only under load.
+const auditEvents = (digest: string) => prisma.privilegedChangeAudit.findMany({ where: { planDigest: digest }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }).then((r) => r.map((a) => a.event));
 
 beforeAll(async () => {
   await prisma.$connect();

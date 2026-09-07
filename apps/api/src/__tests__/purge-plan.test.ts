@@ -34,7 +34,15 @@ const setIdentity = (environment: string) => prisma.deploymentIdentity.upsert({ 
 const goodBackup = async (plan: PurgePlan): Promise<BackupManifest> => ({ targetDigest: plan.target.digest, takenAt: new Date(Date.now() - 60_000).toISOString(), restoreVerifiedAt: new Date().toISOString(), artifactDigest: 'a'.repeat(64) });
 const redigest = (p: PurgePlan): PurgePlan => { const { digest: _d, ...body } = p; void _d; return { ...body, digest: planDigest(body) }; };
 const twoApprovals = (plan: PurgePlan) => [signApproval(SECRET, 'alice', plan.digest), signApproval(SECRET, 'bob', plan.digest)];
-const auditEvents = (digest: string) => prisma.privilegedChangeAudit.findMany({ where: { planDigest: digest }, orderBy: { createdAt: 'asc' } }).then((r) => r.map((a) => a.event));
+// [09-07] Ordered by (createdAt, id), not createdAt alone. `createdAt` is
+// `DateTime @default(now())` — timestamp(3), millisecond resolution — and the last two
+// events of a purge are written ~1 ms apart locally. On a loaded CI runner they land in
+// the SAME millisecond, the tie is unresolved, and `.pop()` returned USER_DELETED instead
+// of COMPLETED. That turned main red at 81da7f97. cuid ids are monotonic within a process,
+// so they break the tie by insertion order. Production never reads these by order — the
+// resume path filters on `event: 'USER_DELETED'` (ops/purge-plan.ts:208) — so this
+// ambiguity was only ever visible to the tests, and only under load.
+const auditEvents = (digest: string) => prisma.privilegedChangeAudit.findMany({ where: { planDigest: digest }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }).then((r) => r.map((a) => a.event));
 
 beforeAll(async () => {
   await prisma.$connect();
@@ -147,7 +155,11 @@ describe('[SCR-001] the register’s red proof', () => {
     expect(after.quarantinedIds).toEqual(before.quarantinedIds); // held, never deleted
     expect(after.adminIds).toEqual(before.adminIds);
     expect(after.unclassified).toBe(before.unclassified);
-    expect((await auditEvents(plan2.digest)).pop()).toBe('COMPLETED');
+    // Two assertions, not one, so a future failure says WHICH thing went wrong: whether the
+    // run failed to record completion at all, or recorded it and the read mis-ordered it.
+    const finalEvents = await auditEvents(plan2.digest);
+    expect(finalEvents.filter((e) => e === 'COMPLETED')).toHaveLength(1);
+    expect(finalEvents.at(-1)).toBe('COMPLETED');
   });
 
   it('production is denied by default; a valid, unexpired break-glass approval over the plan digest opens it; an expired one does not', async () => {
