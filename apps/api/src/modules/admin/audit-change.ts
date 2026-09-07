@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
-import type { AdminRouteEntity } from './admin-authority';
+import { SNAPSHOT_UNIQUE_FIELDS, type AdminRouteEntity } from './admin-authority';
+import { adminAuditSnapshotCounter } from '../../plugins/observability';
 
 /**
  * [ADM-004] THE AUDIT ROW SAYS WHAT CHANGED, NOT WHAT WAS ASKED.
@@ -80,14 +81,33 @@ export async function snapshot(
   if (!id) return ABSENT;
   const delegate = (prisma as unknown as Record<string, { findUnique?: (a: unknown) => Promise<unknown> }>)[entity.model];
   if (!delegate?.findUnique) return ABSENT;
+  // [C-01] The column, not the route parameter. `where` was built as
+  // `entity.param === 'key' ? { key: id } : { id }`, which asked DocType — a
+  // model with no `id` column at all — for `where: { id: 'GY.national_id' }`.
+  // Prisma refused, the catch below swallowed the refusal, and the audit row
+  // for permitting a personal document to leave the country carried a null
+  // before, a null after and an empty diff.
+  const field = entity.uniqueField ?? 'id';
+  if (!SNAPSHOT_UNIQUE_FIELDS.includes(field)) {
+    // Unreachable through the type, reachable through a hand-edited table.
+    // Counted rather than thrown: the trail loses a digest, never an action.
+    adminAuditSnapshotCounter.labels('selector', entity.model).inc();
+    return ABSENT;
+  }
   try {
-    const where = entity.param === 'key' ? { key: id } : { id };
-    const row = await delegate.findUnique({ where });
-    if (!row) return ABSENT;
+    const row = await delegate.findUnique({ where: { [field]: id } });
+    if (!row) {
+      adminAuditSnapshotCounter.labels('missing', entity.model).inc();
+      return ABSENT;
+    }
+    adminAuditSnapshotCounter.labels('found', entity.model).inc();
     return { digest: digestOf(row), fields: declaredFields(row, entity.fields), exists: true };
   } catch {
-    // A model whose unique selector is not `id`/`key` is not a reason to lose
-    // the audit row; the digests are simply absent and the trail says so.
+    // [C-01] A swallowed read is how this defect lived: ABSENT is
+    // indistinguishable from "the row genuinely does not exist". It stays
+    // swallowed — an audit read must never roll back the action it describes —
+    // but it is now a NUMBER someone can alert on, not a silence.
+    adminAuditSnapshotCounter.labels('failed', entity.model).inc();
     return ABSENT;
   }
 }

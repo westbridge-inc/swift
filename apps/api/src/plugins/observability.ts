@@ -203,6 +203,25 @@ export const adminAuditCounter = new client.Counter({
   registers: [registry],
 });
 
+/**
+ * [C-01] The admin audit's SUBJECT READ, by outcome: `found` (a digest pair
+ * exists), `missing` (the row genuinely is not there — a create has no before,
+ * a delete has no after), `failed` (the read threw), `selector` (the declared
+ * column is outside the allowed set).
+ *
+ * `failed` existed as a bare `catch { return ABSENT }` and was the reason a
+ * wrong selector survived: a refused read and an absent row were the same
+ * observation. They are now two numbers. A non-zero `failed` means some
+ * privileged action is being recorded with no before/after digest, which is
+ * exactly the state ADM-004 exists to prevent.
+ */
+export const adminAuditSnapshotCounter = new client.Counter({
+  name: 'swift_admin_audit_snapshot_total',
+  help: 'Admin audit subject reads by outcome (found|missing|failed|selector) and model',
+  labelNames: ['outcome', 'model'] as const,
+  registers: [registry],
+});
+
 /** [A-01 / W-01] Browser (cookie-mode) sessions: cookie_issued, cookie_refreshed, cookie_auth, cookie_cleared,
  *  cookie_rejected_header (a cookie without the client header), cookie_rejected_origin (a cookie from an origin
  *  outside the CORS allowlist), body_tokens_refused. */

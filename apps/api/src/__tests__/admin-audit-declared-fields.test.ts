@@ -33,13 +33,25 @@ describe('[ADM-002] every declared audit field exists on its model', () => {
       for (const f of entity.fields) {
         if (!fields.has(f)) problems.push(`${route}: ${entity.model}.${f} does not exist`);
       }
-      // How the row is addressed. `param` is the URL parameter name, which is USUALLY the
-      // selector column (`key` for keyed config, `code` for the doc registry) but sometimes
-      // is not: `:userId` addresses a `user` row by its `id`. So the selector is `param`
-      // when the model actually has such a column, and `id` otherwise.
-      const idField = entity.param && fields.has(entity.param) ? entity.param : 'id';
-      if (!fields.has(idField)) {
-        problems.push(`${route}: ${entity.model} has no '${idField}' selector`);
+      // [C-01] How the row is addressed. This census once COMPUTED the correct
+      // rule — `param` when the model has such a column, `id` otherwise — and
+      // asserted it against the authority table while the runtime did something
+      // else entirely (`entity.param === 'key' ? { key: id } : { id }`). It
+      // passed the whole time. A static census can only check that the DECLARED
+      // selector is a real column; whether the runtime USES it is a behaviour
+      // question, and `admin-audit-unique-selector.test.ts` is where it is asked
+      // by watching the arguments Prisma actually receives. This is the
+      // secondary gate. That one is the oracle.
+      const uniqueField = entity.uniqueField ?? 'id';
+      if (!fields.has(uniqueField)) {
+        problems.push(`${route}: ${entity.model} has no '${uniqueField}' column to select on`);
+      }
+      // The route parameter must be a real segment of the route template, or the
+      // hook reads `params[undefined]` and every snapshot for it is ABSENT.
+      const routeParam = entity.routeParam ?? 'id';
+      const segments = new Set(route.split(/[/\s]/).filter((s) => s.startsWith(':')).map((s) => s.slice(1)));
+      if (segments.size > 0 && !segments.has(routeParam)) {
+        problems.push(`${route}: declares routeParam ':${routeParam}', which the template does not carry`);
       }
     }
     expect(problems).toEqual([]);

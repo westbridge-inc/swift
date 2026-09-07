@@ -41,7 +41,7 @@
 
 import { ABSENT, changeRecord, snapshot, type EntitySnapshot } from './audit-change';
 import type { PrismaClient } from '@prisma/client';
-import type { AuditLogWriter } from '../../lib/audit-writer';
+import { RESERVED_AUDIT_FIELDS, type AuditFacts, type AuditLogWriter } from '../../lib/audit-writer';
 import { ADMIN_ROUTE_AUTHORITY, reasonOf, routeTemplateOf } from './admin-authority';
 import { adminAuditCounter } from '../../plugins/observability';
 
@@ -69,7 +69,7 @@ export interface AuditRequestLike {
 /** The keys `changeRecord` owns. `extra` may add to `changes`; it may never
  *  redefine one of these, because a route that did so would silently replace
  *  the stated reason, or the before/after digests, with its own idea of them. */
-export const RESERVED_CHANGE_KEYS: ReadonlySet<string> = new Set(['params', 'reason', 'subject', 'before', 'after', 'changed']);
+export const RESERVED_CHANGE_KEYS: ReadonlySet<string> = new Set(RESERVED_AUDIT_FIELDS);
 
 export interface AdminAuditRowInput {
   /** The mounted path, as the trail has always recorded it. */
@@ -99,7 +99,7 @@ export interface AdminAuditRowInput {
    *  addresses into a table with no privacy shaping; spreading a payload
    *  through here would put it straight back. A count, a role, a version — not
    *  `...body`. */
-  readonly extra?: Readonly<Record<string, string | number | boolean | null>> | undefined;
+  readonly extra?: AuditFacts | undefined;
 }
 
 /**
@@ -186,7 +186,7 @@ export async function auditWithin(
     readonly entityId?: string | undefined;
     /** [ADM-002] Named facts the generic row cannot derive. Explicit fields
      *  only — never a request-body spread (see `AdminAuditRowInput.extra`). */
-    readonly extra?: Readonly<Record<string, string | number | boolean | null>> | undefined;
+    readonly extra?: AuditFacts | undefined;
   },
 ): Promise<void> {
   const userId = overrides?.userId ?? request.user?.userId;
@@ -199,7 +199,7 @@ export async function auditWithin(
   const params = (request.params ?? {}) as Record<string, string>;
   const entity = authority?.entity;
   const after = entity
-    ? await snapshot(tx as never, entity, params[entity.param ?? 'id'])
+    ? await snapshot(tx as never, entity, params[entity.routeParam ?? 'id'])
     : ABSENT;
   let row: unknown;
   try {

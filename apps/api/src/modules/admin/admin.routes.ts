@@ -764,7 +764,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeUrl}`];
     if (!authority?.entity) return;
     const params = (request.params ?? {}) as Record<string, string>;
-    request.auditBefore = await snapshot(app.prisma, authority.entity, params[authority.entity.param ?? 'id']);
+    request.auditBefore = await snapshot(app.prisma, authority.entity, params[authority.entity.routeParam ?? 'id']);
   });
 
   // [ADM-007] EVERY SENSITIVE READ LEAVES A RECORD.
@@ -864,7 +864,7 @@ export async function adminRoutes(app: FastifyInstance) {
       const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeTemplateOf(request, app.prefix)}`];
       const before: EntitySnapshot = (request as { auditBefore?: EntitySnapshot }).auditBefore ?? ABSENT;
       const after = authority?.entity
-        ? await snapshot(app.prisma, authority.entity, params[authority.entity.param ?? 'id'])
+        ? await snapshot(app.prisma, authority.entity, params[authority.entity.routeParam ?? 'id'])
         : ABSENT;
       // [ADM-002] One builder, both writers — so a route that migrates to
       // `auditWithin` writes the row it wrote before, at a safer moment.
@@ -5079,7 +5079,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { userId } = request.params as { userId: string };
     const body = z.object({ reason: z.string().min(5).max(500) }).parse(request.body ?? {});
     const user = await cashRules.suspendLossProtection(userId, body.reason,
-      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { reason: body.reason, extra: facts }));
     return { success: true, data: user };
   });
 
