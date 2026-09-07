@@ -420,14 +420,27 @@ export class IncidentService {
    *  (pre-S-08 intakes): the same subject, reporter, order and category within
    *  ten minutes. Enforcement derived from a duplicate is named, never
    *  reversed automatically — a human reviews and merges. */
+  /**
+   * [09-07] The 10-minute HAVING window IS the duplicate rule. There used to be a
+   * `date_trunc('hour', "createdAt")` in the GROUP BY as well, which silently split any pair
+   * that straddled :00 into two groups — so two reports about the same person 60 seconds
+   * apart went unnoticed whenever the clock hour turned between them, in production and in
+   * the test that caught it (`test_duplicate_scan_spans_the_hour_boundary`). A bucket is not
+   * a window; only the window is the rule.
+   *
+   * The LIMIT is a safety valve, not a filter, so it is ordered: newest cluster first, and
+   * deterministic. Unordered, a run above 200 clusters returned an arbitrary subset and an
+   * operator could not tell which duplicates the scan had chosen to show them.
+   */
   async scanDuplicateIntakes(now = new Date()): Promise<{ clusters: Array<{ survivorId: string; duplicateIds: string[]; enforcementFromDuplicate: boolean }> }> {
     const rows = await this.prisma.$queryRaw<Array<{ ids: string[]; enforced: boolean }>>`
       SELECT array_agg(c."id" ORDER BY c."createdAt") AS ids,
              bool_or(c."interimAction" <> 'NONE' OR c."patternFlaggedAt" IS NOT NULL) AS enforced
       FROM "IncidentCase" c
       WHERE c."sourceFingerprint" IS NULL AND c."status" <> 'CLOSED' AND c."createdAt" >= ${new Date(now.getTime() - 90 * 86_400_000)}
-      GROUP BY c."subjectUserId", coalesce(c."reporterUserId", ''), coalesce(c."orderId", ''), c."category", date_trunc('hour', c."createdAt")
+      GROUP BY c."subjectUserId", coalesce(c."reporterUserId", ''), coalesce(c."orderId", ''), c."category"
       HAVING count(*) > 1 AND max(c."createdAt") - min(c."createdAt") <= INTERVAL '10 minutes'
+      ORDER BY min(c."createdAt") DESC
       LIMIT 200`;
     const clusters = rows.map((r) => {
       const [survivorId, ...duplicateIds] = r.ids;
