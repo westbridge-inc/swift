@@ -248,6 +248,26 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'document_record', trigger: 'document_record_tenant_matches_account', parent: 'users', fk: 'accountId' },
   { table: 'rectification_request', trigger: 'rectification_request_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'fraud_case', trigger: 'fraud_case_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
+  // [REPORT-094 PR1197-S1-04] A printed QR code and the storefront it resolves to belong to ONE
+  // tenant, and so does every row that records a scan of it or claims the credit for one. The
+  // resolver is deliberately unauthenticated — a printed code names its own tenant — so nothing
+  // else binds the two, and a malformed row could pair tenant A's code with tenant B's shop while
+  // AttributionService durably credited tenant A for a customer tenant B actually got.
+  //
+  // `entityType` is watched but NOT interpreted here: this rule resolves `entityId` in `vendors`,
+  // so a row declaring any other entity type finds no parent and is REFUSED. That is the correct
+  // answer today (VENDOR is the enum's only value) and it is deliberately NOT future-proof — a
+  // second entity type must add its own rule, and until it does such a row cannot be written.
+  { table: 'qr_codes', trigger: 'qr_codes_tenant_matches_vendor', parent: 'vendors', fk: 'entityId', watch: ['entityId', 'entityType'] },
+  { table: 'slug_redirects', trigger: 'slug_redirects_tenant_matches_vendor', parent: 'vendors', fk: 'entityId', watch: ['entityId', 'entityType'] },
+  // The three tables that record the CREDIT. `qrCodeId` is nullable on two of them (a scan or a
+  // claim can exist without a code), and a row with no code has no lineage to check — expressed as
+  // "its parent tenant is its own", never as an exemption the trigger has to be taught.
+  { table: 'pending_attributions', trigger: 'pending_attributions_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId' },
+  { table: 'attribution_claims', trigger: 'attribution_claims_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId',
+    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM qr_codes WHERE id = NEW."qrCodeId") END` },
+  { table: 'scan_events', trigger: 'scan_events_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId',
+    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM qr_codes WHERE id = NEW."qrCodeId") END` },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.

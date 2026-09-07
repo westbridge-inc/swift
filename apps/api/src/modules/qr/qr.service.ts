@@ -78,15 +78,22 @@ export class QrService {
   /** Idempotent get-or-create of the entity's ACTIVE code. Concurrency-safe:
    *  the partial unique makes the second creator lose with P2002 → re-read. */
   async getOrCreateForVendor(vendorId: string, createdByUserId: string): Promise<QrCode> {
-    const existing = await this.prisma.qrCode.findFirst({
-      where: { entityType: 'VENDOR', entityId: vendorId, status: 'ACTIVE' },
-    });
-    if (existing) return existing;
-
+    // [PR1197-S1-04] The vendor is read FIRST, because its tenant is part of
+    // what makes an existing code THIS vendor's code. Matching on entityId
+    // alone returned a row stamped with a tenant the vendor no longer belongs
+    // to — and once the resolver correctly began binding id + tenantId, that
+    // stale row resolved to NOTHING. A printed code that silently stops working
+    // is a worse outcome than the disclosure it replaced, so a code whose
+    // tenant no longer matches its vendor is not reused: the vendor mints a
+    // fresh one, and the old code stays deactivated history.
     const vendor = await this.prisma.vendor.findUniqueOrThrow({
       where: { id: vendorId },
       select: { slug: true, tenantId: true },
     });
+    const existing = await this.prisma.qrCode.findFirst({
+      where: { entityType: 'VENDOR', entityId: vendorId, tenantId: vendor.tenantId, status: 'ACTIVE' },
+    });
+    if (existing) return existing;
     // Version continuity: minting after a deactivate continues the sequence
     // (…v2 DEACTIVATED → v3 ACTIVE), so per-version analytics never collide.
     const latest = await this.prisma.qrCode.aggregate({
@@ -99,7 +106,7 @@ export class QrService {
       if (!isUniqueViolation(e)) throw e;
       // Lost the one-ACTIVE race — the winner's row is the vendor's code.
       return this.prisma.qrCode.findFirstOrThrow({
-        where: { entityType: 'VENDOR', entityId: vendorId, status: 'ACTIVE' },
+        where: { entityType: 'VENDOR', entityId: vendorId, tenantId: vendor.tenantId, status: 'ACTIVE' },
       });
     }
   }
