@@ -12,8 +12,12 @@ import { recordExternalProcessingDecision, DECISION_REF_REQUIRED } from '../modu
 import { assertExternalProcessingPermitted } from '../modules/legal/processor-register';
 
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'external-processing-decision-test');
-const DIDIT = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' };
-const CONTRACTED = { PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' };
+// [NO-AI] Didit was this file's example of a registered external processor and
+// is deleted. The RULE under test — a PERSONAL type leaves only under a recorded
+// founder decision AND a contracted processor — is unchanged, so it is exercised
+// through a processor that still exists.
+const DIDIT = { name: 'object-store', version: '1', external: true, processorRef: 'OBJECT_STORE' };
+const CONTRACTED = { PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' };
 let app: FastifyInstance;
 const audits: Array<Record<string, unknown>> = [];
 const audit = async (_tx: unknown, facts: Record<string, unknown>) => { audits.push(facts); };

@@ -1,15 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { nanoid } from 'nanoid';
-import { IdAnalyzerKycProvider } from './id-analyzer-provider';
-import { DiditKycProvider } from './didit-provider';
 import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // KycProvider — hard rule 4: every external service sits behind a swappable
-// interface. A Sumsub-class adapter slots in later; nothing outside this
-// module may know which provider exists. We store only the verification
-// RESULT and a reference token — never provider payloads, never to logs,
-// never to any AI service.
+// interface. Nothing outside this module may know which provider exists.
+//
+// [NO-AI · owner directive 2026-09-07] There is no longer an external one.
+// Didit and ID Analyzer performed OCR, document-authenticity scoring and
+// face-match — trained-model work, on a person's identity documents, sent out
+// of the country. Both adapters are deleted. The production provider is
+// `manual`: an encrypted upload stays put, NOTHING reads it, and a human
+// reviewer keys the fields and decides with a plain reason.
+//
+// The interface stays because the seam is still right, and because the
+// extraction ledger, the reviewer state machine and the audit trail are all
+// built against it. What changed is that every implementation of it is now
+// something Swift itself runs.
 // ---------------------------------------------------------------------------
 
 export type KycStatus = 'approved' | 'rejected' | 'pending_manual';
@@ -112,10 +119,11 @@ export function getKycProvider(): KycProvider {
       return new SandboxKycProvider();
     case 'manual':
       return new ManualReviewKycProvider();
-    case 'idanalyzer':
-      return new IdAnalyzerKycProvider();
-    case 'didit':
-      return new DiditKycProvider();
+    // [NO-AI] `idanalyzer` and `didit` are GONE. They performed OCR, document
+    // authenticity scoring and face-match — trained-model work on a person's
+    // identity documents, sent to a third party. An unknown value now throws
+    // rather than silently selecting a fallback: a deployment that still names
+    // a removed provider must fail loudly at boot, not quietly verify nobody.
     default:
       throw new Error(`Unknown KYC_PROVIDER: ${provider}`);
   }

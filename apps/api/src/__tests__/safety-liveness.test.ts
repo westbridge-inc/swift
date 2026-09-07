@@ -10,7 +10,6 @@ import { socketPlugin } from '../plugins/socket';
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { LivenessService, assertShiftLiveness } from '../modules/safety/liveness.service';
-import type { KycProvider } from '../providers/kyc/kyc-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
 
 // [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
@@ -113,103 +112,62 @@ describe('assertShiftLiveness — the go-online gate (§7.1)', () => {
   });
 });
 
-describe('LivenessService.check — the §7.1 outcome ladder', () => {
-  it('PASS stamps the shift cache and satisfies the gate', async () => {
+// ---------------------------------------------------------------------------
+// [NO-AI · owner directive 2026-09-07] THE OUTCOME LADDER TESTED A CAPABILITY
+// THAT NO LONGER EXISTS.
+//
+// A liveness check IS a face match, and face matching ran inside the KYC
+// providers the owner removed. There is no PASS, no FAIL and no BORDERLINE to
+// reach any more, so the ladder that graded them is replaced — not deleted
+// quietly — by the contract that took its place.
+//
+// The old code did something worse than stop working. `biometricFaceMatchEnabled`
+// has defaulted OFF since the founder's FD-D5 decision, so on current `main`
+// every check already threw, was caught as a PROVIDER ERROR, and paged ops with
+// "Face-match provider errored — investigate the provider." There is no provider
+// to investigate. It also pushed each mover into a retro-review queue and, on a
+// FAIL_CLOSED tenant, could block them from going online over a capability
+// Swift itself had switched off.
+//
+// An absent capability is not an outage, and these prove it says so.
+// ---------------------------------------------------------------------------
+describe('[NO-AI] a liveness check is honestly unavailable, not a fake outage', () => {
+  it('refuses with LIVENESS_UNAVAILABLE and records nothing', async () => {
     const { userId, driver } = await makeDriver();
-    const res = await svcCheck(userId, 'https://cdn.test/liveness/auto-approve.jpg');
-    expect(res.outcome).toBe('PASS');
-    expect(res.allowedOnline).toBe(true);
+    const before = await app.prisma.livenessCheck.count({ where: { userId } });
+
+    await expect(svcCheck(userId, 'https://cdn.test/liveness/auto-approve.jpg'))
+      .rejects.toMatchObject({ statusCode: 503, code: 'LIVENESS_UNAVAILABLE' });
+
+    expect(await app.prisma.livenessCheck.count({ where: { userId } }), 'no row is written').toBe(before);
     const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } });
-    expect(after.lastLivenessPassAt).not.toBeNull();
-    process.env['LIVENESS_REQUIRED'] = '1';
-    try {
-      expect(() => assertShiftLiveness(after)).not.toThrow();
-    } finally {
-      delete process.env['LIVENESS_REQUIRED'];
-    }
+    expect(after.livenessLockedAt, 'nobody is locked out over a check that cannot run').toBeNull();
+    expect(after.lastLivenessPassAt, 'and nothing is stamped as passed').toBeNull();
   });
 
-  it('BORDERLINE goes online but lands in the human review queue', async () => {
+  it('pages NOBODY — there is no provider outage to investigate', async () => {
     const admin = await makeUser(['ADMIN']);
-    const { userId, driver } = await makeDriver();
-    const res = await svcCheck(userId, 'https://cdn.test/liveness/unmarked.jpg'); // sandbox → pending_manual
-    expect(res.outcome).toBe('BORDERLINE');
-    expect(res.allowedOnline).toBe(true);
-    expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } })).lastLivenessPassAt).not.toBeNull();
-    const row = await app.prisma.livenessCheck.findUniqueOrThrow({ where: { id: res.checkId } });
-    expect(row.reviewRequired).toBe(true);
-    const page = await app.prisma.notification.findFirst({ where: { userId: admin.userId, title: 'Liveness review needed' } });
-    expect(page).not.toBeNull();
+    const { userId } = await makeDriver();
+    await expect(svcCheck(userId, 'https://cdn.test/liveness/unmarked.jpg')).rejects.toMatchObject({ code: 'LIVENESS_UNAVAILABLE' });
+
+    const pages = await app.prisma.notification.count({
+      where: { userId: admin.userId, OR: [{ title: { contains: 'Liveness' } }, { data: { path: ['kind'], equals: 'liveness_outage' } }] },
+    });
+    expect(pages, 'a removed capability must not raise an operational alarm').toBe(0);
   });
 
-  it('three consecutive FAILs lock the account, force it offline, and page ops (§7.1)', async () => {
-    const { userId, driver } = await makeDriver();
-    const reject = 'https://cdn.test/liveness/auto-reject.jpg';
-    const first = await svcCheck(userId, reject);
-    expect(first.outcome).toBe('FAIL');
-    expect(first.attemptsLeft).toBe(2);
-    const second = await svcCheck(userId, reject);
-    expect(second.attemptsLeft).toBe(1);
-    const third = await svcCheck(userId, reject);
-    expect(third.attemptsLeft).toBe(0);
-
-    const locked = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } });
-    expect(locked.livenessLockedAt).not.toBeNull();
-    expect(locked.isOnline).toBe(false); // forced off NOW, not at next gate
-    expect(locked.isAvailable).toBe(false);
-    const userNote = await app.prisma.notification.findFirst({ where: { userId, type: 'SAFETY', title: 'Identity check failed' } });
-    expect(userNote).not.toBeNull();
-
-    // Locked = no more provider calls, only ops clears.
-    await expect(svcCheck(userId, 'https://cdn.test/liveness/auto-approve.jpg')).rejects.toThrow(/contact support/i);
-    process.env['LIVENESS_REQUIRED'] = '1';
+  it('the environment variable cannot bring it back', async () => {
+    // The flag used to gate a real face-match call. With both adapters deleted
+    // there is nothing behind it, and a switch that appears to enable a missing
+    // capability is worse than no switch at all.
+    const { userId } = await makeDriver();
+    process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
     try {
-      expect(() => assertShiftLiveness(locked)).toThrow(/contact support/i);
+      await expect(svcCheck(userId, 'https://cdn.test/liveness/auto-approve.jpg'))
+        .rejects.toMatchObject({ code: 'LIVENESS_UNAVAILABLE' });
     } finally {
-      delete process.env['LIVENESS_REQUIRED'];
+      delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
     }
-  });
-
-  it('a PASS after two FAILs resets the consecutive count — no lock on old history', async () => {
-    const { userId, driver } = await makeDriver();
-    const reject = 'https://cdn.test/liveness/auto-reject.jpg';
-    await svcCheck(userId, reject);
-    await svcCheck(userId, reject);
-    await svcCheck(userId, 'https://cdn.test/liveness/auto-approve.jpg'); // recovers
-    const res = await svcCheck(userId, reject); // a NEW first failure
-    expect(res.attemptsLeft).toBe(2);
-    expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } })).livenessLockedAt).toBeNull();
-  });
-
-  it('analyzer outage: default policy fails OPEN with a flag; FAIL_CLOSED blocks', async () => {
-    const broken: KycProvider = {
-      verifyIdentity: async () => { throw new Error('analyzer 503'); },
-      verifyDocument: async () => { throw new Error('analyzer 503'); },
-      getStatus: async () => 'pending_manual',
-    };
-    const { userId, driver } = await makeDriver();
-    const svc = new LivenessService(app.prisma, app.io, broken);
-
-    const open = await svc.check({ userId, profile: 'DRIVER', selfieUrl: 'https://cdn.test/liveness/x.jpg' });
-    expect(open.outcome).toBe('ERROR_FAIL_OPEN'); // a vetted driver isn't locked out by a vendor outage
-    expect(open.allowedOnline).toBe(true);
-    expect((await app.prisma.livenessCheck.findUniqueOrThrow({ where: { id: open.checkId } })).reviewRequired).toBe(true);
-
-    process.env['LIVENESS_ANALYZER_OUTAGE_POLICY'] = 'FAIL_CLOSED';
-    try {
-      await app.prisma.driver.update({ where: { id: driver.id }, data: { lastLivenessPassAt: null } });
-      const closed = await svc.check({ userId, profile: 'DRIVER', selfieUrl: 'https://cdn.test/liveness/y.jpg' });
-      expect(closed.outcome).toBe('ERROR_FAIL_CLOSED');
-      expect(closed.allowedOnline).toBe(false);
-      expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } })).lastLivenessPassAt).toBeNull();
-    } finally {
-      delete process.env['LIVENESS_ANALYZER_OUTAGE_POLICY'];
-    }
-  });
-
-  it('no signup selfie → the check refuses (there is nothing trusted to match against)', async () => {
-    const { userId } = await makeDriver({ avatar: null, selfieCapturedAt: null });
-    await expect(svcCheck(userId, 'https://cdn.test/liveness/auto-approve.jpg')).rejects.toThrow(/profile selfie/i);
   });
 });
 
@@ -222,24 +180,22 @@ describe('POST /api/v1/safety/liveness-check (multipart)', () => {
     return { payload: Buffer.concat([head, content, tail]), contentType: `multipart/form-data; boundary=${boundary}` };
   }
 
-  it('uploads the selfie, runs the check, and records the auditable row', async () => {
+  it('[NO-AI] refuses BEFORE the selfie is read or stored — and stores nothing', async () => {
+    // The order matters and is the point. Collecting a selfie for a check that
+    // cannot run is biometric data gathered for no purpose, which the DPA 2023
+    // minimisation duty forbids and which deleting it afterwards does not undo.
     const { userId, token } = await makeDriver();
     const { payload, contentType } = multipartBody('shift.png', 'image/png', REAL_PNG);
     const res = await app.inject({ method: 'POST', url: '/api/v1/safety/liveness-check?profile=DRIVER', payload, headers: { 'content-type': contentType, authorization: `Bearer ${token}` } });
-    expect(res.statusCode).toBe(200);
-    const { checkId, outcome } = res.json().data;
-    const row = await app.prisma.livenessCheck.findUniqueOrThrow({ where: { id: checkId } });
-    expect(row.userId).toBe(userId);
-    expect(row.profile).toBe('DRIVER');
-    expect(row.selfieUrl).toContain(`liveness/${userId}`);
-    expect(['PASS', 'BORDERLINE', 'FAIL', 'ERROR_FAIL_OPEN']).toContain(outcome);
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error?.code ?? res.json().code).toBe('LIVENESS_UNAVAILABLE');
+    expect(await app.prisma.livenessCheck.count({ where: { userId } }), 'no auditable row for a check that never happened').toBe(0);
   });
 
-  it('rejects a non-image payload and unauthenticated calls', async () => {
-    const { token } = await makeDriver();
-    const bad = multipartBody('evil.png', 'image/png', Buffer.from('#!/bin/sh echo pwned'));
-    const res = await app.inject({ method: 'POST', url: '/api/v1/safety/liveness-check', payload: bad.payload, headers: { 'content-type': bad.contentType, authorization: `Bearer ${token}` } });
-    expect(res.statusCode).toBe(400);
+  it('[NO-AI] the refusal does not become a hole in the upload guards', async () => {
+    // An unauthenticated caller must still be refused as unauthenticated —
+    // the new 503 must not short-circuit authentication.
     const anon = multipartBody('a.png', 'image/png', REAL_PNG);
     const res2 = await app.inject({ method: 'POST', url: '/api/v1/safety/liveness-check', payload: anon.payload, headers: { 'content-type': anon.contentType } });
     expect(res2.statusCode).toBe(401);

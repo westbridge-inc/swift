@@ -14,9 +14,8 @@ import {
   coverageOfHost, coverageOfProviderDir, outboundHostLiterals, processorByRef, processorStatus, needsContract,
   processorRegisterView,
 } from '../modules/legal/processor-register';
-import { DiditKycProvider } from '../providers/kyc/didit-provider';
-import { IdAnalyzerKycProvider } from '../providers/kyc/id-analyzer-provider';
 import { UNKNOWN_ENGINE } from '../modules/verification/extraction-ledger';
+import { getKycProvider } from '../providers/kyc/kyc-provider';
 
 const SRC = join(__dirname, '..');
 const EXTERNAL_DIDIT = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' } as const;
@@ -43,17 +42,30 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
     expect(undeclared, `outbound hosts with no register entry: ${undeclared.join('; ')}`).toEqual([]);
   });
 
-  it('test_external_kyc_engines_are_registered: every external engine names an entry that carries the PERSONAL image classes', () => {
-    // a local .env may carry the keys as EMPTY strings; the adapters need any non-empty value to construct
-    for (const k of ['DIDIT_API_KEY', 'ID_ANALYZER_API_KEY']) if (!process.env[k]) process.env[k] = 'test';
-    for (const engine of [new DiditKycProvider().engine, new IdAnalyzerKycProvider().engine]) {
-      expect(engine.external).toBe(true);
-      const entry = processorByRef(engine.processorRef);
-      expect(entry, `engine ${engine.name} → ${engine.processorRef}`).not.toBeNull();
-      expect(entry!.payload).toContain('PERSONAL_DOC_IMAGE');
-      expect(needsContract(entry!)).toBe(true);
-      expect(entry!.contractEnv).toMatch(/^PROCESSOR_CONTRACT_/);
+  it('[NO-AI] test_no_external_kyc_engine_exists: no adapter sends an identity document out of the building', () => {
+    // This used to assert that every EXTERNAL kyc engine named a processor
+    // entry carrying PERSONAL_DOC_IMAGE. Under the owner's no-AI directive
+    // there is no external engine at all: Didit and ID Analyzer are deleted and
+    // production runs `manual` — an encrypted upload stays put, nothing reads
+    // it, a human keys the fields. The invariant is therefore stronger, and
+    // stated as such rather than left as a vacuous loop over an empty list.
+    for (const provider of ['sandbox', 'manual'] as const) {
+      process.env['KYC_PROVIDER'] = provider;
+      const engine = getKycProvider().engine;
+      expect(engine, `${provider} must describe its engine`).toBeTruthy();
+      expect(engine!.external, `${provider} must not be external`).toBe(false);
+      expect(engine!.processorRef, `${provider} must name no processor`).toBeUndefined();
     }
+    delete process.env['KYC_PROVIDER'];
+    // The removed names are refused, not silently fallen back from.
+    for (const removed of ['didit', 'idanalyzer']) {
+      process.env['KYC_PROVIDER'] = removed;
+      expect(() => getKycProvider(), removed).toThrow(/Unknown KYC_PROVIDER/);
+    }
+    delete process.env['KYC_PROVIDER'];
+    // And no processor entry claims to receive identity images any more.
+    const imageProcessors = PROCESSOR_REGISTER.filter((p) => p.payload.includes('PERSONAL_DOC_IMAGE') && p.leavesCountry);
+    expect(imageProcessors.map((p) => p.ref), 'no processor outside Guyana receives an identity document').toEqual([]);
     expect(processorByRef(UNKNOWN_ENGINE.processorRef)).toBeNull();
   });
 
@@ -97,11 +109,16 @@ describe('[DGP-1 · DOC-1 §2] the send gate is fail-closed', () => {
   });
 
   it('test_external_send_refused_without_transfer_basis: a registered processor with no configured contract reference is DORMANT and refused; with one it passes', () => {
-    expect(processorStatus(processorByRef('DIDIT')!, {})).toBe('DORMANT_NO_CONTRACT');
-    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_DIDIT, {}))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_NO_TRANSFER_BASIS' });
-    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_DIDIT, { PROCESSOR_CONTRACT_DIDIT: '   ' }))).toMatchObject({ code: 'PROCESSOR_NO_TRANSFER_BASIS' });
-    expect(processorStatus(processorByRef('DIDIT')!, { PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' })).toBe('ACTIVE');
-    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_DIDIT, { PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' }))).toBeNull();
+    // [NO-AI] This used DIDIT as its example. Didit is deleted, but the RULE is
+    // not — a personal payload may not leave the country without a recorded
+    // transfer basis. OBJECT_STORE is now the processor that carries one, so
+    // the rule is tested through it rather than retired with its old example.
+    const EXTERNAL_STORE = { name: 'object-store', version: '1', external: true, processorRef: 'OBJECT_STORE' } as const;
+    expect(processorStatus(processorByRef('OBJECT_STORE')!, {})).toBe('DORMANT_NO_CONTRACT');
+    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_STORE, {}))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_NO_TRANSFER_BASIS' });
+    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_STORE, { PROCESSOR_CONTRACT_OBJECT_STORE: '   ' }))).toMatchObject({ code: 'PROCESSOR_NO_TRANSFER_BASIS' });
+    expect(processorStatus(processorByRef('OBJECT_STORE')!, { PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' })).toBe('ACTIVE');
+    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_STORE, { PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' }))).toBeNull();
   });
 
   it('test_local_engine_never_gated: an in-process engine passes regardless of the registry row or env', () => {
@@ -110,11 +127,15 @@ describe('[DGP-1 · DOC-1 §2] the send gate is fail-closed', () => {
   });
 
   it('the admin view resolves status from env and never exposes the reference value', () => {
-    const view = processorRegisterView({ PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' });
-    const didit = view.find((p) => p.ref === 'DIDIT')!;
-    expect(didit.status).toBe('ACTIVE'); expect(didit.contractConfigured).toBe(true);
-    expect(JSON.stringify(view)).not.toContain('DPA-2026-001');
-    expect(view.find((p) => p.ref === 'ID_ANALYZER')!.status).toBe('DORMANT_NO_CONTRACT');
+    const view = processorRegisterView({ PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' });
+    const store = view.find((p) => p.ref === 'OBJECT_STORE')!;
+    expect(store.status).toBe('ACTIVE'); expect(store.contractConfigured).toBe(true);
+    expect(JSON.stringify(view), 'the reference VALUE never reaches the view').not.toContain('DPA-2026-001');
     expect(view.find((p) => p.ref === 'MMG')!.status).toBe('ACTIVE');
+    // [NO-AI] And the two that used to receive identity documents are gone from
+    // the register entirely — not merely dormant.
+    for (const gone of ['DIDIT', 'ID_ANALYZER']) {
+      expect(view.find((p) => p.ref === gone), gone).toBeUndefined();
+    }
   });
 });

@@ -694,7 +694,7 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
   });
 });
 
-describe('Operator identity docs are face-matched against the signup selfie', () => {
+describe('[NO-AI] operator identity documents are NOT face-matched — nothing does that any more', () => {
   let faceToken: string;
   let faceUserId: string;
 
@@ -704,8 +704,13 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     faceUserId = u.user.id;
   });
 
-  it('refuses an ID submission when no profile selfie exists', async () => {
-    // Models a pre-selfie account — strip what the fixture helper added.
+  // These two tests used to assert the opposite: that an ID document was routed
+  // through `verifyIdentity` WITH the signup selfie, and that a missing selfie
+  // refused the submission. Face matching lived inside the KYC providers the
+  // owner's no-AI directive removed, so both behaviours are gone — and the
+  // invariant worth holding now is that neither can come back quietly.
+
+  it('an ID submission no longer demands a selfie, because nothing compares the two faces', async () => {
     await app.prisma.user.update({
       where: { id: faceUserId },
       data: { selfieCapturedAt: null, avatar: null },
@@ -718,21 +723,15 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
       consent: true,
       privacyNoticeVersion: 'v1',
     }, faceToken);
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('SELFIE_REQUIRED');
 
-    // A NON-identity document is unaffected by the missing selfie.
-    const plain = await inject('POST', '/api/v1/verification/documents', {
-      role: 'MOVER',
-      docType: 'vehicle_registration',
-      fileUrl: 'storage://t/face-reg.jpg',
-      consent: true,
-      privacyNoticeVersion: 'v1',
-    }, faceToken);
-    expect(plain.statusCode).toBe(201);
+    // Demanding a selfie for a match that cannot happen would be biometric data
+    // collected for no purpose — the same reason the liveness route now refuses
+    // before the upload rather than after it.
+    expect(res.statusCode, res.body).toBe(201);
   });
 
-  it('routes ID docs through verifyIdentity with the selfie; other docs through verifyDocument', async () => {
+  it('every document type goes through verifyDocument; the selfie is never sent', async () => {
+    await app.prisma.verificationDocument.deleteMany({ where: { userId: faceUserId } });
     await app.prisma.user.update({
       where: { id: faceUserId },
       data: { selfieCapturedAt: new Date(), avatar: 'storage://seed/face-selfie.jpg' },
@@ -759,18 +758,30 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     await svc.submitDocument(faceUserId, 'MOVER', 'national_id', 'storage://t/face-id2.jpg', 'v1');
     await svc.submitDocument(faceUserId, 'MOVER', 'drivers_licence', 'storage://t/face-dl.jpg', 'v1');
 
-    expect(calls).toHaveLength(2);
-    expect(calls[0]).toEqual({
-      path: 'identity',
-      input: {
-        userId: faceUserId,
-        idDocumentUrl: 'storage://t/face-id2.jpg',
-        selfieUrl: 'storage://seed/face-selfie.jpg', // the signup selfie IS the match target
-      },
-    });
-    expect(calls[1]?.path).toBe('document');
+    expect(calls.map((c) => c.path), 'an identity document takes the document path like any other').toEqual(['document', 'document']);
+    expect(calls.some((c) => 'selfieUrl' in c.input), 'the selfie URL is never handed to a provider').toBe(false);
+    expect(JSON.stringify(calls), 'and the stored selfie never appears in a provider call').not.toContain('face-selfie.jpg');
+  });
+
+  it('the environment variable cannot re-enable the face match', async () => {
+    await app.prisma.verificationDocument.deleteMany({ where: { userId: faceUserId } });
+    process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
+    try {
+      const calls: string[] = [];
+      const recorder = {
+        verifyIdentity: async () => { calls.push('identity'); return { status: 'approved' as const, referenceToken: 'x' }; },
+        verifyDocument: async () => { calls.push('document'); return { status: 'approved' as const, referenceToken: 'y' }; },
+        getStatus: async () => 'pending_manual' as const,
+      };
+      const svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), recorder);
+      await svc.submitDocument(faceUserId, 'MOVER', 'national_id', 'storage://t/face-id3.jpg', 'v1');
+      expect(calls, 'the flag is ignored: there is no implementation behind it').toEqual(['document']);
+    } finally {
+      delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
+    }
   });
 });
+
 
 describe('Subscriptions are born on verification (auto-approval path)', () => {
   // The dead-end this prevents: KYC auto-approves the full checklist, the

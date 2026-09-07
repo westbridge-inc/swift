@@ -95,6 +95,19 @@ export interface LivenessCheckResult {
  *  is disabled: a report still opens the durable case, which pages a human. */
 export const notMyDriverAuthorityKilled = (env: Record<string, string | undefined> = process.env) => env['NOT_MY_DRIVER_AUTHORITY_KILL'] === '1';
 
+/**
+ * [NO-AI · FD-D5] IS A LIVENESS CHECK POSSIBLE AT ALL?
+ *
+ * A liveness check IS a face match, and face matching ran inside the KYC
+ * providers that the owner's no-AI directive removed. There is no
+ * implementation left, so the answer is simply no — and every surface must give
+ * the same answer, rather than each discovering it separately in the middle of
+ * doing something.
+ */
+export function livenessAvailable(): boolean {
+  return biometricFaceMatchEnabled();
+}
+
 export class LivenessService {
   private notifications: NotificationService;
 
@@ -128,13 +141,28 @@ export class LivenessService {
       throw new AppError(400, 'SELFIE_REQUIRED', 'Take your profile selfie first — the identity check compares against it.');
     }
 
+    // [NO-AI] AN ABSENT CAPABILITY IS NOT AN OUTAGE.
+    //
+    // This used to throw inside the try below, be caught as a provider error,
+    // and page ops with "Face-match provider errored — investigate the
+    // provider." There is no provider to investigate: face matching was
+    // removed. Worse, the flag has defaulted OFF since the founder's FD-D5
+    // decision, so on current `main` EVERY check already raises that false
+    // alarm and pushes the mover into a retro-review queue.
+    //
+    // The honest answer is refusal, before anything is recorded or anyone is
+    // paged. The route refuses earlier still, so a selfie for a check that
+    // cannot run is never even collected.
+    if (!livenessAvailable()) {
+      throw new AppError(
+        503,
+        'LIVENESS_UNAVAILABLE',
+        'Identity checks by face match are not available: Swift performs no face matching. Nothing was recorded.',
+      );
+    }
+
     let outcome: LivenessOutcome;
     try {
-      // [DOC-1 §0.5 · FD-D5] A liveness check IS a face-match. With the biometric
-      // switch off it cannot run; say so, never fall through to a guess.
-      if (!biometricFaceMatchEnabled()) {
-        throw new AppError(409, 'BIOMETRIC_DISABLED', 'Liveness needs face-match, which FEATURE_BIOMETRIC_FACE_MATCH=0 has turned off');
-      }
       const res = await this.kyc.verifyIdentity({
         userId: input.userId,
         idDocumentUrl: user.avatar, // the reference face (already ID-proven at L2)
@@ -235,7 +263,10 @@ export class LivenessService {
    *  Dormant unless LIVENESS_REQUIRED=1. All state is DB columns — the prompt
    *  deadline survives restarts and the enforcement is CAS. */
   async midshiftSweep(now = new Date(), sweepMs = 300_000): Promise<{ prompted: number; enforced: number }> {
-    if (!livenessRequired()) return { prompted: 0, enforced: 0 };
+    // [NO-AI] Prompting a mover to "take the selfie check to stay online", and
+    // then taking them offline for missing a check that cannot run, would be a
+    // penalty for a capability Swift removed.
+    if (!livenessRequired() || !livenessAvailable()) return { prompted: 0, enforced: 0 };
     const out = { prompted: 0, enforced: 0 };
     const deadline = new Date(now.getTime() + midshiftDeadlineMinutes() * 60_000);
     const ticksPerWeek = Math.max(1, (7 * 24 * 3_600_000) / sweepMs);
