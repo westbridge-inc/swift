@@ -15,6 +15,8 @@ let app: FastifyInstance;
 const marker = `pubsf${nanoid(4).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`;
 let liveSlug: string;
 let hiddenSlug: string;
+let liveVendorId: string;
+let hiddenVendorId: string;
 const vendorIds: string[] = [];
 let ownerId: string;
 let userId: string;
@@ -66,8 +68,10 @@ beforeAll(async () => {
 
   const live = await makeVendor({ status: 'ACTIVE', isVerified: true, description: 'A public place' });
   liveSlug = live.slug;
+  liveVendorId = live.id;
   const hidden = await makeVendor({ status: 'PENDING_APPROVAL', isVerified: false });
   hiddenSlug = hidden.slug;
+  hiddenVendorId = hidden.id;
   // Suspended-but-verified must also be invisible
   await makeVendor({ status: 'SUSPENDED', isVerified: true });
 
@@ -136,6 +140,43 @@ describe('public storefront page', () => {
     // Competitive/internal item fields stay private
     for (const leak of ['sku', 'stockQuantity', 'barcode', 'totalOrdered']) {
       expect(item).not.toHaveProperty(leak);
+    }
+  });
+
+  it('test_printed_link_survives_a_rename: a retired slug resolves through SlugRedirect and names the canonical one', async () => {
+    // [09-07] `SlugRedirect` had a table, a tenant scope, an RLS policy and a unique index,
+    // and NOTHING read or wrote it — while `qr/qr-codes.ts` promised in a comment that a
+    // rename "writes a SlugRedirect row so printed links never die". The read half is real
+    // now. The write half arrives with the rename feature, which does not exist yet: a
+    // slug is minted once at onboarding (`partner.service.ts:219`) and never updated.
+    const retired = `retired-${marker}`;
+    const row = await app.prisma.slugRedirect.create({
+      data: { entityType: 'VENDOR', oldSlug: retired, entityId: liveVendorId },
+    });
+    try {
+      const res = await app.inject({ method: 'GET', url: `/api/v1/public/storefronts/${retired}` });
+      expect(res.statusCode, 'a printed code must outlive a rename').toBe(200);
+      const d = res.json().data;
+      expect(d.slug).toBe(liveSlug);
+      expect(d.canonicalSlug, 'the caller is told which URL to use from now on').toBe(liveSlug);
+      // and the live slug itself never claims to be a redirect
+      const direct = await app.inject({ method: 'GET', url: `/api/v1/public/storefronts/${liveSlug}` });
+      expect(direct.json().data).not.toHaveProperty('canonicalSlug');
+    } finally {
+      await app.prisma.slugRedirect.delete({ where: { id: row.id } });
+    }
+  });
+
+  it('a redirect to a store that is no longer live commerce still 404s — a retired link is not a bypass', async () => {
+    const retired = `retired-hidden-${marker}`;
+    const row = await app.prisma.slugRedirect.create({
+      data: { entityType: 'VENDOR', oldSlug: retired, entityId: hiddenVendorId },
+    });
+    try {
+      const res = await app.inject({ method: 'GET', url: `/api/v1/public/storefronts/${retired}` });
+      expect(res.statusCode).toBe(404);
+    } finally {
+      await app.prisma.slugRedirect.delete({ where: { id: row.id } });
     }
   });
 
