@@ -600,6 +600,22 @@ jobs:
           bash scripts/fetch-gitleaks.sh
           ./gitleaks detect --source . --redact --exit-code 1
 
+  licence-gate:
+    name: Licence Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - run: corepack enable && corepack prepare --activate
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
+      # [DOC-1 §26.1 · DOC-INV-23] No dependency outside the licence allowlist without a row in
+      # licence-exceptions.md. Judges the INSTALLED tree (transitive included) with a script in
+      # this repository — no third-party action, no network, nothing to pin.
+      - name: Every installed dependency carries an allowed licence or an exception row
+        run: node scripts/licence-gate.mjs .
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest

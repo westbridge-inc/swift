@@ -1,6 +1,7 @@
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
 import type { FastifyInstance } from 'fastify';
+import { assertPromotable } from '../vendor/vendor-tier';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, AgentActionStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
@@ -1332,6 +1333,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!vendor) throw new NotFoundError('Vendor', id);
 
     const isFeatured = featured !== undefined ? featured : !vendor.isFeatured;
+    // [DOC-1 §3.6 · P3-2] No promoted placement at the unregistered tier.
+    if (isFeatured) assertPromotable(vendor);
 
     const updated = await app.prisma.vendor.update({
       where: { id },
@@ -4836,6 +4839,22 @@ export async function adminRoutes(app: FastifyInstance) {
    * (DPA §3.5); every issuance is audit-logged as the document access trail
    * (§3.6). Returns 410 once a document has been purged under retention.
    */
+  /** [DOC-1 §20.2 · P20-2] The custody narrative: everything the record can prove about one
+   *  submission, and what it cannot. Field codes and verdicts only — never a value, never the
+   *  reviewer's note. `?format=pdf` returns the exportable document. A logged read (C1). */
+  app.get('/verification/:id/custody', { preHandler: [adminGuard] }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { format } = z.object({ format: z.enum(['json', 'pdf']).default('json') }).parse(request.query ?? {});
+    const { custodyNarrative, renderCustodyPdf } = await import('../verification/custody');
+    const narrative = await custodyNarrative(tenantPrisma, id);
+    if (format === 'pdf') {
+      const pdf = await renderCustodyPdf(narrative);
+      reply.header('content-type', 'application/pdf').header('content-disposition', `attachment; filename="custody-${id}.pdf"`).header('cache-control', 'no-store, max-age=0');
+      return reply.send(pdf);
+    }
+    return { success: true, data: narrative };
+  });
+
   app.get('/verification/:id/document-url', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const doc = await tenantPrisma.verificationDocument.findUnique({

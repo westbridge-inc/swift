@@ -25,6 +25,9 @@ const EXPIRING_DOC_TYPES = [
   'drivers_licence', 'vehicle_registration',
   // [DOC-1 §18.1] the addendum's annual licences, submittable through a category gate
   'liquor_licence', 'sanitary_certificate', 'trade_licence',
+  // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year
+  // validity like a licence, so the console must ask for its date too.
+  'self_declaration_unregistered',
 ] as const;
 
 const EMPTY_INSURANCE: InsuranceCheck = {

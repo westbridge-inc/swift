@@ -141,7 +141,8 @@ afterAll(async () => {
 describe('[DOC-1 P18-2] documents control what can be sold', () => {
   it('the registry holds the §18.1 types (inactive, provisional) and exactly the §18.3 gate rows', async () => {
     const types = await system(() => app.prisma.docType.findMany({ where: { code: { in: EXTRA_DOC_TYPES.map((t) => registryCode('GY', t.legacyCode)) } } }));
-    expect(types.map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'liquor_licence', 'nis_employer_reg', 'pharmacy_authorisation', 'sanitary_certificate', 'trade_licence']);
+    // + the §3.2 unregistered-trader self-declaration (P3-2), seeded with the addendum types
+    expect(types.map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'liquor_licence', 'nis_employer_reg', 'pharmacy_authorisation', 'sanitary_certificate', 'self_declaration_unregistered', 'trade_licence']);
     expect(types.every((t) => !t.isActive)).toBe(true);
     expect(types.filter((t) => t.needsSpecimen).map((t) => t.legacyCode).sort()).toEqual(['digital_id', 'pharmacy_authorisation']);
     const gates = await system(() => app.prisma.categoryDocumentGate.findMany({ where: { countryCode: 'GY' }, include: { requiredDocType: { select: { legacyCode: true } } } }));

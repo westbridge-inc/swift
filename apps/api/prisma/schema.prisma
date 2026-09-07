@@ -543,6 +543,9 @@ model CountryConfig {
   /// { maxClaimsPerRiderPerMonth, strikeRestrictThreshold, strikeBanThreshold,
   ///   l3MinPaidOrders, l3MinAccountAgeDays, outlierMultiplier }
   cashRules Json?
+  /// [DOC-1 §3.6 · FD-DOC-1 · P3-2] Micro-vendor tier caps, merged over the code defaults in
+  /// vendor-tier.ts: ordersPerDay, grossPerWeek (major units), nudgeAtFraction.
+  vendorTierCaps Json?
 
   /// [MOB-018] The market emergency policy: per service (police/fire/ambulance)
   /// a dialable number and whether ops has VERIFIED it for this market (drill +
@@ -1447,6 +1450,11 @@ model Vendor {
   // lapse between daily sweeps stops sales at the next order, not the next
   // sweep.
   activationValidUntil    DateTime?
+  /// [DOC-1 §3.6 · P3-2] See VendorTier. Set to UNREGISTERED only by the vendor's own
+  /// signed self-declaration; set to REGISTERED only by a VALID registration record.
+  tier                    VendorTier               @default(REGISTERED)
+  tierChangedAt           DateTime?
+  tierNote                String?
   // [REPORT-013 F-013-07] WHO suspended the store: 'BILLING' (non-payment,
   // reversible by payment) or 'ADMIN' (manual/safety — payment must NOT
   // lift it). Reinstatement CAS-matches BILLING only.
@@ -1517,6 +1525,17 @@ enum VendorType {
   SUPERMARKET
   STORE
   SERVICE
+}
+
+/// [DOC-1 §3.6 · P3-2] The micro-vendor tier. UNREGISTERED = a verified person trading
+/// without a DCRA certificate under a signed self-declaration: capped orders/day and
+/// gross/week, no promoted placement, licence-gated categories closed (it holds no
+/// licence). REGISTERED = a business-registration (or incorporation) record is VALID;
+/// promotion is automatic on that record and lifts every cap. Existing vendors default
+/// to REGISTERED so nothing already live is capped by the migration (expand rule).
+enum VendorTier {
+  UNREGISTERED
+  REGISTERED
 }
 
 enum VendorStatus {
