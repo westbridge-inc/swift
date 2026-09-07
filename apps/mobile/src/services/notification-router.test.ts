@@ -72,7 +72,14 @@ describe('a push never lands on a route its recipient cannot reach [S0]', () => 
   it('a store chased about an order lands on their order desk, not the customer screen', () => {
     // The server tags the audience — the router cannot infer "this orderId is
     // for the store" from an orderId alone.
-    expect(destinationFor({ kind: 'agent_vendor_ping', orderId: 'o1', audience: 'business' }))
+    //
+    // [NO-AI] This used to be carried by `agent_vendor_ping`, sent by the ops
+    // agent. The agent is gone, but the INVARIANT is not: any future
+    // business-audience push with only an orderId would fall through to the
+    // customer tracking screen, a route VendorStack never mounts. The rule is
+    // tested through the router's own audience branch rather than deleted with
+    // the one kind that happened to exercise it.
+    expect(destinationFor({ kind: 'vendor_order_alert', orderId: 'o1', audience: 'business' }))
       .toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o1' } });
   });
 
@@ -90,7 +97,7 @@ describe('a push never lands on a route its recipient cannot reach [S0]', () => 
     // The regression this guards: any of them losing its branch drops straight
     // back into the generic `if (orderId)` catch-all at the bottom.
     for (const data of [
-      { kind: 'agent_vendor_ping', orderId: 'o1', audience: 'business' },
+      { kind: 'vendor_order_alert', orderId: 'o1', audience: 'business' },
       { kind: 'incident_interim_suspension', orderId: 'o1' },
       { kind: 'claim_over_gate', orderId: 'o1' },
     ]) {
@@ -101,7 +108,7 @@ describe('a push never lands on a route its recipient cannot reach [S0]', () => 
   it('a CUSTOMER push with an orderId still goes to Delivery (guards the guard)', () => {
     // The catch-all is right for the case it was written for; these branches
     // must not have broken it.
-    expect(destinationFor({ kind: 'agent_delay_notice', orderId: 'o1' }))
+    expect(destinationFor({ kind: 'prep_ready', orderId: 'o1' }))
       .toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
   });
 });
@@ -225,8 +232,6 @@ const CENSUS: Case[] = [
   // `d` must mirror what the API actually SENDS. The drift check compares only
   // `kind` strings, so a payload that grows a field goes unnoticed here and the
   // case then grades a shape nothing produces.
-  { k: 'agent_vendor_ping', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'the STORE — "order waiting on you" belongs on their order desk. The API now tags audience:business; untagged it carried only an orderId and fell through to the CUSTOMER tracking screen, a route VendorStack never mounts' },
-  { k: 'agent_delay_notice', d: O, to: DELIVERY('o1'), why: 'customer — order delayed' },
   { k: 'claim_over_gate', d: O, to: { screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', orderId: 'o1' } }, why: 'rider — the body says "support will follow up"; this is the door for someone who would rather not wait. GetHelp is mounted in every navigator. Was Delivery, which MoverStack never mounts' },
   { k: 'guardian_checkin', d: { ...O, sessionId: 's1', level: 'SOFT' }, to: { screen: 'Taxi' }, why: 'passenger mid-RIDE — the check-in card lives on Taxi, which asks the server whether one is outstanding. Was Delivery, a screen a ride never renders on, so the person being asked if they are safe could not answer' },
   { k: 'guardian_driver_confirm', d: { ...O, sessionId: 's1', cycleId: 'cy1', nonce: 'n1', respondBy: '2026-09-03T12:00:00.000Z' }, to: { screen: 'GuardianDriverConfirm', params: { sessionId: 's1', cycleId: 'cy1', nonce: 'n1', respondBy: '2026-09-03T12:00:00.000Z', orderId: 'o1' } }, why: '[TST-001] the DRIVER, on a screen MoverStack mounts. This used to route to Delivery — which MoverStack never mounts — and this census asserted that dead end as passing, on a SAFETY path, while POST /safety/guardian/driver-confirm sat with no caller. It carries the cycle and the nonce so the screen answers THAT check' },
@@ -243,8 +248,6 @@ const CENSUS: Case[] = [
   { k: 'incident_interim_suspension', d: { ...O, caseNumber: 'INC-1' }, to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } }, why: 'suspended mover — the body says "contact Swift support to respond", and support is the ONLY way back. Same destination as liveness_locked, for the same reason. Was Delivery, which MoverStack never mounts' },
   { k: 'support_ticket', d: { ...O, ticketId: 't1' }, to: DELIVERY('o1'), why: 'admins — ops queue lives on the web console' },
   { k: 'sos_active', d: { ...O, sosAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — SOS war room is not a mobile surface' },
-  { k: 'agent_approval_needed', d: O, to: DELIVERY('o1'), why: 'admins/agent approval queue' },
-  { k: 'agent_ops_alert', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_delivery_rider_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_dispatch_exhausted', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_food_too_old', d: O, to: DELIVERY('o1'), why: 'admins — [ALG-06] an order too old to deliver was cancelled by the system and needs a person' },
@@ -310,7 +313,6 @@ const CENSUS: Case[] = [
   { k: 'category_request_resolved', to: null, why: 'GAP: store category request answered' },
   { k: 'support_update', d: { ticketId: 't1' }, to: null, why: 'GAP: support thread reply — no support screen wired' },
   { k: 'supply_returned', d: { audience: 'customer', pool: 'RIDER' }, to: null, why: 'GAP: movers are back — no order to open, so nothing to route to' },
-  { k: 'agent_cancel', to: null, why: 'GAP: the agent asked to cancel an order but sends no orderId' },
   { k: 'ad_campaign_scheduled', d: { campaignId: 'c1' }, to: null, why: 'GAP: advertiser — CampaignDetail exists and is unrouted' },
   { k: 'ad_campaign_live', d: { campaignId: 'c1' }, to: null, why: 'GAP: same' },
   { k: 'ad_campaign_completed', d: { campaignId: 'c1' }, to: null, why: 'GAP: same' },
