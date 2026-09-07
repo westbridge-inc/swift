@@ -32,9 +32,23 @@ export function normalizeShortCode(input: string): string | null {
 }
 
 /** NFKD → strip diacritics → lowercase → non-alphanumeric runs become "-" →
- *  collapse/trim → max 60 chars. Tenant-unique collision suffixing (-2, -3…)
- *  happens at the DB call site; slugs are immutable once created — a rename
- *  mints a NEW slug and writes a SlugRedirect row so printed links never die. */
+ *  collapse/trim → max 60 chars.
+ *
+ *  [09-07] What is true, stated exactly. A store's slug is minted ONCE, at onboarding,
+ *  by `partner/partner.service.ts:219` (`slugify(name)-<nanoid>`); nothing in the product
+ *  updates it, so no printed link can die today. There is NO rename path — this comment
+ *  used to describe one ("a rename mints a NEW slug and writes a SlugRedirect row"), and
+ *  `SlugRedirect` had a table, a tenant scope, an RLS policy and a unique index with zero
+ *  writers and zero readers.
+ *
+ *  The read half is built now: `GET /public/storefronts/:slug` resolves a retired slug
+ *  through `SlugRedirect` and returns `canonicalSlug`. A rename feature therefore has one
+ *  obligation and one only — write the row. Until it exists, do not describe renaming as
+ *  something the product does.
+ *
+ *  This helper is not that author. It is the QR-side normaliser, used by the QR tests; the
+ *  duplicate-author question (two slug implementations) is recorded in the audit register,
+ *  not resolved here. */
 export function makeSlug(displayName: string): string {
   return displayName
     .normalize('NFKD')

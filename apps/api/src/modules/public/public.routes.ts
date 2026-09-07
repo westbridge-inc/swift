@@ -177,8 +177,15 @@ export async function publicRoutes(app: FastifyInstance) {
 
   /** GET /storefronts/:slug — one store's public page: profile + hours + menu. */
   app.get<{ Params: { slug: string } }>('/storefronts/:slug', async (request) => {
-    const vendor = await app.prisma.vendor.findFirst({
-      where: { slug: request.params.slug, ...PUBLIC_WHERE, tenantId: await bindPublicTenant(), tenant: { isActive: true } },
+    const tenantId = await bindPublicTenant();
+    // [09-07] A printed QR code outlives a rename. `SlugRedirect` was built for exactly
+    // that — table, tenant scope, RLS policy, unique index — and then read by nothing, so
+    // the promise in `qr/qr-codes.ts` was decorative. One lookup makes it real: an old slug
+    // resolves to the store it names, and the response carries the canonical slug so a
+    // client can correct its URL. The write side arrives with the rename feature; until
+    // then this costs one indexed miss on a 404 that was already a 404.
+    const bySlug = (slug: string) => app.prisma.vendor.findFirst({
+      where: { slug, ...PUBLIC_WHERE, tenantId, tenant: { isActive: true } },
       select: {
         ...PUBLIC_VENDOR_SELECT,
         // The app already shows guests the street address (pickup needs it);
@@ -212,6 +219,20 @@ export async function publicRoutes(app: FastifyInstance) {
         },
       },
     });
+    let vendor = await bySlug(request.params.slug);
+    if (!vendor) {
+      const redirect = await app.prisma.slugRedirect.findUnique({
+        where: { tenantId_entityType_oldSlug: { tenantId, entityType: 'VENDOR', oldSlug: request.params.slug } },
+        select: { entityId: true },
+      });
+      if (redirect) {
+        const current = await app.prisma.vendor.findFirst({
+          where: { id: redirect.entityId, ...PUBLIC_WHERE, tenantId, tenant: { isActive: true } },
+          select: { slug: true },
+        });
+        if (current) vendor = await bySlug(current.slug);
+      }
+    }
     if (!vendor) throw new NotFoundError('Storefront');
 
     // [M-D6] Same mapper as the directory list, so a store's own page and its
@@ -222,6 +243,8 @@ export async function publicRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...vendor,
+        // Present when the request arrived on a retired slug, so the caller can correct its URL.
+        ...(vendor.slug === request.params.slug ? {} : { canonicalSlug: vendor.slug }),
         ...(surface ?? { displayRating: null, ratingBucket: '(0)', ratingCount: 0, topRated: false }),
         minOrderAmount: Number(vendor.minOrderAmount),
         categories: vendor.categories
