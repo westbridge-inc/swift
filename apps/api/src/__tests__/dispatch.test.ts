@@ -2430,6 +2430,24 @@ describe('[F-103-02/03] a disputed order is never advertised, and refusing one n
     });
   }
 
+  it('[F-108-01] a HELD order that is also too old is still RETIRED — the customer is told, not left waiting', async () => {
+    // My first version of the hold returned above the food-age cutoff, so an
+    // unpaid order that was also too old to deliver was silently dropped: never
+    // offered (right) and never CLOSED (wrong). `rescue.test.ts` caught it.
+    // Being unfulfillable is not a reason to leave someone waiting in silence.
+    await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', mmgClaimMismatchAt: null, readyAt: new Date(Date.now() - 6 * 60 * 60_000) },
+    });
+
+    const result = await dispatch.dispatchOrder(order.id);
+
+    expect(result.exhausted, 'the cutoff closes it out rather than the hold swallowing it').toBe(true);
+    expect(result.offered, 'and it is still never offered').toBeUndefined();
+  });
+
   it('[F-108-01] the same order becomes ordinary work the moment the store claims the payment', async () => {
     await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
     const order = await makeDeliveryOrder();

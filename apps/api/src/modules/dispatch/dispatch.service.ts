@@ -935,22 +935,6 @@ export class DispatchService {
         if (order.driverId) return {};
         if (order.status !== 'PENDING') return {};
       }
-      // [F-103-02 · F-108-01] Held for a person — either because the two
-      // parties disagree about the payment, or because the payment has not
-      // landed at all. The assignment gate already refuses both; refusing at
-      // ASSIGNMENT means the offer was made, a rider acted on it, and the
-      // refusal arrived as though the rider had done something wrong. An order
-      // nobody may take is not advertised at all.
-      //
-      // My first pass covered only the dispute and left the far commoner
-      // unpaid case advertised — Codex found it, and found the admin
-      // CUSTOMER_DID_NOT_PAY transition that manufactures exactly that row.
-      const hold = mmgFulfilmentHold(order);
-      if (hold) {
-        dispatchHeldCounter.labels('offer', hold).inc();
-        return {};
-      }
-
       if (order.pickupLat == null || order.pickupLng == null) return {};
 
       // [ALG-06 ②] Food-age cutoff: an order nobody could deliver in time is
@@ -964,6 +948,29 @@ export class DispatchService {
           await retireTooOldOrder({ prisma: this.prisma, redis: this.redis, io: this.io, notifications: this.notifications }, order, age.ageMinutes, limit);
           return { exhausted: true };
         }
+      }
+
+      // [F-103-02 · F-108-01] Held for a person — either because the two
+      // parties disagree about the payment, or because the payment has not
+      // landed at all. The assignment gate already refuses both; refusing at
+      // ASSIGNMENT means the offer was made, a rider acted on it, and the
+      // refusal arrived as though the rider had done something wrong. An order
+      // nobody may take is not advertised at all.
+      //
+      // My first pass covered only the dispute and left the far commoner
+      // unpaid case advertised — Codex found it, and found the admin
+      // CUSTOMER_DID_NOT_PAY transition that manufactures exactly that row.
+      //
+      // PLACED AFTER THE FOOD-AGE CUTOFF, deliberately. My first attempt put it
+      // above, and `rescue.test.ts` caught what that costs: an order too old to
+      // deliver AND unpaid returned here and was never RETIRED, so the customer
+      // was never told their order had been closed. Being unfulfillable is not
+      // a reason to leave someone waiting in silence — the cutoff CLOSES the
+      // order and speaks to them, and the hold only stops it being OFFERED.
+      const hold = mmgFulfilmentHold(order);
+      if (hold) {
+        dispatchHeldCounter.labels('offer', hold).inc();
+        return {};
       }
 
       // One live offer at a time
