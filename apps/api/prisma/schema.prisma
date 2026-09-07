@@ -1886,6 +1886,14 @@ model Order {
   /// claim is a mismatch that holds dispatch until a human looks.
   customerClaimedPaidAt    DateTime?
   customerPaymentRef       String?
+  /// [DOC-1 §31.5 · DOC-INV-48 · F-103-04] The customer's NEGATIVE claim — "I did not pay" —
+  /// as a durable fact of its own. It used to be recorded as the ABSENCE of
+  /// `customerClaimedPaidAt`, which cannot tell "no claim yet" from "the customer said no";
+  /// so a dispute raised BEFORE the store claimed left nothing on the order, the store's
+  /// later claim produced CLAIMED + mmgClaimMismatchAt = null, and every gate passed an
+  /// order whose two parties openly disagreed. Absence of a timestamp may mean exactly one
+  /// thing.
+  customerClaimedNotPaidAt DateTime?
   mmgClaimMismatchAt       DateTime?
 
   estimatedPrepTime     Int?

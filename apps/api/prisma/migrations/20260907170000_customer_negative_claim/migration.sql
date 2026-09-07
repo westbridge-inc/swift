@@ -1,0 +1,23 @@
+-- [DOC-1 §31.5 · DOC-INV-48 · F-103-04] The customer's negative payment claim, made durable.
+--
+-- WHY. The customer's "I did not pay" was recorded only as the absence of
+-- `customerClaimedPaidAt` plus an audit row. Absence therefore meant two different
+-- things — "no claim has been made" and "the customer said they did not pay" — and the
+-- code could not tell them apart. A dispute raised BEFORE the store confirmed receipt
+-- left no fact on the order at all; the store's later claim wrote CLAIMED with
+-- `mmgClaimMismatchAt` still NULL; and every fulfilment gate, every dispatch entrance
+-- and the door itself then passed an order whose two parties openly disagreed about
+-- whether any money had moved.
+--
+-- BACKFILL. Deliberately none. A negative claim that was never recorded cannot be
+-- recovered from an absence, and inventing one would be worse than admitting the gap:
+-- historical orders keep NULL, which now means only "no negative claim on record".
+-- The audit_logs rows with action = 'CUSTOMER_CLAIMED_NOT_PAID' remain the evidence for
+-- anything that happened before this migration, and are not rewritten.
+--
+-- ROLLBACK:
+--   ALTER TABLE "orders" DROP COLUMN "customerClaimedNotPaidAt";
+-- Safe at any time: the column is nullable, has no default, no index and no constraint,
+-- and nothing outside the MMG claim path reads it.
+
+ALTER TABLE "orders" ADD COLUMN "customerClaimedNotPaidAt" TIMESTAMP(3);

@@ -1792,13 +1792,21 @@ export async function vendorRoutes(app: FastifyInstance) {
       // [DOC-1 §31.5 · DOC-INV-48 · P31-2] The store's word is a CLAIM. It lands as CLAIMED —
       // never CAPTURED, which is reserved for a provider's own evidence — so nothing
       // downstream can read a person's attestation as a settled fact.
+      // [DOC-INV-48 · F-103-04] THE OTHER ORDER OF THE SAME DISAGREEMENT.
+      //
+      // If the customer has already said "I did not pay", this claim does not
+      // land as an unremarkable CLAIMED — it lands as CLAIMED *and disputed*,
+      // in the same write, under the same lock. Before, the store's claim
+      // simply overwrote the silence the customer's earlier denial had left,
+      // and the order proceeded with two parties openly disagreeing.
+      const disputedByCustomer = locked.customerClaimedNotPaidAt !== null && !locked.mmgClaimMismatchAt;
       const cas = await tx.order.updateMany({
         where: {
           id: order.id,
           paymentStatus: { notIn: ['CAPTURED', 'CLAIMED'] },
           status: { notIn: ORDER_CLOSED_STATUSES as OrderStatus[] },
         },
-        data: { paymentStatus: 'CLAIMED' },
+        data: { paymentStatus: 'CLAIMED', ...(disputedByCustomer ? { mmgClaimMismatchAt: new Date() } : {}) },
       });
       // [LB-015 / REPORT-004 F-004-08] The capture and its evidence row commit
       // or vanish together, the evidence records the FRESH lifecycle status
@@ -1837,11 +1845,32 @@ export async function vendorRoutes(app: FastifyInstance) {
           userId: request.user.userId, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED', entity: 'Order', entityId: order.id,
           changes: { reference, amount: String(fresh.totalAmount), claim: 'payment_claimed_by_vendor' },
         } });
+        if (disputedByCustomer) {
+          // [F-103-04] Same row, same commit: the disagreement is named as its
+          // own event, so the trail shows a claim that ARRIVED disputed rather
+          // than an order that quietly became one.
+          await tx.auditLog.create({ data: {
+            userId: request.user.userId, action: 'MMG_CLAIM_MISMATCH', entity: 'Order', entityId: order.id,
+            changes: { claim: 'store_claimed_after_customer_denied', reference, customerClaimedNotPaidAt: locked.customerClaimedNotPaidAt?.toISOString() ?? null },
+          } });
+        }
       }
-      return { won: cas.count > 0, order: fresh };
+      return { won: cas.count > 0, order: fresh, arrivedDisputed: disputedByCustomer && cas.count > 0 };
     });
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
+    if (capture.arrivedDisputed) {
+      // [F-103-04] The same page the other ordering already raised: a person
+      // must look, and dispatch is held until they do.
+      mmgAttestationCounter.labels('arrived_disputed').inc();
+      const { notifyAdmins } = await import('../notification/notification.service');
+      await notifyAdmins(app.prisma, notifications, {
+        tenantId: capture.order.tenantId,
+        title: 'MMG payment claims disagree',
+        body: `Order ${order.id}: the customer had already said they did not pay; the store has now reported the payment received. Dispatch is held until someone resolves it.`,
+        data: { kind: 'mmg_claim_mismatch', orderId: order.id },
+      }).catch(() => {});
+    }
     const updated = capture.order;
     app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED' });
     // The socket covers an open order screen; the notification survives it.
