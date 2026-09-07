@@ -674,8 +674,10 @@ describe('Scoring — pure and predictable', () => {
     expect(scoreCandidate({ ...base, acceptanceRate: 95 })).toBeLessThan(scoreCandidate({ ...base, acceptanceRate: 20 }));
   });
 
-  it('rating breaks ties', () => {
-    expect(scoreCandidate({ ...base, averageRating: 4.9 })).toBeLessThan(scoreCandidate({ ...base, averageRating: 3.0 }));
+  it('rating does NOT break ties — RATING_AFFECTS_DISPATCH is false (founder, R-Law 4)', () => {
+    // Was: "rating breaks ties". It asserted the opposite of the recorded decision, which
+    // sat two files away as a constant nothing imported. The scorer consults it now.
+    expect(scoreCandidate({ ...base, averageRating: 4.9 })).toBe(scoreCandidate({ ...base, averageRating: 3.0 }));
   });
 
   it('ranks a field deterministically', () => {
