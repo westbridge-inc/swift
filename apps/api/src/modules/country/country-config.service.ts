@@ -1,5 +1,6 @@
 import type { PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
-import { registryChecklist } from '../verification/doc-registry';
+import { registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER } from '../verification/doc-registry';
+import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
 import { NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
 import { readDeliveryRates } from './pricing-config';
@@ -170,15 +171,20 @@ export class CountryConfigService {
   }
 
   /** Required-document checklist for a role key (drives verification). */
-  async getDocumentChecklist(code: string, roleKey: string): Promise<string[]> {
+  async getDocumentChecklist(code: string, roleKey: string, tier?: string): Promise<string[]> {
     // [DOC-1 §4.2] The registry speaks first — but only for a requirement set
     // whose every document type is ACTIVE (legal facts verified). Until then
     // the answer is the JSON these lists have always come from: same
     // signature, same lists, no behaviour change (test_checklist_facade_unchanged).
-    const fromRegistry = await registryChecklist(this.prisma, code, roleKey);
+    // [DOC-1 §3.6 · P3-2] At the UNREGISTERED tier the same role reads its
+    // <ROLE>_UNREGISTERED list (the registry set at that tier, else the JSON key);
+    // a role with no such list is not offered the tier and keeps its standard set.
+    const unregistered = tier === UNREGISTERED_TIER;
+    const fromRegistry = await registryChecklist(this.prisma, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : undefined);
     if (fromRegistry) return fromRegistry;
     const config = await this.getByCode(code);
-    const lists = config.documentChecklists as Record<string, string[]>;
+    const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists ?? {}) as Record<string, string[]>) };
+    if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!;
     return lists[roleKey] ?? [];
   }
 

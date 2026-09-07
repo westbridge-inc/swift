@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { applySeedPlan, buildSeedPlan, type ApplyOptions, type DesiredConfig, type SeedPlan } from './seed-plan';
+import { isProduction } from '../../utils/runtime-mode';
 
 /**
  * The platform SPINE — the rows a Swift database cannot function without,
@@ -49,12 +50,13 @@ export const guyanaTiers = {
   franchiseDiscountPct: 50,
 };
 
-/** The desired platform spine, as data. */
-export function desiredPlatformConfig(): DesiredConfig {
-  // Document checklists are the LAUNCH default. The GEI-licensed electrician
-  // entry is the one trade-specific requirement; every other trade falls back
-  // to the SERVICE_PROVIDER checklist.
-  const guyanaChecklists = {
+/**
+ * The LAUNCH document checklists, as code. The CountryConfig row carries a copy the
+ * founder may edit; readers merge these defaults UNDER the stored JSON so a key added
+ * here (the UNREGISTERED tier lists, P3-2) exists on every environment without a reseed,
+ * while an edited stored list still wins.
+ */
+export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     MOVER: ['national_id', 'police_clearance'],
     MOVER_MOTOR: ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
     MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'],
@@ -62,12 +64,49 @@ export function desiredPlatformConfig(): DesiredConfig {
     RESTAURANT: ['owner_national_id', 'business_registration', 'tin_certificate', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
     SUPERMARKET: ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'],
     STORE: ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'],
+    // [DOC-1 §3.2/§3.6 · FD-DOC-1 · P3-2] The UNREGISTERED tier of the same roles: identity, the signed
+    // self-declaration, the storefront photo, and — never waived — the food handler permit for food.
+    // TIN is optional at this tier (not blocking); the restaurant licence is a nudge, not a requirement.
+    RESTAURANT_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo', 'food_handler_cert'],
+    SUPERMARKET_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
+    STORE_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
     SERVICE: ['owner_national_id', 'police_clearance'],
     SERVICE_PROVIDER: ['national_id', 'police_clearance'],
     SERVICE_PROVIDER_TRADE_ELECTRICIAN: ['gei_electrical_licence'],
     SERVICE_PROVIDER_TRADE_ELECTRICAL: ['gei_electrical_licence'],
     CUSTOMER_L2: ['national_id', 'selfie'],
-  };
+};
+
+/**
+ * [DOC-1 §30 · DOC-INV-43] No GYD/USD constant in code. The seed needs ONE anchor to
+ * derive every USD-pegged market's local figures and to record the launch market's
+ * rate on its CountryConfig row; that anchor comes from the environment
+ * (`SEED_FX_GYD_PER_USD`, a dated observation the operator sets). Production refuses
+ * to seed without it; outside production the April-2026 observation stands in so
+ * dev and test carry the same numbers they always did. Runtime never reads this —
+ * every conversion reads `CountryConfig.usdExchangeRate` (the row).
+ */
+export const SEED_FX_ENV = 'SEED_FX_GYD_PER_USD';
+export function seedFxRate(env: Record<string, string | undefined> = process.env): number {
+  const raw = env[SEED_FX_ENV];
+  if (raw !== undefined && raw !== '') {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`[DOC-INV-43] ${SEED_FX_ENV} must be a positive number (GYD per USD); got ${JSON.stringify(raw)}`);
+    return n;
+  }
+  if (isProduction(env)) {
+    throw new Error(`[DOC-INV-43] ${SEED_FX_ENV} is required to seed production — the GYD/USD rate is an observation the operator records, never a constant in code.`);
+  }
+  return 209; // DOC-INV-43 fallback: the April-2026 observation, dev/test only (the census test allowlists this line)
+}
+
+/** The desired platform spine, as data. */
+export function desiredPlatformConfig(): DesiredConfig {
+  const gydPerUsd = seedFxRate();
+  // Document checklists are the LAUNCH default. The GEI-licensed electrician
+  // entry is the one trade-specific requirement; every other trade falls back
+  // to the SERVICE_PROVIDER checklist.
+  const guyanaChecklists = DEFAULT_DOCUMENT_CHECKLISTS;
   const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
   const taxiClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 };
   const guyanaCashRules = {
@@ -95,7 +134,7 @@ export function desiredPlatformConfig(): DesiredConfig {
   };
   const guyanaPolicy = {
     isActive: true,
-    usdExchangeRate: 209.0,
+    usdExchangeRate: gydPerUsd,
     idGateThresholdUsd: 50,
     floatL1: 8000,
     floatL2: 20000,
@@ -112,15 +151,15 @@ export function desiredPlatformConfig(): DesiredConfig {
   // Every other Caribbean market is USD-pegged off the Guyana numbers until a
   // local business/legal pass refines it — and says so in its notes.
   const USD = {
-    mover: guyanaTiers.mover / 209,
-    moverHeavy: guyanaTiers.moverHeavy / 209,
-    serviceVendor: guyanaTiers.serviceVendor / 209,
-    smallVendor: guyanaTiers.smallVendor / 209,
-    largeVendor: guyanaTiers.largeVendor / 209,
-    departmentVendor: guyanaTiers.departmentVendor / 209,
+    mover: guyanaTiers.mover / gydPerUsd,
+    moverHeavy: guyanaTiers.moverHeavy / gydPerUsd,
+    serviceVendor: guyanaTiers.serviceVendor / gydPerUsd,
+    smallVendor: guyanaTiers.smallVendor / gydPerUsd,
+    largeVendor: guyanaTiers.largeVendor / gydPerUsd,
+    departmentVendor: guyanaTiers.departmentVendor / gydPerUsd,
   };
-  const USD_TAXI = { base: 1000 / 209, perKm: 300 / 209, perMin: 25 / 209, minimum: 1500 / 209 };
-  const USD_FLOAT = { l1: 8000 / 209, l2: 20000 / 209, l3: 40000 / 209 };
+  const USD_TAXI = { base: 1000 / gydPerUsd, perKm: 300 / gydPerUsd, perMin: 25 / gydPerUsd, minimum: 1500 / gydPerUsd };
+  const USD_FLOAT = { l1: 8000 / gydPerUsd, l2: 20000 / gydPerUsd, l3: 40000 / gydPerUsd };
   const niceRound = (n: number) => {
     if (n >= 1000) return Math.round(n / 100) * 100;
     if (n >= 100) return Math.round(n / 10) * 10;
