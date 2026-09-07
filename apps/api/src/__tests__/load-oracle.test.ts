@@ -38,3 +38,30 @@ describe('[SCR-004] the idempotency oracle', () => {
     expect(manifestVerdict({ ...identity, lease: { ...lease, expiresAt: new Date(Date.now() - 1000).toISOString() } }, manifest).ok).toBe(false);
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// [OTA-131] A refusal is a RESULT. The oracle used to accept any two non-successes.
+// ---------------------------------------------------------------------------
+describe('[OTA-131] the replay verdict compares the refusal, not merely the absence of success', () => {
+  const refused = (code: string, status = 409) => ({ status, body: JSON.stringify({ success: false, error: { code, message: 'x' } }) });
+
+  it('test_two_different_refusals_are_not_one_result: a green swarm must not certify disagreement', () => {
+    // The exact reproduction from the dossier: one status, two different business
+    // outcomes. Before this, `{ ok: true, reason: 'both refused (same honest refusal)' }`.
+    const v = replayVerdict(refused('DELIVERY_NO_RIDERS'), refused('DUPLICATE_REQUEST'));
+    expect(v.ok, 'two different refusals are two different results').toBe(false);
+    expect(v.reason).toMatch(/different refusals under one key/);
+  });
+
+  it('the same refusal twice is one result, and says which', () => {
+    const v = replayVerdict(refused('DELIVERY_NO_RIDERS'), refused('DELIVERY_NO_RIDERS'));
+    expect(v.ok).toBe(true);
+    expect(v.reason).toContain('DELIVERY_NO_RIDERS');
+  });
+
+  it('a refusal carrying no error code cannot be compared, so it is not a pass', () => {
+    const bare = { status: 409, body: JSON.stringify({ success: false }) };
+    expect(replayVerdict(bare, bare).ok, 'unknown is never green').toBe(false);
+  });
+});

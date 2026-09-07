@@ -22,7 +22,16 @@ export function replayVerdict(first, replay) {
   const a = parse(first); const b = parse(replay);
   if (first.status !== replay.status) return { ok: false, reason: 'status differs' };
   if (!a || !b) return { ok: false, reason: 'unparseable body' };
-  if (a.success !== true && b.success !== true) return { ok: true, reason: 'both refused (same honest refusal)' };
+  if (a.success !== true && b.success !== true) {
+    // [OTA-131] This used to return ok:true on nothing more than "neither succeeded".
+    // Two DIFFERENT refusals under one status were certified as one command result — a
+    // first checkout refused DELIVERY_NO_RIDERS and its replay refused DUPLICATE_REQUEST
+    // read as agreement. A refusal is a result: the replay must be the SAME refusal.
+    const codeOf = (x) => (x && x.error && x.error.code) || null;
+    if (!codeOf(a) || !codeOf(b)) return { ok: false, reason: 'a refusal with no error code cannot be compared' };
+    if (codeOf(a) !== codeOf(b)) return { ok: false, reason: `different refusals under one key: ${codeOf(a)} then ${codeOf(b)}` };
+    return { ok: true, reason: `both refused the same way (${codeOf(a)})` };
+  }
   if (b.replayed !== true) return { ok: false, reason: 'replay was not answered from the receipt' };
   if (canonical(a.data) !== canonical(b.data)) return { ok: false, reason: 'replay returned a different result (a second order?)' };
   return { ok: true, reason: 'same command, same result' };
