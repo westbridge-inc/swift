@@ -40,7 +40,19 @@ describe('without an authority the derivation is conservative', () => {
       expect(doorFor({ paymentMethod: 'CASH', paymentStatus: state }), String(state)).toMatchObject({ kind: 'collect-cash', source: 'derived' });
     }
     expect(doorFor({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' })).toEqual({ kind: 'no-cash', version: null, source: 'derived' });
-    expect(doorFor({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' })).toEqual({ kind: 'no-cash', version: null, source: 'derived' });
+    // [DOC-INV-48 · F-103-01] CLAIMED alone NO LONGER opens the door here.
+    // CAPTURED is provider evidence and this device may act on it. CLAIMED is
+    // only the store's word about its own wallet, and whether the customer
+    // disputes that word is a fact the device does not hold — it lives on the
+    // order and reaches the screen ONLY through the server's authority. A
+    // derivation that said "paid" from CLAIMED would independently reopen a
+    // door the server had closed on a disputed payment.
+    expect(doorFor({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' })).toEqual({ kind: 'blocked', reason: 'MMG_CLAIMED_UNVERIFIED', version: null, source: 'derived' });
+    // The server's authority still opens it when the server says so.
+    expect(doorFor({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', handover: authority({ paymentState: 'CLAIMED' }) })).toEqual({ kind: 'no-cash', version: 'v-1', source: 'server' });
+    // …and the server's BLOCKED on a disputed claim is what the screen renders.
+    expect(doorFor({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', handover: authority({ paymentState: 'CLAIMED', permitted: 'BLOCKED', blockReason: 'MMG_CLAIM_MISMATCH' }) }))
+      .toEqual({ kind: 'blocked', reason: 'MMG_CLAIM_MISMATCH', version: 'v-1', source: 'server' });
     expect(doorFor({ paymentMethod: 'CASH', paymentStatus: 'CAPTURED' })).toEqual({ kind: 'no-cash', version: null, source: 'derived' });
     expect(doorFor(null)).toMatchObject({ kind: 'blocked', reason: 'UNKNOWN_RAIL_UNKNOWN' });
     expect(doorFor(undefined).kind).toBe('blocked');

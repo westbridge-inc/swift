@@ -49,7 +49,21 @@ export interface HandoverOrderLike {
   totalAmount: unknown;
   currencyCode?: string | null;
   updatedAt: Date | string;
+  /**
+   * [DOC-INV-48 · F-103-01] When the customer disputes the store's payment
+   * claim. REQUIRED — never optional. An optional property is exactly how the
+   * MMG fulfilment gate came to be inert: a forgotten projection type-checked
+   * and the gate read `undefined` as "no dispute". The door is the one place
+   * where being wrong hands physical goods to someone; it does not get the
+   * weaker type.
+   */
+  mmgClaimMismatchAt: Date | string | null;
 }
+
+/** [F-103-01] Why the door refuses a disputed MMG order — one stable code the client renders. */
+export const MMG_CLAIM_MISMATCH_BLOCK = 'MMG_CLAIM_MISMATCH';
+/** [F-103-01] The projection forgot the column. Fail closed and say which. */
+export const MMG_MISMATCH_UNKNOWN_BLOCK = 'MMG_MISMATCH_UNKNOWN';
 
 export function paymentRailOf(paymentMethod: string): PaymentRail {
   if (paymentMethod === 'CASH') return 'CASH';
@@ -57,10 +71,27 @@ export function paymentRailOf(paymentMethod: string): PaymentRail {
   return 'OTHER';
 }
 
-/** A short digest of (order, custody state, payment state, last write) — the door's version. */
-export function handoverVersionFor(order: Pick<HandoverOrderLike, 'id' | 'status' | 'paymentStatus' | 'updatedAt'>): string {
+/**
+ * A short digest of (order, custody state, payment state, DISPUTE GENERATION,
+ * last write) — the door's version.
+ *
+ * [F-103-01] The dispute is in the digest, not merely implied by `updatedAt`.
+ * Codex asked for the version to be bound to the mismatch generation rather
+ * than to a proxy: a screen loaded before a dispute committed must be refused
+ * on its own terms, whatever a clock or a same-millisecond write does.
+ */
+export function handoverVersionFor(order: Pick<HandoverOrderLike, 'id' | 'status' | 'paymentStatus' | 'updatedAt' | 'mmgClaimMismatchAt'>): string {
   const at = order.updatedAt instanceof Date ? order.updatedAt.getTime() : Date.parse(String(order.updatedAt));
-  return createHash('sha256').update(`${order.id}|${order.status}|${order.paymentStatus}|${Number.isFinite(at) ? at : 'x'}`).digest('hex').slice(0, 16);
+  const dispute = mismatchGenerationOf(order.mmgClaimMismatchAt);
+  return createHash('sha256').update(`${order.id}|${order.status}|${order.paymentStatus}|${dispute}|${Number.isFinite(at) ? at : 'x'}`).digest('hex').slice(0, 16);
+}
+
+/** `none`, `unknown` (the projection forgot it), or the exact instant of the dispute. */
+function mismatchGenerationOf(value: Date | string | null | undefined): string {
+  if (value === undefined) return 'unknown';
+  if (value === null) return 'none';
+  const at = value instanceof Date ? value.getTime() : Date.parse(String(value));
+  return Number.isFinite(at) ? String(at) : 'unparseable';
 }
 
 export function handoverAuthorityFor(order: HandoverOrderLike): HandoverAuthority {
@@ -73,6 +104,22 @@ export function handoverAuthorityFor(order: HandoverOrderLike): HandoverAuthorit
     currency: order.currencyCode ?? 'GYD',
     version: handoverVersionFor(order),
   };
+  // [F-103-01] THE DISPUTE IS CHECKED BEFORE THE DOOR OPENS.
+  //
+  // This branch used to sit below the CLAIMED one, which is to say it did not
+  // exist. An order that was MOBILE_MONEY + CLAIMED + disputed was served
+  // `DELIVER_NO_CASH` — the server telling the person at the door to hand the
+  // goods over on a payment the customer says never happened. The canonical
+  // status write refuses afterwards, but nothing can un-hand food already
+  // given to a customer because the server said the door was open.
+  //
+  // `undefined` means a projection forgot the column. That is a programming
+  // error, but a THROW here would take down the rider's active-order screen;
+  // the door's fail-closed answer is to refuse and be counted, and the
+  // required field above is what actually stops it reaching production.
+  const generation = mismatchGenerationOf(order.mmgClaimMismatchAt);
+  if (generation === 'unknown') return { ...base, permitted: 'BLOCKED', blockReason: MMG_MISMATCH_UNKNOWN_BLOCK };
+  if (generation !== 'none') return { ...base, permitted: 'BLOCKED', blockReason: MMG_CLAIM_MISMATCH_BLOCK };
   // CAPTURED (provider evidence) or CLAIMED (the store's own word on its own wallet, §31.5): the door opens without cash.
   if (order.paymentStatus === 'CAPTURED' || order.paymentStatus === 'CLAIMED') return { ...base, permitted: 'DELIVER_NO_CASH', blockReason: null };
   if (rail === 'CASH') return { ...base, permitted: 'COLLECT_CASH_THEN_DELIVER', blockReason: null };
@@ -81,7 +128,7 @@ export function handoverAuthorityFor(order: HandoverOrderLike): HandoverAuthorit
 }
 
 /** True when the client's echoed version names the order's current state. */
-export function handoverVersionMatches(order: Pick<HandoverOrderLike, 'id' | 'status' | 'paymentStatus' | 'updatedAt'>, echoed: string | undefined | null): boolean {
+export function handoverVersionMatches(order: Pick<HandoverOrderLike, 'id' | 'status' | 'paymentStatus' | 'updatedAt' | 'mmgClaimMismatchAt'>, echoed: string | undefined | null): boolean {
   if (echoed === undefined || echoed === null) return true; // an older client that does not echo is not refused for it
   return echoed === handoverVersionFor(order);
 }

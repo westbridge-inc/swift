@@ -68,7 +68,14 @@ export function doorFor(job: JobLike | null | undefined): Door {
   // No authority on the payload (an older server): derive, and never say "paid" for a state that is not captured.
   const method = job?.paymentMethod ?? null;
   const state = job?.paymentStatus ?? 'UNKNOWN';
-  if (state === 'CAPTURED' || state === 'CLAIMED') return { kind: 'no-cash', version: null, source: 'derived' }; // CLAIMED = the store's own word on its own wallet (DOC-1 §31.5)
+  // [DOC-INV-48 · F-103-01] CAPTURED is PROVIDER evidence and the client may act
+  // on it alone. CLAIMED is only the STORE's word about its own wallet, and
+  // whether the customer disputes that word is a fact this device does not hold
+  // — it lives on the order, and only the server's authority carries it. So a
+  // client deriving "paid" from CLAIMED by itself would independently reopen a
+  // door the server had closed. It stays shut until the server says otherwise.
+  if (state === 'CAPTURED') return { kind: 'no-cash', version: null, source: 'derived' };
+  if (state === 'CLAIMED') return { kind: 'blocked', reason: 'MMG_CLAIMED_UNVERIFIED', version: null, source: 'derived' };
   if (method === 'CASH') return { kind: 'collect-cash', version: null, source: 'derived' };
   return { kind: 'blocked', reason: `${method ?? 'UNKNOWN_RAIL'}_${state}`, version: null, source: 'derived' };
 }
