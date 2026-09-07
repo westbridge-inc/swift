@@ -235,7 +235,17 @@ describe('[DOC-1 P31-1] the policy: covered amount, caps, review threshold, susp
     const autoApproved = await plantClaim(earlier.id, 1200, { photoUrl: 'https://cdn.test/auto.jpg' });
     const facts: Record<string, unknown>[] = [];
     await system(() => cash.suspendLossProtection(riderUserId, 'confirmed collusion finding — case 42', async (_tx, f) => { facts.push(f); }));
-    expect(facts[0]).toMatchObject({ reason: 'confirmed collusion finding — case 42' });
+    // [C-01b] The facts no longer carry `reason`, and must not: `reason` is a
+    // CANONICAL column of the audit row, and `adminAuditRow` refuses an extra
+    // that redefines one — which made every call to
+    // PUT /cash-rules/rlp/movers/:userId/suspend a 500 on main. Nothing caught
+    // it because this test calls the SERVICE with its own stub callback, which
+    // is precisely the shape that hid it. The stated reason is now asserted
+    // through the real route in admin-audit-unique-selector.test.ts; here we
+    // assert the fact the service genuinely owns — what it persisted.
+    expect(facts[0]).toMatchObject({ suspendedReason: 'confirmed collusion finding — case 42' });
+    expect(facts[0]).toHaveProperty('lossProtectionSuspendedAt');
+    expect(facts[0], 'a canonical name in the facts is refused at the audit row').not.toHaveProperty('reason');
     const told = await system(() => app.prisma.notification.findFirst({ where: { userId: riderUserId, data: { path: ['kind'], equals: 'rlp_suspended' } } }));
     expect(told).not.toBeNull();
     const order = await atDoorOrder({ food: 1000 });
