@@ -154,13 +154,6 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
     country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
     note: 'Adapter exists; not selected by any production configuration.',
   },
-  {
-    ref: 'ANTHROPIC', party: 'Anthropic, PBC', service: 'LLM classification and assist (ops agent, search assist)',
-    providerDirs: [], hosts: ['api.anthropic.com'],
-    payload: ['NON_PERSONAL'], lawfulBasis: 'LEGITIMATE_INTEREST',
-    country: 'US', leavesCountry: true, transferBasis: 'NOT_APPLICABLE', contractEnv: null,
-    note: 'PII-free by construction (ai.service.ts, agent.service.ts): enums, ids, counts, scrubbed text. Money/auth/verification never call it.',
-  },
 ];
 
 /** Provider directories that are not a processor, with the reason the census accepts. */

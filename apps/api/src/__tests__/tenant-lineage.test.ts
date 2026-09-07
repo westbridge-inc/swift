@@ -103,8 +103,6 @@ export const PLATFORM_WIDE: Record<string, string> = {
   AlertDelivery: 'ops alert deliveries',
   DispatchSearch: 'dispatch search telemetry',
   MoverRevocationOutbox: 'revocation outbox keyed by mover id',
-  AgentActionRequest: 'agent (AI) action requests — platform ops',
-  AgentAuditEvent: 'agent audit trail — platform ops',
   PrivilegedChangeAudit: 'privileged-change audit trail',
   AuditLog: 'the admin audit trail — actor-scoped, not operator-scoped (ADM-002 rows name their entity)',
   AdEventDedupe: 'dedupe keys',

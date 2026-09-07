@@ -3,7 +3,6 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { categoryBackfillNotifiedMarker, runCategoryBackfill } from '../modules/discovery/backfill';
 import { seedDiscoveryTaxonomy } from '../modules/discovery/taxonomy.seed';
-import type { CategoryClassifier } from '../modules/discovery/ai-classifier';
 
 // ---------------------------------------------------------------------------
 // CAT-I — the backfill movement: Stage A across the live catalog, Stage B for
@@ -54,15 +53,6 @@ async function makeVendorWithMenu(names: string[]) {
   return { vendor, ownerUserId: user.id, items };
 }
 
-const fakeAi = (map: Record<string, Array<{ slug: string; confidence: number }>>): CategoryClassifier => ({
-  enabled: true,
-  classifyCategories: async (items) => {
-    const out: Record<string, Array<{ slug: string; confidence: number }>> = {};
-    for (const i of items) out[i.id] = map[i.name] ?? [];
-    return out;
-  },
-});
-
 beforeAll(async () => {
   await prisma.$connect();
   await prisma.tenant.create({ data: { id: tenantId, name: 'Discovery Backfill Test', slug: tenantId } });
@@ -72,7 +62,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await prisma.platformConfig.deleteMany({ where: { key: categoryBackfillNotifiedMarker(tenantId) } });
   const itemIds = (await prisma.item.findMany({ where: { vendorId: { in: createdVendorIds } }, select: { id: true } })).map((i) => i.id);
-  await prisma.agentAuditEvent.deleteMany({ where: { job: 'categorizer', subjectId: { in: itemIds } } });
   await prisma.discoveryCategorySuggestion.deleteMany({ where: { itemId: { in: itemIds } } });
   await prisma.itemDiscoveryCategory.deleteMany({ where: { itemId: { in: itemIds } } });
   await prisma.vendorDiscoveryCategory.deleteMany({ where: { vendorId: { in: createdVendorIds } } });
@@ -92,7 +81,7 @@ describe('CAT-I: the backfill movement', () => {
     const shop = await makeVendorWithMenu([
       'Chicken chowmein — special', // matcher: chinese
       'Dhalpuri with duck curry', // matcher: roti-curry
-      'The Thursday Thing', // matcher blind → AI places it
+      'The Thursday Thing', // matcher blind: [NO-AI] it now stays unplaced for a person to categorise
     ]);
     const notified: string[] = [];
     const opts = {
@@ -100,13 +89,13 @@ describe('CAT-I: the backfill movement', () => {
       now: TEST_NOW,
       notify: async (userId: string) => { notified.push(userId); },
     };
-    const ai = fakeAi({ 'The Thursday Thing': [{ slug: 'local-creole', confidence: 0.7 }] });
-
-    const first = await runCategoryBackfill(prisma, ai, opts);
+    const first = await runCategoryBackfill(prisma, opts);
     expect(first.itemsScanned).toBe(3);
     expect(first.matcherSuggestionsWritten).toBeGreaterThanOrEqual(2);
-    expect(first.aiScanned).toBe(1);
-    expect(first.aiSuggested).toBe(1);
+    // [NO-AI] Stage B is gone. The matcher's own suggestions are the whole
+    // pipeline, and an item it cannot place is left for a person rather than
+    // guessed at — so the report no longer carries aiScanned/aiSuggested.
+    expect(first).not.toHaveProperty('aiScanned');
     expect(first.vendorsNotified).toBe(1);
     expect(notified).toContain(shop.ownerUserId);
     const firstNotifiedCount = notified.length;
@@ -119,7 +108,7 @@ describe('CAT-I: the backfill movement', () => {
     expect(rowsAfterFirst.length).toBeGreaterThanOrEqual(3);
 
     // The re-run law: same rows byte-for-byte, nobody re-notified.
-    const second = await runCategoryBackfill(prisma, ai, opts);
+    const second = await runCategoryBackfill(prisma, opts);
     const rowsAfterSecond = await prisma.discoveryCategorySuggestion.findMany({
       where: { itemId: { in: itemIds } },
       orderBy: [{ itemId: 'asc' }, { categoryId: 'asc' }],
