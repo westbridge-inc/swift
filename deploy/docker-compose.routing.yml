@@ -1,3 +1,19 @@
+# [SUP-001 · Codex REPORT-075] IMAGES ARE PINNED BY DIGEST, NOT BY TAG.
+#
+# A tag is a pointer its publisher can move. `docker compose pull` against a
+# mutable tag can hand a production host different software than the one that
+# was tested, with no diff and no signal. A digest is a content address: it
+# resolves to exactly those bytes or it fails.
+#
+# The tag is kept beside the digest so a human can still read which version this
+# is. To update one deliberately:
+#
+#     docker buildx imagetools inspect <repo>:<newtag>     # prints the digest
+#     # then edit BOTH the tag and the digest here, in one commit, with a reason
+#
+# `container-image-pinning.test.ts` fails the build if a service is added
+# without a digest, or pinned to `latest`.
+
 # Swift — the self-hosted routing and geocoding stack.
 #
 # This lived outside the repository, in a directory on one laptop, with a note
@@ -49,7 +65,7 @@ services:
   # refuses connections degrades every ETA to the haversine fallback, and the
   # only visible symptom is that distances get slightly worse.
   osrm:
-    image: osrm/osrm-backend:v5.25.0
+    image: osrm/osrm-backend:v5.25.0@sha256:bdfa60e64ae1376bff6ff5605991be50600132a27469a4a9e77c23afd3a6d555
     container_name: swift-osrm
     command: osrm-routed --algorithm mld --max-table-size 10000 /data/guyana-latest.osrm
     volumes:
@@ -62,7 +78,7 @@ services:
   # BATCH_PLANNER=vroom  VROOM_URL=http://<host>:3010   (container port 3000)
   # Sits on OSRM for travel times; stateless, so it needs no data build.
   vroom:
-    image: vroomvrp/vroom-docker:v1.13.0
+    image: vroomvrp/vroom-docker:v1.13.0@sha256:2e417553320bf68a25f6614ba8bdc31b0b2fc1172f8c25518c4656f488031c2a
     container_name: swift-vroom
     environment:
       - VROOM_ROUTER=osrm
@@ -95,7 +111,7 @@ services:
   #
   # Set it explicitly. The dangerous value is the one that is missing.
   photon:
-    image: rtuszik/photon-docker:latest
+    image: rtuszik/photon-docker:2.4.0@sha256:21549c60f9e6488fff3217e40429a652c4b445f374800333fe32859e47cec293
     container_name: swift-photon
     profiles: ["geocoding"]
     environment:
@@ -110,7 +126,7 @@ services:
   # The heavy one: it imports the extract into its own PostgreSQL. One-time,
   # disk- and RAM-hungry, and the only member of this stack that is.
   nominatim:
-    image: mediagis/nominatim:4.4
+    image: mediagis/nominatim:4.4@sha256:b772911424d31f8c36b337fe4b8d4ef3b93d4bf09f96407905a1e9d475d42632
     container_name: swift-nominatim
     profiles: ["geocoding"]
     environment:
