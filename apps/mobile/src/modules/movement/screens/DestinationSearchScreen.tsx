@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { FlatList, Pressable, View } from 'react-native';
+import { FlatList, Linking, Pressable, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { useAddresses } from '../../../hooks';
@@ -59,7 +59,13 @@ export function DestinationSearchScreen({ navigation, route }: any) {
   const near = latitude != null && longitude != null ? { lat: latitude, lng: longitude } : undefined;
 
   const [query, setQuery] = useState('');
-  const { data: suggestions, isFetching } = usePlacesAutocomplete(query, near);
+  const { data: places, isFetching } = usePlacesAutocomplete(query, near);
+  const suggestions = places?.items;
+  // [LIC-002 · PROV-003] The credit the SERVER says these results carry.
+  // OpenStreetMap's ODbL requires it to be visible wherever the derived result
+  // is; the server decides which provider answered, so it also says who to
+  // credit, and this renders that rather than assuming.
+  const attribution = places?.attribution;
   const resolveDetails = usePlaceDetails();
   const { data: addresses } = useAddresses<any[]>();
 
@@ -162,6 +168,18 @@ export function DestinationSearchScreen({ navigation, route }: any) {
           renderItem={({ item: s }) => (
             <PlaceRow icon="map-pin" primary={s.primary} secondary={s.secondary} onPress={() => pickSuggestion(s)} />
           )}
+          ListFooterComponent={
+            attribution?.text ? (
+              <T
+                variant="caption"
+                style={{ color: color.text.muted, textAlign: 'center', paddingTop: space.lg }}
+                onPress={attribution.url ? () => Linking.openURL(attribution.url!).catch(() => undefined) : undefined}
+                accessibilityRole={attribution.url ? 'link' : 'text'}
+              >
+                {attribution.text}
+              </T>
+            ) : null
+          }
         />
       )}
     </Screen>

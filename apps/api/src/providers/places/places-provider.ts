@@ -34,7 +34,37 @@ export interface PlacesQueryContext {
   userId?: string;
 }
 
+/**
+ * [LIC-002 · PROV-003] WHO MUST BE CREDITED FOR THESE RESULTS.
+ *
+ * OSRM, Photon and Nominatim all read OpenStreetMap data, and the ODbL requires
+ * that an application showing derived results credits OpenStreetMap visibly.
+ * Google's terms make the same kind of demand for Places predictions. Neither
+ * credit existed anywhere in Swift.
+ *
+ * The reason it did not is structural, and worth naming: the provider seam
+ * DROPPED provider identity. A suggestion arrived as a label and a place id,
+ * with nothing saying where it came from — so no screen could have attributed
+ * it correctly even if someone had remembered to try, and a change of
+ * `PLACES_PROVIDER` would silently have made any hardcoded credit a lie.
+ *
+ * So attribution is a fact the provider states about itself and carries with
+ * its results, exactly like the handover authority: the client renders what it
+ * is told rather than inferring it.
+ */
+export interface PlacesAttribution {
+  /** Short credit for the UI, e.g. "© OpenStreetMap contributors". Empty when none is owed. */
+  readonly text: string;
+  /** Where a reader goes to check the licence. */
+  readonly url?: string;
+  /** A stable id so a client can render a logo where one is required. */
+  readonly source: 'osm' | 'google' | 'swift';
+}
+
 export interface PlacesProvider {
+  /** What this provider's results oblige Swift to display. Never optional — a
+   *  provider that does not say cannot be rendered safely. */
+  readonly attribution: PlacesAttribution;
   autocomplete(query: string, ctx?: PlacesQueryContext): Promise<PlaceSuggestion[]>;
   // ctx carries the caller's identity: resolving an `addr:` placeId (a saved
   // address) MUST be scoped to its owner, or it's an IDOR.
@@ -80,6 +110,9 @@ function haversineKm(a: PlacePoint, b: PlacePoint): number {
 // ---------------------------------------------------------------------------
 
 export class LocalPlacesProvider implements PlacesProvider {
+  /** Swift's own vendor and saved-address rows. Nobody else's data, no credit owed. */
+  readonly attribution: PlacesAttribution = { text: '', source: 'swift' };
+
   constructor(private prisma: PrismaClient) {}
 
   async autocomplete(query: string, ctx?: PlacesQueryContext): Promise<PlaceSuggestion[]> {
@@ -195,6 +228,15 @@ interface GoogleGeocodeResponse {
 }
 
 export class GooglePlacesProvider implements PlacesProvider {
+  /** Google's terms require the Google mark when predictions are shown without a
+   *  Google map. The client must render the logo, not merely this string —
+   *  `source: 'google'` is what tells it which. */
+  readonly attribution: PlacesAttribution = {
+    text: 'Powered by Google',
+    url: 'https://developers.google.com/maps/documentation/places/web-service/policies',
+    source: 'google',
+  };
+
   constructor(private apiKey: string) {}
 
   private async getJson<T>(url: URL): Promise<T | null> {
@@ -278,6 +320,14 @@ interface NominatimReverseResponse {
 }
 
 export class OsmPlacesProvider implements PlacesProvider {
+  /** Photon and Nominatim both read OpenStreetMap data; the ODbL requires the
+   *  credit to be visible wherever the derived result is. */
+  readonly attribution: PlacesAttribution = {
+    text: '© OpenStreetMap contributors',
+    url: 'https://www.openstreetmap.org/copyright',
+    source: 'osm',
+  };
+
   private fallback: LocalPlacesProvider;
 
   constructor(
