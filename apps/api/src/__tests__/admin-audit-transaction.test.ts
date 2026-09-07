@@ -136,9 +136,28 @@ describe('[ADM-002] a refused audit row takes the action down with it', () => {
     const rows = await runWithoutTenant(() => app.prisma.auditLog.findMany({
       where: { userId: userIds[0]!, entityId: KEY },
     }), 'test-read');
-    // one row for the control write, none for the refused one
-    const changed999 = rows.filter((r) => JSON.stringify(r.changes ?? {}).includes('999'));
-    expect(changed999, 'the refused action left no audit row either').toHaveLength(0);
+
+    // [OTA-001, 2026-09-07] This selector used to be
+    //   rows.filter((r) => JSON.stringify(r.changes ?? {}).includes('999'))
+    // — a substring search for the refused value over the WHOLE serialized
+    // `changes`. That object carries `before` and `after` CONTENT HASHES
+    // (ADM-004), and a 64-character hex digest contains the substring "999"
+    // about 1.4% of the time; across the two hashes, about 1 run in 35. When it
+    // did, the CONTROL row (value 1 → 2, hash
+    // 74c844df48da1a999b44a083e7da989f892c7c2ab2dfae7010e64fd0738cfc60) was
+    // misread as the refused row and this assertion failed. That is what turned
+    // public main red on run 34054398472 and was written off as a flake.
+    //
+    // The invariant is UNCHANGED and the product was never at fault: a refused
+    // audit row does take its action down with it. What follows is strictly
+    // stronger than the old check and independent of hash content — it counts
+    // the rows, and it names the refused value structurally instead of
+    // searching for its digits.
+    expect(rows, 'exactly one row: the control write, and nothing for the refused attempt').toHaveLength(1);
+    const refusedValue = (r: (typeof rows)[number]) =>
+      (r.changes as { changed?: { value?: { to?: { rate?: number } } } } | null)?.changed?.value?.to?.rate;
+    expect(rows.map(refusedValue), 'no row records the refused value').not.toContain(999);
+    expect(refusedValue(rows[0]!), 'the surviving row is the control write').toBe(2);
   });
 
   it('the row is already committed when the response arrives — not written afterwards', async () => {
