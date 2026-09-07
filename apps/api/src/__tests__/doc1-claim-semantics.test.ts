@@ -101,8 +101,21 @@ describe('[DOC-1 P31-2] claim, not fact', () => {
     expect(after.mmgAttestedRef).toBe(`REF${RUN}A`.toUpperCase()); // the route normalises the wallet's reference
     const trail = await system(() => app.prisma.auditLog.findFirst({ where: { action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED', entityId: order.id } }));
     expect(trail).not.toBeNull();
-    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', orderType: 'FOOD' }, 'ACCEPTED')).not.toThrow();
-    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', orderType: 'FOOD' }, 'ACCEPTED')).toThrow(/can move only after/);
+    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', orderType: 'FOOD', mmgClaimMismatchAt: null }, 'ACCEPTED')).not.toThrow();
+    // [DOC-INV-48 · 2026-09-07] The dispute gate was INERT at both assignment entrances.
+    // `mmgClaimMismatchAt` was an OPTIONAL parameter property, so the dispatch-accept lock
+    // (raw SQL, seven columns) and the board-grab payment gate both type-checked while
+    // reading `undefined` — and a disputed order could be dispatched, prepared and handed
+    // over. The field is required now, so a forgotten projection is a compile error; these
+    // three assert the behaviour the compiler cannot see.
+    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', orderType: 'FOOD', mmgClaimMismatchAt: new Date() }, 'RIDER_ASSIGNED'))
+      .toThrow(/disputes the store's payment claim/);
+    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', orderType: 'FOOD', mmgClaimMismatchAt: new Date() }, 'PREPARING'))
+      .toThrow(/disputes the store's payment claim/);
+    // HOSTILE: a caller that did not project the column must fail loudly, never pass.
+    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', orderType: 'FOOD' } as never, 'RIDER_ASSIGNED'))
+      .toThrow(/was not projected/);
+    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', orderType: 'FOOD', mmgClaimMismatchAt: null }, 'ACCEPTED')).toThrow(/can move only after/);
     expect(handoverAuthorityFor({ ...(after as unknown as Record<string, unknown>), paymentStatus: 'CLAIMED' } as never).permitted).toBe('DELIVER_NO_CASH');
     expect(isCapturedMmg({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' })).toBe(true);
     expect(MMG_MONEY_MOVED.has('CLAIMED') && MMG_MONEY_MOVED.has('CAPTURED') && !MMG_MONEY_MOVED.has('PENDING')).toBe(true);

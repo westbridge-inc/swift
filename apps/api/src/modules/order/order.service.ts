@@ -219,13 +219,35 @@ export function assertCashDiscountSponsored(args: {
   );
 }
 
+/**
+ * [DOC-1 §31.5 · DOC-INV-48] Two claims that disagree open a case BEFORE the rider is
+ * dispatched, not after.
+ *
+ * `mmgClaimMismatchAt` is REQUIRED, and that is the whole point. It used to be optional
+ * (`mmgClaimMismatchAt?: Date | null`), so a caller that projected the other three fields
+ * type-checked, `order.mmgClaimMismatchAt` read `undefined`, and the dispute branch below
+ * silently never fired. Both real assignment entrances did exactly that — the dispatch
+ * accept lock (raw SQL, seven columns) and the board-grab payment gate — as did vendor
+ * accept/prepare/ready, the cash handover and picking. The unit test passed because it
+ * builds the object literally. The gate was inert everywhere it mattered.
+ *
+ * Required makes the compiler the guard: a projection that forgets the column no longer
+ * compiles, which is a stronger guarantee than any test could give.
+ */
 export function assertMmgFulfilmentAllowed(
-  order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt?: Date | null },
+  order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null },
   target: OrderStatus,
 ): void {
   if (order.paymentMethod !== 'MOBILE_MONEY') return;
   if (order.orderType === 'TAXI') return;
   if (!MMG_GATED_TARGETS.has(target)) return;
+  // The type makes a forgotten projection a compile error. Raw SQL and `as never` casts
+  // are outside the type system, so the residual risk is answered here: an ABSENT field
+  // is a programming error, never a passing gate. `null` means "no dispute" and is fine;
+  // `undefined` means nobody asked, and this function must not pretend it knows.
+  if (order.mmgClaimMismatchAt === undefined) {
+    throw new Error('assertMmgFulfilmentAllowed: mmgClaimMismatchAt was not projected — the dispute gate cannot be evaluated');
+  }
   // [DOC-1 §31.5] Two claims that disagree open a case BEFORE the rider is dispatched, not after.
   if (order.mmgClaimMismatchAt) {
     throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim. A person must resolve it before the order moves.');
@@ -450,7 +472,7 @@ export class OrderService {
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const paymentGate = await tx.order.findUnique({
       where: { id: input.orderId },
-      select: { paymentMethod: true, paymentStatus: true, orderType: true, deliveryFee: true, fulfillment: true },
+      select: { paymentMethod: true, paymentStatus: true, orderType: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
     });
     if (paymentGate) {
       assertMmgFulfilmentAllowed(paymentGate, 'RIDER_ASSIGNED');
@@ -2252,7 +2274,7 @@ export class OrderService {
       select: {
         riderId: true, driverId: true, deliveryFee: true, tipAmount: true,
         orderType: true, taxiFareTotal: true, paymentMethod: true,
-        paymentStatus: true, vendorId: true,
+        paymentStatus: true, vendorId: true, mmgClaimMismatchAt: true,
       },
     });
     if (!order) return [];
