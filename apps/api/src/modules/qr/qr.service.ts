@@ -42,13 +42,27 @@ export class QrService {
   async findByShortCode(shortCode: string): Promise<QrLookupRow | null> {
     const qr = await this.prisma.qrCode.findUnique({
       where: { shortCode },
-      select: { id: true, tenantId: true, shortCode: true, status: true, supersededAt: true, version: true, entityId: true },
+      select: { id: true, tenantId: true, shortCode: true, status: true, supersededAt: true, version: true, entityId: true, entityType: true },
     });
     if (!qr) return null;
-    const vendor = await this.prisma.vendor.findUnique({
-      where: { id: qr.entityId },
-      select: { slug: true, status: true, isVerified: true, tenant: { select: { isActive: true } } },
-    });
+    // [PR1197-S1-04] THE TARGET MUST BELONG TO THE CODE'S OWN TENANT.
+    //
+    // This looked up the vendor by `id` ALONE. The resolver is deliberately
+    // unauthenticated — a printed code names its own tenant — so nothing else
+    // bound the two, and a malformed or migrated row could pair tenant A's QR
+    // code with tenant B's storefront. AttributionService then persists that
+    // pairing: tenant A gets the credit, tenant B gets the traffic, and the
+    // attribution ledger records something that never happened.
+    //
+    // `entityType` is checked for the same reason. It is a single-valued enum
+    // today, which is exactly when a polymorphic read is written without a
+    // check and exactly when the second value silently breaks it.
+    const vendor = qr.entityType === 'VENDOR'
+      ? await this.prisma.vendor.findFirst({
+        where: { id: qr.entityId, tenantId: qr.tenantId },
+        select: { slug: true, status: true, isVerified: true, tenant: { select: { isActive: true } } },
+      })
+      : null;
     return {
       id: qr.id,
       tenantId: qr.tenantId,
