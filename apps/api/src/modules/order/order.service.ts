@@ -234,6 +234,30 @@ export function assertCashDiscountSponsored(args: {
  * Required makes the compiler the guard: a projection that forgets the column no longer
  * compiles, which is a stronger guarantee than any test could give.
  */
+/**
+ * [DOC-INV-48 · F-103-02] IS THIS ORDER HELD BY A PAYMENT DISAGREEMENT?
+ *
+ * The same fact `assertMmgFulfilmentAllowed` throws on, asked as a question.
+ * Dispatch needs the question, not the throw: it must not ADVERTISE work it
+ * will later refuse. Codex proved the engine installed a rider offer and
+ * emitted `dispatch:offer` for a disputed order, whose only possible ending
+ * was a rider accepting an impossible job and being marked as having declined
+ * it.
+ *
+ * ONE definition of "held by a dispute" — the gate below calls this rather
+ * than re-expressing it, so an entrance can never disagree with the gate.
+ */
+export function mmgClaimIsDisputed(
+  order: { paymentMethod: string | null; orderType: string | null; mmgClaimMismatchAt: Date | null },
+): boolean {
+  if (order.paymentMethod !== 'MOBILE_MONEY') return false;
+  if (order.orderType === 'TAXI') return false;
+  if (order.mmgClaimMismatchAt === undefined) {
+    throw new Error('mmgClaimIsDisputed: mmgClaimMismatchAt was not projected — the dispute cannot be evaluated');
+  }
+  return order.mmgClaimMismatchAt !== null;
+}
+
 export function assertMmgFulfilmentAllowed(
   order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null },
   target: OrderStatus,
@@ -249,7 +273,7 @@ export function assertMmgFulfilmentAllowed(
     throw new Error('assertMmgFulfilmentAllowed: mmgClaimMismatchAt was not projected — the dispute gate cannot be evaluated');
   }
   // [DOC-1 §31.5] Two claims that disagree open a case BEFORE the rider is dispatched, not after.
-  if (order.mmgClaimMismatchAt) {
+  if (mmgClaimIsDisputed(order)) {
     throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim. A person must resolve it before the order moves.');
   }
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {

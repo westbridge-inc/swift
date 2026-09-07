@@ -109,6 +109,10 @@ export async function riderDemand(
       vendorId: { not: null },
       orderType: { not: 'TAXI' },
       status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
+      // [F-103-02] A disputed order is not demand. Counting it tells riders to
+      // ride toward work that does not exist, and adds its fee to the money
+      // the heat map says is waiting for them.
+      mmgClaimMismatchAt: null,
       OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }],
     },
     select: {

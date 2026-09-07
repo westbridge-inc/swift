@@ -980,6 +980,11 @@ export async function riderRoutes(app: FastifyInstance) {
         // [TA-S0-001 hold] Held for a person (too old, already paid by MMG):
         // not open work until an operator decides.
         foodAgeHeldAt: null,
+        // [F-103-02] Held for a person for the other reason: the customer
+        // disputes the store's payment claim. The claim CAS refuses it anyway,
+        // but advertising it sends riders to collect work they will be refused
+        // at — and, before F-103-03, be marked as having declined.
+        mmgClaimMismatchAt: null,
         // LIFECYCLE_V2: a held courier job isn't offerable yet.
         ...notHeldFilter(),
         // [F-0026] A self-delivering vendor fulfils this one itself — it is not
