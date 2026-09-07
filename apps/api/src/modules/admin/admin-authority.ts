@@ -136,7 +136,6 @@ const E = {
   rating: { model: 'rating', fields: ['isPublic', 'state', 'stateReason', 'flagged'] },
   ratingReport: { model: 'ratingReport', fields: ['status'] },
   approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt'] },
-  agentRequest: { model: 'agentActionRequest', fields: ['status', 'decidedBy', 'decidedAt'] },
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
   complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
   discoveryCategory: { model: 'discoveryCategory', fields: ['status', 'slug', 'name', 'sortWeight'] },
@@ -355,14 +354,10 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /approvals': c('C0', 'approvals.read'),
   'POST /approvals/:id/decide': c('C3', 'approvals.decide', E.approval),
 
-  // ── Support, audit and the agent ────────────────────────────────────────
+  // ── Support and audit ───────────────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),
   'GET /support': c('C1', 'support.read'),
   'PUT /support/:id/resolve': c('C2', 'support.resolve'),
-  'GET /agent/approvals': c('C0', 'agent.read'),
-  'GET /agent/audit': c('C1', 'agent.read'),
-  'POST /agent/approvals/:id/approve': c('C3', 'agent.approval.decide', E.agentRequest),
-  'POST /agent/approvals/:id/reject': c('C3', 'agent.approval.decide', E.agentRequest),
 
   // ── Compliance ──────────────────────────────────────────────────────────
   'GET /compliance': c('C0', 'compliance.read'),
