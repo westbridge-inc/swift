@@ -239,6 +239,34 @@ describe('[S-08] operations: duplicates are named, merged only by a human, and t
     await expect(svc().mergeDuplicate(survivor.id, survivor.id, ops.userId)).rejects.toThrow(/itself/);
   });
 
+  it('test_duplicate_scan_spans_the_hour_boundary: two reports 60s apart are one cluster even when the clock hour turns between them', async () => {
+    // [09-07 stop-the-line] The scan used to GROUP BY date_trunc('hour', createdAt) on top of
+    // its real 10-minute HAVING window. A pair straddling :00 landed in two groups and was
+    // never named a duplicate — in this test AND in production. The failing CI run reached
+    // the sibling test at 20:59:03, so its second case fell into the next hour.
+    const subject = await makeDriver();
+    const reporter = await makeUser(['CUSTOMER']);
+    // Pin the clock to the last 30 seconds of an hour, whatever hour the suite happens to run in.
+    const base = new Date();
+    base.setUTCMinutes(59, 30, 0);
+    const at = (offsetMs: number) => new Date(base.getTime() + offsetMs);
+    // one order — the cluster key is (subject, reporter, order, category); only the hour must differ
+    const sharedOrderId = `ord-${nanoid(6)}`;
+    const mk = (offsetMs: number) => app.prisma.incidentCase.create({ data: {
+      caseNumber: `INC-${nanoid(8).toUpperCase()}`, severity: 'S1', category: 'SAFETY_THREAT', intake: 'IN_TRIP_REPORT',
+      subjectUserId: subject.userId, reporterUserId: reporter.userId, orderId: sharedOrderId,
+      summary: 'hour boundary report', slaAckBy: at(3600_000), slaDecideBy: at(86_400_000),
+      interimAction: 'NONE', createdAt: at(offsetMs),
+    } });
+    const survivor = track(await mk(0));          // :59:30
+    const dup = track(await mk(60_000));          // :00:30 — the next hour
+    expect(survivor.createdAt.getUTCHours()).not.toBe(dup.createdAt.getUTCHours());
+
+    const scan = await svc().scanDuplicateIntakes(at(120_000));
+    const cluster = scan.clusters.find((c) => c.survivorId === survivor.id);
+    expect(cluster, 'a duplicate pair 60s apart must cluster across the hour turn').toMatchObject({ duplicateIds: [dup.id] });
+  });
+
   it('the rollback: intake to the review queue creates the case and derives no enforcement', async () => {
     const subject = await makeDriver();
     process.env['INCIDENT_INTAKE_REVIEW_ONLY'] = '1';
