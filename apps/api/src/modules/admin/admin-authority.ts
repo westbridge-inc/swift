@@ -319,6 +319,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /verification/:id/reject': c('C3', 'verification.decide', E.verification),
   'PUT /verification/:id/revoke': c('C3', 'verification.decide', E.verification),
   'GET /verification/:id/document-url': c('C1', 'verification.document.read'),
+  // [DOC-1 §20.2 · P20-2] the custody narrative is metadata about a document, never its content — still a logged read
+  'GET /verification/:id/custody': c('C1', 'verification.custody.read'),
   // [DOC-1 §9.4 · P9-4] Legal holds on a person's documents: placing or releasing
   // one decides whether evidence survives — consequential, a reason is owed.
   'GET /verification/legal-holds': c('C1', 'verification.hold.read'),

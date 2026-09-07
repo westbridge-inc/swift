@@ -2,6 +2,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
+import { custodySummary, proofLists, timelineLines, type CustodyNarrative } from '../lib/custodyView';
 import {
   documentViewUrl,
   fetchReviewApplicant,
@@ -9,6 +10,7 @@ import {
   REASON_CODES,
   type ReviewApplicantRecord,
   type ReviewDoc,
+  custodyNarrative,
 } from '../lib/api';
 
 type DecisionPanel = 'approve' | 'reject' | null;
@@ -151,6 +153,57 @@ function waitingLabel(iso: string): { short: string; detail: string; breaching: 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   return Boolean(target.closest('input, textarea, select, button, a, [contenteditable="true"], [role="textbox"], [data-shortcuts-off]'));
+}
+
+/**
+ * [DOC-1 §20.2 · P20-2 · S5] The chain of custody for the document under review — what the
+ * record proves and what it cannot (§20.3). Metadata only: the server never sends a field
+ * value or the reviewer's note, and the desktop never writes it to disk (standing order 35).
+ */
+function CustodyPanel({ docId }: { docId: string }) {
+  const [open, setOpen] = useState(false);
+  const q = useQuery({
+    queryKey: ['custody', docId],
+    queryFn: () => custodyNarrative(docId) as Promise<CustodyNarrative>,
+    enabled: open,
+    staleTime: 30_000,
+  });
+  const n = q.data;
+  return (
+    <section className="custody-panel" aria-label="Chain of custody" style={{ marginTop: 12 }}>
+      <button className="preview-open-button" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        {open ? 'Hide chain of custody' : 'Chain of custody'}
+      </button>
+      {open && q.isLoading && <div className="document-frame-state">Assembling the custody record…</div>}
+      {open && q.isError && (
+        <div className="document-frame-state document-frame-error">
+          <strong>Custody record unavailable</strong>
+          <span>{(q.error as Error).message}</span>
+        </div>
+      )}
+      {open && n && (
+        <div style={{ display: 'grid', gap: 10, marginTop: 8, fontSize: 13 }}>
+          <p style={{ margin: 0 }}>{custodySummary(n)}</p>
+          <ol style={{ margin: 0, paddingLeft: 18, display: 'grid', gap: 2 }}>
+            {timelineLines(n).map((l, i) => (
+              <li key={`${l.at}-${i}`} data-tone={l.tone} style={{ color: l.tone === 'bad' ? 'var(--danger, #b91c1c)' : l.tone === 'good' ? 'var(--success, #1e6e5a)' : l.tone === 'evidence' ? 'var(--info, #3b5b7a)' : 'inherit' }}>
+                <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.8 }}>{l.when}</span> · {l.actor} · {l.what}
+              </li>
+            ))}
+          </ol>
+          <div style={{ display: 'grid', gap: 6 }}>
+            <strong>What this record proves</strong>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>{proofLists(n).provable.map((p) => <li key={p}>{p}</li>)}</ul>
+            <strong>What it does not prove</strong>
+            <ul style={{ margin: 0, paddingLeft: 18, opacity: 0.8 }}>{proofLists(n).notProvable.map((p) => <li key={p}>{p}</li>)}</ul>
+          </div>
+          <p style={{ margin: 0, opacity: 0.7 }}>
+            Capture device and location: {n.capture.deviceAndLocation === 'NOT_RECORDED' ? 'not recorded' : n.capture.deviceAndLocation} · audit chain {n.audit.chain.anchorVerified === true ? 'anchored and verified' : n.audit.chain.anchoredAt ? 'anchored' : 'not yet anchored'} · generated {new Date(n.generatedAt).toLocaleString()}. The exportable PDF is served by the admin API (`?format=pdf`) — the desktop keeps nothing on disk.
+          </p>
+        </div>
+      )}
+    </section>
+  );
 }
 
 function DocumentFrame({ docId }: { docId: string }) {
@@ -864,6 +917,7 @@ export default function ReviewCenter() {
                 <DocumentFrame key={current.id} docId={current.id} />
                 <button className="preview-open-button" onClick={openPreview}>Open full screen</button>
               </div>
+              <CustodyPanel key={`custody-${current.id}`} docId={current.id} />
 
               {panel === 'approve' && (
                 <ApprovePanel
