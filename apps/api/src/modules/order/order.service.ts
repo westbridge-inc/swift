@@ -185,7 +185,8 @@ export { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus };
 // IS the capture. TAXI is out of scope: fares settle driver-direct at the kerb.
 // ---------------------------------------------------------------------------
 /** [DOC-1 §31.5 · P31-2] On the store's own wallet, money "moved" is either the provider's capture or the store's claim. */
-export const MMG_MONEY_MOVED: ReadonlySet<string> = new Set(['CAPTURED', 'CLAIMED']);
+export { MMG_MONEY_MOVED } from './mmg-hold';
+import { MMG_MONEY_MOVED, mmgFulfilmentHold } from './mmg-hold';
 const MMG_GATED_TARGETS: ReadonlySet<OrderStatus> = new Set([
   'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
   'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
@@ -234,49 +235,22 @@ export function assertCashDiscountSponsored(args: {
  * Required makes the compiler the guard: a projection that forgets the column no longer
  * compiles, which is a stronger guarantee than any test could give.
  */
-/**
- * [DOC-INV-48 · F-103-02] IS THIS ORDER HELD BY A PAYMENT DISAGREEMENT?
- *
- * The same fact `assertMmgFulfilmentAllowed` throws on, asked as a question.
- * Dispatch needs the question, not the throw: it must not ADVERTISE work it
- * will later refuse. Codex proved the engine installed a rider offer and
- * emitted `dispatch:offer` for a disputed order, whose only possible ending
- * was a rider accepting an impossible job and being marked as having declined
- * it.
- *
- * ONE definition of "held by a dispute" — the gate below calls this rather
- * than re-expressing it, so an entrance can never disagree with the gate.
- */
-export function mmgClaimIsDisputed(
-  order: { paymentMethod: string | null; orderType: string | null; mmgClaimMismatchAt: Date | null },
-): boolean {
-  if (order.paymentMethod !== 'MOBILE_MONEY') return false;
-  if (order.orderType === 'TAXI') return false;
-  if (order.mmgClaimMismatchAt === undefined) {
-    throw new Error('mmgClaimIsDisputed: mmgClaimMismatchAt was not projected — the dispute cannot be evaluated');
-  }
-  return order.mmgClaimMismatchAt !== null;
-}
-
 export function assertMmgFulfilmentAllowed(
   order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null },
   target: OrderStatus,
 ): void {
-  if (order.paymentMethod !== 'MOBILE_MONEY') return;
-  if (order.orderType === 'TAXI') return;
   if (!MMG_GATED_TARGETS.has(target)) return;
-  // The type makes a forgotten projection a compile error. Raw SQL and `as never` casts
-  // are outside the type system, so the residual risk is answered here: an ABSENT field
-  // is a programming error, never a passing gate. `null` means "no dispute" and is fine;
-  // `undefined` means nobody asked, and this function must not pretend it knows.
-  if (order.mmgClaimMismatchAt === undefined) {
-    throw new Error('assertMmgFulfilmentAllowed: mmgClaimMismatchAt was not projected — the dispute gate cannot be evaluated');
-  }
-  // [DOC-1 §31.5] Two claims that disagree open a case BEFORE the rider is dispatched, not after.
-  if (mmgClaimIsDisputed(order)) {
+  // [F-108-01] ONE decision, shared with dispatch, the board, recovery and
+  // demand (`mmg-hold.ts`). It carries the same fail-closed treatment of an
+  // unprojected column: an ABSENT field is a programming error, never a
+  // passing gate. Expressing the rule twice is how the offer surfaces came to
+  // enforce only half of it.
+  const hold = mmgFulfilmentHold(order);
+  if (hold === 'mismatch') {
+    // [DOC-1 §31.5] Two claims that disagree open a case BEFORE the rider is dispatched, not after.
     throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim. A person must resolve it before the order moves.');
   }
-  if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
+  if (hold === 'payment_pending') {
     throw new AppError(
       409,
       'MMG_PAYMENT_PENDING',

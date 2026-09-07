@@ -11,7 +11,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import {
   DISPATCH_LOCATION_FRESH_SECONDS,
   DispatchService,
-  claimRefusalBelongsToTheOrder,
+  classifyClaimRefusal,
+  claimRefusalMarksTheMover,
   normalizeDispatchLocationFreshSeconds,
 } from '../modules/dispatch/dispatch.service';
 import { AppError } from '../utils/errors';
@@ -2332,17 +2333,32 @@ describe('[F-103-02/03] a disputed order is never advertised, and refusing one n
     expect(await app.redis.get(`dispatch:mover-offer:${other.riderId}`)).toBeNull();
   });
 
-  it('a refusal that IS the mover’s own situation still marks and cascades — the fix is narrow', async () => {
+  it('[F-108-03] losing a race does NOT mark the rider — they did not decline, they were beaten to it', async () => {
     await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
     const next = await makeRider({ lat: PICKUP.lat + 0.017, acceptance: 100 });
     const order = await makeDeliveryOrder(); // ordinary CASH work
     const offered = (await dispatch.dispatchOrder(order.id)).offered;
     expect(offered).toBeDefined();
 
-    // Someone else wins it durably: this is ALREADY_TAKEN, which is not a hold.
+    // Someone else wins it durably: ALREADY_TAKEN.
     await app.prisma.order.update({ where: { id: order.id }, data: { riderId: next.riderId, status: 'RIDER_ASSIGNED' } });
     await expect(dispatch.acceptOffer(order.id, await userOf(offered!))).rejects.toMatchObject({ code: 'ALREADY_TAKEN' });
-    expect(await declined(order.id), 'the losing mover is still recorded for this order').toContain(offered);
+    expect(await declined(order.id), 'a stale decline here excludes an eligible rider for an hour if the order reopens').not.toContain(offered);
+  });
+
+  it('[F-108-03] a mover who genuinely cannot take it IS marked, and the cascade continues', async () => {
+    const rider = await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
+    const order = await makeDeliveryOrder();
+    const offered = (await dispatch.dispatchOrder(order.id)).offered;
+    expect(offered).toBeDefined();
+
+    // The mover goes inactive between the card and the tap: their situation,
+    // not the order's — another mover can still take this job.
+    await app.prisma.rider.update({ where: { id: offered! }, data: { isOnline: false, isAvailable: false } });
+    await app.prisma.user.update({ where: { id: await userOf(offered!) }, data: { status: 'SUSPENDED' } });
+    await expect(dispatch.acceptOffer(order.id, await userOf(offered!))).rejects.toMatchObject({ code: 'MOVER_INACTIVE' });
+    expect(await declined(order.id), 'so they are recorded and the search moves on').toContain(offered);
+    void rider;
   });
 
   it('the rider board does not advertise a disputed order, and the heat map does not count it', async () => {
@@ -2370,15 +2386,95 @@ describe('[F-103-02/03] a disputed order is never advertised, and refusing one n
     expect(resolved.stores.reduce((sum, v) => sum + v.feesWaiting, 0), 'its fee too').toBeGreaterThan(fees);
   });
 
-  it('classifies whose fault a claim refusal was, and defaults to "not the mover’s"', () => {
-    expect(claimRefusalBelongsToTheOrder(new AppError(409, 'MMG_CLAIM_MISMATCH', 'x'))).toBe(true);
-    expect(claimRefusalBelongsToTheOrder(new AppError(409, 'MMG_PAYMENT_PENDING', 'x'))).toBe(true);
-    expect(claimRefusalBelongsToTheOrder(new AppError(409, 'ALREADY_TAKEN', 'x'))).toBe(false);
-    expect(claimRefusalBelongsToTheOrder(new AppError(409, 'CAPACITY_EXCEEDED', 'x'))).toBe(false);
-    expect(claimRefusalBelongsToTheOrder(new AppError(409, 'FLOAT_EXCEEDED', 'x'))).toBe(false);
-    expect(claimRefusalBelongsToTheOrder(new AppError(409, 'MOVER_INACTIVE', 'x'))).toBe(false);
-    // An invariant error, a projection a gate could not evaluate, a database
-    // fault: never something a rider did.
-    expect(claimRefusalBelongsToTheOrder(new Error('mmgClaimMismatchAt was not projected'))).toBe(true);
+  // [F-108-01] The dispute was only half the rule. An MMG order whose payment
+  // has NOT LANDED is equally unclaimable by every rider, and was still being
+  // offered, recovered, listed and counted — with the assignment gate refusing
+  // the first rider who acted. Codex also found the transition that
+  // manufactures the state in production: an admin resolving a dispute as
+  // CUSTOMER_DID_NOT_PAY returns payment to PENDING while the order stays
+  // ACCEPTED/PREPARING/READY_FOR_PICKUP.
+  const UNPAID_STATES = ['PENDING', 'AUTHORIZED', 'FAILED', 'REFUNDED', 'UNKNOWN', 'EXPIRED'] as const;
+
+  for (const paymentStatus of UNPAID_STATES) {
+    it(`[F-108-01] an MMG order whose payment is ${paymentStatus} is not offered, not recoverable, not on the board, not demand`, async () => {
+      const rider = await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
+      const { token } = await makeRiderDeviceSession(rider.userId, `unpaid-${paymentStatus}-${nanoid(5)}`);
+      const order = await makeDeliveryOrder();
+      await app.prisma.order.update({ where: { id: order.id }, data: { paymentMethod: 'MOBILE_MONEY', paymentStatus, mmgClaimMismatchAt: null } });
+
+      const result = await dispatch.dispatchOrder(order.id);
+
+      expect(result.offered, `${paymentStatus}: no card for work nobody may take`).toBeUndefined();
+      expect(await liveOffer(order.id), `${paymentStatus}: no Redis offer pair`).toBeNull();
+      expect(await declined(order.id), `${paymentStatus}: nobody marked`).toEqual([]);
+
+      const board = await app.inject({ method: 'GET', url: '/api/v1/rider/orders/available', headers: { authorization: `Bearer ${token}` } });
+      expect(board.statusCode).toBe(200);
+      expect(((board.json().data ?? []) as Array<{ id: string }>).map((o) => o.id), `${paymentStatus}: not open work`).not.toContain(order.id);
+
+      // Demand is measured HELD, then again after the hold is lifted on the SAME
+      // order. Comparing two measurements that both contain the row proves
+      // nothing about whether it was counted — my first version did exactly
+      // that and a mutation dropping the filter sailed through it.
+      const held = await riderDemand(app.prisma, PICKUP, 8);
+      const heldFees = held.stores.reduce((sum, v) => sum + v.feesWaiting, 0);
+      await app.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'CLAIMED' } });
+      const freed = await riderDemand(app.prisma, PICKUP, 8);
+      expect(freed.ready + freed.soon, `${paymentStatus}: excluded while held, counted once payable`).toBe(held.ready + held.soon + 1);
+      expect(freed.stores.reduce((sum, v) => sum + v.feesWaiting, 0), `${paymentStatus}: its fee was not advertised as waiting`).toBeGreaterThan(heldFees);
+      await app.prisma.order.update({ where: { id: order.id }, data: { paymentStatus } });
+
+      // …and the assignment gate agrees, which is the point: discovery and the
+      // money authority now say the same thing instead of opposite things.
+      await expect(dispatch.claimOrder(order.id, rider.riderId, 'RIDER')).rejects.toMatchObject({ code: 'MMG_PAYMENT_PENDING' });
+    });
+  }
+
+  it('[F-108-01] the same order becomes ordinary work the moment the store claims the payment', async () => {
+    await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
+    const order = await makeDeliveryOrder();
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', mmgClaimMismatchAt: null } });
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBeUndefined();
+
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'CLAIMED' } });
+    expect((await dispatch.dispatchOrder(order.id)).offered, 'CLAIMED is money moved').toBeDefined();
+  });
+
+  it('[F-108-01] a live card is not recoverable once the payment is taken back to PENDING', async () => {
+    await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
+    const order = await makeDeliveryOrder();
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', mmgClaimMismatchAt: null } });
+    const offered = (await dispatch.dispatchOrder(order.id)).offered;
+    expect(offered).toBeDefined();
+    expect(await dispatch.currentOfferFor(offered!)).not.toBeNull();
+
+    // Exactly what admin CUSTOMER_DID_NOT_PAY does to a live order.
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'PENDING' } });
+    expect(await dispatch.currentOfferFor(offered!), 'the card cannot be resurrected onto unpaid work').toBeNull();
+  });
+
+  it('[F-108-03] classifies a claim refusal by typed outcome, and only mover-ineligibility marks the mover', () => {
+    const table: Array<[unknown, string, boolean]> = [
+      [new AppError(409, 'MMG_CLAIM_MISMATCH', 'x'), 'order-held', false],
+      [new AppError(409, 'MMG_PAYMENT_PENDING', 'x'), 'order-held', false],
+      // [F-108-03] The loser of a race did not decline — they were beaten to
+      // it. Marking them excluded an eligible rider from the reopened order
+      // for a full hour under a handback interleaving.
+      [new AppError(409, 'ALREADY_TAKEN', 'x'), 'lost-race', false],
+      [new AppError(409, 'MMG_PRICE_LOCKED', 'x'), 'lost-race', false],
+      [new AppError(409, 'CAPACITY_EXCEEDED', 'x'), 'mover-ineligible', true],
+      [new AppError(409, 'FLOAT_EXCEEDED', 'x'), 'mover-ineligible', true],
+      [new AppError(409, 'MOVER_INACTIVE', 'x'), 'mover-ineligible', true],
+      [new AppError(409, 'STACK_INELIGIBLE', 'x'), 'mover-ineligible', true],
+      [new AppError(409, 'SELF_OWN_ORDER', 'x'), 'mover-ineligible', true],
+      // An invariant error, a projection a gate could not evaluate, a database
+      // fault: never something a rider did, and never charged to one.
+      [new Error('mmgClaimMismatchAt was not projected'), 'unknown', false],
+      [new AppError(500, 'SOMETHING_NEW', 'x'), 'unknown', false],
+    ];
+    for (const [error, outcome, marks] of table) {
+      expect(classifyClaimRefusal(error), String((error as AppError).code ?? 'plain Error')).toBe(outcome);
+      expect(claimRefusalMarksTheMover(classifyClaimRefusal(error)), String((error as AppError).code ?? 'plain Error')).toBe(marks);
+    }
   });
 });
