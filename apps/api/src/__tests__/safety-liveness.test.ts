@@ -13,6 +13,9 @@ import { LivenessService, assertShiftLiveness } from '../modules/safety/liveness
 import type { KycProvider } from '../providers/kyc/kyc-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
 
+// [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
+process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
+
 // Identity Assurance M5 (safety spec §7.1) — the go-online liveness ladder.
 // The provider tri-state IS the ladder: approved→PASS, pending_manual→
 // BORDERLINE (online + human review), rejected→FAIL (3rd consecutive locks).

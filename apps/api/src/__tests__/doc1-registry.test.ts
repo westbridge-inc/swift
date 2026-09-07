@@ -121,7 +121,7 @@ describe('[DOC-1 §4.2] the registry', () => {
               ${over === 'retention' ? null : 1}, false, 'UNPROFILED', ${over === 'active'}, NULL, ${over === 'external'})`);
     await expect(insert('retention')).rejects.toThrow(/persist_needs_retention/);
     await expect(insert('active')).rejects.toThrow(/active_needs_legal_facts/);
-    await expect(insert('external')).rejects.toThrow(/personal_never_external/);
+    await expect(insert('external')).rejects.toThrow(/personal_external_needs_decision/);
     expect(await app.prisma.docType.count({ where: { countryCode: 'XX' } })).toBe(0);
   });
 });

@@ -33,8 +33,13 @@ describe('[ADM-002] every declared audit field exists on its model', () => {
       for (const f of entity.fields) {
         if (!fields.has(f)) problems.push(`${route}: ${entity.model}.${f} does not exist`);
       }
-      if (entity.param === 'key' ? !fields.has('key') : !fields.has('id')) {
-        problems.push(`${route}: ${entity.model} has no '${entity.param ?? 'id'}' selector`);
+      // How the row is addressed. `param` is the URL parameter name, which is USUALLY the
+      // selector column (`key` for keyed config, `code` for the doc registry) but sometimes
+      // is not: `:userId` addresses a `user` row by its `id`. So the selector is `param`
+      // when the model actually has such a column, and `id` otherwise.
+      const idField = entity.param && fields.has(entity.param) ? entity.param : 'id';
+      if (!fields.has(idField)) {
+        problems.push(`${route}: ${entity.model} has no '${idField}' selector`);
       }
     }
     expect(problems).toEqual([]);
