@@ -157,3 +157,100 @@ describe('[DOC-1 P31-2] claim, not fact', () => {
     expect(attestation).not.toMatch(/payment_confirmed|paymentConfirmed/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [DOC-INV-48 · F-103-04] THE DISAGREEMENT WAS DISCARDED IF THE CUSTOMER SPOKE
+// FIRST.
+//
+// Codex's serial history, from source:
+//
+//   1. MOBILE_MONEY + PENDING + mmgClaimMismatchAt = null
+//   2. the customer posts paid:false
+//   3. the route records only an AuditLog — the order carries no negative fact
+//   4. the store confirms payment, locks the order, sees PENDING, writes CLAIMED
+//   5. final order is CLAIMED + mmgClaimMismatchAt = null
+//   6. every repaired gate passes, and fulfilment proceeds although the two
+//      claims disagree
+//
+// The cause was that ABSENCE meant two different things: "no claim has been
+// made" and "the customer said they did not pay". It is now a fact of its own,
+// written under the same row lock the store's confirm-payment takes.
+//
+// These are Codex's mandatory acceptance tests 1, 2 and 3.
+// ---------------------------------------------------------------------------
+describe('[F-103-04] a disagreement is recorded whichever side speaks first', () => {
+  const gateFor = (o: { paymentStatus: string; mmgClaimMismatchAt: Date | null }) =>
+    () => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: o.paymentStatus, orderType: 'FOOD', mmgClaimMismatchAt: o.mmgClaimMismatchAt }, 'ACCEPTED');
+
+  it('ACCEPTANCE 1 — store first, then the customer denies: mismatch, and the gate holds', async () => {
+    const order = await mmgOrder('PENDING');
+    expect((await confirm(order.id, `REF${RUN}S1`)).statusCode).toBe(200);
+    expect((await claim(order.id, { paid: false })).json().data.mismatch).toBe(true);
+
+    const held = await orderOf(order.id);
+    expect(held.paymentStatus).toBe('CLAIMED');
+    expect(held.mmgClaimMismatchAt).not.toBeNull();
+    expect(held.customerClaimedNotPaidAt, 'the denial is durable in its own right').not.toBeNull();
+    expect(gateFor(held)).toThrow(/disputes the store/);
+  });
+
+  it('ACCEPTANCE 2 — CUSTOMER FIRST, then the store claims: mismatch too. It must NOT end CLAIMED + null', async () => {
+    const order = await mmgOrder('PENDING');
+
+    // The customer denies BEFORE the store has said anything. On main this
+    // wrote nothing to the order at all.
+    const denial = await claim(order.id, { paid: false });
+    expect(denial.statusCode).toBe(200);
+    expect(denial.json().data.mismatch, 'no mismatch YET — the store has not claimed').toBe(false);
+    const afterDenial = await orderOf(order.id);
+    expect(afterDenial.customerClaimedNotPaidAt, 'but the denial is on the order, not only in an audit row').not.toBeNull();
+    expect(afterDenial.mmgClaimMismatchAt).toBeNull();
+
+    // Now the store claims receipt. This is step 4 of Codex's history.
+    expect((await confirm(order.id, `REF${RUN}S2`)).statusCode).toBe(200);
+
+    const held = await orderOf(order.id);
+    expect(held.paymentStatus).toBe('CLAIMED');
+    expect(held.mmgClaimMismatchAt, 'THE defect: CLAIMED + null passed every gate').not.toBeNull();
+    expect(gateFor(held), 'and the gate holds it, exactly as in the other ordering').toThrow(/disputes the store/);
+    // the trail says the claim ARRIVED disputed, rather than quietly becoming so
+    expect(await system(() => app.prisma.auditLog.count({ where: { action: 'MMG_CLAIM_MISMATCH', entityId: order.id } }))).toBeGreaterThanOrEqual(1);
+  });
+
+  it('ACCEPTANCE 3 — the two claims raced: whichever commits first, one honest held state', async () => {
+    for (let round = 0; round < 4; round += 1) {
+      const order = await mmgOrder('PENDING');
+      const [store, customer] = await Promise.all([
+        confirm(order.id, `REF${RUN}R${round}`),
+        claim(order.id, { paid: false }),
+      ]);
+      const fresh = await orderOf(order.id);
+      const shot = JSON.stringify({ round, store: store.statusCode, customer: customer.statusCode, paymentStatus: fresh.paymentStatus, mismatch: fresh.mmgClaimMismatchAt, denied: fresh.customerClaimedNotPaidAt });
+
+      expect(fresh.customerClaimedNotPaidAt, `${shot} — the denial is never lost`).not.toBeNull();
+      // The one state that must not exist: the store's claim standing, the
+      // customer's denial on record, and nothing holding the order.
+      const claimedAndUnheld = fresh.paymentStatus === 'CLAIMED' && fresh.mmgClaimMismatchAt === null;
+      expect(claimedAndUnheld, `${shot} — CLAIMED with a denial on record and no hold`).toBe(false);
+      if (fresh.paymentStatus === 'CLAIMED') expect(gateFor(fresh), shot).toThrow(/disputes the store/);
+    }
+  });
+
+  it('a customer who changes their answer supersedes their own denial', async () => {
+    const order = await mmgOrder('PENDING');
+    expect((await claim(order.id, { paid: false })).statusCode).toBe(200);
+    expect((await orderOf(order.id)).customerClaimedNotPaidAt).not.toBeNull();
+
+    expect((await claim(order.id, { paid: true, reference: `REF${RUN}C` })).statusCode).toBe(200);
+    const after = await orderOf(order.id);
+    expect(after.customerClaimedNotPaidAt, 'the old answer no longer stands').toBeNull();
+    expect(after.customerClaimedPaidAt).not.toBeNull();
+
+    // …and the store's later claim is therefore ordinary, not disputed.
+    expect((await confirm(order.id, `REF${RUN}C`)).statusCode).toBe(200);
+    const done = await orderOf(order.id);
+    expect(done.paymentStatus).toBe('CLAIMED');
+    expect(done.mmgClaimMismatchAt).toBeNull();
+    expect(gateFor(done)).not.toThrow();
+  });
+});

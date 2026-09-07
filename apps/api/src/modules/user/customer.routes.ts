@@ -2513,19 +2513,46 @@ export async function customerRoutes(app: FastifyInstance) {
     if (!request.user?.userId) throw new AppError(401, 'UNAUTHENTICATED', 'Sign in first');
     const { id } = request.params as { id: string };
     const body = z.object({ paid: z.boolean(), reference: z.string().trim().min(3).max(64).optional() }).parse(request.body ?? {});
-    const order = await app.prisma.order.findFirst({ where: { id, customerId: request.user.userId }, select: { id: true, paymentMethod: true, paymentStatus: true, customerClaimedPaidAt: true, mmgClaimMismatchAt: true } });
-    if (!order) throw new NotFoundError('Order', id);
-    if (order.paymentMethod !== 'MOBILE_MONEY') throw new AppError(409, 'NOT_A_WALLET_ORDER', 'Only an MMG order carries a payment claim');
+    const owned = await app.prisma.order.findFirst({ where: { id, customerId: request.user.userId }, select: { id: true, paymentMethod: true } });
+    if (!owned) throw new NotFoundError('Order', id);
+    if (owned.paymentMethod !== 'MOBILE_MONEY') throw new AppError(409, 'NOT_A_WALLET_ORDER', 'Only an MMG order carries a payment claim');
     const now = new Date();
     if (body.paid) {
-      const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: now, customerPaymentRef: body.reference ?? null } });
+      // [F-103-04] A positive claim SUPERSEDES a standing negative one: the
+      // customer has changed their answer, and the old answer must not keep
+      // holding the order.
+      const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: now, customerClaimedNotPaidAt: null, customerPaymentRef: body.reference ?? null } });
       await app.prisma.auditLog.create({ data: { userId: request.user.userId, action: 'CUSTOMER_CLAIMED_PAID', entity: 'Order', entityId: id, changes: { reference: body.reference ?? null, claim: 'customer_claimed_paid' } } });
       return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, customerClaimedPaidAt: updated.customerClaimedPaidAt, storeClaimed: updated.paymentStatus === 'CLAIMED' } };
     }
-    // a dispute: the store says received, the customer says not — a mismatch, before dispatch
-    const mismatch = order.paymentStatus === 'CLAIMED' && !order.mmgClaimMismatchAt;
-    const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: null, customerPaymentRef: null, ...(mismatch ? { mmgClaimMismatchAt: now } : {}) } });
-    await app.prisma.auditLog.create({ data: { userId: request.user.userId, action: mismatch ? 'MMG_CLAIM_MISMATCH' : 'CUSTOMER_CLAIMED_NOT_PAID', entity: 'Order', entityId: id, changes: { claim: 'customer_claimed_not_paid', storeStatus: order.paymentStatus } } });
+    // ---------------------------------------------------------------------
+    // [DOC-INV-48 · F-103-04] THE DISAGREEMENT IS RECORDED WHICHEVER SIDE
+    // SPEAKS FIRST.
+    //
+    // This read was UNLOCKED, and a mismatch was raised only when the preview
+    // already said CLAIMED. So a customer who said "I did not pay" BEFORE the
+    // store confirmed receipt left nothing on the order at all — an audit row,
+    // and `customerClaimedPaidAt: null`, which was already null. The store's
+    // later claim then wrote CLAIMED with `mmgClaimMismatchAt` still null, and
+    // every repaired gate, every dispatch entrance and the door itself passed
+    // an order whose two parties openly disagreed.
+    //
+    // The negative claim is now a fact of its own (`customerClaimedNotPaidAt`),
+    // and it is written under the SAME row lock the store's confirm-payment
+    // takes — so the two claims cannot interleave, and the store's side
+    // reconciles against a negative that is already durable.
+    // ---------------------------------------------------------------------
+    const { mismatch, updated } = await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${id} FOR UPDATE`;
+      const locked = await tx.order.findUniqueOrThrow({ where: { id }, select: { paymentStatus: true, mmgClaimMismatchAt: true } });
+      const raise = locked.paymentStatus === 'CLAIMED' && !locked.mmgClaimMismatchAt;
+      const row = await tx.order.update({
+        where: { id },
+        data: { customerClaimedPaidAt: null, customerPaymentRef: null, customerClaimedNotPaidAt: now, ...(raise ? { mmgClaimMismatchAt: now } : {}) },
+      });
+      await tx.auditLog.create({ data: { userId: request.user!.userId, action: raise ? 'MMG_CLAIM_MISMATCH' : 'CUSTOMER_CLAIMED_NOT_PAID', entity: 'Order', entityId: id, changes: { claim: 'customer_claimed_not_paid', storeStatus: locked.paymentStatus } } });
+      return { mismatch: raise, updated: row };
+    });
     if (mismatch) {
       const { notifyAdmins } = await import('../notification/notification.service');
       await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
