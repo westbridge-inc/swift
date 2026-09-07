@@ -186,7 +186,7 @@ export class AuthService {
       return { isNewUser: true, phone };
     }
 
-    const tokens = await this.createSession(user.id, user.activeRole, deviceInfo, 'OTP');
+    const tokens = await this.createSession(user.id, deviceInfo, 'OTP');
 
     // Update last active
     await this.app.prisma.user.update({
@@ -334,7 +334,6 @@ export class AuthService {
 
     const tokens = await this.createSession(
       user.id,
-      user.activeRole,
       {
         deviceId: 'registration',
         deviceType: 'unknown',
@@ -967,31 +966,65 @@ export class AuthService {
 
   private async createSession(
     userId: string,
-    role: string,
     deviceInfo: DeviceInfo,
     authMethod: SessionAuthMethod,
   ) {
-    const accessToken = this.app.jwt.sign({ userId, role, jti: nanoid(8) });
     const refreshToken = nanoid(64);
+    return this.app.prisma.$transaction(async (tx) => {
+      // OTA-062: session issuance and account status are one linearizable
+      // security decision. The pre-auth lookup above is informational only;
+      // suspension/ban/deactivation can race it, so lock and re-read the User
+      // immediately before inserting the credential. Account-state transitions
+      // take the same User lock, which makes either the login or the transition
+      // win completely instead of leaving a dormant session behind.
+      const users = await tx.$queryRaw<Array<{
+        status: UserStatus;
+        activeRole: UserRole;
+      }>>`
+        SELECT "status", "activeRole"::text AS "activeRole"
+        FROM "users"
+        WHERE "id" = ${userId}
+        FOR UPDATE
+      `;
+      const user = users[0];
+      if (!user) {
+        throw new AppError(401, 'UNAUTHORIZED', 'This account is no longer available');
+      }
+      if (
+        user.status === 'SUSPENDED'
+        || user.status === 'BANNED'
+        || user.status === 'DEACTIVATED'
+      ) {
+        throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
+      }
 
-    await this.app.prisma.session.create({
-      data: {
+      // The caller's role came from an earlier lookup and can be stale after a
+      // concurrent role switch. Sign only the active role protected by the
+      // lock; request authentication still re-resolves current authority.
+      const accessToken = this.app.jwt.sign({
         userId,
-        token: accessToken,
-        refreshToken,
-        authMethod,
-        deviceId: deviceInfo.deviceId,
-        deviceType: deviceInfo.deviceType,
-        ipAddress: deviceInfo.ipAddress,
-        userAgent: deviceInfo.userAgent,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      },
-    });
+        role: user.activeRole,
+        jti: nanoid(8),
+      });
+      await tx.session.create({
+        data: {
+          userId,
+          token: accessToken,
+          refreshToken,
+          authMethod,
+          deviceId: deviceInfo.deviceId,
+          deviceType: deviceInfo.deviceType,
+          ipAddress: deviceInfo.ipAddress,
+          userAgent: deviceInfo.userAgent,
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      });
 
-    return {
-      accessToken,
-      refreshToken,
-      expiresIn: 900, // 15 minutes — MUST match the JWT sign TTL (plugins/auth.ts) [SWIFT-107]
-    };
+      return {
+        accessToken,
+        refreshToken,
+        expiresIn: 900, // 15 minutes — MUST match the JWT sign TTL (plugins/auth.ts) [SWIFT-107]
+      };
+    });
   }
 }
