@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { applyFairnessBand } from '../modules/dispatch/scoring';
-import { scoreCandidate, rankCandidates, type DispatchCandidate } from '../modules/dispatch/scoring';
+import { scoreCandidate, rankCandidates, dispatchWeights, type DispatchCandidate } from '../modules/dispatch/scoring';
+import { RATING_AFFECTS_DISPATCH } from '../modules/rating/rating-math';
 
 const cand = (over: Partial<DispatchCandidate>): DispatchCandidate => ({
   riderId: 'r', userId: 'u', etaMinutes: 5, averageRating: 4, acceptanceRate: 80, hasActiveJob: false, ...over,
@@ -16,18 +17,40 @@ describe('dispatch scoring — per-pool weight profiles', () => {
       expect(rankCandidates([far, near], 'PROXIMITY')[0]!.etaMinutes).toBe(3);
     });
 
-    it('quality only reorders effectively-equidistant cars', () => {
-      const a = cand({ etaMinutes: 4, averageRating: 3.0 });
-      const b = cand({ etaMinutes: 4, averageRating: 5.0 });
-      expect(rankCandidates([a, b], 'PROXIMITY')[0]!.averageRating).toBe(5.0);
+    it('acceptance — not rating — reorders effectively-equidistant cars', () => {
+      const a = cand({ etaMinutes: 4, acceptanceRate: 40 });
+      const b = cand({ etaMinutes: 4, acceptanceRate: 100 });
+      expect(rankCandidates([a, b], 'PROXIMITY')[0]!.acceptanceRate).toBe(100);
     });
   });
 
   describe('delivery (BALANCED): unchanged — quality co-weighs with distance', () => {
-    it('at equal ETA the better-rated, more-reliable courier wins', () => {
-      const worse = cand({ etaMinutes: 3, averageRating: 4.2, acceptanceRate: 60 });
-      const better = cand({ etaMinutes: 3, averageRating: 5, acceptanceRate: 100 });
+    it('at equal ETA the more-reliable courier wins — reliability is a choice, a rating is other people\'s opinion', () => {
+      const worse = cand({ etaMinutes: 3, acceptanceRate: 60 });
+      const better = cand({ etaMinutes: 3, acceptanceRate: 100 });
       expect(scoreCandidate(better, 'BALANCED')).toBeLessThan(scoreCandidate(worse, 'BALANCED'));
+    });
+
+    it('test_rating_does_not_move_dispatch_rank: the recorded decision is load-bearing, not decorative', () => {
+      // [09-07] RATING_AFFECTS_DISPATCH is FALSE (R-Law 4, founder). It used to be a dead
+      // constant while this scorer weighted rating 0.20 / 0.08 — a silent earnings penalty.
+      expect(RATING_AFFECTS_DISPATCH).toBe(false);
+      for (const profile of ['BALANCED', 'PROXIMITY'] as const) {
+        const low = cand({ averageRating: 1.0 });
+        const high = cand({ averageRating: 5.0 });
+        expect(scoreCandidate(low, profile)).toBe(scoreCandidate(high, profile));
+        expect(dispatchWeights(profile).rating).toBe(0);
+        // weights still describe a whole: a score stays comparable to every other score
+        const w = dispatchWeights(profile);
+        expect(w.eta + w.rating + w.acceptance + w.load).toBeCloseTo(1, 10);
+        // and the switch is real: enabling it restores a live rating term
+        expect(dispatchWeights(profile, true).rating).toBeGreaterThan(0);
+        const on = dispatchWeights(profile, true);
+        const score = (c: DispatchCandidate, ww: typeof on) =>
+          ww.eta * (Math.min(c.etaMinutes, 60) / 60) + ww.rating * ((5 - c.averageRating) / 5)
+          + ww.acceptance * (1 - c.acceptanceRate / 100) + ww.load * (c.hasActiveJob ? 1 : 0);
+        expect(score(high, on)).toBeLessThan(score(low, on));
+      }
     });
 
     it('default profile is BALANCED — the existing delivery behavior is preserved', () => {

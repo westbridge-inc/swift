@@ -19,22 +19,47 @@ export interface DispatchCandidate {
   hasActiveJob: boolean;
 }
 
+import { RATING_AFFECTS_DISPATCH } from '../rating/rating-math';
+
 /** BALANCED = delivery/courier; PROXIMITY = taxi (the rider sees the car move). */
 export type DispatchProfile = 'BALANCED' | 'PROXIMITY';
 
-const WEIGHTS_BY_PROFILE: Record<DispatchProfile, { eta: number; rating: number; acceptance: number; load: number }> = {
+type Weights = { eta: number; rating: number; acceptance: number; load: number };
+
+const WEIGHTS_BY_PROFILE: Record<DispatchProfile, Weights> = {
   BALANCED: { eta: 0.5, rating: 0.2, acceptance: 0.15, load: 0.15 },
-  // Proximity is near-absolute for taxi: rating/acceptance/load only reorder
+  // Proximity is near-absolute for taxi: acceptance/load only reorder
   // effectively-equidistant cars. Tuned so a 3-min car is never ranked behind a
-  // 14-min car regardless of the far car's rating/acceptance (see scoring test).
+  // 14-min car regardless of the far car's quality (see scoring test).
   PROXIMITY: { eta: 0.85, rating: 0.08, acceptance: 0.05, load: 0.02 },
 };
+
+/**
+ * [09-07] `RATING_AFFECTS_DISPATCH` is a recorded founder decision (R-Law 4) and it is
+ * FALSE. Until today it was a dead constant: two tests asserted it, nothing imported it,
+ * and this scorer weighted rating 0.20 on delivery / 0.08 on taxi off the real column — so
+ * a lower-rated mover silently received fewer offers, an earnings penalty the decision says
+ * Swift does not apply. The ratings writer's own comment admitted the legacy mean "is still
+ * read by dispatch scoring".
+ *
+ * The constant is load-bearing now. With it false the rating term is removed and its share
+ * is redistributed across the remaining factors, so the weights still sum to 1 and a score
+ * stays comparable to every other score. Flipping the decision to true restores the tuned
+ * weights above and nothing else — `dispatchWeights(profile, true)` IS those weights, which
+ * is how the tests prove this switch is live rather than decorative.
+ */
+export function dispatchWeights(profile: DispatchProfile, affectsDispatch: boolean = RATING_AFFECTS_DISPATCH): Weights {
+  const w = WEIGHTS_BY_PROFILE[profile];
+  if (affectsDispatch) return w;
+  const rest = w.eta + w.acceptance + w.load;
+  return { eta: w.eta / rest, rating: 0, acceptance: w.acceptance / rest, load: w.load / rest };
+}
 
 /** ETAs beyond this are treated as "max bad" so one outlier can't skew ranks */
 const ETA_CEILING_MINUTES = 60;
 
 export function scoreCandidate(candidate: DispatchCandidate, profile: DispatchProfile = 'BALANCED'): number {
-  const w = WEIGHTS_BY_PROFILE[profile];
+  const w = dispatchWeights(profile);
   const eta = Math.min(candidate.etaMinutes, ETA_CEILING_MINUTES) / ETA_CEILING_MINUTES;
   const rating = (5 - clamp(candidate.averageRating, 0, 5)) / 5;
   const acceptance = 1 - clamp(candidate.acceptanceRate, 0, 100) / 100;
