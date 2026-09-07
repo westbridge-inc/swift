@@ -211,13 +211,18 @@ export const adminAuditCounter = new client.Counter({
  *
  * `failed` existed as a bare `catch { return ABSENT }` and was the reason a
  * wrong selector survived: a refused read and an absent row were the same
- * observation. They are now two numbers. A non-zero `failed` means some
- * privileged action is being recorded with no before/after digest, which is
- * exactly the state ADM-004 exists to prevent.
+ * observation. They are now separate numbers.
+ *
+ * EVERY exit is counted, not only the interesting ones — `no_id` (the route
+ * carried no subject) and `no_delegate` (the declared model does not exist on
+ * the client, which is what a rename or a typo produces, and the same shape as
+ * C-01). A metric that reports four of six outcomes cannot support the claim
+ * "zero failures means the digests are present"; it only ever meant "zero of
+ * the failures I remembered to count".
  */
 export const adminAuditSnapshotCounter = new client.Counter({
   name: 'swift_admin_audit_snapshot_total',
-  help: 'Admin audit subject reads by outcome (found|missing|failed|selector) and model',
+  help: 'Admin audit subject reads by outcome (found|missing|failed|selector|no_id|no_delegate) and model',
   labelNames: ['outcome', 'model'] as const,
   registers: [registry],
 });

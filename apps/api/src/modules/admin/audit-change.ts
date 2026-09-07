@@ -78,9 +78,19 @@ export async function snapshot(
   entity: AdminRouteEntity,
   id: string | undefined,
 ): Promise<EntitySnapshot> {
-  if (!id) return ABSENT;
+  // [review] Both of these used to return ABSENT silently. The second is
+  // exactly what a renamed or mistyped `model` produces — the same shape as
+  // C-01 — so a metric whose contract says "non-zero `failed` means digests are
+  // missing" was one-sided: zero did not mean they were present.
+  if (!id) {
+    adminAuditSnapshotCounter.labels('no_id', entity.model).inc();
+    return ABSENT;
+  }
   const delegate = (prisma as unknown as Record<string, { findUnique?: (a: unknown) => Promise<unknown> }>)[entity.model];
-  if (!delegate?.findUnique) return ABSENT;
+  if (!delegate?.findUnique) {
+    adminAuditSnapshotCounter.labels('no_delegate', entity.model).inc();
+    return ABSENT;
+  }
   // [C-01] The column, not the route parameter. `where` was built as
   // `entity.param === 'key' ? { key: id } : { id }`, which asked DocType — a
   // model with no `id` column at all — for `where: { id: 'GY.national_id' }`.

@@ -25,6 +25,15 @@ describe('[ADM-002] every declared audit field exists on its model', () => {
     for (const [route, authority] of Object.entries(ADMIN_ROUTE_AUTHORITY)) {
       const entity = authority.entity;
       if (!entity) continue;
+      // [review] The routeParam check is a property of the ROUTE, not of the
+      // (model, fields) shorthand — so it runs BEFORE the dedup. With it below,
+      // the first route to share a shorthand silenced the check for every other
+      // route using it.
+      const routeParam = entity.routeParam ?? 'id';
+      const segments = new Set(route.split(/[/\s]/).filter((s) => s.startsWith(':')).map((s) => s.slice(1)));
+      if (segments.size > 0 && !segments.has(routeParam)) {
+        problems.push(`${route}: declares routeParam ':${routeParam}', which the template does not carry`);
+      }
       const key = `${entity.model}:${entity.fields.join(',')}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -42,16 +51,18 @@ describe('[ADM-002] every declared audit field exists on its model', () => {
       // question, and `admin-audit-unique-selector.test.ts` is where it is asked
       // by watching the arguments Prisma actually receives. This is the
       // secondary gate. That one is the oracle.
+      // [review] A real column is not enough — it must be a UNIQUE one.
+      // `PlatformConfig` has both `id` and `key`; declaring `id` passed the old
+      // check and silently returned ABSENT for every C5 config change, caught
+      // by nothing but the one unit test. `findUnique` needs uniqueness, so the
+      // census asks the schema for it.
       const uniqueField = entity.uniqueField ?? 'id';
-      if (!fields.has(uniqueField)) {
+      const model = Prisma.dmmf.datamodel.models.find((m) => lowerFirst(m.name) === entity.model);
+      const column = model?.fields.find((f) => f.name === uniqueField);
+      if (!column) {
         problems.push(`${route}: ${entity.model} has no '${uniqueField}' column to select on`);
-      }
-      // The route parameter must be a real segment of the route template, or the
-      // hook reads `params[undefined]` and every snapshot for it is ABSENT.
-      const routeParam = entity.routeParam ?? 'id';
-      const segments = new Set(route.split(/[/\s]/).filter((s) => s.startsWith(':')).map((s) => s.slice(1)));
-      if (segments.size > 0 && !segments.has(routeParam)) {
-        problems.push(`${route}: declares routeParam ':${routeParam}', which the template does not carry`);
+      } else if (!column.isId && !column.isUnique) {
+        problems.push(`${route}: ${entity.model}.${uniqueField} is not unique — findUnique cannot select on it`);
       }
     }
     expect(problems).toEqual([]);

@@ -876,6 +876,7 @@ export async function adminRoutes(app: FastifyInstance) {
           before,
           after,
           entityDeclared: !!authority?.entity,
+          entity: authority?.entity,
           entityOverride: isAuditedRead ? 'integrity' : undefined,
         }) as never,
       });
@@ -5078,8 +5079,13 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/cash-rules/rlp/movers/:userId/suspend', { preHandler: [adminGuard] }, async (request) => {
     const { userId } = request.params as { userId: string };
     const body = z.object({ reason: z.string().min(5).max(500) }).parse(request.body ?? {});
+    // [review] NO `reason` override. `auditWithin` derives it through
+    // `reasonOf(body, headers)`, where the HEADER wins — the rule ADM-006
+    // validates against. Passing `body.reason` here made the reason VALIDATED
+    // and the reason RECORDED two different strings, and left this route
+    // disagreeing with its own sibling one line below.
     const user = await cashRules.suspendLossProtection(userId, body.reason,
-      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { reason: body.reason, extra: facts }));
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: user };
   });
 

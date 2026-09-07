@@ -71,6 +71,21 @@ export interface AuditRequestLike {
  *  the stated reason, or the before/after digests, with its own idea of them. */
 export const RESERVED_CHANGE_KEYS: ReadonlySet<string> = new Set(RESERVED_AUDIT_FIELDS);
 
+/** [review] The subject id, from the entity's OWN declared route parameter.
+ *  This was `params['id'] ?? params['key'] ?? params['userId'] ?? '-'` — a
+ *  hardcoded list of parameter NAMES, which is the same mistake C-01 fixed one
+ *  layer up, and which omitted `code`: a `:code` entity recorded its subject
+ *  only because its route passed `entityId` by hand, and the next one to forget
+ *  would have recorded `-`. The declaration is the source of truth; the old
+ *  list stays as the fallback for the routes that declare no entity at all. */
+export function auditSubjectId(
+  params: Record<string, string>,
+  entity: { routeParam?: string } | undefined,
+): string {
+  const declared = entity ? params[entity.routeParam ?? 'id'] : undefined;
+  return declared ?? params['id'] ?? params['key'] ?? params['userId'] ?? params['code'] ?? '-';
+}
+
 export interface AdminAuditRowInput {
   /** The mounted path, as the trail has always recorded it. */
   readonly routeUrl: string;
@@ -90,6 +105,8 @@ export interface AdminAuditRowInput {
    *  exist when the request was routed. Without this the row says `-` and the
    *  trail cannot name what was created. */
   readonly entityIdOverride?: string | undefined;
+  /** The declared entity, so the subject id comes from its own route parameter. */
+  readonly entity?: { routeParam?: string } | undefined;
   /** [ADM-002] NAMED facts a route's own audit row carried that the generic
    *  one cannot derive — `POST /notifications/broadcast` records how many
    *  people it reached, and its whole subject IS the audience.
@@ -114,19 +131,38 @@ export function adminAuditRow(
 ): Record<string, unknown> {
   const params = (request.params ?? {}) as Record<string, string>;
   const headers = request.headers ?? {};
-  const extra = input.extra ?? {};
-  const collision = Object.keys(extra).find((key) => RESERVED_CHANGE_KEYS.has(key));
-  if (collision) {
-    // A programming error at the call site, surfaced where the test for that
-    // route will see it — never a quietly rewritten trail.
-    throw new TypeError(`[ADM-002] audit extra may not redefine the canonical field '${collision}'`);
+  // [review] THE CANONICAL FIELDS ARE PROTECTED BY REMOVAL, NOT BY A THROW.
+  //
+  // This threw a TypeError on a collision. The intent was right — a "fact"
+  // silently replacing the stated reason or a before/after digest is a
+  // falsified trail — but the throw lands INSIDE the action's transaction, so
+  // the whole privileged action fails with a 500. That is C-01b exactly: two
+  // live admin routes returned 500 on every call for precisely this reason.
+  //
+  // The `AuditFacts` type is the primary control and makes the common case a
+  // build error. It is not airtight: an `undefined`-valued reserved key, a
+  // variable with a string index signature, a spread of one, and the older
+  // hand-written facts shape all assign to it without a cast. So the runtime
+  // must handle a collision that reaches it, and killing the action is the one
+  // response that is worse than the problem.
+  //
+  // The colliding key is DROPPED and COUNTED. The trail loses one extra fact —
+  // never a canonical field, never the action itself — and the drop is a number
+  // somebody can alert on rather than a silence.
+  const suppliedExtra = input.extra ?? {};
+  const collisions = Object.keys(suppliedExtra).filter((key) => RESERVED_CHANGE_KEYS.has(key));
+  for (const key of collisions) {
+    adminAuditCounter.labels(`extra_collision:${key}`, 'C0').inc();
   }
+  const extra = collisions.length === 0
+    ? suppliedExtra
+    : Object.fromEntries(Object.entries(suppliedExtra).filter(([key]) => !RESERVED_CHANGE_KEYS.has(key)));
   const resource = input.template?.split('/').filter(Boolean)[0];
   return {
     userId,
     action: `ADMIN ${request.method} ${input.routeUrl}`,
     entity: input.entityOverride ?? resource ?? (input.routeUrl.split('/').filter(Boolean)[0] ?? 'admin'),
-    entityId: input.entityIdOverride ?? params['id'] ?? params['key'] ?? params['userId'] ?? '-',
+    entityId: input.entityIdOverride ?? auditSubjectId(params, input.entity),
     // Named extras first, the canonical record last: even if the guard above
     // were ever bypassed, the reason and the digests are the ones that stand.
     changes: {
@@ -211,6 +247,7 @@ export async function auditWithin(
         before: request.auditBefore ?? ABSENT,
         after,
         entityDeclared: !!entity,
+        entity,
         entityIdOverride: overrides?.entityId,
         extra: overrides?.extra,
       }),

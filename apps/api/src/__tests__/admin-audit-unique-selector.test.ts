@@ -3,8 +3,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { ADMIN_ROUTE_AUTHORITY, type AdminRouteEntity } from '../modules/admin/admin-authority';
-import { snapshot } from '../modules/admin/audit-change';
-import { adminAuditSnapshotCounter } from '../plugins/observability';
+import { snapshot, ABSENT } from '../modules/admin/audit-change';
+import { adminAuditRow, auditSubjectId } from '../modules/admin/audit-within';
+import { adminAuditSnapshotCounter, adminAuditCounter } from '../plugins/observability';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -54,6 +55,12 @@ const RUN = nanoid(8).toLowerCase().replace(/[^a-z0-9]/g, 'x');
 const DOC_CODE = `ZZ.selector_${RUN}`;
 const CONFIG_KEY = `ADM_SELECTOR_${RUN}`;
 let userId = '';
+// [review] The old fixture was `+5926${RUN.slice(0,6).replace(/[a-z]/g,'7')}` —
+// a nanoid collapsed into six digits, which over 20,000 draws produced only
+// 1,938 distinct numbers and landed on `+5926777777` 40.4% of the time.
+// `User.phone` is unique, so one leftover row from a crashed run took the whole
+// FILE down, behind an afterAll TypeError that hid the real cause.
+const probePhone = `+5926${String(Math.floor(Math.random() * 900000) + 100000)}${String(Date.now()).slice(-4)}`;
 
 interface DelegateCall { readonly model: string; readonly where: unknown }
 
@@ -91,6 +98,7 @@ const entityOf = (route: string): AdminRouteEntity => {
 };
 
 beforeAll(async () => {
+  await prisma.user.deleteMany({ where: { phone: probePhone } }).catch(() => {});
   await prisma.docType.create({
     data: {
       code: DOC_CODE, countryCode: 'ZZ', legacyCode: `selector_${RUN}`, displayName: 'Selector probe',
@@ -100,7 +108,7 @@ beforeAll(async () => {
   });
   await prisma.platformConfig.create({ data: { key: CONFIG_KEY, value: { probe: true } } });
   const user = await prisma.user.create({
-    data: { phone: `+5926${RUN.slice(0, 6).replace(/[a-z]/g, '7')}`, firstName: 'Selector', lastName: 'Probe', roles: ['CUSTOMER'], activeRole: 'CUSTOMER' },
+    data: { phone: probePhone, firstName: 'Selector', lastName: 'Probe', roles: ['CUSTOMER'], activeRole: 'CUSTOMER' },
   });
   userId = user.id;
 
@@ -283,5 +291,95 @@ describe('[C-01] a real privileged action records what it changed', () => {
     expect(changes.before).not.toBe(changes.after);
     expect(changes.changed?.['lossProtectionSuspendedAt']?.from, 'was not suspended before').toBeNull();
     expect(changes.changed?.['lossProtectionSuspendedAt']?.to, 'is suspended after').toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [independent review] THE THINGS THE FIRST VERSION CHANGED AND DID NOT TEST.
+//
+// The review's sharpest point was not a defect in the fix — it was that three
+// of its behaviours had no test at all. Replacing the reason override with
+// 'MUTANT-REASON-NOBODY-CHECKS' left 57 of 57 suites passing. A change nothing
+// can detect is a change nobody can rely on.
+// ---------------------------------------------------------------------------
+
+describe('[review] the audit row records the reason the platform VALIDATED', () => {
+  it('the header wins over a body that says something else', async () => {
+    // ADM-006 grades the HEADER (`admin-authority.ts`: "The header wins: a route
+    // whose body happens to contain the word is not thereby explained"). An
+    // earlier version of this branch passed `body.reason` as an override, so the
+    // reason validated and the reason recorded could differ — on ONE of two
+    // adjacent routes, which is worse than either rule applied consistently.
+    const headerReason = 'HEADER-REASON collusion finding confirmed, case 42';
+    const res = await injectWithApproval(app, {
+      method: 'PUT' as never,
+      url: `/api/v1/admin/cash-rules/rlp/movers/${userId}/reinstate`,
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-swift-reason': headerReason },
+      payload: { note: 'BODY-NOTE something entirely different' } as Record<string, unknown>,
+    });
+    expect(res.statusCode, res.body).toBe(200);
+
+    const row = await auditRowFor(userId);
+    expect((row!.changes as { reason?: string }).reason, 'the recorded reason is the validated one').toBe(headerReason);
+  });
+});
+
+describe('[review] a colliding audit fact loses the fact, never the action', () => {
+  it('drops the canonical key, counts it, and still writes the row', async () => {
+    const readCollision = async (key: string) => {
+      const m = await adminAuditCounter.get();
+      return m.values.find((v) => v.labels['writer'] === `extra_collision:${key}`)?.value ?? 0;
+    };
+    const before = await readCollision('reason');
+
+    // The shape the type cannot stop: a variable with a string index signature.
+    const smuggled: Record<string, string> = { reason: 'SMUGGLED', harmless: 'kept' };
+    const row = adminAuditRow(
+      { method: 'PUT', url: '/x', params: { id: 'o1' }, headers: {} } as never,
+      userId,
+      { routeUrl: '/x', reason: null, before: ABSENT, after: ABSENT, entityDeclared: false, extra: smuggled },
+    );
+
+    const changes = row['changes'] as Record<string, unknown>;
+    expect(changes['reason'], 'the canonical field is not overwritten').toBeUndefined();
+    expect(changes['harmless'], 'the honest fact survives').toBe('kept');
+    expect(await readCollision('reason'), 'and the drop is a number, not a silence').toBe(before + 1);
+    // The row EXISTS. Throwing here used to 500 the whole privileged action —
+    // which is the defect (C-01b) this branch was written to remove.
+    expect(row['action']).toContain('ADMIN PUT');
+  });
+});
+
+describe('[review] every snapshot exit is counted, not only the interesting ones', () => {
+  const outcome = async (name: string, model: string) => {
+    const m = await adminAuditSnapshotCounter.get();
+    return m.values.find((v) => v.labels['outcome'] === name && v.labels['model'] === model)?.value ?? 0;
+  };
+
+  it('a route with no subject in its params reports no_id', async () => {
+    const before = await outcome('no_id', 'user');
+    expect(await snapshot(prisma, entityOf('PUT /users/:id/suspend'), undefined)).toEqual(ABSENT);
+    expect(await outcome('no_id', 'user')).toBe(before + 1);
+  });
+
+  it('a declared model that does not exist on the client reports no_delegate', async () => {
+    // What a renamed or mistyped `model` produces — the same shape as C-01, and
+    // previously an ABSENT that moved no counter at all.
+    const typo = { model: 'docTypes', uniqueField: 'code', fields: [] } as unknown as AdminRouteEntity;
+    const before = await outcome('no_delegate', 'docTypes');
+    expect(await snapshot(prisma, typo, DOC_CODE)).toEqual(ABSENT);
+    expect(await outcome('no_delegate', 'docTypes')).toBe(before + 1);
+  });
+});
+
+describe('[review] the subject id comes from the entity’s own route parameter', () => {
+  it('a :code route records its subject without the route passing it by hand', () => {
+    const params = { code: 'GY.national_id' };
+    expect(auditSubjectId(params, entityOf('PUT /verification/doc-types/:code/external-processing'))).toBe('GY.national_id');
+    // …and a :userId route still resolves through its own declared parameter.
+    expect(auditSubjectId({ userId: 'u1' }, entityOf('PUT /cash-rules/rlp/movers/:userId/suspend'))).toBe('u1');
+    // A route with no declared entity keeps the old fallback list.
+    expect(auditSubjectId({ id: 'x1' }, undefined)).toBe('x1');
+    expect(auditSubjectId({}, undefined)).toBe('-');
   });
 });
