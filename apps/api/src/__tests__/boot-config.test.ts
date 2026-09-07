@@ -14,8 +14,10 @@ const good: Record<string, string | undefined> = {
   NOTIFICATION_PROVIDER: 'twilio',
   PUSH_PROVIDER: 'expo',
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
-  KYC_PROVIDER: 'didit',
-  DIDIT_API_KEY: 'didit-live-key',
+  // [NO-AI] `manual` is the only production provider now: on-shore human
+  // review, which approves nothing automatically. The model-backed adapters
+  // that needed API keys are deleted.
+  KYC_PROVIDER: 'manual',
   PAYMENT_PROVIDER: 'stripe',
   STRIPE_SECRET_KEY: 'sk_live_boot_config_test',
   MMG_DRIVER: 'live',
@@ -63,8 +65,12 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
   it('refuses sandbox or unconfigured KYC in production', () => {
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: undefined })).toThrow(/KYC_PROVIDER/);
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'sandbox' })).toThrow(/KYC_PROVIDER/);
-    expect(() => assertSafeBootConfig({ ...good, DIDIT_API_KEY: undefined })).toThrow(/DIDIT_API_KEY/);
-    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'idanalyzer', ID_ANALYZER_API_KEY: undefined })).toThrow(/ID_ANALYZER_API_KEY/);
+    // [NO-AI] A deployment still naming a removed provider must fail LOUDLY at
+    // boot — never fall through to something else — and the error must say the
+    // provider no longer exists rather than leaving an operator guessing.
+    for (const removed of ['didit', 'idanalyzer']) {
+      expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: removed }), removed).toThrow(/was removed with the AI runtime/);
+    }
   });
 
   it('refuses sandbox/test subscription card processors in production', () => {

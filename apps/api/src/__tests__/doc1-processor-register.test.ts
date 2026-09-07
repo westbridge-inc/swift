@@ -109,11 +109,16 @@ describe('[DGP-1 · DOC-1 §2] the send gate is fail-closed', () => {
   });
 
   it('test_external_send_refused_without_transfer_basis: a registered processor with no configured contract reference is DORMANT and refused; with one it passes', () => {
-    expect(processorStatus(processorByRef('DIDIT')!, {})).toBe('DORMANT_NO_CONTRACT');
-    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_DIDIT, {}))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_NO_TRANSFER_BASIS' });
-    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_DIDIT, { PROCESSOR_CONTRACT_DIDIT: '   ' }))).toMatchObject({ code: 'PROCESSOR_NO_TRANSFER_BASIS' });
-    expect(processorStatus(processorByRef('DIDIT')!, { PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' })).toBe('ACTIVE');
-    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_DIDIT, { PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' }))).toBeNull();
+    // [NO-AI] This used DIDIT as its example. Didit is deleted, but the RULE is
+    // not — a personal payload may not leave the country without a recorded
+    // transfer basis. OBJECT_STORE is now the processor that carries one, so
+    // the rule is tested through it rather than retired with its old example.
+    const EXTERNAL_STORE = { name: 'object-store', version: '1', external: true, processorRef: 'OBJECT_STORE' } as const;
+    expect(processorStatus(processorByRef('OBJECT_STORE')!, {})).toBe('DORMANT_NO_CONTRACT');
+    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_STORE, {}))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_NO_TRANSFER_BASIS' });
+    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_STORE, { PROCESSOR_CONTRACT_OBJECT_STORE: '   ' }))).toMatchObject({ code: 'PROCESSOR_NO_TRANSFER_BASIS' });
+    expect(processorStatus(processorByRef('OBJECT_STORE')!, { PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' })).toBe('ACTIVE');
+    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_STORE, { PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' }))).toBeNull();
   });
 
   it('test_local_engine_never_gated: an in-process engine passes regardless of the registry row or env', () => {
@@ -122,11 +127,15 @@ describe('[DGP-1 · DOC-1 §2] the send gate is fail-closed', () => {
   });
 
   it('the admin view resolves status from env and never exposes the reference value', () => {
-    const view = processorRegisterView({ PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' });
-    const didit = view.find((p) => p.ref === 'DIDIT')!;
-    expect(didit.status).toBe('ACTIVE'); expect(didit.contractConfigured).toBe(true);
-    expect(JSON.stringify(view)).not.toContain('DPA-2026-001');
-    expect(view.find((p) => p.ref === 'ID_ANALYZER')!.status).toBe('DORMANT_NO_CONTRACT');
+    const view = processorRegisterView({ PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' });
+    const store = view.find((p) => p.ref === 'OBJECT_STORE')!;
+    expect(store.status).toBe('ACTIVE'); expect(store.contractConfigured).toBe(true);
+    expect(JSON.stringify(view), 'the reference VALUE never reaches the view').not.toContain('DPA-2026-001');
     expect(view.find((p) => p.ref === 'MMG')!.status).toBe('ACTIVE');
+    // [NO-AI] And the two that used to receive identity documents are gone from
+    // the register entirely — not merely dormant.
+    for (const gone of ['DIDIT', 'ID_ANALYZER']) {
+      expect(view.find((p) => p.ref === gone), gone).toBeUndefined();
+    }
   });
 });

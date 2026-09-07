@@ -65,6 +65,21 @@ const PUBLISHED: Record<
     driver_agreement: '923d398238ff81c5b554673871eab012999b77a27742a2812afa965e5ffc7ead',
     vendor_agreement: '5023bc04a37935f4de6e873f400c8e8b35443164d46e7a951c0f72bbb93946d1',
   },
+  // [NO-AI · section D] The model-backed identity providers are gone too, so two
+  // more sentences became untrue: the Privacy Policy named "Didit or ID Analyzer"
+  // as the processor receiving your document and selfie, and said the two were
+  // matched to confirm they belong to the same person. Neither happens. It now
+  // says a trained person reviews the document, no automated system reads,
+  // scores or face-matches it, and it is not sent to any outside service.
+  //
+  // Its own version rather than an edit of 2026-09-07: that stamp may publish
+  // first, and words never change under a stamp someone has already consented to.
+  '2026-09-08': {
+    terms: '9e1e49f48dcd881a4f9b96152af56846c96c0c7a27d0b1457fb8dabedcc22908',
+    privacy: 'f71fb560ce6989a387ec5b95c0f2760164f0211bf68391b06bc226e73b7a0414',
+    driver_agreement: 'eda8bad84f9ef2054b6944754f6f51737e5113b23d465f7d49fb1c402f50c8f8',
+    vendor_agreement: '702a7969ddaa75eb786cf6266be2072284f736cb1614f27c35b9e987ef7c185f',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

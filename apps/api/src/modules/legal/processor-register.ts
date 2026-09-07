@@ -56,22 +56,16 @@ export const CONTRACT_GATED_PAYLOADS: ReadonlySet<PayloadClass> = new Set([
 ]);
 
 export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
-  {
-    ref: 'DIDIT', party: 'Didit', service: 'Identity verification: ID document image, selfie, liveness, OCR',
-    providerDirs: ['kyc'], hosts: ['verification.didit.me', 'didit.me'],
-    payload: ['PERSONAL_DOC_IMAGE', 'BIOMETRIC', 'IDENTITY_FIELDS'], lawfulBasis: 'LEGAL_OBLIGATION',
-    country: 'vendor-hosted (EU/US)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES',
-    contractEnv: 'PROCESSOR_CONTRACT_DIDIT',
-    note: 'KYC_PROVIDER=didit. Biometric operations additionally need FD-D5 (FEATURE_BIOMETRIC_FACE_MATCH).',
-  },
-  {
-    ref: 'ID_ANALYZER', party: 'ID Analyzer', service: 'Document OCR + biometric match',
-    providerDirs: ['kyc'], hosts: ['api2.idanalyzer.com', 'idanalyzer.com'],
-    payload: ['PERSONAL_DOC_IMAGE', 'BIOMETRIC', 'IDENTITY_FIELDS'], lawfulBasis: 'LEGAL_OBLIGATION',
-    country: 'vendor-hosted (US)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES',
-    contractEnv: 'PROCESSOR_CONTRACT_ID_ANALYZER',
-    note: 'KYC_PROVIDER=id-analyzer. Same gate as Didit.',
-  },
+  // [NO-AI · owner directive 2026-09-07] DIDIT and ID_ANALYZER are GONE.
+  // They were the only processors that ever received a `PERSONAL_DOC_IMAGE` or
+  // a `BIOMETRIC` payload, and the only ones that sent an identity document out
+  // of the country. Both adapters are deleted; production runs `manual`, where
+  // an encrypted upload stays on Swift's own infrastructure, nothing reads it,
+  // and a human reviewer keys the fields and decides.
+  //
+  // The register is not merely shortened: `doc1-processor-register.test.ts` now
+  // asserts that NO entry receives an identity image abroad, so re-adding one
+  // is a test failure rather than a line nobody notices.
   {
     ref: 'OBJECT_STORE', party: 'Cloudflare R2 / AWS S3 (S3-compatible endpoint)', service: 'Object storage for uploaded documents',
     providerDirs: ['storage'], hosts: ['r2.cloudflarestorage.com', 'amazonaws.com'],
@@ -159,6 +153,12 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
 /** Provider directories that are not a processor, with the reason the census accepts. */
 export const NON_PROCESSOR_DIRS: Readonly<Record<string, string>> = {
   prescreen: 'in-process heuristics (HeuristicAdPreScreenProvider); no network call',
+  // [NO-AI · owner directive 2026-09-07] The KYC adapters that sent identity
+  // documents to Didit and ID Analyzer are deleted. What remains is
+  // `ManualReviewKycProvider`: it makes no network call, approves nothing, and
+  // every submission waits for a human reviewer. A directory with no processor
+  // must SAY why — an empty entry and a removed one look identical otherwise.
+  kyc: 'on-shore manual review (ManualReviewKycProvider); no network call, no document leaves Swift infrastructure',
 };
 
 /** Outbound host literals in source that are not processors, with the reason. */

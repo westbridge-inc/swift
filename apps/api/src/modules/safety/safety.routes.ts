@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { SosService, LIVE_SOS_STATUSES } from './sos.service';
 import { GuardianService } from './guardian.service';
-import { LivenessService } from './liveness.service';
+import { LivenessService, livenessAvailable } from './liveness.service';
 import { IncidentService, DECISION_CODES } from './incident.service';
 import { EvidenceService } from './evidence.service';
 import { EmergencyContactService } from './emergency-contact.service';
@@ -374,6 +374,15 @@ export async function safetyRoutes(app: FastifyInstance) {
   const liveness = new LivenessService(app.prisma, app.io);
 
   app.post('/liveness-check', auth, async (request) => {
+    // [NO-AI] Refused BEFORE the upload, deliberately. Face matching was removed
+    // with the model runtime, so this check cannot run — and collecting a
+    // selfie for a check that will never happen is biometric data gathered for
+    // no purpose, which the DPA 2023 minimisation duty forbids and which no
+    // later deletion undoes.
+    if (!livenessAvailable()) {
+      throw new AppError(503, 'LIVENESS_UNAVAILABLE',
+        'Identity checks by face match are not available: Swift performs no face matching. Nothing was uploaded or recorded.');
+    }
     const { profile } = z.object({ profile: z.enum(['DRIVER', 'RIDER']).default('DRIVER') }).parse(request.query ?? {});
     const file = await request.file();
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach a selfie image');

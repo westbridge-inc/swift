@@ -56,13 +56,6 @@ async function makeDriver(extra: Record<string, unknown> = {}) {
   return { ...u, driver };
 }
 
-async function makeRider(extra: Record<string, unknown> = {}) {
-  const u = await makeUser(['MOVER']);
-  const rider = await app.prisma.rider.create({
-    data: { userId: u.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', isOnline: true, isAvailable: true, locationSessionId: syntheticLocationOwner('live-mid'), ...extra },
-  });
-  return { ...u, rider };
-}
 
 async function makeRide(driverId: string, customerId: string, status: string) {
   const order = await app.prisma.order.create({
@@ -120,47 +113,31 @@ describe('§7.2 random mid-shift checks', () => {
     expect((await driverRow(driver.id)).isOnline).toBe(true); // even an expired prompt is not enforced while off
   });
 
-  it('prompts idle online movers (never mid-trip, never locked) and stamps a DB deadline', async () => {
+  // [NO-AI · owner directive 2026-09-07] The two tests that stood here drove the
+  // mid-shift PROMPT and the ENFORCEMENT that follows a missed one. Both are
+  // unreachable now: a mid-shift check is a face match, and face matching was
+  // removed with the model runtime.
+  //
+  // Leaving them driving `LIVENESS_REQUIRED=1` would have tested a path that
+  // cannot complete — and, worse, the sweep would have prompted a mover to
+  // "take the selfie check to stay online" and then taken them offline for
+  // missing a check Swift itself had removed. Penalising someone for a
+  // capability we withdrew is the one outcome worth guarding against, so that
+  // is what is tested instead.
+  it('[NO-AI] the sweep does not prompt, and does not enforce, a check that cannot run', async () => {
     process.env['LIVENESS_REQUIRED'] = '1';
-    process.env['LIVENESS_MIDSHIFT_PER_WEEK'] = '10000000'; // p = 1: selection is deterministic
+    process.env['LIVENESS_MIDSHIFT_PER_WEEK'] = '10000000'; // p = 1: selection would be certain
     try {
       const idle = await makeDriver();
-      const busy = await makeDriver({ currentRideId: 'ride-busy' });
-      const locked = await makeDriver({ livenessLockedAt: new Date() });
-      await svc().midshiftSweep(new Date(), 300_000);
+      const overdue = await makeDriver({ livenessPromptDeadlineAt: new Date(Date.now() - 60_000) });
 
-      expect((await driverRow(idle.driver.id)).livenessPromptDeadlineAt).not.toBeNull();
-      expect((await driverRow(busy.driver.id)).livenessPromptDeadlineAt).toBeNull(); // §7.2: never while a trip is in progress
-      expect((await driverRow(locked.driver.id)).livenessPromptDeadlineAt).toBeNull();
-      const prompt = await app.prisma.notification.findFirst({ where: { userId: idle.userId, type: 'SAFETY', title: 'Safety check-in' } });
-      expect(prompt).not.toBeNull();
+      expect(await svc().midshiftSweep(new Date(), 300_000)).toEqual({ prompted: 0, enforced: 0 });
 
-      // A passing check ANSWERS the prompt — deadline cleared.
-      await svc().check({ userId: idle.userId, profile: 'DRIVER', selfieUrl: 'https://cdn.test/liveness/auto-approve.jpg' });
-      expect((await driverRow(idle.driver.id)).livenessPromptDeadlineAt).toBeNull();
-    } finally {
-      delete process.env['LIVENESS_REQUIRED'];
-      delete process.env['LIVENESS_MIDSHIFT_PER_WEEK'];
-    }
-  });
-
-  it('a missed deadline forces the mover offline until a fresh PASS (rider side)', async () => {
-    process.env['LIVENESS_REQUIRED'] = '1';
-    process.env['LIVENESS_MIDSHIFT_PER_WEEK'] = '0.0000001'; // selection ~never; this tick only enforces
-    try {
-      const r = await makeRider({
-        lastLivenessPassAt: new Date(), // was fresh — missing the prompt still voids it
-        livenessPromptDeadlineAt: new Date(Date.now() - 60_000),
-      });
-      const res = await svc().midshiftSweep(new Date(), 300_000);
-      expect(res.enforced).toBeGreaterThanOrEqual(1);
-      const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.rider.id } });
-      expect(after.isOnline).toBe(false);
-      expect(after.isAvailable).toBe(false);
-      expect(after.lastLivenessPassAt).toBeNull(); // must PASS again to return
-      expect(after.livenessPromptDeadlineAt).toBeNull();
-      const note = await app.prisma.notification.findFirst({ where: { userId: r.userId, title: 'Identity check missed' } });
-      expect(note).not.toBeNull();
+      expect((await driverRow(idle.driver.id)).livenessPromptDeadlineAt, 'nobody is asked for a selfie').toBeNull();
+      expect(await app.prisma.notification.count({ where: { userId: idle.userId, title: 'Safety check-in' } })).toBe(0);
+      // The one that matters: a mover with an EXPIRED prompt is not taken
+      // offline for missing a check that no longer exists.
+      expect((await driverRow(overdue.driver.id)).isOnline, 'nobody is penalised for a withdrawn capability').toBe(true);
     } finally {
       delete process.env['LIVENESS_REQUIRED'];
       delete process.env['LIVENESS_MIDSHIFT_PER_WEEK'];
