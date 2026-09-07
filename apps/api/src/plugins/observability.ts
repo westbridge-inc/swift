@@ -203,6 +203,25 @@ export const adminAuditCounter = new client.Counter({
   registers: [registry],
 });
 
+/**
+ * [DOC-INV-48 · F-103-02/03] Work that was NOT advertised, and claims refused
+ * because the ORDER is held rather than because the mover did anything.
+ *
+ * `stage=offer` counts a dispatch pass that declined to offer a held order —
+ * it should be small and non-zero only while disputes are open.
+ * `stage=accept` counts a claim refused by an order-level hold: every one of
+ * these used to be recorded as a rider declining, which excluded that rider
+ * from the cascade and sent the same impossible job to the next one. It should
+ * trend to zero as the offer stop does its work; a rising `accept` with a flat
+ * `offer` means an entrance is still advertising held work.
+ */
+export const dispatchHeldCounter = new client.Counter({
+  name: 'swift_dispatch_held_total',
+  help: 'Dispatch actions withheld because the order is held (stage=offer|accept, reason)',
+  labelNames: ['stage', 'reason'] as const,
+  registers: [registry],
+});
+
 /** [A-01 / W-01] Browser (cookie-mode) sessions: cookie_issued, cookie_refreshed, cookie_auth, cookie_cleared,
  *  cookie_rejected_header (a cookie without the client header), cookie_rejected_origin (a cookie from an origin
  *  outside the CORS allowlist), body_tokens_refused. */

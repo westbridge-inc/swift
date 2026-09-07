@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { getTenantId } from '../../plugins/tenant-context';
 import { haversineDistance } from '../../utils/distance';
+import { NOT_MMG_HELD } from '../order/mmg-hold';
 
 /**
  * Earner-facing demand reads (dashboard plan Phase A) — the availability
@@ -109,6 +110,13 @@ export async function riderDemand(
       vendorId: { not: null },
       orderType: { not: 'TAXI' },
       status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
+      // [F-103-02 · F-108-01] A HELD order is not demand — disputed, or simply
+      // not paid for yet. Counting it tells riders to ride toward work that
+      // does not exist, and adds its fee to the money the heat map says is
+      // waiting for them. Canonical filter, parity-tested against the gate's
+      // own predicate. In AND, not spread: it is an `OR`, and so is the hold
+      // window below — spreading both would silently drop one.
+      AND: [NOT_MMG_HELD],
       OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }],
     },
     select: {

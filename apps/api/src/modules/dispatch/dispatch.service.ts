@@ -22,10 +22,11 @@ import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { vehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { log } from '../../utils/logger';
-import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
+import { dispatchSearchesCounter, dispatchTimeToAssign, dispatchHeldCounter } from '../../plugins/observability';
 import { getTenantId } from '../../plugins/tenant-context';
 import { clampDriverFare } from '../../utils/markup';
 import { assertMmgFulfilmentAllowed } from '../order/order.service';
+import { isMmgHeld, mmgFulfilmentHold } from '../order/mmg-hold';
 import { FloatService, riderFloatForOrder } from './float.service';
 import {
   hasTaxiPassengerCustody,
@@ -278,6 +279,49 @@ interface GeoCandidateRow {
   averageRating: number;
   acceptanceRate: number;
   currentOrderId: string | null;
+}
+
+/**
+ * [DOC-INV-48 · F-103-03 · F-108-03] WHY WAS THIS CLAIM REFUSED?
+ *
+ * A typed outcome, not an expanding negative list. My first version asked one
+ * yes/no question against an allowlist of two codes, and Codex showed what that
+ * costs: `ALREADY_TAKEN` fell to the default branch and still marked the LOSER
+ * of a race as having declined. They did not decline — they were beaten to it —
+ * and under a board-grab/handback interleaving that stale marker excludes an
+ * otherwise eligible rider from the reopened order for a full hour.
+ *
+ * Four outcomes, and only ONE of them is the mover's own doing:
+ *
+ *   order-held        nobody may claim it right now (a hold, not a person)
+ *   lost-race         somebody else got there first, or the fare was refused
+ *   mover-ineligible  THIS mover cannot take it; another can
+ *   unknown           we do not know, so we do not charge it to anyone
+ */
+export type ClaimRefusal = 'order-held' | 'lost-race' | 'mover-ineligible' | 'unknown';
+
+const ORDER_HELD_CLAIM_CODES: ReadonlySet<string> = new Set(['MMG_CLAIM_MISMATCH', 'MMG_PAYMENT_PENDING']);
+const LOST_RACE_CLAIM_CODES: ReadonlySet<string> = new Set(['ALREADY_TAKEN', 'RIDER_ASSIGNED', 'DRIVER_ASSIGNED', 'MMG_PRICE_LOCKED']);
+const MOVER_INELIGIBLE_CLAIM_CODES: ReadonlySet<string> = new Set([
+  'MOVER_INACTIVE', 'CAPACITY_EXCEEDED', 'DRIVER_BUSY', 'FLOAT_EXCEEDED', 'STACK_INELIGIBLE', 'SELF_OWN_ORDER',
+]);
+
+export function classifyClaimRefusal(error: unknown): ClaimRefusal {
+  if (!(error instanceof AppError)) return 'unknown';
+  if (ORDER_HELD_CLAIM_CODES.has(error.code)) return 'order-held';
+  if (LOST_RACE_CLAIM_CODES.has(error.code)) return 'lost-race';
+  if (MOVER_INELIGIBLE_CLAIM_CODES.has(error.code)) return 'mover-ineligible';
+  return 'unknown';
+}
+
+/**
+ * [F-108-03] Only explicit mover-ineligibility may put a mover in the declined
+ * set and restart the cascade. Everything else — a hold, a lost race, an
+ * unknown failure — is a SYSTEM outcome, recorded as such so that acceptance
+ * rate and fairness metrics stay truthful.
+ */
+export function claimRefusalMarksTheMover(outcome: ClaimRefusal): boolean {
+  return outcome === 'mover-ineligible';
 }
 
 export class DispatchService {
@@ -860,6 +904,11 @@ export class DispatchService {
           fulfillment: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
           customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
           subtotalBase: true, paymentMethod: true, paymentStatus: true, tenantId: true, readyAt: true, foodAgeHeldAt: true, foodAgeWaivedAt: true,
+          // [F-103-02] The dispute is authority, not decoration: an order held by a
+          // payment disagreement is not offerable, and this read is where every
+          // enqueue path — queue worker, vendor retry, admin retry, handback,
+          // fulfillment-mode switch, safety redispatch — converges.
+          mmgClaimMismatchAt: true,
           // [WS-6.0] The cash-math triple. A mover deciding on a CASH job is
           // deciding how much of their OWN float to commit, and the card used
           // to show only what they earn. Every number is a stored column, not
@@ -899,6 +948,29 @@ export class DispatchService {
           await retireTooOldOrder({ prisma: this.prisma, redis: this.redis, io: this.io, notifications: this.notifications }, order, age.ageMinutes, limit);
           return { exhausted: true };
         }
+      }
+
+      // [F-103-02 · F-108-01] Held for a person — either because the two
+      // parties disagree about the payment, or because the payment has not
+      // landed at all. The assignment gate already refuses both; refusing at
+      // ASSIGNMENT means the offer was made, a rider acted on it, and the
+      // refusal arrived as though the rider had done something wrong. An order
+      // nobody may take is not advertised at all.
+      //
+      // My first pass covered only the dispute and left the far commoner
+      // unpaid case advertised — Codex found it, and found the admin
+      // CUSTOMER_DID_NOT_PAY transition that manufactures exactly that row.
+      //
+      // PLACED AFTER THE FOOD-AGE CUTOFF, deliberately. My first attempt put it
+      // above, and `rescue.test.ts` caught what that costs: an order too old to
+      // deliver AND unpaid returned here and was never RETIRED, so the customer
+      // was never told their order had been closed. Being unfulfillable is not
+      // a reason to leave someone waiting in silence — the cutoff CLOSES the
+      // order and speaks to them, and the hold only stops it being OFFERED.
+      const hold = mmgFulfilmentHold(order);
+      if (hold) {
+        dispatchHeldCounter.labels('offer', hold).inc();
+        return {};
       }
 
       // One live offer at a time
@@ -1180,11 +1252,18 @@ export class DispatchService {
         pickupAddress: true, deliveryAddress: true, pickupLat: true, pickupLng: true,
         totalAmount: true, subtotalBase: true, serviceFee: true, taxAmount: true, discount: true,
         status: true, riderId: true, driverId: true, fulfillment: true, orderType: true,
+        // [F-103-02 · F-108-01] A card for a HELD order recovers NOTHING — the
+        // same reason an already-claimed order recovers nothing: the only
+        // ending is an accept that cannot succeed. `paymentStatus` is projected
+        // here for the first time; without it this read could not evaluate the
+        // payment-first half of the hold at all.
+        mmgClaimMismatchAt: true, paymentStatus: true,
         vendor: { select: { name: true } },
         items: { select: { quantity: true } },
       },
     });
     if (!order) return null;
+    if (isMmgHeld(order)) return null;
     // [REPORT-014 F-014-09] The Redis pair is a routing cache; PostgreSQL is
     // the assignment authority. A board/direct grab can commit a winner while
     // this pair lingers — resurrecting the card then invites an accept that
@@ -1527,6 +1606,31 @@ export class DispatchService {
       if (pool === 'RIDER') await this.settleRescueIncentive(orderId, mover.id);
       return claimed;
     } catch (error) {
+      // [F-103-03] WHOSE FAULT WAS THIS?
+      //
+      // The catch was code-agnostic: EVERY rejection put the mover in the
+      // declined set and restarted the cascade. So when the claim was refused
+      // because THE ORDER was held — a disputed MMG claim, a payment that has
+      // not landed — the rider who did exactly the right thing lost the card,
+      // was recorded as having declined, was excluded from the rest of the
+      // cascade, and the same impossible job went straight to the next rider.
+      // Codex captured it:
+      //
+      //   ACCEPT {"thrown":{"statusCode":409,"code":"MMG_CLAIM_MISMATCH"},
+      //           "sideEffects":[["sadd","dispatch:declined:order-1","rider-1"],
+      //                          ["redispatch","order-1"]]}
+      //
+      // Two different facts, now told apart: "this mover cannot take it"
+      // (someone else won, capacity, float, inactive) keeps the old behaviour,
+      // because another mover still can. "The order cannot be taken by anyone"
+      // marks nobody and cascades to nobody — there is no one to give it to.
+      const outcome = classifyClaimRefusal(error);
+      if (!claimRefusalMarksTheMover(outcome)) {
+        // [F-108-03] Recorded as a SYSTEM outcome, separately from a decline or
+        // an expiry, so fairness metrics and acceptance rate stay truthful.
+        dispatchHeldCounter.labels('accept', `${outcome}:${error instanceof AppError ? error.code : 'INVARIANT'}`).inc();
+        throw error;
+      }
       await this.redis.sadd(declinedKey(orderId), mover.id).catch(() => {});
       await this.redis.expire(declinedKey(orderId), 3600).catch(() => {});
       await this.dispatchOrder(orderId).catch(() => {});

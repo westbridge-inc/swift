@@ -20,6 +20,7 @@ import { SubscriptionService } from '../subscription/subscription.service';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { AgentService } from '../agent/agent.service';
 import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
+import { mmgFulfilmentHold } from '../order/mmg-hold';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
@@ -4745,14 +4746,26 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/orders/:id/payment-claim/resolve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = z.object({ resolution: z.enum(['CUSTOMER_PAID', 'CUSTOMER_DID_NOT_PAY']), note: z.string().min(3).max(500) }).parse(request.body);
-    const order = await app.prisma.order.findUnique({ where: { id }, select: { id: true, mmgClaimMismatchAt: true, paymentStatus: true } });
+    const order = await app.prisma.order.findUnique({ where: { id }, select: { id: true, mmgClaimMismatchAt: true, paymentStatus: true, status: true, orderType: true, paymentMethod: true } });
     if (!order) throw new NotFoundError('Order', id);
+    // [F-108-01] CUSTOMER_DID_NOT_PAY returns the order to PENDING. It used to
+    // leave `status` exactly where the dispute found it — ACCEPTED, PREPARING,
+    // READY_FOR_PICKUP — which is the offerable-but-unclaimable row Codex
+    // reproduced: discovery says go, the money authority says stop, and the
+    // first rider to act is refused. Clearing the dispute does not make the
+    // order fulfillable; it makes it UNPAID, which is where an unpaid order
+    // belongs. The hold below is the same one every entrance now reads.
+    const unpaid = body.resolution === 'CUSTOMER_DID_NOT_PAY';
     const updated = await app.prisma.order.update({ where: { id }, data: {
       mmgClaimMismatchAt: null,
-      ...(body.resolution === 'CUSTOMER_DID_NOT_PAY' ? { paymentStatus: 'PENDING', customerClaimedPaidAt: null } : { customerClaimedPaidAt: new Date() }),
+      ...(unpaid ? { paymentStatus: 'PENDING', customerClaimedPaidAt: null } : { customerClaimedPaidAt: new Date() }),
     } });
-    await audit(request.user.userId, 'MMG_CLAIM_MISMATCH_RESOLVED', 'Order', id, { resolution: body.resolution, note: body.note, wasStatus: order.paymentStatus }, request);
-    return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, mismatch: false } };
+    const stillHeld = mmgFulfilmentHold({ paymentMethod: updated.paymentMethod, paymentStatus: updated.paymentStatus, orderType: updated.orderType, mmgClaimMismatchAt: updated.mmgClaimMismatchAt });
+    await audit(request.user.userId, 'MMG_CLAIM_MISMATCH_RESOLVED', 'Order', id, { resolution: body.resolution, note: body.note, wasStatus: order.paymentStatus, hold: stillHeld ?? 'none' }, request);
+    // The row is coherent because every discovery surface reads the same hold:
+    // an order back at PENDING is not offered, not on the board, not counted in
+    // demand, and no live card survives for it.
+    return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, mismatch: false, hold: stillHeld } };
   });
 
   app.put('/verification/:id/revoke', { preHandler: [adminGuard] }, async (request) => {

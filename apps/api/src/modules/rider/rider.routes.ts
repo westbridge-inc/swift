@@ -28,6 +28,7 @@ import { assertNotSafetySuspended } from '../safety/incident.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, MMG_CLAIM_MISMATCH_BLOCK, MMG_MISMATCH_UNKNOWN_BLOCK } from '../order/handover-authority';
+import { NOT_MMG_HELD } from '../order/mmg-hold';
 import { handoverBlockCounter } from '../../plugins/observability';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { haversineDistance } from '../../utils/distance';
@@ -980,13 +981,23 @@ export async function riderRoutes(app: FastifyInstance) {
         // [TA-S0-001 hold] Held for a person (too old, already paid by MMG):
         // not open work until an operator decides.
         foodAgeHeldAt: null,
+        // [F-103-02 · F-108-01] Held for a person for the other reasons: the
+        // payment is disputed, or it has not landed at all. Both refuse at the
+        // claim, so advertising either sends riders to collect work they will
+        // be refused at — and, before F-103-03, be marked as having declined.
+        // This is the CANONICAL filter (mmg-hold.ts), parity-tested against the
+        // predicate the gate uses; a hand-written half of it is what shipped
+        // last time. It goes in AND, NOT spread: it is expressed as an `OR`,
+        // and `notHeldFilter()` below spreads an `OR` too — spreading both
+        // would leave one of them silently overwritten by the other, which is
+        // the exact failure mode this whole invariant exists to catch.
         // LIFECYCLE_V2: a held courier job isn't offerable yet.
         ...notHeldFilter(),
         // [F-0026] A self-delivering vendor fulfils this one itself — it is not
         // open work, and advertising it sends riders to collect food that is
         // already out for delivery. In AND because notHeldFilter already spread
         // an OR key above.
-        AND: [notSelfDeliveredFilter()],
+        AND: [notSelfDeliveredFilter(), NOT_MMG_HELD],
       },
       include: {
         vendor: {
