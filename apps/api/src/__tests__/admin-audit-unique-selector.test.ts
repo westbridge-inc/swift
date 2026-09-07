@@ -4,6 +4,7 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { ADMIN_ROUTE_AUTHORITY, type AdminRouteEntity } from '../modules/admin/admin-authority';
 import { snapshot } from '../modules/admin/audit-change';
+import { adminAuditSnapshotCounter } from '../plugins/observability';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -200,17 +201,48 @@ describe('[C-01] the audit snapshot selects on the model column, not the route p
     expect(result.exists).toBe(true);
   });
 
-  it('every declared entity selects on a column its model actually has', () => {
-    // The runtime rule, applied to the whole authority table — the census's
-    // question, asked of the code that answers it rather than of the table.
-    const problems: string[] = [];
-    for (const [route, authority] of Object.entries(ADMIN_ROUTE_AUTHORITY)) {
-      const entity = authority.entity;
-      if (!entity) continue;
-      const field = entity.uniqueField ?? 'id';
-      if (!(['id', 'key', 'code'] as const).includes(field)) problems.push(`${route}: '${field}' is outside the allowed selector set`);
-    }
-    expect(problems).toEqual([]);
+  // NOTE ON A TEST I DELETED. This block used to iterate the authority table
+  // asserting that every `uniqueField` was inside the allowed set. `uniqueField`
+  // is TYPED to that set, so the assertion could never fail — a test that only
+  // restates the compiler. What actually needed proving is the runtime guard
+  // that exists for a hand-edited or JSON-shaped table, and the four outcomes
+  // the counter reports. Those are below, and they bite.
+
+  it('a selector outside the allowed set is refused, counted, and never reaches Prisma', async () => {
+    const calls: DelegateCall[] = [];
+    const smuggled = { model: 'user', uniqueField: 'phone', fields: ['status'] } as unknown as AdminRouteEntity;
+
+    const result = await snapshot(recording(prisma, calls), smuggled, userId);
+
+    expect(calls, 'the database is never asked with a selector we do not vouch for').toHaveLength(0);
+    expect(result).toEqual({ digest: '', fields: {}, exists: false });
+  });
+
+  it('reports the four outcomes it can have, so a swallowed read is a number rather than a silence', async () => {
+    const readOutcome = async (outcome: string, model: string) => {
+      const metric = await adminAuditSnapshotCounter.get();
+      return metric.values.find((v) => v.labels['outcome'] === outcome && v.labels['model'] === model)?.value ?? 0;
+    };
+    const docType = entityOf('PUT /verification/doc-types/:code/external-processing');
+
+    const foundBefore = await readOutcome('found', 'docType');
+    await snapshot(prisma, docType, DOC_CODE);
+    expect(await readOutcome('found', 'docType'), 'a row that exists').toBe(foundBefore + 1);
+
+    const missingBefore = await readOutcome('missing', 'docType');
+    await snapshot(prisma, docType, `ZZ.absent_${RUN}`);
+    expect(await readOutcome('missing', 'docType'), 'a row that genuinely is not there').toBe(missingBefore + 1);
+
+    // A read that THREW used to be indistinguishable from a row that was not
+    // there — which is precisely how C-01 survived. Two numbers now.
+    const failedBefore = await readOutcome('failed', 'docType');
+    const exploding = { ...prisma, docType: { findUnique: async () => { throw new Error('connection reset'); } } } as unknown as typeof prisma;
+    expect(await snapshot(exploding, docType, DOC_CODE)).toEqual({ digest: '', fields: {}, exists: false });
+    expect(await readOutcome('failed', 'docType'), 'a refused read is its own number').toBe(failedBefore + 1);
+
+    const selectorBefore = await readOutcome('selector', 'user');
+    await snapshot(prisma, { model: 'user', uniqueField: 'phone', fields: [] } as unknown as AdminRouteEntity, userId);
+    expect(await readOutcome('selector', 'user')).toBe(selectorBefore + 1);
   });
 });
 
