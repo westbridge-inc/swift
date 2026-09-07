@@ -1760,6 +1760,18 @@ model Option {
 // ORDERS
 // ==========================================
 
+/// [OTA-021] One row per day. Checkout advances it INSIDE its transaction, so two
+/// concurrent checkouts can never be handed the same sequence number. Before this the
+/// sequence came from a COUNT taken outside the transaction and uniqueness rested on three
+/// random characters — a ~0.52 chance of an aborted real order at 200 orders on one number.
+model OrderNumberCounter {
+  day       DateTime @id @db.Date
+  next      Int
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("order_number_counter")
+}
+
 model Order {
   id                     String                  @id @default(cuid())
   tenantId               String                  @default("swift-default")

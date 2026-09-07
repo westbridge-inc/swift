@@ -79,6 +79,7 @@ export const PLATFORM_WIDE: Record<string, string> = {
   AuditChainAnchor: 'the daily head of the audit chain — a digest, platform-wide',
   DocStateTransition: 'the document state machine transition table (DOC-1 §5.1) — global rule data, mirrored from doc-state.ts',
   RlpReserveEntry: 'the rider loss protection reserve ledger (DOC-1 §31.4) — the platform\'s own liability line, per country, never a tenant\'s money',
+  OrderNumberCounter: 'the per-day order-number sequence (OTA-021) — one counter for the whole platform per day, holding no tenant data: a monotonic integer and the date it belongs to',
   RequirementSet: 'a market’s checklist for an actor role — country-keyed registry data',
   RequirementItem: 'items of a requirement set',
   ChatMessage: 'messages of participant-addressed rooms (ChatRoom is platform-wide)',

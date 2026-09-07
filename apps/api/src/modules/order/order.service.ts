@@ -993,10 +993,14 @@ export class OrderService {
       ? `New account (${Math.floor(accountAgeHours)}h) + high value + odd hours — call to confirm`
       : null;
 
-    // Order numbers: per-day sequence, one per vendor order
+    // [OTA-021] The per-day sequence is claimed INSIDE the transaction, from
+    // `order_number_counter`, never from a COUNT taken out here. Counting outside the
+    // transaction handed every concurrent checkout the same number, leaving uniqueness to
+    // three random characters over 27,000 possibilities — a ~0.52 chance of collision at
+    // 200 orders on one number, and a collision aborts a real customer's order because
+    // `orders.orderNumber` is UNIQUE.
     const today = new Date(now);
     today.setHours(0, 0, 0, 0);
-    const todayCount = await this.prisma.order.count({ where: { placedAt: { gte: today } } });
 
     // Inventory alerts collected inside the transaction, delivered after it
     // commits (notifications are best-effort and never roll an order back).
@@ -1143,7 +1147,18 @@ export class OrderService {
       }
 
       const created = [];
-      let sequence = todayCount;
+      // One atomic claim per order, inside this transaction: concurrent checkouts
+      // serialise on the day's row and each is handed a number nobody else holds.
+      const nextSequence = async (): Promise<number> => {
+        const [row] = await tx.$queryRaw<Array<{ next: number }>>`
+          INSERT INTO "order_number_counter" ("day", "next")
+          VALUES (${today}::date, 1)
+          ON CONFLICT ("day") DO UPDATE SET "next" = "order_number_counter"."next" + 1, "updatedAt" = now()
+          RETURNING "next"
+        `;
+        if (!row) throw new Error('order number counter returned no row');
+        return row.next;
+      };
 
       // A vendor promotion discounts (and records against) THAT vendor's order;
       // a platform-wide code applies to the whole basket.
@@ -1178,7 +1193,7 @@ export class OrderService {
       }
 
       for (const [index, plan] of plans.entries()) {
-        sequence += 1;
+        const sequence = await nextSequence();
         const planTip = planTipFor(index);
         const planDiscount = discountAlloc[index]!;
         // [ALG-24] The one total — the cart quote computes its total through the same function.
