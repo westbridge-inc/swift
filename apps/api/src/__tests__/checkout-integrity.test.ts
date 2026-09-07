@@ -533,3 +533,30 @@ describe('express surcharge is server-owned [SWIFT-070]', () => {
     expect(order.deliveryFee).toBe(cart.deliveryFee + cart.expressSurcharge);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [OTA-021] The order number's sequence is CLAIMED from `order_number_counter`
+// inside the checkout transaction — never counted outside it.
+// ---------------------------------------------------------------------------
+describe('[OTA-021] checkout claims its order number, it does not count for it', () => {
+  it('test_checkout_sequence_comes_from_the_counter: the number a real checkout issues is the number the counter handed out', async () => {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const before = await app.prisma.orderNumberCounter.findUnique({ where: { day: today } });
+    const c = await makeCustomer();
+    const res = await cartAndCheckout(c, {});
+    expect([200, 201], res.body).toContain(res.statusCode);
+    const after = await app.prisma.orderNumberCounter.findUnique({ where: { day: today } });
+    expect(after, 'checkout must have claimed from the counter').not.toBeNull();
+    const claimed = after!.next;
+    expect(claimed, 'the counter advanced by exactly the orders placed').toBe((before?.next ?? 0) + 1);
+
+    // and the issued number carries that claim, not some other number
+    const d = res.json().data;
+    const orders = d.orders ?? (d.order ? [d.order] : [d]);
+    const numbers: string[] = orders.map((o: { orderNumber: string }) => o.orderNumber);
+    expect(numbers).toHaveLength(1);
+    const seqPart = /^SW-\d{6}-(\d+)[A-Z0-9]{3}$/.exec(numbers[0]!);
+    expect(seqPart, `unexpected order number shape: ${numbers[0]}`).not.toBeNull();
+    expect(Number(seqPart![1]), 'the order number must carry the claimed sequence').toBe(claimed);
+  });
+});
