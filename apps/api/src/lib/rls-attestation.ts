@@ -46,11 +46,18 @@ export const rlsBindEnabled = (env: EnvLike = process.env): boolean => env['TENA
  * `assertTenantWall` too; the census test in `rls-attestation.test.ts` fails
  * if a new `tenant.create` appears in production code without it.
  *
- * This module deliberately does NOT force RLS. Forcing while the app still
- * connects as owner and never sets `app.current_tenant` per request would take
- * the platform from "no wall" to "every query returns zero rows" — an outage
- * dressed as a fix. FORCE lands with the login, together, in one deliberate
- * migration; `forceRlsStatements()` already exists for that day.
+ * This module does not force RLS, and no longer needs to: FORCE ROW LEVEL
+ * SECURITY has since been applied by migration to the walled tables (11
+ * migrations, 81 of them in `20260905000000_review_tenant`). Only the
+ * least-privilege LOGIN is still outstanding, so under the shipped credential
+ * three bypasses (owner, BYPASSRLS, superuser) still mask it.
+ *
+ * That changes what this gate must watch for. The danger used to be one-sided
+ * — a missing wall. It is now two-sided, and the second side is an OUTAGE: the
+ * day the login lands, an app that has not also set `TENANT_RLS_BIND=1` reads
+ * NOTHING, because a FORCE'd table returns zero rows to a connection that never
+ * SET LOCALs `app.current_tenant`. Neither side scales with tenant count, which
+ * is why this gate no longer returns early when there is only one tenant.
  */
 
 /**
@@ -168,15 +175,33 @@ export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
   };
 }
 
+/** [REPORT-111 P0.3] Has this deployment DECLARED that it runs wall-less?
+ *
+ *  Exactly `'1'`. A posture this consequential is not something to infer from
+ *  a truthy string. */
+export const expandPostureAttested = (env: EnvLike = process.env): boolean =>
+  env['TENANT_WALL_EXPAND_ATTESTED'] === '1';
+
 /**
  * REPORT-042 §AI: "block tenant two until contract complete."
+ * REPORT-111 P0.3: "RLS must fail closed even with one active tenant."
  *
- * One tenant with an owner-mode credential is the sanctioned EXPAND state and
- * boots normally — the wall is redundant when there is nothing to isolate it
- * from. The moment a second active tenant exists, application-layer scoping is
- * the ONLY thing standing between two customers' data, and a single missed
- * `where` clause is a cross-tenant breach with no backstop. That is not a
- * posture to discover in production, so it refuses to start.
+ * Three postures, and only one of them boots:
+ *
+ * 1. **The wall binds (`enforced`).** Then the application must bind it too —
+ *    at ANY tenant count, zero and one included. A FORCE'd table returns zero
+ *    rows to a connection that never SET LOCALs `app.current_tenant`, so an
+ *    enforced wall in front of an unbound app is a total outage that used to
+ *    boot green and silent. Tenant count has nothing to do with it.
+ * 2. **No wall, two or more tenants.** Application-layer scoping is then the
+ *    only thing between two customers' data, and one missed `where` clause is
+ *    a breach with no backstop. Refuse — unchanged, and not waivable.
+ * 3. **No wall, at most one tenant.** The sanctioned EXPAND state: there is
+ *    nothing to isolate yet. It may be run deliberately — but it must be SAID.
+ *    A posture nobody declared is indistinguishable from an accident, and
+ *    silence here is exactly how an owner-mode credential survives to the day
+ *    tenant two arrives. `TENANT_WALL_EXPAND_ATTESTED=1` is that declaration,
+ *    and it buys precisely one tenant.
  */
 export function assertTenantWall(
   attestation: RlsAttestation,
@@ -184,9 +209,27 @@ export function assertTenantWall(
   env: EnvLike = process.env,
 ): void {
   if (runtimeMode(env) !== 'production') return;
-  if (activeTenants <= 1) return;
-  if (!attestation.enforced) {
-    const why = attestation.bypasses.map((b) => `  - ${explainBypass(b, attestation.facts)}`).join('\n');
+
+  // POSTURE 1 — the database holds up its end, so the application must hold up
+  // its own. [STA-1 4.1 / DL-2] A wall the app never binds returns NOTHING to a
+  // NOBYPASSRLS login, and a request that never bound its tenant must fail
+  // closed rather than read every tenant and be counted. Neither consequence
+  // waits for a second tenant, so neither does this check.
+  if (attestation.enforced) {
+    const missing = appSideWallGaps(env);
+    if (missing.length === 0) return;
+    throw new Error(
+      `FATAL: the database tenant wall binds this connection (${activeTenants} active tenant(s)), but the application does not hold up its end:\n` +
+        missing.map((m) => `  - ${m}`).join('\n') + '\n' +
+        'A FORCE\'d table returns ZERO ROWS to a connection that never SET LOCALs app.current_tenant — this is an outage, not a gap, and it does not wait for a second tenant. ' +
+        'Set both and restart. Refusing to start.',
+    );
+  }
+
+  const why = attestation.bypasses.map((b) => `  - ${explainBypass(b, attestation.facts)}`).join('\n');
+
+  // POSTURE 2 — no wall, and something to isolate. Not waivable.
+  if (activeTenants > 1) {
     throw new Error(
       `FATAL: ${activeTenants} active tenants, but the database tenant wall does not bind this connection:\n${why}\n` +
         'With more than one tenant, row-level security is the only barrier that survives a missed application-layer scope. ' +
@@ -194,17 +237,16 @@ export function assertTenantWall(
         'per-request SET LOCAL app.current_tenant, and the FORCE ROW LEVEL SECURITY migration from forceRlsStatements(). Refusing to start.',
     );
   }
-  // [STA-1 4.1 / DL-2] The database holds up its end; the application must
-  // hold up its own. A wall the app never binds returns NOTHING to a
-  // NOBYPASSRLS login (an outage), and a request that never bound its tenant
-  // must fail closed, not read every tenant and be counted. Both were the
-  // shape of the 09-03 finding — measured, not assumed.
-  const missing = appSideWallGaps(env);
-  if (missing.length === 0) return;
+
+  // POSTURE 3 — no wall, nothing to isolate yet. Legitimate, once declared.
+  if (expandPostureAttested(env)) return;
   throw new Error(
-    `FATAL: ${activeTenants} active tenants and the database tenant wall binds this connection, but the application does not hold up its end:\n` +
-      missing.map((m) => `  - ${m}`).join('\n') + '\n' +
-      'Set both and restart. Refusing to start.',
+    `FATAL: the database tenant wall does not bind this connection:\n${why}\n` +
+      `There ${activeTenants === 1 ? 'is 1 active tenant' : `are ${activeTenants} active tenants`}, so there is nothing to isolate yet and this posture MAY be deliberate — ` +
+      'but a wall-less production deployment must be declared, never assumed. Choose one:\n' +
+      '  - complete the CONTRACT stage: a least-privilege LOGIN that is a member of swift_app (NOBYPASSRLS, not the table owner), then TENANT_RLS_BIND=1 and TENANT_UNSCOPED_ACCESS=deny; or\n' +
+      '  - set TENANT_WALL_EXPAND_ATTESTED=1 to record that this deployment runs the wall-less EXPAND posture on purpose. It buys exactly one tenant — the second still refuses to start.\n' +
+      'Refusing to start.',
   );
 }
 

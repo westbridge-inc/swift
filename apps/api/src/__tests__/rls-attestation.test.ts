@@ -32,6 +32,8 @@ const ENFORCED: RlsFacts = {
 const PROD = { NODE_ENV: 'production' };
 /** The posture that boots with a second tenant: the database wall AND the app's side of it. */
 const PROD_HELD_UP = { ...PROD, TENANT_RLS_BIND: '1', TENANT_UNSCOPED_ACCESS: 'deny' };
+/** The sanctioned EXPAND posture, declared rather than assumed: no wall yet, one tenant, said out loud. */
+const PROD_EXPAND = { ...PROD, TENANT_WALL_EXPAND_ATTESTED: '1' };
 
 describe('[TA-S0-003] the attestation names every way the wall fails to bind', () => {
   it('a fully contracted role is enforced and lists no bypass', () => {
@@ -129,9 +131,12 @@ describe('[TA-S0-003] the tenant-two gate', () => {
     expect(() => assertTenantWall(bypassed, 2, PROD)).toThrow(/superuser/i);
   });
 
-  it('single-tenant production boots — the sanctioned EXPAND state', () => {
-    expect(() => assertTenantWall(bypassed, 1, PROD)).not.toThrow();
-    expect(() => assertTenantWall(bypassed, 0, PROD)).not.toThrow();
+  it('single-tenant production boots — the sanctioned EXPAND state, once ATTESTED', () => {
+    // The EXPAND posture is legitimate. Booting into it SILENTLY is not: that
+    // silence is how an owner-mode credential survives to the day tenant two
+    // arrives. It is allowed, and it must be said out loud in the environment.
+    expect(() => assertTenantWall(bypassed, 1, PROD_EXPAND)).not.toThrow();
+    expect(() => assertTenantWall(bypassed, 0, PROD_EXPAND)).not.toThrow();
   });
 
   it('an enforced wall, with the app holding up its end, boots at any tenant count', () => {
@@ -331,8 +336,77 @@ describe('[STA-1 4.1 / DL-2] with a second tenant, the APPLICATION side of the w
     expect(() => assertTenantWall(bypassed, 2, PROD)).toThrow(/tenant wall does not bind/i);
   });
 
-  it('one tenant is the sanctioned EXPAND state and boots without either; outside production nothing is asserted', () => {
-    expect(() => assertTenantWall(enforced, 1, PROD)).not.toThrow();
+  it('one tenant does NOT excuse the app side of an enforced wall; outside production nothing is asserted', () => {
+    // Changed deliberately (REPORT-111 P0.3). This used to assert
+    // `.not.toThrow()`: an enforced wall with an unbound app booted green at
+    // one tenant. That is the zero-rows outage, and tenant count never made it
+    // safe — see the [REPORT-111 P0.3] block below.
+    expect(() => assertTenantWall(enforced, 1, PROD)).toThrow(/TENANT_RLS_BIND/);
     expect(() => assertTenantWall(enforced, 2, { NODE_ENV: 'development' })).not.toThrow();
+  });
+});
+
+
+describe('[REPORT-111 P0.3] the wall fails closed at ONE tenant, in both directions', () => {
+  const enforced = attestationOf(ENFORCED);
+  const bypassed = attestationOf({ ...ENFORCED, isSuperuser: true });
+
+  // ── Direction 1: an ENFORCED wall the app never binds. ────────────────────
+  // FORCE ROW LEVEL SECURITY is applied to the walled tables (11 migrations,
+  // 81 of them in 20260905000000_review_tenant). Under a NOBYPASSRLS login
+  // that posture is real. If the app then never SET LOCALs app.current_tenant,
+  // every walled table returns ZERO ROWS — to everyone, at one tenant, with a
+  // green boot log. The old gate returned early at `activeTenants <= 1` and so
+  // could not see the largest outage the wall can cause.
+  it('an enforced wall with an unbound app is refused at ONE tenant — not just at two', () => {
+    expect(() => assertTenantWall(enforced, 1, PROD)).toThrow(/TENANT_RLS_BIND/);
+    expect(() => assertTenantWall(enforced, 1, PROD)).toThrow(/does not hold up its end/);
+  });
+
+  it('...and at ZERO tenants, which is the same connection before the first tenant is seeded', () => {
+    expect(() => assertTenantWall(enforced, 0, PROD)).toThrow(/TENANT_RLS_BIND/);
+  });
+
+  it('an enforced wall with the app holding up its end boots at one tenant', () => {
+    expect(() => assertTenantWall(enforced, 1, PROD_HELD_UP)).not.toThrow();
+    expect(() => assertTenantWall(enforced, 0, PROD_HELD_UP)).not.toThrow();
+  });
+
+  // ── Direction 2: a BYPASSED wall nobody declared. ─────────────────────────
+  it('a bypassed wall at one tenant is refused until the EXPAND posture is attested', () => {
+    expect(() => assertTenantWall(bypassed, 1, PROD)).toThrow(/TENANT_WALL_EXPAND_ATTESTED/);
+    expect(() => assertTenantWall(bypassed, 1, PROD)).toThrow(/superuser/i);
+  });
+
+  it('the refusal names the two ways out, so the log is the runbook', () => {
+    let message = '';
+    try { assertTenantWall(bypassed, 1, PROD); } catch (e) { message = (e as Error).message; }
+    expect(message).toMatch(/TENANT_WALL_EXPAND_ATTESTED=1/);
+    expect(message).toMatch(/least-privilege/i);
+  });
+
+  // ── The attestation is a declaration, never a waiver. ─────────────────────
+  it('attesting EXPAND does NOT buy a second tenant — that gate is unchanged', () => {
+    expect(() => assertTenantWall(bypassed, 2, PROD_EXPAND)).toThrow(/tenant wall does not bind/i);
+    expect(() => assertTenantWall(bypassed, 50, PROD_EXPAND)).toThrow(/tenant wall does not bind/i);
+  });
+
+  it('attesting EXPAND does NOT waive the app-side settings of an ENFORCED wall', () => {
+    // Different posture, different requirement: the ack answers "why is there
+    // no wall", not "why does the app not bind the wall there is".
+    expect(() => assertTenantWall(enforced, 1, PROD_EXPAND)).toThrow(/TENANT_RLS_BIND/);
+  });
+
+  it('a value other than "1" does not attest anything', () => {
+    for (const v of ['0', 'true', 'yes', '', ' 1', 'TRUE']) {
+      expect(() => assertTenantWall(bypassed, 1, { ...PROD, TENANT_WALL_EXPAND_ATTESTED: v })).toThrow(
+        /TENANT_WALL_EXPAND_ATTESTED/,
+      );
+    }
+  });
+
+  it('development and test are still never gated, attested or not', () => {
+    expect(() => assertTenantWall(bypassed, 1, { NODE_ENV: 'development' })).not.toThrow();
+    expect(() => assertTenantWall(enforced, 1, { NODE_ENV: 'test' })).not.toThrow();
   });
 });
