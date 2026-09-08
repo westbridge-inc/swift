@@ -13,6 +13,24 @@
 #
 # `container-image-pinning.test.ts` fails the build if a service is added
 # without a digest, or pinned to `latest`.
+#
+# PLATFORM: THIS STACK REQUIRES AN amd64 (x86_64) HOST. Two of these images
+# publish a SINGLE amd64 manifest, not a multi-platform index:
+#
+#     postgis/postgis:16-3.4       linux/amd64 only
+#     osrm/osrm-backend:v5.25.0    linux/amd64 only   (routing compose)
+#
+# Every other image here is amd64+arm64. So an ARM host — Ampere, Graviton, a
+# Hetzner CAX box, an Apple-silicon laptop — cannot run Postgres or OSRM
+# natively; it will refuse the pull or fall back to qemu emulation, which for
+# PostGIS means a database several times slower than the hardware it is on.
+# This is a property of the upstream images, not of pinning: the bare tags
+# resolved to the same single manifests. Verify before changing a host:
+#
+#     docker buildx imagetools inspect <repo>:<tag> | grep Platform
+#
+# (no Platform lines at all = a single-platform image; check its config with
+#  `docker image inspect <ref> --format '{{.Os}}/{{.Architecture}}'`)
 
 version: '3.8'
 
