@@ -13,13 +13,37 @@ export type HandoverPermission = 'DELIVER_NO_CASH' | 'COLLECT_CASH_THEN_DELIVER'
 
 /**
  * [DOC-INV-48 · F-106-01] The rule set the server computed an authority under.
- * The client accepts THIS one only: an authority from a server that predates
- * the dispute rule is syntactically perfect and will happily say
- * DELIVER_NO_CASH on a disputed order, and during a rollout — or from a cached
- * payload that outlived an update — that is the same open door by another
- * route. Must match `HANDOVER_POLICY` in the API's handover-authority.ts.
+ *
+ * An authority from a server that predates the dispute rule is syntactically
+ * perfect and will happily say DELIVER_NO_CASH on a disputed order, so the
+ * client will not act on a policy it does not recognise: for a mobile-money
+ * order that means the door stays shut.
+ *
+ * WHY THIS IS A SET, AND NOT ONE STRING. It was one string, matched exactly,
+ * and its own doc comment said "bump this whenever the door's rules change" —
+ * an instruction that, followed on the API alone, blocks EVERY mobile-money
+ * handover in the fleet. Mobile builds are never atomic with an API deploy
+ * (EAS, OTA, app-store review), and the refusal is minted on the DEVICE, so
+ * nothing in server telemetry would show it. Cash keeps working, so the
+ * dashboards look normal while every rider on a mobile-money order is stuck at
+ * a customer's door.
+ *
+ * Two things follow, and both are load-bearing:
+ *
+ *  1. A release that introduces a new policy keeps the previous one here for
+ *     one release, so an app and an API from adjacent releases interoperate in
+ *     BOTH directions — a forward rollout and a rollback.
+ *  2. `handover-policy-contract.test.ts` in the API reads THIS FILE and fails
+ *     the build if the API's `HANDOVER_POLICY` is not in this list. The drift
+ *     therefore cannot reach production at all; it is a red build, not an
+ *     outage. That test is the reason this comment can be trusted.
+ *
+ * Ordered newest first. Drop the tail entry one release after the new one ships.
  */
-export const HANDOVER_POLICY = 'mismatch-1';
+export const ACCEPTED_HANDOVER_POLICIES: readonly string[] = ['mismatch-1'];
+
+/** The policy this build prefers and mints fixtures under: the newest accepted. */
+export const HANDOVER_POLICY = ACCEPTED_HANDOVER_POLICIES[0]!;
 
 /** [F-106-01] The client could not derive permission, so it did not. */
 export const HANDOVER_AUTHORITY_REQUIRED = 'HANDOVER_AUTHORITY_REQUIRED';
@@ -59,12 +83,15 @@ export function parseHandoverAuthority(raw: unknown): HandoverAuthority | null {
   // [F-106-01] An authority from an unrecognised policy is treated exactly like
   // no authority at all — which, for a mobile-money order, means the door stays
   // shut. This is the whole point of the discriminator.
-  if (h['policy'] !== HANDOVER_POLICY) return null;
+  if (typeof h['policy'] !== 'string' || !ACCEPTED_HANDOVER_POLICIES.includes(h['policy'])) return null;
   if (typeof h['permitted'] !== 'string' || !PERMISSIONS.has(h['permitted'])) return null;
   if (typeof h['version'] !== 'string' || !h['version']) return null;
   if (h['rail'] !== 'CASH' && h['rail'] !== 'MOBILE_MONEY' && h['rail'] !== 'OTHER') return null;
   return {
-    policy: HANDOVER_POLICY,
+    // The policy the SERVER used, not the one this build prefers. Overwriting it
+    // with our own constant would erase the only evidence of which rule set
+    // actually decided the door during a mixed-version rollout.
+    policy: h['policy'],
     rail: h['rail'],
     paymentState: typeof h['paymentState'] === 'string' ? h['paymentState'] : 'UNKNOWN',
     custodyState: typeof h['custodyState'] === 'string' ? h['custodyState'] : 'UNKNOWN',

@@ -87,8 +87,53 @@ export const PAYMENT_STATE_INCONSISTENT_BLOCK = 'PAYMENT_STATE_INCONSISTENT';
  * So the authority carries the policy that produced it, and the client refuses
  * one it does not recognise. Bump this whenever the door's RULES change, never
  * for a refactor.
+ *
+ * ⚠️ BUMPING THIS ALONE BLOCKS EVERY MOBILE-MONEY HANDOVER IN THE FLEET. The
+ * rider app refuses an unrecognised policy, and it refuses ON THE DEVICE, so
+ * no server metric moves and cash orders keep working — the dashboards look
+ * normal while every rider on a mobile-money order is stuck at a door. In the
+ * SAME change, add the new value to the FRONT of `ACCEPTED_HANDOVER_POLICIES`
+ * in `apps/mobile/src/lib/handoverAuthority.ts` and keep the previous one for
+ * a release, so adjacent releases interoperate through a rollout AND a
+ * rollback. `handover-policy-contract.test.ts` fails the build otherwise —
+ * that is why this warning can be trusted rather than merely believed.
  */
 export const HANDOVER_POLICY = 'mismatch-1';
+
+/**
+ * [F-106-xx] What the RIDER is told for each reason the door can refuse.
+ *
+ * This exists because the completing route enumerated two reasons and let the
+ * third fall through to `PAYMENT_NOT_CAPTURED` — so a
+ * `PAYMENT_STATE_INCONSISTENT` order, which this module DOES produce, answered
+ * "Payment is captured — do not hand over. Refresh, or ask the store to confirm
+ * the payment." That sentence contradicts itself, and "ask the store" is the
+ * advice F-106-03 removed for exactly this situation. The screen and the route
+ * also disagreed about the same row, because `GET /orders/active` sent the
+ * third reason while the route could never produce it.
+ *
+ * One table, and `handover-refusal-census.test.ts` fails if a block reason ever
+ * lacks an entry — a new reason cannot be added and silently mistranslated.
+ */
+export const HANDOVER_REFUSALS: Readonly<Record<string, { code: string; message: string }>> = {
+  [MMG_CLAIM_MISMATCH_BLOCK]: {
+    code: MMG_CLAIM_MISMATCH_BLOCK,
+    message: "The customer disputes the store's payment claim. Do not hand over. A person must resolve it before this order moves.",
+  },
+  [MMG_MISMATCH_UNKNOWN_BLOCK]: {
+    code: MMG_MISMATCH_UNKNOWN_BLOCK,
+    message: 'This order cannot be verified right now. Do not hand over — contact support.',
+  },
+  [PAYMENT_STATE_INCONSISTENT_BLOCK]: {
+    code: PAYMENT_STATE_INCONSISTENT_BLOCK,
+    message: "This order's payment record is inconsistent and cannot be trusted. Do not hand over — contact support. Nothing you did caused this.",
+  },
+};
+
+/** Every reason the door can return, for the census that keeps the table complete. */
+export const HANDOVER_BLOCK_REASONS = [
+  MMG_CLAIM_MISMATCH_BLOCK, MMG_MISMATCH_UNKNOWN_BLOCK, PAYMENT_STATE_INCONSISTENT_BLOCK,
+] as const;
 
 export function paymentRailOf(paymentMethod: string): PaymentRail {
   if (paymentMethod === 'CASH') return 'CASH';
@@ -159,8 +204,23 @@ export function handoverAuthorityFor(order: HandoverOrderLike): HandoverAuthorit
     if (generation === 'unknown') return { ...base, permitted: 'BLOCKED', blockReason: MMG_MISMATCH_UNKNOWN_BLOCK };
     if (generation !== 'none') return { ...base, permitted: 'BLOCKED', blockReason: MMG_CLAIM_MISMATCH_BLOCK };
   }
-  // CAPTURED (provider evidence) or CLAIMED (the store's own word on its own wallet, §31.5): the door opens without cash.
-  if (order.paymentStatus === 'CAPTURED' || order.paymentStatus === 'CLAIMED') return { ...base, permitted: 'DELIVER_NO_CASH', blockReason: null };
+  // CAPTURED is provider evidence, and it means the same thing on every rail.
+  if (order.paymentStatus === 'CAPTURED') return { ...base, permitted: 'DELIVER_NO_CASH', blockReason: null };
+  // CLAIMED is NOT. It is the store's own word about its own MOBILE-MONEY
+  // wallet — that is how schema.prisma defines it and what DOC-1 §31.5 means by
+  // it — so it opens a door only on that rail. The condition used to be
+  // rail-blind while this very comment scoped it to the wallet, so a CASH order
+  // carrying CLAIMED was served DELIVER_NO_CASH: the server telling a rider to
+  // collect nothing on an order where no cash has been taken, while this
+  // change's own client blocked the same row. A server and a client disagreeing
+  // about one order is the defect class this work exists to close.
+  //
+  // Nothing can produce that state today (`confirm-payment` is MMG-only), which
+  // is exactly why it was worth fixing while it is still only a trap.
+  if (order.paymentStatus === 'CLAIMED') {
+    if (rail === 'MOBILE_MONEY') return { ...base, permitted: 'DELIVER_NO_CASH', blockReason: null };
+    return { ...base, permitted: 'BLOCKED', blockReason: PAYMENT_STATE_INCONSISTENT_BLOCK };
+  }
   if (rail === 'CASH') return { ...base, permitted: 'COLLECT_CASH_THEN_DELIVER', blockReason: null };
   // A non-cash rail whose money has not landed: the door is closed until it does.
   return { ...base, permitted: 'BLOCKED', blockReason: `${rail}_${order.paymentStatus}` };

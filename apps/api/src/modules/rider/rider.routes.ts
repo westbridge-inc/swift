@@ -27,7 +27,7 @@ import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
-import { handoverAuthorityFor, handoverVersionMatches, MMG_CLAIM_MISMATCH_BLOCK, MMG_MISMATCH_UNKNOWN_BLOCK } from '../order/handover-authority';
+import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 import { handoverBlockCounter } from '../../plugins/observability';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { haversineDistance } from '../../utils/distance';
@@ -1484,15 +1484,13 @@ export async function riderRoutes(app: FastifyInstance) {
       const authority = handoverAuthorityFor(order);
       if (authority.permitted === 'BLOCKED') {
         handoverBlockCounter.labels(authority.blockReason ?? 'BLOCKED').inc();
-        // [F-103-01] A disputed claim is not "payment not captured" — the money
-        // question is open between two people, and the rider is told that,
-        // because "refresh and ask the store" is advice that cannot work here.
-        if (authority.blockReason === MMG_CLAIM_MISMATCH_BLOCK) {
-          throw new AppError(409, MMG_CLAIM_MISMATCH_BLOCK, "The customer disputes the store's payment claim. Do not hand over. A person must resolve it before this order moves.");
-        }
-        if (authority.blockReason === MMG_MISMATCH_UNKNOWN_BLOCK) {
-          throw new AppError(409, MMG_MISMATCH_UNKNOWN_BLOCK, 'This order cannot be verified right now. Do not hand over — contact support.');
-        }
+        // [F-103-01 · F-106-xx] ONE mapping, so a reason the door produces is
+        // never answered as a different one. This enumerated two and let the
+        // third fall through to "Payment is captured — do not hand over",
+        // which contradicts itself and re-offers the "ask the store" advice
+        // F-106-03 removed.
+        const refusal = HANDOVER_REFUSALS[authority.blockReason ?? ''];
+        if (refusal) throw new AppError(409, refusal.code, refusal.message);
         // PENDING keeps the fulfilment gate's one domain error (SPS-F-0016); every other un-landed state is the door's.
         const code = order.paymentStatus === 'PENDING' ? 'MMG_PAYMENT_PENDING' : 'PAYMENT_NOT_CAPTURED';
         throw new AppError(409, code, `Payment is ${order.paymentStatus.toLowerCase()} — do not hand over. Refresh, or ask the store to confirm the payment.`);

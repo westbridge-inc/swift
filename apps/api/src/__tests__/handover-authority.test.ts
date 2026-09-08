@@ -139,9 +139,24 @@ describe('[F-106-04] the dispute reason belongs to the rail that can have one', 
       if (paymentMethod === 'CASH') expect(a.blockReason).toBeNull();
     });
 
-    it(`${paymentMethod}: null behaves exactly as it always did`, () => {
+    it(`${paymentMethod}: a null marker leaves the rail's own CLAIMED rule to decide`, () => {
+      // Changed deliberately. This asserted 'CLAIMED is money landed on any
+      // rail' — which is not what CLAIMED means: schema.prisma and DOC-1 §31.5
+      // define it as the store's attestation about its own MOBILE-MONEY wallet.
+      // On a cash rail it is a corrupt row, and the server was answering
+      // DELIVER_NO_CASH for it while this change's own client blocked it.
+      // This loop covers the non-MMG rails only.
       const a = handoverAuthorityFor({ ...base, paymentMethod, paymentStatus: 'CLAIMED', mmgClaimMismatchAt: null });
-      expect(a.permitted, 'CLAIMED is money landed on any rail').toBe('DELIVER_NO_CASH');
+      expect(a.permitted, 'CLAIMED on a non-MMG rail is a state that should not exist').toBe('BLOCKED');
+      expect(a.blockReason).toBe('PAYMENT_STATE_INCONSISTENT');
+    });
+
+    it(`${paymentMethod}: the MMG rail still opens on its own CLAIMED`, () => {
+      // The other half of the rail-scoping, asserted once alongside it so the
+      // change reads as a scoping and not as "CLAIMED stopped working".
+      const a = handoverAuthorityFor({ ...base, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', mmgClaimMismatchAt: null });
+      expect(a.permitted).toBe('DELIVER_NO_CASH');
+      expect(a.blockReason).toBeNull();
     });
   }
 

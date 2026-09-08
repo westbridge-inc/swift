@@ -771,16 +771,25 @@ describe('[F-103-01] a disputed MMG claim closes the door at every rider surface
 // The race test above repeats `Promise.all` and asserts the invariant for
 // whichever side won. Codex's objection is exact: five green runs may all have
 // taken one scheduler order, so that is sampled stress and not proof that both
-// serializations are safe. These two force each order and assert the whole
-// outcome — HTTP result, final state, audit row, and the absence of the
-// forbidden combination.
+// serializations are safe.
+//
+// WHAT THESE TWO ACTUALLY PROVE, stated precisely because the previous wording
+// overstated it. They force each COMMIT order — the first request is awaited to
+// completion before the second is issued — and assert the whole outcome: HTTP
+// result, final state, audit row, and the absence of the forbidden combination.
+// They do NOT prove anything about LOCK ordering, because sequential requests
+// never contend: removing the `SELECT ... FOR UPDATE` from confirm-payment's
+// transaction leaves both of them green, carried by the CAS predicates. The
+// interleaving property is still covered only by the sampled stress above.
+// Closing that needs real contention — a barrier or an injected delay inside
+// one transaction — and is not done here.
 //
 // The forbidden combination is CANCELLED + money-landed, where money-landed is
 // CLAIMED *or* CAPTURED: `confirm-payment` writes CLAIMED (vendor.routes.ts),
 // and asking only about CAPTURED is what let this test read as a flake for so
 // long (F-103-01b).
 // ---------------------------------------------------------------------------
-describe('[F-106-05] claim vs cancel, each order forced', () => {
+describe('[F-106-05] claim vs cancel, each COMMIT order forced (sequential, not contended)', () => {
   const forbidden = (o: { status: string; paymentStatus: string }) =>
     o.status === 'CANCELLED' && (o.paymentStatus === 'CLAIMED' || o.paymentStatus === 'CAPTURED');
 
