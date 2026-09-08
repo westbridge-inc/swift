@@ -107,6 +107,12 @@ export interface AdminAuditRowInput {
   readonly entityIdOverride?: string | undefined;
   /** The declared entity, so the subject id comes from its own route parameter. */
   readonly entity?: { routeParam?: string } | undefined;
+  /** [review] The route's ACTION CLASS, for the collision counter. Both callers
+   *  know it and neither passed it, so every dropped fact was labelled `C0` —
+   *  "read, discloses nothing sensitive" — including a drop on a C4 settlement
+   *  or a C5 platform control. An alert on `cls` could not tell those apart,
+   *  which is the whole reason the label exists. */
+  readonly cls?: string | undefined;
   /** [ADM-002] NAMED facts a route's own audit row carried that the generic
    *  one cannot derive — `POST /notifications/broadcast` records how many
    *  people it reached, and its whole subject IS the audience.
@@ -152,7 +158,7 @@ export function adminAuditRow(
   const suppliedExtra = input.extra ?? {};
   const collisions = Object.keys(suppliedExtra).filter((key) => RESERVED_CHANGE_KEYS.has(key));
   for (const key of collisions) {
-    adminAuditCounter.labels(`extra_collision:${key}`, 'C0').inc();
+    adminAuditCounter.labels(`extra_collision:${key}`, input.cls ?? 'unknown').inc();
   }
   const extra = collisions.length === 0
     ? suppliedExtra
@@ -181,7 +187,12 @@ export function adminAuditRow(
 }
 
 /** Where the audit row for this request came from. */
-export type AuditWriterKind = 'inline' | 'backstop' | 'failed' | 'refused' | 'rolled-back';
+export type AuditWriterKind =
+  | 'inline' | 'backstop' | 'failed' | 'refused' | 'rolled-back'
+  /** [review] A dropped colliding fact. The counter has always emitted this
+   *  shape; the union and the metric help text both omitted it, so two
+   *  enumerations of the same values disagreed with the code. */
+  | `extra_collision:${string}`;
 
 /**
  * Write the audit row through the caller's transaction, and mark the request
@@ -250,6 +261,7 @@ export async function auditWithin(
         entity,
         entityIdOverride: overrides?.entityId,
         extra: overrides?.extra,
+        cls: authority?.cls,
       }),
     });
   } catch (err) {

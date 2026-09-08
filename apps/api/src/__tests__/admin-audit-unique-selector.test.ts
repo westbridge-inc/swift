@@ -51,6 +51,10 @@ let app: FastifyInstance;
 let token = '';
 const userIds: string[] = [];
 const REASON = 'C-01 selector proof: the trail must carry the digests, ref GY-C01';
+/** Deliberately different from REASON. When body and header carry the SAME
+ *  string the precedence rule is unobservable by construction — which is how
+ *  a `reason` override survived a review that was looking straight at it. */
+const BODY_REASON = 'BODY-REASON that must never reach the audit row';
 const RUN = nanoid(8).toLowerCase().replace(/[^a-z0-9]/g, 'x');
 const DOC_CODE = `ZZ.selector_${RUN}`;
 const CONFIG_KEY = `ADM_SELECTOR_${RUN}`;
@@ -263,13 +267,21 @@ describe('[C-01] the audit snapshot selects on the model column, not the route p
 describe('[C-01] a real privileged action records what it changed', () => {
   it('a doc-type external-processing decision writes non-null digests and the real diff', async () => {
     const res = await call('PUT', `/api/v1/admin/verification/doc-types/${DOC_CODE}/external-processing`, {
-      allowed: true, decisionRef: `FD-C01-${RUN.slice(0, 5)}`, reason: REASON,
+      allowed: true, decisionRef: `FD-C01-${RUN.slice(0, 5)}`, reason: BODY_REASON,
     });
     expect(res.statusCode, res.body).toBe(200);
 
     const row = await auditRowFor(DOC_CODE);
     expect(row, 'the decision wrote an audit row').toBeTruthy();
-    const changes = row!.changes as { before?: unknown; after?: unknown; changed?: Record<string, { from: unknown; to: unknown }> };
+    const changes = row!.changes as { before?: unknown; after?: unknown; reason?: string; changed?: Record<string, { from: unknown; to: unknown }> };
+
+    // [review] THE ASSERTION THAT WAS MISSING. This route passed `body.reason`
+    // as an audit override while ADM-006 validates the HEADER — so the reason
+    // checked and the reason recorded could be two different strings, on the one
+    // route this change exists for. Replacing the override with a sentinel left
+    // 57 of 57 suites green. Not any more.
+    expect(changes.reason, 'the recorded reason is the one ADM-006 validated, not the body field').toBe(REASON);
+    expect(changes.reason).not.toBe(BODY_REASON);
 
     expect(changes.before, 'the BEFORE digest — null here is exactly the C-01 defect').toMatch(/^[0-9a-f]{64}$/);
     expect(changes.after, 'the AFTER digest').toMatch(/^[0-9a-f]{64}$/);
@@ -279,12 +291,19 @@ describe('[C-01] a real privileged action records what it changed', () => {
   });
 
   it('a loss-protection suspension writes non-null digests for a :userId route', async () => {
-    const res = await call('PUT', `/api/v1/admin/cash-rules/rlp/movers/${userId}/suspend`, { reason: REASON });
+    const res = await call('PUT', `/api/v1/admin/cash-rules/rlp/movers/${userId}/suspend`, { reason: BODY_REASON });
     expect(res.statusCode, res.body).toBe(200);
 
     const row = await auditRowFor(userId);
     expect(row, 'the suspension wrote an audit row').toBeTruthy();
-    const changes = row!.changes as { before?: unknown; after?: unknown; changed?: Record<string, { from: unknown; to: unknown }> };
+    const changes = row!.changes as { before?: unknown; after?: unknown; reason?: string; changed?: Record<string, { from: unknown; to: unknown }> };
+
+    // The sibling of the assertion above. A comment on this route claimed the
+    // stated reason was "asserted through the real route" elsewhere; it was not
+    // — the only route-level reason assertion covered a DIFFERENT route that
+    // never carried the override. Asserted here, on the route itself.
+    expect(changes.reason, 'the recorded reason is the validated one').toBe(REASON);
+    expect(changes.reason).not.toBe(BODY_REASON);
 
     expect(changes.before).toMatch(/^[0-9a-f]{64}$/);
     expect(changes.after).toMatch(/^[0-9a-f]{64}$/);
@@ -315,7 +334,11 @@ describe('[review] the audit row records the reason the platform VALIDATED', () 
       method: 'PUT' as never,
       url: `/api/v1/admin/cash-rules/rlp/movers/${userId}/reinstate`,
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-swift-reason': headerReason },
-      payload: { note: 'BODY-NOTE something entirely different' } as Record<string, unknown>,
+      // [review] The body must actually SAY a reason, or there is no body
+      // candidate to prefer and precedence is never exercised. The previous
+      // payload carried only `note`, so inverting the rule in
+      // `statedReason` left this test green.
+      payload: { note: 'BODY-NOTE something entirely different', reason: BODY_REASON } as Record<string, unknown>,
     });
     expect(res.statusCode, res.body).toBe(200);
 
@@ -326,24 +349,35 @@ describe('[review] the audit row records the reason the platform VALIDATED', () 
 
 describe('[review] a colliding audit fact loses the fact, never the action', () => {
   it('drops the canonical key, counts it, and still writes the row', async () => {
-    const readCollision = async (key: string) => {
+    const readCollision = async (key: string, cls?: string) => {
       const m = await adminAuditCounter.get();
-      return m.values.find((v) => v.labels['writer'] === `extra_collision:${key}`)?.value ?? 0;
+      return m.values
+        .filter((v) => v.labels['writer'] === `extra_collision:${key}` && (cls === undefined || v.labels['cls'] === cls))
+        .reduce((a, v) => a + v.value, 0);
     };
     const before = await readCollision('reason');
 
     // The shape the type cannot stop: a variable with a string index signature.
     const smuggled: Record<string, string> = { reason: 'SMUGGLED', harmless: 'kept' };
+    const beforeC5 = await readCollision('reason', 'C5');
+    const beforeC0 = await readCollision('reason', 'C0');
     const row = adminAuditRow(
       { method: 'PUT', url: '/x', params: { id: 'o1' }, headers: {} } as never,
       userId,
-      { routeUrl: '/x', reason: null, before: ABSENT, after: ABSENT, entityDeclared: false, extra: smuggled },
+      { routeUrl: '/x', reason: null, before: ABSENT, after: ABSENT, entityDeclared: false, extra: smuggled, cls: 'C5' },
     );
 
     const changes = row['changes'] as Record<string, unknown>;
     expect(changes['reason'], 'the canonical field is not overwritten').toBeUndefined();
     expect(changes['harmless'], 'the honest fact survives').toBe('kept');
     expect(await readCollision('reason'), 'and the drop is a number, not a silence').toBe(before + 1);
+    // [review] ...counted against the route's REAL class. This was hardcoded to
+    // 'C0' — "read, discloses nothing sensitive" — so a fact dropped on a C4
+    // settlement or a C5 platform control was filed as a harmless read, and an
+    // alert on `cls` could not tell them apart. Changing the label used to be
+    // free: both counter assertions matched on `writer` and ignored `cls`.
+    expect(await readCollision('reason', 'C5'), 'the drop carries the class it happened on').toBe(beforeC5 + 1);
+    expect(await readCollision('reason', 'C0'), 'and is NOT filed as a harmless read').toBe(beforeC0);
     // The row EXISTS. Throwing here used to 500 the whole privileged action —
     // which is the defect (C-01b) this branch was written to remove.
     expect(row['action']).toContain('ADMIN PUT');

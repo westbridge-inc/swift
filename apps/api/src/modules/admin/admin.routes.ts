@@ -878,6 +878,7 @@ export async function adminRoutes(app: FastifyInstance) {
           entityDeclared: !!authority?.entity,
           entity: authority?.entity,
           entityOverride: isAuditedRead ? 'integrity' : undefined,
+          cls: authority?.cls,
         }) as never,
       });
     } catch (err) {
@@ -920,8 +921,18 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/verification/doc-types/:code/external-processing', { preHandler: [platformControlGuard] }, async (request) => {
     const { code } = request.params as { code: string };
     const body = z.object({ allowed: z.boolean(), decisionRef: z.string().trim().min(3).max(120).optional(), reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    const result = await recordExternalProcessingDecision(app.prisma, { code, allowed: body.allowed, decisionRef: body.decisionRef ?? null, reason: body.reason },
-      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: code, reason: body.reason, extra: facts }));
+    // [review] ONE reason, and it is the one that was VALIDATED. `reasonProblem`
+    // (the C4 guard) checks the STATED reason — the header when present, at
+    // ADMIN_REASON_MIN characters — while this route's own zod requires only
+    // min(3) on the body field. Passing `body.reason` therefore made the reason
+    // validated and the reason recorded two different strings, on the single
+    // route this whole change exists for, and left it disagreeing with the
+    // sibling route whose comment states the rule. No override: `auditWithin`
+    // derives the same value through `reasonOf(body, headers)`, and the
+    // decision row is given it too so the two can never diverge.
+    const stated = reasonOf(request.body, request.headers as never) ?? body.reason;
+    const result = await recordExternalProcessingDecision(app.prisma, { code, allowed: body.allowed, decisionRef: body.decisionRef ?? null, reason: stated },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: code, extra: facts }));
     return { success: true, data: result.after };
   });
 

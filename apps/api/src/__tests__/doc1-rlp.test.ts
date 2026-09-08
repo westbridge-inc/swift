@@ -240,9 +240,17 @@ describe('[DOC-1 P31-1] the policy: covered amount, caps, review threshold, susp
     // that redefines one — which made every call to
     // PUT /cash-rules/rlp/movers/:userId/suspend a 500 on main. Nothing caught
     // it because this test calls the SERVICE with its own stub callback, which
-    // is precisely the shape that hid it. The stated reason is now asserted
-    // through the real route in admin-audit-unique-selector.test.ts; here we
-    // assert the fact the service genuinely owns — what it persisted.
+    // is precisely the shape that hid it.
+    //
+    // [review] The previous version of this comment said the stated reason was
+    // "now asserted through the real route" — it was NOT. The only route-level
+    // reason assertion covered /reinstate, a DIFFERENT route that never carried
+    // the override, so coverage was removed on a justification that did not
+    // exist. It exists now: admin-audit-unique-selector.test.ts asserts
+    // changes.reason on THIS route (and on the doc-type route), with a body
+    // reason deliberately different from the header so precedence is
+    // observable. Here we assert the fact the service genuinely owns — what it
+    // persisted.
     expect(facts[0]).toMatchObject({ suspendedReason: 'confirmed collusion finding — case 42' });
     expect(facts[0]).toHaveProperty('lossProtectionSuspendedAt');
     expect(facts[0], 'a canonical name in the facts is refused at the audit row').not.toHaveProperty('reason');

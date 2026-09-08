@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Prisma } from '@prisma/client';
-import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
+import { ADMIN_ROUTE_AUTHORITY, SNAPSHOT_UNIQUE_FIELDS } from '../modules/admin/admin-authority';
 
 // ---------------------------------------------------------------------------
 // [ADM-002 / ADM-004] A DECLARED FIELD THAT DOES NOT EXIST IS A DIFF THAT SAYS
@@ -52,10 +52,6 @@ describe('[ADM-002] every declared audit field exists on its model', () => {
       // by watching the arguments Prisma actually receives. This is the
       // secondary gate. That one is the oracle.
       // [review] A real column is not enough — it must be a UNIQUE one.
-      // `PlatformConfig` has both `id` and `key`; declaring `id` passed the old
-      // check and silently returned ABSENT for every C5 config change, caught
-      // by nothing but the one unit test. `findUnique` needs uniqueness, so the
-      // census asks the schema for it.
       const uniqueField = entity.uniqueField ?? 'id';
       const model = Prisma.dmmf.datamodel.models.find((m) => lowerFirst(m.name) === entity.model);
       const column = model?.fields.find((f) => f.name === uniqueField);
@@ -63,6 +59,30 @@ describe('[ADM-002] every declared audit field exists on its model', () => {
         problems.push(`${route}: ${entity.model} has no '${uniqueField}' column to select on`);
       } else if (!column.isId && !column.isUnique) {
         problems.push(`${route}: ${entity.model}.${uniqueField} is not unique — findUnique cannot select on it`);
+      }
+      // [review 2] The check above is NOT the one that catches C-01, and the
+      // comment that used to sit here said it was. `PlatformConfig.id` is `@id`,
+      // so `isId` is true and declaring `id` for a `:key` route passes it —
+      // exactly as it passed the older check. It rejects a NON-unique column,
+      // which no entry has ever had: vacuous on the day it was written.
+      //
+      // The failure it was supposed to catch is a MIS-ADDRESSED row, not an
+      // unusable column: a `:key`/`:code` route defaulting to `id`, so
+      // `findUnique({ where: { id: 'GY.national_id' } })` returns null, the
+      // catch records ABSENT before/after, and the trail says nothing about what
+      // changed — with `failed`/`selector`/`no_delegate` all still at zero,
+      // indistinguishable from a row that legitimately does not exist.
+      //
+      // So: when the ROUTE addresses the row by a name that is itself a unique
+      // column on that model, the DECLARED selector must be that column.
+      if (routeParam !== uniqueField && (SNAPSHOT_UNIQUE_FIELDS as readonly string[]).includes(routeParam)) {
+        const paramColumn = model?.fields.find((f) => f.name === routeParam);
+        if (paramColumn && (paramColumn.isId || paramColumn.isUnique)) {
+          problems.push(
+            `${route}: addressed by ':${routeParam}', and ${entity.model}.${routeParam} is a unique column, ` +
+            `but the declared selector is '${uniqueField}' — the value would be looked up in the wrong column and record ABSENT`,
+          );
+        }
       }
     }
     expect(problems).toEqual([]);
