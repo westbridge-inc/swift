@@ -83,9 +83,18 @@ export class QrService {
     // alone returned a row stamped with a tenant the vendor no longer belongs
     // to — and once the resolver correctly began binding id + tenantId, that
     // stale row resolved to NOTHING. A printed code that silently stops working
-    // is a worse outcome than the disclosure it replaced, so a code whose
-    // tenant no longer matches its vendor is not reused: the vendor mints a
-    // fresh one, and the old code stays deactivated history.
+    // is a worse outcome than the disclosure it replaced.
+    //
+    // That is now prevented at the source rather than compensated for here: a
+    // vendor cannot leave its lineage behind (`vendors_tenant_move_guard`), and
+    // the supported move (`move_vendor_tenant`) carries the printed codes with
+    // it, so a code whose tenant does not match its vendor should not exist. If
+    // one does — historical residue predating the guard — this read simply does
+    // not reuse it and the vendor mints a fresh one.
+    //
+    // An earlier version of this comment said the stale code "stays deactivated
+    // history". It did not: nothing deactivated it, and it remained ACTIVE and
+    // unreachable. Said plainly instead of asserted.
     const vendor = await this.prisma.vendor.findUniqueOrThrow({
       where: { id: vendorId },
       select: { slug: true, tenantId: true },
@@ -120,7 +129,13 @@ export class QrService {
     });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const active = await this.prisma.qrCode.findFirst({
-        where: { entityType: 'VENDOR', entityId: vendorId, status: 'ACTIVE' },
+        // Bound to the VENDOR'S tenant, exactly as getOrCreateForVendor is. An
+        // unscoped caller (a job, system mode, or a raw PrismaClient) otherwise
+        // picks up a stale ACTIVE row from the tenant the vendor used to be in,
+        // supersedes THAT, and creates in the new one — where the partial
+        // unique then bites and the fallback read below can return the foreign
+        // row. The route answers 200 with a code that resolves to /qr/unavailable.
+        where: { entityType: 'VENDOR', entityId: vendorId, status: 'ACTIVE', tenantId: vendor.tenantId },
       });
       try {
         if (!active) {
@@ -152,7 +167,7 @@ export class QrService {
       }
     }
     const winner = await this.prisma.qrCode.findFirstOrThrow({
-      where: { entityType: 'VENDOR', entityId: vendorId, status: 'ACTIVE' },
+      where: { entityType: 'VENDOR', entityId: vendorId, status: 'ACTIVE', tenantId: vendor.tenantId },
     });
     return { current: winner, superseded: null };
   }

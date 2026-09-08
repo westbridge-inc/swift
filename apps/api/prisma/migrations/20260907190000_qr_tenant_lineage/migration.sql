@@ -1,5 +1,16 @@
--- [REPORT-086 · PR1197-S1-04] A QR CODE, ITS STOREFRONT, AND EVERY ROW THAT
--- CREDITS A SCAN OF IT BELONG TO ONE TENANT.
+-- [REPORT-086 · PR1197-S1-04] A QR CODE, ITS STOREFRONT, AND THE ROWS THAT
+-- CREDIT A SCAN OF IT BELONG TO ONE TENANT.
+--
+-- SCOPE, stated because the first version of this header said "EVERY row" and
+-- that was not measured. Covered here: qr_codes, slug_redirects,
+-- pending_attributions, attribution_claims, scan_events. NOT covered, and owed:
+--   * scan_daily_rollups  — tenantId + non-null qrCodeId, read as credit by
+--     QrAnalyticsService. The strict analogue of scan_events. It has no
+--     application writer today (the 90-day sweep is unbuilt), so nothing can
+--     currently create a cross-tenant row — which is why this is owed rather
+--     than urgent, not why it is fine.
+--   * orders."attributionQrCodeId" — written only by a fixture today.
+-- Both are registered in the review ledger; neither is claimed closed here.
 --
 -- WHY. `qr_codes` and `slug_redirects` address their target polymorphically —
 -- (entityType, entityId) — with no relation and nothing binding that pair to a
@@ -16,7 +27,7 @@
 -- WHY THIS SHAPE. An earlier draft of this migration hand-rolled its own trigger
 -- function. That was wrong twice over: this repository already has the exact
 -- mechanism — `TENANT_LINEAGE_TABLES` + `tenantLineageDdl()` in
--- `src/lib/tenant-rls.ts`, 24 tables, mirrored by the test installer so a
+-- `src/lib/tenant-rls.ts` (23 tables before this migration, 28 after), mirrored by the test installer so a
 -- db-push environment heals itself — and a second, divergent implementation of
 -- "this row's tenant must equal its parent's" is how two rules drift apart. The
 -- five rules below are registered there and this file is generated from it.
@@ -37,7 +48,14 @@
 -- Every orphan is a row whose VENDOR WAS DELETED (test cleanup), not a
 -- cross-tenant pairing. The lineage trigger fires BEFORE INSERT OR UPDATE and
 -- returns NEW when an UPDATE finds no parent, so historical residue is left
--- exactly as it is while no new corruption can be written.
+-- exactly as it is.
+--
+-- "No new corruption can be written" was NOT true of this migration alone, and
+-- the claim is corrected here rather than repeated: these triggers watch the
+-- CHILD, and nothing watched the parent, so one `UPDATE vendors SET "tenantId"`
+-- produced exactly the cross-tenant pairing they exist to prevent — a statement
+-- this migration's own test performed. The parent side ships in
+-- 20260908020000_vendor_tenant_move_guard; the two together are what closes it.
 --
 -- ROLLBACK (per table T and trigger G, all five):
 --   DROP TRIGGER IF EXISTS G ON T; DROP FUNCTION IF EXISTS G();
