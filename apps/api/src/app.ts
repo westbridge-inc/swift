@@ -6,6 +6,7 @@ import Redis from 'ioredis';
 import multipart from '@fastify/multipart';
 import { helmetOptions } from './config/security-headers';
 import { rateLimitKey } from './utils/rate-limit-key';
+import { getLastRoutingProbe } from './providers/maps/routing-probe';
 import { authRoutes } from './modules/auth/auth.routes';
 import { customerRoutes } from './modules/user/customer.routes';
 import { vendorRoutes } from './modules/vendor/vendor.routes';
@@ -277,6 +278,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
       // a cap-5 API "late" before its page was even due. The server states
       // its own truth; the harness pins to it. Detail-gated like the rest.
       dispatch: { exhaustCap: EXHAUST_CAP, redispatchDelayMs: REDISPATCH_DELAY_MS },
+      // [ROUTE-001] The boot routing probe's verdict, reported HERE and not in
+      // `checks` — deliberately. `allOk` above turns any non-ok check into a
+      // 503, which takes this instance out of the load balancer. Routing is
+      // DEGRADABLE: OsrmMapsProvider answers from haversine when OSRM is
+      // unreachable, so orders keep flowing with worse numbers. Failing
+      // readiness for it would turn a degraded platform into a down one — a
+      // guard suppressing the very behaviour it exists to protect. It pages
+      // ops instead (server.ts), and states itself here.
+      routing: getLastRoutingProbe() ?? { status: 'skipped', provider: 'unknown', why: 'the probe has not run in this process' },
     };
   });
 
