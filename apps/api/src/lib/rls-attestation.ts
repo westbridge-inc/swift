@@ -30,8 +30,10 @@ export const rlsBindEnabled = (env: EnvLike = process.env): boolean => env['TENA
  * a database wall. Under the shipped credential there is none, and the process
  * never said so. Measured on a real boot, 3 Sep 2026: connected as `swift`,
  * which is the table owner AND holds BYPASSRLS AND is a superuser — three
- * independent bypasses — and 0 of 76 walled tables are FORCE'd. Scoped to one
- * tenant, that credential read, UPDATEd and DELETEd another tenant's row.
+ * independent bypasses — and at that time 0 of 76 walled tables were FORCE'd.
+ * Scoped to one tenant, that credential read, UPDATEd and DELETEd another
+ * tenant's row. ⚠️ THAT MEASUREMENT IS HISTORICAL: FORCE has since been applied
+ * (see below). Read the date, not the number.
  *
  * So: attest the posture out loud at boot (REPORT-042 names this telemetry
  * "DB role/row-security boot attestation"), and make the spec's own rule —
@@ -47,8 +49,12 @@ export const rlsBindEnabled = (env: EnvLike = process.env): boolean => env['TENA
  * if a new `tenant.create` appears in production code without it.
  *
  * This module does not force RLS, and no longer needs to: FORCE ROW LEVEL
- * SECURITY has since been applied by migration to the walled tables (11
- * migrations, 81 of them in `20260905000000_review_tenant`). Only the
+ * SECURITY has since been applied by migration to the walled tables: 104
+ * distinct tables across 12 migration files, 80 of them in
+ * `20260905000000_review_tenant`. (An earlier version of this comment said 11
+ * and 81 — the 81 was a `grep -c` that counted the section's own header
+ * comment. Counts in a security comment are load-bearing; these are measured
+ * with an anchored pattern.) Only the
  * least-privilege LOGIN is still outstanding, so under the shipped credential
  * three bypasses (owner, BYPASSRLS, superuser) still mask it.
  *
@@ -68,7 +74,26 @@ export const rlsBindEnabled = (env: EnvLike = process.env): boolean => env['TENA
  * attestation that reports "no bypass found" when it failed to look is worse
  * than no attestation at all. Unknown posture is unsafe posture.
  */
-export type RlsBypass = 'UNKNOWN_ROLE' | 'SUPERUSER' | 'BYPASSRLS' | 'RLS_DISABLED' | 'OWNER_NOT_FORCED';
+export type RlsBypass =
+  | 'UNKNOWN_ROLE' | 'SUPERUSER' | 'BYPASSRLS' | 'RLS_DISABLED' | 'OWNER_NOT_FORCED'
+  /**
+   * [review] Membership of `swift_bypass_rls`. This is not a Postgres role
+   * attribute — it is the escape THIS REPOSITORY'S OWN POLICY grants:
+   *
+   *   USING ("tenantId" = current_setting('app.current_tenant', true)
+   *          OR pg_has_role(current_user, 'swift_bypass_rls', 'MEMBER'))
+   *
+   * So a login that is NOBYPASSRLS, not a superuser, not the table owner, with
+   * every table FORCE'd — the posture this module calls `enforced` — still
+   * reads every tenant if it holds that membership. One stray GRANT, or a
+   * request pool pointed at SYSTEM_DATABASE_URL, is enough.
+   *
+   * That mattered less when `enforced` only gated tenant two. It matters now:
+   * `enforced` is the FIRST discriminator and the single sufficient condition
+   * for an unattested production boot at any tenant count, so an `enforced`
+   * that can be a lie is the whole gate.
+   */
+  | 'BYPASS_ROLE_MEMBER';
 
 export interface RlsFacts {
   /** The role the pool actually authenticated as — not the configured one. */
@@ -77,6 +102,8 @@ export interface RlsFacts {
   roleResolved: boolean;
   isSuperuser: boolean;
   hasBypassRls: boolean;
+  /** Member of `swift_bypass_rls` — the escape the tenant policy itself grants. */
+  isBypassRoleMember: boolean;
   /** Tables in `public` carrying a `tenantId` column. */
   tenantTables: number;
   /** ...of those, with row security not enabled at all. */
@@ -102,6 +129,8 @@ export function explainBypass(bypass: RlsBypass, facts: RlsFacts): string {
       return `role "${facts.role}" is a superuser — PostgreSQL exempts superusers from every policy`;
     case 'BYPASSRLS':
       return `role "${facts.role}" holds the BYPASSRLS attribute`;
+    case 'BYPASS_ROLE_MEMBER':
+      return `role "${facts.role}" is a member of swift_bypass_rls — every tenant policy in this schema has an OR branch that this membership satisfies, so the wall is open to it whatever the table flags say`;
     case 'RLS_DISABLED':
       return `${facts.rlsDisabledTables} tenant-bearing table(s) have no row security enabled at all`;
     case 'OWNER_NOT_FORCED':
@@ -121,6 +150,7 @@ export function attestationOf(facts: RlsFacts): RlsAttestation {
   if (!facts.roleResolved) bypasses.push('UNKNOWN_ROLE');
   if (facts.isSuperuser) bypasses.push('SUPERUSER');
   if (facts.hasBypassRls) bypasses.push('BYPASSRLS');
+  if (facts.isBypassRoleMember) bypasses.push('BYPASS_ROLE_MEMBER');
   if (facts.rlsDisabledTables > 0) bypasses.push('RLS_DISABLED');
   if (facts.ownedUnforcedTables > 0) bypasses.push('OWNER_NOT_FORCED');
   return { facts, bypasses, enforced: bypasses.length === 0 && facts.tenantTables > 0 };
@@ -146,10 +176,15 @@ type RawDb = {
  * config, which is what made the gap invisible in the first place.
  */
 export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
-  const [role] = await db.$queryRaw<Array<{ role: string; superuser: boolean; bypassrls: boolean }>>`
+  const [role] = await db.$queryRaw<Array<{ role: string; superuser: boolean; bypassrls: boolean; bypass_member: boolean }>>`
     SELECT current_user::text AS role,
            COALESCE(r.rolsuper, false)     AS superuser,
-           COALESCE(r.rolbypassrls, false) AS bypassrls
+           COALESCE(r.rolbypassrls, false) AS bypassrls,
+           -- [review] The escape the tenant POLICY grants, not a role attribute.
+           -- Addressed by oid so a missing role yields no row (=> NULL => false)
+           -- instead of the error the name,name,text form raises.
+           COALESCE((SELECT pg_has_role(current_user, b.oid, 'MEMBER')
+                       FROM pg_roles b WHERE b.rolname = 'swift_bypass_rls'), false) AS bypass_member
       FROM pg_roles r
      WHERE r.rolname = current_user`;
   const [tables] = await db.$queryRaw<Array<{ total: bigint; disabled: bigint; owned_unforced: bigint }>>`
@@ -169,6 +204,7 @@ export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
     roleResolved: role !== undefined,
     isSuperuser: role?.superuser ?? false,
     hasBypassRls: role?.bypassrls ?? false,
+    isBypassRoleMember: role?.bypass_member ?? false,
     tenantTables: Number(tables?.total ?? 0),
     rlsDisabledTables: Number(tables?.disabled ?? 0),
     ownedUnforcedTables: Number(tables?.owned_unforced ?? 0),
@@ -209,6 +245,16 @@ export function assertTenantWall(
   env: EnvLike = process.env,
 ): void {
   if (runtimeMode(env) !== 'production') return;
+  // [review] Before the postures, because the old shape refused a NaN count by
+  // accident (`NaN <= 1` is false, so it fell through to the throw) and the new
+  // one would have BOOTED it (`NaN > 1` is false, landing in posture 3). A
+  // count that is not a count is not evidence of anything.
+  if (!Number.isInteger(activeTenants) || activeTenants < 0) {
+    throw new Error(
+      `FATAL: the active-tenant count is ${String(activeTenants)}, which is not a count. ` +
+        'The tenant wall cannot be assessed against it, and guessing is how a wall-less posture boots. Refusing to start.',
+    );
+  }
 
   // POSTURE 1 — the database holds up its end, so the application must hold up
   // its own. [STA-1 4.1 / DL-2] A wall the app never binds returns NOTHING to a
@@ -239,7 +285,22 @@ export function assertTenantWall(
   }
 
   // POSTURE 3 — no wall, nothing to isolate yet. Legitimate, once declared.
-  if (expandPostureAttested(env)) return;
+  //
+  // [review] The attestation answers "why is there no wall", NOT "why did the
+  // probe find nothing". `tenantTables === 0` produces `bypasses: []` and
+  // `enforced: false` — this module's own doc calls that "a broken census or a
+  // wrong schema, never a clean bill" — and it landed here with an EMPTY reason
+  // list, so an attested deployment booted green on a wrong DATABASE_URL, a
+  // changed search_path, or a renamed tenantId column. The attestation is a
+  // statement about a KNOWN posture; it cannot cover an unknown one.
+  if (attestation.bypasses.length > 0 && expandPostureAttested(env)) return;
+  if (attestation.bypasses.length === 0) {
+    throw new Error(
+      `FATAL: the tenant-wall probe found ${attestation.facts.tenantTables} tenant-bearing table(s) and no bypass — it has learned nothing.\n` +
+        'That is a broken census or a wrong schema, not a clean bill: check DATABASE_URL, the search_path, and that the tenantId column still has that name. ' +
+        'TENANT_WALL_EXPAND_ATTESTED does not cover this — it declares a KNOWN wall-less posture, not an unreadable one. Refusing to start.',
+    );
+  }
   throw new Error(
     `FATAL: the database tenant wall does not bind this connection:\n${why}\n` +
       `There ${activeTenants === 1 ? 'is 1 active tenant' : `are ${activeTenants} active tenants`}, so there is nothing to isolate yet and this posture MAY be deliberate — ` +
