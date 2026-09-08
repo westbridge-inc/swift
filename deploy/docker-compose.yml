@@ -41,10 +41,35 @@
 # intentionally gated (see deploy/README.md "Production" and the
 # MOVER-AUTHORITY-CUTOVER-RUNBOOK). Everything here is data-safe to run.
 #
-# Services: postgres (PostGIS), redis, meilisearch, the API, and a dedicated
-# BullMQ worker (so N API replicas never process a job N times).
+# Services: postgres (PostGIS), valkey, meilisearch, the API, and a dedicated
+# BullMQ worker (so N API replicas never process a job N times) -- plus the
+# routing stack, included below.
 # ===========================================================================
 name: swift
+
+# [ROUTE-001] THE ROUTING STACK IS PART OF THIS DEPLOYMENT, NOT A NEIGHBOUR.
+#
+# It used to be a second compose file you ran separately. Compose derives a
+# project name from the directory when a file does not set one, so the routing
+# services landed in project `deploy` on network `deploy_default` while the API
+# sat in project `swift` on `swift_default`. Two networks. `osrm` did not
+# resolve from the API container -- and `.env.deploy.example` shipped
+# `MAPS_PROVIDER=osrm` with `OSRM_URL=http://osrm:5000` anyway.
+#
+# Nothing errored. OsrmMapsProvider catches every failure and returns
+# HaversineMapsProvider's answer, so a deployment that believed it had road
+# routing served STRAIGHT-LINE distances for every fare, every ETA and every
+# dispatch ranking. In Georgetown, where the Demerara splits the city and you
+# cross at one bridge, a 2 km straight line can be a 15 km drive.
+#
+# `include:` puts them in one project and one network, so the service name
+# resolves and the container port is the right port. The heavy geocoders stay
+# behind their `geocoding` profile and do NOT start with this file:
+#
+#     docker compose -f deploy/docker-compose.yml up -d                     # api + osrm + vroom
+#     docker compose -f deploy/docker-compose.yml --profile geocoding up -d # + photon + nominatim
+include:
+  - path: docker-compose.routing.yml
 
 services:
   postgres:

@@ -7,6 +7,7 @@ import { assertSafeBootConfig, assertProductionData } from './utils/boot-config'
 import { attestationOf, attestationLine, readRlsFacts, assertTenantWall } from './lib/rls-attestation';
 import { rlsAttestationGauge } from './plugins/observability';
 import { isProduction } from './utils/runtime-mode';
+import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
@@ -29,6 +30,45 @@ async function start() {
 
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);
+
+    // [ROUTE-001] ASK THE ROUTING ENGINE WHETHER IT IS ACTUALLY THERE.
+    //
+    // OsrmMapsProvider degrades to haversine on every failure, which is right
+    // at runtime and blinding at deploy time: a permanently unreachable OSRM
+    // looks exactly like MAPS_PROVIDER=haversine. That is not hypothetical —
+    // .env.deploy.example shipped MAPS_PROVIDER=osrm with an OSRM_URL naming a
+    // service in a DIFFERENT compose project, so every fare, ETA and dispatch
+    // ranking was a straight line and nothing said so.
+    //
+    // After listen, never blocking the port, never failing readiness: routing
+    // is degradable and taking the instance out of rotation would be the worse
+    // outage. It pages ops and records the verdict for /health.
+    void (async () => {
+      const { getMapsProvider } = await import('./providers/maps/maps-provider');
+      const { probeRouting, setLastRoutingProbe } = await import('./providers/maps/routing-probe');
+      const verdict = await probeRouting(getMapsProvider());
+      setLastRoutingProbe(verdict);
+      if (verdict.status === 'ok') {
+        app.log.info({ routing: verdict }, `routing: ${verdict.provider} answered (${verdict.km.toFixed(2)} km probe route)`);
+        void resolveOpsPage(app.prisma, 'Routing engine unreachable').catch(() => {});
+        return;
+      }
+      if (verdict.status === 'skipped') {
+        app.log.info({ routing: verdict }, `routing: not probed — ${verdict.why}`);
+        return;
+      }
+      app.log.error({ routing: verdict }, `ROUTING DEGRADED: ${verdict.why}`);
+      const { NotificationService } = await import('./modules/notification/notification.service');
+      await pageOps(
+        { prisma: app.prisma, redis: app.redis, notifications: new NotificationService(app.prisma, app.io) },
+        {
+          key: 'ops_page:routing-unreachable',
+          title: 'Routing engine unreachable',
+          body: `${verdict.why} Fares, ETAs and dispatch ranking are all straight-line until this is fixed.`,
+          data: { kind: 'ops_routing_unreachable', provider: verdict.provider },
+        },
+      );
+    })().catch((err) => app.log.error({ err }, 'routing probe failed to run'));
 
     // [MKT G3/G5] PLANT THE DISCOVERY TAXONOMY.
     //
