@@ -16,7 +16,11 @@
 //     Chicken Curry ................ 1500
 //     Chicken Curry                $1,500.00
 //     2. Fish & Chips   G$2,250
-//     Pepperpot  1800   (served with bread)
+//     Pepperpot (served with bread) ..... 1800
+//
+// Price-LAST is the rule. A line whose description follows the price
+// ("Pepperpot  1800  (served with bread)") is NOT read — TRAILING_PRICE
+// anchors at end of line — and is left for the vendor rather than guessed at.
 //     STARTERS                      <- a category header: no price, short
 // ---------------------------------------------------------------------------
 
@@ -31,13 +35,26 @@ export interface MenuDraft {
 const MAX_PRICE = 10_000_000;
 const MIN_PRICE = 1;
 /**
- * A BARE small integer — no currency mark, no thousands separator, no decimals,
- * no dotted leader — is almost never a price. "Page 2", "Table 4", "Serves 2"
- * all match a trailing-number rule perfectly. So a number under this threshold
- * is only accepted when the line SHOWS it is money. A genuinely $5 item written
- * as "$5" or "5.00" still reads; one written as a naked "5" is left for the
- * vendor to add, which is the right way round: a skipped line costs one typed
- * row, an invented one puts a wrong price on a live product.
+ * A BARE integer — no currency mark, no thousands separator, no decimals, no
+ * dotted leader — is almost never a price, AT ANY MAGNITUDE. This used to be a
+ * floor: a naked number under 50 was rejected, anything above it accepted. That
+ * inverted the module's own rule for exactly the lines a menu footer is full of,
+ * because the numbers in them are large:
+ *
+ *     "Call us on 592 226 1234"        -> item "Call us on 592 226"  @ 1234
+ *     "Established 1998"               -> item "Established"         @ 1998
+ *     "Serving Georgetown since 1998"  -> item "Serving Georgetown since" @ 1998
+ *     "Table 100"                      -> item "Table"               @ 100
+ *
+ * A Guyanese phone number written the ordinary way sailed straight through; only
+ * the unseparated form ever hit MAX_PRICE. So the magnitude escape hatch is
+ * gone: a number is a price when the line SHOWS it is money, and otherwise it is
+ * left for the vendor. A genuinely $5 item written "$5" or "5.00" still reads.
+ * That is the trade this file already argued for — a skipped line costs one
+ * typed row, an invented one puts a wrong price on a live product.
+ *
+ * The floor is KEPT for the weakest signal — a plain column gap — because that
+ * is where "Chapter   5" and "Page   2" live. It is no longer the whole rule.
  */
 const BARE_INTEGER_FLOOR = 50;
 const MAX_NAME = 150;
@@ -109,10 +126,34 @@ export function parseMenuText(text: string, opts: { defaultCategory?: string } =
 
     const rawBefore = line.slice(0, priceMatch.index ?? 0);
     // Does the line SHOW that this number is money?
-    const looksLikeMoney = Boolean(currency) || Boolean(cents) || /[,\s]/.test(digits) || LEADERS.test(rawBefore);
-    if (!looksLikeMoney && basePrice < BARE_INTEGER_FLOOR) continue;
+    // The gap between the name and the price. TRAILING_PRICE consumes the
+    // separator itself, so most of it lives in the MATCH, not in rawBefore —
+    // reading only rawBefore misses the column gap entirely and rejects the
+    // commonest menu shape of all ("Real Item   900").
+    const gap = (/[\s.·…_-]*$/.exec(rawBefore)?.[0] ?? '') + (/^[\s.·…_-]*/.exec(priceMatch[0])?.[0] ?? '');
+    // Does the line SHOW that this number is money? A column gap, a dotted
+    // leader, a currency mark, decimals, or thousands grouping. A single space
+    // is none of those — it is just the next word.
+    // Three strengths of signal, and they are not interchangeable.
+    //  STRONG  — a currency mark, decimals, or thousands grouping. Unambiguous.
+    //  LEADER  — a dotted/dashed run, an explicit menu convention.
+    //  GAP     — plain whitespace of two or more. The weakest, and the one a
+    //            spaced number sequence or a column of prose also produces.
+    const strongMoney = Boolean(currency) || Boolean(cents) || /[,\s]/.test(digits);
+    // A leader is a RUN. One hyphen is punctuation inside a token, not a menu
+    // convention — "WhatsApp orders 592-600-1234" is the case that proves it.
+    const leaderMoney = gap.length >= 2 && /[.·…_-]/.test(gap);
+    const gapMoney = gap.length >= 2;
+    if (!strongMoney && !leaderMoney && !gapMoney) continue;
 
     const beforePrice = rawBefore.replace(LEADERS, '');
+    if (!strongMoney && !leaderMoney) {
+      // Carried only by a column gap. Two things are then still not prices:
+      // a small naked number ("Chapter   5", "Page   2"), and a number that
+      // continues the name's own digits ("Call us on 592 226   1234").
+      if (basePrice < BARE_INTEGER_FLOOR) continue;
+      if (/\d$/.test(beforePrice)) continue;
+    }
     const withoutOrnament = beforePrice.replace(LEADING_ORNAMENT, '');
     const { name, description } = splitNameAndDescription(withoutOrnament);
     // A price with no name is a subtotal, a page number, or a stray column.

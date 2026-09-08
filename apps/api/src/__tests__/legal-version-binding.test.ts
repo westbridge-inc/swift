@@ -53,7 +53,10 @@ const PUBLISHED: Record<
   // and menu text went to a model provider — became untrue. A policy that
   // describes processing which no longer happens is as wrong as one that hides
   // processing which does. It now says plainly that Swift sends nothing you
-  // write to an AI service.
+  // write to an AI service — AND names the one place a model does run (the
+  // identity check), because the first draft of this paragraph claimed no model
+  // existed anywhere while the KYC face-match was live. That claim is graded
+  // against the processor register now; see legal-ai-claim.test.ts.
   //
   // All four documents re-pin, not only the Privacy Policy: the published
   // "Last updated" date is part of every served text, so changing it changes
@@ -61,7 +64,7 @@ const PUBLISHED: Record<
   // the words people actually consented to.
   '2026-09-07': {
     terms: '585d5b6e5f147e945602fd3dce05a27509952563a9be2b6c2127524be6811c32',
-    privacy: '3da38b74fa97fcd42cd8f32d5fc7d642c9db0bfe344e95cec6314690da4f5f87',
+    privacy: 'edad85c0a55cd9520d8e45ed0e0f504481b4d94030068bf0d25df63445a6d6f9',
     driver_agreement: '923d398238ff81c5b554673871eab012999b77a27742a2812afa965e5ffc7ead',
     vendor_agreement: '5023bc04a37935f4de6e873f400c8e8b35443164d46e7a951c0f72bbb93946d1',
   },

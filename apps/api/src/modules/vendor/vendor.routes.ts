@@ -2259,7 +2259,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   }
 
   /** POST /items/import/automap — map a messy store CSV's columns to Swift
-   *  fields (deterministic synonyms + AI assist). Returns a preview + a canonical
+   *  fields (a deterministic synonym table; unmapped columns go to the vendor).
+   *  Returns a preview + a canonical
    *  CSV to confirm via POST /items/import. */
   app.post('/items/import/automap', auth, async (request) => {
     await requireVendor(app, request, 'MANAGER');
@@ -2324,7 +2325,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items/import/menu-parse — a restaurant's PDF menu becomes draft
    *  items to CONFIRM (master plan §3.1). Deterministic guard rails: the AI
-   *  only restructures the extracted text; rows without a parseable price are
+   *  parser reads the extracted text; rows without a parseable price are
    *  dropped, never invented, and nothing imports until the vendor confirms. */
   app.post('/items/import/menu-parse', auth, async (request) => {
     await requireVendor(app, request, 'MANAGER');

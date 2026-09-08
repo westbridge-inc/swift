@@ -20,7 +20,6 @@ const createdVendorIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_750_000_000 + Math.floor(Math.random() * 9_000_000);
 const tenantId = `test-discovery-backfill-${nanoid(8).toLowerCase()}`;
-const TEST_NOW = new Date('2084-07-16T08:00:00.000Z');
 
 async function makeVendorWithMenu(names: string[]) {
   seq += 1;
@@ -77,7 +76,7 @@ afterAll(async () => {
 
 describe('CAT-I: the backfill movement', () => {
   it('A→B→C→notify runs the catalog; a re-run writes zero new rows and never re-notifies', async () => {
-    // A menu Stage A can mostly place + one line only the AI can.
+    // A menu the matcher can mostly place, plus one line it is blind to.
     const shop = await makeVendorWithMenu([
       'Chicken chowmein — special', // matcher: chinese
       'Dhalpuri with duck curry', // matcher: roti-curry
@@ -86,16 +85,25 @@ describe('CAT-I: the backfill movement', () => {
     const notified: string[] = [];
     const opts = {
       tenantId,
-      now: TEST_NOW,
       notify: async (userId: string) => { notified.push(userId); },
     };
     const first = await runCategoryBackfill(prisma, opts);
     expect(first.itemsScanned).toBe(3);
     expect(first.matcherSuggestionsWritten).toBeGreaterThanOrEqual(2);
-    // [NO-AI] Stage B is gone. The matcher's own suggestions are the whole
-    // pipeline, and an item it cannot place is left for a person rather than
-    // guessed at — so the report no longer carries aiScanned/aiSuggested.
+    // [NO-AI] Stage B is gone. `not.toHaveProperty('aiScanned')` only restates
+    // the return TYPE, which the compiler already guarantees and which no
+    // behaviour change can violate — so it is kept for readability and graded
+    // by the assertion below, which is the actual invariant: an item the
+    // matcher cannot place ends with NO suggestion rows. A re-introduced
+    // guesser writing one low-confidence row under any other key name would
+    // satisfy every other assertion in this test.
     expect(first).not.toHaveProperty('aiScanned');
+    const unplaceable = shop.items.find((i) => i.name === 'The Thursday Thing');
+    expect(unplaceable, 'fixture drifted — the unplaceable item is gone').toBeTruthy();
+    expect(
+      await prisma.discoveryCategorySuggestion.count({ where: { itemId: unplaceable!.id } }),
+      'an item the matcher cannot place must stay unplaced for a person, not be guessed at',
+    ).toBe(0);
     expect(first.vendorsNotified).toBe(1);
     expect(notified).toContain(shop.ownerUserId);
     const firstNotifiedCount = notified.length;

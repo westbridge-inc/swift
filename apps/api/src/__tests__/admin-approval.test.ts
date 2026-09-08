@@ -18,7 +18,7 @@ import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/ad
 // Every finance, billing, subscription and ads money route decided on a single
 // actor's request. A settlement processed, a fee waived, a top-up granted, an
 // invoice marked paid — no independent check, no reversal path. The only
-// approval model in the schema gates the autonomous agent; no human action
+// approval model in the schema gates privileged admin action; no human action
 // passed through anything like it. One mistaken or malicious admin was the
 // whole control.
 //

@@ -40,6 +40,16 @@ export interface ProcessorEntry {
   /** Host suffixes the party is reached at (defaults and env-configured endpoints). */
   hosts: readonly string[];
   payload: readonly PayloadClass[];
+  /**
+   * Does this party run a machine-learning model over what Swift sends it?
+   *
+   * Recorded as a stated fact per processor, never inferred from a payload
+   * class that happens to correlate today. The Privacy Policy's "no AI" claim
+   * is GRADED against this field (`legal-ai-claim.test.ts`), so the policy
+   * cannot drift into saying something the register contradicts — which is
+   * exactly what it did before this was here.
+   */
+  modelBacked: boolean;
   lawfulBasis: LawfulBasis;
   /** Where the processing happens, as recorded for the transfer register. */
   country: string;
@@ -58,6 +68,7 @@ export const CONTRACT_GATED_PAYLOADS: ReadonlySet<PayloadClass> = new Set([
 export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   {
     ref: 'DIDIT', party: 'Didit', service: 'Identity verification: ID document image, selfie, liveness, OCR',
+    modelBacked: true,
     providerDirs: ['kyc'], hosts: ['verification.didit.me', 'didit.me'],
     payload: ['PERSONAL_DOC_IMAGE', 'BIOMETRIC', 'IDENTITY_FIELDS'], lawfulBasis: 'LEGAL_OBLIGATION',
     country: 'vendor-hosted (EU/US)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES',
@@ -66,6 +77,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   },
   {
     ref: 'ID_ANALYZER', party: 'ID Analyzer', service: 'Document OCR + biometric match',
+    modelBacked: true,
     providerDirs: ['kyc'], hosts: ['api2.idanalyzer.com', 'idanalyzer.com'],
     payload: ['PERSONAL_DOC_IMAGE', 'BIOMETRIC', 'IDENTITY_FIELDS'], lawfulBasis: 'LEGAL_OBLIGATION',
     country: 'vendor-hosted (US)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES',
@@ -74,6 +86,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   },
   {
     ref: 'OBJECT_STORE', party: 'Cloudflare R2 / AWS S3 (S3-compatible endpoint)', service: 'Object storage for uploaded documents',
+    modelBacked: false,
     providerDirs: ['storage'], hosts: ['r2.cloudflarestorage.com', 'amazonaws.com'],
     payload: ['PERSONAL_DOC_CIPHERTEXT'], lawfulBasis: 'CONTRACT',
     country: 'vendor region (AWS_S3_ENDPOINT)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES',
@@ -82,6 +95,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   },
   {
     ref: 'ERROR_TRACKING', party: 'Swift (self-hosted GlitchTip, Sentry-SDK compatible)', service: 'Error and performance telemetry',
+    modelBacked: false,
     providerDirs: [], hosts: [],
     payload: ['DIAGNOSTIC'], lawfulBasis: 'LEGITIMATE_INTEREST',
     country: 'Swift infrastructure', leavesCountry: false, transferBasis: 'SELF_HOSTED', contractEnv: null,
@@ -89,6 +103,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   },
   {
     ref: 'TWILIO', party: 'Twilio Inc.', service: 'SMS one-time codes and notices',
+    modelBacked: false,
     providerDirs: ['notifications'], hosts: ['api.twilio.com', 'twilio.com'],
     payload: ['CONTACT'], lawfulBasis: 'CONTRACT',
     country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
@@ -96,6 +111,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   },
   {
     ref: 'EXPO_PUSH', party: 'Expo (650 Industries)', service: 'Push notification relay',
+    modelBacked: false,
     providerDirs: ['notifications'], hosts: ['exp.host', 'expo.dev'],
     payload: ['DEVICE_TOKEN', 'CONTACT'], lawfulBasis: 'CONTRACT',
     country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
@@ -103,6 +119,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   },
   {
     ref: 'SMTP_EMAIL', party: 'GoDaddy mailbox (SMTP)', service: 'Transactional email',
+    modelBacked: false,
     providerDirs: ['notifications'], hosts: ['secureserver.net', 'godaddy.com', 'titan.email'],
     payload: ['CONTACT'], lawfulBasis: 'CONTRACT',
     country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
@@ -110,6 +127,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   },
   {
     ref: 'GOOGLE_MAPS', party: 'Google LLC (Maps Platform)', service: 'Places autocomplete, geocoding, distance matrix',
+    modelBacked: false,
     providerDirs: ['maps', 'places'], hosts: ['maps.googleapis.com', 'googleapis.com'],
     payload: ['LOCATION'], lawfulBasis: 'CONTRACT',
     country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
@@ -117,24 +135,28 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   },
   {
     ref: 'OSRM', party: 'Swift (self-hosted OSRM)', service: 'Routing and ETAs',
+    modelBacked: false,
     providerDirs: ['maps'], hosts: [], payload: ['LOCATION'], lawfulBasis: 'CONTRACT',
     country: 'Swift infrastructure', leavesCountry: false, transferBasis: 'SELF_HOSTED', contractEnv: null,
     note: 'OSRM_URL; no third party.',
   },
   {
     ref: 'VROOM', party: 'Swift (self-hosted VROOM)', service: 'Dispatch and batch planning',
+    modelBacked: false,
     providerDirs: ['dispatch'], hosts: [], payload: ['LOCATION'], lawfulBasis: 'CONTRACT',
     country: 'Swift infrastructure', leavesCountry: false, transferBasis: 'SELF_HOSTED', contractEnv: null,
     note: 'VROOM_URL; no third party.',
   },
   {
     ref: 'OSM_PLACES', party: 'Swift (self-hosted Photon + Nominatim)', service: 'Address search and reverse geocoding',
+    modelBacked: false,
     providerDirs: ['places'], hosts: [], payload: ['LOCATION'], lawfulBasis: 'CONTRACT',
     country: 'Swift infrastructure', leavesCountry: false, transferBasis: 'SELF_HOSTED', contractEnv: null,
     note: 'PHOTON_URL / NOMINATIM_URL; no public OSM endpoint is a default.',
   },
   {
     ref: 'MMG', party: 'Mobile Money Guyana (GTT)', service: 'Merchant subscription payments',
+    modelBacked: false,
     providerDirs: ['mmg'], hosts: ['mmg.gy', 'mmgtest.net'],
     payload: ['PAYMENT', 'CONTACT'], lawfulBasis: 'CONTRACT',
     country: 'GY', leavesCountry: false, transferBasis: 'IN_COUNTRY', contractEnv: null,
@@ -142,6 +164,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   },
   {
     ref: 'POWERTRANZ', party: 'PowerTranz (First Atlantic Commerce)', service: 'Card payment gateway',
+    modelBacked: false,
     providerDirs: ['payment'], hosts: ['ptranz.com'],
     payload: ['PAYMENT'], lawfulBasis: 'CONTRACT',
     country: 'Barbados (Caribbean)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
@@ -149,6 +172,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   },
   {
     ref: 'STRIPE', party: 'Stripe, Inc.', service: 'Card payment gateway (dormant — V1 is cash-only)',
+    modelBacked: false,
     providerDirs: ['payment'], hosts: ['api.stripe.com', 'stripe.com'],
     payload: ['PAYMENT'], lawfulBasis: 'CONTRACT',
     country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,

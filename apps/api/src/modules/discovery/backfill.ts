@@ -5,9 +5,10 @@ import { requireDiscoveryTenantId } from './tenant-boundary';
 
 // ---------------------------------------------------------------------------
 // The backfill movement (#17 Part 4, CAT-I): run once per tenant behind the
-// flag — Stage A across every live item, Stage B for what A couldn't place
-// (under the daily budget; the un-placed remainder simply waits for the
-// hourly job on later days), Stage C derivation, then ONE notification per
+// flag — Stage A across every live item, Stage C derivation, then ONE
+// notification per
+// [NO-AI] There is no Stage B. An item Stage A cannot place stays UNPLACED for
+// a person to categorise; nothing guesses it and no job retries it later.
 // vendor with pending suggestions. Idempotent by construction (upserts +
 // law-C frozen ground): a re-run scans again but writes nothing new and
 // never re-notifies. Keyset iteration — no OFFSET on a growing table (#22).
@@ -31,8 +32,6 @@ export async function runCategoryBackfill(
     /** Send the review notification to vendors with pending suggestions. */
     notify?: (userId: string) => Promise<void>;
     batchSize?: number;
-    /** Injectable accounting clock; production defaults to the current UTC day. */
-    now?: Date;
   },
 ): Promise<BackfillReport> {
   const tenantId = requireDiscoveryTenantId(opts.tenantId);

@@ -45,6 +45,38 @@ describe('[NO-AI] parseMenuText reads a menu instead of imagining one', () => {
     expect(drafts.map((d) => d.name)).toEqual(['Real Item']);
   });
 
+  it('does not turn a menu footer into priced products', () => {
+    // Every line here was accepted as an item before the bare-integer floor was
+    // removed: the floor rejected small naked numbers ("Page 2") and waved
+    // through large ones, which is precisely the shape a phone number, a year
+    // and a table number have. Found by independent review of #1218.
+    const drafts = parseMenuText([
+      'Call us on 592 226 1234',
+      'Call us on 592 226   1234',            // same line, wider gap
+      'Established 1998',
+      'Serving Georgetown since 1998',
+      'WhatsApp orders 592-600-1234',
+      'Follow us on Instagram @swiftgy 2026',
+      'Table 100',
+      'Real Item   900',                      // the only readable line
+    ].join('\n'));
+
+    expect(drafts).toEqual([
+      { category: 'Menu', name: 'Real Item', description: '', basePrice: 900 },
+    ]);
+  });
+
+  it('still reads a numbered combo, because a dotted leader is a real menu convention', () => {
+    // The guard above rejects a name ending mid-number when the only separator
+    // is whitespace. It must NOT reject an item whose name legitimately ends in
+    // a digit and is separated by a leader.
+    const drafts = parseMenuText([
+      'Combo 2 ............ 1500',
+      'Combo 3   $1,800',
+    ].join('\n'));
+    expect(drafts.map((d) => [d.name, d.basePrice])).toEqual([['Combo 2', 1500], ['Combo 3', 1800]]);
+  });
+
   it('refuses a price outside anything a menu line can mean', () => {
     const drafts = parseMenuText([
       'Suspiciously Cheap   0',

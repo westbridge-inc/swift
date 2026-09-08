@@ -14,8 +14,12 @@
 -- So the tables are RETIRED, not removed:
 --   * renamed out of the live namespace, so no ORM regenerates a model for them
 --     and no future migration silently reuses the name;
---   * marked read-only by a rule that refuses INSERT, UPDATE and DELETE, so
---     nothing can add to or quietly edit a closed record;
+--   * marked read-only by rules that refuse INSERT, UPDATE and DELETE, so no
+--     ordinary statement can add to or quietly edit a closed record. Stated
+--     precisely, because a rule is not a permission: `DO INSTEAD NOTHING` does
+--     NOT constrain `COPY ... FROM`, is bypassed by `TRUNCATE`, and says
+--     nothing about `DROP TABLE` or `ALTER TABLE`. It closes the application's
+--     doors, not a superuser's;
 --   * commented with what they were and when they stopped.
 --
 -- A later, separate decision may export and drop them under the retention
@@ -43,27 +47,43 @@ ALTER TABLE IF EXISTS "agent_audit_events"    SET SCHEMA "retired";
 ALTER TABLE IF EXISTS "retired"."agent_action_requests" RENAME TO "retired_agent_action_requests";
 ALTER TABLE IF EXISTS "retired"."agent_audit_events"    RENAME TO "retired_agent_audit_events";
 
-COMMENT ON TABLE "retired"."retired_agent_action_requests" IS
-  'RETIRED 2026-09-07 (NO-AI). Written by the removed ops agent. Read-only evidence; no runtime reads or writes it.';
-COMMENT ON TABLE "retired"."retired_agent_audit_events" IS
-  'RETIRED 2026-09-07 (NO-AI). Written by the removed ops agent. Read-only evidence; no runtime reads or writes it.';
+-- Everything below addresses the retired tables by name. The four ALTERs above
+-- are written IF EXISTS, which only makes sense if they may be absent — and on
+-- exactly that database (one where a `prisma db push` already removed them)
+-- these statements would abort `migrate deploy` part-way and block every later
+-- migration until _prisma_migrations was hand-repaired. So the guard is carried
+-- all the way through rather than half-way.
+DO $retire$
+BEGIN
+  IF to_regclass('"retired"."retired_agent_action_requests"') IS NULL
+     OR to_regclass('"retired"."retired_agent_audit_events"') IS NULL THEN
+    RAISE NOTICE 'retire_ai_agent_tables: agent tables absent; nothing to retire';
+    RETURN;
+  END IF;
 
-CREATE OR REPLACE RULE "retired_no_insert" AS ON INSERT TO "retired"."retired_agent_action_requests" DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE "retired_no_update" AS ON UPDATE TO "retired"."retired_agent_action_requests" DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE "retired_no_delete" AS ON DELETE TO "retired"."retired_agent_action_requests" DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE "retired_no_insert" AS ON INSERT TO "retired"."retired_agent_audit_events" DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE "retired_no_update" AS ON UPDATE TO "retired"."retired_agent_audit_events" DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE "retired_no_delete" AS ON DELETE TO "retired"."retired_agent_audit_events" DO INSTEAD NOTHING;
+    COMMENT ON TABLE "retired"."retired_agent_action_requests" IS
+      'RETIRED 2026-09-07 (NO-AI). Written by the removed ops agent. Read-only evidence; no runtime reads or writes it.';
+    COMMENT ON TABLE "retired"."retired_agent_audit_events" IS
+      'RETIRED 2026-09-07 (NO-AI). Written by the removed ops agent. Read-only evidence; no runtime reads or writes it.';
 
--- The enum type goes, but its VALUES stay. The retired table's status column is
--- converted to text first, so every recorded status is preserved verbatim as
--- the label it always read as. Keeping a Prisma-less enum alive would leave the
--- schema permanently drifted from its migrations; converting the column removes
--- the dependency without touching a single recorded fact.
--- The column DEFAULT also references the type, and a default on a table that
--- refuses INSERT is meaningless anyway.
-ALTER TABLE "retired"."retired_agent_action_requests" ALTER COLUMN "status" DROP DEFAULT;
-ALTER TABLE "retired"."retired_agent_action_requests"
-  ALTER COLUMN "status" TYPE text USING "status"::text;
+    CREATE OR REPLACE RULE "retired_no_insert" AS ON INSERT TO "retired"."retired_agent_action_requests" DO INSTEAD NOTHING;
+    CREATE OR REPLACE RULE "retired_no_update" AS ON UPDATE TO "retired"."retired_agent_action_requests" DO INSTEAD NOTHING;
+    CREATE OR REPLACE RULE "retired_no_delete" AS ON DELETE TO "retired"."retired_agent_action_requests" DO INSTEAD NOTHING;
+    CREATE OR REPLACE RULE "retired_no_insert" AS ON INSERT TO "retired"."retired_agent_audit_events" DO INSTEAD NOTHING;
+    CREATE OR REPLACE RULE "retired_no_update" AS ON UPDATE TO "retired"."retired_agent_audit_events" DO INSTEAD NOTHING;
+    CREATE OR REPLACE RULE "retired_no_delete" AS ON DELETE TO "retired"."retired_agent_audit_events" DO INSTEAD NOTHING;
+
+    -- The enum type goes, but its VALUES stay. The retired table's status column is
+    -- converted to text first, so every recorded status is preserved verbatim as
+    -- the label it always read as. Keeping a Prisma-less enum alive would leave the
+    -- schema permanently drifted from its migrations; converting the column removes
+    -- the dependency without touching a single recorded fact.
+    -- The column DEFAULT also references the type, and a default on a table that
+    -- refuses INSERT is meaningless anyway.
+    ALTER TABLE "retired"."retired_agent_action_requests" ALTER COLUMN "status" DROP DEFAULT;
+    ALTER TABLE "retired"."retired_agent_action_requests"
+      ALTER COLUMN "status" TYPE text USING "status"::text;
+END
+$retire$;
 
 DROP TYPE IF EXISTS "AgentActionStatus";

@@ -5975,7 +5975,7 @@ model DiscoveryCategorySuggestion {
   itemId     String
   categoryId String
   confidence Decimal   @db.Decimal(3, 2)
-  stage      String // "MATCHER" | "AI"
+  stage      String // "MATCHER" — the only stage that writes; the model stage is retired
   status     String    @default("PENDING") // PENDING | ACCEPTED | DISMISSED | SUPERSEDED
   createdAt  DateTime  @default(now())
   resolvedAt DateTime?
