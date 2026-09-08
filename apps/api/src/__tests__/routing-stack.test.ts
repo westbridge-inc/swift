@@ -56,9 +56,18 @@ describe('[routing] the stack is in the repository', () => {
     // (and names the two locally-built images that are legitimately exempt).
     // This one keeps the routing stack's own four honest in the file that
     // documents them.
-    const images = [...COMPOSE.matchAll(/image:\s*(\S+)/g)].map((m) => m[1]!);
+    // [review] Two tests enforcing one rule with two different parsers is how
+    // they come to disagree. This one was UNANCHORED, so it counted `image:`
+    // inside COMMENTS — following this file's own instruction to add a worked
+    // example line would have turned it red on a comment-only edit. It also
+    // matched `:latest` as a SUBSTRING, so `foo:latest-alpine@sha256:...` was a
+    // false positive. Both now match the gate's own rules.
+    const images = COMPOSE.split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .flatMap((l) => [...l.replace(/\s+#.*$/, '').matchAll(/(?:^|[\s{,])image:\s*([^,}\n]+)/g)])
+      .map((m) => m[1]!.trim().replace(/^['"]|['"],?$/g, ''));
     expect(images.length).toBe(4);
-    expect(images.filter((i) => i.includes(':latest'))).toEqual([]);
+    expect(images.filter((i) => /:latest(@|$)/.test(i))).toEqual([]);
     const undigested = images.filter((i) => !/@sha256:[0-9a-f]{64}$/.test(i));
     expect(undigested, 'every routing image must carry a digest').toEqual([]);
   });

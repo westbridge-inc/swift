@@ -20,7 +20,7 @@ REFRESH=0
 DATA="routing-data/osrm"
 PBF="guyana-latest.osm.pbf"
 URL="https://download.geofabrik.de/south-america/${PBF}"
-IMAGE="osrm/osrm-backend:v5.25.0"
+IMAGE="osrm/osrm-backend:v5.25.0@sha256:bdfa60e64ae1376bff6ff5605991be50600132a27469a4a9e77c23afd3a6d555"
 
 mkdir -p "$DATA"
 cd "$DATA"
