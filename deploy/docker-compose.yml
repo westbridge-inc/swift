@@ -64,14 +64,44 @@ services:
     # No published port by default — the API reaches it on the private network.
     # Uncomment to inspect from the host: ports: ["5432:5432"]
 
-  redis:
-    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+  # [LIC-001 · Codex REPORT-075] VALKEY, NOT REDIS — and the volume is new on purpose.
+  #
+  # Redis 7.4 is not open source. It is offered under RSALv2 or SSPLv1; neither
+  # is OSI-approved, and SSPL's service-source obligations are exactly the kind
+  # a delivery platform should not discover late. Valkey is the Linux
+  # Foundation fork of Redis 7.2, BSD-3-Clause, and is a drop-in for every
+  # command this platform issues (measured: 58 distinct verbs, 13,187 calls,
+  # the whole API suite green against it).
+  #
+  # THE VOLUME IS `swift-valkeydata`, NOT `swift-redisdata`. Valkey 8 CANNOT
+  # READ REDIS 7.4 DATA — proven, not assumed:
+  #
+  #     # Can't handle RDB format version 12
+  #     # Error reading the RDB base file appendonly.aof.2.base.rdb, AOF loading aborted
+  #
+  # and the container exits 1. `MIGRATE`/`DUMP`+`RESTORE` fail the same way
+  # ("DUMP payload version or checksum are wrong"), so there is no binary
+  # migration path at all. Pointing Valkey at the old volume would crash-loop
+  # it, fail the API's startup PING, and take the whole platform down.
+  #
+  # Keeping the old volume under its own name is therefore not tidiness: it is
+  # the rollback. Put the previous service back and the data is exactly where
+  # it was.
+  #
+  # DO NOT CUT OVER WITHOUT THE PREFLIGHT. Delayed BullMQ jobs are lost with
+  # the old instance, and `auto-cancel` — which can be scheduled up to
+  # ORDER_HOLD_MINUTES + the vendor response SLA ahead (default 15 min,
+  # configurable to 24 h) — leaves an order stuck forever if it never fires.
+  # `deploy/valkey-preflight.mjs` measures what is actually outstanding.
+  # Procedure and rollback: deploy/VALKEY-MIGRATION.md
+  valkey:
+    image: valkey/valkey:8-alpine@sha256:d2e18f3410b6f616de1417f570fa55261af2898b9c5b2cfb6781ce2373ea43d1
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    command: ["valkey-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     volumes:
-      - swift-redisdata:/data
+      - swift-valkeydata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -125,7 +155,7 @@ services:
       HOST: 0.0.0.0
       PORT: "3000"
       DATABASE_URL: postgresql://${POSTGRES_USER:-swift}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swift}
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://valkey:6379
       MEILISEARCH_URL: http://meilisearch:7700
       # The API process serves HTTP only; the worker service below owns jobs.
       RUN_WORKERS: "0"
@@ -134,7 +164,7 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      redis:
+      valkey:
         condition: service_healthy
       meilisearch:
         condition: service_healthy
@@ -153,16 +183,20 @@ services:
       # sizing, which is how this process ended up with five connections for
       # nineteen concurrent jobs in the first place.
       DATABASE_URL: postgresql://${POSTGRES_USER:-swift}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swift}
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://valkey:6379
       MEILISEARCH_URL: http://meilisearch:7700
       RUN_WORKERS: "1"
     depends_on:
       migrate:
         condition: service_completed_successfully
-      redis:
+      valkey:
         condition: service_healthy
 
 volumes:
   swift-pgdata:
+  swift-valkeydata:
+  # Kept declared, not deleted: this is the rollback target. Valkey cannot
+  # read it (RDB v12), so it stays exactly as Redis left it until the
+  # cutover is proven and someone deliberately removes it.
   swift-redisdata:
   swift-meilidata:

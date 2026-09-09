@@ -73,7 +73,20 @@ if command -v docker >/dev/null 2>&1; then
   # A wedged docker CLI is itself a known failure state — bound the wait where
   # the platform allows it.
   if PS_OUT=$(bounded docker ps --format '{{.Names}}' 2>/dev/null); then
-    for c in "$PG_CONTAINER" swift-redis; do
+    # The cache container is `swift-valkey` after the LIC-001 migration and
+    # `swift-redis` before it. Checking only one name turns a correct
+    # environment into a false alarm (or a stale one into a false all-clear),
+    # so look for either and say which is actually there.
+    CACHE_CONTAINER=swift-valkey
+    if printf '%s\n' "$PS_OUT" | grep -qx swift-redis; then
+      if printf '%s\n' "$PS_OUT" | grep -qx swift-valkey; then
+        warn "BOTH swift-valkey and swift-redis are running — two caches on one machine is how a queue gets read by nobody. Stop the old one."
+      else
+        CACHE_CONTAINER=swift-redis
+        warn "cache is still swift-redis (Redis 7.4, RSALv2/SSPL) — deploy/VALKEY-MIGRATION.md moves it to Valkey"
+      fi
+    fi
+    for c in "$PG_CONTAINER" "$CACHE_CONTAINER"; do
       if printf '%s\n' "$PS_OUT" | grep -qx "$c"; then
         POLICY=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$c" 2>/dev/null || echo '?')
         if [ "$POLICY" = "no" ] || [ -z "$POLICY" ]; then
