@@ -21,11 +21,11 @@ const pdfjs = vi.hoisted(() => ({
 
 vi.mock('pdfjs-dist', () => pdfjs);
 
-type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: unknown) => void };
+type Deferred<T> = { promise: Promise<T>; resolve: (_value: T) => void; reject: (_reason?: unknown) => void };
 
 function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
+  let resolve!: (_value: T) => void;
+  let reject!: (_reason?: unknown) => void;
   const promise = new Promise<T>((done, fail) => {
     resolve = done;
     reject = fail;

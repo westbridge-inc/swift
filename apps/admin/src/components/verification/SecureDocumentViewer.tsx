@@ -47,8 +47,8 @@ interface PdfViewport {
 }
 
 interface PdfPage {
-  getViewport: (options: { scale: number }) => PdfViewport;
-  render: (options: {
+  getViewport: (_options: { scale: number }) => PdfViewport;
+  render: (_options: {
     canvas: HTMLCanvasElement;
     viewport: PdfViewport;
     annotationMode: number;
@@ -59,7 +59,7 @@ interface PdfPage {
 
 interface PdfDocument {
   numPages: number;
-  getPage: (pageNumber: number) => Promise<PdfPage>;
+  getPage: (_pageNumber: number) => Promise<PdfPage>;
   cleanup?: () => void;
   destroy?: () => Promise<void>;
 }

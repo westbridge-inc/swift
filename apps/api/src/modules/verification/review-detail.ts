@@ -259,7 +259,7 @@ export async function renderDocumentReviewDetail(
         try {
           dek = await keyProvider.unwrapDek(Buffer.from(run.wrappedDek), { signal: options.signal });
           throwIfAborted(options.signal);
-        } catch (error) {
+        } catch {
           throwIfAborted(options.signal);
           keyUnavailable = true;
         }

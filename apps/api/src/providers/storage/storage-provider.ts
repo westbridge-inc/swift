@@ -473,10 +473,6 @@ export function getStorageProvider(): StorageProvider {
   }
 }
 
-type HistoricalStorageLocation =
-  | { kind: 'local'; baseDir: string }
-  | { kind: 's3'; bucket: string; endpoint?: string; region?: string; sse?: string };
-
 /**
  * Resolve an immutable location identity across bucket/endpoint/base-dir
  * rotations. Historical locations are operator-configured without embedding

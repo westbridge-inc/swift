@@ -104,6 +104,8 @@ function verificationHandler(
           phone?: string;
           driver?: unknown;
         };
+        void _phone;
+        void _driver;
         return { ...document, user };
       });
       return { body: { success: true, data: queueDocuments } };
