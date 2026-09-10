@@ -6,9 +6,8 @@
  * validator PASS (a SKIP is not a PASS), processor confidence known and at or
  * above the type's threshold, no cross-subject collision, and the type outside
  * the always-review set — every PERSONAL document, the insurance certificate,
- * anything still needing a specimen. Until a type is active the legacy verdict
- * holds (minus the §0.5 gate, held by `test_blocking_fail_never_auto_approves`
- * in doc1-extraction-ledger), so activation is the one switch.
+ * anything still needing a specimen. An absent or provisional type is
+ * fail-closed to human review; activation never makes uncertainty an approval.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -22,9 +21,10 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { seedDocRegistry, registryCode } from '../modules/verification/doc-registry';
-import { alwaysReview, autoApproveEligible, type ExtractionPlan } from '../modules/verification/extraction-ledger';
+import { alwaysReview, autoApproveEligible, gateAutoApproval, type ExtractionPlan } from '../modules/verification/extraction-ledger';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import type { KycEngine, KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
+import { submitDocumentWithUpload } from './helpers/verification-upload';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
@@ -63,8 +63,15 @@ async function owner(n: number) {
   users.push(u.id);
   return u.id;
 }
-const submit = (userId: string, docType: string) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+const submit = (userId: string, docType: string) => runWithTenant('swift-default', async () => (
+  await submitDocumentWithUpload(app.prisma, service, {
+    userId,
+    roleKey: 'RESTAURANT',
+    docType,
+    privacyNoticeVersion: 'test-v1',
+    marker: `${RUN}-${docType}`,
+  })
+).document);
 const setActive = (code: string, on: boolean) => system(() => app.prisma.docType.update({ where: { code }, data: { isActive: on, legalFactsVerifiedAt: on ? new Date() : null } }));
 const openCases = (docId: string) => system(() => app.prisma.reviewCase.findMany({ where: { submissionId: docId, closedAt: null } }));
 const readOnly = () => { kyc.verdict = 'approved'; kyc.extracted = { documentNumber: `TIN-${RUN}-${nanoid(4)}` }; };
@@ -93,12 +100,16 @@ beforeAll(async () => {
 afterAll(async () => {
   await system(async () => {
     const docs = await app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true } });
-    await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: docs.map((d) => d.id) } } } });
-    await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.identityKey.deleteMany({ where: { accountId: { in: users } } });
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: users } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
+    // Upload authority is intentionally append-only and holds RESTRICT links
+    // to its document and user. Purge the dummy objects, then leave the
+    // value-free authority tombstones for the disposable test database rather
+    // than weakening that invariant to make cleanup convenient.
+    for (const d of await app.prisma.verificationDocument.findMany({
+      where: { id: { in: docs.map((doc) => doc.id) }, purgedAt: null },
+      select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
+    })) {
+      await service.purgeDocumentNow(d, 'test-cleanup', { requireRetentionElapsed: false, shredFields: true });
+    }
     await app.prisma.docField.deleteMany({ where: { docTypeCode: { in: [CODES.BUSINESS, CODES.PERSONAL] }, fieldCode: 'doc_number' } });
     for (const code of Object.values(CODES)) await app.prisma.docType.update({ where: { code }, data: { isActive: false, legalFactsVerifiedAt: null, needsSpecimen: false } });
   });
@@ -126,7 +137,7 @@ describe('[DOC-1 P6-4] routing after extraction — auto_approve_eligible (§6.9
     } as unknown as ExtractionPlan;
     const type = { isActive: true, bucket: 'BUSINESS' as const, needsSpecimen: false, alwaysReview: false, minConfidenceAutoApprove: 0.97 };
     expect(autoApproveEligible(plan, type, false)).toEqual({ eligible: false, reason: 'NOT_VALIDATED' });
-    expect(autoApproveEligible(plan, { ...type, isActive: false }, false)).toEqual({ eligible: true, reason: null });
+    expect(autoApproveEligible(plan, { ...type, isActive: false }, false)).toEqual({ eligible: false, reason: 'REGISTRY_INACTIVE' });
   });
 
   it('the reasons are told apart: unknown confidence is CONFIDENCE_UNKNOWN, a low one is BELOW_THRESHOLD, a collision is COLLISION, the threshold is inclusive', () => {
@@ -143,12 +154,26 @@ describe('[DOC-1 P6-4] routing after extraction — auto_approve_eligible (§6.9
     expect(autoApproveEligible({ ...withConf(1), blockingFail: true } as ExtractionPlan, type, false)).toEqual({ eligible: false, reason: 'BLOCKING_FAIL' });
   });
 
-  it('registry silent (type inactive): the processor approval stands without any confidence — activation is the one switch', async () => {
+  it('registry silent (type inactive): an automated approval is held for a person', async () => {
     const u = await owner(1);
     expect((await system(() => app.prisma.docType.findUniqueOrThrow({ where: { code: CODES.BUSINESS } }))).isActive).toBe(false);
     readOnly(); kyc.confidence = undefined;
     const doc = await submit(u, BUSINESS);
-    expect(doc.status).toBe('APPROVED');
+    expect(doc.status).toBe('PENDING');
+    expect((await openCases(doc.id)).map((c) => c.queue)).toEqual(['STANDARD']);
+  });
+
+  it('a provider rejection is evidence for a human, never a final adverse decision', () => {
+    const plan = {
+      run: { confidence: 1 }, fields: [], blockingFail: false,
+      validations: [{ validatorCode: 'V_ALL_REQUIRED_PRESENT', status: 'PASS', detailCode: null, isBlocking: true }],
+    } as unknown as ExtractionPlan;
+    const type = { isActive: true, bucket: 'BUSINESS' as const, needsSpecimen: false, alwaysReview: false, minConfidenceAutoApprove: 0.97 };
+    expect(gateAutoApproval({ status: 'rejected', reason: 'provider detail', referenceToken: 'ref' }, plan, type)).toEqual({
+      status: 'pending_manual',
+      reason: 'Automated checks could not verify this document — human review required',
+      referenceToken: 'ref',
+    });
   });
 
   it('active BUSINESS type: fields read, confidence at the threshold, no collision → the approval stands and the run records the confidence', async () => {

@@ -455,11 +455,19 @@ export async function riderRoutes(app: FastifyInstance) {
     const rider = await getRider(app, request.user.userId);
 
     const body = updateRiderProfileSchema.parse(request.body);
+    if (body.nationalIdUrl !== undefined
+      || body.driverLicenseUrl !== undefined
+      || body.vehicleInsuranceUrl !== undefined) {
+      throw new AppError(
+        409,
+        'VERIFICATION_UPLOAD_REQUIRED',
+        'Identity and licence documents must be submitted through the verification upload flow.',
+      );
+    }
 
     const allowedFields = [
       'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel',
       'vehicleYear', 'vehicleColor', 'licensePlate', 'profilePhotoUrl',
-      'nationalIdUrl', 'driverLicenseUrl', 'vehicleInsuranceUrl',
     ] as const;
 
     const updateData: Record<string, unknown> = {};
@@ -467,12 +475,6 @@ export async function riderRoutes(app: FastifyInstance) {
       if (body[field] !== undefined) {
         updateData[field] = body[field];
       }
-    }
-
-    // If documents are re-uploaded, reset verification so admin can re-verify.
-    const docFields = ['nationalIdUrl', 'driverLicenseUrl', 'vehicleInsuranceUrl'];
-    if (docFields.some((f) => updateData[f] !== undefined)) {
-      updateData['documentsVerified'] = false;
     }
 
     if (Object.keys(updateData).length === 0) {

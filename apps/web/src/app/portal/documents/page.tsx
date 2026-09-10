@@ -10,7 +10,6 @@ import { DataUnavailable } from '@/components/data-unavailable';
 import { LEGAL_URL } from '@/lib/api';
 
 const pretty = (docType: string) => docType.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-
 function statusTone(s: string, expiresAt: string | null) {
   const expiringSoon = expiresAt && new Date(expiresAt).getTime() - Date.now() < 30 * 24 * 3600 * 1000;
   if (s === 'APPROVED' && expiringSoon) return { label: 'Expiring soon', cls: 'bg-amber-100 text-amber-700' };
@@ -38,8 +37,12 @@ export default function DocumentsPage() {
 
   const submit = useMutation({
     mutationFn: async (v: { docType: string; file: File }) => {
-      const { url } = await uploadVerificationFile(v.file);
-      return submitVerificationDocument(v.docType, url);
+      const document = await uploadVerificationFile(v.file, {
+        purpose: 'CHECKLIST_DOCUMENT',
+        role: 'MOVER',
+        docType: v.docType,
+      });
+      return submitVerificationDocument(v.docType, document.uploadId);
     },
     onSuccess: (_r, v) => {
       setDone(v.docType);
@@ -93,6 +96,7 @@ export default function DocumentsPage() {
         {(d?.checklist ?? []).map((docType) => {
           const doc = latestByType.get(docType);
           const tone = doc ? statusTone(doc.status, doc.expiresAt) : null;
+          const requiresLiveSelfie = d?.selfieRequiredDocTypes.includes(docType) === true;
           return (
             <div key={docType} className="rounded-2xl border border-black/5 bg-white p-5">
               <div className="flex flex-wrap items-center gap-3">
@@ -107,15 +111,22 @@ export default function DocumentsPage() {
                 )}
                 <button
                   onClick={() => { setUploadFor(uploadFor === docType ? null : docType); setConsent(false); setError(null); }}
-                  className="ml-auto rounded-lg border border-black/10 px-3 py-1.5 text-xs font-semibold hover:bg-[var(--swift-subtle)]"
+                  disabled={requiresLiveSelfie}
+                  title={requiresLiveSelfie ? 'Secure live-selfie capture is available in the Swift mobile app.' : undefined}
+                  className="ml-auto rounded-lg border border-black/10 px-3 py-1.5 text-xs font-semibold hover:bg-[var(--swift-subtle)] disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {doc ? 'Upload renewal' : 'Upload'}
+                  {requiresLiveSelfie ? 'Use mobile app' : doc ? 'Upload renewal' : 'Upload'}
                 </button>
               </div>
               {doc?.reviewNote && doc.status === 'REJECTED' && (
                 <p className="mt-2 text-sm text-[var(--swift-red)]">Reviewer: {doc.reviewNote}</p>
               )}
               {done === docType && <p className="mt-2 text-sm font-medium text-green-600">Submitted — it is in review ✓</p>}
+              {requiresLiveSelfie && (
+                <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                  This identity document needs secure live-selfie capture. Submit it in the Swift mobile app.
+                </p>
+              )}
               {uploadFor === docType && (
                 <div className="mt-3 space-y-3 border-t border-black/5 pt-3">
                   <label className="flex items-start gap-2 text-xs text-[var(--swift-muted)]">
@@ -123,7 +134,7 @@ export default function DocumentsPage() {
                     <span>
                       I consent to Swift processing this document for verification, per the{' '}
                       <a href={LEGAL_URL('privacy')} target="_blank" rel="noreferrer" className="font-semibold text-[var(--swift-red)]">privacy notice</a>.
-                      It is stored encrypted and never shared.
+                      It is stored encrypted and may be sent to a contracted identity-verification processor only as described there.
                     </span>
                   </label>
                   <button
@@ -131,7 +142,9 @@ export default function DocumentsPage() {
                     disabled={!consent || submit.isPending}
                     className="flex items-center gap-2 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
                   >
-                    <FileUp className="h-4 w-4" /> {submit.isPending ? 'Uploading…' : 'Choose file (JPG, PNG or PDF)'}
+                    <FileUp className="h-4 w-4" /> {submit.isPending
+                      ? 'Uploading…'
+                      : 'Choose file (JPG, PNG or PDF)'}
                   </button>
                   <input
                     ref={fileRef}
@@ -140,7 +153,9 @@ export default function DocumentsPage() {
                     className="hidden"
                     onChange={(e) => {
                       const f = e.target.files?.[0];
-                      if (f && uploadFor) submit.mutate({ docType: uploadFor, file: f });
+                      if (f && uploadFor) {
+                        submit.mutate({ docType: uploadFor, file: f });
+                      }
                       e.target.value = '';
                     }}
                   />

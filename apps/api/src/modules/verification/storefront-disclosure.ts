@@ -78,7 +78,7 @@ export async function compileStorefrontDisclosure(db: Db, vendorId: string, now 
   if (!vendor) return { complete: false, missing: ['vendor'], legalName: null, address: null, contact: null, licences: [], operator: platformOperator(), compiledAt: now.toISOString() };
   const accountId = vendor.owner.userId;
   const records = await db.documentRecord.findMany({
-    where: { accountId, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }], submission: { purgedAt: null } },
+    where: { accountId, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }], submission: { storageProvenance: 'VERIFIED', purgedAt: null } },
     select: { id: true, docType: true, submissionId: true },
   });
   const business = records.filter((r) => BUCKET_OF[r.docType] === 'BUSINESS');

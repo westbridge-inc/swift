@@ -26,6 +26,13 @@ const baseDocument = {
     phone: 'target-phone',
     countryCode: 'GY',
   },
+  reviewCase: {
+    id: 'case-target',
+    queue: 'STANDARD',
+    priority: 100,
+    assignedAt: '2026-09-09T20:00:00.000Z',
+    claimedByMe: true,
+  },
 };
 
 const otherDocument = {
@@ -36,24 +43,70 @@ const otherDocument = {
     firstName: 'Other',
     phone: 'other-phone',
   },
+  reviewCase: {
+    ...baseDocument.reviewCase,
+    id: 'case-other',
+  },
 };
 
 function verificationHandler(
   mutation: (_request: ApiRequest) => ApiReply | Promise<ApiReply>,
-  documents = [baseDocument],
+  documents: any[] = [baseDocument],
+  intercept?: (_request: ApiRequest) => ApiReply | Promise<ApiReply> | undefined,
 ) {
   return (request: ApiRequest) => {
+    const intercepted = intercept?.(request);
+    if (intercepted !== undefined) return intercepted;
     // [A-19] Approving now requires the evidence to have been OPENED, so every
     // review flow fetches a signed URL first.
     if (request.method === 'GET' && request.url.pathname.endsWith('/document-url')) {
-      return { body: { success: true, data: { url: 'https://signed.test/doc.jpg' } } };
+      const id = request.url.pathname.split('/').at(-2) ?? 'document-target';
+      return { body: { success: true, data: {
+        url: `/api/v1/admin/verification/${id}/render`,
+        mimeType: 'image/jpeg',
+        expiresInSeconds: 300,
+        reviewGrantToken: `review-grant-token-${id}-000000000000`,
+      } } };
+    }
+    if (request.method === 'GET' && request.url.pathname.endsWith('/render')) {
+      // The viewer consumes protected image bytes through an authenticated fetch
+      // and renders its Blob URL, rather than putting a render URL in <img src>.
+      return { body: new Uint8Array([
+        0xff, 0xd8, 0xff, 0xc0, 0x00, 0x07, 0x08,
+        0x00, 0x20, 0x00, 0x20,
+      ]) };
+    }
+    if (request.method === 'POST' && request.url.pathname.endsWith('/render-ack')) {
+      return { body: { success: true, data: { acknowledged: true } } };
+    }
+    if (request.method === 'GET' && request.url.pathname.endsWith('/review-detail')) {
+      const id = request.url.pathname.split('/').at(-2);
+      const document = documents.find((candidate) => candidate.id === id) ?? documents[0]!;
+      return { body: { success: true, data: {
+        document: {
+          consentAt: document.consentAt,
+          privacyNoticeVersion: document.privacyNoticeVersion,
+        },
+        applicant: document.user,
+        extraction: [], validations: [], missingDeclaredFields: [], cases: [],
+      } } };
     }
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/verification/queue') {
       expect(request.url.searchParams.get('status')).toBe('PENDING');
-      expect(request.url.searchParams.get('limit')).toBe('100');
+      expect(request.url.searchParams.get('limit')).toBe('25');
+      expect(request.url.searchParams.get('page')).toBe('1');
       // [G6] every test in this file works the routine queue — the operator lane.
       expect(request.url.searchParams.get('role')).toBe('operator');
-      return { body: { success: true, data: documents } };
+      // Model the real minimized queue: phone, vehicle, consent and privacy
+      // fields arrive only from the claimed sensitive-detail endpoint above.
+      const queueDocuments = documents.map(({ consentAt: _consentAt, privacyNoticeVersion: _notice, ...document }) => {
+        const { phone: _phone, driver: _driver, ...user } = document.user as typeof document.user & {
+          phone?: string;
+          driver?: unknown;
+        };
+        return { ...document, user };
+      });
+      return { body: { success: true, data: queueDocuments } };
     }
     return mutation(request);
   };
@@ -74,9 +127,15 @@ async function openReview(
  * when the document type carries one. Approve stays disabled until both.
  */
 async function reviewEvidence(user: UserEvent, opts: { expires?: boolean } = {}) {
-  vi.stubGlobal('open', vi.fn()); // happy-dom has no real window.open
-  await user.click(screen.getByRole('button', { name: /View document/ }));
-  await screen.findByRole('button', { name: 'View document again' });
+  await user.click(screen.getByRole('button', { name: /Open secure document viewer/ }));
+  const image = await screen.findByRole('img');
+  fireEvent.load(image);
+  await waitFor(() => expect(screen.queryByText(/current session-, case-, assignment-/i)).toBeNull());
+  await user.type(
+    screen.getByPlaceholderText(/State what you checked/),
+    'Source details match the submitted application',
+  );
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Rejection category' }), 'UNREADABLE');
   if (opts.expires) {
     const future = new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const input = document.querySelector('input[type="date"]') as HTMLInputElement;
@@ -144,6 +203,8 @@ describe('verification mutations', () => {
       hireClassConfirmed: true,
       plateCrossChecked: true,
     });
+    expect(sent.reason).toBe('Source details match the submitted application');
+    expect(sent.reviewGrantToken).toBe('review-grant-token-document-target-000000000000');
     // [A-19] and the printed expiry the reviewer keyed rides with it — without
     // it the server refuses, and an approved policy would never lapse.
     expect(typeof sent.expiresAt).toBe('string');
@@ -185,7 +246,11 @@ describe('verification mutations', () => {
     );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/verification/document-target/reject`);
     expect(init?.method).toBe('PUT');
-    expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Document is unreadable' });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      reason: 'Document is unreadable',
+      reasonCode: 'UNREADABLE',
+      reviewGrantToken: 'review-grant-token-document-target-000000000000',
+    });
   });
 
   it.each([
@@ -223,7 +288,7 @@ describe('verification mutations', () => {
       'Verification action failed: Document is APPROVED, only PENDING documents can be reviewed',
     );
     expect((screen.getByRole('button', { name: buttonName }) as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.getAllByText('target-phone')).not.toHaveLength(0);
+    expect(screen.getByText(/target-phone/)).toBeTruthy();
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
     // one QUEUE read (the signed-URL evidence read is also a GET now)
     expect(requestsByMethod(fetchMock, 'GET').filter(([url]) => String(url).includes('/queue'))).toHaveLength(1);
@@ -303,7 +368,9 @@ describe('verification mutations', () => {
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
 
     pending.resolve({ body: { success: true, data: {} } });
-    await waitFor(() => expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(2));
+    await waitFor(() => expect(
+      requestsByMethod(fetchMock, 'GET').filter(([url]) => String(url).includes('/verification/queue')),
+    ).toHaveLength(2));
   });
 });
 
@@ -365,10 +432,117 @@ describe('[A-19] a decision requires the evidence', () => {
 
     const approve = () => screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
     expect(approve().disabled).toBe(true);
-    expect(screen.getByText(/not a review/i)).toBeTruthy();
+    expect(screen.getByText(/current session-, case-, assignment-/i)).toBeTruthy();
 
     await reviewEvidence(user);
     expect(approve().disabled).toBe(false);
+  });
+
+  it('keeps both decisions locked until the render acknowledgement commits', async () => {
+    const acknowledgement = deferredReply();
+    const fetchMock = mockApi(verificationHandler(
+      () => { throw new Error('no mutation expected'); },
+      [baseDocument],
+      (request) => request.method === 'POST' && request.url.pathname.endsWith('/render-ack')
+        ? acknowledgement.promise
+        : undefined,
+    ));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await user.type(
+      screen.getByPlaceholderText(/State what you checked/),
+      'Source details match the submitted application',
+    );
+    await user.type(screen.getByPlaceholderText('Rejection reason'), 'Document is unreadable');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Rejection category' }), 'UNREADABLE');
+    await user.click(screen.getByRole('button', { name: /Open secure document viewer/ }));
+    fireEvent.load(await screen.findByRole('img'));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+
+    expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Reject' }) as HTMLButtonElement).disabled).toBe(true);
+
+    acknowledgement.resolve({ body: { success: true, data: { acknowledged: true } } });
+    await waitFor(() => expect(
+      (screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled,
+    ).toBe(false));
+    expect((screen.getByRole('button', { name: 'Reject' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('does not permit a decision when render acknowledgement fails', async () => {
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    const fetchMock = mockApi(verificationHandler(
+      (request) => {
+        if (request.method === 'PUT') return { body: { success: true, data: {} } };
+        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+      },
+      [baseDocument],
+      (request) => request.method === 'POST' && request.url.pathname.endsWith('/render-ack')
+        ? { status: 500, body: { success: false, error: { code: 'AUDIT_WRITE_FAILED', message: 'audit unavailable' } } }
+        : undefined,
+    ));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await user.type(
+      screen.getByPlaceholderText(/State what you checked/),
+      'Source details match the submitted application',
+    );
+    await user.click(screen.getByRole('button', { name: /Open secure document viewer/ }));
+    fireEvent.load(await screen.findByRole('img'));
+    expect((await screen.findByRole('alert')).textContent).toContain('audit unavailable');
+
+    const approve = screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    await user.click(approve);
+    expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
+  });
+
+  it('drops a delayed grant for A after the reviewer selects B', async () => {
+    const mint = deferredReply();
+    mockApi(verificationHandler(
+      () => { throw new Error('no mutation expected'); },
+      [baseDocument, otherDocument],
+      (request) => request.method === 'GET'
+        && request.url.pathname === '/api/v1/admin/verification/document-target/document-url'
+        ? mint.promise
+        : undefined,
+    ));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await user.click(screen.getByRole('button', { name: /Open secure document viewer/ }));
+    await openReview(user, 'Other Applicant');
+    mint.resolve({ body: { success: true, data: {
+      url: '/api/v1/admin/verification/document-target/render',
+      mimeType: 'image/jpeg',
+      expiresInSeconds: 300,
+      reviewGrantToken: 'review-grant-token-delayed-target-00001',
+    } } });
+
+    await waitFor(() => expect(screen.queryByRole('img')).toBeNull());
+    expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/other-phone/)).toBeTruthy();
+  });
+
+  it('does not credit a delayed acknowledgement for A to selected document B', async () => {
+    const acknowledgement = deferredReply();
+    mockApi(verificationHandler(
+      () => { throw new Error('no mutation expected'); },
+      [baseDocument, otherDocument],
+      (request) => request.method === 'POST'
+        && request.url.pathname === '/api/v1/admin/verification/document-target/render-ack'
+        ? acknowledgement.promise
+        : undefined,
+    ));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await user.click(screen.getByRole('button', { name: /Open secure document viewer/ }));
+    fireEvent.load(await screen.findByRole('img'));
+    await openReview(user, 'Other Applicant');
+    acknowledgement.resolve({ body: { success: true, data: { acknowledged: true } } });
+
+    await waitFor(() => expect(screen.queryByRole('img')).toBeNull());
+    expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/other-phone/)).toBeTruthy();
   });
 
   it('a signed-URL failure does not unlock the decision', async () => {
@@ -377,6 +551,9 @@ describe('[A-19] a decision requires the evidence', () => {
       if (request.method === 'GET' && request.url.pathname.endsWith('/document-url')) {
         return { status: 502, body: { success: false, error: { message: 'storage down' } } };
       }
+      if (request.method === 'GET' && request.url.pathname.endsWith('/review-detail')) {
+        return { body: { success: true, data: { extraction: [], validations: [], missingDeclaredFields: [], cases: [] } } };
+      }
       if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/verification/queue') {
         return { body: { success: true, data: [baseDocument] } };
       }
@@ -384,8 +561,7 @@ describe('[A-19] a decision requires the evidence', () => {
     });
     const { user } = renderWithQuery(<VerificationPage />);
     await openReview(user);
-    vi.stubGlobal('open', vi.fn());
-    await user.click(screen.getByRole('button', { name: /View document/ }));
+    await user.click(screen.getByRole('button', { name: /Open secure document viewer/ }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeTruthy());
     // the preview FAILED, so the decision stays locked
     expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
@@ -421,6 +597,83 @@ describe('[A-19] a decision requires the evidence', () => {
     await openReview(user);
     expect(screen.getByText('HB 4210')).toBeTruthy();
     expect(screen.getByText(/Toyota/)).toBeTruthy();
+  });
+});
+
+describe('review-case selection races and sensitive-detail lifetime', () => {
+  it('does not apply a delayed claim for A to selected document B', async () => {
+    const claim = deferredReply();
+    const unclaimed = (document: typeof baseDocument) => ({
+      ...document,
+      reviewCase: { ...document.reviewCase, assignedAt: null, claimedByMe: false },
+    });
+    const target = unclaimed(baseDocument);
+    const other = unclaimed(otherDocument);
+    mockApi(verificationHandler(
+      () => { throw new Error('no unexpected request'); },
+      [target, other],
+      (request) => request.method === 'POST' && request.url.pathname === '/api/v1/admin/verification/cases/case-target/claim'
+        ? claim.promise
+        : undefined,
+    ));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await user.click(screen.getByRole('button', { name: 'Claim case' }));
+    await openReview(user, 'Other Applicant');
+    claim.resolve({ body: { success: true, data: {
+      id: 'case-target', assignedAt: '2026-09-09T20:05:00.000Z', assignedTo: 'reviewer',
+    } } });
+
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Claim case' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByRole('button', { name: 'Release' })).toBeNull();
+  });
+
+  it('does not apply a delayed release for A to selected document B', async () => {
+    const release = deferredReply();
+    mockApi(verificationHandler(
+      () => { throw new Error('no unexpected request'); },
+      [baseDocument, otherDocument],
+      (request) => request.method === 'POST' && request.url.pathname === '/api/v1/admin/verification/cases/case-target/release'
+        ? release.promise
+        : undefined,
+    ));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await user.click(screen.getByRole('button', { name: 'Release' }));
+    await openReview(user, 'Other Applicant');
+    release.resolve({ body: { success: true, data: {} } });
+
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByRole('button', { name: 'Claim case' })).toBeNull();
+    expect(screen.getByText(/other-phone/)).toBeTruthy();
+  });
+
+  it('removes claimed-only PII and vehicle evidence immediately on release', async () => {
+    const withVehicle = {
+      ...baseDocument,
+      consentAt: '2026-08-01T00:00:00.000Z',
+      user: {
+        ...baseDocument.user,
+        phone: 'target-phone',
+        driver: { licensePlate: 'HB 4210', vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleType: 'CAR' },
+      },
+    };
+    mockApi(verificationHandler(
+      (request) => request.method === 'POST' && request.url.pathname.endsWith('/release')
+        ? { body: { success: true, data: {} } }
+        : Promise.reject(new Error(`Unexpected request: ${request.method} ${request.url}`)),
+      [withVehicle],
+    ));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    expect(await screen.findByText(/target-phone/)).toBeTruthy();
+    expect(screen.getByText('HB 4210')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Release' }));
+
+    await waitFor(() => expect(screen.queryByText(/target-phone/)).toBeNull());
+    expect(screen.queryByText('HB 4210')).toBeNull();
+    expect(screen.getByText(/Phone withheld until the claimed detail loads/)).toBeTruthy();
+    expect(screen.getByText(/available after claim/)).toBeTruthy();
   });
 });
 

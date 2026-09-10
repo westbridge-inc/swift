@@ -1,14 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { VehicleType } from '@prisma/client';
+import { VehicleType, VerificationUploadPurpose } from '@prisma/client';
 import { VerificationService } from './verification.service';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
-import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
-import { createHash } from 'node:crypto';
 import { looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
+import { createVerificationUpload } from './verification-upload';
 
 const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE', 'SERVICE_PROVIDER']);
 
@@ -29,21 +28,39 @@ const consentFields = {
 const submitDocumentSchema = z.object({
   role: checklistRoleSchema,
   docType: z.string().min(2).max(60),
-  // Storage reference from the upload service — never raw document content
-  fileUrl: z.string().min(5).max(2048),
+  // One-use server authority from POST /upload; never a client object key.
+  uploadId: z.string().uuid(),
+  // Identity-bearing checklist documents require a fresh one-use selfie.
+  selfieUploadId: z.string().uuid().optional(),
   ...consentFields,
 });
 
 const submitIdentitySchema = z.object({
-  idDocumentUrl: z.string().min(5).max(2048),
-  selfieUrl: z.string().min(5).max(2048),
+  idUploadId: z.string().uuid(),
+  selfieUploadId: z.string().uuid().optional(),
   ...consentFields,
+});
+
+const uploadQuerySchema = z.object({
+  purpose: z.nativeEnum(VerificationUploadPurpose),
+  role: z.union([z.literal('CUSTOMER'), checklistRoleSchema]).optional(),
+  docType: z.string().trim().min(1).max(60).optional(),
 });
 
 export async function verificationRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
   const auth = { preHandler: [app.authenticate] };
+
+  /** Privacy-sensitive collection contract. Clients must ask before capturing
+   * a fresh selfie; the kill switch defaults off and intake rejects one while
+   * disabled, so an old UI cannot silently collect unused biometric material. */
+  app.get('/capabilities', auth, async () => {
+    return {
+      success: true,
+      data: verification.biometricCapabilities(),
+    };
+  });
 
   /** GET /status?role= — checklist, submitted docs, what's missing. */
   app.get('/status', auth, async (request) => {
@@ -104,18 +121,27 @@ export async function verificationRoutes(app: FastifyInstance) {
       request.user.userId,
       body.role,
       body.docType,
-      body.fileUrl,
+      body.uploadId,
       body.privacyNoticeVersion,
+      body.selfieUploadId,
     );
     reply.code(201);
     return { success: true, data: doc };
   });
 
-  /** POST /upload — store one document file behind the StorageProvider; returns the fileUrl.
+  /** POST /upload — reserve and store one purpose-bound, one-use upload.
    *  Rate-limited: an authenticated attacker could otherwise fan out 5MB uploads
    *  to fill disk / spam duplicate-document alerts. A real onboarder uploads a
    *  handful of documents. */
   app.post('/upload', { ...auth, config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (request) => {
+    const query = uploadQuerySchema.parse(request.query);
+    if (query.purpose === 'IDENTITY_SELFIE' && !verification.biometricSelfieEnabled()) {
+      throw new AppError(
+        409,
+        'BIOMETRIC_DISABLED',
+        'Fresh-selfie collection is disabled for verification.',
+      );
+    }
     const file = await request.file();
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach a document file');
     const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
@@ -128,105 +154,24 @@ export async function verificationRoutes(app: FastifyInstance) {
     if (!looksLikeDocument(buffer, file.mimetype)) {
       throw new AppError(400, 'BAD_CONTENT', 'File content does not match its declared format');
     }
-    const storage = getStorageProvider();
-
-    // Envelope encryption (onboarding spec §5): with a KEK configured the
-    // bucket only ever holds AES-256-GCM ciphertext; the wrapped per-file DEK
-    // lands in encrypted_objects. Without one, behavior is unchanged
-    // (private object + provider-side SSE) — encryption is config, not code.
-    const keys = getKeyProvider();
-    if (keys) {
-      const sha256 = createHash('sha256').update(buffer).digest('hex');
-      // SWIFT-078: the SAME physical document already on ANOTHER account is a
-      // fraud signal — one person opening several accounts, or a reused/forged
-      // ID. Flag it to the reviewers; it must never quietly auto-progress.
-      const dup = await app.prisma.encryptedObject.findFirst({
-        where: { sha256, createdBy: { not: request.user.userId } },
-        select: { createdBy: true },
-      });
-
-      const dek = generateDek();
-      const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
-      const { url } = await storage.upload({
-        buffer: ciphertext,
-        filename: `${file.filename}.enc`,
-        mimeType: 'application/octet-stream',
-        folder: `verification/${request.user.userId}`,
-      });
-      await app.prisma.encryptedObject.create({
-        data: {
-          fileKey: url,
-          iv: new Uint8Array(iv),
-          authTag: new Uint8Array(authTag),
-          wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
-          mimeType: file.mimetype,
-          sizeBytes: buffer.length,
-          sha256,
-          createdBy: request.user.userId,
-        },
-      });
-
-      if (dup) {
-        // The hash, not the document, goes to admins — never the PII itself.
-        await notifyAdmins(app.prisma, notifications, {
-          // Follows the uploader [NOC-A F45].
-          tenantId: await tenantOfUser(app.prisma, request.user.userId),
-          title: 'Duplicate verification document',
-          body: 'A document just uploaded is byte-identical to one already on another account. Review both before approving — possible multi-accounting or a reused/forged document.',
-          data: { kind: 'dup_doc', sha256, uploader: request.user.userId, matchesUser: dup.createdBy },
-        }).catch(() => {});
-      }
-      return { success: true, data: { url, duplicate: !!dup } };
-    }
-
-    const { url } = await storage.upload({
+    const receipt = await createVerificationUpload(app.prisma, getStorageProvider(), app.log, {
+      userId: request.user.userId,
+      purpose: query.purpose,
+      roleKey: query.role,
+      docType: query.docType,
       buffer,
       filename: file.filename,
       mimeType: file.mimetype,
-      folder: `verification/${request.user.userId}`,
     });
-    return { success: true, data: { url } };
-  });
-
-  /**
-   * GET /render/:docId?expires&sig — decrypting stream for envelope-encrypted
-   * documents. HMAC-token gated (not JWT) so the admin console's <img> can load
-   * it; tokens are minted ONLY by the audited admin document-url route and live
-   * seconds. The bucket object is ciphertext — this is the only way to see it.
-   */
-  app.get<{ Params: { docId: string } }>('/render/:docId', async (request, reply) => {
-    const { docId } = request.params;
-    const { expires, sig } = z.object({ expires: z.coerce.number(), sig: z.string().min(16) }).parse(request.query);
-    if (expires < Math.floor(Date.now() / 1000)) {
-      throw new AppError(410, 'LINK_EXPIRED', 'This view link has expired — reopen the document.');
+    if (receipt.duplicate) {
+      await notifyAdmins(app.prisma, notifications, {
+        tenantId: await tenantOfUser(app.prisma, request.user.userId),
+        title: 'Duplicate verification document',
+        body: 'A verification upload is byte-identical to an active upload on another account. Review both before approving.',
+        data: { kind: 'dup_doc', uploadId: receipt.uploadId },
+      }).catch(() => {});
     }
-    if (!verifyRenderToken(docId, expires, sig)) {
-      throw new AppError(403, 'BAD_SIGNATURE', 'Invalid view link.');
-    }
-
-    const doc = await app.prisma.verificationDocument.findUnique({
-      where: { id: docId },
-      select: { fileUrl: true, purgedAt: true },
-    });
-    if (!doc || doc.purgedAt || !doc.fileUrl) {
-      throw new AppError(410, 'DOCUMENT_PURGED', 'This document has been deleted under the retention policy');
-    }
-    const meta = await app.prisma.encryptedObject.findUnique({ where: { fileKey: doc.fileUrl } });
-    if (!meta) throw new AppError(404, 'NOT_ENCRYPTED', 'No encrypted object for this document.');
-    if (!meta.wrappedDek || meta.shreddedAt) {
-      throw new AppError(410, 'DOCUMENT_SHREDDED', 'This document was crypto-shredded and cannot be recovered.');
-    }
-    const keys = getKeyProvider();
-    if (!keys) throw new AppError(503, 'ENCRYPTION_OFF', 'MASTER_KEK is not configured on this server.');
-
-    const ciphertext = await getStorageProvider().getObject(doc.fileUrl);
-    const dek = await keys.unwrapDek(Buffer.from(meta.wrappedDek));
-    const plaintext = decryptBuffer(ciphertext, dek, Buffer.from(meta.iv), Buffer.from(meta.authTag));
-    reply
-      .type(meta.mimeType)
-      .header('Cache-Control', 'no-store, max-age=0')
-      .header('Content-Disposition', 'inline');
-    return reply.send(plaintext);
+    return { success: true, data: receipt };
   });
 
   /** POST /identity — L2 flow: government ID + selfie. Permanent once approved. */
@@ -234,8 +179,8 @@ export async function verificationRoutes(app: FastifyInstance) {
     const body = submitIdentitySchema.parse(request.body);
     const doc = await verification.submitIdentity(
       request.user.userId,
-      body.idDocumentUrl,
-      body.selfieUrl,
+      body.idUploadId,
+      body.selfieUploadId,
       body.privacyNoticeVersion,
     );
     reply.code(201);

@@ -53,7 +53,7 @@ async function owner(n: number) {
   users.push(u.id);
   return u.id;
 }
-const submit = (userId: string, docType = 'business_registration', fileKey = `/uploads/verification/${RUN}/${nanoid(5)}.enc`) =>
+const submit = (userId: string, docType = 'business_registration', fileKey = `/uploads/verification/${userId}/${RUN}-${nanoid(5)}.enc`) =>
   runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, fileKey, 'v1'));
 const openCase = (docId: string) => system(() => app.prisma.reviewCase.findFirst({ where: { submissionId: docId }, orderBy: { createdAt: 'desc' }, include: { decisions: true } }));
 
@@ -101,8 +101,8 @@ describe('[DOC-1 P4-5] review cases and decisions', () => {
     const a = await owner(2);
     const b = await owner(3);
     const sha = crypto.createHash('sha256').update(`dup-${RUN}`).digest('hex');
-    const keyA = `/uploads/verification/${RUN}/a.enc`;
-    const keyB = `/uploads/verification/${RUN}/b.enc`;
+    const keyA = `/uploads/verification/${a}/${RUN}-a.enc`;
+    const keyB = `/uploads/verification/${b}/${RUN}-b.enc`;
     for (const [k, who] of [[keyA, a], [keyB, b]] as const) {
       await app.prisma.encryptedObject.create({ data: { fileKey: k, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(40, 3), mimeType: 'image/jpeg', sizeBytes: 10, sha256: sha, createdBy: who } });
     }

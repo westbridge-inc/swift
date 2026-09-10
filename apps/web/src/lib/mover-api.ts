@@ -83,21 +83,31 @@ export interface DocStatus {
   missing: string[];
   vehicleType?: string | null;
   roleVerified: boolean;
+  selfieRequiredDocTypes: string[];
 }
 export const getVerificationStatus = (vehicleType?: string) =>
   apiFetch(`/api/v1/verification/status?role=MOVER${vehicleType ? `&vehicleType=${vehicleType}` : ''}`).then(
     (r) => r.data as DocStatus,
   );
-export const uploadVerificationFile = (file: File) => {
+export const uploadVerificationFile = (
+  file: File,
+  authority: {
+    purpose: 'CHECKLIST_DOCUMENT' | 'IDENTITY_SELFIE';
+    role: 'MOVER';
+    docType?: string;
+  },
+) => {
   const form = new FormData();
   form.append('file', file);
-  return apiFetch('/api/v1/verification/upload', { method: 'POST', body: form }).then(
-    (r) => r.data as { url: string },
+  const query = new URLSearchParams({ purpose: authority.purpose, role: authority.role });
+  if (authority.docType) query.set('docType', authority.docType);
+  return apiFetch(`/api/v1/verification/upload?${query.toString()}`, { method: 'POST', body: form }).then(
+    (r) => r.data as { uploadId: string; expiresAt: string },
   );
 };
-export const submitVerificationDocument = (docType: string, fileUrl: string) =>
+export const submitVerificationDocument = (docType: string, uploadId: string, selfieUploadId?: string) =>
   apiFetch('/api/v1/verification/documents', {
     method: 'POST',
     // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5)
-    body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1' }),
+    body: JSON.stringify({ role: 'MOVER', docType, uploadId, ...(selfieUploadId ? { selfieUploadId } : {}), consent: true, privacyNoticeVersion: 'web-v1' }),
   });

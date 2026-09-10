@@ -81,7 +81,7 @@ afterAll(async () => {
 
 const service = (kyc: KycProvider) => new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), kyc);
 const submitOwnerId = (kyc: KycProvider, tag: string) =>
-  runWithTenant('swift-default', () => service(kyc).submitDocument(userId, 'RESTAURANT', 'owner_national_id', `documents/${RUN}/${tag}.jpg`, 'v1'));
+  runWithTenant('swift-default', () => service(kyc).submitDocument(userId, 'RESTAURANT', 'owner_national_id', `/uploads/verification/${userId}/${RUN}-${tag}.jpg`, 'v1'));
 
 describe('[DOC-1 §0.5] hard limits', () => {
   it.fails('[1] PERSONAL bytes are not persisted beyond the IDV-1 transient intake TTL — VIOLATED BY DECISION (CONFLICT-DOC-2): images persist to the retention clock', () => {

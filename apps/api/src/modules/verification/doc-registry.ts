@@ -53,7 +53,7 @@ export const PROVISIONAL_NOTE =
 
 /** The agent's reading of each checklist key. Unknown keys are PERSONAL — the most restrictive bucket. */
 export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
-  national_id: 'PERSONAL', owner_national_id: 'PERSONAL', selfie: 'PERSONAL', police_clearance: 'PERSONAL',
+  national_id: 'PERSONAL', owner_national_id: 'PERSONAL', identity_l2: 'PERSONAL', selfie: 'PERSONAL', police_clearance: 'PERSONAL',
   drivers_licence: 'PERSONAL', gei_electrical_licence: 'PERSONAL', food_handler_cert: 'PERSONAL',
   business_registration: 'BUSINESS', tin_certificate: 'BUSINESS', gra_restaurant_licence: 'BUSINESS', storefront_photo: 'BUSINESS',
   vehicle_registration: 'VEHICLE', vehicle_insurance: 'VEHICLE', hire_car_permit: 'VEHICLE', vehicle_plate_photo: 'VEHICLE',

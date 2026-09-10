@@ -7,8 +7,7 @@
  * (swift-standard/doc-1/founder-inputs.md, FD-DOC-3 / CONFLICT-DOC-2) is to
  * KEEP face-match on — behind a switch that did not exist. This is the switch.
  *
- * Default ON: no guard is relaxed and the production boot guard that requires
- * a real KYC provider is untouched. The switch is OFF by default (founder decision
+ * The switch is OFF by default (founder decision
  * 2026-09-07, FD-D5 not approved): every biometric call is document-only verification
  * and the shift-selfie liveness check is skipped. `FEATURE_BIOMETRIC_FACE_MATCH=1` turns
  * them on, deterministically, without a deploy — only after FD-D5 is recorded APPROVED.
@@ -17,4 +16,26 @@ export function biometricFaceMatchEnabled(env: Record<string, string | undefined
   // [FD-D5 · founder 2026-09-07] OFF unless explicitly '1': face-match is special-category
   // processing and is not approved. DOC-1 §10.4's default is now the code's default.
   return env['FEATURE_BIOMETRIC_FACE_MATCH'] === '1';
+}
+
+export type BiometricCaptureAssurance =
+  | 'NONE'
+  | 'USER_SUPPLIED_FILE'
+  | 'HOSTED_LIVENESS'
+  | 'TEST_SIMULATED';
+
+/**
+ * Verification may collect a new selfie only through an adapter that proves
+ * live capture. A raw gallery/camera file plus a face-match score does not
+ * prove freshness. The sandbox can simulate the branch outside production,
+ * but every currently configured real synchronous adapter remains disabled.
+ */
+export function verificationBiometricFaceMatchEnabled(
+  assurance: BiometricCaptureAssurance,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (!biometricFaceMatchEnabled(env)) return false;
+  if (assurance === 'HOSTED_LIVENESS') return true;
+  return assurance === 'TEST_SIMULATED'
+    && (env['NODE_ENV'] === 'test' || env['NODE_ENV'] === 'development');
 }

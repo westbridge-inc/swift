@@ -53,7 +53,7 @@ async function owner(n: number) {
 /** A committed submission with bytes in storage (a real object, so the probe can confirm absence). */
 async function committed(userId: string, docType: string, extra: Record<string, unknown> = {}) {
   const { getStorageProvider } = await import('../providers/storage/storage-provider');
-  const { url } = await getStorageProvider().upload({ buffer: Buffer.from(`image ${RUN}`), filename: `${docType}-${nanoid(5)}.enc`, mimeType: 'application/octet-stream', folder: `verification/${RUN}` });
+  const { url } = await getStorageProvider().upload({ buffer: Buffer.from(`image ${RUN}`), filename: `${docType}-${nanoid(5)}.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
   return system(() => app.prisma.verificationDocument.create({ data: {
     userId, role: 'VENDOR_OWNER', docType, fileUrl: url, status: 'APPROVED', reviewedBy: 'policy-test', reviewedAt: new Date(), expiresAt: new Date(Date.now() + 100 * DAY), ...extra,
   } }));

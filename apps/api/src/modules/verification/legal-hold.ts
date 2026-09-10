@@ -59,6 +59,10 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
     const holdable = await tx.verificationDocument.findMany({
       where: {
         userId: input.subjectUserId, purgedAt: null, legalHoldId: null,
+        OR: [
+          { storagePurgeRequestedAt: null },
+          { storagePurgeMode: 'IMAGE_ONLY', imagePurgedAt: { not: null } },
+        ],
         ...(input.documentIds && input.documentIds.length > 0 ? { id: { in: input.documentIds } } : {}),
       },
       select: { id: true },
@@ -71,7 +75,15 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
       placedBy: input.placedBy, placedAt: now, incidentCaseId: input.incidentCaseId ?? null,
     } });
     const stamped = await tx.verificationDocument.updateMany({
-      where: { id: { in: holdable.map((d) => d.id) }, purgedAt: null, legalHoldId: null },
+      where: {
+        id: { in: holdable.map((d) => d.id) },
+        purgedAt: null,
+        legalHoldId: null,
+        OR: [
+          { storagePurgeRequestedAt: null },
+          { storagePurgeMode: 'IMAGE_ONLY', imagePurgedAt: { not: null } },
+        ],
+      },
       data: { legalHoldId: hold.id },
     });
     return { hold, documents: stamped.count };
@@ -80,14 +92,31 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
 
 export async function releaseDocLegalHold(prisma: PrismaClient, input: { holdId: string; releasedBy: string; reason: string }, now = new Date()) {
   return prisma.$transaction(async (tx) => {
+    // Read only the lock key first, then acquire the same subject lock used by
+    // hold placement and purge. Re-read under that lock: a concurrent release
+    // must observe the first winner rather than overwrite its audit evidence.
+    const pointer = await tx.docLegalHold.findUnique({
+      where: { id: input.holdId },
+      select: { subjectUserId: true },
+    });
+    if (!pointer) throw new NotFoundError('DocLegalHold', input.holdId);
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "users"
+      WHERE "id" = ${pointer.subjectUserId}
+      FOR UPDATE /* verification-document-purge-authority */
+    `;
+    if (!locked[0]) throw new NotFoundError('User', pointer.subjectUserId);
     const hold = await tx.docLegalHold.findUnique({ where: { id: input.holdId } });
-    if (!hold) throw new NotFoundError('DocLegalHold', input.holdId);
+    if (!hold || hold.subjectUserId !== pointer.subjectUserId) {
+      throw new AppError(409, 'HOLD_AUTHORITY_CHANGED', 'This hold changed before release.');
+    }
     if (hold.releasedAt) throw new AppError(409, 'HOLD_ALREADY_RELEASED', 'This hold was already released');
-    await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${hold.subjectUserId} FOR UPDATE /* verification-document-purge-authority */`;
-    const released = await tx.docLegalHold.update({
-      where: { id: hold.id },
+    const won = await tx.docLegalHold.updateMany({
+      where: { id: hold.id, releasedAt: null },
       data: { releasedAt: now, releasedBy: input.releasedBy, releaseReason: input.reason },
     });
+    if (won.count !== 1) throw new AppError(409, 'HOLD_ALREADY_RELEASED', 'This hold was already released');
+    const released = await tx.docLegalHold.findUniqueOrThrow({ where: { id: hold.id } });
     const unstamped = await tx.verificationDocument.updateMany({ where: { legalHoldId: hold.id }, data: { legalHoldId: null } });
     return { hold: released, documents: unstamped.count };
   });

@@ -76,7 +76,7 @@ describe('onboarding review loop', () => {
     );
 
     const doc = await verification.submitDocument(
-      applicant.id, 'MOVER', 'police_clearance', 'storage://test/pc.jpg', 'v1',
+      applicant.id, 'MOVER', 'police_clearance', `/uploads/verification/${applicant.id}/pc.jpg`, 'v1',
     );
     expect(doc.status).toBe('PENDING');
 

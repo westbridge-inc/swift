@@ -13,6 +13,7 @@
 import PDFDocument from 'pdfkit';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
+import { resolveOwnedVerificationObjectKey } from './storage-ownership';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -23,8 +24,9 @@ export interface CustodyNarrative {
     id: string; docType: string; role: string; accountId: string; subjectId: string | null; state: string; status: string;
     capturedAt: string; consentAt: string | null; privacyNoticeVersion: string | null; expiresAt: string | null;
     purgedAt: string | null; imagePurgedAt: string | null; retentionExpiresAt: string | null; legalHoldId: string | null;
+    storageProvenance: string; storageAnomalyCode: string | null;
   };
-  capture: { sha256: string | null; sizeBytes: number | null; mimeType: string | null; uploadedBy: string | null; encrypted: boolean; shreddedAt: string | null; deviceAndLocation: 'NOT_RECORDED' };
+  capture: { sha256: string | null; sizeBytes: number | null; mimeType: string | null; uploadedBy: string | null; encrypted: boolean; shreddedAt: string | null; authority: 'VERIFIED' | 'UNVERIFIED' | 'QUARANTINED' | 'INVALID'; deviceAndLocation: 'NOT_RECORDED' };
   extraction: Array<{
     runId: string; engine: string; engineVersion: string; modelSha256: string | null; profile: string; startedAt: string; finishedAt: string | null; durationMs: number | null;
     outcome: string; errorClass: string | null; ranExternally: boolean; processorRef: string | null;
@@ -51,14 +53,22 @@ export async function custodyNarrative(db: Db, submissionId: string): Promise<Cu
     select: {
       id: true, userId: true, role: true, docType: true, fileUrl: true, status: true, state: true, expiresAt: true, reviewedBy: true, reviewedAt: true,
       consentAt: true, privacyNoticeVersion: true, retentionExpiresAt: true, purgedAt: true, createdAt: true, legalHoldId: true, subjectId: true, imagePurgedAt: true,
+      storageProvenance: true, storageAnomalyCode: true,
       extractionRuns: { orderBy: { startedAt: 'asc' }, include: { fields: { orderBy: { fieldCode: 'asc' } } } },
       validationResults: { orderBy: { evaluatedAt: 'asc' } },
       record: true,
     },
   });
   if (!doc) throw new NotFoundError('VerificationDocument', submissionId);
+  const ownedObject = doc.fileUrl
+    ? await resolveOwnedVerificationObjectKey(db, doc.userId, doc.fileUrl, {
+      allowDocumentId: doc.id,
+      requireExclusiveReference: true,
+    })
+    : null;
+  const ownershipInvalid = Boolean(doc.fileUrl && !ownedObject);
   const [object, cases, receipts, auditRows, anchor] = await Promise.all([
-    doc.fileUrl ? db.encryptedObject.findUnique({ where: { fileKey: doc.fileUrl }, select: { sha256: true, sizeBytes: true, mimeType: true, createdBy: true, shreddedAt: true, wrappedDek: true, createdAt: true } }) : Promise.resolve(null),
+    ownedObject ? db.encryptedObject.findUnique({ where: { fileKey: ownedObject.providerKey }, select: { sha256: true, sizeBytes: true, mimeType: true, createdBy: true, shreddedAt: true, wrappedDek: true, createdAt: true } }) : Promise.resolve(null),
     db.reviewCase.findMany({ where: { submissionId }, orderBy: { createdAt: 'asc' }, include: { decisions: { orderBy: { decidedAt: 'asc' } }, holds: { orderBy: { placedAt: 'asc' } } } }).catch(async () =>
       db.reviewCase.findMany({ where: { submissionId }, orderBy: { createdAt: 'asc' }, include: { decisions: { orderBy: { decidedAt: 'asc' } } } }) as never),
     db.deletionReceipt.findMany({ where: { submissionId }, orderBy: { deletedAt: 'asc' } }),
@@ -98,11 +108,15 @@ export async function custodyNarrative(db: Db, submissionId: string): Promise<Cu
     ...audit.map((a) => ({ ...a, what: `AUDIT ${a.what}` })),
   ].sort((a, b) => a.at.localeCompare(b.at));
 
-  const sha = object?.sha256 ?? doc.record?.contentSha256 ?? destruction[0]?.contentSha256 ?? null;
+  const sha = doc.storageProvenance === 'VERIFIED'
+    ? object?.sha256 ?? doc.record?.contentSha256 ?? destruction[0]?.contentSha256 ?? null
+    : null;
   const passed = validations.filter((v) => v.status === 'PASS').map((v) => v.code);
   const lastDecision = review.flatMap((c) => c.decisions).at(-1);
   const provable = [
-    `A document of type ${doc.docType}${sha ? `, hash ${sha}` : ' (hash not recorded)'}, was submitted at ${doc.createdAt.toISOString()} by account ${doc.userId}${doc.subjectId ? ` for subject ${doc.subjectId}` : ''}.`,
+    ...(doc.storageProvenance === 'VERIFIED' && !ownershipInvalid
+      ? [`A purpose-bound document of type ${doc.docType}${sha ? `, hash ${sha}` : ' (hash not recorded)'}, was submitted at ${doc.createdAt.toISOString()} by account ${doc.userId}${doc.subjectId ? ` for subject ${doc.subjectId}` : ''}.`]
+      : [`A ${doc.docType} row was recorded at ${doc.createdAt.toISOString()}, but its storage authority is ${ownershipInvalid ? 'invalid for the current storage location' : doc.storageProvenance.toLowerCase()}; the underlying capture is not claimed as proven.`]),
     passed.length ? `It passed validators ${passed.join(', ')}.` : 'No validator recorded a PASS for it.',
     lastDecision ? `Reviewer ${lastDecision.reviewerId} decided ${lastDecision.outcome} at ${lastDecision.decidedAt}${lastDecision.reasonCode ? ` under reason code ${lastDecision.reasonCode}` : ''}.` : doc.reviewedBy ? `${doc.reviewedBy} set ${doc.status} at ${iso(doc.reviewedAt)}.` : 'No decision has been recorded.',
     sha ? `Whether hash ${sha} appeared on another account is answerable from the extraction ledger (V_SHA_COLLISION verdict: ${validations.find((v) => v.code === 'V_SHA_COLLISION')?.status ?? 'not evaluated'}).` : 'No hash was recorded, so cross-account reuse of these exact bytes cannot be answered.',
@@ -113,14 +127,18 @@ export async function custodyNarrative(db: Db, submissionId: string): Promise<Cu
     'Anything not in the declared, extracted field set.',
     "The reviewer's private impression of it — the internal note is not part of this record.",
     'Whether a different photograph of the same physical document was submitted elsewhere.',
+    ...(ownershipInvalid || doc.storageProvenance !== 'VERIFIED'
+      ? ['That the recorded storage pointer was issued to this submission, owner, purpose, and storage location.']
+      : []),
   ];
   return {
     submission: {
       id: doc.id, docType: doc.docType, role: doc.role, accountId: doc.userId, subjectId: doc.subjectId ?? null, state: (doc.state ?? 'UNSET') as string, status: doc.status,
       capturedAt: doc.createdAt.toISOString(), consentAt: iso(doc.consentAt), privacyNoticeVersion: doc.privacyNoticeVersion ?? null, expiresAt: iso(doc.expiresAt),
       purgedAt: iso(doc.purgedAt), imagePurgedAt: iso(doc.imagePurgedAt), retentionExpiresAt: iso(doc.retentionExpiresAt), legalHoldId: doc.legalHoldId ?? null,
+      storageProvenance: doc.storageProvenance, storageAnomalyCode: doc.storageAnomalyCode ?? null,
     },
-    capture: { sha256: object?.sha256 ?? null, sizeBytes: object?.sizeBytes ?? null, mimeType: object?.mimeType ?? null, uploadedBy: object?.createdBy ?? null, encrypted: Boolean(object?.wrappedDek), shreddedAt: iso(object?.shreddedAt), deviceAndLocation: 'NOT_RECORDED' },
+    capture: { sha256: object?.sha256 ?? null, sizeBytes: object?.sizeBytes ?? null, mimeType: object?.mimeType ?? null, uploadedBy: object?.createdBy ?? null, encrypted: Boolean(object?.wrappedDek), shreddedAt: iso(object?.shreddedAt), authority: ownershipInvalid ? 'INVALID' : doc.storageProvenance, deviceAndLocation: 'NOT_RECORDED' },
     extraction, validations, review,
     record: doc.record ? { status: doc.record.status, approvedBy: doc.record.approvedBy, approvedAt: doc.record.approvedAt.toISOString(), expiresOn: iso(doc.record.expiresOn), contentSha256: doc.record.contentSha256 ?? null } : null,
     destruction,

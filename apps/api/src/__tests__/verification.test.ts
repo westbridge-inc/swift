@@ -79,6 +79,9 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, 
   });
 }
 
+const ownedDocumentUrl = (userId: string, name: string) =>
+  `/uploads/verification/${userId}/${name}`;
+
 async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR') {
   await loginWithOtp(app, phone);
   const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
@@ -263,7 +266,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
       const res = await inject('POST', '/api/v1/verification/documents', {
         role: 'MOVER',
         docType,
-        fileUrl: `storage://t/${docType}.jpg`,
+        fileUrl: ownedDocumentUrl(moverUserId, `${docType}.jpg`),
         consent: true,
         privacyNoticeVersion: 'v1',
       }, moverToken);
@@ -307,7 +310,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: 'storage://t/national_id_v2.jpg',
+      fileUrl: ownedDocumentUrl(moverUserId, 'national_id_v2.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -345,7 +348,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: 'storage://t/dupe.jpg',
+      fileUrl: ownedDocumentUrl(moverUserId, 'dupe.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -359,7 +362,7 @@ describe('Provider auto-decisions (swappable interface)', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'owner_national_id',
-      fileUrl: 'storage://t/auto-approve/owner_id.jpg',
+      fileUrl: ownedDocumentUrl(vendorUserId, 'auto-approve-owner-id.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
@@ -380,7 +383,7 @@ describe('Provider auto-decisions (swappable interface)', () => {
     const clearance = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'police_clearance',
-      fileUrl: 'storage://t/auto-approve/clearance.jpg',
+      fileUrl: ownedDocumentUrl(vendorUserId, 'auto-approve-clearance.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
@@ -405,8 +408,8 @@ describe('L2 identity — permanent customer verification', () => {
   it('auto-approval promotes to L2 immediately', async () => {
     const customer = await signup(L2_AUTO_PHONE, 'CUSTOMER');
     const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: 'storage://t/auto-approve/id.jpg',
-      selfieUrl: 'storage://t/selfie.jpg',
+      idDocumentUrl: ownedDocumentUrl(customer.user.id, 'auto-approve-id.jpg'),
+      selfieUrl: ownedDocumentUrl(customer.user.id, 'auto-approve-selfie.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
@@ -418,8 +421,8 @@ describe('L2 identity — permanent customer verification', () => {
 
     // Already verified — no second submission
     const again = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: 'storage://t/id2.jpg',
-      selfieUrl: 'storage://t/selfie2.jpg',
+      idDocumentUrl: ownedDocumentUrl(customer.user.id, 'id2.jpg'),
+      selfieUrl: ownedDocumentUrl(customer.user.id, 'selfie2.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
@@ -429,8 +432,8 @@ describe('L2 identity — permanent customer verification', () => {
   it('manual path: pending review, then admin approval promotes to L2', async () => {
     const customer = await signup(L2_MANUAL_PHONE, 'CUSTOMER');
     const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: 'storage://t/id.jpg',
-      selfieUrl: 'storage://t/selfie.jpg',
+      idDocumentUrl: ownedDocumentUrl(customer.user.id, 'manual-id.jpg'),
+      selfieUrl: ownedDocumentUrl(customer.user.id, 'manual-selfie.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
@@ -520,7 +523,7 @@ describe('Document storage & DPA compliance', () => {
         userId: moverUserId,
         role: 'MOVER',
         docType: 'national_id',
-        fileUrl: '/uploads/verification/signed-me.jpg',
+        fileUrl: `/uploads/verification/${moverUserId}/signed-me.jpg`,
         status: 'PENDING',
         consentAt: new Date(),
         privacyNoticeVersion: 'v1',
@@ -547,7 +550,7 @@ describe('Document storage & DPA compliance', () => {
         userId: moverUserId,
         role: 'MOVER',
         docType: 'national_id',
-        fileUrl: '/uploads/verification/purge-me.jpg',
+        fileUrl: `/uploads/verification/${moverUserId}/purge-me.jpg`,
         status: 'APPROVED',
         consentAt: new Date(),
         privacyNoticeVersion: 'v1',
@@ -572,7 +575,7 @@ describe('Document storage & DPA compliance', () => {
         userId: moverUserId,
         role: 'MOVER',
         docType: 'national_id',
-        fileUrl: '/uploads/verification/retain-me.jpg',
+        fileUrl: `/uploads/verification/${moverUserId}/retain-me.jpg`,
         status: 'APPROVED',
         consentAt: new Date(),
         privacyNoticeVersion: 'v1',
@@ -594,7 +597,7 @@ describe('Taxi checklist merge + auto-KYC audit', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'hire_car_permit',
-      fileUrl: 'storage://t/auto-approve/hire_permit.jpg',
+      fileUrl: ownedDocumentUrl(moverUserId, 'auto-approve-hire-permit.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -714,7 +717,7 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: 'storage://t/auto-approve/face-id.jpg',
+      fileUrl: ownedDocumentUrl(faceUserId, 'auto-approve-face-id.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, faceToken);
@@ -725,7 +728,7 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     const plain = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'vehicle_registration',
-      fileUrl: 'storage://t/face-reg.jpg',
+      fileUrl: ownedDocumentUrl(faceUserId, 'face-reg.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, faceToken);
@@ -756,15 +759,17 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
       recorder,
     );
 
-    await svc.submitDocument(faceUserId, 'MOVER', 'national_id', 'storage://t/face-id2.jpg', 'v1');
-    await svc.submitDocument(faceUserId, 'MOVER', 'drivers_licence', 'storage://t/face-dl.jpg', 'v1');
+    const faceIdUrl = ownedDocumentUrl(faceUserId, 'face-id2.jpg');
+    const faceLicenceUrl = ownedDocumentUrl(faceUserId, 'face-dl.jpg');
+    await svc.submitDocument(faceUserId, 'MOVER', 'national_id', faceIdUrl, 'v1');
+    await svc.submitDocument(faceUserId, 'MOVER', 'drivers_licence', faceLicenceUrl, 'v1');
 
     expect(calls).toHaveLength(2);
     expect(calls[0]).toEqual({
       path: 'identity',
       input: {
         userId: faceUserId,
-        idDocumentUrl: 'storage://t/face-id2.jpg',
+        idDocumentUrl: faceIdUrl,
         selfieUrl: 'storage://seed/face-selfie.jpg', // the signup selfie IS the match target
       },
     });
@@ -825,7 +830,7 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'owner_national_id',
-      fileUrl: 'storage://t/auto-approve/owner_id_renewed.jpg',
+      fileUrl: ownedDocumentUrl(vendorUserId, 'auto-approve-owner-id-renewed.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
@@ -887,7 +892,7 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     const renewal = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'police_clearance',
-      fileUrl: 'storage://t/auto-approve/clearance_renewed.jpg',
+      fileUrl: ownedDocumentUrl(vendorUserId, 'auto-approve-clearance-renewed.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
@@ -909,7 +914,7 @@ describe('Early renewal window — resubmission opens 30 days before expiry', ()
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'drivers_licence',
-      fileUrl: 'storage://t/licence_renewal.jpg',
+      fileUrl: ownedDocumentUrl(moverUserId, 'licence-renewal.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -925,7 +930,7 @@ describe('Early renewal window — resubmission opens 30 days before expiry', ()
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'vehicle_registration',
-      fileUrl: 'storage://t/too-early.jpg',
+      fileUrl: ownedDocumentUrl(moverUserId, 'too-early.jpg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);

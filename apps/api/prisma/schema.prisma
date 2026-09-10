@@ -86,23 +86,25 @@ model User {
   walletBalance Decimal @default(0) @db.Decimal(12, 2)
 
   verificationDocuments VerificationDocument[]
+  verificationUploads   VerificationUpload[]
+  reviewRenderGrants    ReviewRenderGrant[]    @relation("ReviewGrantReviewer")
   subjectsCreated       Subject[]              @relation("SubjectCreatedBy")
   subjectLinks          SubjectLink[]          @relation("SubjectLinkAccount")
 
   /// [DOC-1 P9-4] legal holds on this person's documents
 
   docLegalHolds        DocLegalHold[]         @relation("DocLegalHoldSubject")
-  complianceViolations  ComplianceViolation[]
-  complianceReviews     ComplianceReviewCase[]
-  strikes               Strike[]
+  complianceViolations ComplianceViolation[]
+  complianceReviews    ComplianceReviewCase[]
+  strikes              Strike[]
 
-  deviceTokens DeviceToken[]
+  deviceTokens   DeviceToken[]
   /// [SCR-002] Synthetic (seeded / test-run) accounts carry an immutable run id; a purge selects
   /// ONLY marked rows, never a negative classification. Forbidden in production (boot + purge verify).
   syntheticRunId String?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  lastActiveAt DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  lastActiveAt   DateTime?
 
   customer               Customer?
   rider                  Rider?
@@ -127,8 +129,7 @@ model User {
   resolvedTickets        SupportTicket[]       @relation("supportResolver")
   /// [STA-1 DL-4] Never in analytics, GMV, counts, ratings, identity
   /// graph or a ledger. Belt to Tenant.kind's braces.
-  isSynthetic Boolean @default(false)
-
+  isSynthetic            Boolean               @default(false)
 
   @@index([tenantId])
   @@index([isSynthetic])
@@ -167,36 +168,37 @@ enum UserStatus {
 }
 
 model Session {
-  id                   String    @id @default(cuid())
+  id                   String              @id @default(cuid())
   userId               String
-  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token                String    @unique
-  refreshToken         String    @unique
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token                String              @unique
+  refreshToken         String              @unique
   /// Durable authentication assurance for this exact session generation.
   /// Existing/pre-cutover rows intentionally remain LEGACY and can continue
   /// serving non-privileged accounts, but can never inherit platform-admin
   /// authority. Only OTP is approved for ADMIN/SUPER_ADMIN until ADR-001's
   /// managed-identity/WebAuthn follow-up adds another explicit assurance.
-  authMethod            SessionAuthMethod @default(LEGACY)
+  authMethod           SessionAuthMethod   @default(LEGACY)
   // Refresh rotation theft detection: the token this one replaced, and when.
   // A replay of previousRefreshToken outside the race-grace window means the
   // token was stolen — the whole session is revoked (see AuthService.refreshTokens).
-  previousRefreshToken String?   @unique
+  previousRefreshToken String?             @unique
   rotatedAt            DateTime?
   deviceId             String
   deviceType           String
   ipAddress            String?
   userAgent            String?
   expiresAt            DateTime
-  createdAt            DateTime  @default(now())
+  createdAt            DateTime            @default(now())
+  reviewRenderGrants   ReviewRenderGrant[]
 
-  @@map("sessions")
   @@index([expiresAt]) // retention sweep cutoff [F-021-20]
   // [P2] Revocation is a WHERE on userId — theft response, authority
   // revocation, account deletion, and the User cascade all take this path.
   // Without the index each one sequential-scanned the largest table in the
   // schema while holding a transaction.
   @@index([userId])
+  @@map("sessions")
 }
 
 enum SessionAuthMethod {
@@ -374,57 +376,60 @@ enum TenantKind {
 }
 
 model Tenant {
-  id        String   @id @default(cuid())
+  id             String     @id @default(cuid())
   /// Human name ("Swift").
-  name      String
+  name           String
   /// URL/route-safe key, unique across operators.
-  slug      String   @unique
-  isActive  Boolean  @default(true)
+  slug           String     @unique
+  isActive       Boolean    @default(true)
   /// [STA-1 DL-2/DL-4] Every aggregation and every purge reads this.
-  kind      TenantKind @default(PRODUCTION)
+  kind           TenantKind @default(PRODUCTION)
   /// [STA-1 DL-8] The go-live purge and every bulk cleanup skip this tenant;
   /// tenants_purge_guard (a DB trigger) refuses DELETE while it is set.
-  purgeProtected Boolean @default(false)
+  purgeProtected Boolean    @default(false)
   /// Per-tenant branding/config/billing (JSON until it needs columns).
-  config    Json?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  config         Json?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
 
-  users            User[]
-  vendors          Vendor[]
-  orders           Order[]
-  rideQueueEntries RideQueueEntry[]
-  zones            Zone[]
-  adRefundIntents  AdRefundIntent[]
-  adRefundItems    AdRefundItem[]
-  adRefundOutbox   AdRefundOutbox[]
-  reviewSessions    ReviewSession[]
-  reviewCredentials ReviewCredential[]
-  reviewFixtures    ReviewFixture[]
-  items             Item[]
-  categories        Category[]
-  transactions      Transaction[]
-  earnings          Earning[]
-  settlements       Settlement[]
+  users                   User[]
+  vendors                 Vendor[]
+  orders                  Order[]
+  rideQueueEntries        RideQueueEntry[]
+  zones                   Zone[]
+  adRefundIntents         AdRefundIntent[]
+  adRefundItems           AdRefundItem[]
+  adRefundOutbox          AdRefundOutbox[]
+  reviewSessions          ReviewSession[]
+  reviewCredentials       ReviewCredential[]
+  reviewFixtures          ReviewFixture[]
+  items                   Item[]
+  categories              Category[]
+  transactions            Transaction[]
+  earnings                Earning[]
+  settlements             Settlement[]
   deliveryCashSettlements DeliveryCashSettlement[]
-  payoutRequests    PayoutRequest[]
-  payoutSchedules   PayoutSchedule[]
-  deletionReceipts  DeletionReceipt[]
-  reviewCases       ReviewCase[]
-  reviewDecisions   ReviewDecision[]
-  extractionRuns    ExtractionRun[]
-  extractedFields   ExtractedField[]
-  validationResults ValidationResult[]
-  docLegalHolds     DocLegalHold[]
-  renewalSchedules  RenewalSchedule[]
-  subjects          Subject[]
-  subjectLinks      SubjectLink[]
-  personProfiles    PersonProfile[]
-  businessProfiles  BusinessProfile[]
-  vehicleProfiles   VehicleProfile[]
-  documentRecords   DocumentRecord[]
-  rectifications    RectificationRequest[]
-  fraudCases        FraudCase[]
+  payoutRequests          PayoutRequest[]
+  payoutSchedules         PayoutSchedule[]
+  deletionReceipts        DeletionReceipt[]
+  reviewCases             ReviewCase[]
+  reviewDecisions         ReviewDecision[]
+  extractionRuns          ExtractionRun[]
+  extractedFields         ExtractedField[]
+  validationResults       ValidationResult[]
+  docLegalHolds           DocLegalHold[]
+  renewalSchedules        RenewalSchedule[]
+  subjects                Subject[]
+  subjectLinks            SubjectLink[]
+  personProfiles          PersonProfile[]
+  businessProfiles        BusinessProfile[]
+  vehicleProfiles         VehicleProfile[]
+  documentRecords         DocumentRecord[]
+  rectifications          RectificationRequest[]
+  fraudCases              FraudCase[]
+  verificationDocuments   VerificationDocument[]
+  verificationUploads     VerificationUpload[]
+  reviewRenderGrants      ReviewRenderGrant[]
 
   @@index([kind])
   @@map("tenants")
@@ -542,7 +547,7 @@ model CountryConfig {
   /// Cash guarantee + strike thresholds:
   /// { maxClaimsPerRiderPerMonth, strikeRestrictThreshold, strikeBanThreshold,
   ///   l3MinPaidOrders, l3MinAccountAgeDays, outlierMultiplier }
-  cashRules Json?
+  cashRules      Json?
   /// [DOC-1 §3.6 · FD-DOC-1 · P3-2] Micro-vendor tier caps, merged over the code defaults in
   /// vendor-tier.ts: ordersPerDay, grossPerWeek (major units), nudgeAtFraction.
   vendorTierCaps Json?
@@ -607,73 +612,181 @@ model PricingConfigVersion {
 // ==========================================
 
 model VerificationDocument {
-  id                   String                     @id @default(cuid())
-  userId               String
-  user                 User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                      String                        @id @default(cuid())
+  tenantId                String                        @default("swift-default")
+  tenant                  Tenant                        @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  userId                  String
+  user                    User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
   /// Which role this document supports (vendor docs, mover docs, customer L2 ID)
-  role                 UserRole
+  role                    UserRole
   /// Checklist key from CountryConfig.documentChecklists (e.g. "national_id")
-  docType              String
+  docType                 String
   /// Storage fileKey only (never a public URL). Raw documents: private +
   /// encrypted at rest, viewed via short-lived signed URLs, never logged,
   /// never sent to any AI service (hard rule 3 / DPA §3.5).
-  fileUrl              String
+  fileUrl                 String
   /// Provider case reference — the only provider-side artifact we keep
-  kycRef               String?
-  status               VerificationDocumentStatus @default(PENDING)
+  kycRef                  String?
+  status                  VerificationDocumentStatus    @default(PENDING)
   /// [DOC-1 P5-1] Machine state; null only for a row a legacy writer inserted before the
   /// trigger derived it (never null after the trigger runs). Every transition is a CAS on
   /// this column and the trigger refuses any pair that is not in `doc_state_transition`.
-  state                DocState?
+  state                   DocState?
   /// OCR'd / manually entered expiry; lapse of a critical doc auto-suspends listings
-  expiresAt            DateTime?
-  reviewedBy           String?
-  reviewNote           String?
-  reviewedAt           DateTime?
+  expiresAt               DateTime?
+  reviewedBy              String?
+  reviewNote              String?
+  reviewedAt              DateTime?
   /// Insurance 5-point manual check (spec §3.4) — captured when an admin reviews
   /// a hire-insurance document. The taxi go-live gate requires HIRE + confirmed.
-  insurerName          String?
-  policyNumber         String?
-  coverageClass        CoverageClass?
-  hireClassConfirmed   Boolean                    @default(false)
-  plateCrossChecked    Boolean                    @default(false)
+  insurerName             String?
+  policyNumber            String?
+  coverageClass           CoverageClass?
+  hireClassConfirmed      Boolean                       @default(false)
+  plateCrossChecked       Boolean                       @default(false)
   /// DPA §3.5 consent captured at upload (privacy notice acknowledged)
-  consentAt            DateTime?
-  privacyNoticeVersion String?
+  consentAt               DateTime?
+  privacyNoticeVersion    String?
   /// Retention (DPA §3.5): the purge job deletes the stored object after this
   /// time and records purgedAt. Set when a participant leaves / is deactivated.
-  retentionExpiresAt   DateTime?
-  purgedAt             DateTime?
-  createdAt            DateTime                   @default(now())
-  updatedAt            DateTime                   @updatedAt
+  retentionExpiresAt      DateTime?
+  purgedAt                DateTime?
+  createdAt               DateTime                      @default(now())
+  updatedAt               DateTime                      @updatedAt
+  /// A document is allowed to create trust, expose derived fields or authorize
+  /// object access only after purpose-bound upload claims were atomically
+  /// consumed into it. Legacy rows begin UNVERIFIED and require a census or
+  /// re-submission; an ownership anomaly is quarantined, never guessed valid.
+  storageProvenance       VerificationStorageProvenance @default(UNVERIFIED)
+  /// Exact role key bound by the consumed upload authority. Legacy rows are
+  /// null; new rows cannot become VERIFIED without a matching claim.
+  verificationRoleKey     String?
+  storageAnomalyCode      String?
+  storageQuarantinedAt    DateTime?
+  /// Set in the same locked transaction that moves consumed upload claims to
+  /// PURGE_PENDING; distinct from the later confirmed image/policy purge.
+  storagePurgeRequestedAt DateTime?
+  /// Durable intent for an in-flight object purge. The value may only move to
+  /// a stronger mode (image < retention < erasure) under the database guard.
+  storagePurgeMode        VerificationPurgeMode?
+  storagePurgeRequestedBy String?
+  uploads                 VerificationUpload[]
   /// [DOC-1 P4-4] the extraction ledger of this submission
-  extractionRuns       ExtractionRun[]
-  validationResults    ValidationResult[]
+  extractionRuns          ExtractionRun[]
+  validationResults       ValidationResult[]
   /// [DOC-1 §9.4 P9-4] while set, this document cannot be purged; release clears it (T22: the state is untouched)
-  legalHoldId          String?                    @db.Uuid
-  legalHold            DocLegalHold?              @relation(fields: [legalHoldId], references: [id], onDelete: Restrict)
+  legalHoldId             String?                       @db.Uuid
+  legalHold               DocLegalHold?                 @relation(fields: [legalHoldId], references: [id], onDelete: Restrict)
   /// [DOC-1 §4.3 · P1-2] The subject this document is evidence ABOUT (a person, a business,
   /// a vehicle) — EXPAND beside userId, which stays the account that uploaded it. Null only
   /// on rows that predate subjects; `pnpm doc1:backfill-subjects` fills them.
-  subjectId            String?                    @db.Uuid
-  subject              Subject?                   @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  subjectId               String?                       @db.Uuid
+  subject                 Subject?                      @relation(fields: [subjectId], references: [id], onDelete: SetNull)
   /// [DOC-1 §4.4 · P4-2] The image was purged under the bucket's image policy (§1.3) — the
   /// bytes are gone, the record below still answers. Distinct from `purgedAt`, which retires
   /// the submission itself (retention elapsed / erasure) and ends its evidence.
-  imagePurgedAt        DateTime?
+  imagePurgedAt           DateTime?
   /// [DOC-1 §4.4 · P4-2] The durable, post-purge truth of this submission (kept by trigger).
-  record               DocumentRecord?
+  record                  DocumentRecord?
   /// [DOC-1 §9.3 P4-7] the renewal schedule the database keeps for an approved document with an expiry
-  renewalSchedule      RenewalSchedule?
+  renewalSchedule         RenewalSchedule?
+  reviewRenderGrants      ReviewRenderGrant[]
 
   @@index([status])
+  @@index([tenantId, userId])
   @@index([userId])
   @@index([expiresAt])
   @@index([retentionExpiresAt])
   @@index([legalHoldId])
   @@index([state])
   @@index([subjectId])
+  @@index([storageProvenance])
   @@map("verification_documents")
+}
+
+enum VerificationStorageProvenance {
+  UNVERIFIED
+  VERIFIED
+  QUARANTINED
+}
+
+enum VerificationUploadPurpose {
+  CHECKLIST_DOCUMENT
+  IDENTITY_DOCUMENT
+  IDENTITY_SELFIE
+}
+
+enum VerificationProcessingPolicy {
+  DOCUMENT_ONLY
+  FACE_MATCH
+}
+
+enum VerificationUploadState {
+  UPLOADING
+  UPLOADED
+  PROCESSING
+  CONSUMED
+  EXPIRED
+  QUARANTINED
+  PURGE_PENDING
+  PURGED
+}
+
+enum VerificationPurgeMode {
+  IMAGE_ONLY
+  FULL_RETENTION
+  FULL_ERASURE
+}
+
+/// Server-issued authority for one stored verification or identity object.
+/// The provider key is reserved and this row is committed before bytes are
+/// written, so every crash boundary leaves a durable deletion obligation.
+/// Owner, tenant, purpose and content facts are immutable by database trigger.
+model VerificationUpload {
+  id                  String                        @id @default(uuid()) @db.Uuid
+  tenantId            String                        @default("swift-default")
+  tenant              Tenant                        @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  userId              String
+  user                User                          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  storageLocationId   String
+  providerKey         String
+  canonicalKey        String
+  /// Provider-issued immutable generation identity. S3/R2 uses VersionId or
+  /// ETag; local test storage uses a content digest. It is sealed exactly once
+  /// when UPLOADING becomes UPLOADED and all later access/deletion is conditional.
+  objectVersion       String?
+  purpose             VerificationUploadPurpose
+  /// Exact checklist role key (for example RESTAURANT), not the projected
+  /// UserRole stored on the eventual document row.
+  roleKey             String?
+  docType             String?
+  mimeType            String
+  sizeBytes           Int
+  sha256              String
+  encrypted           Boolean                       @default(false)
+  state               VerificationUploadState       @default(UPLOADING)
+  expiresAt           DateTime
+  processingId        String?                       @db.Uuid
+  processingStartedAt DateTime?
+  processingPolicy    VerificationProcessingPolicy?
+  submissionId        String?
+  submission          VerificationDocument?         @relation(fields: [submissionId], references: [id], onDelete: Restrict)
+  consumedAt          DateTime?
+  quarantineReason    String?
+  quarantinedAt       DateTime?
+  purgeRequestedAt    DateTime?
+  purgedAt            DateTime?
+  createdAt           DateTime                      @default(now())
+  updatedAt           DateTime                      @updatedAt
+  storageOrphan       StorageOrphan?
+
+  @@unique([storageLocationId, providerKey])
+  @@unique([storageLocationId, canonicalKey])
+  @@unique([submissionId, purpose])
+  @@index([tenantId, userId, state, expiresAt, id])
+  @@index([state, expiresAt, id])
+  @@index([submissionId])
+  @@map("verification_uploads")
 }
 
 /// Liability shield (founder directive 2026-07-15): the ENFORCEMENT layer
@@ -915,12 +1028,12 @@ model RetentionSweepReceipt {
 /// consent for accounts created in the gap cannot be manufactured on commencement
 /// day, so it is captured now, hash-anchored to the exact text the user saw.
 model LegalDocument {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   /// privacy_policy | terms_of_service | driver_agreement | vendor_agreement
   /// | marketing_consent | location_bg_consent
   documentType String
   version      String
-  locale       String   @default("en-GY")
+  locale       String    @default("en-GY")
   /// sha256 of the exact rendered text served to users at this version.
   contentHash  String
   /// [F-021-24] The EXACT text itself — the hash alone cannot answer
@@ -928,7 +1041,7 @@ model LegalDocument {
   renderedText String?
   /// NULL = draft. Consent may never reference a draft (INV-NR1b).
   publishedAt  DateTime?
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
 
   @@unique([documentType, version, locale])
   @@map("legal_documents")
@@ -1032,47 +1145,47 @@ enum CoverageClass {
 /// Status is decided by deterministic guardrails —
 /// caps/outliers/collusion route to manual review, never auto-payout.
 model ReimbursementClaim {
-  id         String      @id @default(cuid())
-  orderId    String      @unique
+  id               String           @id @default(cuid())
+  orderId          String           @unique
   /// [M-29] Exactly one of riderId / driverId names the mover — the database checks it.
-  riderId    String?
-  driverId   String?
-  customerId String
-  amount     Decimal     @db.Decimal(12, 2)
+  riderId          String?
+  driverId         String?
+  customerId       String
+  amount           Decimal          @db.Decimal(12, 2)
   /// no_show | refused
-  reason     String
+  reason           String
   /// Golden-rule evidence — captured at the door, claim impossible without it
-  gpsLat     Float
-  gpsLng     Float
-  photoUrl   String?
-  status     ClaimStatus @default(PENDING_REVIEW)
+  gpsLat           Float
+  gpsLng           Float
+  photoUrl         String?
+  status           ClaimStatus      @default(PENDING_REVIEW)
   /// Deterministic guardrail flags: over_cap, outlier, collusion_customer, collusion_pair
-  flags      String[]
-  reviewedBy String?
-  reviewNote String?
-  reviewedAt DateTime?
-  paidAt     DateTime?
+  flags            String[]
+  reviewedBy       String?
+  reviewNote       String?
+  reviewedAt       DateTime?
+  paidAt           DateTime?
   /// [A-11] The payout's evidence, and it is UNIQUE. One bank/MMG reference
   /// settles ONE claim: without this a single typed string could close ten of
   /// them, which is exactly the "reused or fabricated reference" the register
   /// names. Nullable, so unpaid claims do not collide.
-  paymentRef String?     @unique
+  paymentRef       String?          @unique
   /// [A-11] What the payer states they actually sent, checked against `amount`
   /// before the claim closes. Typing a reference alone attested nothing about
   /// the figure.
-  paidAmount Decimal?    @db.Decimal(12, 2)
+  paidAmount       Decimal?         @db.Decimal(12, 2)
   /// [A-11] WHO recorded the payout — distinct from `reviewedBy`, which is the
   /// person who approved the claim. The two are often different people and the
   /// record could not tell them apart.
-  paidById   String?
+  paidById         String?
   /// [DOC-1 §31.4 · DOC-INV-47 · P31-1] The evidence bundle as assembled at filing —
   /// from artefacts the platform already holds (arrival, GPS, photo, pickup, cart),
   /// never typed by the rider. Re-derived at payout; the stored copy is the review
   /// record. `evidenceComplete` false means the claim is never auto-paid.
   evidence         Json?
-  evidenceComplete Boolean     @default(false)
-  createdAt  DateTime    @default(now())
-  reserveEntry RlpReserveEntry?
+  evidenceComplete Boolean          @default(false)
+  createdAt        DateTime         @default(now())
+  reserveEntry     RlpReserveEntry?
 
   @@index([riderId])
   @@index([driverId])
@@ -1504,12 +1617,11 @@ model Vendor {
   /// boundary that hands it to a customer's dialler.
   publicPhone String?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
   /// [STA-1 DL-4] Never in analytics, GMV, counts, ratings, identity
   /// graph or a ledger. Belt to Tenant.kind's braces.
-  isSynthetic Boolean @default(false)
-
+  isSynthetic Boolean  @default(false)
 
   @@index([status])
   @@index([vendorType])
@@ -1596,31 +1708,31 @@ model Category {
 /// The locked model's Listing: one model for goods AND services.
 /// Services carry bookingConfig (duration, slots) and APPOINTMENT fulfillment.
 model Item {
-  id                String            @id @default(cuid())
-  vendorId          String
-  vendor            Vendor            @relation(fields: [vendorId], references: [id], onDelete: Cascade)
-  categoryId        String
-  category          Category          @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  id            String          @id @default(cuid())
+  vendorId      String
+  vendor        Vendor          @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  categoryId    String
+  category      Category        @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   /// [STA-1 §4 lineage] The vendor's tenant: stamped by the wall on create and
   /// held equal to the vendor's by items_tenant_matches_vendor (a DB trigger).
   /// A child table walled only through its parent leaks through any relation
   /// filter that forgets the tenant — this column is the wall on the row itself.
-  tenantId          String            @default("swift-default")
-  tenant            Tenant            @relation(fields: [tenantId], references: [id])
-  name              String
-  description       String?
-  imageUrl          String?
-  basePrice         Decimal           @db.Decimal(10, 2)
-  fulfillment       FulfillmentType   @default(DELIVERY)
+  tenantId      String          @default("swift-default")
+  tenant        Tenant          @relation(fields: [tenantId], references: [id])
+  name          String
+  description   String?
+  imageUrl      String?
+  basePrice     Decimal         @db.Decimal(10, 2)
+  fulfillment   FulfillmentType @default(DELIVERY)
   /// SERVICE listings only: { durationMinutes: number, slots: [{ dayOfWeek, start, end }] }
-  bookingConfig     Json?
-  bookings          Booking[]
-  optionGroups      OptionGroup[]
-  isAvailable       Boolean           @default(true)
-  isPopular         Boolean           @default(false)
-  sku               String?
-  barcode           String?
-  unit              String?
+  bookingConfig Json?
+  bookings      Booking[]
+  optionGroups  OptionGroup[]
+  isAvailable   Boolean         @default(true)
+  isPopular     Boolean         @default(false)
+  sku           String?
+  barcode       String?
+  unit          String?
 
   /// [G1/G2] How much room ONE unit takes, relative to an ordinary item (1).
   /// A sachet is 1; a 20 kg bag of rice is nearer 8. Null = ordinary, so every
@@ -1865,12 +1977,12 @@ model Order {
   /// Chosen taxi tier (Economy/Comfort/XL). Null for non-taxi orders.
   rideClass      RideClass?
 
-  paymentMethod PaymentMethod
-  paymentStatus PaymentStatus @default(PENDING)
-  paymentId     String?
+  paymentMethod            PaymentMethod
+  paymentStatus            PaymentStatus @default(PENDING)
+  paymentId                String?
   /// Immutable direct-payment destination committed under the vendor row lock.
   /// Never fall back to the vendor's mutable profile URL for an existing order.
-  mmgPayUrlSnapshot       String?
+  mmgPayUrlSnapshot        String?
   mmgRecipientNameSnapshot String?
   /// [W-25] A capture on this rail rests on the STORE's word: Swift holds no
   /// money and has no provider feed here. These three say so out loud — the
@@ -1878,7 +1990,7 @@ model Order {
   /// orders, so one transaction cannot mark two orders paid), who attested,
   /// and when. A later reconciliation matches on the reference; until then
   /// they are the list of captures with no provider evidence behind them.
-  mmgAttestedRef           String?   @unique
+  mmgAttestedRef           String?       @unique
   mmgAttestedById          String?
   mmgAttestedAt            DateTime?
   /// [DOC-1 §31.5 · P31-2] The customer's own claim, from their device: "I paid" with the
@@ -1930,7 +2042,7 @@ model Order {
   /// moment, so it gets a column rather than being re-derived by scanning
   /// the status log for the newest DRIVER_ARRIVED row. Named distinctly from
   /// RunStop.arrivedAt so a query can never confuse the two.
-  driverArrivedAt   DateTime?
+  driverArrivedAt       DateTime?
   preparingAt           DateTime?
   readyAt               DateTime?
   pickedUpAt            DateTime?
@@ -1963,8 +2075,8 @@ model Order {
   refundSettledById String?
   refundSettledAt   DateTime?
 
-  promoCodeId String?
-  promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])
+  promoCodeId     String?
+  promoCode       PromoCode?       @relation(fields: [promoCodeId], references: [id])
   /// [M-32] The redemption snapshot, when a promo discounted this order.
   promoRedemption PromoRedemption?
 
@@ -2411,40 +2523,40 @@ model RatingTagDef {
 
 /// Retail returns/disputes (spec §4.5) — retail has returns, food doesn't.
 model ReturnRequest {
-  id             String       @id @default(cuid())
-  orderId        String
-  customerId     String
-  reason         String
-  status         ReturnStatus @default(REQUESTED)
-  resolutionNote String?
-  reviewedBy     String?
-  reviewedAt     DateTime?
+  id                   String       @id @default(cuid())
+  orderId              String
+  customerId           String
+  reason               String
+  status               ReturnStatus @default(REQUESTED)
+  resolutionNote       String?
+  reviewedBy           String?
+  reviewedAt           DateTime?
   /// [A-13] The refund's evidence, and it is UNIQUE: one transfer settles one
   /// return. Nullable, so the many unsettled returns do not collide.
-  refundRef        String?    @unique
+  refundRef            String?      @unique
   /// What the payer states they actually sent, checked against `refundAmount`.
-  refundPaidAmount Decimal?   @db.Decimal(12, 2)
+  refundPaidAmount     Decimal?     @db.Decimal(12, 2)
   /// WHO settled it — distinct from `reviewedBy`, who decided the refund was owed.
-  refundPaidById   String?
-  refundPaidAt     DateTime?
+  refundPaidById       String?
+  refundPaidAt         DateTime?
   /// [ALG-25] What the refund algorithm said when the return was requested:
   /// which of the three cases it is (CASH_PRE_HANDOVER | CASH_POST_HANDOVER |
   /// MMG_BLOCKED), the amount it computed, and the sentence. Recorded, never
   /// moved — Swift holds no order money.
-  refundKind     String?
-  refundAmount   Decimal?     @db.Decimal(12, 2)
-  refundSentence String?
+  refundKind           String?
+  refundAmount         Decimal?     @db.Decimal(12, 2)
+  refundSentence       String?
   /// [M-33] Where the discount share came from: SNAPSHOT (the order's
   /// immutable component/line allocation), INFERRED (no snapshot — the legacy
   /// proportional share of the aggregate discount, routed to review) or NONE
   /// (no discount). Never silently inferred.
-  refundBasis    String?
+  refundBasis          String?
   /// [M-33] The dual calculation: what the aggregate inference would have
   /// said. The delta against refundAmount is the observed refund drift.
-  refundInferredAmount Decimal? @db.Decimal(12, 2)
+  refundInferredAmount Decimal?     @db.Decimal(12, 2)
   /// [M-33] Who funded the discount the refund is net of (PLATFORM | VENDOR).
-  refundFunder   String?
-  createdAt      DateTime     @default(now())
+  refundFunder         String?
+  createdAt            DateTime     @default(now())
 
   @@index([orderId])
   @@index([customerId])
@@ -2710,33 +2822,33 @@ enum BillingEventType {
 /// (PrepaidBalance/BillingEvent) — a BigInt-minor island inside a Decimal
 /// engine would be the conversion-bug factory the money laws exist to prevent.
 model MmgAgentPayment {
-  id             String    @id @default(cuid())
+  id                String    @id @default(cuid())
   /// MMG_AGENT_WEBHOOK | MMG_SETTLEMENT_FILE | MANUAL_ADMIN
-  channel        String
+  channel           String
   /// Idempotency key within the channel (MMG txn id / file row id / MANUAL:<receipt>)
-  externalId     String
+  externalId        String
   /// Normalized MMG transaction id — cross-CHANNEL dedupe (webhook + file = one credit)
-  mmgTxnId       String?
+  mmgTxnId          String?
   /// [M-18] The provider transaction this record observes — one identity, one lifecycle, one credit.
   providerPaymentId String?
-  sanRaw         String
-  sanNormalized  String?   @db.Char(10)
-  tenantId       String    @default("swift-default")
-  subscriptionId String?
-  amount         Decimal   @db.Decimal(12, 2)
-  currencyCode   String    @db.Char(3)
-  paidAt         DateTime
-  agentRef       String?
-  payerMsisdn    String?
+  sanRaw            String
+  sanNormalized     String?   @db.Char(10)
+  tenantId          String    @default("swift-default")
+  subscriptionId    String?
+  amount            Decimal   @db.Decimal(12, 2)
+  currencyCode      String    @db.Char(3)
+  paidAt            DateTime
+  agentRef          String?
+  payerMsisdn       String?
   /// RECEIVED | MATCHED | UNMATCHED | RECONCILED | RESOLVED | REFUND_FLAGGED
-  status         String
+  status            String
   /// SAN_MALFORMED | SAN_CHECKSUM_FAILED | SAN_UNKNOWN | ACCOUNT_CLOSED | TOMBSTONED | BAD_CURRENCY | AMOUNT_OUT_OF_RANGE
-  failureCode    String?
-  raw            Json
-  resolvedBy     String?
-  resolvedAt     DateTime?
-  note           String?
-  createdAt      DateTime  @default(now())
+  failureCode       String?
+  raw               Json
+  resolvedBy        String?
+  resolvedAt        DateTime?
+  note              String?
+  createdAt         DateTime  @default(now())
 
   @@unique([channel, externalId])
   @@index([status, createdAt])
@@ -2781,23 +2893,23 @@ model ProviderPayment {
 /// compare-and-set (one batch winner) and every row's outcome is recorded
 /// back on the batch. A rejected batch never touches the ledger.
 model SettlementImport {
-  id             String    @id @default(cuid())
-  tenantId       String    @default("swift-default")
-  source         String
+  id            String    @id @default(cuid())
+  tenantId      String    @default("swift-default")
+  source        String
   /// sha256 of the file text — the same file imported twice is one batch
-  fileHash       String
-  rowCount       Int
-  computedTotal  Decimal   @db.Decimal(14, 2)
-  controlTotal   Decimal?  @db.Decimal(14, 2)
+  fileHash      String
+  rowCount      Int
+  computedTotal Decimal   @db.Decimal(14, 2)
+  controlTotal  Decimal?  @db.Decimal(14, 2)
   /// STAGED | REJECTED | PUBLISHING | PUBLISHED
-  status         String    @default("STAGED")
-  rejectReasons  Json?
-  rows           Json
-  results        Json?
-  credited       Int       @default(0)
-  publishedAt    DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  status        String    @default("STAGED")
+  rejectReasons Json?
+  rows          Json
+  results       Json?
+  credited      Int       @default(0)
+  publishedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   @@unique([tenantId, fileHash])
   @@index([status, createdAt])
@@ -2917,15 +3029,30 @@ model SanTombstone {
 /// One open row per key (upsert re-opens); purgedAt closes it. Retried
 /// opportunistically at account deletion; IDV-1 Phase 2 owns the sweeper.
 model StorageOrphan {
-  id        String    @id @default(cuid())
-  tenantId  String    @default("swift-default")
-  key       String    @unique
-  reason    String
-  userId    String?
-  createdAt DateTime  @default(now())
-  purgedAt  DateTime?
+  id                   String              @id @default(cuid())
+  tenantId             String              @default("swift-default")
+  /// Kept unique during EXPAND so old binaries using ON CONFLICT(key) remain
+  /// safe during a rolling rollout; objectIdentity is the future locator.
+  key                  String              @unique
+  objectIdentity       String              @unique
+  storageLocationId    String?
+  reason               String
+  userId               String?
+  verificationUploadId String?             @unique @db.Uuid
+  verificationUpload   VerificationUpload? @relation(fields: [verificationUploadId], references: [id], onDelete: Restrict)
+  attempts             Int                 @default(0)
+  nextAttemptAt        DateTime            @default(now())
+  lastAttemptAt        DateTime?
+  lastErrorCode        String?
+  quarantinedAt        DateTime?
+  quarantineReason     String?
+  confirmedAbsentAt    DateTime?
+  createdAt            DateTime            @default(now())
+  purgedAt             DateTime?
 
+  @@unique([storageLocationId, key])
   @@index([tenantId, purgedAt])
+  @@index([purgedAt, quarantinedAt, nextAttemptAt, id])
   @@map("storage_orphans")
 }
 
@@ -3066,19 +3193,19 @@ model Earning {
   rider     Rider?        @relation(fields: [riderId], references: [id])
   driverId  String?
   driver    Driver?       @relation(fields: [driverId], references: [id])
-  tenantId String @default("swift-default")
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId  String        @default("swift-default")
+  tenant    Tenant        @relation(fields: [tenantId], references: [id])
   orderId   String
   type      EarningType
   amount    Decimal       @db.Decimal(10, 2)
   status    EarningStatus @default(PENDING)
   createdAt DateTime      @default(now())
 
+  @@unique([orderId, type])
   // One earning per (order, type): a mover's fee/fare/tip for an order is a
   // single fact. This makes createEarnings idempotent — two concurrent order
   // completions can't double-pay (createMany skipDuplicates relies on it).
   @@index([tenantId])
-  @@unique([orderId, type])
   @@index([status])
   @@index([riderId])
   @@index([driverId])
@@ -3091,25 +3218,25 @@ model Earning {
 /// and their status. Chat/reply threading is a later step; this is the
 /// report → acknowledge → resolve loop launch actually needs.
 model SupportTicket {
-  id           String          @id @default(cuid())
+  id           String             @id @default(cuid())
   userId       String
-  user         User            @relation(fields: [userId], references: [id])
+  user         User               @relation(fields: [userId], references: [id])
   orderId      String?
-  order        Order?          @relation(fields: [orderId], references: [id])
+  order        Order?             @relation(fields: [orderId], references: [id])
   category     SupportCategory
   subject      String
   message      String
-  status       SupportStatus   @default(OPEN)
+  status       SupportStatus      @default(OPEN)
   adminNote    String?
   /// [A-18] What actually happened. A ticket cannot reach RESOLVED without one,
   /// and a SAFETY ticket cannot be closed on "answered" alone — the disposition
   /// is the structured evidence a safety review reads back.
   resolution   SupportResolution?
   resolvedById String?
-  resolvedBy   User?           @relation("supportResolver", fields: [resolvedById], references: [id])
+  resolvedBy   User?              @relation("supportResolver", fields: [resolvedById], references: [id])
   resolvedAt   DateTime?
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
 
   @@index([userId])
   @@index([status])
@@ -3168,47 +3295,47 @@ enum EarningStatus {
 /// and every correction is a later, immutable ADJUSTMENT row (sequence 1, 2 …)
 /// recomputed from the ledger and naming the row it supersedes.
 model Settlement {
-  id            String           @id @default(cuid())
-  vendorId      String
-  vendor        Vendor           @relation(fields: [vendorId], references: [id])
-  tenantId String @default("swift-default")
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  periodStart   DateTime
-  periodEnd     DateTime
+  id                  String           @id @default(cuid())
+  vendorId            String
+  vendor              Vendor           @relation(fields: [vendorId], references: [id])
+  tenantId            String           @default("swift-default")
+  tenant              Tenant           @relation(fields: [tenantId], references: [id])
+  periodStart         DateTime
+  periodEnd           DateTime
   /// DIGEST | ADJUSTMENT
-  kind          String           @default("DIGEST")
-  sequence      Int              @default(0)
-  supersedesId  String?
-  reason        String?
-  totalOrders   Int
-  totalBase     Decimal          @db.Decimal(12, 2)
-  totalMarkup   Decimal          @db.Decimal(12, 2)
+  kind                String           @default("DIGEST")
+  sequence            Int              @default(0)
+  supersedesId        String?
+  reason              String?
+  totalOrders         Int
+  totalBase           Decimal          @db.Decimal(12, 2)
+  totalMarkup         Decimal          @db.Decimal(12, 2)
   /// Σ Order.discount over the period — the customer-facing discounts
-  totalDiscount Decimal          @default(0) @db.Decimal(12, 2)
+  totalDiscount       Decimal          @default(0) @db.Decimal(12, 2)
   /// What the vendor keeps from goods: goodsSales − vendorPromoDiscount
   /// (= customerCollection + sponsorReceivable). [M-38] Before, every promo
   /// — the platform's included — was subtracted from the vendor's sales.
-  netSales      Decimal          @default(0) @db.Decimal(12, 2)
+  netSales            Decimal          @default(0) @db.Decimal(12, 2)
   /// [M-38] The separated columns, from each order's redemption snapshot.
   /// NULL on rows written before M-38 (componentsVersion 0): estimated, not
   /// settled, until recomputed as an ADJUSTMENT.
-  goodsSales          Decimal? @db.Decimal(12, 2)
-  vendorPromoDiscount Decimal? @db.Decimal(12, 2)
-  sponsorReceivable   Decimal? @db.Decimal(12, 2)
-  customerCollection  Decimal? @db.Decimal(12, 2)
-  feeFunding          Decimal? @db.Decimal(12, 2)
-  moverPayable        Decimal? @db.Decimal(12, 2)
+  goodsSales          Decimal?         @db.Decimal(12, 2)
+  vendorPromoDiscount Decimal?         @db.Decimal(12, 2)
+  sponsorReceivable   Decimal?         @db.Decimal(12, 2)
+  customerCollection  Decimal?         @db.Decimal(12, 2)
+  feeFunding          Decimal?         @db.Decimal(12, 2)
+  moverPayable        Decimal?         @db.Decimal(12, 2)
   /// Orders in the period with a discount but no redemption snapshot (placed
   /// before M-32): their split is the conservative estimate, and says so.
-  estimatedOrders     Int      @default(0)
-  componentsVersion   Int      @default(0)
-  status        SettlementStatus @default(PENDING)
-  paidAt        DateTime?
-  reference     String?
-  createdAt     DateTime         @default(now())
-  @@index([tenantId])
+  estimatedOrders     Int              @default(0)
+  componentsVersion   Int              @default(0)
+  status              SettlementStatus @default(PENDING)
+  paidAt              DateTime?
+  reference           String?
+  createdAt           DateTime         @default(now())
 
   @@unique([vendorId, periodStart, sequence])
+  @@index([tenantId])
   @@index([vendorId, periodStart])
   @@map("settlements")
 }
@@ -3234,22 +3361,22 @@ enum CashSettlementStatus {
 }
 
 model DeliveryCashSettlement {
-  id               String               @id @default(cuid())
-  orderId          String               @unique
-  order            Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  riderId          String
-  rider            Rider                @relation(fields: [riderId], references: [id])
-  vendorId         String
-  vendor           Vendor               @relation(fields: [vendorId], references: [id])
-  tenantId String @default("swift-default")
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  id                  String               @id @default(cuid())
+  orderId             String               @unique
+  order               Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  riderId             String
+  rider               Rider                @relation(fields: [riderId], references: [id])
+  vendorId            String
+  vendor              Vendor               @relation(fields: [vendorId], references: [id])
+  tenantId            String               @default("swift-default")
+  tenant              Tenant               @relation(fields: [tenantId], references: [id])
   /// Delivery pay the store owes the rider (GYD): delivery fee PLUS any
   /// prepaid tip — the customer's MMG payment landed both in the store's
   /// wallet [REPORT-005/006 carryover: "fee" alone under-describes the debt].
-  amount           Decimal              @db.Decimal(10, 2)
-  status           CashSettlementStatus @default(OWED)
-  riderConfirmedAt DateTime?
-  storeConfirmedAt DateTime?
+  amount              Decimal              @db.Decimal(10, 2)
+  status              CashSettlementStatus @default(OWED)
+  riderConfirmedAt    DateTime?
+  storeConfirmedAt    DateTime?
   /// [W-26] WHO closed each half, and WHAT they say changed hands.
   /// The row used to carry timestamps alone: it recorded that "the store"
   /// confirmed, never which person, and never the amount they attested to.
@@ -3259,9 +3386,9 @@ model DeliveryCashSettlement {
   storeConfirmedById  String?
   riderAttestedAmount Decimal?             @db.Decimal(10, 2)
   storeAttestedAmount Decimal?             @db.Decimal(10, 2)
-  createdAt        DateTime             @default(now())
-  @@index([tenantId])
+  createdAt           DateTime             @default(now())
 
+  @@index([tenantId])
   @@index([riderId, status])
   @@index([vendorId, status])
   @@map("delivery_cash_settlements")
@@ -3278,8 +3405,8 @@ model Transaction {
   id           String          @id @default(cuid())
   userId       String
   user         User            @relation(fields: [userId], references: [id])
-  tenantId String @default("swift-default")
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId     String          @default("swift-default")
+  tenant       Tenant          @relation(fields: [tenantId], references: [id])
   type         TransactionType
   amount       Decimal         @db.Decimal(12, 2)
   direction    String
@@ -3288,8 +3415,8 @@ model Transaction {
   externalRef  String?
   balanceAfter Decimal         @db.Decimal(12, 2)
   createdAt    DateTime        @default(now())
-  @@index([tenantId])
 
+  @@index([tenantId])
   @@index([userId])
   @@index([createdAt])
   @@map("transactions")
@@ -3312,35 +3439,35 @@ enum TransactionType {
 // ==========================================
 
 model PromoCode {
-  id             String       @id @default(cuid())
-  code           String       @unique
+  id             String            @id @default(cuid())
+  code           String            @unique
   description    String
   /// null = platform-wide (admin-issued). Set = the vendor's own promotion
   /// (master plan §4.2): validated against and discounted from that vendor's
   /// plan only at checkout.
   vendorId       String?
-  vendor         Vendor?      @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  vendor         Vendor?           @relation(fields: [vendorId], references: [id], onDelete: Cascade)
   discountType   DiscountType
-  discountValue  Decimal      @db.Decimal(10, 2)
-  minOrderAmount Decimal?     @db.Decimal(10, 2)
-  maxDiscount    Decimal?     @db.Decimal(10, 2)
+  discountValue  Decimal           @db.Decimal(10, 2)
+  minOrderAmount Decimal?          @db.Decimal(10, 2)
+  maxDiscount    Decimal?          @db.Decimal(10, 2)
   applicableTo   OrderType[]
   validFrom      DateTime
   validUntil     DateTime
   maxUses        Int?
-  maxUsesPerUser Int          @default(1)
-  currentUses    Int          @default(0)
-  isActive       Boolean      @default(true)
+  maxUsesPerUser Int               @default(1)
+  currentUses    Int               @default(0)
+  isActive       Boolean           @default(true)
   orders         Order[]
-  createdAt      DateTime     @default(now())
+  createdAt      DateTime          @default(now())
   /// [M-32] Who pays for this discount: VENDOR for a store's own code (it may
   /// only discount goods), PLATFORM for an admin code (goods, then the
   /// delivery fee). The tip is never discountable — nobody funds it.
-  funder         PromoFunder  @default(PLATFORM)
+  funder         PromoFunder       @default(PLATFORM)
   /// [M-32] The live terms version. Every create and update writes an
   /// immutable PromoTerms row and moves this pointer; rollback pins a prior
   /// version by writing a new one that names what it restored.
-  termsVersion   Int          @default(1)
+  termsVersion   Int               @default(1)
   terms          PromoTerms[]
   redemptions    PromoRedemption[]
 
@@ -3443,8 +3570,8 @@ model Notification {
 
   @@unique([userId, dedupeKey])
   @@index([userId, isRead])
-  @@map("notifications")
   @@index([createdAt]) // retention sweep cutoff [F-021-20]
+  @@map("notifications")
 }
 
 enum NotificationType {
@@ -3640,16 +3767,16 @@ enum ReportStatus {
 }
 
 model ContentReport {
-  id             String           @id @default(cuid())
-  reporterId     String
-  targetType     ReportTargetType
-  targetId       String
-  reason         ReportReason
-  detail         String?
-  status         ReportStatus     @default(PENDING)
-  resolvedBy     String?
-  resolvedAt     DateTime?
-  resolutionNote String?
+  id                String           @id @default(cuid())
+  reporterId        String
+  targetType        ReportTargetType
+  targetId          String
+  reason            ReportReason
+  detail            String?
+  status            ReportStatus     @default(PENDING)
+  resolvedBy        String?
+  resolvedAt        DateTime?
+  resolutionNote    String?
   /// [A-17] WHAT WAS DECIDED, coded — for CSAE reports, required to close.
   /// A free-text note could say anything or nothing, and "handled" and "nobody
   /// looked properly" produced identical rows.
@@ -3670,8 +3797,8 @@ model ContentReport {
   /// failure mode is acting too slowly.
   dismissProposedBy String?
   dismissProposedAt DateTime?
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
 
   // One report per reporter per target — re-reporting is idempotent, not spam.
   @@unique([reporterId, targetType, targetId])
@@ -3799,8 +3926,8 @@ model PayoutRequest {
   id           String       @id @default(cuid())
   userId       String
   user         User         @relation(fields: [userId], references: [id])
-  tenantId String @default("swift-default")
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId     String       @default("swift-default")
+  tenant       Tenant       @relation(fields: [tenantId], references: [id])
   amount       Decimal      @db.Decimal(12, 2)
   method       PayoutMethod
   status       PayoutStatus @default(PENDING)
@@ -3811,8 +3938,8 @@ model PayoutRequest {
   processedAt  DateTime?
   failedReason String?
   createdAt    DateTime     @default(now())
-  @@index([tenantId])
 
+  @@index([tenantId])
   @@map("payout_requests")
 }
 
@@ -3820,8 +3947,8 @@ model PayoutSchedule {
   id           String       @id @default(cuid())
   userId       String       @unique
   user         User         @relation(fields: [userId], references: [id])
-  tenantId String @default("swift-default")
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId     String       @default("swift-default")
+  tenant       Tenant       @relation(fields: [tenantId], references: [id])
   frequency    String
   dayOfWeek    Int?
   method       PayoutMethod
@@ -3831,8 +3958,8 @@ model PayoutSchedule {
   nextPayoutAt DateTime?
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
-  @@index([tenantId])
 
+  @@index([tenantId])
   @@map("payout_schedules")
 }
 
@@ -4016,18 +4143,18 @@ model SosRetrigger {
 /// and the rows that keep failing (poison) so one bad row never blocks the
 /// rest of the population from being visited.
 model SweepCursor {
-  workType         String    @id
-  cursorId         String?
-  passStartedAt    DateTime?
-  passCompletedAt  DateTime?
-  passesCompleted  Int       @default(0)
-  lastPassVisited  Int       @default(0)
-  lastPassFailed   Int       @default(0)
-  lastPageAt       DateTime?
-  lastPageSize     Int       @default(0)
-  poison           Json?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  workType        String    @id
+  cursorId        String?
+  passStartedAt   DateTime?
+  passCompletedAt DateTime?
+  passesCompleted Int       @default(0)
+  lastPassVisited Int       @default(0)
+  lastPassFailed  Int       @default(0)
+  lastPageAt      DateTime?
+  lastPageSize    Int       @default(0)
+  poison          Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   @@map("sweep_cursors")
 }
@@ -4172,13 +4299,13 @@ model SafetyDeletionHold {
   reviewBy  DateTime
   purgeBy   DateTime
 
-  requestedAt DateTime  @default(now())
-  releasedAt  DateTime?
-  purgedAt    DateTime?
+  requestedAt     DateTime  @default(now())
+  releasedAt      DateTime?
+  purgedAt        DateTime?
   /// One final purge generation. Release and the retention sweep can both
   /// fire on the same row; the shred increments this under a conditional
   /// update, so exactly one of them performs it.
-  purgeGeneration Int @default(0)
+  purgeGeneration Int       @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4497,13 +4624,13 @@ model TripSafetySession {
   checkinDeadlineAt  DateTime?
   checkinRespondedAt DateTime?
 
-  escalatedToSosId String?
-  closedAt         DateTime?
-  closeReason      GuardianCloseReason?
+  escalatedToSosId  String?
+  closedAt          DateTime?
+  closeReason       GuardianCloseReason?
   /// [S-06] The durable delivery obligations of this session's check-in asks.
   checkinDeliveries GuardianCheckinDelivery[]
-  createdAt        DateTime             @default(now())
-  updatedAt        DateTime             @updatedAt
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
 
   @@index([tenantId, status])
   @@index([tenantId, driverUserId])
@@ -4636,8 +4763,8 @@ model IncidentCase {
   /// against a retried intake; a replay returns THIS case and changes nothing.
   sourceType        String?
   sourceId          String?
-  sourceFingerprint String? @unique
-  replayCount       Int     @default(0)
+  sourceFingerprint String?        @unique
+  replayCount       Int            @default(0)
   /// [S-09] The one transactional authority behind this case's legal hold.
   legalHoldRecord   LegalHold?
   /// [DOC-1 P9-4] document holds raised from this case
@@ -4996,22 +5123,22 @@ model AdBooking {
 }
 
 model AdInvoice {
-  id             String          @id @default(cuid())
-  tenantId       String          @default("swift-default")
+  id             String           @id @default(cuid())
+  tenantId       String           @default("swift-default")
   advertiserId   String
   campaignId     String
-  number         String          @unique // ADS-{YYYY}-{seq}
-  amount         Decimal         @db.Decimal(12, 2)
-  currency       String          @default("GYD")
-  status         AdInvoiceStatus @default(UNPAID)
+  number         String           @unique // ADS-{YYYY}-{seq}
+  amount         Decimal          @db.Decimal(12, 2)
+  currency       String           @default("GYD")
+  status         AdInvoiceStatus  @default(UNPAID)
   provider       String? // MMG | POWERTRANZ | MANUAL | MOCK
   providerRef    String?
   paymentUrl     String?
   paidAt         DateTime?
-  refundedAmount Decimal         @default(0) @db.Decimal(12, 2)
-  createdAt      DateTime        @default(now())
-  advertiser     Advertiser      @relation(fields: [advertiserId], references: [id])
-  campaign       AdCampaign      @relation(fields: [campaignId], references: [id])
+  refundedAmount Decimal          @default(0) @db.Decimal(12, 2)
+  createdAt      DateTime         @default(now())
+  advertiser     Advertiser       @relation(fields: [advertiserId], references: [id])
+  campaign       AdCampaign       @relation(fields: [campaignId], references: [id])
   refundIntents  AdRefundIntent[]
 
   @@unique([id, tenantId, campaignId, currency], map: "ad_invoices_id_tenantId_campaignId_currency_key")
@@ -5377,8 +5504,8 @@ model SignupAttempt {
   @@index([deviceHash, createdAt])
   @@index([ipHash, createdAt])
   @@index([phoneHash, createdAt])
-  @@map("signup_attempts")
   @@index([createdAt]) // retention sweep cutoff [F-021-20]
+  @@map("signup_attempts")
 }
 
 model IntegritySettings {
@@ -6128,38 +6255,38 @@ enum AmlRecordClass {
 
 model DocType {
   /// `<country>.<legacyCode>` — one row per market per document class.
-  code                      String         @id
-  countryCode               String         @db.Char(2)
+  code                          String         @id
+  countryCode                   String         @db.Char(2)
   /// The bare checklist key the rest of the system speaks (`national_id`).
-  legacyCode                String
-  displayName               String
-  bucket                    DocBucket
-  subjectKind               DocSubjectKind
-  issuer                    String
-  imagePolicy               DocImagePolicy
-  intakeTtlHours            Int            @default(336)
-  persistRetentionDays      Int?
-  amlRecordClass            AmlRecordClass @default(NOT_APPLICABLE)
-  hasExpiry                 Boolean
-  defaultValidityDays       Int?
-  expirySource              String         @default("PRINTED")
+  legacyCode                    String
+  displayName                   String
+  bucket                        DocBucket
+  subjectKind                   DocSubjectKind
+  issuer                        String
+  imagePolicy                   DocImagePolicy
+  intakeTtlHours                Int            @default(336)
+  persistRetentionDays          Int?
+  amlRecordClass                AmlRecordClass @default(NOT_APPLICABLE)
+  hasExpiry                     Boolean
+  defaultValidityDays           Int?
+  expirySource                  String         @default("PRINTED")
   /// Spec §4.2 references an `extraction_profile` table it never defines; a
   /// code without an FK until that table is specified (CONFLICT-DOC-5).
-  extractionProfile         String
-  externalProcessingAllowed Boolean        @default(false)
+  extractionProfile             String
+  externalProcessingAllowed     Boolean        @default(false)
   /// [DGP-1 · CONFLICT-DOC-2] a PERSONAL type may be sent externally only under a recorded founder decision (the DB CHECK enforces it)
   externalProcessingDecisionRef String?
-  externalProcessingDecidedAt DateTime?
-  localAuthorityVariant     String?
-  minConfidenceAutoApprove  Decimal        @default(0.97) @db.Decimal(3, 2)
-  legalFactsVerifiedAt      DateTime?      @db.Date
-  legalFactsSourceNote      String?
-  needsSpecimen             Boolean        @default(false)
+  externalProcessingDecidedAt   DateTime?
+  localAuthorityVariant         String?
+  minConfidenceAutoApprove      Decimal        @default(0.97) @db.Decimal(3, 2)
+  legalFactsVerifiedAt          DateTime?      @db.Date
+  legalFactsSourceNote          String?
+  needsSpecimen                 Boolean        @default(false)
   /// [DOC-1 §6.9] In the always-review set by registry fact (the insurance certificate at launch);
   /// PERSONAL bucket and needsSpecimen are always-review by rule.
-  alwaysReview              Boolean        @default(false)
-  isActive                  Boolean        @default(false)
-  registryVersion           Int            @default(1)
+  alwaysReview                  Boolean        @default(false)
+  isActive                      Boolean        @default(false)
+  registryVersion               Int            @default(1)
 
   fields           DocField[]
   requirementItems RequirementItem[]
@@ -6173,12 +6300,12 @@ model DocType {
 
 model DocField {
   docTypeCode    String
-  docType        DocType  @relation(fields: [docTypeCode], references: [code])
+  docType        DocType    @relation(fields: [docTypeCode], references: [code])
   fieldCode      String
   dataType       String
   isRequired     Boolean
   isPii          Boolean
-  isBlindIndexed Boolean  @default(false)
+  isBlindIndexed Boolean    @default(false)
   /// [DOC-1 §7.1] The validator that proves this field; required fields of an ACTIVE type must name one (DOC-INV-2).
   validatorRef   String?
   validator      Validator? @relation(fields: [validatorRef], references: [code])
@@ -6269,25 +6396,78 @@ enum ReviewOutcome {
   ESCALATE
 }
 
+enum SecondReviewOrigin {
+  HUMAN_ESCALATION
+  MACHINE_COLLISION
+}
+
 model ReviewCase {
-  id           String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId     String           @default("swift-default")
-  tenant       Tenant           @relation(fields: [tenantId], references: [id])
+  id                      String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                String              @default("swift-default")
+  tenant                  Tenant              @relation(fields: [tenantId], references: [id])
   /// The VerificationDocument under review (P4-2's document_submission is not yet split out).
-  submissionId String
-  queue        ReviewQueue      @default(STANDARD)
+  submissionId            String
+  queue                   ReviewQueue         @default(STANDARD)
   /// Lower is more urgent. 100 = normal; an SLA breach drops it to 10.
-  priority     Int              @default(100)
-  slaDueAt     DateTime
-  assignedTo   String?
-  assignedAt   DateTime?
-  closedAt     DateTime?
-  createdAt    DateTime         @default(now())
-  decisions    ReviewDecision[]
+  priority                Int                 @default(100)
+  slaDueAt                DateTime
+  assignedTo              String?
+  assignedAt              DateTime?
+  /// Fresh UUID on every claim. Unlike a millisecond timestamp, this cannot
+  /// become valid again after release -> reclaim (assignment ABA).
+  assignmentEpoch         String?             @db.Uuid
+  secondReviewOrigin      SecondReviewOrigin?
+  /// ReviewDecision.id for HUMAN_ESCALATION; ValidationResult.id for
+  /// MACHINE_COLLISION. The code revalidates the referenced durable evidence.
+  secondReviewEvidenceRef String?
+  closedAt                DateTime?
+  createdAt               DateTime            @default(now())
+  decisions               ReviewDecision[]
+  reviewRenderGrants      ReviewRenderGrant[]
 
   @@index([submissionId])
   @@index([tenantId, closedAt, slaDueAt])
   @@map("review_case")
+}
+
+/// Short-lived authority for one reviewer session to fetch one exact stored
+/// generation while it owns one exact review-case assignment. The raw grant
+/// never reaches the database: only its SHA-256 digest is persisted. Fetch,
+/// browser-render acknowledgement and decision consumption are distinct so an
+/// HTTP GET is never described as proof that a person inspected the pixels.
+model ReviewRenderGrant {
+  id                String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tokenHash         String               @unique
+  tenantId          String
+  tenant            Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  documentId        String
+  document          VerificationDocument @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  caseId            String               @db.Uuid
+  reviewCase        ReviewCase           @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  reviewerId        String
+  reviewer          User                 @relation("ReviewGrantReviewer", fields: [reviewerId], references: [id], onDelete: Restrict)
+  sessionId         String
+  session           Session              @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  assignmentAt      DateTime
+  assignmentEpoch   String               @db.Uuid
+  storageLocationId String
+  objectKeyHash     String
+  objectVersion     String
+  objectEncrypted   Boolean
+  objectSha256      String
+  expiresAt         DateTime
+  reservedAt        DateTime?
+  fetchedAt         DateTime?
+  acknowledgedAt    DateTime?
+  consumedAt        DateTime?
+  revokedAt         DateTime?
+  createdAt         DateTime             @default(now())
+
+  @@index([tenantId, reviewerId, expiresAt])
+  @@index([documentId, caseId])
+  @@index([caseId, assignmentEpoch])
+  @@index([sessionId])
+  @@map("review_render_grants")
 }
 
 model ReviewDecision {
@@ -6576,12 +6756,12 @@ enum GateEnforcement {
 /// the order at checkout. Registry data, country-keyed, like doc_type. enforcedFrom NULL
 /// = enforced now; a future date announces before it bites.
 model CategoryDocumentGate {
-  code                String                  @id
-  countryCode         String                  @db.Char(2)
+  code                String                 @id
+  countryCode         String                 @db.Char(2)
   categorySlug        String?
   categoryKind        DiscoveryCategoryKind?
   requiredDocTypeCode String
-  requiredDocType     DocType                 @relation(fields: [requiredDocTypeCode], references: [code])
+  requiredDocType     DocType                @relation(fields: [requiredDocTypeCode], references: [code])
   requiredField       String?
   requiredValues      String[]
   enforcement         GateEnforcement
@@ -6645,18 +6825,18 @@ enum SubjectRelation {
 }
 
 model Subject {
-  id           String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId     String         @default("swift-default")
-  tenant       Tenant         @relation(fields: [tenantId], references: [id])
+  id           String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String                 @default("swift-default")
+  tenant       Tenant                 @relation(fields: [tenantId], references: [id])
   kind         DocSubjectKind
   countryCode  String
   /// The account that first registered the subject — the tenant-lineage parent (STA-1 §4).
   createdById  String
-  createdBy    User           @relation("SubjectCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
-  mergedIntoId String?        @db.Uuid
-  mergedInto   Subject?       @relation("SubjectMerge", fields: [mergedIntoId], references: [id])
-  mergedFrom   Subject[]      @relation("SubjectMerge")
-  createdAt    DateTime       @default(now())
+  createdBy    User                   @relation("SubjectCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  mergedIntoId String?                @db.Uuid
+  mergedInto   Subject?               @relation("SubjectMerge", fields: [mergedIntoId], references: [id])
+  mergedFrom   Subject[]              @relation("SubjectMerge")
+  createdAt    DateTime               @default(now())
   links        SubjectLink[]
   documents    VerificationDocument[]
   records      DocumentRecord[]
@@ -6691,13 +6871,13 @@ model SubjectLink {
 /// One PERSON subject per account today (the account IS the person until the identity
 /// graph merges two). Name / date-of-birth facts live in the extraction ledger, not here.
 model PersonProfile {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId          String   @default("swift-default")
-  tenant            Tenant   @relation(fields: [tenantId], references: [id])
-  subjectId         String   @unique @db.Uuid
-  subject           Subject  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
-  accountId         String   @unique
-  verificationLevel String   @default("NONE")
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String    @default("swift-default")
+  tenant            Tenant    @relation(fields: [tenantId], references: [id])
+  subjectId         String    @unique @db.Uuid
+  subject           Subject   @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  accountId         String    @unique
+  verificationLevel String    @default("NONE")
   verifiedAt        DateTime?
 
   @@map("person_profile")

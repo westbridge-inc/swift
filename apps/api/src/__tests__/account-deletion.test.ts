@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { getStorageProvider } from '../providers/storage/storage-provider';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — self-serve DPA rights: export (access + portability) and
@@ -102,7 +103,7 @@ describe('D9-05 — account deletion (erasure)', () => {
     const u = await makeUser(['CUSTOMER']);
     await app.prisma.address.create({ data: { userId: u.userId, label: 'Home', addressLine1: '1 Main St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.1 } });
 
-    const fileKey = `verif/${nanoid(12)}.jpg`;
+    const fileKey = `/uploads/verification/${u.userId}/${nanoid(12)}.jpg`;
     await app.prisma.encryptedObject.create({
       data: { fileKey, iv: Buffer.from('iv'), authTag: Buffer.from('tag'), wrappedDek: Buffer.from('dek'), mimeType: 'image/jpeg', sizeBytes: 10, sha256: 'abc', createdBy: u.userId },
     });
@@ -126,6 +127,33 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(enc?.shreddedAt).not.toBeNull();
     const purged = await app.prisma.verificationDocument.findUnique({ where: { id: doc.id } });
     expect(purged?.purgedAt).not.toBeNull();
+  });
+
+  it('does not delete another account’s avatar when a legacy pointer is poisoned', async () => {
+    const victim = await makeUser(['CUSTOMER']);
+    const attacker = await makeUser(['CUSTOMER']);
+    const victimBytes = Buffer.from(`victim-avatar-${nanoid(12)}`);
+    const storage = getStorageProvider();
+    const { url: victimKey } = await storage.upload({
+      buffer: victimBytes,
+      filename: 'avatar.bin',
+      mimeType: 'application/octet-stream',
+      folder: `avatars/${victim.userId}`,
+    });
+
+    try {
+      await app.prisma.user.update({ where: { id: victim.userId }, data: { avatar: victimKey } });
+      // Simulate a legacy or compromised database pointer. Destructive sinks
+      // must independently prove ownership even when intake was bypassed.
+      await app.prisma.user.update({ where: { id: attacker.userId }, data: { avatar: victimKey } });
+
+      const res = await inject('DELETE', '/api/v1/customer/account', attacker.token);
+      expect(res.statusCode, res.body).toBe(200);
+      await expect(storage.getObject(victimKey)).resolves.toEqual(victimBytes);
+      expect((await app.prisma.user.findUniqueOrThrow({ where: { id: victim.userId } })).avatar).toBe(victimKey);
+    } finally {
+      await storage.delete(victimKey);
+    }
   });
 
   it('[NR-3 gap 6] ephemeral high-risk rows go with the account', async () => {

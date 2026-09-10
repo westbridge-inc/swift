@@ -35,7 +35,7 @@ class ApprovingKyc implements KycProvider {
   async getStatus(): Promise<'approved'> { return 'approved'; }
 }
 
-const fileKeyFor = (who: string) => `/uploads/verification/${who}-${RUN}/id.jpg.enc`;
+const fileKeyFor = (who: 'A' | 'B' | 'C') => `/uploads/verification/${ids[who]}/${RUN}-id.jpg.enc`;
 async function envelope(who: 'A' | 'B' | 'C', sha256: string) {
   await app.prisma.encryptedObject.create({ data: { fileKey: fileKeyFor(who), iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(40, 3), mimeType: 'image/jpeg', sizeBytes: 1000, sha256, createdBy: ids[who] } });
 }

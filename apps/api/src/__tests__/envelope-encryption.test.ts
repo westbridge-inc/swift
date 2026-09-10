@@ -13,6 +13,8 @@ import {
   mintRenderPath, resetKeyProviderForTests, signRenderToken, verifyRenderToken,
 } from '../providers/storage/envelope';
 import { getStorageProvider } from '../providers/storage/storage-provider';
+import { canonicalVerificationObjectKey, verificationObjectKeyIsNamespacedTo } from '../modules/verification/storage-ownership';
+import { submitDocumentWithUpload } from './helpers/verification-upload';
 import crypto from 'node:crypto';
 
 // ---------------------------------------------------------------------------
@@ -30,11 +32,13 @@ const PLAINTEXT = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
   Buffer.from(`swift-envelope-test-${marker}`),
 ]);
+const ORIGINAL_BIOMETRIC_FLAG = process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
+  process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '0';
   process.env['MASTER_KEK'] = crypto.randomBytes(32).toString('base64');
   resetKeyProviderForTests();
 
@@ -72,20 +76,34 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (ORIGINAL_BIOMETRIC_FLAG === undefined) delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
+  else process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = ORIGINAL_BIOMETRIC_FLAG;
   delete process.env['MASTER_KEK'];
   resetKeyProviderForTests();
   if (userId) {
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: userId } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId } });
+    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: userId } }).catch(() => {});
     await app.prisma.session.deleteMany({ where: { userId } });
     await app.prisma.customer.deleteMany({ where: { userId } });
-    await app.prisma.user.deleteMany({ where: { id: userId } });
+    // The immutable upload ledger intentionally retains its synthetic owner and
+    // consumed document in this isolated test database.
   }
   await app.close();
 });
 
-function uploadAs(bearer: string, bytes: Buffer) {
+type UploadIntent = {
+  purpose: 'CHECKLIST_DOCUMENT' | 'IDENTITY_DOCUMENT' | 'IDENTITY_SELFIE';
+  role: 'MOVER' | 'CUSTOMER';
+  docType?: string;
+};
+
+function uploadAs(
+  bearer: string,
+  bytes: Buffer,
+  intent: UploadIntent = { purpose: 'CHECKLIST_DOCUMENT', role: 'MOVER', docType: 'police_clearance' },
+) {
   const boundary = `----swift${marker}`;
+  const query = new URLSearchParams({ purpose: intent.purpose, role: intent.role });
+  if (intent.docType) query.set('docType', intent.docType);
   const body = Buffer.concat([
     Buffer.from(
       `--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="doc.png"\r\ncontent-type: image/png\r\n\r\n`,
@@ -95,13 +113,23 @@ function uploadAs(bearer: string, bytes: Buffer) {
   ]);
   return app.inject({
     method: 'POST',
-    url: '/api/v1/verification/upload',
+    url: `/api/v1/verification/upload?${query.toString()}`,
     headers: { authorization: `Bearer ${bearer}`, 'content-type': `multipart/form-data; boundary=${boundary}` },
     payload: body,
   });
 }
 function uploadMultipart() {
   return uploadAs(token, PLAINTEXT);
+}
+
+async function uploadClaim(response: Awaited<ReturnType<typeof uploadMultipart>>) {
+  const uploadId = response.json().data.uploadId as string;
+  const claim = await app.prisma.verificationUpload.findUniqueOrThrow({
+    where: { id: uploadId },
+    select: { providerKey: true, objectVersion: true, purpose: true, roleKey: true, docType: true },
+  });
+  if (!claim.objectVersion) throw new Error('verification fixture did not seal an object generation');
+  return { uploadId, ...claim, objectVersion: claim.objectVersion };
 }
 
 describe('crypto primitives', () => {
@@ -141,14 +169,94 @@ describe('crypto primitives', () => {
   });
 });
 
+describe('verification object ownership', () => {
+  it('canonicalizes provider spellings and rejects URLs, traversal and another account namespace', () => {
+    expect(canonicalVerificationObjectKey(`/uploads/verification/${userId}/a.enc`)).toBe(`verification/${userId}/a.enc`);
+    expect(canonicalVerificationObjectKey(`verification/${userId}/a.enc`)).toBe(`verification/${userId}/a.enc`);
+    expect(canonicalVerificationObjectKey('https://objects.example/victim.enc')).toBeNull();
+    expect(canonicalVerificationObjectKey(`/uploads/verification/${userId}/../victim.enc`)).toBeNull();
+    expect(verificationObjectKeyIsNamespacedTo(`/uploads/verification/other/a.enc`, userId)).toBe(false);
+  });
+
+  it('refuses a foreign upload at intake, render and DSAR erasure without touching its bytes or key', async () => {
+    const victimUpload = await uploadMultipart();
+    expect(victimUpload.statusCode).toBe(200);
+    const victimClaim = await uploadClaim(victimUpload);
+    const victimKey = victimClaim.providerKey;
+    const attacker = await app.prisma.user.create({
+      data: {
+        phone: `+59266${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        firstName: 'Object', lastName: 'Boundary', roles: ['MOVER'] as never[], activeRole: 'MOVER' as never,
+        isPhoneVerified: true,
+      },
+    });
+    const attackerToken = app.jwt.sign({ userId: attacker.id, role: 'MOVER', jti: nanoid(8) });
+    await app.prisma.session.create({
+      data: { userId: attacker.id, token: attackerToken, refreshToken: nanoid(48), deviceId: 'ownership-test', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) },
+    });
+    let poisonedDocId = '';
+    try {
+      const submit = await app.inject({
+        method: 'POST',
+        url: '/api/v1/verification/documents',
+        headers: { authorization: `Bearer ${attackerToken}`, 'content-type': 'application/json' },
+        payload: {
+          role: 'MOVER',
+          docType: 'police_clearance',
+          uploadId: victimClaim.uploadId,
+          consent: true,
+          privacyNoticeVersion: 'test-v1',
+        },
+      });
+      expect(submit.statusCode, submit.body).toBe(409);
+      expect(submit.json().error.code).toBe('UPLOAD_CLAIM_INVALID');
+
+      // Simulate a legacy/poisoned row to prove every read/destructive sink is
+      // independently fail-closed even if intake was bypassed in the past.
+      const poisoned = await app.prisma.verificationDocument.create({
+        data: { userId: attacker.id, role: 'MOVER', docType: 'police_clearance', fileUrl: victimKey, status: 'PENDING' },
+      });
+      poisonedDocId = poisoned.id;
+      const rendered = await app.inject({ method: 'GET', url: mintRenderPath(poisoned.id, 60).path });
+      expect(rendered.statusCode, rendered.body).toBe(410);
+      expect(rendered.json().error.code).toBe('DOCUMENT_OWNERSHIP_INVALID');
+
+      const erased = await app.inject({
+        method: 'POST',
+        url: '/api/v1/verification/dsar/documents/erase',
+        headers: { authorization: `Bearer ${attackerToken}`, 'content-type': 'application/json' },
+        payload: { documentIds: [poisoned.id] },
+      });
+      expect(erased.statusCode, erased.body).toBe(409);
+      expect(erased.json().error.code).toBe('DOCUMENT_OBJECT_NOT_OWNED');
+
+      expect((await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: victimKey } })).wrappedDek).toBeTruthy();
+      await expect(getStorageProvider().getObject(victimKey, victimClaim.objectVersion)).resolves.toBeInstanceOf(Buffer);
+    } finally {
+      if (poisonedDocId) await app.prisma.verificationDocument.deleteMany({ where: { id: poisonedDocId } });
+      await app.prisma.session.deleteMany({ where: { userId: attacker.id } });
+      await app.prisma.customer.deleteMany({ where: { userId: attacker.id } });
+      await app.prisma.user.deleteMany({ where: { id: attacker.id } }).catch(() => {});
+      await app.prisma.encryptedObject.deleteMany({ where: { fileKey: victimKey } });
+      await getStorageProvider().deleteExact(victimKey, victimClaim.objectVersion);
+    }
+  });
+});
+
 describe('encrypted upload → render → shred', () => {
   let fileKey: string;
+  let uploadId: string;
+  let objectVersion: string;
   let docId: string;
 
   it('stores ONLY ciphertext and records the envelope metadata', async () => {
     const res = await uploadMultipart();
     expect(res.statusCode).toBe(200);
-    fileKey = res.json().data.url;
+    const claim = await uploadClaim(res);
+    fileKey = claim.providerKey;
+    uploadId = claim.uploadId;
+    objectVersion = claim.objectVersion;
+    expect(claim).toMatchObject({ purpose: 'CHECKLIST_DOCUMENT', roleKey: 'MOVER', docType: 'police_clearance' });
 
     const meta = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey } });
     expect(meta.wrappedDek).toBeTruthy();
@@ -156,15 +264,26 @@ describe('encrypted upload → render → shred', () => {
     expect(meta.sizeBytes).toBe(PLAINTEXT.length);
 
     // The object in storage must NOT be the plaintext.
-    const stored = await getStorageProvider().getObject(fileKey);
+    const stored = await getStorageProvider().getObject(fileKey, objectVersion);
     expect(stored.equals(PLAINTEXT)).toBe(false);
     expect(stored.includes(marker)).toBe(false);
   });
 
   it('the minted render link decrypts back to the original bytes', async () => {
-    const doc = await app.prisma.verificationDocument.create({
-      data: { userId, role: 'MOVER', docType: 'national_id', fileUrl: fileKey, status: 'PENDING' },
+    const submitted = await app.inject({
+      method: 'POST',
+      url: '/api/v1/verification/documents',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      payload: {
+        role: 'MOVER',
+        docType: 'police_clearance',
+        uploadId,
+        consent: true,
+        privacyNoticeVersion: 'test-v1',
+      },
     });
+    expect(submitted.statusCode, submitted.body).toBe(201);
+    const doc = submitted.json().data;
     docId = doc.id;
 
     const minted = mintRenderPath(docId, 60);
@@ -199,25 +318,30 @@ describe('encrypted upload → render → shred', () => {
     const minted = mintRenderPath(docId, 60);
     const res = await app.inject({ method: 'GET', url: minted.path });
     expect(res.statusCode).toBe(410);
-    expect(res.json().error.code).toBe('DOCUMENT_SHREDDED');
+    // Ownership validation now proves the live envelope before the render path;
+    // a shredded envelope therefore fails closed at that earlier boundary.
+    expect(res.json().error.code).toBe('DOCUMENT_OWNERSHIP_INVALID');
   });
 });
 
 describe('retention purge shreds the envelope', () => {
   it('purgeExpiredDocuments nulls wrappedDek alongside the object delete', async () => {
-    const up = await uploadMultipart();
-    const key = up.json().data.url;
-    await app.prisma.verificationDocument.create({
-      data: {
-        userId, role: 'MOVER', docType: 'police_clearance', fileUrl: key, status: 'REJECTED',
-        retentionExpiresAt: new Date(Date.now() - 1000),
-      },
-    });
-
     const { VerificationService } = await import('../modules/verification/verification.service');
     const { NotificationService } = await import('../modules/notification/notification.service');
     const { getKycProvider } = await import('../providers/kyc/kyc-provider');
     const svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
+    const seeded = await submitDocumentWithUpload(app.prisma, svc, {
+      userId,
+      roleKey: 'MOVER',
+      docType: 'police_clearance',
+      marker: `auto-reject-retention-${marker}`,
+    });
+    expect(seeded.document.status).toBe('REJECTED');
+    const key = seeded.primary.providerKey;
+    await app.prisma.verificationDocument.update({
+      where: { id: seeded.document.id },
+      data: { retentionExpiresAt: new Date(Date.now() - 1000) },
+    });
     const purged = await svc.purgeExpiredDocuments();
     expect(purged).toBeGreaterThanOrEqual(1);
 
@@ -258,6 +382,7 @@ describe('duplicate-document detection [SWIFT-078]', () => {
     await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: [userB.id] } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: [admin.id, userB.id] } } });
     await app.prisma.session.deleteMany({ where: { userId: userB.id } });
-    await app.prisma.user.deleteMany({ where: { id: { in: [admin.id, userB.id] } } });
+    await app.prisma.user.deleteMany({ where: { id: admin.id } }).catch(() => {});
+    // userB remains as the owner of its append-only upload authority.
   });
 });

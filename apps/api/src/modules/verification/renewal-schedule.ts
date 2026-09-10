@@ -53,7 +53,7 @@ export interface DueNotice { scheduleId: string; documentId: string; subjectId: 
 /** The latest notice due per active schedule that has not been sent — one per document, never a burst. */
 export async function dueRenewalNotices(prisma: PrismaClient, now = new Date()): Promise<DueNotice[]> {
   const rows = await prisma.renewalSchedule.findMany({
-    where: { suspendedAt: null, expiresOn: { gt: now }, document: { status: 'APPROVED' } },
+    where: { suspendedAt: null, expiresOn: { gt: now }, document: { status: 'APPROVED', storageProvenance: 'VERIFIED' } },
     select: { id: true, documentId: true, subjectId: true, expiresOn: true, notifyAt: true, lastNotified: true },
   });
   const due: DueNotice[] = [];

@@ -7,7 +7,7 @@ import { color, space } from '@swift/ui';
 import { Card, PillButton, T } from '../../../kit';
 import { Badge } from '../../../kit/badge';
 import { PressableScale } from '../../../kit/pressable-scale';
-import { useUploadFile, useSubmitIdentity } from '../../../hooks/verification';
+import { useUploadFile, useSubmitIdentity, useVerificationCapabilities } from '../../../hooks/verification';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -43,8 +43,10 @@ function UploadRow({
 export function IdentityVerificationScreen({ navigation }: any) {
   const upload = useUploadFile();
   const submit = useSubmitIdentity();
-  const [idUrl, setIdUrl] = useState<string | undefined>(undefined);
-  const [selfieUrl, setSelfieUrl] = useState<string | undefined>(undefined);
+  const capabilities = useVerificationCapabilities();
+  const selfieRequired = capabilities.data?.identitySelfieRequired === true;
+  const [idUploadId, setIdUploadId] = useState<string | undefined>(undefined);
+  const [selfieUploadId, setSelfieUploadId] = useState<string | undefined>(undefined);
   const [picking, setPicking] = useState<'id' | 'selfie' | null>(null);
   const [submitted, setSubmitted] = useState(false);
   const [permErr, setPermErr] = useState<string | null>(null);
@@ -52,29 +54,46 @@ export function IdentityVerificationScreen({ navigation }: any) {
   const pick = async (kind: 'id' | 'selfie') => {
     try {
       const owner = requireAuthSessionSnapshot();
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      const liveCapture = kind === 'selfie';
+      const perm = liveCapture
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
       requireAuthSessionForPrincipal(owner);
       if (!perm.granted) {
         // [G9 · #917's law] A denied permission explains itself — this was
         // the LAST silent library denial in the app.
-        setPermErr('Photo access needed — allow it in Settings to upload your documents.');
+        setPermErr(liveCapture
+          ? 'Camera access is needed for secure live-selfie capture. Allow it in Settings and try again.'
+          : 'Photo access is needed to upload your ID. Allow it in Settings and try again.');
         return;
       }
       setPermErr(null);
-      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
+      const res = liveCapture
+        ? await ImagePicker.launchCameraAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            cameraType: ImagePicker.CameraType.front,
+            quality: 0.8,
+          })
+        : await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            quality: 0.8,
+          });
       requireAuthSessionForPrincipal(owner);
       if (res.canceled || !res.assets?.[0]) return;
       const a = res.assets[0];
       setPicking(kind);
-      const url = await upload.mutateAsync({
+      const uploadId = await upload.mutateAsync({
         uri: a.uri,
         name: a.fileName ?? `${kind}.jpg`,
         type: a.mimeType ?? 'image/jpeg',
+        purpose: kind === 'id' ? 'IDENTITY_DOCUMENT' : 'IDENTITY_SELFIE',
+        role: 'CUSTOMER',
+        ...(kind === 'id' ? { docType: 'identity_l2' } : {}),
         authSession: owner,
       });
       requireAuthSessionForPrincipal(owner);
-      if (kind === 'id') setIdUrl(url);
-      else setSelfieUrl(url);
+      if (kind === 'id') setIdUploadId(uploadId);
+      else setSelfieUploadId(uploadId);
     } catch (pickError) {
       if (pickError instanceof AuthSessionBoundaryError) return;
       // surfaced below
@@ -110,10 +129,14 @@ export function IdentityVerificationScreen({ navigation }: any) {
       </View>
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
-          A one-time check, required for larger cash orders and rides. Upload a government ID and a selfie — verify once and the limit is gone.
+          {selfieRequired
+            ? 'A one-time check, required for larger cash orders and rides. Upload a government ID and a fresh selfie.'
+            : 'A one-time document check, required for larger cash orders and rides. Upload a government ID to continue.'}
         </T>
-        <UploadRow title="Government ID" done={!!idUrl} busy={picking === 'id'} onPress={() => pick('id')} />
-        <UploadRow title="Selfie" done={!!selfieUrl} busy={picking === 'selfie'} onPress={() => pick('selfie')} />
+        <UploadRow title="Government ID" done={!!idUploadId} busy={picking === 'id'} onPress={() => pick('id')} />
+        {selfieRequired ? (
+          <UploadRow title="Selfie" done={!!selfieUploadId} busy={picking === 'selfie'} onPress={() => pick('selfie')} />
+        ) : null}
 
         {/* [WR-027] The catch above says "surfaced below" — this is that
             surface. Only the submit error rendered; a failed photo UPLOAD was
@@ -121,15 +144,25 @@ export function IdentityVerificationScreen({ navigation }: any) {
         {permErr ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>{permErr}</T> : null}
         {upload.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>That photo didn&apos;t upload — tap the card and try again.</T> : null}
         {submit.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>Couldn&apos;t submit. Please try again.</T> : null}
+        {capabilities.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>Couldn&apos;t load the verification privacy settings. Try again before uploading.</T> : null}
 
         {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
-          label={!idUrl ? 'Upload your ID first' : !selfieUrl ? 'Add your selfie' : 'Submit for verification'}
+          label={!capabilities.isSuccess
+            ? 'Loading verification settings…'
+            : !idUploadId
+              ? 'Upload your ID first'
+              : selfieRequired && !selfieUploadId
+                ? 'Add your selfie'
+                : 'Submit for verification'}
           loading={submit.isPending}
           style={{ marginTop: space.lg }}
-          disabled={!idUrl || !selfieUrl}
+          disabled={!capabilities.isSuccess || !idUploadId || (selfieRequired && !selfieUploadId)}
           onPress={() =>
-            submit.mutate({ idDocumentUrl: idUrl as string, selfieUrl: selfieUrl as string }, { onSuccess: () => setSubmitted(true) })
+            submit.mutate({
+              idUploadId: idUploadId as string,
+              ...(selfieRequired ? { selfieUploadId: selfieUploadId as string } : {}),
+            }, { onSuccess: () => setSubmitted(true) })
           }
         />
         <T variant="micro" tone="muted" center style={{ marginTop: space.md }}>

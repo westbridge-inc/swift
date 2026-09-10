@@ -42,28 +42,65 @@ let adminToken = '';
 const REASON = 'Document review, onboarding queue, ticket GY-8001';
 const PNG_1x1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 const TEST_KEK = Buffer.alloc(32, 7).toString('base64');
+const ORIGINAL_BIOMETRIC_FLAG = process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
 
-function uploadAs(bearer: string, bytes: Buffer, mime: string, filename = 'doc.png') {
+type UploadIntent = {
+  purpose: 'CHECKLIST_DOCUMENT' | 'IDENTITY_DOCUMENT' | 'IDENTITY_SELFIE';
+  role: 'MOVER' | 'CUSTOMER' | 'RESTAURANT';
+  docType?: string;
+};
+
+function uploadAs(
+  bearer: string,
+  bytes: Buffer,
+  mime: string,
+  filename = 'doc.png',
+  intent: UploadIntent = { purpose: 'CHECKLIST_DOCUMENT', role: 'MOVER', docType: 'police_clearance' },
+) {
   const boundary = `----swift${RUN}`;
+  const query = new URLSearchParams({ purpose: intent.purpose, role: intent.role });
+  if (intent.docType) query.set('docType', intent.docType);
   const body = Buffer.concat([
     Buffer.from(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="${filename}"\r\ncontent-type: ${mime}\r\n\r\n`),
     bytes,
     Buffer.from(`\r\n--${boundary}--\r\n`),
   ]);
-  return app.inject({ method: 'POST', url: '/api/v1/verification/upload',
+  return app.inject({ method: 'POST', url: `/api/v1/verification/upload?${query.toString()}`,
     headers: { authorization: `Bearer ${bearer}`, 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: body });
 }
 const approve = (docId: string, payload: Record<string, unknown> = {}) => adminApp.inject({
   method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, payload,
   headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': REASON } });
 async function pendingDoc(docType: string) {
-  const d = await app.prisma.verificationDocument.create({ data: {
-    userId: userIds[1]!, role: 'RIDER', docType, fileUrl: `verification/${userIds[1]}/${docType}-${RUN}`, status: 'PENDING',
-    consentAt: new Date(), privacyNoticeVersion: 'test-1' } });
+  const role = docType === 'business_registration' ? 'RESTAURANT' as const : 'MOVER' as const;
+  const uploaded = await uploadAs(
+    moverToken,
+    PNG_1x1,
+    'image/png',
+    `${docType}.png`,
+    { purpose: 'CHECKLIST_DOCUMENT', role, docType },
+  );
+  expect(uploaded.statusCode, uploaded.body).toBe(200);
+  const uploadId = uploaded.json().data.uploadId as string;
+  const claim = await app.prisma.verificationUpload.findUniqueOrThrow({
+    where: { id: uploadId },
+    select: { providerKey: true, objectVersion: true },
+  });
+  expect(claim.objectVersion).toBeTruthy();
+  uploadedKeys.push(claim.providerKey);
+  const submitted = await app.inject({
+    method: 'POST',
+    url: '/api/v1/verification/documents',
+    headers: { authorization: `Bearer ${moverToken}`, 'content-type': 'application/json' },
+    payload: { role, docType, uploadId, consent: true, privacyNoticeVersion: 'test-1' },
+  });
+  expect(submitted.statusCode, submitted.body).toBe(201);
+  const d = submitted.json().data;
   docIds.push(d.id); return d;
 }
 
 beforeAll(async () => {
+  process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '0';
   delete process.env['MASTER_KEK']; resetKeyProviderForTests();
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -93,18 +130,21 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (ORIGINAL_BIOMETRIC_FLAG === undefined) delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
+  else process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = ORIGINAL_BIOMETRIC_FLAG;
   delete process.env['MASTER_KEK']; resetKeyProviderForTests();
   for (const key of uploadedKeys) await getStorageProvider().delete(key).catch(() => {});
   await runWithoutTenant(async () => {
     await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: userIds } } }).catch(() => {});
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'doc1').catch(() => 0);
     await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'doc1').catch(() => 0);
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
-    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
+    // The mover's append-only upload authority retains both its document and
+    // owning User. Only the synthetic admin has no upload-ledger dependency.
+    await app.prisma.user.deleteMany({ where: { id: userIds[0] } }).catch(() => {});
   }, 'doc1');
   await adminApp.close();
   await app.close();
@@ -127,17 +167,37 @@ describe('test_characterization_legacy_upload_paths', () => {
       expect(res.statusCode).toBe(400);
       expect(res.json().error?.code ?? res.json().code).toBe('BAD_CONTENT');
     });
+    it('refuses disabled biometric selfie intake before reserving or storing bytes', async () => {
+      const beforeClaims = await app.prisma.verificationUpload.count({ where: { userId: userIds[1] } });
+      const beforeEnvelopes = await app.prisma.encryptedObject.count({ where: { createdBy: userIds[1] } });
+      const res = await uploadAs(
+        moverToken,
+        PNG_1x1,
+        'image/png',
+        'selfie.png',
+        { purpose: 'IDENTITY_SELFIE', role: 'MOVER' },
+      );
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error?.code ?? res.json().code).toBe('BIOMETRIC_DISABLED');
+      expect(await app.prisma.verificationUpload.count({ where: { userId: userIds[1] } })).toBe(beforeClaims);
+      expect(await app.prisma.encryptedObject.count({ where: { createdBy: userIds[1] } })).toBe(beforeEnvelopes);
+    });
   });
 
   describe('2. without MASTER_KEK the object is stored as-is and no envelope row is written', () => {
     it('plaintext fallback', async () => {
       const res = await uploadAs(moverToken, PNG_1x1, 'image/png');
       expect(res.statusCode, res.body).toBe(200);
-      const { url } = res.json().data as { url: string };
-      uploadedKeys.push(url);
-      expect(url).toContain(`verification/${userIds[1]}`);
-      expect(url.endsWith('.enc')).toBe(false);
-      expect(await app.prisma.encryptedObject.findUnique({ where: { fileKey: url } })).toBeNull();
+      const uploadId = res.json().data.uploadId as string;
+      const claim = await app.prisma.verificationUpload.findUniqueOrThrow({
+        where: { id: uploadId },
+        select: { providerKey: true, objectVersion: true },
+      });
+      uploadedKeys.push(claim.providerKey);
+      expect(claim.providerKey).toContain(`verification/${userIds[1]}`);
+      expect(claim.providerKey.endsWith('.enc')).toBe(false);
+      expect(claim.objectVersion).toBeTruthy();
+      expect(await app.prisma.encryptedObject.findUnique({ where: { fileKey: claim.providerKey } })).toBeNull();
     });
   });
 
@@ -147,11 +207,28 @@ describe('test_characterization_legacy_upload_paths', () => {
       try {
         const up = await uploadAs(moverToken, PNG_1x1, 'image/png');
         expect(up.statusCode, up.body).toBe(200);
-        const { url } = up.json().data as { url: string };
-        uploadedKeys.push(url);
-        expect(url.endsWith('.enc')).toBe(true);
-        const doc = await app.prisma.verificationDocument.create({ data: {
-          userId: userIds[1]!, role: 'RIDER', docType: 'national_id', fileUrl: url, status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'test-1' } });
+        const uploadId = up.json().data.uploadId as string;
+        const claim = await app.prisma.verificationUpload.findUniqueOrThrow({
+          where: { id: uploadId },
+          select: { providerKey: true, objectVersion: true },
+        });
+        uploadedKeys.push(claim.providerKey);
+        expect(claim.providerKey.endsWith('.enc')).toBe(true);
+        expect(claim.objectVersion).toBeTruthy();
+        const submitted = await app.inject({
+          method: 'POST',
+          url: '/api/v1/verification/documents',
+          headers: { authorization: `Bearer ${moverToken}`, 'content-type': 'application/json' },
+          payload: {
+            role: 'MOVER',
+            docType: 'police_clearance',
+            uploadId,
+            consent: true,
+            privacyNoticeVersion: 'test-1',
+          },
+        });
+        expect(submitted.statusCode, submitted.body).toBe(201);
+        const doc = submitted.json().data;
         docIds.push(doc.id);
         const { path } = mintRenderPath(doc.id, 60);
         const res = await app.inject({ method: 'GET', url: path });

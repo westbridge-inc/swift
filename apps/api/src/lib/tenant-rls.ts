@@ -112,6 +112,8 @@ export const TENANT_TABLES = [
   'settlement_batches',
   // [M-20] A settlement file as one staged, validated import.
   'settlement_imports', 'slug_redirects', 'storage_orphans', 'supply_watches',
+  // Verification evidence and its server-issued, purpose-bound object authority.
+  'verification_documents', 'verification_uploads',
   'tenant_billing_currency',
   // [M-08] The prepaid top-up as one persisted command.
   'topup_commands', 'trial_grants', 'trip_share_tokens',
@@ -216,6 +218,8 @@ export interface TenantLineageRule {
   watch?: readonly string[];
 }
 export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
+  { table: 'verification_documents', trigger: 'verification_documents_tenant_matches_user', parent: 'users', fk: 'userId' },
+  { table: 'verification_uploads', trigger: 'verification_uploads_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'items', trigger: 'items_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'categories', trigger: 'categories_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   // [money] one hop through the owner

@@ -36,6 +36,17 @@ export function useVerificationStatus<T = any>(role: string, vehicleType?: strin
   return previewMover ? previewQuery(PREVIEW_VERIFICATION) : q;
 }
 
+export function useVerificationCapabilities() {
+  return useQuery({
+    queryKey: ['verification', 'capabilities'],
+    queryFn: () => unwrap<{
+      identitySelfieRequired: boolean;
+      selfieRequiredDocTypes: string[];
+    }>(verificationApi.capabilities()),
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
 /** Public weekly price list for the partner pitch ("N days free, then X/week"). */
 export function usePartnerPricing(countryCode?: string) {
   return useQuery({
@@ -109,32 +120,39 @@ export function useBecomePartner() {
   });
 }
 
-/** Upload a single picked file to storage; resolves to its fileUrl. */
+/** Upload a single picked file under one explicit, one-use purpose. */
 export function useUploadFile() {
   return useMutation({
     mutationFn: async (input: {
       uri: string;
       name: string;
       type: string;
+      purpose: 'IDENTITY_DOCUMENT' | 'IDENTITY_SELFIE';
+      role: 'CUSTOMER';
+      docType?: string;
       authSession?: AuthSessionSnapshot;
     }) => {
-      const { authSession, ...file } = input;
+      const { authSession, purpose, role, docType, ...file } = input;
       const owner = authSession ?? requireAuthSessionSnapshot();
       const current = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
       form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
-      const up = await unwrap<{ url: string }>(verificationApi.upload(form, current));
+      const up = await unwrap<{ uploadId: string }>(verificationApi.upload(
+        form,
+        { purpose, role, ...(docType ? { docType } : {}) },
+        current,
+      ));
       requireAuthSessionForPrincipal(owner);
-      return up.url;
+      return up.uploadId;
     },
   });
 }
 
-/** Consumer L2: submit a government ID + selfie (manual KYC review). */
+/** Consumer L2: submit a government ID and, only when enabled, a fresh selfie. */
 export function useSubmitIdentity() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (data: { idDocumentUrl: string; selfieUrl: string }) => {
+    mutationFn: async (data: { idUploadId: string; selfieUploadId?: string }) => {
       const owner = requireAuthSessionSnapshot();
       const result = await unwrap(verificationApi.submitIdentity(
         { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION },
@@ -151,22 +169,42 @@ export function useSubmitIdentity() {
 export function useUploadDocument(role: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ docType, file, authSession }: {
+    mutationFn: async ({ docType, file, selfieFile, authSession }: {
       docType: string;
       file: { uri: string; name: string; type: string };
+      selfieFile?: { uri: string; name: string; type: string };
       authSession?: AuthSessionSnapshot;
     }) => {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const initial = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
       form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
-      const uploaded = await unwrap<{ url: string }>(verificationApi.upload(form, initial));
+      const uploaded = await unwrap<{ uploadId: string }>(verificationApi.upload(
+        form,
+        { purpose: 'CHECKLIST_DOCUMENT', role, docType },
+        initial,
+      ));
+      let selfieUploadId: string | undefined;
+      if (selfieFile) {
+        const selfieForm = new FormData();
+        selfieForm.append('file', {
+          uri: selfieFile.uri,
+          name: selfieFile.name,
+          type: selfieFile.type,
+        } as any);
+        selfieUploadId = (await unwrap<{ uploadId: string }>(verificationApi.upload(
+          selfieForm,
+          { purpose: 'IDENTITY_SELFIE', role },
+          requireAuthSessionForPrincipal(owner),
+        ))).uploadId;
+      }
       const current = requireAuthSessionForPrincipal(owner);
       const result = await unwrap(
         verificationApi.submitDocument({
           role,
           docType,
-          fileUrl: uploaded.url,
+          uploadId: uploaded.uploadId,
+          ...(selfieUploadId ? { selfieUploadId } : {}),
           consent: true,
           privacyNoticeVersion: PRIVACY_NOTICE_VERSION,
         }, current),

@@ -52,7 +52,6 @@ type DocStatus = 'APPROVED' | 'PENDING' | 'REJECTED' | 'EXPIRED' | undefined;
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Mirrors the API's renewal window: re-submission opens 30 days before expiry.
 const RENEWAL_WINDOW_DAYS = 30;
-
 export function DocumentUploadCard({
   role,
   docType,
@@ -61,6 +60,7 @@ export function DocumentUploadCard({
   submittedAt,
   reviewNote,
   isNext,
+  freshSelfieRequired = false,
 }: {
   role: string;
   docType: string;
@@ -69,6 +69,7 @@ export function DocumentUploadCard({
   submittedAt?: string | null;
   reviewNote?: string | null;
   isNext?: boolean;
+  freshSelfieRequired?: boolean;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -79,14 +80,6 @@ export function DocumentUploadCard({
   const expiringSoon = status === 'APPROVED' && daysLeft != null && daysLeft <= RENEWAL_WINDOW_DAYS;
   // An approved doc inside its renewal window re-opens for upload.
   const approved = status === 'APPROVED' && !expiringSoon;
-
-  const send = (a: ImagePicker.ImagePickerAsset, authSession: AuthSessionSnapshot) =>
-    upload.mutate({
-      docType,
-      file: { uri: a.uri, name: a.fileName ?? `${docType}.jpg`, type: a.mimeType ?? 'image/jpeg' },
-      authSession,
-    });
-
 
 /** G9: a denied permission must never be a silent dead end. On iOS the OS
  *  prompt appears ONCE — after that every tap returns instantly denied, the
@@ -115,6 +108,65 @@ function explainPermissionDenied(
     ],
   );
 }
+
+  const submitAssets = (
+    document: ImagePicker.ImagePickerAsset,
+    authSession: AuthSessionSnapshot,
+    selfie?: ImagePicker.ImagePickerAsset,
+  ) => upload.mutate({
+    docType,
+    file: {
+      uri: document.uri,
+      name: document.fileName ?? `${docType}.jpg`,
+      type: document.mimeType ?? 'image/jpeg',
+    },
+    ...(selfie ? {
+      selfieFile: {
+        uri: selfie.uri,
+        name: selfie.fileName ?? `${docType}-selfie.jpg`,
+        type: selfie.mimeType ?? 'image/jpeg',
+      },
+    } : {}),
+    authSession,
+  });
+
+  const send = (document: ImagePicker.ImagePickerAsset, authSession: AuthSessionSnapshot) => {
+    if (!freshSelfieRequired) {
+      submitAssets(document, authSession);
+      return;
+    }
+    Alert.alert(
+      'Fresh selfie needed',
+      'For this identity document, take a live selfie now. It is bound to this submission and cannot be reused.',
+      [
+        {
+          text: 'Take selfie',
+          onPress: () => {
+            void (async () => {
+              const permission = await ImagePicker.requestCameraPermissionsAsync();
+              requireAuthSessionForPrincipal(authSession);
+              if (!permission.granted) {
+                explainPermissionDenied('camera', permission.canAskAgain, () => undefined);
+                return;
+              }
+              const result = await ImagePicker.launchCameraAsync({
+                mediaTypes: ImagePicker.MediaTypeOptions.Images,
+                cameraType: ImagePicker.CameraType.front,
+                quality: 0.8,
+              });
+              requireAuthSessionForPrincipal(authSession);
+              if (!result.canceled && result.assets?.[0]) {
+                submitAssets(document, authSession, result.assets[0]);
+              }
+            })().catch((error: unknown) => {
+              if (!(error instanceof AuthSessionBoundaryError)) throw error;
+            });
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+    );
+  };
 
   const fromCamera = async () => {
     try {
@@ -215,9 +267,9 @@ function explainPermissionDenied(
             {caption}
           </T>
           <T variant="body" weight="semibold">{label(docType)}</T>
-          {docType === 'national_id' || docType === 'owner_national_id' ? (
+          {freshSelfieRequired ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
-              Face-matched against your profile selfie
+              A camera selfie is checked against the portrait on this document
             </T>
           ) : null}
         </View>

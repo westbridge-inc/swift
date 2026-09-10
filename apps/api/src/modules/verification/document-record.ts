@@ -21,7 +21,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
   v_tenant TEXT;
 BEGIN
-  IF NEW.state = 'COMMITTED' THEN
+  IF NEW.state = 'COMMITTED' AND NEW."storageProvenance" = 'VERIFIED' THEN
     SELECT "tenantId" INTO v_tenant FROM users WHERE id = NEW."userId";
     INSERT INTO document_record (id, "tenantId", "accountId", "subjectId", "docType", "submissionId", status, "expiresOn", "approvedBy", "approvedAt", "createdAt", "updatedAt")
     VALUES (gen_random_uuid(), COALESCE(v_tenant, 'swift-default'), NEW."userId", NEW."subjectId", NEW."docType", NEW.id, 'VALID',
@@ -33,6 +33,9 @@ BEGIN
     UPDATE verification_documents SET state = 'SUPERSEDED'
       WHERE "userId" = NEW."userId" AND "docType" = NEW."docType" AND id <> NEW.id
         AND "subjectId" IS NOT DISTINCT FROM NEW."subjectId" AND state = 'COMMITTED';
+  ELSIF NEW."storageProvenance" <> 'VERIFIED' THEN
+    UPDATE document_record SET status = 'REVOKED', "updatedAt" = now()
+      WHERE "submissionId" = NEW.id AND status <> 'REVOKED';
   ELSIF NEW.state IN ('EXPIRED', 'REVOKED', 'SUPERSEDED') THEN
     UPDATE document_record SET status = NEW.state::text::"DocumentRecordStatus", "updatedAt" = now()
       WHERE "submissionId" = NEW.id AND status <> NEW.state::text::"DocumentRecordStatus";
@@ -42,7 +45,7 @@ END
 $$;`,
     `DROP TRIGGER IF EXISTS ${DOCUMENT_RECORD_TRIGGER} ON verification_documents;`,
     `CREATE TRIGGER ${DOCUMENT_RECORD_TRIGGER}
-AFTER INSERT OR UPDATE OF state, status, "purgedAt", "expiresAt", "subjectId" ON verification_documents
+AFTER INSERT OR UPDATE OF state, status, "purgedAt", "expiresAt", "subjectId", "storageProvenance" ON verification_documents
 FOR EACH ROW EXECUTE FUNCTION verification_documents_keep_record();`,
   ];
 }
@@ -54,4 +57,5 @@ SELECT gen_random_uuid(), u."tenantId", d."userId", d."subjectId", d."docType", 
        d."expiresAt", now() + interval '90 days', COALESCE(d."reviewedBy", 'system'), COALESCE(d."reviewedAt", d."updatedAt"), now(), now()
 FROM verification_documents d JOIN users u ON u.id = d."userId"
 WHERE d.state IN ('COMMITTED', 'EXPIRED', 'REVOKED', 'SUPERSEDED')
+  AND d."storageProvenance" = 'VERIFIED'
 ON CONFLICT ("submissionId") DO NOTHING;`;

@@ -115,7 +115,8 @@ afterAll(async () => {
     await app.prisma.encryptedObject.deleteMany({ where: { createdBy: userId } });
     await app.prisma.session.deleteMany({ where: { userId } });
     await app.prisma.customer.deleteMany({ where: { userId } });
-    await app.prisma.user.deleteMany({ where: { id: userId } });
+    // Verification-upload authority is append-only and retains its owning User,
+    // so the isolated test database intentionally keeps this synthetic identity.
   }
   if (vendorId) {
     await app.prisma.item.deleteMany({ where: { vendorId } });
@@ -138,7 +139,7 @@ function uploadBytes(bytes: Buffer, mime: string) {
   ]);
   return app.inject({
     method: 'POST',
-    url: '/api/v1/verification/upload',
+    url: '/api/v1/verification/upload?purpose=CHECKLIST_DOCUMENT&role=MOVER&docType=police_clearance',
     headers: { authorization: `Bearer ${token}`, 'content-type': `multipart/form-data; boundary=${boundary}` },
     payload: body,
   });
@@ -161,7 +162,18 @@ describe('upload magic-byte sniffing (spec §6)', () => {
   it('accepts a real PDF', async () => {
     const res = await uploadBytes(Buffer.from('%PDF-1.4\n%test document bytes'), 'application/pdf');
     expect(res.statusCode).toBe(200);
-    expect(res.json().data.url).toBeTruthy();
+    const uploadId = res.json().data.uploadId as string;
+    expect(uploadId).toBeTruthy();
+    const claim = await app.prisma.verificationUpload.findUniqueOrThrow({
+      where: { id: uploadId },
+      select: { purpose: true, roleKey: true, docType: true, objectVersion: true },
+    });
+    expect(claim).toMatchObject({
+      purpose: 'CHECKLIST_DOCUMENT',
+      roleKey: 'MOVER',
+      docType: 'police_clearance',
+    });
+    expect(claim.objectVersion).toBeTruthy();
   });
 });
 

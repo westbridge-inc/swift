@@ -39,6 +39,9 @@ interface FaceMatchResponse {
 
 export class DiditKycProvider implements KycProvider {
   readonly engine: KycEngine = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' };
+  // Standalone face-match accepts caller-supplied files; it is not hosted
+  // liveness and therefore cannot turn on fresh-selfie collection.
+  readonly biometricCaptureAssurance = 'USER_SUPPLIED_FILE' as const;
 
   private readonly apiKey: string;
   private readonly baseUrl: string;

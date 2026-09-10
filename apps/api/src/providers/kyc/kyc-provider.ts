@@ -3,6 +3,11 @@ import { nanoid } from 'nanoid';
 import { IdAnalyzerKycProvider } from './id-analyzer-provider';
 import { DiditKycProvider } from './didit-provider';
 import { isProduction } from '../../utils/runtime-mode';
+import {
+  biometricFaceMatchEnabled,
+  verificationBiometricFaceMatchEnabled,
+  type BiometricCaptureAssurance,
+} from '../../lib/biometric-guard';
 
 // ---------------------------------------------------------------------------
 // KycProvider — hard rule 4: every external service sits behind a swappable
@@ -40,6 +45,8 @@ export interface KycEngine {
 }
 
 export interface KycProvider {
+  /** How this adapter proves the submitted face was captured live. */
+  readonly biometricCaptureAssurance?: BiometricCaptureAssurance;
   /** Absent = an adapter that never described itself; the ledger records it as an external unknown. */
   readonly engine?: KycEngine;
   /** L2 identity check: government ID + selfie. */
@@ -58,6 +65,7 @@ export interface KycProvider {
  */
 export class SandboxKycProvider implements KycProvider {
   readonly engine: KycEngine = { name: 'sandbox', version: '1', external: false };
+  readonly biometricCaptureAssurance = 'TEST_SIMULATED' as const;
 
   private decide(url: string): KycVerificationResult {
     // Deterministic extraction marker so integrity tests can inject document
@@ -96,6 +104,7 @@ export class SandboxKycProvider implements KycProvider {
  */
 export class ManualReviewKycProvider implements KycProvider {
   readonly engine: KycEngine = { name: 'manual-review', version: '1', external: false };
+  readonly biometricCaptureAssurance = 'NONE' as const;
   async verifyIdentity(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `manual_${randomUUID()}` }; }
   async verifyDocument(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `manual_${randomUUID()}` }; }
   async getStatus(): Promise<KycStatus> { return 'pending_manual'; }
@@ -107,16 +116,28 @@ export function getKycProvider(): KycProvider {
   if (isProduction() && provider === 'sandbox') {
     throw new Error('KYC_PROVIDER=sandbox is forbidden in production');
   }
+  let selected: KycProvider;
   switch (provider) {
     case 'sandbox':
-      return new SandboxKycProvider();
+      selected = new SandboxKycProvider();
+      break;
     case 'manual':
-      return new ManualReviewKycProvider();
+      selected = new ManualReviewKycProvider();
+      break;
     case 'idanalyzer':
-      return new IdAnalyzerKycProvider();
+      selected = new IdAnalyzerKycProvider();
+      break;
     case 'didit':
-      return new DiditKycProvider();
+      selected = new DiditKycProvider();
+      break;
     default:
       throw new Error(`Unknown KYC_PROVIDER: ${provider}`);
   }
+  const assurance = selected.biometricCaptureAssurance ?? 'NONE';
+  if (biometricFaceMatchEnabled() && !verificationBiometricFaceMatchEnabled(assurance)) {
+    throw new Error(
+      `FEATURE_BIOMETRIC_FACE_MATCH=1 requires a hosted-liveness KYC adapter; ${provider} only provides ${assurance}`,
+    );
+  }
+  return selected;
 }

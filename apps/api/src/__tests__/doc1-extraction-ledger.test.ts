@@ -66,7 +66,7 @@ async function owner(n: number) {
   return u.id;
 }
 const submit = (userId: string, docType: string) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${userId}/${RUN}-${nanoid(5)}.enc`, 'v1'));
 const ledger = (docId: string) => system(async () => ({
   run: await app.prisma.extractionRun.findFirst({ where: { submissionId: docId }, include: { fields: { orderBy: { fieldCode: 'asc' } } } }),
   validations: await app.prisma.validationResult.findMany({ where: { submissionId: docId }, orderBy: { validatorCode: 'asc' } }),

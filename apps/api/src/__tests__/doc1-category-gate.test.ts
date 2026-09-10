@@ -197,8 +197,8 @@ describe('[DOC-1 P18-2] documents control what can be sold', () => {
     const submittable = await system(() => submittableGateDocTypes(app.prisma, 'GY'));
     expect(submittable).toContain('liquor_licence');
     expect(submittable).not.toContain('pharmacy_authorisation');
-    await expect(runWithTenant(TENANT, () => verification.submitDocument(s.ownerUserId, 'STORE', 'pharmacy_authorisation', `/uploads/verification/${RUN}/p.enc`, 'v1'))).rejects.toMatchObject({ code: 'INVALID_DOC_TYPE' });
-    const submitted = await runWithTenant(TENANT, () => verification.submitDocument(s.ownerUserId, 'STORE', 'liquor_licence', `/uploads/verification/${RUN}/l.enc`, 'v1'));
+    await expect(runWithTenant(TENANT, () => verification.submitDocument(s.ownerUserId, 'STORE', 'pharmacy_authorisation', `/uploads/verification/${s.ownerUserId}/${RUN}-p.enc`, 'v1'))).rejects.toMatchObject({ code: 'INVALID_DOC_TYPE' });
+    const submitted = await runWithTenant(TENANT, () => verification.submitDocument(s.ownerUserId, 'STORE', 'liquor_licence', `/uploads/verification/${s.ownerUserId}/${RUN}-l.enc`, 'v1'));
     expect(submitted.status).toBe('PENDING');
   });
 });

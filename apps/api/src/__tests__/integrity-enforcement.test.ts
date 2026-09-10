@@ -128,7 +128,7 @@ describe('scenario H — device velocity (Part 5)', () => {
     const verification = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
     // The sandbox marker would auto-approve a clean account; the hold forces
     // pending_manual — rung 2's whole meaning.
-    const doc = await verification.submitIdentity(u.id, 'https://x/id-auto-approve.jpg', 'https://x/selfie-auto-approve.jpg', 'v1');
+    const doc = await verification.submitIdentity(u.id, `/uploads/verification/${u.id}/id-auto-approve.jpg`, `/uploads/verification/${u.id}/selfie-auto-approve.jpg`, 'v1');
     expect(doc.status).toBe('PENDING');
   });
 });

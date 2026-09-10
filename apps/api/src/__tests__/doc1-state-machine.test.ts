@@ -62,7 +62,7 @@ const at = (userId: string, state: DocState, extra: Record<string, unknown> = {}
 const move = (id: string, state: DocState) => system(() => app.prisma.$executeRawUnsafe('UPDATE verification_documents SET state = $1::"DocState" WHERE id = $2', state, id));
 const setStatus = (id: string, status: string) => system(() => app.prisma.$executeRawUnsafe('UPDATE verification_documents SET status = $1::"VerificationDocumentStatus" WHERE id = $2', status, id));
 const read = (id: string) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, select: { state: true, status: true, purgedAt: true, reviewNote: true } }));
-const submit = (userId: string, url = `/uploads/verification/${RUN}/${nanoid(5)}.enc`) =>
+const submit = (userId: string, url = `/uploads/verification/${userId}/${RUN}-${nanoid(5)}.enc`) =>
   runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', url, 'v1'));
 const decideApprove = (docId: string, reviewerId: string, outcome: 'APPROVE' | 'REJECT' = 'APPROVE') => system(async () => {
   const kase = await app.prisma.reviewCase.create({ data: { submissionId: docId, tenantId: 'swift-default', queue: 'STANDARD', slaDueAt: new Date() } });
@@ -257,9 +257,9 @@ describe('[DOC-1 §5.1] the real path walks the machine', () => {
 
   it('the processor\'s verdict is reached by transitions: an auto-reject lands REJECTED; an approval without confidence never auto-commits', async () => {
     const u = await owner(9);
-    const rejected = await submit(u, `/uploads/verification/${RUN}/auto-reject-${nanoid(4)}.enc`);
+    const rejected = await submit(u, `/uploads/verification/${u}/${RUN}-auto-reject-${nanoid(4)}.enc`);
     expect(await read(rejected.id)).toMatchObject({ state: 'REJECTED', status: 'REJECTED' });
-    const approved = await submit(u, `/uploads/verification/${RUN}/auto-approve-${nanoid(4)}.enc`);
+    const approved = await submit(u, `/uploads/verification/${u}/${RUN}-auto-approve-${nanoid(4)}.enc`);
     // While the registry type is INACTIVE the processor's approval stands (P6-4's confidence
     // gate engages at activation): T8 then T17, with the extraction ledger as the provenance.
     expect(await read(approved.id)).toMatchObject({ state: 'COMMITTED', status: 'APPROVED' });

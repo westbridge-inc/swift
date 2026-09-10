@@ -71,7 +71,7 @@ async function person(n: number) {
 }
 const submit = (userId: string, docType: string, documentNumber?: string) => {
   kyc.extracted = documentNumber ? { documentNumber } : undefined;
-  return runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  return runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${userId}/${RUN}-${nanoid(5)}.enc`, 'v1'));
 };
 const get = (userId: string) => app.inject({ method: 'GET', url: '/api/v1/verification/dsar/documents', headers: { authorization: `Bearer ${tokens.get(userId)}` } });
 const erase = (userId: string, documentIds?: string[]) => app.inject({ method: 'POST', url: '/api/v1/verification/dsar/documents/erase', payload: documentIds ? { documentIds } : {}, headers: { authorization: `Bearer ${tokens.get(userId)}`, 'content-type': 'application/json' } });
