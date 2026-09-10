@@ -751,15 +751,20 @@ export async function customerRoutes(app: FastifyInstance) {
   app.delete('/account', async (request: AuthRequest) => {
     const result = await account.deleteAccount(request.user.userId);
     // Leave an audit trail (the de-identified row is retained, so its id stays a
-    // valid FK). Best-effort — the erasure itself has already committed.
+    // valid FK). A pending object/hold is truthfully a request in progress, not
+    // a completed erasure.
     await app.prisma.auditLog
       .create({
         data: {
           userId: request.user.userId,
-          action: 'ACCOUNT_SELF_DELETED',
+          action: result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_ERASURE_PENDING',
           entity: 'User',
           entityId: request.user.userId,
-          changes: { reason: 'DPA right to erasure (self-serve)' },
+          changes: {
+            reason: 'DPA right to erasure (self-serve)',
+            complete: result.deleted,
+            ...('status' in result ? { status: result.status } : {}),
+          },
         },
       })
       .catch(() => {});

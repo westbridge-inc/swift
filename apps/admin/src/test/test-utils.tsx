@@ -28,10 +28,13 @@ export function mockApi(handler: (_request: ApiRequest) => ApiReply | Promise<Ap
     const requestMethod = typeof input === 'object' && 'method' in input ? input.method : undefined;
     const method = (init?.method ?? requestMethod ?? 'GET').toUpperCase();
     const reply = await handler({ init, method, url: new URL(inputUrl) });
+    const rawBody = reply.body instanceof Uint8Array
+      ? reply.body
+      : JSON.stringify(reply.body);
 
-    return new Response(JSON.stringify(reply.body), {
+    return new Response(rawBody, {
       status: reply.status ?? 200,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': reply.body instanceof Uint8Array ? 'application/octet-stream' : 'application/json' },
     });
   });
 

@@ -315,13 +315,18 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /rides/drivers/:id/vehicle-identity': c('C3', 'rides.vehicle.write'),
 
   // ── Verification ────────────────────────────────────────────────────────
-  'GET /verification/queue': c('C0', 'verification.read'),
+  // Names, phone numbers and document types are personal data. The queue is a
+  // C1 sensitive read even though it does not return the document bytes.
+  'GET /verification/queue': c('C1', 'verification.read'),
   // [DOC-1 §8.4 · P8-4] SUPPORT sees status counts, never a document, a name or a phone (DOC-INV-19).
   'GET /verification/queue/counts': c('C0', 'verification.counts'),
   'PUT /verification/:id/approve': c('C3', 'verification.decide', E.verification),
   'PUT /verification/:id/reject': c('C3', 'verification.decide', E.verification),
   'PUT /verification/:id/revoke': c('C3', 'verification.decide', E.verification),
   'GET /verification/:id/document-url': c('C1', 'verification.document.read'),
+  'GET /verification/:id/review-detail': c('C1', 'verification.document.read'),
+  'GET /verification/:id/render': c('C1', 'verification.document.read'),
+  'POST /verification/:id/render-ack': c('C2', 'verification.document.read'),
   // [DOC-1 §20.2 · P20-2] the custody narrative is metadata about a document, never its content — still a logged read
   'GET /verification/:id/custody': c('C1', 'verification.custody.read'),
   // [DOC-1 §9.4 · P9-4] Legal holds on a person's documents: placing or releasing

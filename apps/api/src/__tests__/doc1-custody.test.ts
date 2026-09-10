@@ -90,7 +90,7 @@ afterAll(async () => {
 
 describe('[DOC-1 P20-2] the custody narrative', () => {
   it('a submission, its extraction, its verdicts, the decision under a reason code, the durable record and the destruction receipt — one ordered narrative; never a value, never the note', async () => {
-    const doc = await runWithTenant('swift-default', () => service.submitDocument(ownerId, 'RESTAURANT', TYPE, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+    const doc = await runWithTenant('swift-default', () => service.submitDocument(ownerId, 'RESTAURANT', TYPE, `/uploads/verification/${ownerId}/${RUN}-${nanoid(5)}.enc`, 'v1'));
     docId = doc.id;
     expect(doc.status).toBe('PENDING');
     await runWithTenant('swift-default', () => service.approveDocument(doc.id, adminId, new Date(Date.now() + 200 * 86_400_000)));

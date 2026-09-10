@@ -131,6 +131,7 @@ export function DocumentChecklist({
             submittedAt={doc?.createdAt ?? null}
             reviewNote={doc?.reviewNote ?? null}
             isNext={docType === nextDoc}
+            freshSelfieRequired={status?.selfieRequiredDocTypes?.includes(docType) === true}
           />
         );
       })}

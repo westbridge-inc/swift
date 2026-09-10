@@ -371,6 +371,62 @@ export async function runCollusionAffinityScan(ctx: JobContext): Promise<{ flagg
   return { flaggedPairs: pairs.length };
 }
 
+export async function runVerificationStorageOrphanSweep(
+  ctx: JobContext,
+  options: { batchSize?: number; maxBatches?: number; now?: Date } = {},
+): Promise<{ purged: number; remainingDue: number; batches: number }> {
+  const { systemPrismaClient } = await import('../plugins/prisma');
+  const { runAsSystem } = await import('../plugins/tenant-context');
+  const { getStorageProvider } = await import('../providers/storage/storage-provider');
+  const { retryStorageOrphans } = await import('../lib/storage-orphans');
+  const db = systemPrismaClient() ?? ctx.prisma;
+  const batchSize = Math.max(1, Math.min(500, options.batchSize ?? 100));
+  const maxBatches = Math.max(1, Math.min(100, options.maxBatches ?? 20));
+  const now = options.now ?? new Date();
+  const abandonedBefore = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+
+  return runAsSystem('verification-storage-orphan-sweep', async () => {
+    const due = async () => {
+      const [claims, unscheduled, orphans] = await Promise.all([
+        db.verificationUpload.count({
+          where: {
+            submissionId: null,
+            OR: [
+              { state: 'UPLOADING', expiresAt: { lte: now } },
+              { state: 'UPLOADED', expiresAt: { lte: now } },
+              { state: 'PROCESSING', processingStartedAt: { lte: abandonedBefore } },
+            ],
+          },
+        }),
+        db.verificationUpload.count({
+          where: { state: 'PURGE_PENDING', storageOrphan: null },
+        }),
+        db.storageOrphan.count({
+          where: { purgedAt: null, quarantinedAt: null, nextAttemptAt: { lte: now } },
+        }),
+      ]);
+      return claims + unscheduled + orphans;
+    };
+
+    let purged = 0;
+    let batches = 0;
+    let remainingDue = await due();
+    while (remainingDue > 0 && batches < maxBatches) {
+      const before = remainingDue;
+      purged += await retryStorageOrphans(db, getStorageProvider(), ctx.log, batchSize);
+      batches += 1;
+      remainingDue = await due();
+      if (remainingDue >= before) break;
+    }
+    if (remainingDue > 0) {
+      throw new Error(
+        `Verification storage orphan sweep left ${remainingDue} due obligation(s) after ${batches} batch(es)`,
+      );
+    }
+    return { purged, remainingDue, batches };
+  });
+}
+
 export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const connection = bullConnectionOpts(ctx.redis);
   const constructedWorkers: Worker[] = [];
@@ -841,6 +897,28 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         docImagePolicyCounter.inc({ outcome: 'probe_failed' }, run.probeFailed);
         docImagePolicyCounter.inc({ outcome: 'skipped' }, run.skipped);
         ctx.log.info(`Image-policy sweep: ${run.candidates} candidates, ${run.purged} purged, ${run.probeFailed} probe failures, ${run.skipped} skipped`);
+        return;
+      }
+
+      if (job.name === 'storage-orphan-sweep') {
+        const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
+        try {
+          const run = await runVerificationStorageOrphanSweep(ctx);
+          ctx.log.info(run, 'verification storage orphan sweep complete');
+        } catch (err) {
+          await opsPageOnce(ctx, 'verification-storage-orphan-failure', 30 * 60, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              tenantId: null,
+              title: 'Verification object cleanup is behind',
+              body: 'Expired or abandoned verification uploads could not be fully reconciled. Treat retained identity images as a privacy incident until the sweep is clean.',
+              data: {
+                kind: 'ops_verification_storage_orphan_failed',
+                error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+              },
+            }),
+          );
+          throw err;
+        }
         return;
       }
 
@@ -2116,6 +2194,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '20 6 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
+  });
+
+  // Verification upload claims expire after 30 minutes. This five-minute
+  // scheduler is the enforcement mechanism, including process/DB failure
+  // recovery and exact-generation delete retries.
+  await queues.verificationQueue.add('storage-orphan-sweep', {}, {
+    repeat: { every: 5 * 60_000 },
+    removeOnComplete: 30,
+    removeOnFail: 50,
   });
 
   // [DCR-1 NR-2] Retention clocks: daily at 04:10, before the day starts.

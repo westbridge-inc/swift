@@ -113,6 +113,41 @@ afterAll(async () => {
 });
 
 describe('Vehicle photo uploads (public trees)', () => {
+  it('legacy profile document URLs cannot bypass the verification upload authority', async () => {
+    const driver = await makeUser(['DRIVER', 'CUSTOMER'], 'DRIVER');
+    await app.prisma.driver.create({
+      data: {
+        userId: driver.userId,
+        vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2021,
+        vehicleColor: 'White', licensePlate: `HD-${seq}`,
+        driverLicenseUrl: 'legacy://seed/licence', vehicleInsuranceUrl: 'legacy://seed/insurance',
+      },
+    });
+    const driverWrite = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/driver/profile',
+      payload: { nationalIdUrl: 'https://untrusted.example/id.jpg' },
+      headers: { authorization: `Bearer ${driver.token}`, 'content-type': 'application/json' },
+    });
+    expect(driverWrite.statusCode).toBe(409);
+    expect(driverWrite.json().error.code).toBe('VERIFICATION_UPLOAD_REQUIRED');
+    expect((await app.prisma.driver.findUniqueOrThrow({ where: { userId: driver.userId } })).nationalIdUrl).toBeNull();
+
+    const rider = await makeUser(['RIDER', 'CUSTOMER'], 'RIDER');
+    await app.prisma.rider.create({
+      data: { userId: rider.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', licensePlate: `CR-${seq}` },
+    });
+    const riderWrite = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/rider/profile',
+      payload: { driverLicenseUrl: 'https://untrusted.example/licence.jpg' },
+      headers: { authorization: `Bearer ${rider.token}`, 'content-type': 'application/json' },
+    });
+    expect(riderWrite.statusCode).toBe(409);
+    expect(riderWrite.json().error.code).toBe('VERIFICATION_UPLOAD_REQUIRED');
+    expect((await app.prisma.rider.findUniqueOrThrow({ where: { userId: rider.userId } })).driverLicenseUrl).toBeNull();
+  });
+
   it('driver uploads a car photo → stored publicly, set on the profile', async () => {
     const u = await makeUser(['DRIVER', 'CUSTOMER'], 'DRIVER');
     await app.prisma.driver.create({

@@ -109,7 +109,13 @@ export function assertPromotable(vendor: Pick<Vendor, 'name' | 'tier'>): void {
 /** THE definition of "registered": a VALID, unexpired registration record for the owner. One reader for promotion and for the declaration route. */
 export async function validRegistrationRecord(db: Db, ownerUserId: string, now = new Date()): Promise<{ id: string; docType: string } | null> {
   return db.documentRecord.findFirst({
-    where: { accountId: ownerUserId, docType: { in: [...REGISTRATION_DOC_TYPES] }, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }] },
+    where: {
+      accountId: ownerUserId,
+      docType: { in: [...REGISTRATION_DOC_TYPES] },
+      status: 'VALID',
+      OR: [{ expiresOn: null }, { expiresOn: { gt: now } }],
+      submission: { storageProvenance: 'VERIFIED', purgedAt: null },
+    },
     select: { id: true, docType: true },
   });
 }
@@ -174,4 +180,3 @@ export async function nudgeOwnerOnce(
   });
   return true;
 }
-

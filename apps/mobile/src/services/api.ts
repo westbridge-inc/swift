@@ -708,22 +708,33 @@ export const servicesApi = {
 
 // Verification (mounted at /api/v1/verification)
 export const verificationApi = {
+  capabilities: () => api.get('/verification/capabilities'),
   status: (role: string, vehicleType?: string) =>
     api.get('/verification/status', { params: { role, ...(vehicleType ? { vehicleType } : {}) } }),
-  upload: (form: FormData, session?: AuthSessionSnapshot) =>
+  upload: (
+    form: FormData,
+    authority: {
+      purpose: 'CHECKLIST_DOCUMENT' | 'IDENTITY_DOCUMENT' | 'IDENTITY_SELFIE';
+      role: string;
+      docType?: string;
+    },
+    session?: AuthSessionSnapshot,
+  ) =>
     api.post('/verification/upload', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      params: authority,
     })),
   submitDocument: (data: {
     role: string;
     docType: string;
-    fileUrl: string;
+    uploadId: string;
+    selfieUploadId?: string;
     consent: true;
     privacyNoticeVersion: string;
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
-    data: { idDocumentUrl: string; selfieUrl: string; consent: true; privacyNoticeVersion: string },
+    data: { idUploadId: string; selfieUploadId?: string; consent: true; privacyNoticeVersion: string },
     session?: AuthSessionSnapshot,
   ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
 };

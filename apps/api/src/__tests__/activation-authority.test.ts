@@ -427,13 +427,13 @@ describe('STRAND-3 — commercial classes carry their own checklist', () => {
     // The union checklist admits the type (the old CAR-only list threw
     // INVALID_DOC_TYPE and made buses impossible to onboard).
     await expect(
-      svc.submitDocument(busUser.id, 'MOVER', 'road_service_licence', `test/${marker}/rsl`, 'test-v1'),
+      svc.submitDocument(busUser.id, 'MOVER', 'road_service_licence', `/uploads/verification/${busUser.id}/${marker}-rsl`, 'test-v1'),
     ).resolves.toBeTruthy();
 
     const bikeUser = await makeUser('BikeSubmit');
     await app.prisma.rider.create({ data: { userId: bikeUser.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: false } });
     await expect(
-      svc.submitDocument(bikeUser.id, 'MOVER', 'road_service_licence', `test/${marker}/rsl2`, 'test-v1'),
+      svc.submitDocument(bikeUser.id, 'MOVER', 'road_service_licence', `/uploads/verification/${bikeUser.id}/${marker}-rsl2`, 'test-v1'),
     ).rejects.toMatchObject({ code: 'INVALID_DOC_TYPE' });
   });
 });

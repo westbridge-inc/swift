@@ -57,7 +57,7 @@ async function owner(n: number) {
   return u.id;
 }
 const submit = (service: VerificationService, userId: string, docType = 'business_registration') =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${userId}/${RUN}-${nanoid(5)}.enc`, 'v1'));
 const runOf = (docId: string) => system(() => app.prisma.extractionRun.findFirstOrThrow({ where: { submissionId: docId }, include: { fields: true } }));
 const docOf = (id: string) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, select: { state: true, status: true, record: { select: { status: true } } } }));
 

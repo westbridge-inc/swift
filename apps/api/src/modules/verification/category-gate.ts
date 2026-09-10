@@ -41,7 +41,7 @@ export function gateApplies(gate: { categorySlug: string | null; categoryKind: D
 /** VALID = approved and unexpired, held by the vendor's owner. The image may be purged; the record is what counts. */
 export async function holdsValidDocument(prisma: Db, ownerUserId: string, legacyCode: string, now = new Date()): Promise<boolean> {
   const doc = await prisma.verificationDocument.findFirst({
-    where: { userId: ownerUserId, docType: legacyCode, status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    where: { userId: ownerUserId, docType: legacyCode, status: 'APPROVED', storageProvenance: 'VERIFIED', OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
     select: { id: true },
   });
   return doc !== null;

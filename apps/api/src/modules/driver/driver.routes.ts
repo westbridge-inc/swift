@@ -166,6 +166,16 @@ export async function driverRoutes(app: FastifyInstance) {
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
     const me = await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
+    if (body.nationalIdUrl !== undefined
+      || body.driverLicenseUrl !== undefined
+      || body.vehicleInsuranceUrl !== undefined
+      || body.vehicleInspectionUrl !== undefined) {
+      throw new AppError(
+        409,
+        'VERIFICATION_UPLOAD_REQUIRED',
+        'Identity and licence documents must be submitted through the verification upload flow.',
+      );
+    }
     const mmgPayUrl = body.mmgPayUrl === undefined
       ? undefined
       : mmgPayUrlForWrite(body.mmgPayUrl);
@@ -191,10 +201,6 @@ export async function driverRoutes(app: FastifyInstance) {
         // otherwise tag a 4-seat car GROUP and receive 14-passenger work.
         // The fields remain accepted-and-ignored so legacy clients don't 400.
         ...(body.profilePhotoUrl !== undefined && { profilePhotoUrl: body.profilePhotoUrl }),
-        ...(body.nationalIdUrl !== undefined && { nationalIdUrl: body.nationalIdUrl }),
-        ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
-        ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
-        ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
       },
       include: {
         user: {

@@ -19,8 +19,7 @@ import { fmtSlotTime } from '../booking/availability';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
-import { encryptBuffer, generateDek, getKeyProvider } from '../../providers/storage/envelope';
-import { createHash } from 'node:crypto';
+import { createVerificationUpload } from '../verification/verification-upload';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION } from '../legal/legal.routes';
 import { ACTIVITY_CLASSES, DECLARATION_CONSENT_TYPE, DECLARATION_VERSION, UNREGISTERED_TRADER_DECLARATION_V1, renderDeclarationPdf } from './unregistered-declaration';
@@ -999,7 +998,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true } }),
       app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true, countryCode: true } }),
       validRegistrationRecord(app.prisma, userId),
-      app.prisma.verificationDocument.findFirst({ where: { userId, docType: DECLARATION_DOC_TYPE, status: { in: ['PENDING', 'APPROVED'] } }, select: { id: true, status: true } }),
+      app.prisma.verificationDocument.findFirst({ where: { userId, docType: DECLARATION_DOC_TYPE, storageProvenance: 'VERIFIED', status: { in: ['PENDING', 'APPROVED'] } }, select: { id: true, status: true } }),
     ]);
     if (registered) throw new AppError(409, 'ALREADY_REGISTERED', 'A business registration is on file for this store, so it is a registered seller — no declaration is needed.');
     if (existing) throw new AppError(409, 'DECLARATION_EXISTS', `A self-declaration is already ${existing.status === 'APPROVED' ? 'on file' : 'under review'} for this store.`);
@@ -1022,22 +1021,17 @@ export async function vendorRoutes(app: FastifyInstance) {
       tradingName: body.tradingName, activityClass: body.activityClass, declaredAddress: body.declaredAddress,
       legalName: `${user.firstName} ${user.lastName}`.trim(), signedAt, storeName: vendor.name,
     });
-    const storage = getStorageProvider();
-    const keys = getKeyProvider();
-    let fileUrl: string;
-    if (keys) {
-      const dek = generateDek();
-      const { ciphertext, iv, authTag } = encryptBuffer(pdf, dek);
-      const up = await storage.upload({ buffer: ciphertext, filename: `declaration-${DECLARATION_VERSION}.pdf.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
-      fileUrl = up.url;
-      await app.prisma.encryptedObject.create({ data: {
-        fileKey: fileUrl, iv: new Uint8Array(iv), authTag: new Uint8Array(authTag), wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
-        mimeType: 'application/pdf', sizeBytes: pdf.length, sha256: createHash('sha256').update(pdf).digest('hex'), createdBy: userId,
-      } });
-    } else {
-      fileUrl = (await storage.upload({ buffer: pdf, filename: `declaration-${DECLARATION_VERSION}.pdf`, mimeType: 'application/pdf', folder: `verification/${userId}` })).url;
-    }
-    const doc = await verification.submitDocument(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE', DECLARATION_DOC_TYPE, fileUrl, body.privacyNoticeVersion);
+    const roleKey = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
+    const upload = await createVerificationUpload(app.prisma, getStorageProvider(), app.log, {
+      userId,
+      purpose: 'CHECKLIST_DOCUMENT',
+      roleKey,
+      docType: DECLARATION_DOC_TYPE,
+      buffer: pdf,
+      filename: `declaration-${DECLARATION_VERSION}.pdf`,
+      mimeType: 'application/pdf',
+    });
+    const doc = await verification.submitDocument(userId, roleKey, DECLARATION_DOC_TYPE, upload.uploadId, body.privacyNoticeVersion);
     reply.code(201);
     return { success: true, data: { tier: 'UNREGISTERED', declaration: { id: doc.id, status: doc.status, docType: doc.docType }, status: await verification.getStatus(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE') } };
   });
@@ -1062,8 +1056,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       vendorTierCapsFor(new CountryConfigService(app.prisma), user.countryCode),
       tierUsage(app.prisma, vendorId, now),
       validRegistrationRecord(app.prisma, userId, now),
-      app.prisma.verificationDocument.findFirst({ where: { userId, docType: DECLARATION_DOC_TYPE }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true, expiresAt: true } }),
-      app.prisma.verificationDocument.findFirst({ where: { userId, docType: { in: [...REGISTRATION_DOC_TYPES] } }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true } }),
+      app.prisma.verificationDocument.findFirst({ where: { userId, docType: DECLARATION_DOC_TYPE, storageProvenance: 'VERIFIED' }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true, expiresAt: true } }),
+      app.prisma.verificationDocument.findFirst({ where: { userId, docType: { in: [...REGISTRATION_DOC_TYPES] }, storageProvenance: 'VERIFIED' }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true } }),
     ]);
     const verdict = judgeTierCap(usage, caps, 0);
     return { success: true, data: {

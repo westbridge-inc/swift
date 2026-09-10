@@ -65,7 +65,7 @@ async function subject(n: number) {
 }
 /** A pending document, and the review case P4-5 opened for it. */
 async function pendingCase(userId: string) {
-  const doc = await runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  const doc = await runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', `/uploads/verification/${userId}/${RUN}-${nanoid(5)}.enc`, 'v1'));
   const kase = await system(() => app.prisma.reviewCase.findFirstOrThrow({ where: { submissionId: doc.id, closedAt: null } }));
   return { doc, kase };
 }

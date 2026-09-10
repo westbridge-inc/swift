@@ -95,7 +95,10 @@ export function PersonalDataScreen() {
       const res = await customerApi.deleteAccount(owner);
       const current = requireAuthSessionForPrincipal(owner);
       setConfirmDelete(false);
-      toast.success('Your account has been deleted.');
+      const result = res.data?.data as { deleted?: boolean } | undefined;
+      toast.success(result?.deleted
+        ? 'Your account has been deleted.'
+        : 'Your account is closed. Protected records are still being erased or held as required.');
       logoutIfCurrent(current);
       return res;
     },

@@ -1,5 +1,10 @@
 import { recordStorageOrphan, retryStorageOrphans } from '../../lib/storage-orphans';
-import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
+import {
+  authorizeVerificationPurge,
+  deleteAuthorizedVerificationUploads,
+  finalizeVerificationPurge,
+  shredFieldsForAuthorizedErasure,
+} from '../verification/verification-upload';
 import type { FastifyInstance } from 'fastify';
 import type { ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -8,6 +13,7 @@ import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
 import { partnerObligations, verdictFor, refusalMessage, windDownPartner } from './partner-wind-down';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
+import { managedObjectKeyIsNamespacedTo } from '../../utils/owned-storage-key';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — the DPA-2023 rights of access, portability and erasure,
@@ -303,26 +309,51 @@ export class AccountService {
         changes: { heldDocuments: deferred.count, reason: 'DOC-1 §9.4: a legal hold blocks purge until released' },
       } });
     }
+    let pendingVerificationDocuments = deferred.count;
     const docs = await prisma.verificationDocument.findMany({
       where: { userId, purgedAt: null, legalHoldId: null },
-      select: { id: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
+      select: { id: true },
     });
     for (const doc of docs) {
-      // [DOC-INV-7] Delete, shred, PROBE, and write the receipt with the purge
-      // mark in one transaction. Erasure must complete for the person, so a
-      // FAILED probe is recorded as FAILED and the bytes are filed as a
-      // storage orphan for the retry sweep — never silently swallowed.
-      const evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, doc.fileUrl) : NOTHING_STORED;
-      if (evidence.probe === 'FAILED' && doc.fileUrl) {
-        await recordStorageOrphan(prisma, this.app.log, { key: doc.fileUrl, reason: 'ERASURE_PURGE_PROBE_FAILED', userId, tenantId: doc.user.tenantId });
+      // Establish durable, purpose-bound delete authority before touching the
+      // provider. A failed probe leaves PURGE_PENDING claims and linked retry
+      // rows; extracted values are still crypto-shredded under the same
+      // erasure authority, and the daily reaper can finish the exact objects.
+      try {
+        const authority = await authorizeVerificationPurge(prisma, {
+          documentId: doc.id,
+          userId,
+          mode: 'FULL_ERASURE',
+          requestedBy: userId,
+          requireRetentionElapsed: false,
+        });
+        if (authority.alreadyFinalized) continue;
+        const evidence = await deleteAuthorizedVerificationUploads(prisma, this.app.log, authority);
+        if (evidence.probe === 'FAILED') {
+          await shredFieldsForAuthorizedErasure(prisma, authority);
+          pendingVerificationDocuments += 1;
+          continue;
+        }
+        const finalized = await finalizeVerificationPurge(prisma, authority, evidence, { shredFields: true });
+        if (!finalized) pendingVerificationDocuments += 1;
+      } catch (error) {
+        // A legacy pointer without an immutable upload claim cannot become a
+        // destructive capability. Keep the row for manual census and record
+        // the incomplete erasure without logging its storage key.
+        this.app.log.error({
+          code: error instanceof AppError ? error.code : 'ERASURE_AUTHORITY_FAILED',
+          documentId: doc.id,
+          userId,
+        }, 'verification document erasure remains pending');
+        await prisma.auditLog.create({ data: {
+          userId,
+          action: 'ERASURE_DOCUMENT_PENDING_AUTHORITY',
+          entity: 'VerificationDocument',
+          entityId: doc.id,
+          changes: { reason: 'STORAGE_AUTHORITY_UNPROVEN' },
+        } }).catch(() => undefined);
+        pendingVerificationDocuments += 1;
       }
-      await prisma.$transaction(async (tx) => {
-        await tx.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
-        // [DOC-1 Part XXV] Erasure takes the extracted VALUES with the image: shred the run DEKs (rows stay as the custody record).
-        await tx.extractionRun.updateMany({ where: { submissionId: doc.id }, data: { wrappedDek: null } });
-        await tx.extractedField.updateMany({ where: { submissionId: doc.id }, data: { valueCt: null } });
-        await writeDeletionReceipt(tx, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
-      });
     }
 
     // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
@@ -339,15 +370,17 @@ export class AccountService {
 
     const avatarRow = await prisma.user.findUnique({ where: { id: userId }, select: { avatar: true, tenantId: true } });
     const rawAvatar = avatarRow?.avatar;
-    if (rawAvatar && !rawAvatar.startsWith('http://') && !rawAvatar.startsWith('https://')) {
-      // Pass the stored value as-is: the provider's resolveKey normalises the
-      // "/uploads/" prefix and refuses path escapes (same call the doc loop uses).
+    if (rawAvatar && managedObjectKeyIsNamespacedTo(rawAvatar, 'avatars', userId)) {
+      // The pointer is not deletion authority by itself: only this account's
+      // canonical avatar namespace may reach the destructive storage sink.
       await storage.delete(rawAvatar).catch(async (err) => {
-        this.app.log.error({ err, userId, key: rawAvatar }, '[F-024-08] avatar object delete failed on account deletion — orphaned key');
+        this.app.log.error({ err, userId }, '[F-024-08] avatar object delete failed on account deletion — orphaned key');
         // [F-026-02] Nulling the column erases the only pointer — census it
         // durably so the deletion barrier survives this failure.
-        await recordStorageOrphan(prisma, this.app.log, { key: rawAvatar, reason: 'ACCOUNT_DELETION_DELETE_FAILED', userId, tenantId: avatarRow?.tenantId });
+        await recordStorageOrphan(prisma, this.app.log, { key: rawAvatar, reason: 'ACCOUNT_DELETION_DELETE_FAILED', userId, tenantId: avatarRow?.tenantId, storageLocationId: storage.locationId() });
       });
+    } else if (rawAvatar) {
+      this.app.log.error({ userId }, '[F-024-08] avatar ownership unproved — destructive delete skipped');
     }
 
     // 1b. Identity-integrity purge (trial-integrity spec Part 8, DPA 2023):
@@ -413,6 +446,17 @@ export class AccountService {
     // escrow of the minimum needed to finish an emergency that was already
     // open, and it shreds itself when that emergency ends — or at `purgeBy` if
     // it never does.
+    if (pendingVerificationDocuments > 0) {
+      return preflight.hold
+        ? {
+          deleted: false,
+          status: 'PENDING_ERASURE_AND_SAFETY_HOLD' as const,
+          pendingVerificationDocuments,
+          holdId: preflight.hold.holdId,
+          holdReasons: preflight.hold.reasons,
+        }
+        : { deleted: false, status: 'PENDING_ERASURE' as const, pendingVerificationDocuments };
+    }
     return preflight.hold
       ? { deleted: true, status: 'PENDING_SAFETY_HOLD' as const, holdId: preflight.hold.holdId, holdReasons: preflight.hold.reasons }
       : { deleted: true };

@@ -34,6 +34,7 @@ interface ScanResponse {
 
 export class IdAnalyzerKycProvider implements KycProvider {
   readonly engine: KycEngine = { name: 'id-analyzer', version: 'api2', external: true, processorRef: 'ID_ANALYZER' };
+  readonly biometricCaptureAssurance = 'USER_SUPPLIED_FILE' as const;
 
   private readonly apiKey: string;
   private readonly baseUrl: string;

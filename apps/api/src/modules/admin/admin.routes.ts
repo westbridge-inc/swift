@@ -30,8 +30,23 @@ import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
-import { getStorageProvider } from '../../providers/storage/storage-provider';
-import { mintRenderPath } from '../../providers/storage/envelope';
+import {
+  getStorageProvider,
+  getStorageProviderForLocation,
+  StorageObjectTooLargeError,
+} from '../../providers/storage/storage-provider';
+import { decryptBuffer, getKeyProvider } from '../../providers/storage/envelope';
+import {
+  assertVerificationObjectBodyIntegrity,
+  resolveOwnedVerificationObjectKey,
+} from '../verification/storage-ownership';
+import {
+  acknowledgeReviewRenderGrant,
+  assertGrantObjectIdentity,
+  createReviewRenderGrant,
+  lockClaimedReviewAccess,
+  lockReviewRenderGrant,
+} from '../verification/review-access';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
@@ -52,6 +67,7 @@ import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana
 import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { platformStats } from './platform-stats';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 
@@ -293,6 +309,11 @@ const settleRefundSchema = z.object({
 });
 
 const approveDocSchema = z.object({
+  // Approval changes whether a person may work or transact on Swift. ADM-006
+  // therefore requires the reviewer to state what evidence supports it; the
+  // same sentence is stored on ReviewDecision and in the atomic admin trail.
+  reason: z.string().trim().min(12).max(500),
+  reviewGrantToken: z.string().min(32).max(128),
   // Optional document expiry (e.g. licence end date entered during review)
   expiresAt: z.coerce.date().optional(),
   // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
@@ -305,10 +326,15 @@ const approveDocSchema = z.object({
   }).optional(),
 });
 
-const rejectDocSchema = z.object({
-  reason: z.string().min(3).max(500),
+const rejectVerificationDocSchema = z.object({
+  reason: z.string().trim().min(12).max(500),
   // Templated opener (spec §9.3) — consistent applicant messaging across reviewers.
-  reasonCode: z.enum(REJECTION_REASON_CODES).optional(),
+  reasonCode: z.enum(REJECTION_REASON_CODES),
+  reviewGrantToken: z.string().min(32).max(128),
+});
+
+const rejectClaimSchema = z.object({
+  reason: z.string().trim().min(3).max(500),
 });
 
 const auditLogsQuerySchema = z.object({
@@ -369,6 +395,69 @@ function coerceMoney<T>(value: T): T {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = coerceMoney(v);
   return out as unknown as T;
+}
+
+const MAX_VERIFICATION_RENDER_BYTES = 5 * 1024 * 1024;
+const REVIEW_EXTERNAL_DEADLINE_MS = 15_000;
+
+async function withReviewExternalDeadline<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timeoutHandle = setTimeout(() => {
+      const error = new AppError(
+        504,
+        'REVIEW_EXTERNAL_TIMEOUT',
+        'The secure document service did not respond in time. Mint a new review grant and try again.',
+      );
+      controller.abort(error);
+      reject(error);
+    }, REVIEW_EXTERNAL_DEADLINE_MS);
+    timeoutHandle.unref?.();
+  });
+  try {
+    return await Promise.race([operation(controller.signal), timeout]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+type ReviewEnvelopeSnapshot = {
+  fileKey: string;
+  iv: Uint8Array;
+  authTag: Uint8Array;
+  wrappedDek: Uint8Array | null;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  createdBy: string;
+  shreddedAt: Date | null;
+};
+
+/** Length-prefix every field so the digest is an unambiguous snapshot of the
+ * decrypt authority. The second transaction refuses bytes when crypto-shred,
+ * re-encryption or metadata replacement won while storage was being read. */
+function reviewEnvelopeDigest(envelope: ReviewEnvelopeSnapshot | null): string | null {
+  if (!envelope) return null;
+  const digest = createHash('sha256');
+  const field = (value: string | Uint8Array | number | Date | null) => {
+    const bytes = Buffer.from(
+      value === null ? '<null>' : value instanceof Date ? value.toISOString() : typeof value === 'number' ? String(value) : value,
+    );
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(bytes.length);
+    digest.update(length).update(bytes);
+  };
+  field(envelope.fileKey);
+  field(envelope.iv);
+  field(envelope.authTag);
+  field(envelope.wrappedDek);
+  field(envelope.mimeType);
+  field(envelope.sizeBytes);
+  field(envelope.sha256);
+  field(envelope.createdBy);
+  field(envelope.shreddedAt);
+  return digest.digest('hex');
 }
 
 export async function adminRoutes(app: FastifyInstance) {
@@ -785,6 +874,10 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!authority || authority.cls !== 'C1') return;
     const userId: string | undefined = request.user?.userId;
     if (!userId) return;
+    // Document detail/mint/render reads write their access row inside the
+    // same fail-closed transaction that authorizes the disclosure. Do not
+    // append a second, weaker after-response row for those routes.
+    if (request.sensitiveReadWrittenInline === true) return;
     try {
       const params = (request.params ?? {}) as Record<string, string>;
       await app.prisma.sensitiveReadLog.create({
@@ -4687,15 +4780,21 @@ export async function adminRoutes(app: FastifyInstance) {
     const [documents, total] = await Promise.all([
       tenantPrisma.verificationDocument.findMany({
         where,
-        include: {
-          // [A-19] The reviewer is asked to tick "cross-checked against the
-          // H-plate" — so the plate has to be ON THE SCREEN. It was not sent at
-          // all, which made that checkbox an assertion about something the
-          // operator could not see.
+        // Explicit response contract: never serialize fileUrl, provider refs,
+        // consent/storage internals, phone numbers, insurance identifiers, or
+        // another newly-added scalar by accident. Those facts belong to the
+        // claimed single-document detail read, not the list index.
+        select: {
+          id: true,
+          role: true,
+          docType: true,
+          status: true,
+          expiresAt: true,
+          createdAt: true,
+          reviewedAt: true,
           user: {
             select: {
-              id: true, firstName: true, lastName: true, phone: true, countryCode: true,
-              driver: { select: { licensePlate: true, vehicleMake: true, vehicleModel: true, vehicleType: true } },
+              id: true, firstName: true, lastName: true, countryCode: true,
             },
           },
         },
@@ -4705,22 +4804,57 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
       tenantPrisma.verificationDocument.count({ where }),
     ]);
+    const openCases = documents.length === 0 ? [] : await tenantPrisma.reviewCase.findMany({
+      where: { submissionId: { in: documents.map((document) => document.id) }, closedAt: null },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        submissionId: true,
+        queue: true,
+        priority: true,
+        slaDueAt: true,
+        assignedTo: true,
+        assignedAt: true,
+        createdAt: true,
+      },
+    });
+    const openCaseByDocument = new Map<string, (typeof openCases)[number]>();
+    for (const reviewCase of openCases) {
+      // The partial unique index makes this unreachable after migration. Fail
+      // closed during cutover instead of showing one case and deciding another.
+      if (openCaseByDocument.has(reviewCase.submissionId)) {
+        throw new AppError(500, 'REVIEW_CASE_INTEGRITY', 'A document has conflicting open review cases.');
+      }
+      openCaseByDocument.set(reviewCase.submissionId, reviewCase);
+    }
+    const safeDocuments = documents.map((document) => {
+      const reviewCase = openCaseByDocument.get(document.id);
+      return {
+        ...document,
+        reviewCase: reviewCase ? {
+          ...reviewCase,
+          claimedByMe: reviewCase.assignedTo === request.user.userId,
+          assignedTo: undefined,
+        } : null,
+      };
+    });
 
-    return { success: true, ...paginatedResponse(documents, total, { page, limit, skip }) };
+    return { success: true, ...paginatedResponse(safeDocuments, total, { page, limit, skip }) };
   });
 
   app.put('/verification/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = approveDocSchema.parse(request.body ?? {});
+    if (!request.authSessionId) throw new AppError(401, 'UNAUTHORIZED', 'This reviewer session is no longer active.');
 
-    const doc = await verification.approveDocument(id, request.user.userId, body.expiresAt, body.insurance);
-    await audit(
-      request.user.userId,
-      'APPROVE_VERIFICATION_DOC',
-      'VerificationDocument',
+    const doc = await verification.approveDocument(
       id,
-      { docType: doc.docType, ...(body.insurance ? { insurance: body.insurance } : {}) },
-      request,
+      request.user.userId,
+      body.expiresAt,
+      body.insurance,
+      body.reason,
+      { reviewGrantToken: body.reviewGrantToken, sessionId: request.authSessionId },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
     );
 
     return { success: true, data: doc };
@@ -4728,12 +4862,17 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/verification/:id/reject', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = rejectDocSchema.parse(request.body);
+    const body = rejectVerificationDocSchema.parse(request.body);
+    if (!request.authSessionId) throw new AppError(401, 'UNAUTHORIZED', 'This reviewer session is no longer active.');
 
-    const doc = await verification.rejectDocument(id, request.user.userId, body.reason, body.reasonCode);
-    // [DOC-1 §24.2] A fraud-class verdict from the first reviewer escalates instead of rejecting — the trail says which happened.
-    const action = doc.status === 'PENDING' ? 'ESCALATE_VERIFICATION_DOC' : 'REJECT_VERIFICATION_DOC';
-    await audit(request.user.userId, action, 'VerificationDocument', id, { docType: doc.docType, reason: body.reason, reasonCode: body.reasonCode ?? null }, request);
+    const doc = await verification.rejectDocument(
+      id,
+      request.user.userId,
+      body.reason,
+      body.reasonCode,
+      { reviewGrantToken: body.reviewGrantToken, sessionId: request.authSessionId },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
 
     return { success: true, data: doc };
   });
@@ -4759,8 +4898,12 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = revokeDocSchema.parse(request.body);
 
-    const doc = await verification.revokeDocument(id, request.user.userId, body.reason);
-    await audit(request.user.userId, 'REVOKE_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
+    const doc = await verification.revokeDocument(
+      id,
+      request.user.userId,
+      body.reason,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
 
     return { success: true, data: doc };
   });
@@ -4822,15 +4965,21 @@ export async function adminRoutes(app: FastifyInstance) {
   // here, server-side — never in the UI; the decision routes re-check it.
   app.post('/verification/cases/:id/claim', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const kase = await verification.claimReviewCase(id, request.user.userId);
-    await audit(request.user.userId, 'CLAIM_REVIEW_CASE', 'ReviewCase', id, { submissionId: kase.submissionId }, request);
+    const kase = await verification.claimReviewCase(
+      id,
+      request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
     return { success: true, data: kase };
   });
 
   app.post('/verification/cases/:id/release', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const kase = await verification.releaseReviewCase(id, request.user.userId);
-    await audit(request.user.userId, 'RELEASE_REVIEW_CASE', 'ReviewCase', id, { submissionId: kase.submissionId }, request);
+    const kase = await verification.releaseReviewCase(
+      id,
+      request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
     return { success: true, data: kase };
   });
 
@@ -4855,39 +5004,349 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: narrative };
   });
 
-  app.get('/verification/:id/document-url', { preHandler: [adminGuard] }, async (request) => {
+  /** One sensitive, explicitly-shaped reviewer read. Claim and recusal are
+   * re-evaluated under locks, and the access row commits before any decrypted
+   * field is returned. */
+  app.get('/verification/:id/review-detail', { preHandler: [adminGuard] }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const doc = await tenantPrisma.verificationDocument.findUnique({
-      where: { id },
-      select: { id: true, fileUrl: true, purgedAt: true, docType: true },
+    const sessionId = request.authSessionId;
+    if (!sessionId) throw new AppError(401, 'UNAUTHORIZED', 'This reviewer session is no longer active.');
+    const {
+      documentReviewDetailSnapshot,
+      renderDocumentReviewDetail,
+      reviewDetailSnapshotDigest,
+    } = await import('../verification/review-detail');
+    const tenantId = requireTenantId();
+    const reservation = await app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const access = await lockClaimedReviewAccess(tx, {
+        tenantId,
+        documentId: id,
+        reviewerId: request.user.userId,
+        sessionId,
+        requiredCapability: 'verification.document.read',
+      });
+      const snapshot = await documentReviewDetailSnapshot(tx, id);
+      await tx.sensitiveReadLog.create({ data: {
+        tenantId,
+        actorUserId: request.user.userId,
+        action: 'RESERVE_VERIFICATION_REVIEW_DETAIL',
+        capability: 'verification.document.read',
+        subjectId: id,
+        purpose: `HUMAN_VERIFICATION_REVIEW:${access.reviewCase.id}`,
+      } });
+      return {
+        caseId: access.reviewCase.id,
+        queue: access.reviewCase.queue,
+        assignmentEpoch: access.reviewCase.assignmentEpoch,
+        snapshot,
+        digest: reviewDetailSnapshotDigest(snapshot),
+      };
     });
-    if (!doc) throw new NotFoundError('VerificationDocument', id);
-    if (doc.purgedAt || !doc.fileUrl) {
-      throw new AppError(410, 'DOCUMENT_PURGED', 'This document has been deleted under the retention policy');
-    }
 
-    const ttlSeconds = 300;
+    const detail = await withReviewExternalDeadline((signal) =>
+      renderDocumentReviewDetail(reservation.snapshot, {
+        signal,
+        currentCaseId: reservation.caseId,
+        currentQueue: reservation.queue,
+      }));
 
-    // Envelope-encrypted documents (spec §5): the bucket object is ciphertext,
-    // so a plain signed URL would render garbage. Mint the audited, expiring
-    // decrypt-render path instead. Legacy plaintext objects keep signed URLs.
-    const encrypted = await app.prisma.encryptedObject.findUnique({
-      where: { fileKey: doc.fileUrl },
-      select: { wrappedDek: true, shreddedAt: true },
-    });
-    if (encrypted) {
-      if (!encrypted.wrappedDek || encrypted.shreddedAt) {
-        throw new AppError(410, 'DOCUMENT_SHREDDED', 'This document was crypto-shredded and cannot be recovered');
+    await app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const access = await lockClaimedReviewAccess(tx, {
+        tenantId,
+        documentId: id,
+        reviewerId: request.user.userId,
+        sessionId,
+        requiredCapability: 'verification.document.read',
+        expectedCaseId: reservation.caseId,
+        expectedAssignmentEpoch: reservation.assignmentEpoch,
+      });
+      const currentSnapshot = await documentReviewDetailSnapshot(tx, id);
+      if (reviewDetailSnapshotDigest(currentSnapshot) !== reservation.digest) {
+        throw new AppError(409, 'REVIEW_DETAIL_STALE', 'The review evidence changed; reopen the document.');
       }
-      const minted = mintRenderPath(id, ttlSeconds);
-      await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
-      return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
+      await tx.sensitiveReadLog.create({ data: {
+        tenantId,
+        actorUserId: request.user.userId,
+        action: 'GET /verification/:id/review-detail',
+        capability: 'verification.document.read',
+        subjectId: id,
+        purpose: `HUMAN_VERIFICATION_REVIEW:${access.reviewCase.id}`,
+      } });
+    });
+    (request as any).sensitiveReadWrittenInline = true;
+    sensitiveReadCounter.labels('verification.document.read').inc();
+    reply.header('Cache-Control', 'no-store, max-age=0').header('Pragma', 'no-cache');
+    return { success: true, data: detail };
+  });
+
+  app.get('/verification/:id/document-url', { preHandler: [adminGuard] }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const sessionId = request.authSessionId;
+    if (!sessionId) throw new AppError(401, 'UNAUTHORIZED', 'This reviewer session is no longer active.');
+    const tenantId = requireTenantId();
+    const minted = await app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const access = await lockClaimedReviewAccess(tx, {
+        tenantId,
+        documentId: id,
+        reviewerId: request.user.userId,
+        sessionId,
+        requiredCapability: 'verification.document.read',
+      });
+      if (access.document.purgedAt || !access.document.fileUrl) {
+        throw new AppError(410, 'DOCUMENT_PURGED', 'This document has been deleted under the retention policy');
+      }
+      const ownedObject = await resolveOwnedVerificationObjectKey(tx, access.document.userId, access.document.fileUrl, {
+        allowDocumentId: access.document.id,
+        requireExclusiveReference: true,
+      });
+      if (!ownedObject) {
+        throw new AppError(410, 'DOCUMENT_OWNERSHIP_INVALID', 'This document is unavailable because its storage ownership could not be proved.');
+      }
+      const grant = await createReviewRenderGrant(tx, {
+        access,
+        reviewerId: request.user.userId,
+        sessionId,
+        object: ownedObject,
+      });
+      await tx.sensitiveReadLog.create({ data: {
+        tenantId,
+        actorUserId: request.user.userId,
+        action: 'MINT_VERIFICATION_RENDER_GRANT',
+        capability: 'verification.document.read',
+        subjectId: id,
+        purpose: `HUMAN_VERIFICATION_REVIEW:${access.reviewCase.id}`,
+      } });
+      return { grant, mimeType: ownedObject.mimeType };
+    });
+    (request as any).sensitiveReadWrittenInline = true;
+    sensitiveReadCounter.labels('verification.document.read').inc();
+    reply.header('Cache-Control', 'no-store, max-age=0').header('Pragma', 'no-cache');
+    return {
+      success: true,
+      data: {
+        url: `/api/v1/admin/verification/${id}/render`,
+        mimeType: minted.mimeType,
+        expiresInSeconds: Math.max(0, Math.floor((minted.grant.expiresAt.getTime() - Date.now()) / 1000)),
+        reviewGrantToken: minted.grant.token,
+      },
+    };
+  });
+
+  /** Fetch one exact generation. The random grant travels in a header (never
+   * a URL/log), and both the authenticated session and current case assignment
+   * are rechecked before storage is read. */
+  app.get('/verification/:id/render', { preHandler: [adminGuard] }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const reviewGrantToken = z.string().min(32).max(128).parse(request.headers['x-swift-review-grant']);
+    const sessionId = request.authSessionId;
+    if (!sessionId) throw new AppError(401, 'UNAUTHORIZED', 'This reviewer session is no longer active.');
+    const tenantId = requireTenantId();
+
+    // Phase 1 reserves this one-use grant while all review authority is locked,
+    // then releases every database lock before the object store or key service
+    // is contacted. A failed external read burns only this grant; the reviewer
+    // can mint a fresh one without permitting a replay of the old capability.
+    const reservation = await app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const { grant, access } = await lockReviewRenderGrant(tx, {
+        token: reviewGrantToken,
+        tenantId,
+        documentId: id,
+        reviewerId: request.user.userId,
+        sessionId,
+      });
+      if (grant.reservedAt || grant.fetchedAt) {
+        throw new AppError(409, 'REVIEW_GRANT_FETCHED', 'This one-use render grant was already fetched.');
+      }
+      const ownedObject = await resolveOwnedVerificationObjectKey(tx, access.document.userId, access.document.fileUrl, {
+        allowDocumentId: access.document.id,
+        requireExclusiveReference: true,
+      });
+      if (!ownedObject) {
+        throw new AppError(410, 'DOCUMENT_OWNERSHIP_INVALID', 'This document is unavailable because its storage ownership could not be proved.');
+      }
+      assertGrantObjectIdentity(grant, ownedObject);
+      if (ownedObject.sizeBytes < 1 || ownedObject.sizeBytes > MAX_VERIFICATION_RENDER_BYTES) {
+        throw new AppError(413, 'DOCUMENT_RENDER_SIZE_INVALID', 'This document exceeds the secure review size limit.');
+      }
+      const envelopeRow = await tx.encryptedObject.findUnique({ where: { fileKey: ownedObject.providerKey } });
+      const envelope: ReviewEnvelopeSnapshot | null = envelopeRow ? {
+        fileKey: envelopeRow.fileKey,
+        iv: Buffer.from(envelopeRow.iv),
+        authTag: Buffer.from(envelopeRow.authTag),
+        wrappedDek: envelopeRow.wrappedDek ? Buffer.from(envelopeRow.wrappedDek) : null,
+        mimeType: envelopeRow.mimeType,
+        sizeBytes: envelopeRow.sizeBytes,
+        sha256: envelopeRow.sha256,
+        createdBy: envelopeRow.createdBy,
+        shreddedAt: envelopeRow.shreddedAt,
+      } : null;
+      if (ownedObject.encrypted !== (envelope !== null)) {
+        throw new AppError(
+          409,
+          'DOCUMENT_ENCRYPTION_AUTHORITY_INVALID',
+          'The document encryption authority does not match its upload claim.',
+        );
+      }
+      if (envelope) {
+        if (!envelope.wrappedDek || envelope.shreddedAt) {
+          throw new AppError(410, 'DOCUMENT_SHREDDED', 'This document was crypto-shredded and cannot be recovered.');
+        }
+      }
+      const won = await tx.reviewRenderGrant.updateMany({
+        where: { id: grant.id, reservedAt: null, fetchedAt: null, consumedAt: null, revokedAt: null },
+        data: { reservedAt: new Date() },
+      });
+      if (won.count !== 1) throw new AppError(409, 'REVIEW_GRANT_FETCHED', 'This one-use render grant was already fetched.');
+      await tx.sensitiveReadLog.create({ data: {
+        tenantId,
+        actorUserId: request.user.userId,
+        action: 'RESERVE_VERIFICATION_DOCUMENT_FETCH',
+        capability: 'verification.document.read',
+        subjectId: id,
+        purpose: `HUMAN_VERIFICATION_REVIEW:${access.reviewCase.id}`,
+      } });
+      return {
+        grantId: grant.id,
+        caseId: access.reviewCase.id,
+        object: ownedObject,
+        envelope,
+        envelopeDigest: reviewEnvelopeDigest(envelope),
+      };
+    });
+
+    const storage = getStorageProviderForLocation(reservation.object.storageLocationId);
+    if (!storage) {
+      throw new AppError(503, 'STORAGE_LOCATION_UNAVAILABLE', 'The storage location for this document is unavailable.');
+    }
+    let rendered: { body: Buffer; mimeType: string };
+    try {
+      rendered = await withReviewExternalDeadline(async (signal) => {
+        const ciphertext = await storage.getObject(
+          reservation.object.providerKey,
+          reservation.object.objectVersion,
+          { maxBytes: MAX_VERIFICATION_RENDER_BYTES, signal },
+        );
+        let body = ciphertext;
+        let mimeType = reservation.object.mimeType;
+        if (reservation.envelope) {
+          const keys = getKeyProvider();
+          if (!keys) throw new AppError(503, 'ENCRYPTION_OFF', 'The document key service is unavailable.');
+          if (!reservation.envelope.wrappedDek) {
+            throw new AppError(410, 'DOCUMENT_SHREDDED', 'This document was crypto-shredded and cannot be recovered.');
+          }
+          const dek = await keys.unwrapDek(Buffer.from(reservation.envelope.wrappedDek), { signal });
+          signal.throwIfAborted();
+          body = decryptBuffer(
+            ciphertext,
+            dek,
+            Buffer.from(reservation.envelope.iv),
+            Buffer.from(reservation.envelope.authTag),
+          );
+          mimeType = reservation.envelope.mimeType;
+        }
+        signal.throwIfAborted();
+        assertVerificationObjectBodyIntegrity(reservation.object, body);
+        return { body, mimeType };
+      });
+    } catch (error) {
+      if (error instanceof StorageObjectTooLargeError) {
+        throw new AppError(413, 'DOCUMENT_RENDER_SIZE_INVALID', 'This document exceeds the secure review size limit.');
+      }
+      if (error instanceof AppError) throw error;
+      request.log.warn({
+        storageLocationId: reservation.object.storageLocationId,
+        failureClass: error instanceof Error ? error.name : typeof error,
+      }, 'Secure verification-object read failed');
+      throw new AppError(503, 'DOCUMENT_STORAGE_UNAVAILABLE', 'The secure document could not be read. Mint a new review grant and try again.');
     }
 
-    const url = await getStorageProvider().getSignedUrl(doc.fileUrl, ttlSeconds);
-    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds }, request);
+    // Phase 2 re-locks and recomputes every mutable authority after the slow
+    // external work. Release, reassignment, purge, crypto-shred or generation
+    // rotation wins the race and prevents these already-read bytes from leaving
+    // the process. The access row and fetchedAt commit before reply.send().
+    await app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const { grant, access } = await lockReviewRenderGrant(tx, {
+        token: reviewGrantToken,
+        tenantId,
+        documentId: id,
+        reviewerId: request.user.userId,
+        sessionId,
+      });
+      if (grant.id !== reservation.grantId || !grant.reservedAt || grant.fetchedAt) {
+        throw new AppError(409, 'REVIEW_GRANT_STALE', 'This document fetch is no longer current.');
+      }
+      const currentObject = await resolveOwnedVerificationObjectKey(tx, access.document.userId, access.document.fileUrl, {
+        allowDocumentId: access.document.id,
+        requireExclusiveReference: true,
+      });
+      if (!currentObject) {
+        throw new AppError(410, 'DOCUMENT_OWNERSHIP_INVALID', 'This document is unavailable because its storage ownership could not be proved.');
+      }
+      assertGrantObjectIdentity(grant, currentObject);
+      if (currentObject.sizeBytes !== reservation.object.sizeBytes || currentObject.mimeType !== reservation.object.mimeType) {
+        throw new AppError(409, 'REVIEW_GRANT_STALE', 'The stored document metadata changed; reopen the document.');
+      }
+      const currentEnvelope = await tx.encryptedObject.findUnique({ where: { fileKey: currentObject.providerKey } });
+      if (reviewEnvelopeDigest(currentEnvelope) !== reservation.envelopeDigest) {
+        throw new AppError(409, 'REVIEW_GRANT_STALE', 'The document encryption authority changed; reopen the document.');
+      }
+      // Fail closed: if the access trail cannot commit, the bytes never leave
+      // this handler. The row describes a server fetch, not human inspection.
+      await tx.sensitiveReadLog.create({ data: {
+        tenantId,
+        actorUserId: request.user.userId,
+        action: 'FETCH_VERIFICATION_DOCUMENT',
+        capability: 'verification.document.read',
+        subjectId: id,
+        purpose: `HUMAN_VERIFICATION_REVIEW:${access.reviewCase.id}`,
+      } });
+      const won = await tx.reviewRenderGrant.updateMany({
+        where: { id: grant.id, reservedAt: { not: null }, fetchedAt: null, consumedAt: null, revokedAt: null },
+        data: { fetchedAt: new Date() },
+      });
+      if (won.count !== 1) throw new AppError(409, 'REVIEW_GRANT_FETCHED', 'This one-use render grant was already fetched.');
+    });
+    (request as any).sensitiveReadWrittenInline = true;
+    sensitiveReadCounter.labels('verification.document.read').inc();
+    reply
+      .type(rendered.mimeType)
+      .header('Cache-Control', 'no-store, max-age=0')
+      .header('Pragma', 'no-cache')
+      .header('Referrer-Policy', 'no-referrer')
+      .header('X-Content-Type-Options', 'nosniff')
+      .header('Cross-Origin-Resource-Policy', 'same-site')
+      .header('Content-Security-Policy', "default-src 'none'; sandbox")
+      .header('Content-Disposition', 'inline');
+    return reply.send(rendered.body);
+  });
 
-    return { success: true, data: { url, expiresInSeconds: ttlSeconds } };
+  /** Browser-side PDF canvas/image decoding completed. This is an emulatable
+   * workflow acknowledgement, deliberately not labelled proof of human sight. */
+  app.post('/verification/:id/render-ack', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { reviewGrantToken } = z.object({ reviewGrantToken: z.string().min(32).max(128) }).parse(request.body ?? {});
+    const sessionId = request.authSessionId;
+    if (!sessionId) throw new AppError(401, 'UNAUTHORIZED', 'This reviewer session is no longer active.');
+    const tenantId = requireTenantId();
+    await app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      await acknowledgeReviewRenderGrant(tx, {
+        token: reviewGrantToken,
+        tenantId,
+        documentId: id,
+        reviewerId: request.user.userId,
+        sessionId,
+      });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        extra: { acknowledgement: 'browser-render-complete' },
+      });
+    });
+    return { success: true, data: { acknowledged: true } };
   });
 
   // ─── Retail returns ──────────────────────────────────────────
@@ -5023,7 +5482,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/cash-rules/claims/:id/reject', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = rejectDocSchema.parse(request.body);
+    const body = rejectClaimSchema.parse(request.body);
     const claim = await cashRules.rejectClaim(id, request.user.userId, body.reason,
       (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: claim };

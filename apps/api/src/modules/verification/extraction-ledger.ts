@@ -209,7 +209,7 @@ export function alwaysReview(type: Pick<RoutingType, 'bucket' | 'needsSpecimen' 
 }
 
 export type IneligibleReason =
-  | 'BLOCKING_FAIL' | 'ALWAYS_REVIEW' | 'COLLISION' | 'NOT_VALIDATED' | 'CONFIDENCE_UNKNOWN' | 'CONFIDENCE_BELOW_THRESHOLD';
+  | 'BLOCKING_FAIL' | 'REGISTRY_INACTIVE' | 'ALWAYS_REVIEW' | 'COLLISION' | 'NOT_VALIDATED' | 'CONFIDENCE_UNKNOWN' | 'CONFIDENCE_BELOW_THRESHOLD';
 
 /**
  * auto_approve_eligible (§6.9): every blocking validator PASS (a SKIP is not a
@@ -224,7 +224,10 @@ export function autoApproveEligible(
   collided: boolean,
 ): { eligible: boolean; reason: IneligibleReason | null } {
   if (plan.blockingFail) return { eligible: false, reason: 'BLOCKING_FAIL' };
-  if (!type?.isActive) return { eligible: true, reason: null }; // the registry is silent: legacy behaviour
+  // A missing or provisional registry row means Swift has not established the
+  // type's policy facts. That uncertainty can never authorize a machine
+  // approval; a person must decide while the policy remains inactive.
+  if (!type?.isActive) return { eligible: false, reason: 'REGISTRY_INACTIVE' };
   if (alwaysReview(type)) return { eligible: false, reason: 'ALWAYS_REVIEW' };
   if (collided) return { eligible: false, reason: 'COLLISION' };
   if (!plan.validations.some((v) => v.isBlocking) || plan.validations.some((v) => v.isBlocking && v.status !== 'PASS')) {
@@ -237,6 +240,7 @@ export function autoApproveEligible(
 
 const INELIGIBLE_TEXT: Record<IneligibleReason, string> = {
   BLOCKING_FAIL: 'Required fields could not be read from the document — human review',
+  REGISTRY_INACTIVE: 'Document policy is not active — human review required',
   ALWAYS_REVIEW: 'This document type is always reviewed by a person (DOC-1 §6.9)',
   COLLISION: 'Duplicate of a document already on another account — second review required',
   NOT_VALIDATED: 'Nothing was validated for this document type — human review',
@@ -244,12 +248,23 @@ const INELIGIBLE_TEXT: Record<IneligibleReason, string> = {
   CONFIDENCE_BELOW_THRESHOLD: 'Processor confidence is below the auto-approval threshold — human review',
 };
 
-/** A processor approval becomes human review whenever §6.9 / §0.5 say it is not eligible. Anything else passes through untouched. */
+/**
+ * Machine approvals must satisfy the policy gate. Machine rejections are
+ * adverse decisions and always become human review; provider evidence may
+ * inform the reviewer, but it cannot deny access or earning by itself.
+ */
 export function gateAutoApproval<T extends { status: string; reason?: string; collided?: boolean }>(
   result: T,
   plan: ExtractionPlan,
   type: RoutingType | null,
 ): T {
+  if (result.status === 'rejected') {
+    return {
+      ...result,
+      status: 'pending_manual',
+      reason: 'Automated checks could not verify this document — human review required',
+    };
+  }
   if (result.status !== 'approved') return result;
   const verdict = autoApproveEligible(plan, type, result.collided === true);
   if (verdict.eligible) return result;

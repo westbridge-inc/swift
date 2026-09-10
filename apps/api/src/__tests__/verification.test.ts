@@ -1,8 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { prismaPlugin } from '../plugins/prisma';
+import { prismaPlugin, bindTenantTransaction } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
@@ -12,13 +10,22 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { VerificationService, docTypeExpires, resolveApprovalExpiry } from '../modules/verification/verification.service';
+import { VerificationService, docTypeExpires, resolveApprovalExpiry, type ChecklistRole } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import {
+  seedVerificationUpload,
+  seedProvenanceVerifiedDocument,
+  seedTrustedVerificationDocument,
+  submitDocumentWithUpload,
+  type SeedVerifiedDocumentOptions,
+} from './helpers/verification-upload';
+import { hopDocState } from '../modules/verification/doc-state';
+import { DOC_REVIEWER_CAPABILITIES } from '../modules/admin/admin-authority';
 
 // [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
 process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
@@ -37,14 +44,14 @@ process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
 const runBase = 592_001_000_000 + Math.floor(Math.random() * 8_000_000); // window disjoint from the 592_8XX suite bases
 const MOVER_PHONE = `+${runBase + 1}`;
 const VENDOR_PHONE = `+${runBase + 2}`;
-const L2_AUTO_PHONE = `+${runBase + 3}`;
+const L2_PROVIDER_PHONE = `+${runBase + 3}`;
 const L2_MANUAL_PHONE = `+${runBase + 4}`;
 const ADMIN_PHONE = `+${runBase + 5}`;
 const TAXI_MOVER_PHONE = `+${runBase + 6}`;
 const BICYCLE_MOVER_PHONE = `+${runBase + 7}`;
 const PREVIEW_MOVER_PHONE = `+${runBase + 8}`;
 const FACE_MATCH_PHONE = `+${runBase + 9}`;
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE];
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_PROVIDER_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE];
 
 // Base (incl. police clearance — required of every courier) + motor docs.
 const MOVER_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
@@ -52,21 +59,13 @@ const MOVER_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehic
 let app: FastifyInstance;
 let sweepService: VerificationService;
 let adminToken: string;
+let adminUserId: string;
 let moverToken: string;
 let moverUserId: string;
 let vendorToken: string;
 let vendorUserId: string;
 let serviceVendorId: string;
 let serviceCategoryId: string;
-
-async function cleanup() {
-  const users = await app.prisma.user.findMany({ where: { phone: { in: ALL_PHONES } }, select: { id: true } });
-  const ids = users.map((u) => u.id);
-  if (ids.length) {
-    await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
-  }
-}
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, token?: string) {
   return injectWithApproval(app, {
@@ -77,6 +76,104 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, 
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     },
   });
+}
+
+async function checklistUploads(
+  userId: string,
+  roleKey: ChecklistRole,
+  docType: string,
+  marker: string,
+  includeSelfie = true,
+) {
+  const primary = await seedVerificationUpload(app.prisma, {
+    userId, purpose: 'CHECKLIST_DOCUMENT', roleKey, docType, marker,
+  });
+  const selfie = includeSelfie && ['national_id', 'owner_national_id'].includes(docType)
+    ? await seedVerificationUpload(app.prisma, {
+      userId, purpose: 'IDENTITY_SELFIE', roleKey, marker: `${marker}-selfie`,
+    })
+    : undefined;
+  return { uploadId: primary.uploadId, ...(selfie ? { selfieUploadId: selfie.uploadId } : {}) };
+}
+
+async function identityUploads(userId: string, marker: string) {
+  const primary = await seedVerificationUpload(app.prisma, {
+    userId, purpose: 'IDENTITY_DOCUMENT', roleKey: 'CUSTOMER', docType: 'identity_l2', marker,
+  });
+  const selfie = await seedVerificationUpload(app.prisma, {
+    userId, purpose: 'IDENTITY_SELFIE', roleKey: 'CUSTOMER', marker: `${marker}-selfie`,
+  });
+  return { idUploadId: primary.uploadId, selfieUploadId: selfie.uploadId };
+}
+
+async function seedQueuedDocument(input: SeedVerifiedDocumentOptions) {
+  const doc = await seedProvenanceVerifiedDocument(app.prisma, input);
+  await app.prisma.$transaction(async (tx) => {
+    await bindTenantTransaction(tx);
+    expect(await hopDocState(tx, { id: doc.id }, 'CAPTURED', 'PREPROCESSED')).toBe(true);
+    expect(await hopDocState(tx, { id: doc.id }, 'PREPROCESSED', 'EXTRACTING')).toBe(true);
+    expect(await hopDocState(tx, { id: doc.id }, 'EXTRACTING', 'REVIEW_QUEUED')).toBe(true);
+    await tx.reviewCase.create({ data: {
+      tenantId: doc.tenantId,
+      submissionId: doc.id,
+      queue: 'STANDARD',
+      slaDueAt: new Date(Date.now() + 86_400_000),
+    } });
+  });
+  return app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } });
+}
+
+async function claimDocument(documentId: string) {
+  const reviewCase = await app.prisma.reviewCase.findFirstOrThrow({
+    where: { submissionId: documentId, closedAt: null },
+  });
+  const claim = await inject('POST', `/api/v1/admin/verification/cases/${reviewCase.id}/claim`, {}, adminToken);
+  expect(claim.statusCode, claim.body).toBe(200);
+  return reviewCase.id;
+}
+
+async function mintDocumentGrant(documentId: string) {
+  await claimDocument(documentId);
+  const minted = await inject('GET', `/api/v1/admin/verification/${documentId}/document-url`, undefined, adminToken);
+  expect(minted.statusCode, minted.body).toBe(200);
+  const data = minted.json().data as { url: string; reviewGrantToken: string; expiresInSeconds: number; mimeType: string };
+  expect(data.url).toBe(`/api/v1/admin/verification/${documentId}/render`);
+  expect(data.reviewGrantToken).toHaveLength(43);
+  return data;
+}
+
+async function renderDocumentGrant(documentId: string, reviewGrantToken: string) {
+  return injectWithApproval(app, {
+    method: 'GET',
+    url: `/api/v1/admin/verification/${documentId}/render`,
+    headers: {
+      authorization: `Bearer ${adminToken}`,
+      'x-swift-reason': TEST_ADMIN_REASON,
+      'x-swift-review-grant': reviewGrantToken,
+    },
+  });
+}
+
+async function reviewAuthority(documentId: string) {
+  const { reviewGrantToken } = await mintDocumentGrant(documentId);
+  const rendered = await renderDocumentGrant(documentId, reviewGrantToken);
+  expect(rendered.statusCode, rendered.body).toBe(200);
+  expect(rendered.rawPayload.length).toBeGreaterThan(0);
+  const acknowledged = await inject('POST', `/api/v1/admin/verification/${documentId}/render-ack`, { reviewGrantToken }, adminToken);
+  expect(acknowledged.statusCode, acknowledged.body).toBe(200);
+  expect(acknowledged.json().data.acknowledged).toBe(true);
+  return reviewGrantToken;
+}
+
+async function approveWithReview(documentId: string, docType: string) {
+  const response = await inject('PUT', `/api/v1/admin/verification/${documentId}/approve`, {
+    reason: TEST_ADMIN_REASON,
+    reviewGrantToken: await reviewAuthority(documentId),
+    ...(docTypeExpires(docType) ? { expiresAt: new Date(Date.now() + 200 * 86_400_000).toISOString() } : {}),
+  }, adminToken);
+  expect(response.statusCode, response.body).toBe(200);
+  expect(response.json().data.status).toBe('APPROVED');
+  return response;
 }
 
 async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR') {
@@ -116,7 +213,6 @@ beforeAll(async () => {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
 
-  await cleanup();
   for (const phone of ALL_PHONES) {
     await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_attempt:${phone}`, `otp_verified:${phone}`);
   }
@@ -135,10 +231,12 @@ beforeAll(async () => {
       lastName: 'Admin',
       roles: ['ADMIN'],
       activeRole: 'ADMIN',
+      status: 'ACTIVE',
       isPhoneVerified: true, selfieCapturedAt: new Date(),
-      admin: { create: { permissions: ['*'] } },
+      admin: { create: { permissions: [...DOC_REVIEWER_CAPABILITIES] } },
     },
   });
+  adminUserId = adminUser.id;
   adminToken = app.jwt.sign({ userId: adminUser.id, role: 'ADMIN', jti: `s4-${Date.now()}` });
   await app.prisma.session.create({
     data: {
@@ -169,7 +267,7 @@ beforeAll(async () => {
     data: {
       ownerId: owner.id,
       name: 'Step4 Spa',
-      slug: 'step4-spa',
+      slug: `step4-spa-${runBase}`,
       vendorType: 'SERVICE',
       phone: VENDOR_PHONE,
       addressLine1: '1 Test Lane',
@@ -189,7 +287,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await cleanup();
+  // Upload claims, review decisions and purge receipts are durable evidence
+  // with restrictive references to their synthetic owners. Keep the fixture
+  // graph intact; every run uses unique identities and a unique vendor slug.
   await app.close();
 });
 
@@ -207,7 +307,7 @@ describe('Checklists drive from config', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'boat_licence',
-      fileUrl: 'storage://t/boat.jpg',
+      ...await checklistUploads(moverUserId, 'MOVER', 'boat_licence', 'boat'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -257,13 +357,14 @@ describe('Gating — no work until verified', () => {
 
 describe('Manual review queue — submit, reject, resubmit, approve', () => {
   let rejectedDocId: string;
+  let rejectedReviewGrant: string;
 
   it('submitted documents land in the admin queue as PENDING', async () => {
     for (const docType of MOVER_DOCS) {
       const res = await inject('POST', '/api/v1/verification/documents', {
         role: 'MOVER',
         docType,
-        fileUrl: `storage://t/${docType}.jpg`,
+        ...await checklistUploads(moverUserId, 'MOVER', docType, docType),
         consent: true,
         privacyNoticeVersion: 'v1',
       }, moverToken);
@@ -271,12 +372,24 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
       expect(res.json().data.status).toBe('PENDING');
     }
 
-    const queue = await inject('GET', '/api/v1/admin/verification/queue?limit=50', undefined, adminToken);
-    expect(queue.statusCode).toBe(200);
-    const docTypes = queue.json().data
-      .filter((d: { userId: string }) => d.userId === moverUserId)
-      .map((d: { docType: string }) => d.docType);
-    for (const docType of MOVER_DOCS) expect(docTypes).toContain(docType);
+    const docTypes = new Set<string>();
+    let page = 1;
+    let hasNext = true;
+    while (hasNext && !MOVER_DOCS.every((docType) => docTypes.has(docType))) {
+      const queue = await inject('GET', `/api/v1/admin/verification/queue?limit=50&page=${page}`, undefined, adminToken);
+      expect(queue.statusCode, queue.body).toBe(200);
+      const result = queue.json() as {
+        data: Array<{ user: { id: string }; docType: string }>;
+        meta: { page: number; hasNext: boolean };
+      };
+      expect(result.meta.page).toBe(page);
+      for (const doc of result.data) {
+        if (doc.user.id === moverUserId) docTypes.add(doc.docType);
+      }
+      hasNext = result.meta.hasNext;
+      page += 1;
+    }
+    for (const docType of MOVER_DOCS) expect(docTypes.has(docType), docType).toBe(true);
   });
 
   it('rejection notifies the applicant with the reason (resubmit path)', async () => {
@@ -284,9 +397,12 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
       where: { userId: moverUserId, docType: 'national_id', status: 'PENDING' },
     });
     rejectedDocId = doc.id;
+    rejectedReviewGrant = await reviewAuthority(doc.id);
 
     const res = await inject('PUT', `/api/v1/admin/verification/${doc.id}/reject`, {
       reason: 'Photo is blurry',
+      reasonCode: 'UNREADABLE',
+      reviewGrantToken: rejectedReviewGrant,
     }, adminToken);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('REJECTED');
@@ -298,16 +414,22 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   });
 
   it('a rejected document cannot be re-reviewed', async () => {
-    const res = await inject('PUT', `/api/v1/admin/verification/${rejectedDocId}/approve`, {}, adminToken);
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('NOT_PENDING');
+    const decisionsBefore = await app.prisma.reviewDecision.count({ where: { case: { submissionId: rejectedDocId } } });
+    const res = await inject('PUT', `/api/v1/admin/verification/${rejectedDocId}/approve`, {
+      reason: TEST_ADMIN_REASON,
+      reviewGrantToken: rejectedReviewGrant,
+    }, adminToken);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('DOCUMENT_NOT_REVIEWABLE');
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: rejectedDocId } })).status).toBe('REJECTED');
+    expect(await app.prisma.reviewDecision.count({ where: { case: { submissionId: rejectedDocId } } })).toBe(decisionsBefore);
   });
 
   it('resubmission after rejection creates a fresh PENDING document', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: 'storage://t/national_id_v2.jpg',
+      ...await checklistUploads(moverUserId, 'MOVER', 'national_id', 'national-id-v2'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -323,9 +445,13 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     for (const doc of pending) {
       // [A-19] A reviewer keys the printed expiry; a document type that carries
       // one can no longer be approved without it.
-      const body = docTypeExpires(doc.docType)
-        ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() }
-        : {};
+      const body = {
+        reason: TEST_ADMIN_REASON,
+        reviewGrantToken: await reviewAuthority(doc.id),
+        ...(docTypeExpires(doc.docType)
+          ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() }
+          : {}),
+      };
       const res = await inject('PUT', `/api/v1/admin/verification/${doc.id}/approve`, body, adminToken);
       expect(res.statusCode, doc.docType).toBe(200);
     }
@@ -345,7 +471,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: 'storage://t/dupe.jpg',
+      ...await checklistUploads(moverUserId, 'MOVER', 'national_id', 'dupe'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -354,18 +480,19 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   });
 });
 
-describe('Provider auto-decisions (swappable interface)', () => {
-  it('auto-approves the vendor checklist and unlocks listing', async () => {
+describe('Provider evidence remains subject to human review', () => {
+  it('requires human approval of the full vendor checklist before unlocking listing', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'owner_national_id',
-      fileUrl: 'storage://t/auto-approve/owner_id.jpg',
+      ...await checklistUploads(vendorUserId, 'SERVICE', 'owner_national_id', 'auto-approve-owner-id'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
     expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
+    expect(res.json().data.status).toBe('PENDING');
     expect(res.json().data.kycRef).toMatch(/^sbx_/);
+    await approveWithReview(res.json().data.id, 'owner_national_id');
 
     // ID alone is not the SERVICE bar — police clearance is still missing
     // (service people enter customers' homes), so listing stays gated.
@@ -380,12 +507,13 @@ describe('Provider auto-decisions (swappable interface)', () => {
     const clearance = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'police_clearance',
-      fileUrl: 'storage://t/auto-approve/clearance.jpg',
+      ...await checklistUploads(vendorUserId, 'SERVICE', 'police_clearance', 'auto-approve-clearance'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
     expect(clearance.statusCode).toBe(201);
-    expect(clearance.json().data.status).toBe('APPROVED');
+    expect(clearance.json().data.status).toBe('PENDING');
+    await approveWithReview(clearance.json().data.id, 'police_clearance');
 
     const listing = await inject('POST', '/api/v1/vendor/items', {
       categoryId: serviceCategoryId,
@@ -402,24 +530,24 @@ describe('Provider auto-decisions (swappable interface)', () => {
 });
 
 describe('L2 identity — permanent customer verification', () => {
-  it('auto-approval promotes to L2 immediately', async () => {
-    const customer = await signup(L2_AUTO_PHONE, 'CUSTOMER');
+  it('provider-positive identity evidence promotes to L2 only after human approval', async () => {
+    const customer = await signup(L2_PROVIDER_PHONE, 'CUSTOMER');
     const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: 'storage://t/auto-approve/id.jpg',
-      selfieUrl: 'storage://t/selfie.jpg',
+      ...await identityUploads(customer.user.id, 'auto-approve-id'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
     expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
+    expect(res.json().data.status).toBe('PENDING');
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: customer.user.id } })).trustLevel).not.toBe('L2');
+    await approveWithReview(res.json().data.id, 'identity_l2');
 
-    const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_AUTO_PHONE } });
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_PROVIDER_PHONE } });
     expect(user.trustLevel).toBe('L2');
 
     // Already verified — no second submission
     const again = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: 'storage://t/id2.jpg',
-      selfieUrl: 'storage://t/selfie2.jpg',
+      ...await identityUploads(customer.user.id, 'id2'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
@@ -429,14 +557,16 @@ describe('L2 identity — permanent customer verification', () => {
   it('manual path: pending review, then admin approval promotes to L2', async () => {
     const customer = await signup(L2_MANUAL_PHONE, 'CUSTOMER');
     const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: 'storage://t/id.jpg',
-      selfieUrl: 'storage://t/selfie.jpg',
+      ...await identityUploads(customer.user.id, 'manual-id'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
     expect(res.json().data.status).toBe('PENDING');
 
-    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, {}, adminToken);
+    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, {
+      reason: TEST_ADMIN_REASON,
+      reviewGrantToken: await reviewAuthority(res.json().data.id),
+    }, adminToken);
     expect(approve.statusCode).toBe(200);
 
     const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_MANUAL_PHONE } });
@@ -446,15 +576,12 @@ describe('L2 identity — permanent customer verification', () => {
 
 describe('Expiry automation', () => {
   it('expires a document that lapses DURING pending review', async () => {
-    const doc = await app.prisma.verificationDocument.create({
-      data: {
-        userId: moverUserId,
-        role: 'MOVER',
-        docType: 'vehicle_insurance',
-        fileUrl: 'storage://t/lapsing.jpg',
-        status: 'PENDING',
-        expiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
-      },
+    const doc = await seedQueuedDocument({
+      userId: moverUserId,
+      roleKey: 'MOVER',
+      docType: 'vehicle_insurance',
+      marker: 'lapsing',
+      overrides: { expiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
     });
 
     await sweepService.expireLapsedDocuments();
@@ -504,53 +631,77 @@ describe('Expiry automation', () => {
 });
 
 describe('Document storage & DPA compliance', () => {
+  it('rejects legacy client object URLs as submission authority', async () => {
+    const before = await app.prisma.verificationDocument.count({ where: { userId: moverUserId } });
+    const document = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER',
+      docType: 'national_id',
+      fileUrl: `/uploads/verification/${moverUserId}/client-chosen.pdf`,
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, moverToken);
+    expect(document.statusCode).toBe(400);
+    const identity = await inject('POST', '/api/v1/verification/identity', {
+      idDocumentUrl: `/uploads/verification/${moverUserId}/client-chosen.pdf`,
+      selfieUrl: `/uploads/verification/${moverUserId}/client-chosen.png`,
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, moverToken);
+    expect(identity.statusCode).toBe(400);
+    expect(await app.prisma.verificationDocument.count({ where: { userId: moverUserId } })).toBe(before);
+  });
+
   it('rejects a document upload without consent (DPA §3.5)', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: 'storage://t/no-consent.jpg',
+      ...await checklistUploads(moverUserId, 'MOVER', 'national_id', 'no-consent'),
       // consent + privacyNoticeVersion intentionally omitted
     }, moverToken);
     expect(res.statusCode).toBe(400);
   });
 
-  it('issues a short-lived signed URL and audit-logs the access', async () => {
-    const doc = await app.prisma.verificationDocument.create({
-      data: {
-        userId: moverUserId,
-        role: 'MOVER',
-        docType: 'national_id',
-        fileUrl: '/uploads/verification/signed-me.jpg',
-        status: 'PENDING',
-        consentAt: new Date(),
-        privacyNoticeVersion: 'v1',
-      },
+  it('issues a short-lived authenticated render grant and audit-logs the actual fetch', async () => {
+    const doc = await seedQueuedDocument({
+      userId: moverUserId,
+      roleKey: 'MOVER',
+      docType: 'national_id',
+      marker: 'signed-me',
+      overrides: { consentAt: new Date(), privacyNoticeVersion: 'v1' },
     });
 
-    const res = await inject('GET', `/api/v1/admin/verification/${doc.id}/document-url`, undefined, adminToken);
-    expect(res.statusCode).toBe(200);
-    const { url, expiresInSeconds } = res.json().data;
+    const { url, expiresInSeconds, reviewGrantToken } = await mintDocumentGrant(doc.id);
     expect(expiresInSeconds).toBeGreaterThan(0);
-    // Signed + time-limited — never a raw public link
-    expect(url).toContain('expires=');
-    expect(url).toContain('signed-me.jpg');
+    expect(expiresInSeconds).toBeLessThanOrEqual(300);
+    expect(url).not.toContain(reviewGrantToken);
+    expect(url).not.toContain(doc.fileUrl);
+    const unauthenticated = await app.inject({ method: 'GET', url, headers: { 'x-swift-review-grant': reviewGrantToken } });
+    expect(unauthenticated.statusCode).toBe(401);
+    const rendered = await renderDocumentGrant(doc.id, reviewGrantToken);
+    expect(rendered.statusCode, rendered.body).toBe(200);
+    expect(rendered.headers['content-type']).toContain('application/pdf');
+    expect(rendered.headers['cache-control']).toContain('no-store');
+    expect(rendered.body).toContain('swift-test-signed-me');
+    const replay = await renderDocumentGrant(doc.id, reviewGrantToken);
+    expect(replay.statusCode).toBe(409);
+    expect(replay.json().error.code).toBe('REVIEW_GRANT_FETCHED');
 
-    const access = await app.prisma.auditLog.findFirst({
-      where: { action: 'VIEW_VERIFICATION_DOC', entityId: doc.id },
+    const access = await app.prisma.sensitiveReadLog.findFirst({
+      where: { action: 'FETCH_VERIFICATION_DOCUMENT', subjectId: doc.id, actorUserId: adminUserId },
     });
     expect(access).not.toBeNull();
   });
 
   it('retention purge deletes the object, clears the key, and blocks viewing (410)', async () => {
-    const doc = await app.prisma.verificationDocument.create({
-      data: {
-        userId: moverUserId,
-        role: 'MOVER',
-        docType: 'national_id',
-        fileUrl: '/uploads/verification/purge-me.jpg',
-        status: 'APPROVED',
+    const doc = await seedTrustedVerificationDocument(app.prisma, {
+      userId: moverUserId,
+      roleKey: 'MOVER',
+      docType: 'national_id',
+      marker: 'purge-me',
+      overrides: {
         consentAt: new Date(),
         privacyNoticeVersion: 'v1',
+        reviewedBy: adminUserId,
         retentionExpiresAt: new Date(Date.now() - 1000),
       },
     });
@@ -567,16 +718,12 @@ describe('Document storage & DPA compliance', () => {
   });
 
   it('scheduleDocumentRetention sets a future deletion date from CountryConfig', async () => {
-    const doc = await app.prisma.verificationDocument.create({
-      data: {
-        userId: moverUserId,
-        role: 'MOVER',
-        docType: 'national_id',
-        fileUrl: '/uploads/verification/retain-me.jpg',
-        status: 'APPROVED',
-        consentAt: new Date(),
-        privacyNoticeVersion: 'v1',
-      },
+    const doc = await seedTrustedVerificationDocument(app.prisma, {
+      userId: moverUserId,
+      roleKey: 'MOVER',
+      docType: 'national_id',
+      marker: 'retain-me',
+      overrides: { consentAt: new Date(), privacyNoticeVersion: 'v1', reviewedBy: adminUserId },
     });
 
     const count = await sweepService.scheduleDocumentRetention(moverUserId);
@@ -588,23 +735,32 @@ describe('Document storage & DPA compliance', () => {
   });
 });
 
-describe('Taxi checklist merge + auto-KYC audit', () => {
-  it('a mover can submit a taxi-only document and the auto-approval is audited', async () => {
+describe('Taxi checklist merge + human-decision audit', () => {
+  it('a mover can submit a taxi-only document and its human approval is audited', async () => {
     // hire_car_permit lives in MOVER_TAXI_EXTRA — only submittable via the merge
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'hire_car_permit',
-      fileUrl: 'storage://t/auto-approve/hire_permit.jpg',
+      ...await checklistUploads(moverUserId, 'MOVER', 'hire_car_permit', 'auto-approve-hire-permit'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
     expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
+    expect(res.json().data.status).toBe('PENDING');
+    await approveWithReview(res.json().data.id, 'hire_car_permit');
 
     const audit = await app.prisma.auditLog.findFirst({
-      where: { action: 'KYC_AUTO_APPROVE', entityId: res.json().data.id },
+      where: {
+        action: 'ADMIN PUT /api/v1/admin/verification/:id/approve',
+        entityId: res.json().data.id,
+        userId: adminUserId,
+      },
     });
     expect(audit).not.toBeNull();
+    const decision = await app.prisma.reviewDecision.findFirst({
+      where: { case: { submissionId: res.json().data.id }, reviewerId: adminUserId, outcome: 'APPROVE' },
+    });
+    expect(decision).not.toBeNull();
   });
 });
 
@@ -694,7 +850,7 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
   });
 });
 
-describe('Operator identity docs are face-matched against the signup selfie', () => {
+describe('Operator identity docs are face-matched against a fresh owned selfie', () => {
   let faceToken: string;
   let faceUserId: string;
 
@@ -704,8 +860,9 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     faceUserId = u.user.id;
   });
 
-  it('refuses an ID submission when no profile selfie exists', async () => {
-    // Models a pre-selfie account — strip what the fixture helper added.
+  it('refuses an ID submission when no fresh selfie receipt exists', async () => {
+    // Neither an absent profile photo nor a submitted document can stand in
+    // for the fresh, purpose-bound capture required for this verification.
     await app.prisma.user.update({
       where: { id: faceUserId },
       data: { selfieCapturedAt: null, avatar: null },
@@ -714,25 +871,41 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: 'storage://t/auto-approve/face-id.jpg',
+      ...await checklistUploads(faceUserId, 'MOVER', 'national_id', 'auto-approve-face-id', false),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, faceToken);
     expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('SELFIE_REQUIRED');
+    expect(res.json().error.code).toBe('SELFIE_REFRESH_REQUIRED');
 
     // A NON-identity document is unaffected by the missing selfie.
     const plain = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'vehicle_registration',
-      fileUrl: 'storage://t/face-reg.jpg',
+      ...await checklistUploads(faceUserId, 'MOVER', 'vehicle_registration', 'face-reg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, faceToken);
     expect(plain.statusCode).toBe(201);
   });
 
-  it('routes ID docs through verifyIdentity with the selfie; other docs through verifyDocument', async () => {
+  it('a profile selfie cannot replace the fresh verification selfie receipt', async () => {
+    await app.prisma.user.update({
+      where: { id: faceUserId },
+      data: { selfieCapturedAt: new Date(), avatar: 'storage://seed/face-selfie.jpg' },
+    });
+    const res = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER',
+      docType: 'national_id',
+      ...await checklistUploads(faceUserId, 'MOVER', 'national_id', 'profile-selfie-is-not-authority', false),
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, faceToken);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('SELFIE_REFRESH_REQUIRED');
+  });
+
+  it('routes ID docs through verifyIdentity with the fresh selfie; other docs through verifyDocument', async () => {
     await app.prisma.user.update({
       where: { id: faceUserId },
       data: { selfieCapturedAt: new Date(), avatar: 'storage://seed/face-selfie.jpg' },
@@ -740,6 +913,8 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
 
     const calls: Array<{ path: string; input: Record<string, unknown> }> = [];
     const recorder = {
+      engine: { name: 'test-recorder', version: '1', external: false },
+      biometricCaptureAssurance: 'TEST_SIMULATED' as const,
       verifyIdentity: async (input: { userId: string; idDocumentUrl: string; selfieUrl: string }) => {
         calls.push({ path: 'identity', input });
         return { status: 'approved' as const, referenceToken: 'stub_identity' };
@@ -756,27 +931,34 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
       recorder,
     );
 
-    await svc.submitDocument(faceUserId, 'MOVER', 'national_id', 'storage://t/face-id2.jpg', 'v1');
-    await svc.submitDocument(faceUserId, 'MOVER', 'drivers_licence', 'storage://t/face-dl.jpg', 'v1');
+    const faceId = await submitDocumentWithUpload(app.prisma, svc, {
+      userId: faceUserId, roleKey: 'MOVER', docType: 'national_id', marker: 'face-id2', privacyNoticeVersion: 'v1',
+    });
+    const faceLicence = await submitDocumentWithUpload(app.prisma, svc, {
+      userId: faceUserId, roleKey: 'MOVER', docType: 'drivers_licence', marker: 'face-dl', privacyNoticeVersion: 'v1',
+    });
 
     expect(calls).toHaveLength(2);
     expect(calls[0]).toEqual({
       path: 'identity',
       input: {
         userId: faceUserId,
-        idDocumentUrl: 'storage://t/face-id2.jpg',
-        selfieUrl: 'storage://seed/face-selfie.jpg', // the signup selfie IS the match target
+        idDocumentUrl: faceId.primary.providerKey,
+        selfieUrl: faceId.selfie!.providerKey,
       },
     });
-    expect(calls[1]?.path).toBe('document');
+    expect(calls[0]?.input['selfieUrl']).not.toBe('storage://seed/face-selfie.jpg');
+    expect(calls[1]).toEqual({
+      path: 'document',
+      input: { userId: faceUserId, docType: 'drivers_licence', fileUrl: faceLicence.primary.providerKey },
+    });
   });
 });
 
-describe('Subscriptions are born on verification (auto-approval path)', () => {
-  // The dead-end this prevents: KYC auto-approves the full checklist, the
-  // operator is "verified", but only the ADMIN entity-verify endpoints ever
-  // started trials — so go-online failed with SUBSCRIPTION_REQUIRED and there
-  // was no self-serve way out.
+describe('Subscriptions are born after human approval of the complete checklist', () => {
+  // Completing the document review must start the eligible operator's trial
+  // without a separate admin entity-verification action. Approval of several
+  // documents must still create exactly one subscription.
   it('a fully-verified mover holds exactly one TRIAL subscription', async () => {
     const rider = await app.prisma.rider.findFirstOrThrow({
       where: { userId: moverUserId },
@@ -825,12 +1007,16 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'owner_national_id',
-      fileUrl: 'storage://t/auto-approve/owner_id_renewed.jpg',
+      ...await checklistUploads(vendorUserId, 'SERVICE', 'owner_national_id', 'auto-approve-owner-id-renewed'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
     expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
+    expect(res.json().data.status).toBe('PENDING');
+    const awaitingReview = await app.prisma.vendor.findUniqueOrThrow({ where: { id: serviceVendorId } });
+    expect(awaitingReview.isVerified).toBe(false);
+    expect(awaitingReview.acceptingOrders).toBe(false);
+    await approveWithReview(res.json().data.id, 'owner_national_id');
 
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: serviceVendorId } });
     expect(vendor.isVerified).toBe(true);
@@ -878,8 +1064,8 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     const off = await inject('PUT', '/api/v1/vendor/vendor/toggle-orders', {}, vendorToken);
     expect(off.json().data.acceptingOrders).toBe(false);
 
-    // …then a document renewal is approved (police clearance enters its
-    // 30-day window and the renewal auto-approves).
+    // …then a reviewer approves a renewal submitted during the police
+    // clearance's 30-day renewal window.
     await app.prisma.verificationDocument.updateMany({
       where: { userId: vendorUserId, docType: 'police_clearance', status: 'APPROVED' },
       data: { expiresAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) },
@@ -887,11 +1073,13 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     const renewal = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'police_clearance',
-      fileUrl: 'storage://t/auto-approve/clearance_renewed.jpg',
+      ...await checklistUploads(vendorUserId, 'SERVICE', 'police_clearance', 'auto-approve-clearance-renewed'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
     expect(renewal.statusCode).toBe(201);
+    expect(renewal.json().data.status).toBe('PENDING');
+    await approveWithReview(renewal.json().data.id, 'police_clearance');
 
     // Still verified — but the pause the owner chose stays.
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: serviceVendorId } });
@@ -909,7 +1097,7 @@ describe('Early renewal window — resubmission opens 30 days before expiry', ()
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'drivers_licence',
-      fileUrl: 'storage://t/licence_renewal.jpg',
+      ...await checklistUploads(moverUserId, 'MOVER', 'drivers_licence', 'licence-renewal'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -925,7 +1113,7 @@ describe('Early renewal window — resubmission opens 30 days before expiry', ()
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'vehicle_registration',
-      fileUrl: 'storage://t/too-early.jpg',
+      ...await checklistUploads(moverUserId, 'MOVER', 'vehicle_registration', 'too-early'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -946,26 +1134,28 @@ describe('Taxi hire-class insurance — the manual 5-point check is enforced', (
     taxiUserId = u.id;
     // Full CAR checklist approved; insurance reviewed HIRE + hire class
     // confirmed, but the reviewer has NOT cross-checked the plate yet.
-    await app.prisma.verificationDocument.createMany({
-      data: TAXI_CHECKLIST.map((docType) => ({
+    for (const docType of TAXI_CHECKLIST) {
+      await seedTrustedVerificationDocument(app.prisma, {
         userId: taxiUserId,
-        role: 'MOVER' as const,
+        roleKey: 'MOVER',
         docType,
-        fileUrl: `storage://t/taxi/${docType}.jpg`,
-        status: 'APPROVED' as const,
-        reviewedBy: 'test',
-        reviewedAt: new Date(),
-        consentAt: new Date(),
-        privacyNoticeVersion: 'v1',
-        ...(docType === 'vehicle_insurance' && {
-          insurerName: 'Demerara Mutual',
-          policyNumber: 'HC-TEST-5PT',
-          coverageClass: 'HIRE' as const,
-          hireClassConfirmed: true,
-          plateCrossChecked: false,
-        }),
-      })),
-    });
+        marker: `taxi-${docType}`,
+        overrides: {
+          reviewedBy: adminUserId,
+          reviewedAt: new Date(),
+          consentAt: new Date(),
+          privacyNoticeVersion: 'v1',
+          ...(docTypeExpires(docType) && { expiresAt: new Date(Date.now() + 200 * 86_400_000) }),
+          ...(docType === 'vehicle_insurance' && {
+            insurerName: 'Demerara Mutual',
+            policyNumber: 'HC-TEST-5PT',
+            coverageClass: 'HIRE' as const,
+            hireClassConfirmed: true,
+            plateCrossChecked: false,
+          }),
+        },
+      });
+    }
   });
 
   it('blocks live operation until the plate cross-check is confirmed', async () => {
@@ -1100,11 +1290,16 @@ describe('[A-19] an expiring document cannot be approved without its expiry', ()
   });
 
   it('the route refuses the approval, and the document stays PENDING', async () => {
-    const pending = await app.prisma.verificationDocument.findFirst({
-      where: { status: 'PENDING', docType: { in: ['drivers_licence', 'vehicle_insurance', 'police_clearance'] } },
+    const pending = await seedQueuedDocument({
+      userId: moverUserId,
+      roleKey: 'MOVER',
+      docType: 'drivers_licence',
+      marker: 'expiry-required',
     });
-    if (!pending) return; // no such candidate in this fixture run
-    const res = await inject('PUT', `/api/v1/admin/verification/${pending.id}/approve`, {}, adminToken);
+    const res = await inject('PUT', `/api/v1/admin/verification/${pending.id}/approve`, {
+      reason: TEST_ADMIN_REASON,
+      reviewGrantToken: await reviewAuthority(pending.id),
+    }, adminToken);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('EXPIRY_REQUIRED');
     const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: pending.id } });
@@ -1113,21 +1308,28 @@ describe('[A-19] an expiring document cannot be approved without its expiry', ()
 });
 
 describe('[A-19] the reviewer can see what they are asked to cross-check', () => {
-  it('the queue sends the driver’s plate and vehicle with each document', async () => {
+  it('the claimed document detail supplies the plate and vehicle without exposing them in the queue', async () => {
+    const taxi = await app.prisma.user.findUniqueOrThrow({ where: { phone: TAXI_MOVER_PHONE } });
+    const driver = await app.prisma.driver.findUniqueOrThrow({ where: { userId: taxi.id } });
+    const document = await seedQueuedDocument({
+      userId: taxi.id,
+      roleKey: 'MOVER',
+      docType: 'vehicle_insurance',
+      marker: 'plate-cross-check-detail',
+    });
     const res = await inject('GET', '/api/v1/admin/verification/queue?status=PENDING&role=operator&limit=100', undefined, adminToken);
     expect(res.statusCode).toBe(200);
     const rows = res.json().data as Array<{ user?: { driver?: unknown } }>;
-    // The console shows a "cross-checked against the H-plate" checkbox. If the
-    // plate never reaches the page, that checkbox asserts something the
-    // operator cannot see — so the SHAPE has to be on the wire.
-    const withDriver = rows.find((r) => r.user?.driver);
-    if (withDriver) {
-      expect(withDriver.user!.driver).toHaveProperty('licensePlate');
-      expect(withDriver.user!.driver).toHaveProperty('vehicleMake');
-    } else {
-      // no driver applicant in this fixture run — assert the selection exists
-      const routes = readFileSync(join(__dirname, '../modules/admin/admin.routes.ts'), 'utf8');
-      expect(routes).toMatch(/driver: \{ select: \{ licensePlate: true/);
-    }
+    for (const row of rows) expect(row.user).not.toHaveProperty('driver');
+    const beforeClaim = await inject('GET', `/api/v1/admin/verification/${document.id}/review-detail`, undefined, adminToken);
+    expect(beforeClaim.statusCode).toBe(409);
+    await claimDocument(document.id);
+    const detail = await inject('GET', `/api/v1/admin/verification/${document.id}/review-detail`, undefined, adminToken);
+    expect(detail.statusCode, detail.body).toBe(200);
+    expect(detail.json().data.applicant.driver).toMatchObject({
+      licensePlate: driver.licensePlate,
+      vehicleMake: driver.vehicleMake,
+      vehicleModel: driver.vehicleModel,
+    });
   });
 });

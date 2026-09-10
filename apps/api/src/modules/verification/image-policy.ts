@@ -13,6 +13,7 @@
  */
 import type { PrismaClient } from '@prisma/client';
 import type { VerificationService } from './verification.service';
+import { IDENTITY_DOC_TYPE } from './verification.service';
 
 export interface ImagePolicyRun { candidates: number; purged: number; probeFailed: number; skipped: number }
 
@@ -32,9 +33,14 @@ export async function applyImagePolicy(
   const byCountry = new Map<string, string[]>();
   for (const t of purgeTypes) byCountry.set(t.countryCode, [...(byCountry.get(t.countryCode) ?? []), t.legacyCode]);
   for (const [countryCode, legacyCodes] of byCountry) {
+    // L2 uses a synthetic submission type, but its bytes are the country's
+    // national-ID evidence and must obey the same PERSONAL image policy.
+    const candidateTypes = legacyCodes.includes('national_id')
+      ? [...new Set([...legacyCodes, IDENTITY_DOC_TYPE])]
+      : legacyCodes;
     const docs = await prisma.verificationDocument.findMany({
       where: {
-        state: 'COMMITTED', docType: { in: legacyCodes }, imagePurgedAt: null, purgedAt: null, legalHoldId: null, fileUrl: { not: '' },
+        state: 'COMMITTED', storageProvenance: 'VERIFIED', docType: { in: candidateTypes }, imagePurgedAt: null, purgedAt: null, legalHoldId: null, fileUrl: { not: '' },
         user: { countryCode },
         extractionRuns: { some: { outcome: 'OK' } },
       },

@@ -19,7 +19,7 @@ import { storageSigningKeys } from '../../utils/signing-keys';
 
 export interface KeyProvider {
   wrapDek(dek: Buffer): Promise<Buffer>;
-  unwrapDek(wrapped: Buffer): Promise<Buffer>;
+  unwrapDek(wrapped: Buffer, options?: { signal?: AbortSignal }): Promise<Buffer>;
 }
 
 /** KEK from MASTER_KEK (base64, 32 bytes); wrap = AES-256-GCM over the DEK. */
@@ -42,13 +42,16 @@ export class EnvKeyProvider implements KeyProvider {
     return Buffer.concat([iv, cipher.getAuthTag(), ct]);
   }
 
-  async unwrapDek(wrapped: Buffer): Promise<Buffer> {
+  async unwrapDek(wrapped: Buffer, options: { signal?: AbortSignal } = {}): Promise<Buffer> {
+    options.signal?.throwIfAborted();
     const iv = wrapped.subarray(0, 12);
     const tag = wrapped.subarray(12, 28);
     const ct = wrapped.subarray(28);
     const decipher = crypto.createDecipheriv('aes-256-gcm', this.kek, iv);
     decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(ct), decipher.final()]);
+    const result = Buffer.concat([decipher.update(ct), decipher.final()]);
+    options.signal?.throwIfAborted();
+    return result;
   }
 }
 
@@ -92,10 +95,10 @@ export function resetKeyProviderForTests() {
 // [M-37] The keyring never falls open in production; see utils/signing-keys.
 const renderSecret = () => storageSigningKeys().current.secret;
 
-export function signRenderToken(docId: string, expires: number): string {
+export function signRenderToken(docId: string, expires: number, actorId?: string): string {
   return crypto
     .createHmac('sha256', renderSecret())
-    .update(`render:${docId}:${expires}`)
+    .update(`render:${docId}:${expires}${actorId ? `:actor:${actorId}` : ''}`)
     .digest('hex')
     .slice(0, 32);
 }
@@ -104,17 +107,18 @@ export function signRenderToken(docId: string, expires: number): string {
  *  `sig === expected` compares byte-by-byte and short-circuits on the first
  *  mismatch, leaking — through response timing — how much of the HMAC an
  *  attacker has already guessed. timingSafeEqual removes that oracle. */
-export function verifyRenderToken(docId: string, expires: number, sig: string): boolean {
-  const expected = Buffer.from(signRenderToken(docId, expires));
+export function verifyRenderToken(docId: string, expires: number, sig: string, actorId?: string): boolean {
+  const expected = Buffer.from(signRenderToken(docId, expires, actorId));
   const provided = Buffer.from(sig);
   return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
 }
 
 /** Path (relative to the API origin) for a time-limited decrypted render. */
-export function mintRenderPath(docId: string, ttlSeconds = 300): { path: string; expiresInSeconds: number } {
+export function mintRenderPath(docId: string, ttlSeconds = 300, actorId?: string): { path: string; expiresInSeconds: number } {
   const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
+  const actor = actorId ? `&actor=${encodeURIComponent(actorId)}` : '';
   return {
-    path: `/api/v1/verification/render/${docId}?expires=${expires}&sig=${signRenderToken(docId, expires)}`,
+    path: `/api/v1/verification/render/${docId}?expires=${expires}&sig=${signRenderToken(docId, expires, actorId)}${actor}`,
     expiresInSeconds: ttlSeconds,
   };
 }

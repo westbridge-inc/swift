@@ -93,6 +93,12 @@ export class IdentityService {
       // The account row is also the authority for capture provenance; callers
       // cannot accidentally (or deliberately) stamp a foreign/default tenant.
       return await runWithoutTenant(() => this.prisma.$transaction(async (tx) => {
+        // Review recusal takes the same lock before reading cluster membership.
+        // This coarse lock is intentional: identity capture is low-volume and
+        // no review decision may race a cluster union involving any account.
+        await tx.$queryRaw<Array<{ locked: string }>>`
+          SELECT pg_advisory_xact_lock(hashtextextended('identity-graph-membership', 0))::text AS locked
+        `;
         // Serialize the first capture of one normalized signal across every
         // API node. Without this lock, two simultaneous accounts can each
         // insert an uncommitted key, miss the other in their peer query, and

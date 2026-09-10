@@ -40,7 +40,7 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
       AND: [
         { OR: [{ expiresOn: null }, { expiresOn: { gt: now } }] },
         { OR: [{ accountId: userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])] },
-        { submission: { purgedAt: null, OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] } },
+        { submission: { storageProvenance: 'VERIFIED', purgedAt: null, OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] } },
       ],
     },
     select: {

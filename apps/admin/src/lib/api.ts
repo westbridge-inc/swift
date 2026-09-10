@@ -1,5 +1,15 @@
 const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 
+/** Review media is served only by Swift's API render boundary. Refuse an
+ * absolute/provider URL so a future backend regression cannot make the admin
+ * browser send sensitive document context to an arbitrary origin. */
+export function apiMediaUrl(path: string): string {
+  if (!path.startsWith('/') || path.startsWith('//')) {
+    throw new Error('The document viewer refused a non-Swift media URL.');
+  }
+  return `${API_URL}${path}`;
+}
+
 // ── The session ──────────────────────────────────────────────────────────────
 // [A-01] THE CONSOLE HOLDS NO CREDENTIAL. The session is an HttpOnly cookie pair
 // the API sets when this client names itself (`X-Swift-Client: admin-web`) —
@@ -522,14 +532,43 @@ export const rejectCreative = (id: string, reason: string, notes?: string) =>
     body: JSON.stringify({ reason, ...(notes ? { notes } : {}) }),
   });
 
-export const fetchVerificationQueue = (status = 'PENDING', role = 'operator') =>
-  apiFetch(`/api/v1/admin/verification/queue?status=${status}&role=${role}&limit=100`);
+export const fetchVerificationQueue = (status = 'PENDING', role = 'operator', page = 1, limit = 25) =>
+  apiFetch(`/api/v1/admin/verification/queue?status=${status}&role=${role}&page=${page}&limit=${limit}`);
+export const getVerificationReviewDetail = (id: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/review-detail`, { cache: 'no-store' });
 export const getDocSignedUrl = (id: string) =>
-  apiFetch(`/api/v1/admin/verification/${id}/document-url`);
-export const approveDoc = (id: string, body?: { expiresAt?: string; insurance?: InsuranceCheck }) =>
-  apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}) });
-export const rejectDoc = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
+  apiFetch(`/api/v1/admin/verification/${id}/document-url`, { cache: 'no-store' });
+export const acknowledgeVerificationDocumentRendered = (id: string, reviewGrantToken: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/render-ack`, {
+    method: 'POST',
+    body: JSON.stringify({ reviewGrantToken }),
+  });
+export const claimVerificationCase = (id: string) =>
+  apiFetch(`/api/v1/admin/verification/cases/${id}/claim`, { method: 'POST', body: '{}' });
+export const releaseVerificationCase = (id: string) =>
+  apiFetch(`/api/v1/admin/verification/cases/${id}/release`, { method: 'POST', body: '{}' });
+export const VERIFICATION_REJECTION_REASON_CODES = [
+  'EXPIRED', 'UNREADABLE', 'WRONG_DOCUMENT', 'FACE_MISMATCH', 'NAME_MISMATCH',
+  'INSURANCE_NOT_HIRE', 'NOT_YELLOW', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
+  'WRONG_PLATE_CLASS',
+] as const;
+export type VerificationRejectionReasonCode = (typeof VERIFICATION_REJECTION_REASON_CODES)[number];
+export const approveDoc = (id: string, body: {
+  reason: string;
+  reviewGrantToken: string;
+  expiresAt?: string;
+  insurance?: InsuranceCheck;
+}) =>
+  apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body) });
+export const rejectDoc = (
+  id: string,
+  reason: string,
+  reasonCode: VerificationRejectionReasonCode,
+  reviewGrantToken: string,
+) => apiFetch(`/api/v1/admin/verification/${id}/reject`, {
+  method: 'PUT',
+  body: JSON.stringify({ reason, reasonCode, reviewGrantToken }),
+});
 
 // ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
 // GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been
