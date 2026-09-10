@@ -764,7 +764,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeUrl}`];
     if (!authority?.entity) return;
     const params = (request.params ?? {}) as Record<string, string>;
-    request.auditBefore = await snapshot(app.prisma, authority.entity, params[authority.entity.param ?? 'id']);
+    request.auditBefore = await snapshot(app.prisma, authority.entity, params[authority.entity.routeParam ?? 'id']);
   });
 
   // [ADM-007] EVERY SENSITIVE READ LEAVES A RECORD.
@@ -864,7 +864,7 @@ export async function adminRoutes(app: FastifyInstance) {
       const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeTemplateOf(request, app.prefix)}`];
       const before: EntitySnapshot = (request as { auditBefore?: EntitySnapshot }).auditBefore ?? ABSENT;
       const after = authority?.entity
-        ? await snapshot(app.prisma, authority.entity, params[authority.entity.param ?? 'id'])
+        ? await snapshot(app.prisma, authority.entity, params[authority.entity.routeParam ?? 'id'])
         : ABSENT;
       // [ADM-002] One builder, both writers — so a route that migrates to
       // `auditWithin` writes the row it wrote before, at a safer moment.
@@ -876,7 +876,9 @@ export async function adminRoutes(app: FastifyInstance) {
           before,
           after,
           entityDeclared: !!authority?.entity,
+          entity: authority?.entity,
           entityOverride: isAuditedRead ? 'integrity' : undefined,
+          cls: authority?.cls,
         }) as never,
       });
     } catch (err) {
@@ -919,8 +921,18 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/verification/doc-types/:code/external-processing', { preHandler: [platformControlGuard] }, async (request) => {
     const { code } = request.params as { code: string };
     const body = z.object({ allowed: z.boolean(), decisionRef: z.string().trim().min(3).max(120).optional(), reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    const result = await recordExternalProcessingDecision(app.prisma, { code, allowed: body.allowed, decisionRef: body.decisionRef ?? null, reason: body.reason },
-      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: code, reason: body.reason, extra: facts }));
+    // [review] ONE reason, and it is the one that was VALIDATED. `reasonProblem`
+    // (the C4 guard) checks the STATED reason — the header when present, at
+    // ADMIN_REASON_MIN characters — while this route's own zod requires only
+    // min(3) on the body field. Passing `body.reason` therefore made the reason
+    // validated and the reason recorded two different strings, on the single
+    // route this whole change exists for, and left it disagreeing with the
+    // sibling route whose comment states the rule. No override: `auditWithin`
+    // derives the same value through `reasonOf(body, headers)`, and the
+    // decision row is given it too so the two can never diverge.
+    const stated = reasonOf(request.body, request.headers as never) ?? body.reason;
+    const result = await recordExternalProcessingDecision(app.prisma, { code, allowed: body.allowed, decisionRef: body.decisionRef ?? null, reason: stated },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: code, extra: facts }));
     return { success: true, data: result.after };
   });
 
@@ -5078,6 +5090,11 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/cash-rules/rlp/movers/:userId/suspend', { preHandler: [adminGuard] }, async (request) => {
     const { userId } = request.params as { userId: string };
     const body = z.object({ reason: z.string().min(5).max(500) }).parse(request.body ?? {});
+    // [review] NO `reason` override. `auditWithin` derives it through
+    // `reasonOf(body, headers)`, where the HEADER wins — the rule ADM-006
+    // validates against. Passing `body.reason` here made the reason VALIDATED
+    // and the reason RECORDED two different strings, and left this route
+    // disagreeing with its own sibling one line below.
     const user = await cashRules.suspendLossProtection(userId, body.reason,
       (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: user };
