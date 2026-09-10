@@ -12,7 +12,7 @@
     "legal:sync": "tsx scripts/sync-legal.ts"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.66.0",
+    "@tanstack/react-query": "^5.102.8",
     "lucide-react": "^0.475.0",
     "next": "^15.5.24",
     "react": "^19.0.0",
