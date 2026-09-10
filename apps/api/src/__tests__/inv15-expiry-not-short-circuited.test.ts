@@ -71,4 +71,30 @@ describe('[AUD-L8b-001 / INV-15] an expired document takes a verified mover off 
     );
     expect(status).toEqual({ allowed: true, reason: 'ok' });
   });
+
+  it('the flag still grandfathers when a checklist type was NEVER filed, so later gates still get their turn', async () => {
+    // The regression CI caught. A taxi fixture holds a vehicle_insurance record
+    // and no licence record. Scoping the "was it ever filed" question to the
+    // WHOLE checklist saw that insurance row, disabled the grandfather, and
+    // returned 'docs' — hiding the insurance verdict the caller was asserting.
+    // Asked of the MISSING types only, the clause still applies and the taxi
+    // insurance gate below is reached and returns its own reason.
+    const svc = service();
+    const status = await svc.getLiveOperationStatus(
+      'user-insurance-only',
+      { vehicleType: 'CAR' as never, legacyVerified: true },
+      {
+        user: { findUnique: async () => ({ countryCode: 'GY' }) },
+        subjectLink: { findMany: async () => [] },
+        documentRecord: {
+          // nothing CURRENT for the checklist, and nothing ever filed for the
+          // two types that are missing
+          findMany: async () => [],
+          count: async () => 0,
+        },
+      } as never,
+    );
+    // reaches the passenger-vehicle insurance leg rather than stopping at 'docs'
+    expect(status).toEqual({ allowed: false, reason: 'insurance' });
+  });
 });

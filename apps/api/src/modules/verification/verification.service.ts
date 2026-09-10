@@ -1432,9 +1432,17 @@ export class VerificationService {
     } else {
       const approvedDocs = await this.approvedEvidence(db, userId, required, now);
       const approved = new Set(approvedDocs.map((d) => d.docType));
-      baseOk = required.every((docType) => approved.has(docType));
+      const missing = required.filter((docType) => !approved.has(docType));
+      baseOk = missing.length === 0;
       if (!baseOk && (opts.legacyVerified ?? false)) {
-        baseOk = !(await anyChecklistEvidenceFor(db, userId, required));
+        // The question is asked of the MISSING types only, and that distinction
+        // is the whole rule. A type that is missing because a record EXISTS and
+        // is no longer current is an expiry — exactly what the flag must not be
+        // allowed to paper over. A type that is missing because no record was
+        // ever filed is an absence, which is the pre-checklist state the clause
+        // was written for, and which other gates (hire insurance below, the
+        // vendor checklist, admin review) still judge on their own terms.
+        baseOk = !(await anyChecklistEvidenceFor(db, userId, missing));
       }
     }
     if (!baseOk) return { allowed: false, reason: 'docs' };

@@ -59,9 +59,12 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
  * [AUD-L8b-001] Has this account EVER held checklist evidence — valid, expired,
  * rejected or superseded?
  *
- * `approvedEvidenceFor` answers "what is current". This answers "is this account
- * inside the document system at all", which is the only question the legacy
- * `documentsVerified` grandfather clause was ever entitled to ask. Same ownership
+ * `approvedEvidenceFor` answers "what is current". This answers "was a record
+ * for this type ever filed", which is the only question the legacy
+ * `documentsVerified` grandfather clause was ever entitled to ask — and it is
+ * asked of the MISSING types alone. A type missing because its record lapsed is
+ * an expiry; a type missing because nothing was ever filed is the pre-checklist
+ * state the clause exists for. Same ownership
  * and purge filters as above; deliberately NO status or expiry filter, because a
  * record that has expired is precisely the case the flag must not be allowed to
  * paper over.
