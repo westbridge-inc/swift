@@ -54,3 +54,33 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
     hireClassConfirmed: r.submission.hireClassConfirmed, plateCrossChecked: r.submission.plateCrossChecked,
   }));
 }
+
+/**
+ * [AUD-L8b-001] Has this account EVER held checklist evidence — valid, expired,
+ * rejected or superseded?
+ *
+ * `approvedEvidenceFor` answers "what is current". This answers "is this account
+ * inside the document system at all", which is the only question the legacy
+ * `documentsVerified` grandfather clause was ever entitled to ask. Same ownership
+ * and purge filters as above; deliberately NO status or expiry filter, because a
+ * record that has expired is precisely the case the flag must not be allowed to
+ * paper over.
+ */
+export async function anyChecklistEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[]): Promise<boolean> {
+  if (checklist.length === 0) return false;
+  const vehicles = await db.subjectLink.findMany({
+    where: { accountId: userId, validTo: null, subject: { kind: 'VEHICLE' } },
+    select: { subjectId: true },
+  });
+  const vehicleIds = vehicles.map((v) => v.subjectId);
+  const held = await db.documentRecord.count({
+    where: {
+      docType: { in: [...checklist] },
+      AND: [
+        { OR: [{ accountId: userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])] },
+        { submission: { purgedAt: null } },
+      ],
+    },
+  });
+  return held > 0;
+}
