@@ -30,7 +30,7 @@
     "expo-application": "~56.0.3",
     "expo-camera": "~56.0.8",
     "expo-constants": "~56.0.18",
-    "expo-crypto": "~56.0.4",
+    "expo-crypto": "~57.0.2",
     "expo-dev-client": "~56.0.26",
     "expo-document-picker": "~56.0.4",
     "expo-font": "~56.0.7",
