@@ -43,9 +43,9 @@
     "expo-splash-screen": "~56.0.10",
     "expo-task-manager": "~56.0.21",
     "expo-video": "~56.1.4",
-    "expo-web-browser": "^57.0.0",
-    "libphonenumber-js": "^1.13.8",
-    "react": "19.2.3",
+    "expo-web-browser": "^57.0.2",
+    "libphonenumber-js": "^1.13.12",
+    "react": "19.2.8",
     "react-native": "^0.85.3",
     "react-native-gesture-handler": "^2.31.2",
     "react-native-maps": "^1.20.0",
@@ -53,12 +53,12 @@
     "react-native-reanimated": "^4.3.1",
     "react-native-safe-area-context": "^5.2.0",
     "react-native-screens": "^4.25.2",
-    "react-native-svg": "15.15.4",
+    "react-native-svg": "15.15.5",
     "socket.io-client": "^4.8.0",
-    "zustand": "^5.0.0"
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
-    "@types/react": "^19.0.0",
+    "@types/react": "^19.2.18",
     "typescript": "^6.0.3",
     "vite": "8.0.16",
     "vitest": "^4.1.0"
