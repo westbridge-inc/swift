@@ -54,3 +54,36 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
     hireClassConfirmed: r.submission.hireClassConfirmed, plateCrossChecked: r.submission.plateCrossChecked,
   }));
 }
+
+/**
+ * [AUD-L8b-001] Has this account EVER held checklist evidence — valid, expired,
+ * rejected or superseded?
+ *
+ * `approvedEvidenceFor` answers "what is current". This answers "was a record
+ * for this type ever filed", which is the only question the legacy
+ * `documentsVerified` grandfather clause was ever entitled to ask — and it is
+ * asked of the MISSING types alone. A type missing because its record lapsed is
+ * an expiry; a type missing because nothing was ever filed is the pre-checklist
+ * state the clause exists for. Same ownership
+ * and purge filters as above; deliberately NO status or expiry filter, because a
+ * record that has expired is precisely the case the flag must not be allowed to
+ * paper over.
+ */
+export async function anyChecklistEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[]): Promise<boolean> {
+  if (checklist.length === 0) return false;
+  const vehicles = await db.subjectLink.findMany({
+    where: { accountId: userId, validTo: null, subject: { kind: 'VEHICLE' } },
+    select: { subjectId: true },
+  });
+  const vehicleIds = vehicles.map((v) => v.subjectId);
+  const held = await db.documentRecord.count({
+    where: {
+      docType: { in: [...checklist] },
+      AND: [
+        { OR: [{ accountId: userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])] },
+        { submission: { purgedAt: null } },
+      ],
+    },
+  });
+  return held > 0;
+}

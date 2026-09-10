@@ -6,7 +6,7 @@ import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClass
 import { BUCKET_OF } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
-import { approvedEvidenceFor } from './evidence';
+import { approvedEvidenceFor, anyChecklistEvidenceFor } from './evidence';
 import { compileStorefrontDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
@@ -1411,15 +1411,38 @@ export class VerificationService {
     if (!user) return { allowed: false, reason: 'docs' };
 
     const now = new Date();
-    let baseOk = opts.legacyVerified ?? false;
-    if (!baseOk) {
-      const required = await this.countryConfig.getMoverChecklist(user.countryCode, opts.vehicleType);
-      if (required.length === 0) {
-        baseOk = true;
-      } else {
-        const approvedDocs = await this.approvedEvidence(db, userId, required, now);
-        const approved = new Set(approvedDocs.map((d) => d.docType));
-        baseOk = required.every((docType) => approved.has(docType));
+    // [AUD-L8b-001 · INV-15] The checklist is evaluated FIRST, always. This used
+    // to read `let baseOk = opts.legacyVerified ?? false` and only evaluate
+    // `if (!baseOk)` — and because `approvedEvidence(..., now)` is the ONLY place
+    // `now` is consulted, a true flag made document expiry unreachable code.
+    // `admin.routes.ts` sets `documentsVerified` on EVERY successful verification,
+    // so the clause named "legacy" in fact covered every verified mover on the
+    // platform: an expired licence or police clearance never took anyone off the
+    // road, and the daily sweep below could not either, because it passes this
+    // same flag back in.
+    //
+    // The grandfather clause keeps the job it was written for and loses the one it
+    // was never entitled to: it may rescue an account with NO checklist evidence at
+    // all (a genuine pre-checklist account, where nothing can have expired), and it
+    // may never override evidence that exists and is no longer current.
+    const required = await this.countryConfig.getMoverChecklist(user.countryCode, opts.vehicleType);
+    let baseOk: boolean;
+    if (required.length === 0) {
+      baseOk = true;
+    } else {
+      const approvedDocs = await this.approvedEvidence(db, userId, required, now);
+      const approved = new Set(approvedDocs.map((d) => d.docType));
+      const missing = required.filter((docType) => !approved.has(docType));
+      baseOk = missing.length === 0;
+      if (!baseOk && (opts.legacyVerified ?? false)) {
+        // The question is asked of the MISSING types only, and that distinction
+        // is the whole rule. A type that is missing because a record EXISTS and
+        // is no longer current is an expiry — exactly what the flag must not be
+        // allowed to paper over. A type that is missing because no record was
+        // ever filed is an absence, which is the pre-checklist state the clause
+        // was written for, and which other gates (hire insurance below, the
+        // vendor checklist, admin review) still judge on their own terms.
+        baseOk = !(await anyChecklistEvidenceFor(db, userId, missing));
       }
     }
     if (!baseOk) return { allowed: false, reason: 'docs' };
