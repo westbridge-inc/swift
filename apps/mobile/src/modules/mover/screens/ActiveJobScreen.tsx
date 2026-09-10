@@ -26,7 +26,7 @@ import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
 import { openExternal } from '../../../lib/openExternal';
 import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
-import { doorFor, recordDoorBlocked, recordDoorMismatch } from '../../../lib/handoverAuthority';
+import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
 import { telUrl } from '../../../lib/emergencyPolicy';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
@@ -226,8 +226,10 @@ export function ActiveJobScreen({ navigation }: any) {
   const doorBlocked = door.kind === 'blocked';
   const onHandoverRefused = (err: unknown) => {
     const code = (err as { response?: { data?: { error?: { code?: string } } } })?.response?.data?.error?.code;
-    if (code === 'HANDOVER_STALE' || code === 'PAYMENT_NOT_CAPTURED' || code === 'MMG_PAYMENT_PENDING') {
-      // The server's door differs from the one on screen: count it, and re-read the job.
+    // [F-106-03] The dispute and unknown-authority codes belong here too: they
+    // are exactly the refusals where the screen and the server disagreed, and
+    // leaving them out meant the one case worth counting was the one not counted.
+    if (code && DOOR_REFUSAL_CODES.has(code)) {
       recordDoorMismatch(code);
       active.refetch?.();
     }
@@ -706,16 +708,23 @@ export function ActiveJobScreen({ navigation }: any) {
               </>
             ) : doorBlocked ? (
               <>
-                {/* [MOB-023] The rail says "paid" but the payment state does not
-                    (pending, unknown, failed, reversed): no hand-over, nothing
-                    collected, nothing completed — refresh, or the store confirms. */}
+                {/* [MOB-023 · F-106-03] No hand-over, nothing collected, nothing
+                    completed. The REASON decides both the sentence and the way
+                    out: a dispute cannot be refreshed away, and telling the
+                    rider to ask the store again would strand them holding the
+                    order while following advice that cannot work. */}
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.error, 0.12), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md }}>
                   <Feather name="alert-triangle" size={15} color={color.error} style={{ marginTop: 1 }} />
                   <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
-                    {`Payment not confirmed (${door.reason.replace(/_/g, ' ').toLowerCase()}) — do not hand over the order yet. Ask the store to confirm the payment, then refresh.`}
+                    {doorGuidanceFor(door.reason).headline}
                   </T>
                 </View>
-                {bigButton('Refresh payment status', () => { recordDoorBlocked(door.reason); active.refetch?.(); }, { loading: active.isFetching === true, disabled: busy })}
+                {doorGuidanceFor(door.reason).action !== 'support'
+                  ? bigButton('Refresh payment status', () => { recordDoorBlocked(door.reason); active.refetch?.(); }, { loading: active.isFetching === true, disabled: busy })
+                  : null}
+                {doorGuidanceFor(door.reason).action !== 'refresh'
+                  ? bigButton('Contact support', () => { recordDoorBlocked(door.reason); navigation.navigate('GetHelp' as never); }, { disabled: busy })
+                  : null}
               </>
             ) : isMmgPaid ? (
               <>

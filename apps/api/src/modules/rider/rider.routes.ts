@@ -27,7 +27,7 @@ import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
-import { handoverAuthorityFor, handoverVersionMatches } from '../order/handover-authority';
+import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 import { handoverBlockCounter } from '../../plugins/observability';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { haversineDistance } from '../../utils/distance';
@@ -1092,7 +1092,9 @@ export async function riderRoutes(app: FastifyInstance) {
     items: { select: { name: true, quantity: true, totalCustomer: true, specialInstructions: true } },
     statusHistory: { orderBy: { createdAt: 'desc' as const }, take: 10 },
   };
-  const activeOrderView = <O extends { id: string; status: string; paymentMethod: string; paymentStatus: string; updatedAt: Date; currencyCode?: string | null; deliveryFee: unknown; tipAmount: unknown; totalAmount: unknown }>(order: O) => ({
+  // [F-103-01] `mmgClaimMismatchAt` is named in the constraint: a projection that
+  // stops selecting it fails the build here rather than quietly opening the door.
+  const activeOrderView = <O extends { id: string; status: string; paymentMethod: string; paymentStatus: string; updatedAt: Date; currencyCode?: string | null; mmgClaimMismatchAt: Date | null; deliveryFee: unknown; tipAmount: unknown; totalAmount: unknown }>(order: O) => ({
     ...order,
     deliveryFee: Number(order.deliveryFee),
     tipAmount: Number(order.tipAmount),
@@ -1482,6 +1484,13 @@ export async function riderRoutes(app: FastifyInstance) {
       const authority = handoverAuthorityFor(order);
       if (authority.permitted === 'BLOCKED') {
         handoverBlockCounter.labels(authority.blockReason ?? 'BLOCKED').inc();
+        // [F-103-01 · F-106-xx] ONE mapping, so a reason the door produces is
+        // never answered as a different one. This enumerated two and let the
+        // third fall through to "Payment is captured — do not hand over",
+        // which contradicts itself and re-offers the "ask the store" advice
+        // F-106-03 removed.
+        const refusal = HANDOVER_REFUSALS[authority.blockReason ?? ''];
+        if (refusal) throw new AppError(409, refusal.code, refusal.message);
         // PENDING keeps the fulfilment gate's one domain error (SPS-F-0016); every other un-landed state is the door's.
         const code = order.paymentStatus === 'PENDING' ? 'MMG_PAYMENT_PENDING' : 'PAYMENT_NOT_CAPTURED';
         throw new AppError(409, code, `Payment is ${order.paymentStatus.toLowerCase()} — do not hand over. Refresh, or ask the store to confirm the payment.`);
