@@ -40,6 +40,7 @@ import { loggerRedactConfig } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
+import { mmgReturnRoutes } from './modules/billing/mmg-return.routes';
 import { publicRoutes } from './modules/public/public.routes';
 import { qrResolverRoutes } from './modules/qr/qr-resolver.routes';
 import { attributionRoutes } from './modules/qr/attribution.routes';
@@ -183,6 +184,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(observabilityPlugin);
   // Public legal pages (ToS/Privacy) — linked from the app's register screen.
   await app.register(legalRoutes, { prefix: '/legal' });
+  // [MMG Checkout] The success/error URLs given to MMG. Deliberately public,
+  // deliberately inert: a redirect is not proof of payment — see the module header.
+  await app.register(mmgReturnRoutes, { prefix: '/billing/mmg' });
 
   // Health check. The load balancer needs a bare status; per-dependency
   // detail (db/redis state, uptime) is an internal map of the deployment and
