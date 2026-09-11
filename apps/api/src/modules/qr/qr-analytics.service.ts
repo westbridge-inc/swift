@@ -54,8 +54,12 @@ export class QrAnalyticsService {
   constructor(private prisma: PrismaClient) {}
 
   async forVendor(vendorId: string, range: QrAnalyticsRange): Promise<QrAnalyticsResponse> {
+    // Bound to the vendor's own tenant. Matching on entityId alone counts a
+    // stale code from a tenant this vendor has left — the same cross-tenant
+    // match the resolver was fixed for, one service over.
+    const vendor = await this.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { tenantId: true } });
     const codes = await this.prisma.qrCode.findMany({
-      where: { entityType: 'VENDOR', entityId: vendorId },
+      where: { entityType: 'VENDOR', entityId: vendorId, tenantId: vendor.tenantId },
       select: { id: true },
     });
     const ids = codes.map((c) => c.id);

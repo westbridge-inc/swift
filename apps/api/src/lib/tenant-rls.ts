@@ -248,6 +248,26 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'document_record', trigger: 'document_record_tenant_matches_account', parent: 'users', fk: 'accountId' },
   { table: 'rectification_request', trigger: 'rectification_request_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'fraud_case', trigger: 'fraud_case_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
+  // [REPORT-094 PR1197-S1-04] A printed QR code and the storefront it resolves to belong to ONE
+  // tenant, and so does every row that records a scan of it or claims the credit for one. The
+  // resolver is deliberately unauthenticated — a printed code names its own tenant — so nothing
+  // else binds the two, and a malformed row could pair tenant A's code with tenant B's shop while
+  // AttributionService durably credited tenant A for a customer tenant B actually got.
+  //
+  // `entityType` is watched but NOT interpreted here: this rule resolves `entityId` in `vendors`,
+  // so a row declaring any other entity type finds no parent and is REFUSED. That is the correct
+  // answer today (VENDOR is the enum's only value) and it is deliberately NOT future-proof — a
+  // second entity type must add its own rule, and until it does such a row cannot be written.
+  { table: 'qr_codes', trigger: 'qr_codes_tenant_matches_vendor', parent: 'vendors', fk: 'entityId', watch: ['entityId', 'entityType'] },
+  { table: 'slug_redirects', trigger: 'slug_redirects_tenant_matches_vendor', parent: 'vendors', fk: 'entityId', watch: ['entityId', 'entityType'] },
+  // The three tables that record the CREDIT. `qrCodeId` is nullable on two of them (a scan or a
+  // claim can exist without a code), and a row with no code has no lineage to check — expressed as
+  // "its parent tenant is its own", never as an exemption the trigger has to be taught.
+  { table: 'pending_attributions', trigger: 'pending_attributions_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId' },
+  { table: 'attribution_claims', trigger: 'attribution_claims_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId',
+    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM qr_codes WHERE id = NEW."qrCodeId") END` },
+  { table: 'scan_events', trigger: 'scan_events_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId',
+    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM qr_codes WHERE id = NEW."qrCodeId") END` },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.
@@ -278,6 +298,71 @@ export function tenantLineageDdl(): string[] {
     `DROP TRIGGER IF EXISTS ${trigger} ON ${table}`,
     `CREATE TRIGGER ${trigger} BEFORE INSERT OR UPDATE OF "tenantId", ${(watch ?? [fk]).map((c) => `"${c}"`).join(', ')} ON ${table} FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
   ]);
+}
+
+/**
+ * [PR1197-S1-04] A PARENT MAY NOT WALK AWAY FROM ITS LINEAGE.
+ *
+ * The lineage triggers are BEFORE INSERT OR UPDATE on the CHILD: they refuse a
+ * child that names a parent in another tenant. Nothing watched the PARENT. So a
+ * single `UPDATE vendors SET "tenantId" = ...` created exactly the cross-tenant
+ * pairing the lineage migration says it has made impossible — and the QR
+ * migration's own test performed that statement, with no trigger firing.
+ *
+ * It also produced the outage. A vendor moved out of its tenant left every
+ * already-PRINTED code stranded: `qr_codes.tenantId` still named the old
+ * tenant, the resolver is bound to `id + tenantId`, and every scan of a sticker
+ * already on a shop window resolved to /qr/unavailable, permanently and
+ * silently. That is worse than the disclosure it replaced, which is why the
+ * first attempt at this was rejected.
+ *
+ * Both are one problem: the move was unaccompanied. So
+ *   - `vendors_tenant_move_guard` REFUSES a tenant change that would strand
+ *     lineage rows, and
+ *   - `move_vendor_tenant()` performs the move WITH them, in one transaction.
+ *
+ * The guard is bypassed only for the exact vendor id the function is moving,
+ * set transaction-locally, so it cannot be left switched on.
+ */
+export function vendorTenantMoveDdl(): string[] {
+  const CHILDREN_DIRECT = ['qr_codes', 'slug_redirects'];
+  const CHILDREN_VIA_CODE = ['pending_attributions', 'attribution_claims', 'scan_events'];
+  return [
+    `CREATE OR REPLACE FUNCTION vendors_tenant_move_guard() RETURNS trigger AS $$
+      DECLARE stranded BIGINT;
+      BEGIN
+        IF NEW."tenantId" IS NOT DISTINCT FROM OLD."tenantId" THEN RETURN NEW; END IF;
+        -- The supported move sets this to the vendor it is moving, for this
+        -- transaction only. Any other id (or none) is an unaccompanied move.
+        IF coalesce(current_setting('app.vendor_tenant_move', true), '') = NEW.id THEN RETURN NEW; END IF;
+        SELECT ${CHILDREN_DIRECT.map((t) => `(SELECT count(*) FROM ${t} WHERE "entityType" = 'VENDOR' AND "entityId" = NEW.id AND "tenantId" = OLD."tenantId")`).join(' + ')}
+          INTO stranded;
+        IF stranded > 0 THEN
+          RAISE EXCEPTION 'vendor % cannot change tenant while % lineage row(s) remain in tenant %: every printed QR code would resolve to nothing. Use move_vendor_tenant(%, %) which moves them together [PR1197-S1-04]',
+            NEW.id, stranded, OLD."tenantId", quote_literal(NEW.id), quote_literal(NEW."tenantId") USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`,
+    `DROP TRIGGER IF EXISTS vendors_tenant_move_guard ON vendors`,
+    `CREATE TRIGGER vendors_tenant_move_guard BEFORE UPDATE OF "tenantId" ON vendors FOR EACH ROW EXECUTE FUNCTION vendors_tenant_move_guard()`,
+    `CREATE OR REPLACE FUNCTION move_vendor_tenant(p_vendor_id TEXT, p_new_tenant TEXT) RETURNS void AS $$
+      DECLARE old_tenant TEXT;
+      BEGIN
+        SELECT "tenantId" INTO old_tenant FROM vendors WHERE id = p_vendor_id;
+        IF old_tenant IS NULL THEN
+          RAISE EXCEPTION 'vendor % does not exist', p_vendor_id USING ERRCODE = 'check_violation';
+        END IF;
+        IF old_tenant = p_new_tenant THEN RETURN; END IF;
+        PERFORM set_config('app.vendor_tenant_move', p_vendor_id, true);
+        -- The parent first: each child's own lineage trigger then checks
+        -- against a parent that has already arrived, so every re-stamp is
+        -- validated by the same rule that would refuse a wrong one.
+        UPDATE vendors SET "tenantId" = p_new_tenant WHERE id = p_vendor_id;
+        ${CHILDREN_DIRECT.map((t) => `UPDATE ${t} SET "tenantId" = p_new_tenant WHERE "entityType" = 'VENDOR' AND "entityId" = p_vendor_id AND "tenantId" = old_tenant;`).join('\n        ')}
+        ${CHILDREN_VIA_CODE.map((t) => `UPDATE ${t} c SET "tenantId" = p_new_tenant FROM qr_codes q WHERE q.id = c."qrCodeId" AND q."entityType" = 'VENDOR' AND q."entityId" = p_vendor_id AND c."tenantId" = old_tenant;`).join('\n        ')}
+        PERFORM set_config('app.vendor_tenant_move', '', true);
+      END $$ LANGUAGE plpgsql`,
+  ];
 }
 
 /** [DOC-INV-7] A receipt that can be edited proves nothing. Mirrors migration 20260905180000. */
