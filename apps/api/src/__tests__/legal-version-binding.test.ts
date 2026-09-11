@@ -48,6 +48,26 @@ const PUBLISHED: Record<
     driver_agreement: 'da8d8ef8e1bbc7afc0dbf6c4b37da9255ef6447de0b1fca93572a68aed423753',
     vendor_agreement: '9d6454a303b4246dc928909752c2941c3c4f249fec7548c8c3c92cdd84eb16b3',
   },
+  // [NO-AI] The owner removed every AI runtime from Swift, so the Privacy
+  // Policy's "AI processing" paragraph — which told people their search terms
+  // and menu text went to a model provider — became untrue. A policy that
+  // describes processing which no longer happens is as wrong as one that hides
+  // processing which does. It now says plainly that Swift sends nothing you
+  // write to an AI service — AND names the one place a model does run (the
+  // identity check), because the first draft of this paragraph claimed no model
+  // existed anywhere while the KYC face-match was live. That claim is graded
+  // against the processor register now; see legal-ai-claim.test.ts.
+  //
+  // All four documents re-pin, not only the Privacy Policy: the published
+  // "Last updated" date is part of every served text, so changing it changes
+  // each document's words. The 2026-08-30 entry above is untouched — those are
+  // the words people actually consented to.
+  '2026-09-07': {
+    terms: '585d5b6e5f147e945602fd3dce05a27509952563a9be2b6c2127524be6811c32',
+    privacy: 'edad85c0a55cd9520d8e45ed0e0f504481b4d94030068bf0d25df63445a6d6f9',
+    driver_agreement: '923d398238ff81c5b554673871eab012999b77a27742a2812afa965e5ffc7ead',
+    vendor_agreement: '5023bc04a37935f4de6e873f400c8e8b35443164d46e7a951c0f72bbb93946d1',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

@@ -17,8 +17,8 @@ import type { FastifyInstance } from 'fastify';
 // row is retained untouched (legal evidence is never rewritten); the changed
 // words get their own version. legal-version-binding.test.ts now pins every
 // served text to its version, so words can never change under a stamp again.
-export const LEGAL_VERSION = '2026-08-30';
-const LAST_UPDATED = '30 August 2026'; // human form of LEGAL_VERSION
+export const LEGAL_VERSION = '2026-09-07';
+const LAST_UPDATED = '7 September 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -156,7 +156,7 @@ export const PRIVACY = page(
 <h2>5. Sharing</h2>
 <p>A business sees what it needs to fulfil your order (items, first name, delivery address). A mover sees pickup/drop-off details and your first name. Movers and customers see each other's first names, photos and ratings. Your verified emergency contacts receive your live location if you raise an SOS. We share data with authorities only where the law requires it, and we document every such demand.</p>
 <p><b>Technical service providers (processors):</b> to run Swift we use a small number of providers, each bound to process only what its function needs, on our instructions: Twilio (delivers your SMS verification codes — your phone number), Expo (delivers push notifications — a device token), an identity-verification provider — Didit or ID Analyzer — (receives the verification document and matching selfie to perform the identity check), Sentry (crash and error reports; we attach route templates rather than full URLs, drop request query strings, headers, cookies and bodies, and run an automated filter that reduces tokens and signed links across the report — a report is diagnostic context, not your account records), encrypted cloud object storage (verification documents and images), and Google Maps (addresses and coordinates for map display and travel estimates). Some of these providers process data on infrastructure outside Guyana; where that happens, the transfer is made under the Act's conditions with contractual safeguards and the minimisation described here.</p>
-<p><b>AI processing:</b> some features — such as understanding a search query or tidying a store's menu text — use Anthropic's Claude API. Before any text is sent it passes an automated filter that removes phone numbers, email addresses, card-like numbers, tokens, document references and common address forms. Swift never sends your verification documents or account records to AI services, and these API inputs are not used to train AI models. Free text you type could still contain personal details the filter cannot recognise — avoid putting personal information in search terms or menu text.</p>
+<p><b>AI processing:</b> Swift sends nothing you write to an artificial-intelligence service. Search terms, store menus and your messages are handled by our own software and by people; no model reads them, and none is used to decide anything about you. There is one exception, and it is not text you write: the identity-verification provider named above (Didit or ID Analyzer) runs automated document-reading and face-matching checks on the verification document and selfie you submit, because that is what an identity check is. Those checks produce a flag for a person to review, never a decision on their own &mdash; section 4 applies to them in full. Swift sends no other document, message or account record to any automated-analysis service.</p>
 <p><b>Business changes:</b> if Swift's business is transferred to a successor, your data moves with it under this policy's protections, and you are told before any materially different use begins.</p>
 
 <h2>6. Retention and deletion</h2>

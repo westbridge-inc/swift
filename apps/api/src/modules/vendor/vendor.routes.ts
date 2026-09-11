@@ -27,8 +27,8 @@ import { ACTIVITY_CLASSES, DECLARATION_CONSENT_TYPE, DECLARATION_VERSION, UNREGI
 import { DECLARATION_DOC_TYPE } from '../verification/doc-registry';
 import { validRegistrationRecord } from './vendor-tier';
 import { parseCsvWithHeader } from '../../utils/csv';
-import { AiService } from '../ai/ai.service';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
+import { parseMenuText } from '../../utils/menu-text-parse';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
@@ -2234,12 +2234,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
     const headers = Object.keys(rows[0]!);
 
-    let mapping: ColumnMapping = guessColumnMapping(headers);
-    if (REQUIRED_FIELDS.some((f) => !mapping[f])) {
-      // Best-effort AI assist for columns the synonyms missed (off the critical path).
-      const ai = await new AiService().mapCatalogueColumns(headers);
-      if (ai) mapping = { ...(ai as ColumnMapping), ...mapping }; // heuristic wins ties
-    }
+    // [NO-AI] The synonym table in `utils/catalogue-map.ts` is the whole
+    // mapper now. A model used to be asked for the columns the synonyms
+    // missed; when it cannot be asked, the honest answer is to say WHICH
+    // columns were not recognised and let the vendor rename them or use the
+    // template — which is what the 422 below already does, and which is the
+    // manual confirmation the removal requires. Nothing is guessed.
+    const mapping: ColumnMapping = guessColumnMapping(headers);
 
     const missing = REQUIRED_FIELDS.filter((f) => !mapping[f]);
     if (missing.length > 0) {
@@ -2258,7 +2259,8 @@ export async function vendorRoutes(app: FastifyInstance) {
   }
 
   /** POST /items/import/automap — map a messy store CSV's columns to Swift
-   *  fields (deterministic synonyms + AI assist). Returns a preview + a canonical
+   *  fields (a deterministic synonym table; unmapped columns go to the vendor).
+   *  Returns a preview + a canonical
    *  CSV to confirm via POST /items/import. */
   app.post('/items/import/automap', auth, async (request) => {
     await requireVendor(app, request, 'MANAGER');
@@ -2323,7 +2325,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /items/import/menu-parse — a restaurant's PDF menu becomes draft
    *  items to CONFIRM (master plan §3.1). Deterministic guard rails: the AI
-   *  only restructures the extracted text; rows without a parseable price are
+   *  parser reads the extracted text; rows without a parseable price are
    *  dropped, never invented, and nothing imports until the vendor confirms. */
   app.post('/items/import/menu-parse', auth, async (request) => {
     await requireVendor(app, request, 'MANAGER');
@@ -2361,16 +2363,16 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(422, 'MENU_NO_TEXT', 'That PDF has no readable text (a photo scan?) — use CSV/Excel or type items in');
     }
 
-    const ai = new AiService();
-    if (!ai.enabled) {
-      throw new AppError(503, 'AI_UNAVAILABLE', 'Menu parsing is offline right now — use CSV/Excel or add items manually');
-    }
-    const drafts = await ai.parseMenuItems(text.slice(0, 12_000));
-    if (!drafts || drafts.length === 0) {
+    // [NO-AI] The menu is READ, not interpreted. `parseMenuText` takes the
+    // PDF's own text layer and returns only the lines that plainly carry a
+    // name and a price; anything it cannot read is skipped rather than
+    // guessed at, and the vendor confirms every row in the preview below.
+    const drafts = parseMenuText(text.slice(0, 12_000));
+    if (drafts.length === 0) {
       throw new AppError(422, 'MENU_UNPARSEABLE', 'Couldn’t find priced items in that menu — use CSV/Excel or add items manually');
     }
 
-    // Deterministic validation — the AI restructures, it never decides.
+    // The same validation as before: the parser proposes, this decides.
     const normalized = drafts
       .map((d) => ({
         category: String(d.category ?? 'Menu').slice(0, 80) || 'Menu',
