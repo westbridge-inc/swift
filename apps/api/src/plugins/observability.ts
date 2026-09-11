@@ -481,6 +481,18 @@ export const billingAttemptReclaimCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [LAW M-5] MMG requests that timed out at initiate and that we can never
+ *  confirm, because MMG's merchant-initiated body carries no merchant reference
+ *  and its history returns neither `external_id` nor the payer. Each one is a
+ *  payer who MAY have paid and whom we must not dun on silence. This number is
+ *  the size of the manual queue, and it should be near zero — if it climbs, the
+ *  attribution question is costing real money and real support time. */
+export const mmgUnverifiableCounter = new client.Counter({
+  name: 'swift_mmg_unverifiable_total',
+  help: 'MMG intents aged into the admin queue because the provider offers nothing to match on',
+  registers: [registry],
+});
+
 /** [M-10] Terminal orders whose expected earnings tuples — the mover's fee or
  *  fare row, and the tip row when a tip was paid — are not all present. Set by
  *  the reconciler on every sweep: `found` before the repair, `unhealed` after

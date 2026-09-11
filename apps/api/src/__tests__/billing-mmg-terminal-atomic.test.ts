@@ -226,13 +226,22 @@ describe('[M-04] the poller: terminal status and dunning outcome land together o
     expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: unknown.id } })).status).toBe('UNKNOWN');
     expect(await failedEvents(subId)).toBe(0);
 
-    const next = await billing.pollPendingMmgCharges(tick(1));
-    expect(next.failed).toBeGreaterThanOrEqual(1); // this row, plus whatever other rows this file left due
+    // CHANGED DELIBERATELY [LAW M-5]. This pinned the old behaviour: a
+    // timed-out initiate was terminalized EXPIRED and the payer dunned. Its
+    // premise — "MMG has no record by our reference" — is false. MMG's
+    // merchant-initiated body carries NO reference field, and its history
+    // returns neither `external_id` nor `debitParty` (both verified against the
+    // UAT sandbox), so a miss is guaranteed rather than informative. Dunning on
+    // it suspended the payer who approved late — having paid. The row now ages
+    // into the admin queue, exactly as PaymentStatus.UNKNOWN's schema comment
+    // has always promised.
+    const before = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+    await billing.pollPendingMmgCharges(tick(1));
     const p = await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: unknown.id } });
     const s = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-    expect({ payment: p.status, code: p.failureCode, sub: s.status, attempts: s.failedAttempts })
-      .toEqual({ payment: 'EXPIRED', code: 'REQUEST_EXPIRED', sub: 'PAST_DUE', attempts: 1 });
-    expect(await failedEvents(subId)).toBe(1);
+    expect({ payment: p.status, sub: s.status, attempts: s.failedAttempts })
+      .toEqual({ payment: 'UNKNOWN', sub: before.status, attempts: before.failedAttempts });
+    expect(await failedEvents(subId), 'silence from MMG is not a failure event').toBe(0);
   });
 });
 

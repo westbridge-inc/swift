@@ -189,18 +189,21 @@ describe('MMG charge lifecycle', () => {
       },
     });
 
-    const polled = await billing.pollPendingMmgCharges();
-    expect(polled.failed).toBeGreaterThanOrEqual(1);
-
+    await billing.pollPendingMmgCharges();
+    // CHANGED DELIBERATELY [LAW M-5]. This pinned the old behaviour: a
+    // timed-out initiate was terminalized EXPIRED and the payer dunned. Its
+    // premise — "MMG has no record by our reference" — is false. MMG's
+    // merchant-initiated body carries NO reference field, and its history
+    // returns neither `external_id` nor `debitParty` (both verified against the
+    // UAT sandbox), so a miss is guaranteed rather than informative. Dunning on
+    // it suspended the payer who approved late — having paid. The row now ages
+    // into the admin queue, exactly as PaymentStatus.UNKNOWN's schema comment
+    // has always promised.
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-    expect(after.status).toBe('PAST_DUE'); // dunning, not silence
-    expect(after.failedAttempts).toBe(1);
+    expect(after.failedAttempts, 'silence must not advance the ladder toward SUSPENDED').toBe(0);
+    expect(after.status).not.toBe('SUSPENDED');
     const payment = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } });
-    // The intent machine labels a timed-out request EXPIRED (distinct from a
-    // provider decline's FAILED) — same dunning consequences, sharper truth,
-    // and a normalized code the ladder can branch on.
-    expect(payment.status).toBe('EXPIRED');
-    expect(payment.failureCode).toBe('REQUEST_EXPIRED');
+    expect(payment.status, 'ages into the admin queue, never auto-failed').toBe('UNKNOWN');
   });
 
   it('a fresh still-pending request is left alone', async () => {
