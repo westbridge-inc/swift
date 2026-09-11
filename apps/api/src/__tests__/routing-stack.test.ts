@@ -40,13 +40,36 @@ describe('[routing] the stack is in the repository', () => {
     }
   });
 
-  it('pins every image — :latest is not a deployment', () => {
-    // Except photon, whose publisher ships no version tags. Named so the
-    // exception is a decision on the record rather than an oversight.
-    const images = [...COMPOSE.matchAll(/image:\s*(\S+)/g)].map((m) => m[1]!);
+  it('pins every image — :latest is not a deployment, and neither is a tag', () => {
+    // This assertion USED to grant photon an exception, on the stated ground
+    // that "its publisher ships no version tags". That ground was false:
+    // rtuszik/photon-docker publishes 2.4.0, and its digest is byte-identical
+    // to what `latest` resolved to. The exception was never a decision about
+    // photon; it was an unchecked claim that hardened into policy, and the
+    // test then defended the weaker state against being fixed.
+    //
+    // The rule is now the whole rule. A tag is a pointer its publisher can
+    // move, so a tag-only reference — `latest` or otherwise — means a
+    // production pull can return software nobody tested. A digest cannot.
+    //
+    // container-image-pinning.test.ts is the ratchet across ALL compose files
+    // (and names the two locally-built images that are legitimately exempt).
+    // This one keeps the routing stack's own four honest in the file that
+    // documents them.
+    // [review] Two tests enforcing one rule with two different parsers is how
+    // they come to disagree. This one was UNANCHORED, so it counted `image:`
+    // inside COMMENTS — following this file's own instruction to add a worked
+    // example line would have turned it red on a comment-only edit. It also
+    // matched `:latest` as a SUBSTRING, so `foo:latest-alpine@sha256:...` was a
+    // false positive. Both now match the gate's own rules.
+    const images = COMPOSE.split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .flatMap((l) => [...l.replace(/\s+#.*$/, '').matchAll(/(?:^|[\s{,])image:\s*([^,}\n]+)/g)])
+      .map((m) => m[1]!.trim().replace(/^['"]|['"],?$/g, ''));
     expect(images.length).toBe(4);
-    const unpinned = images.filter((i) => i.endsWith(':latest'));
-    expect(unpinned).toEqual(['rtuszik/photon-docker:latest']);
+    expect(images.filter((i) => /:latest(@|$)/.test(i))).toEqual([]);
+    const undigested = images.filter((i) => !/@sha256:[0-9a-f]{64}$/.test(i));
+    expect(undigested, 'every routing image must carry a digest').toEqual([]);
   });
 });
 

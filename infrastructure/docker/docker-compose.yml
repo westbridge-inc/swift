@@ -1,8 +1,42 @@
+# [SUP-001 · Codex REPORT-075] IMAGES ARE PINNED BY DIGEST, NOT BY TAG.
+#
+# A tag is a pointer its publisher can move. `docker compose pull` against a
+# mutable tag can hand a production host different software than the one that
+# was tested, with no diff and no signal. A digest is a content address: it
+# resolves to exactly those bytes or it fails.
+#
+# The tag is kept beside the digest so a human can still read which version this
+# is. To update one deliberately:
+#
+#     docker buildx imagetools inspect <repo>:<newtag>     # prints the digest
+#     # then edit BOTH the tag and the digest here, in one commit, with a reason
+#
+# `container-image-pinning.test.ts` fails the build if a service is added
+# without a digest, or pinned to `latest`.
+#
+# PLATFORM: THIS STACK REQUIRES AN amd64 (x86_64) HOST. Two of these images
+# publish a SINGLE amd64 manifest, not a multi-platform index:
+#
+#     postgis/postgis:16-3.4       linux/amd64 only
+#     osrm/osrm-backend:v5.25.0    linux/amd64 only   (routing compose)
+#
+# Every other image here is amd64+arm64. So an ARM host — Ampere, Graviton, a
+# Hetzner CAX box, an Apple-silicon laptop — cannot run Postgres or OSRM
+# natively; it will refuse the pull or fall back to qemu emulation, which for
+# PostGIS means a database several times slower than the hardware it is on.
+# This is a property of the upstream images, not of pinning: the bare tags
+# resolved to the same single manifests. Verify before changing a host:
+#
+#     docker buildx imagetools inspect <repo>:<tag> | grep Platform
+#
+# (no Platform lines at all = a single-platform image; check its config with
+#  `docker image inspect <ref> --format '{{.Os}}/{{.Architecture}}'`)
+
 version: '3.8'
 
 services:
   postgres:
-    image: postgis/postgis:16-3.4
+    image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
     container_name: swift-postgres
     environment:
       POSTGRES_USER: swift
@@ -14,7 +48,7 @@ services:
       - pgdata:/var/lib/postgresql/data
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     container_name: swift-redis
     # Append-only persistence: dispatch offer state + delayed BullMQ jobs live
     # here, so a restart without AOF silently strands in-flight orders. fsync
@@ -26,7 +60,7 @@ services:
       - redisdata:/data
 
   meilisearch:
-    image: getmeili/meilisearch:v1.11
+    image: getmeili/meilisearch:v1.11@sha256:6f8f1fc29d1ff67b4d8d503bb4e0a69b55c8d42600decafde951344218193a27
     container_name: swift-search
     environment:
       MEILI_NO_ANALYTICS: true
