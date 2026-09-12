@@ -3,7 +3,7 @@ import type Redis from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type { FastifyBaseLogger } from 'fastify';
-import { captureError, osrmOutcomeCounter } from '../plugins/observability';
+import { captureError, opsPageCounter, osrmOutcomeCounter } from '../plugins/observability';
 import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
 import { runWithTenant } from '../plugins/tenant-context';
@@ -231,7 +231,36 @@ export async function opsPageOnce(
   }
   if (claimed !== 'OK') return false;
   try {
-    await page();
+    const reached = await page();
+    // [AUD-MAIN-008] A page that reached NOBODY is not a delivered page.
+    //
+    // The catch below already released the claim when `page()` THREW. It did
+    // not when `page()` RESOLVED having notified no one — and that is the
+    // shape that actually occurs: `notifyAdmins` returns the number of
+    // recipients it reached and never throws on zero, so the key stayed
+    // claimed for the whole window and the condition went dark with nobody
+    // told. Thirty of this helper's forty call sites resolve to that count
+    // directly, so the number was always here and simply discarded.
+    //
+    // Observed: `backup-freshness` fires daily, correctly, forever. A stock
+    // deploy seeds no SUPER_ADMIN, so `notifyAdmins` returns 0 — and the alarm
+    // for total, unrecoverable data loss marked itself delivered and slept 20
+    // hours, every day.
+    //
+    // This is not a new rule. `modules/ops/ops-page.ts` already refuses to
+    // claim a zero-recipient page (`zero_recipient_pending`) and leaves the
+    // OpsAlert row open for escalation; it covers one condition. This gives
+    // the same guarantee to the other 39.
+    //
+    // A callback that reports NOTHING (resolves undefined/void) is unchanged:
+    // silence is not zero, and treating it as undelivered would re-page every
+    // window for conditions that are in fact being delivered.
+    if (typeof reached === 'number' && reached <= 0) {
+      // Same outcome name pageOps already uses, so both pagers report on one metric.
+      opsPageCounter.labels('zero_recipient_pending').inc();
+      await ctx.redis.del(redisKey).catch(() => {});
+      return false;
+    }
     return true;
   } catch {
     // The page failed — release the claim so the NEXT detection re-pages rather
