@@ -7,7 +7,7 @@
 #     docker build -f apps/api/Dockerfile -t swift-api .
 # ---------------------------------------------------------------------------
 
-FROM node:20-slim AS base
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS base
 ENV PNPM_HOME=/pnpm PATH=$PNPM_HOME:$PATH
 # OpenSSL is required by the Prisma query engine at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
