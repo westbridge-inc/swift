@@ -14,35 +14,40 @@ export type HandoverPermission = 'DELIVER_NO_CASH' | 'COLLECT_CASH_THEN_DELIVER'
 /**
  * [DOC-INV-48 · F-106-01] The rule set the server computed an authority under.
  *
- * An authority from a server that predates the dispute rule is syntactically
- * perfect and will happily say DELIVER_NO_CASH on a disputed order, so the
- * client will not act on a policy it does not recognise: for a mobile-money
- * order that means the door stays shut.
+ * The client will not act on an authority it cannot vouch for: an authority
+ * from a server that PREDATES the dispute rule is syntactically perfect and
+ * will happily say DELIVER_NO_CASH on a disputed order.
  *
- * WHY THIS IS A SET, AND NOT ONE STRING. It was one string, matched exactly,
- * and its own doc comment said "bump this whenever the door's rules change" —
- * an instruction that, followed on the API alone, blocks EVERY mobile-money
- * handover in the fleet. Mobile builds are never atomic with an API deploy
- * (EAS, OTA, app-store review), and the refusal is minted on the DEVICE, so
- * nothing in server telemetry would show it. Cash keeps working, so the
- * dashboards look normal while every rider on a mobile-money order is stuck at
- * a customer's door.
+ * ── WHY THIS IS A MINIMUM, NOT A LIST ───────────────────────────────────────
  *
- * Two things follow, and both are load-bearing:
+ * It was a list of accepted strings carried HERE, on the device, with the API
+ * warning that bumping its constant alone would black out every mobile-money
+ * handover in the fleet. That could not work. Mobile builds are never atomic
+ * with an API deploy — there is no `expo-updates` in this app, so even a
+ * JS-only change needs an EAS build, store review and a user upgrade — so the
+ * grace window sat on the side that updates LAST, which cannot hold it. A
+ * rider at a customer's door would have seen the refusal, and because it is
+ * minted HERE, no server metric would have moved.
  *
- *  1. A release that introduces a new policy keeps the previous one here for
- *     one release, so an app and an API from adjacent releases interoperate in
- *     BOTH directions — a forward rollout and a rollback.
- *  2. `handover-policy-contract.test.ts` in the API reads THIS FILE and fails
- *     the build if the API's `HANDOVER_POLICY` is not in this list. The drift
- *     therefore cannot reach production at all; it is a red build, not an
- *     outage. That test is the reason this comment can be trusted.
+ * The risk is one-directional. A server AHEAD of this build has strictly more
+ * rules and has already decided `permitted`; this file only renders that
+ * decision, and an unknown `permitted` value still fails closed below. A server
+ * BEHIND it is the danger. So the rule is `served >= this build's minimum`,
+ * and the API can move ahead freely.
  *
- * Ordered newest first. Drop the tail entry one release after the new one ships.
+ * Raise this only when acting on an older server's authority becomes unsafe —
+ * which is a rule change on the SERVER, not a release cadence.
+ */
+export const MIN_HANDOVER_POLICY_VERSION = 1;
+
+/**
+ * LEGACY. Servers predating `policyVersion` identify their rule set by this
+ * string. Kept so this build still works against one, and checked exactly as
+ * before. Remove it only when no such server can be deployed.
  */
 export const ACCEPTED_HANDOVER_POLICIES: readonly string[] = ['mismatch-1'];
 
-/** The policy this build prefers and mints fixtures under: the newest accepted. */
+/** The policy this build mints fixtures under. */
 export const HANDOVER_POLICY = ACCEPTED_HANDOVER_POLICIES[0]!;
 
 /** [F-106-01] The client could not derive permission, so it did not. */
@@ -50,6 +55,8 @@ export const HANDOVER_AUTHORITY_REQUIRED = 'HANDOVER_AUTHORITY_REQUIRED';
 
 export interface HandoverAuthority {
   policy: string;
+  /** The ORDERED policy the server served, or null from a server predating it. */
+  policyVersion: number | null;
   rail: 'CASH' | 'MOBILE_MONEY' | 'OTHER';
   paymentState: string;
   custodyState: string;
@@ -83,7 +90,16 @@ export function parseHandoverAuthority(raw: unknown): HandoverAuthority | null {
   // [F-106-01] An authority from an unrecognised policy is treated exactly like
   // no authority at all — which, for a mobile-money order, means the door stays
   // shut. This is the whole point of the discriminator.
-  if (typeof h['policy'] !== 'string' || !ACCEPTED_HANDOVER_POLICIES.includes(h['policy'])) return null;
+  // [review] Ordered first: a server at or ahead of this build's minimum is
+  // accepted, so the API can bump its policy without stranding the fleet.
+  // A server with no version field predates it — fall back to the string,
+  // which is exactly the check that protected us before.
+  const servedVersion = h['policyVersion'];
+  if (typeof servedVersion === 'number' && Number.isInteger(servedVersion)) {
+    if (servedVersion < MIN_HANDOVER_POLICY_VERSION) return null;
+  } else if (typeof h['policy'] !== 'string' || !ACCEPTED_HANDOVER_POLICIES.includes(h['policy'])) {
+    return null;
+  }
   if (typeof h['permitted'] !== 'string' || !PERMISSIONS.has(h['permitted'])) return null;
   if (typeof h['version'] !== 'string' || !h['version']) return null;
   if (h['rail'] !== 'CASH' && h['rail'] !== 'MOBILE_MONEY' && h['rail'] !== 'OTHER') return null;
@@ -91,7 +107,8 @@ export function parseHandoverAuthority(raw: unknown): HandoverAuthority | null {
     // The policy the SERVER used, not the one this build prefers. Overwriting it
     // with our own constant would erase the only evidence of which rule set
     // actually decided the door during a mixed-version rollout.
-    policy: h['policy'],
+    policy: typeof h['policy'] === 'string' ? h['policy'] : `v${String(servedVersion)}`,
+    policyVersion: typeof servedVersion === 'number' ? servedVersion : null,
     rail: h['rail'],
     paymentState: typeof h['paymentState'] === 'string' ? h['paymentState'] : 'UNKNOWN',
     custodyState: typeof h['custodyState'] === 'string' ? h['custodyState'] : 'UNKNOWN',
