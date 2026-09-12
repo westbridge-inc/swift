@@ -160,6 +160,11 @@ function appendSetCookies(reply: FastifyReply, values: string[]): void {
     : Array.isArray(present)
       ? present.map(String)
       : [String(present)];
+  // Fastify appends Set-Cookie values instead of replacing them. Re-submitting
+  // `current` without first removing the header therefore duplicates every
+  // cookie already staged on a real reply (the simple unit harness used to
+  // hide that distinction).
+  reply.removeHeader('Set-Cookie');
   reply.header('Set-Cookie', [...current, ...values]);
 }
 

@@ -67,7 +67,18 @@ export default function SignupPage() {
   const doRegister = () => wrap(async () => {
     // Consent is explicit clickwrap: the agreement line sits directly above
     // the button that triggers this. Recorded server-side [SWIFT-AUD-D9-03].
-    await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role, acceptTerms: true });
+    try {
+      await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role, acceptTerms: true });
+    } catch (cause) {
+      // Registration consumes its HttpOnly continuation before account reads
+      // and writes. A transport or server error is therefore ambiguous: never
+      // encourage replay of the old code/cookie. Keep the entered profile data
+      // but return to the step that starts a completely fresh ceremony.
+      setCode('');
+      setStep('phone');
+      const detail = cause instanceof Error ? cause.message : 'Could not create your account.';
+      throw new Error(`${detail} Request a new verification code to try again.`);
+    }
     if (role === 'CUSTOMER') {
       const next = safeReturnPath();
       router.replace(`/selfie${next ? `?next=${encodeURIComponent(next)}` : ''}`);

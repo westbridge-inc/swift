@@ -185,6 +185,7 @@ describe('Auth Routes', () => {
       '+5929998874',
       '+5929998873',
       '+5929998872',
+      '+5929998871',
     ];
 
     afterAll(async () => {
@@ -314,6 +315,55 @@ describe('Auth Routes', () => {
         acceptTerms: true,
       });
       expect(newest.statusCode, newest.body).toBe(201);
+    });
+
+    it('[CST-192-01] a paused older verifier cannot mint after the newer ceremony wins', async () => {
+      const phone = continuationPhones[5]!;
+      const oldCode = await requestOtp(app, phone);
+
+      let reachedLookup!: () => void;
+      let resumeLookup!: () => void;
+      const atLookup = new Promise<void>((resolve) => { reachedLookup = resolve; });
+      const resume = new Promise<void>((resolve) => { resumeLookup = resolve; });
+      const originalFindUnique = app.prisma.user.findUnique.bind(app.prisma.user);
+      const lookup = vi.spyOn(app.prisma.user, 'findUnique').mockImplementationOnce((async (...args: unknown[]) => {
+        const found = await originalFindUnique(...(args as [Parameters<typeof originalFindUnique>[0]]));
+        reachedLookup();
+        await resume;
+        return found;
+      }) as never);
+
+      let oldRequest: ReturnType<typeof inject> | undefined;
+      let oldResponse!: Awaited<ReturnType<typeof app.inject>>;
+      let newProof = '';
+      try {
+        oldRequest = inject('POST', '/api/v1/auth/verify-otp', { phone, code: oldCode });
+        await atLookup;
+
+        const newCode = await requestOtp(app, phone);
+        const newResponse = await inject('POST', '/api/v1/auth/verify-otp', { phone, code: newCode });
+        expect(newResponse.statusCode, newResponse.body).toBe(200);
+        newProof = newResponse.json().data.registrationProof;
+        expect(newProof).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+        resumeLookup();
+        oldResponse = await oldRequest;
+      } finally {
+        resumeLookup();
+        if (oldRequest && !oldResponse) oldResponse = await oldRequest;
+        lookup.mockRestore();
+      }
+
+      expect(oldResponse.statusCode, oldResponse.body).toBe(400);
+      expect(oldResponse.json().error.code).toBe('INVALID_OTP');
+      const registered = await inject('POST', '/api/v1/auth/register', {
+        phone,
+        registrationProof: newProof,
+        firstName: 'Newer',
+        lastName: 'Ceremony',
+        acceptTerms: true,
+      });
+      expect(registered.statusCode, registered.body).toBe(201);
     });
 
     // SWIFT-AUD-D9-03: DPA-2023 consent must be demonstrable — the acceptance

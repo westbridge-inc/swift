@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';
-import { useRoute } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { authApi, API_URL } from '../../services/api';
 import { openPayLink } from '../../lib/payLink';
@@ -14,6 +14,7 @@ import { BrandCheckbox, LabeledInput, PillButton, Screen, T } from '../../kit';
 // verified from the OTP step; name (+ optional email) completes the account.
 export function RegisterScreen() {
   const route = useRoute<any>();
+  const navigation = useNavigation<any>();
   const phone: string = route.params?.phone ?? '';
   const registrationProof: string = route.params?.registrationProof ?? '';
   const { setAuth, intent, countryCode } = useAuthStore();
@@ -45,12 +46,16 @@ export function RegisterScreen() {
     },
   });
 
+  // The server deliberately consumes the one-use proof before account reads
+  // or writes. After any ambiguous failure, a retry cannot safely assume the
+  // proof survived; provide an explicit path that starts a fresh ceremony.
+  const mustVerifyAgain = !registrationProof || register.isError;
   const err = !registrationProof
     ? 'Verify your phone again to continue registration.'
     : register.isError
-    ? ((register.error as any)?.response?.data?.error?.message ?? 'Registration failed. Try again.')
+    ? `${(register.error as any)?.response?.data?.error?.message ?? 'Registration failed.'} Verify your phone again to retry.`
     : undefined;
-  const valid = !!registrationProof && firstName.trim().length >= 2 && lastName.trim().length >= 2 && agreed;
+  const valid = !!registrationProof && !mustVerifyAgain && firstName.trim().length >= 2 && lastName.trim().length >= 2 && agreed;
 
   return (
     <Screen style={{ backgroundColor: color.surface.base }}>
@@ -121,13 +126,22 @@ export function RegisterScreen() {
           </Pressable>
 
           <View style={{ flex: 1 }} />
-          <PillButton
-            label="Register"
-            onPress={() => register.mutate()}
-            disabled={!valid}
-            loading={register.isPending}
-            style={{ marginTop: space['2xl'], marginBottom: space['2xl'] }}
-          />
+          {mustVerifyAgain ? (
+            <PillButton
+              label="Verify phone again"
+              onPress={() => navigation.reset({ index: 0, routes: [{ name: 'PhoneEntry' }] })}
+              testID="register-verify-phone-again"
+              style={{ marginTop: space['2xl'], marginBottom: space['2xl'] }}
+            />
+          ) : (
+            <PillButton
+              label="Register"
+              onPress={() => register.mutate()}
+              disabled={!valid}
+              loading={register.isPending}
+              style={{ marginTop: space['2xl'], marginBottom: space['2xl'] }}
+            />
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </Screen>

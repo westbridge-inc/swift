@@ -38,6 +38,9 @@ describe('OTP verification accessibility and automation contract', () => {
     expect(registerSource).toContain("route.params?.registrationProof ?? ''");
     expect(registerSource).toMatch(/authApi\.register\(\{[\s\S]*registrationProof/);
     expect(registerSource).toContain('const valid = !!registrationProof');
+    expect(registerSource).toContain('const mustVerifyAgain = !registrationProof || register.isError');
+    expect(registerSource).toContain('testID="register-verify-phone-again"');
+    expect(registerSource).toContain("navigation.reset({ index: 0, routes: [{ name: 'PhoneEntry' }] })");
     expect(source + registerSource).not.toMatch(/(?:AsyncStorage|SecureStore|localStorage).*registrationProof/);
   });
 });
