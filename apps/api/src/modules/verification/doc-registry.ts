@@ -13,7 +13,6 @@
  */
 import type { PrismaClient, DocBucket, ValidatorScope, GateEnforcement, DiscoveryCategoryKind, DocImagePolicy } from '@prisma/client';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
-import { AUTO_APPROVE_EXPIRY_DAYS } from './verification.service';
 
 export const REGISTRY_TIER = 'STANDARD';
 /** Provisional. The onboarding spec these checklists were built to is dated 2026-06. */
@@ -63,6 +62,33 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   nis_employer_reg: 'BUSINESS', digital_id: 'PERSONAL',
   // [DOC-1 §3.2 · P3-2] the unregistered trader's signed self-declaration (versioned, hashed, consent-ledger row)
   self_declaration_unregistered: 'BUSINESS',
+};
+
+/** Auto-approved documents must still LAPSE (the "verified ≠ valid now" rule).
+ *  A human reviewer keys the real printed expiry; the automatic path applies a
+ *  conservative default so the daily sweep + reminders always have a date.
+ *  Days by docType; absent = non-expiring (e.g. business registration).
+ *
+ *  This is registry policy, so it lives with the registry instead of importing
+ *  the verification service back into this module. Keeping the dependency one
+ *  way prevents registry consumers from initializing through a service cycle.
+ */
+export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
+  police_clearance: 365,   // Certificate of Character — commonly re-issued yearly
+  fitness_cert: 365,       // annual fitness
+  vehicle_insurance: 365,  // annual policy
+  hire_car_permit: 365,    // annual occupational permit
+  road_service_licence: 365, // annual commercial road-service licence
+  food_handler_cert: 365,  // annual health cert
+  gra_restaurant_licence: 365,
+  // [DOC-1 §18.1] the addendum's annual Guyana licences (submittable through a category gate)
+  liquor_licence: 365,
+  sanitary_certificate: 365,
+  trade_licence: 365,
+  drivers_licence: 3 * 365,
+  vehicle_registration: 3 * 365,
+  // [DOC-1 §3.2 · P3-2] the unregistered trader's self-declaration is valid 365 days from signing
+  self_declaration_unregistered: 365,
 };
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
 /**
