@@ -3,7 +3,7 @@ import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf } from './subjects';
-import { BUCKET_OF } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
 import { approvedEvidenceFor, anyChecklistEvidenceFor } from './evidence';
@@ -25,7 +25,6 @@ import { NotificationService, notifyAdmins, tenantOfUser } from '../notification
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { assertExternalProcessingPermitted } from '../legal/processor-register';
 import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApproval, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
-import { registryCode } from './doc-registry';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
@@ -49,27 +48,8 @@ export const IDENTITY_DOC_TYPE = 'identity_l2';
  *  photo"), through the same KycProvider.verifyIdentity seam the L2 flow uses. */
 const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
 
-/** Auto-approved documents must still LAPSE (the "verified ≠ valid now" rule).
- *  A human reviewer keys the real printed expiry; the automatic path applies a
- *  conservative default so the daily sweep + reminders always have a date.
- *  Days by docType; absent = non-expiring (e.g. business registration). */
-export const AUTO_APPROVE_EXPIRY_DAYS: Record<string, number> = {
-  police_clearance: 365,   // Certificate of Character — commonly re-issued yearly
-  fitness_cert: 365,       // annual fitness
-  vehicle_insurance: 365,  // annual policy
-  hire_car_permit: 365,    // annual occupational permit
-  road_service_licence: 365, // annual commercial road-service licence
-  food_handler_cert: 365,  // annual health cert
-  gra_restaurant_licence: 365,
-  // [DOC-1 §18.1] the addendum's annual Guyana licences (submittable through a category gate)
-  liquor_licence: 365,
-  sanitary_certificate: 365,
-  trade_licence: 365,
-  drivers_licence: 3 * 365,
-  vehicle_registration: 3 * 365,
-  // [DOC-1 §3.2 · P3-2] the unregistered trader's self-declaration is valid 365 days from signing
-  self_declaration_unregistered: 365,
-};
+// Compatibility export for existing callers; the policy itself is registry data.
+export { AUTO_APPROVE_EXPIRY_DAYS } from './doc-registry';
 
 /**
  * [A-19] Which document types carry a printed expiry.

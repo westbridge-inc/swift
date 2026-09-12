@@ -1,5 +1,5 @@
 import { normalizeDocNumber } from '../integrity/normalize';
-import { IDENTITY_DOC_TYPES } from './identity-document-types';
+import { IDENTITY_DOC_TYPES } from './doc-registry';
 
 /** The synthetic L2 flow always receives a government identity document. */
 const L2_IDENTITY_DOC_TYPE = 'identity_l2';

@@ -427,11 +427,11 @@ describe('[A-19] a decision requires the evidence', () => {
 describe('[A-19] the expiring-type list cannot drift from the server', () => {
   it('matches AUTO_APPROVE_EXPIRY_DAYS in the API, key for key', () => {
     const api = readFileSync(
-      join(process.cwd(), '../api/src/modules/verification/verification.service.ts'),
+      join(process.cwd(), '../api/src/modules/verification/doc-registry.ts'),
       'utf8',
     );
-    const block = /const AUTO_APPROVE_EXPIRY_DAYS: Record<string, number> = \{([\s\S]*?)\};/.exec(api);
-    if (!block) throw new Error('AUTO_APPROVE_EXPIRY_DAYS not found in the API service');
+    const block = /const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = \{([\s\S]*?)\};/.exec(api);
+    if (!block) throw new Error('AUTO_APPROVE_EXPIRY_DAYS not found in the API document registry');
     const serverTypes = [...block[1]!.matchAll(/^\s*([a-z_]+):/gm)].map((m) => m[1]!).sort();
     const page = readFileSync(join(process.cwd(), 'src/app/verification/page.tsx'), 'utf8');
     const local = /const EXPIRING_DOC_TYPES = \[([\s\S]*?)\] as const;/.exec(page);
