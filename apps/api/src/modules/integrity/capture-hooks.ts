@@ -1,8 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { IdentityService } from './identity.service';
 import {
-  normalizeDocNumber,
-  normalizePlate,
   normalizePhone,
   normalizeEmail,
   normalizeDevice,
@@ -89,30 +87,6 @@ export function captureSignup(
       }
     }
   })(); // [R048-007] the caller awaits, bounds, counts and logs a failure — nothing is swallowed here
-}
-
-/** Extracted ID document number (§2.1 ID_DOC_NUMBER — HARD). The raw number
- *  arrives from the KYC result, is hashed here, and is never stored. */
-export function captureDocumentNumber(
-  prisma: PrismaClient,
-  input: { userId: string; role: string; documentNumber: string },
-): void {
-  void service(prisma).capture({
-    accountId: input.userId, actorRole: input.role,
-    type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(input.documentNumber), source: 'AI_ID_ANALYZER',
-  }).catch((err) => log().error({ err, userId: input.userId }, 'doc-number identity capture failed — flow unaffected'));
-}
-
-/** Vehicle plate (§2.1 PLATE — HARD): one plate, one active vehicle-bound
- *  account. Captured when a driver's documents reach verified. */
-export function capturePlate(
-  prisma: PrismaClient,
-  input: { userId: string; role: string; plate: string },
-): void {
-  void service(prisma).capture({
-    accountId: input.userId, actorRole: input.role,
-    type: 'PLATE', normalizedValue: normalizePlate(input.plate), source: 'ONBOARDING_DOC',
-  }).catch((err) => log().error({ err, userId: input.userId }, 'plate identity capture failed — flow unaffected'));
 }
 
 /** MMG payer MSISDN (§2.1 MMG_PAYER — HARD: the money doesn't lie). Captured
