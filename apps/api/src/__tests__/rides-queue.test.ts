@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
+import { createRideRequest, type RideRequestApp } from '../modules/rides/rides.service';
 import { scanRideQueue } from '../modules/rides/queue.service';
 import { FareService } from '../modules/rides/fare.service';
 import { makeDispatchService } from '../modules/dispatch/dispatch.service';
@@ -28,6 +29,17 @@ const phoneBase = 592_140_000_000 + Math.floor(Math.random() * 800_000_000);
 // Two pickup areas far apart so per-area budgets are exercised honestly.
 const GT = { lat: 6.8013, lng: -58.1553 };       // Georgetown
 const LINDEN = { lat: 6.0011, lng: -58.3079 };   // ~90 km away
+
+function twoPartyBarrier() {
+  let arrivals = 0;
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  return async () => {
+    arrivals += 1;
+    if (arrivals === 2) release();
+    await released;
+  };
+}
 
 let app: FastifyInstance;
 const userIds: string[] = [];
@@ -386,6 +398,107 @@ describe('the scan', () => {
     });
     expect(entry?.status).toBe('LEFT');
     await app.prisma.order.updateMany({ where: { customerId: c.userId }, data: { status: 'CANCELLED' } });
+  });
+
+  it('serializes a queue auto-hail racing a manual hail into one active ride', async () => {
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const queued = await join(c.token);
+    expect(queued.statusCode).toBe(201);
+
+    // Both callers must finish the real pre-flight active-order read before
+    // either can enter creation. This is an arrival barrier, not a sleep: on
+    // the unfixed source both transactions then commit distinct TAXI rows.
+    const atFareBarrier = twoPartyBarrier();
+    const racingFare = {
+      estimateTiers: vi.fn(async () => {
+        await atFareBarrier();
+        return {
+          tiers: [{ rideClass: 'ECONOMY', fare: 2_000, capacity: 4, source: 'formula' }],
+          currencyCode: 'GYD',
+          distanceKm: 4,
+          durationMin: 12,
+          billableKm: 4,
+          routeSource: 'haversine',
+        };
+      }),
+    } as unknown as FareService;
+    const dispatch = {
+      getAvailability: vi.fn(async () => ({ level: 'GOOD', nearestEtaMinutes: 2 })),
+      dispatchOrder: vi.fn(async () => undefined),
+    } as unknown as ReturnType<typeof makeDispatchService>;
+    const notifications = {
+      send: vi.fn(async () => undefined),
+    } as unknown as NotificationService;
+    const dispatchAdd = vi.fn(async () => undefined);
+    const requestApp = {
+      prisma: app.prisma,
+      dispatchQueue: { add: dispatchAdd },
+    } as unknown as RideRequestApp;
+    const trip = {
+      pickup: GT,
+      dropoff: { lat: 6.8143, lng: -58.1443 },
+      pickupAddress: 'Stabroek Market',
+      dropoffAddress: 'Camp Street',
+      rideClass: 'ECONOMY' as const,
+      passengerCount: 1,
+    };
+
+    // Remove the unique display number as an accidental race arbiter. Each
+    // creation receives a distinct deterministic suffix while persistence,
+    // customer locking and active-order reads remain real PostgreSQL calls.
+    const random = vi.spyOn(Math, 'random')
+      .mockReturnValueOnce(0.1).mockReturnValueOnce(0.1).mockReturnValueOnce(0.1)
+      .mockReturnValueOnce(0.8).mockReturnValueOnce(0.8).mockReturnValueOnce(0.8);
+    let scanResult: PromiseSettledResult<{ expired: number; matched: number }>;
+    let manualResult: PromiseSettledResult<Awaited<ReturnType<typeof createRideRequest>>>;
+    try {
+      [scanResult, manualResult] = await runWithoutTenant(async () => Promise.allSettled([
+        scanRideQueue(requestApp, racingFare, dispatch, notifications, 1),
+        createRideRequest(requestApp, racingFare, dispatch, c.userId, trip),
+      ]));
+    } finally {
+      random.mockRestore();
+    }
+
+    expect(scanResult.status).toBe('fulfilled');
+    const active = await runWithoutTenant(async () => app.prisma.order.findMany({
+      where: {
+        customerId: c.userId,
+        orderType: 'TAXI',
+        status: { in: ['PENDING', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'] },
+      },
+      select: { id: true },
+    }));
+    expect(active).toHaveLength(1);
+    expect(await runWithoutTenant(async () => app.prisma.orderStatusLog.count({
+      where: { orderId: active[0]!.id, status: 'PENDING' },
+    }))).toBe(1);
+    expect(dispatchAdd).toHaveBeenCalledTimes(1);
+
+    const entry = await runWithoutTenant(async () => app.prisma.rideQueueEntry.findFirstOrThrow({
+      where: { customerId: c.userId },
+      orderBy: { createdAt: 'desc' },
+    }));
+    if (manualResult.status === 'rejected') {
+      expect(manualResult.reason).toMatchObject({ code: 'RIDE_IN_PROGRESS' });
+      expect(scanResult).toMatchObject({ status: 'fulfilled', value: { matched: 1 } });
+      expect(entry).toMatchObject({ status: 'MATCHED', matchedOrderId: active[0]!.id });
+    } else {
+      expect(scanResult).toMatchObject({ status: 'fulfilled', value: { matched: 0 } });
+      expect(entry).toMatchObject({ status: 'LEFT', matchedOrderId: null });
+      expect(manualResult.value.order.id).toBe(active[0]!.id);
+    }
+
+    await runWithoutTenant(async () => {
+      await app.prisma.rideQueueEntry.updateMany({
+        where: { customerId: c.userId },
+        data: { status: 'LEFT' },
+      });
+      await app.prisma.order.updateMany({
+        where: { customerId: c.userId },
+        data: { status: 'CANCELLED' },
+      });
+    });
   });
 
   it('expires a stale entry once, with ONE re-request push carrying the trip', async () => {
