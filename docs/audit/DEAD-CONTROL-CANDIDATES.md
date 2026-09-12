@@ -224,6 +224,47 @@ understand template literals/client base URLs, carry allowlisted server-to-serve
 and direct-navigation reasons, and emit a machine-readable manifest. Until then,
 the 99 entries are reviewed manually and the detector remains non-blocking.
 
+### Manual classification tranche — all 99 leads
+
+Every lead was searched across production clients, API/server-generated URLs,
+workers, tests, load tools, and documentation. This is static evidence only; it
+does not authorize deletion.
+
+| Classification | Count | Disposition |
+|---|---:|---|
+| `FALSE_POSITIVE` | 1 | `GET /api/v1/vendor/stores` is constructed from `V = '/api/v1/vendor'` in `apps/web/src/lib/vendor-api.ts:8,186-187` and executed by `apps/web/src/app/dashboard/layout.tsx:35` |
+| `USED` | 2 | Statement and verification render URLs are minted server-side and opened dynamically; retain |
+| `EXTERNALLY_INVOKED_KEEP` | 6 | Two signed MMG channels, three public upload families, and the pre-auth attribution intent endpoint; retain |
+| `TEST_OPS_ONLY` | 3 | Two conditionally registered load-test controls plus authenticated admin search sync; retain and verify deployment exposure separately |
+| `PLAUSIBLY_DEAD_NEEDS_RUNTIME` | 87 | No first-party production caller found; classify as missing UI, intentional external/ops surface, dark feature, or retirement candidate before changing code |
+
+The 87 unresolved candidates group as follows:
+
+| Surface | Count | Current evidence |
+|---|---:|---|
+| Privileged admin controls | 58 | No committed dashboard/desktop caller. Includes verification, legal processing, held orders, zones, ads, integrity, billing, ETA/prep, batching, vehicle identity and ratings. These are more likely missing admin seams or dark operations than safe deletion. |
+| Vendor product controls | 10 | QR assets, onboarding declaration, alerts, category ordering/store categories, settlements and subscription rail selection lack a production caller. |
+| Verification appeal and data rights | 4 | Appeal plus document access/erase/rectify are API-test-only; absence of UI is a rights/product gap, not deletion evidence. |
+| Password authentication | 4 | Login, set and reset routes have no first-party UI; launch authentication policy must decide whether to wire or retire them. |
+| Customer booking/notifications | 4 | Reschedule and notification preference/count controls lack a client seam. |
+| AI helpers | 2 | Search-intent and menu-polish appear test-only; separately decide whether deterministic replacements supersede them. |
+| Discovery/location/services | 3 | Nearby search, reverse geocoding and provider standing are product-shaped with no caller. |
+| Rider/driver subscription rail selection | 2 | Live financial-effect routes lack a settings action. |
+
+Concrete retained paths include server-generated statement URLs
+(`apps/api/src/modules/order/statement.ts:356-371`) and verification render URLs
+(`apps/api/src/providers/storage/envelope.ts:116-119`); signed MMG ingress
+(`apps/api/src/modules/billing/agent-cash.routes.ts:13-20,69-74,107-115`);
+public uploads (`apps/api/src/utils/public-uploads.ts:6-12,26-45`); and load-only
+test controls (`apps/api/src/app.ts:299-305`, `tools/load/lib.js:29-35,128`).
+
+The exported scanner also had a root-sensitivity defect: a programmatic
+`scanRepo('.')` call could produce 1,135 routes / 191 leads because relative
+scanned paths did not equal absolute imported-helper paths. The CLI normalized
+its root, but the exported function did not. The candidate repair normalizes
+inside `scanRepo` and tests that absolute and relative roots both yield the
+573-route / 99-lead baseline.
+
 ## Required proof for any cleanup PR
 
 - Candidate ID and pinned SHA.

@@ -126,4 +126,17 @@ test('current Swift composition yields a substantial route census', () => {
   assert.ok(signatures.has('GET /uploads/items/*'));
   assert.ok(signatures.has('GET /uploads/avatars/*'));
   assert.ok(signatures.has('GET /uploads/vehicles/*'));
+
+  const relativeRepo = path.relative(process.cwd(), repo) || '.';
+  const relative = scanRepo(relativeRepo);
+  assert.equal(
+    relative.routes.length,
+    routes.length,
+    'programmatic callers must get the same census from a relative repo root',
+  );
+  assert.equal(
+    relative.dead.length,
+    99,
+    'relative-root normalization must not duplicate helper/plugin routes',
+  );
 });

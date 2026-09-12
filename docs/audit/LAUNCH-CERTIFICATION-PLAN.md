@@ -39,7 +39,7 @@ The baseline was measured from a clean worktree at the pinned SHA.
 | Production-like TS/TSX/JS files / lines | 876 / 177,692 | Excludes conventional test, fixture, and mock paths |
 | Test TS/TSX lines | 134,443 | A large test corpus is present; coverage quality still needs grading |
 | API route census before detector repair | 0 routes, exit 0 | Vacuous green caused by reading `server.ts` |
-| Static route-declaration census after bounded repair | 573 static paths/patterns; 99 reachability leads | Includes app.ts plus registered helper/plugin source and statically expanded finite loops; manifest SHA-256 `98ae1e4211764c892f50c7a4b8431cb6380391bca2b87471f8455f4f25231e0b`; it is not a runtime Fastify count |
+| Static route-declaration census after bounded repair | 573 static paths/patterns; 99 reachability leads | Manual static triage: 1 detector false positive, 2 server-generated uses, 6 external/direct ingress, 3 test/ops-only, 87 needing runtime/product disposition. Includes app.ts plus registered helper/plugin source and statically expanded finite loops; manifest SHA-256 `98ae1e4211764c892f50c7a4b8431cb6380391bca2b87471f8455f4f25231e0b`; it is not a runtime Fastify count |
 | Raw-Prisma test candidates | 64 of 520 test files | Boundary-review leads; many are deliberate harnesses |
 | Export scanner candidates | 224 of 1,768 exports | 201 are used in their defining file; its narrowed graph called 23 declaration-only, but exact whole-repository search already refuted 3, leaving at most 20 first-pass leads |
 | Dependency override leads | 35 ranged overrides | 30 labelled redundant and 5 inapplicable by a simplistic detector; no removal authorized |

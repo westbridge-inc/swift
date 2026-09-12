@@ -223,6 +223,11 @@ function isProductionClientFile(file, root) {
 }
 
 function scanRepo(root) {
+  // The composition import resolver returns absolute paths. Normalize here,
+  // not only in the CLI wrapper, so programmatic callers cannot compare a
+  // relative `scanned` path with an absolute imported-helper path and count
+  // the same routes twice.
+  root = path.resolve(root);
   const compositionPath = path.join(root, 'apps/api/src/app.ts');
   if (!fs.existsSync(compositionPath)) {
     throw new Error(`Not a Swift checkout: ${compositionPath} does not exist.`);
