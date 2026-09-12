@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useRef } from 'react';
-import { AccessibilityInfo, Animated, ScrollView, StyleSheet, View } from 'react-native';
+import { AccessibilityInfo, Alert, Animated, ScrollView, StyleSheet, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, fontSize, motion, radius, space } from '@swift/ui';
 import { Card, ErrorState, Header, LinkText, LoadingBlock, PillButton, Screen, StatTile as KitStatTile, T, TonePill } from '../../../kit';
@@ -13,6 +13,7 @@ import { API_URL, driverApi, riderApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
 import {
+  getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
 } from '../../../stores/authStore';
@@ -31,6 +32,10 @@ import {
   serverText,
 } from '../earner-data';
 import { errorMessage } from '../../../lib/apiError';
+import {
+  captureRiderCashSettlementConfirmation,
+  requireCurrentCashSettlementConfirmation,
+} from '../../../hooks/cashSettlement';
 
 /** Thin domain wrapper over the kit's StatTile [Wave 3 part 2]: this screen's
  *  tiles always show money-or-dash with a job-count detail line. */
@@ -150,10 +155,14 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
         const orderNumber = serverText(row['orderNumber']);
         const createdAt = serverDate(row['createdAt']);
         const status = serverText(row['status'])?.toUpperCase();
+        const authSession = getAuthSessionSnapshot();
+        const confirmation = id && attestation && authSession
+          ? captureRiderCashSettlementConfirmation(id, attestation.amount, authSession)
+          : null;
         const meta = [orderNumber ? `#${orderNumber}` : undefined, createdAt ? dateLabel(createdAt) : undefined]
           .filter((part): part is string => !!part)
           .join(' · ');
-        const canConfirm = !!id && attestation != null && (status === 'OWED' || status === 'STORE_CONFIRMED');
+        const canConfirm = confirmation != null && (status === 'OWED' || status === 'STORE_CONFIRMED');
         return (
           <View key={id ?? `cash-row-${index}`}>
             {index > 0 ? (
@@ -195,7 +204,13 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
                 loading={confirm.isPending && confirm.variables?.id === id}
                 disabled={confirm.isPending}
                 onPress={() => {
-                  if (id && attestation) confirm.mutate({ id, amount: attestation.amount });
+                  if (!confirmation) return;
+                  try {
+                    requireCurrentCashSettlementConfirmation(confirmation);
+                    confirm.mutate(confirmation);
+                  } catch (confirmationError) {
+                    Alert.alert('Not confirmed', errorMessage(confirmationError));
+                  }
                 }}
               />
             ) : null}

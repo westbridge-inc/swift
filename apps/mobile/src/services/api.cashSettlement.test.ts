@@ -5,6 +5,7 @@ import {
   type InternalAxiosRequestConfig,
 } from 'axios';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import type { AuthSessionSnapshot } from '../lib/authSession';
 
 const env = vi.hoisted(() => {
   const previousApiUrl = process.env['EXPO_PUBLIC_API_URL'];
@@ -12,13 +13,18 @@ const env = vi.hoisted(() => {
   return { previousApiUrl };
 });
 
+const auth = vi.hoisted(() => ({
+  current: null as AuthSessionSnapshot | null,
+  selectedStoreId: null as string | null,
+}));
+
 vi.mock('../stores/authStore', () => ({
-  getAuthSessionSnapshot: () => null,
+  getAuthSessionSnapshot: () => auth.current,
   isAuthSessionSnapshotCurrent: () => false,
   useAuthStore: { getState: () => ({ rotateTokensIfCurrent: () => null, logoutIfCurrent: () => false }) },
 }));
 vi.mock('../stores/storeSwitcher', () => ({
-  useStoreSwitcher: { getState: () => ({ selectedStoreId: null }) },
+  useStoreSwitcher: { getState: () => ({ selectedStoreId: auth.selectedStoreId }) },
 }));
 vi.mock('expo-constants', () => ({ default: { expoConfig: {} } }));
 vi.mock('react-native', () => ({ TurboModuleRegistry: { get: () => null } }));
@@ -26,6 +32,12 @@ vi.mock('react-native', () => ({ TurboModuleRegistry: { get: () => null } }));
 import { api, riderApi, vendorApi } from './api';
 
 const originalApiAdapter = api.defaults.adapter;
+const accountA: AuthSessionSnapshot = {
+  generation: 1,
+  userId: 'account-a',
+  accessToken: 'access-a',
+  refreshToken: 'refresh-a',
+};
 
 function response(
   config: InternalAxiosRequestConfig,
@@ -41,6 +53,8 @@ function jsonBody(config: InternalAxiosRequestConfig): unknown {
 
 afterEach(() => {
   api.defaults.adapter = originalApiAdapter;
+  auth.current = null;
+  auth.selectedStoreId = null;
 });
 
 afterAll(() => {
@@ -60,12 +74,13 @@ describe('delivery cash-settlement attestation requests', () => {
     };
     api.defaults.adapter = adapter;
 
-    await confirm('settlement-1', 417.25);
+    await confirm('settlement-1', 417.25, accountA);
 
     expect(seen).toHaveLength(1);
     expect(seen[0]!.url).toBe(url);
     expect(seen[0]!.method).toBe('post');
     expect(jsonBody(seen[0]!)).toStrictEqual({ amount: 417.25 });
+    expect(seen[0]!.headers.get('Authorization')).toBe('Bearer access-a');
   });
 
   it.each([
@@ -88,11 +103,26 @@ describe('delivery cash-settlement attestation requests', () => {
       );
     }) as AxiosAdapter;
 
-    await expect(confirm('settlement-1', 418)).rejects.toMatchObject({
+    await expect(confirm('settlement-1', 418, accountA)).rejects.toMatchObject({
       response: {
         status: 409,
         data: { error: { code: 'ATTESTED_AMOUNT_MISMATCH' } },
       },
     });
+  });
+
+  it('pins the originating vendor store instead of a later selection', async () => {
+    const seen: InternalAxiosRequestConfig[] = [];
+    api.defaults.adapter = (async (config) => {
+      seen.push(config);
+      return response(config, 200, { success: true, data: { status: 'STORE_CONFIRMED' } });
+    }) as AxiosAdapter;
+    auth.selectedStoreId = 'store-b';
+
+    await vendorApi.confirmCashSettlement('settlement-1', 417.25, accountA, 'store-a');
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.headers.get('x-vendor-id')).toBe('store-a');
+    expect(seen[0]!.headers.get('Authorization')).toBe('Bearer access-a');
   });
 });

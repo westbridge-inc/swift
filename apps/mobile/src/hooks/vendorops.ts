@@ -13,6 +13,7 @@ import {
   requireAuthSessionSnapshot,
 } from '../stores/authStore';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
+import { confirmVendorCashSettlement } from './cashSettlement';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -423,7 +424,7 @@ export function useVendorCashSettlements(enabled = true) {
 export function useConfirmVendorCashSettlement() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: ({ id, amount }: { id: string; amount: number }) => unwrap(vendorApi.confirmCashSettlement(id, amount)),
+    mutationFn: confirmVendorCashSettlement,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'cash-settlements'] }),
   });
 }

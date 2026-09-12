@@ -26,10 +26,15 @@ import {
   useBusyHours,
   useRepeatCustomers,
 } from '../../../hooks/vendorops';
-import { requireAuthSessionForPrincipal, requireAuthSessionSnapshot } from '../../../stores/authStore';
+import { getAuthSessionSnapshot, requireAuthSessionForPrincipal, requireAuthSessionSnapshot } from '../../../stores/authStore';
 import { useVendorPreview } from '../../../stores/vendorPreview';
+import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { money, moneyExact } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
+import {
+  captureVendorCashSettlementConfirmation,
+  requireCurrentCashSettlementConfirmation,
+} from '../../../hooks/cashSettlement';
 import {
   TabHeader,
   type RevenueDay,
@@ -520,6 +525,7 @@ function InsightMetric({ label, value, detail, badge }: { label: string; value: 
 function RiderFeesOwedCard() {
   const q = useVendorCashSettlements();
   const confirm = useConfirmVendorCashSettlement();
+  const selectedStoreId = useStoreSwitcher((state) => state.selectedStoreId);
   // [MOB-046] A failed read used to produce an empty list, and an empty list
   // removed this card from the screen — which to a store owner is not an
   // outage, it is the absence of a debt. Money owed to a person is the last
@@ -564,6 +570,10 @@ function RiderFeesOwedCard() {
         // the attestation body. Operators never type or reconstruct the amount.
         const attestation = cashSettlementAmount(r.amount);
         const formattedAmount = attestation?.formatted ?? '—';
+        const authSession = getAuthSessionSnapshot();
+        const confirmation = attestation && authSession
+          ? captureVendorCashSettlementConfirmation(r.id, attestation.amount, selectedStoreId, authSession)
+          : null;
         return (
         <View key={r.id} style={{ paddingTop: space.md, marginTop: space.md, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -590,7 +600,7 @@ function RiderFeesOwedCard() {
                   The rider confirmed receiving it — mark it paid to close it out.
                 </T>
               ) : null}
-              {attestation ? (
+              {confirmation ? (
                 <PillButton
                   label="Mark paid"
                   variant="soft"
@@ -604,16 +614,28 @@ function RiderFeesOwedCard() {
                     // that money left the till and reached a named person: it
                     // names them and the amount, because a mis-tap on the wrong
                     // row is the same mistake as not paying at all.
-                    const prompt = markPaidPrompt(r, formattedAmount);
-                    Alert.alert(prompt.title, prompt.body, [
-                      { text: 'Not yet', style: 'cancel' },
-                      {
-                        text: prompt.confirm,
-                        onPress: () => confirm.mutate({ id: r.id, amount: attestation.amount }, {
-                          onError: (mutationError) => Alert.alert('Not recorded', errorMessage(mutationError)),
-                        }),
-                      },
-                    ]);
+                    try {
+                      requireCurrentCashSettlementConfirmation(confirmation);
+                      const prompt = markPaidPrompt(r, formattedAmount);
+                      Alert.alert(prompt.title, prompt.body, [
+                        { text: 'Not yet', style: 'cancel' },
+                        {
+                          text: prompt.confirm,
+                          onPress: () => {
+                            try {
+                              requireCurrentCashSettlementConfirmation(confirmation);
+                              confirm.mutate(confirmation, {
+                                onError: (mutationError) => Alert.alert('Not recorded', errorMessage(mutationError)),
+                              });
+                            } catch (confirmationError) {
+                              Alert.alert('Not recorded', errorMessage(confirmationError));
+                            }
+                          },
+                        },
+                      ]);
+                    } catch (confirmationError) {
+                      Alert.alert('Not recorded', errorMessage(confirmationError));
+                    }
                   }}
                 />
               ) : null}
