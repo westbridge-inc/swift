@@ -2,7 +2,9 @@
 
 Status: DRAFT — execution plan and current-main evidence, not a launch verdict
 
-Pinned baseline: `d51a1b0ed5cbe6b7a210c90e8b4e9d85fabaadd1`
+Pinned measurement baseline: `d51a1b0ed5cbe6b7a210c90e8b4e9d85fabaadd1`
+
+Current main incorporated by this plan branch: `42233da9f8467d76cd5747cae058f571b0884c9c`
 
 Prepared: 2026-09-12
 
@@ -44,12 +46,13 @@ The baseline was measured from a clean worktree at the pinned SHA.
 | Export scanner candidates | 224 of 1,768 exports | 201 are used in their defining file; its narrowed graph called 23 declaration-only, but exact whole-repository search already refuted 3, leaving at most 20 first-pass leads |
 | Dependency override leads | 35 ranged overrides | 30 labelled redundant and 5 inapplicable by a simplistic detector; no removal authorized |
 
-Current main also contains eight merged changes after the older audit baseline
+Current main also contains nine merged changes after the older audit baseline
 `156244e`: tenant-wall attestation, admin audit corrections, MMG handover
 refusal, dependency updates, document-expiry availability enforcement,
 ops-only incident merging, tenant-scoped search reconciliation, and truthful
-zero-recipient paging. Every older finding must therefore be reproduced against
-the pinned current baseline before it can be called open or closed.
+zero-recipient paging, plus the controlled mobile taxi-driver handback. Every
+older finding must therefore be reproduced against current main before it can
+be called open or closed.
 
 ## Evidence law
 
@@ -260,13 +263,13 @@ Golden journeys:
 The initial static allegation that mobile `rideApi` calls three nonexistent
 passenger routes was refuted by a second trace: `GET /rides/:id`,
 `POST /rides/:id/cancel`, and `POST /rides/:id/sos` are all registered, and the
-cancel/SOS wrappers are used. The adjacent verified gap is on the driver side:
-the API provides a controlled pre-custody driver-cancel/re-dispatch route, but
-the mobile `driverApi`, mover hook, and active-job UI expose no cancel action.
-Going offline is refused while the ride is assigned, so the driver can become
-trapped in the accepted flow without an in-app release path. This is the first
-taxi remediation candidate; its direct route and mobile contract tests are
-required before merge.
+cancel/SOS wrappers are used. The adjacent driver-side gap was reproduced and
+repaired on current main by `42233da9`: the mobile API, mover hook, and active
+job UI now expose the server's controlled pre-custody cancel/re-dispatch route,
+with a required reason and live-state eligibility. That bounded repair passed
+its pre-merge gates; its exact merge-commit post-merge CI remains part of the
+release evidence. Taxi as a whole is still not certified until every golden
+journey above passes.
 
 ### 5. Send / courier
 
@@ -439,14 +442,17 @@ The audit produces:
 ## Known blockers at this checkpoint
 
 - Current main is not certified launch-ready.
-- The alleged passenger taxi route mismatch was refuted. A missing mobile
-  driver-cancel control, web appointment blockage, and mobile reverse-geocode
-  absence are current static contract leads requiring dedicated remediation or
-  product-scope decisions.
-- The 99 route reachability leads, 64 raw-Prisma test leads, at most 20 remaining
-  declaration-only export leads, and dependency override leads are unclassified;
-  none authorizes deletion. Three of the export scanner's 23 claims are already
-  refuted by consumers outside its narrowed graph.
+- The alleged passenger taxi route mismatch was refuted and the verified mobile
+  driver handback gap is repaired on current main. Taxi's remaining journeys,
+  web appointment blockage, and mobile reverse-geocode absence still require
+  executable certification or an explicit launch-scope decision.
+- All 99 route leads now have a coarse manual disposition: 12 are known
+  false-positive/external/server/test/ops classes and 87 still need runtime or
+  product proof. Of 23 declaration-only export leads, 3 are proved scanner
+  false positives, 9 are missing/unwired controls, 10 are bounded cleanup
+  candidates, and 1 remains uncertain. The 64 raw-Prisma test leads and
+  dependency-override leads still need semantic review. None authorizes
+  deletion.
 - Product-lane Postgres is unassigned, so product database integration tests are
   held. Security-lane Postgres/Redis endpoints were unreachable at this
   checkpoint.
@@ -456,8 +462,9 @@ The audit produces:
   monitoring, store release, and Guyana legal retention decisions remain
   externally or operationally unverified.
 
-The immediate execution order is: finish the dead-control ledger and detector
-repair review; resolve the document-provenance security draft; reproduce the
-taxi contract mismatch; then certify MMG/money, food/grocery/pickup, courier,
+The immediate execution order is: land the reviewed report-only dead-control
+census after current-base CI; resolve the document-provenance and identity-
+signal security work; repair the reproduced service-job transition defects;
+then certify MMG/money, food/grocery/pickup, courier, taxi's remaining journeys,
 services/appointments, and the remaining cross-cutting verticals in the order
 above.
