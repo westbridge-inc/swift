@@ -1424,16 +1424,31 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const vendor = await app.prisma.vendor.findUnique({
       where: { id },
-      select: { id: true, averageRating: true, totalRatings: true },
+      select: { id: true },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
 
-    const result = await ratingService.getVendorReviews(id, limit, skip);
+    const result = await ratingService.getVendorReviews(
+      id,
+      limit,
+      skip,
+      request.user?.userId && request.tenantId
+        ? { userId: request.user.userId, tenantId: request.tenantId }
+        : undefined,
+    );
 
     return {
       success: true,
       data: {
-        vendor: { id: vendor.id, averageRating: vendor.averageRating, totalRatings: vendor.totalRatings },
+        // The profile's materialized score includes ratings this viewer may
+        // not see. Keep this review page's headline consistent with its
+        // viewer-scoped rows and distribution; other storefront surfaces
+        // retain the platform-wide vendor score.
+        vendor: {
+          id: vendor.id,
+          averageRating: result.averageRating,
+          totalRatings: result.total,
+        },
         reviews: result.reviews.map((r) => ({
           id: r.id,
           score: r.score,

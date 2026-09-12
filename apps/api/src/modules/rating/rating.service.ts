@@ -7,6 +7,11 @@ import { maskPii, processReviewText } from './review-scrub';
 import { SAFETY_TAGS, canonicalTags, mostSevereSafetyTag } from './tag-registry';
 import { ratingPipelineCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
+import {
+  publishedVendorReviewWhere,
+  summarizeRatingDistribution,
+  vendorReviewWhereForViewer,
+} from './vendor-review-visibility';
 
 // Safety spec ("Rating flags: reuse the ratings/quality engine — safety-tagged
 // categories route here automatically"): a rating carrying one of these tags
@@ -23,6 +28,11 @@ type RatingType =
   | 'DRIVER_TO_CUSTOMER'
   | 'CUSTOMER_TO_PROVIDER'
   | 'PROVIDER_TO_CUSTOMER';
+
+export interface ReviewViewer {
+  tenantId: string;
+  userId: string;
+}
 
 interface RateInput {
   orderId: string;
@@ -345,29 +355,42 @@ export class RatingService {
     return { ratings, message: 'Thank you for your feedback!' };
   }
 
-  async getVendorReviews(vendorId: string, limit = 20, offset = 0) {
-    const [reviews, total] = await Promise.all([
+  async getVendorReviews(vendorId: string, limit = 20, offset = 0, viewer?: ReviewViewer) {
+    // [STORE-002] A block is directional for public content: the blocker no
+    // longer sees reviews written by the person they blocked, while guests
+    // and every other viewer still see the same published review. Keep one
+    // predicate for rows, count and distribution so pagination and the score
+    // bars cannot disclose content that the list itself withheld.
+    const visibleWhere = viewer
+      ? await vendorReviewWhereForViewer(
+        this.prisma,
+        viewer.tenantId,
+        viewer.userId,
+        vendorId,
+      )
+      : publishedVendorReviewWhere(vendorId);
+    const [reviews, scoreBuckets] = await Promise.all([
       this.prisma.rating.findMany({
-        where: { vendorId, type: 'CUSTOMER_TO_VENDOR', isPublic: true, visibleAt: { not: null } },
+        where: visibleWhere,
         include: { rater: { select: { firstName: true, avatar: true } } },
         orderBy: { createdAt: 'desc' },
         take: limit,
         skip: offset,
       }),
-      this.prisma.rating.count({ where: { vendorId, type: 'CUSTOMER_TO_VENDOR', isPublic: true, visibleAt: { not: null } } }),
+      this.prisma.rating.groupBy({
+        by: ['score'],
+        where: visibleWhere,
+        _count: true,
+      }),
     ]);
+    const summary = summarizeRatingDistribution(scoreBuckets);
 
-    // Rating distribution
-    const distribution = await this.prisma.rating.groupBy({
-      by: ['score'],
-      where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
-      _count: true,
-    });
-
-    const dist: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-    for (const d of distribution) dist[d.score] = d._count;
-
-    return { reviews, total, distribution: dist };
+    return {
+      reviews,
+      total: summary.totalReviews,
+      averageRating: summary.averageRating,
+      distribution: summary.distribution,
+    };
   }
 
   /**
