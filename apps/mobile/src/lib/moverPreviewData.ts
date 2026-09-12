@@ -11,8 +11,6 @@
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const SAMPLE_DAILY_TOTALS = [6200, 7400, 5100, 8800, 9600, 11200, 8400];
 
-export const PREVIEW_KIND = 'DRIVER' as const;
-
 /** A verified, online sample driver — drives `online`, the GO gate, identity. */
 export const PREVIEW_PROFILE = {
   id: 'preview-driver',
