@@ -7,7 +7,7 @@ import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Card, ErrorState, LinkText, LoadingBlock, PillButton, Screen, Segmented, T } from '../../../kit';
 import { DeltaBadge, GUTTER, InlineInput, KpiTile, fmtDate } from '../shared';
-import { classifyOwedLedger, markPaidPrompt } from '../../../lib/riderFeesOwed';
+import { cashSettlementAmount, classifyOwedLedger, markPaidPrompt } from '../../../lib/riderFeesOwed';
 import { errorMessage } from '../../../lib/apiError';
 import { StandingCard } from '../../../components/StandingCard';
 import { API_URL, vendorApi } from '../../../services/api';
@@ -28,7 +28,7 @@ import {
 } from '../../../hooks/vendorops';
 import { requireAuthSessionForPrincipal, requireAuthSessionSnapshot } from '../../../stores/authStore';
 import { useVendorPreview } from '../../../stores/vendorPreview';
-import { money } from '../../../lib/money';
+import { money, moneyExact } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import {
   TabHeader,
@@ -534,7 +534,7 @@ function RiderFeesOwedCard() {
           YOU OWE RIDERS
         </T>
         <T variant="label" weight="bold">
-          {ledger.owed == null ? '—' : money(ledger.owed)}
+          {ledger.owed == null ? '—' : moneyExact(ledger.owed)}
         </T>
       </View>
       {ledger.state !== 'ready' ? (
@@ -562,8 +562,8 @@ function RiderFeesOwedCard() {
       {rows.map((r) => {
         // The server-minted ledger row supplies both the displayed number and
         // the attestation body. Operators never type or reconstruct the amount.
-        const amount = numericFact(r.amount);
-        const formattedAmount = amount == null ? '—' : money(amount);
+        const attestation = cashSettlementAmount(r.amount);
+        const formattedAmount = attestation?.formatted ?? '—';
         return (
         <View key={r.id} style={{ paddingTop: space.md, marginTop: space.md, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -590,7 +590,7 @@ function RiderFeesOwedCard() {
                   The rider confirmed receiving it — mark it paid to close it out.
                 </T>
               ) : null}
-              {amount != null ? (
+              {attestation ? (
                 <PillButton
                   label="Mark paid"
                   variant="soft"
@@ -609,7 +609,7 @@ function RiderFeesOwedCard() {
                       { text: 'Not yet', style: 'cancel' },
                       {
                         text: prompt.confirm,
-                        onPress: () => confirm.mutate({ id: r.id, amount }, {
+                        onPress: () => confirm.mutate({ id: r.id, amount: attestation.amount }, {
                           onError: (mutationError) => Alert.alert('Not recorded', errorMessage(mutationError)),
                         }),
                       },

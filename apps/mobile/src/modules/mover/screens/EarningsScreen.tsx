@@ -5,7 +5,8 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, fontSize, motion, radius, space } from '@swift/ui';
 import { Card, ErrorState, Header, LinkText, LoadingBlock, PillButton, Screen, StatTile as KitStatTile, T, TonePill } from '../../../kit';
 import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
-import { money } from '../../../lib/money';
+import { money, moneyExact } from '../../../lib/money';
+import { cashSettlementAmount } from '../../../lib/riderFeesOwed';
 import { dateLabel } from '../shared';
 import { useMutation } from '@tanstack/react-query';
 import { API_URL, driverApi, riderApi } from '../../../services/api';
@@ -135,7 +136,7 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
     <Card style={{ marginTop: space.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
         <T variant="micro" tone="muted">STORES OWE YOU</T>
-        <T variant="numM">{moneyOrDash(owed)}</T>
+        <T variant="numM">{owed == null ? '—' : moneyExact(owed)}</T>
       </View>
       <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
         MMG orders — the customer paid the store, so your delivery fee comes from them in cash.
@@ -144,7 +145,7 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
         const id = serverText(row['id']);
         // The ledger row is the authority for both the number on screen and the
         // amount attested to the server. There is no editable amount field.
-        const amount = serverNumber(row['amount']);
+        const attestation = cashSettlementAmount(row['amount']);
         const vendorName = serverText(serverRecord(row['vendor'])?.['name']);
         const orderNumber = serverText(row['orderNumber']);
         const createdAt = serverDate(row['createdAt']);
@@ -152,7 +153,7 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
         const meta = [orderNumber ? `#${orderNumber}` : undefined, createdAt ? dateLabel(createdAt) : undefined]
           .filter((part): part is string => !!part)
           .join(' · ');
-        const canConfirm = !!id && amount != null && (status === 'OWED' || status === 'STORE_CONFIRMED');
+        const canConfirm = !!id && attestation != null && (status === 'OWED' || status === 'STORE_CONFIRMED');
         return (
           <View key={id ?? `cash-row-${index}`}>
             {index > 0 ? (
@@ -173,7 +174,7 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
                 ) : null}
                 {meta ? <T variant="caption" tone="muted">{meta}</T> : null}
               </View>
-              <T variant="numM" style={{ marginLeft: space.md }}>{moneyOrDash(amount)}</T>
+              <T variant="numM" style={{ marginLeft: space.md }}>{attestation?.formatted ?? '—'}</T>
             </View>
             {status === 'RIDER_CONFIRMED' ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
@@ -194,7 +195,7 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
                 loading={confirm.isPending && confirm.variables?.id === id}
                 disabled={confirm.isPending}
                 onPress={() => {
-                  if (id && amount != null) confirm.mutate({ id, amount });
+                  if (id && attestation) confirm.mutate({ id, amount: attestation.amount });
                 }}
               />
             ) : null}

@@ -12,19 +12,19 @@ const vendorScreen = readFileSync(
 
 describe('delivery cash-settlement screen contract', () => {
   it('renders and submits the same authoritative rider-row amount', () => {
-    expect(riderScreen).toContain("const amount = serverNumber(row['amount']);");
-    expect(riderScreen).toContain('{moneyOrDash(amount)}');
-    expect(riderScreen).toContain('confirm.mutate({ id, amount });');
+    expect(riderScreen).toContain("const attestation = cashSettlementAmount(row['amount']);");
+    expect(riderScreen).toContain("{attestation?.formatted ?? '—'}");
+    expect(riderScreen).toContain('confirm.mutate({ id, amount: attestation.amount });');
     expect(riderScreen).toContain('confirm.variables?.id === id');
     expect(riderScreen).toContain('errorMessage(confirm.error,');
     expect(riderScreen).not.toContain('confirm.mutate(id)');
   });
 
   it('renders, names, and submits the same authoritative vendor-row amount', () => {
-    expect(vendorScreen).toContain('const amount = numericFact(r.amount);');
-    expect(vendorScreen).toContain("const formattedAmount = amount == null ? '—' : money(amount);");
+    expect(vendorScreen).toContain('const attestation = cashSettlementAmount(r.amount);');
+    expect(vendorScreen).toContain("const formattedAmount = attestation?.formatted ?? '—';");
     expect(vendorScreen).toContain('markPaidPrompt(r, formattedAmount)');
-    expect(vendorScreen).toContain('confirm.mutate({ id: r.id, amount }, {');
+    expect(vendorScreen).toContain('confirm.mutate({ id: r.id, amount: attestation.amount }, {');
     expect(vendorScreen).toContain('confirm.variables?.id === r.id');
     expect(vendorScreen).toContain("Alert.alert('Not recorded', errorMessage(mutationError))");
     expect(vendorScreen).not.toContain('confirm.mutate(r.id');
