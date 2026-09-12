@@ -41,7 +41,7 @@ The baseline was measured from a clean worktree at the pinned SHA.
 | API route census before detector repair | 0 routes, exit 0 | Vacuous green caused by reading `server.ts` |
 | Static route-declaration census after bounded repair | 567 declaration sites/patterns; 96 reachability leads | Includes composition-root routes and one dynamic pattern; it is not a runtime Fastify count |
 | Raw-Prisma test candidates | 64 of 520 test files | Boundary-review leads; many are deliberate harnesses |
-| Export scanner candidates | 224 of 1,768 exports | 201 are used in their defining file; only 23 are declaration-only leads |
+| Export scanner candidates | 224 of 1,768 exports | 201 are used in their defining file; its narrowed graph called 23 declaration-only, but exact whole-repository search already refuted 3, leaving at most 20 first-pass leads |
 | Dependency override leads | 35 ranged overrides | 30 labelled redundant and 5 inapplicable by a simplistic detector; no removal authorized |
 
 Current main also contains eight merged changes after the older audit baseline
@@ -443,9 +443,10 @@ The audit produces:
   driver-cancel control, web appointment blockage, and mobile reverse-geocode
   absence are current static contract leads requiring dedicated remediation or
   product-scope decisions.
-- The 96 route reachability leads, 64 raw-Prisma test leads, 23 declaration-only
-  export leads, and dependency override leads are unclassified; none authorizes
-  deletion.
+- The 96 route reachability leads, 64 raw-Prisma test leads, at most 20 remaining
+  declaration-only export leads, and dependency override leads are unclassified;
+  none authorizes deletion. Three of the export scanner's 23 claims are already
+  refuted by consumers outside its narrowed graph.
 - Product-lane Postgres is unassigned, so product database integration tests are
   held. Security-lane Postgres/Redis endpoints were unreachable at this
   checkpoint.

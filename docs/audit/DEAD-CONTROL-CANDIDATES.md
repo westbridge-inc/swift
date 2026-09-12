@@ -27,11 +27,13 @@ suitable as a blocking CI gate in its present form.
 | Route reachability, repaired | 567 static declaration sites/patterns | 96 | Path-prefix text leads; webhooks, direct browser pages, internal routes, and honest placeholders can be valid |
 | D5 dependency overrides | 35 ranged entries | 30 “redundant”, 5 “inapplicable” | Hygiene leads only; detector does not prove the pnpm graph or vulnerability state |
 | D6 raw Prisma in tests | 520 test files | 64 occurrences | Some are intentional DDL/RLS harnesses; others lack exact-role boundary proof |
-| D8 exported symbols | 1,768 exports / 350 production files | 224 | 201 are consumed in their own file; 23 occur only at declaration |
+| D8 exported symbols | 1,768 exports / 350 production files | 224 | 201 are consumed in their own file; the narrowed graph called 23 declaration-only, but whole-repository search refuted 3 |
 
-## D8 — 23 declaration-only export leads
+## D8 — 23 scanner-reported declaration-only export leads
 
-Every item is `NEEDS_CALL_GRAPH_EVIDENCE`; `deletion_allowed` is `false`.
+The scanner considered a narrowed consumer graph. Exact whole-repository search
+has already proved three claims false; the other 20 remain
+`NEEDS_CALL_GRAPH_EVIDENCE`. `deletion_allowed` is `false` for every item.
 
 | Symbol | Location | Risk if wrongly removed |
 |---|---|---|
@@ -63,6 +65,25 @@ Before changing any item, inspect package consumers outside `apps/api/src`,
 generated/import-by-name use, scripts, tests, telemetry dashboards, runbooks,
 and whether the correct action is merely to remove `export` while retaining the
 local implementation.
+
+### Exact-repository correction — first semantic tranche
+
+These three are **KEEP / scanner false positive** on baseline `d51a1b0e`:
+
+- `defaultJournalPath` is imported and invoked by
+  `scripts/dev/bootstrap.ts:35,45`.
+- `STAGES` is imported and used to validate the requested bootstrap stage by
+  `scripts/dev/bootstrap.ts:35,42`.
+- `ensureEphemeralIdentity` is imported and awaited by
+  `apps/api/prisma/seed.ts:3,11`.
+
+Their consumers sit outside the scanner's narrowed `apps/api/src` graph. This
+is direct evidence that the detector cannot authorize cleanup. Exact `rg -w`
+over the repository found declaration-only occurrences for the other 20 names,
+but that proves neither runtime irrelevance nor whether a disconnected safety,
+retry, privacy, telemetry, or validation control should be wired instead of
+deleted. They remain report-only candidates pending product and behavioral
+evidence.
 
 ## D8 — confirmed false-positive class
 
