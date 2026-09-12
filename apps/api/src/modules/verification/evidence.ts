@@ -59,15 +59,15 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
  * [AUD-L8b-001] Has this account EVER held checklist evidence — valid, expired,
  * rejected or superseded?
  *
- * `approvedEvidenceFor` answers "what is current". This answers "was a record
- * for this type ever filed", which is the only question the legacy
+ * `approvedEvidenceFor` answers "what is current". This answers "was this type
+ * ever filed", which is the only question the legacy
  * `documentsVerified` grandfather clause was ever entitled to ask — and it is
  * asked of the MISSING types alone. A type missing because its record lapsed is
  * an expiry; a type missing because nothing was ever filed is the pre-checklist
- * state the clause exists for. Same ownership
- * and purge filters as above; deliberately NO status or expiry filter, because a
- * record that has expired is precisely the case the flag must not be allowed to
- * paper over.
+ * state the clause exists for. Same ownership filter as above, but deliberately
+ * NO state, status, expiry or purge filter. Durable records survive retention
+ * purge, but are only created on COMMITTED approval. Never-approved submissions
+ * are history too; rejecting or retiring one cannot make it look never filed.
  */
 export async function anyChecklistEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[]): Promise<boolean> {
   if (checklist.length === 0) return false;
@@ -79,11 +79,15 @@ export async function anyChecklistEvidenceFor(db: EvidenceDb, userId: string, ch
   const held = await db.documentRecord.count({
     where: {
       docType: { in: [...checklist] },
-      AND: [
-        { OR: [{ accountId: userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])] },
-        { submission: { purgedAt: null } },
-      ],
+      OR: [{ accountId: userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])],
     },
   });
-  return held > 0;
+  if (held > 0) return true;
+  const submitted = await db.verificationDocument.count({
+    where: {
+      docType: { in: [...checklist] },
+      OR: [{ userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])],
+    },
+  });
+  return submitted > 0;
 }

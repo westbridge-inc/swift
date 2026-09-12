@@ -1,4 +1,4 @@
-import type { PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
+import type { Prisma, PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
 import { registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER } from '../verification/doc-registry';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
 import { NotFoundError } from '../../utils/errors';
@@ -134,8 +134,8 @@ export function moverRateFor(tiers: SubscriptionTiers, vehicleType: VehicleType)
 export class CountryConfigService {
   constructor(private prisma: PrismaClient) {}
 
-  async getByCode(code: string): Promise<CountryConfig> {
-    const config = await this.prisma.countryConfig.findUnique({ where: { code } });
+  async getByCode(code: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<CountryConfig> {
+    const config = await db.countryConfig.findUnique({ where: { code } });
     if (!config) throw new NotFoundError('CountryConfig', code);
     return config;
   }
@@ -202,8 +202,8 @@ export class CountryConfigService {
    * An unseeded profile key resolves to no extra documents. Used both to display
    * the checklist and to gate live operation.
    */
-  async getMoverChecklist(code: string, vehicleType: VehicleType): Promise<string[]> {
-    const config = await this.getByCode(code);
+  async getMoverChecklist(code: string, vehicleType: VehicleType, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<string[]> {
+    const config = await this.getByCode(code, db);
     const lists = config.documentChecklists as Record<string, string[]>;
     const base = lists['MOVER'] ?? [];
     const extra = docProfilesFor(vehicleType).flatMap((key) => lists[key] ?? []);
