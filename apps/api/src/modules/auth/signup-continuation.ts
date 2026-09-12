@@ -51,6 +51,7 @@ return 1
 const ARM_DEVELOPMENT_GENERATION_SCRIPT = `
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
 redis.call('DEL', KEYS[2])
+redis.call('DEL', KEYS[3])
 return 1
 `;
 
@@ -104,12 +105,13 @@ export async function armDevelopmentSignupGeneration(
   phone: string,
 ): Promise<string> {
   const generation = randomBytes(24).toString('base64url');
-  const { otpGeneration, current } = keysFor(phone, 'unused');
+  const { otpGeneration, current, otpRecord } = keysFor(phone, 'unused');
   await redis.eval(
     ARM_DEVELOPMENT_GENERATION_SCRIPT,
-    2,
+    3,
     otpGeneration,
     current,
+    otpRecord,
     generation,
     String(SIGNUP_CONTINUATION_TTL_S),
   );

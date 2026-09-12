@@ -33,9 +33,10 @@ class ScriptRedis {
 
     // Development-only ceremony parity: arm a generation and invalidate the
     // earlier continuation in the same cluster-slot operation.
-    if (keyCount === 2 && argv.length === 2) {
+    if (keyCount === 3 && argv.length === 2 && script.includes("redis.call('SET', KEYS[1], ARGV[1]")) {
       this.put(keys[0]!, argv[0]!, Number(argv[1]));
       this.values.delete(keys[1]!);
+      this.values.delete(keys[2]!);
       return 1;
     }
 
@@ -206,6 +207,32 @@ describe('signup continuation capability', () => {
 
     await expect(consumeSignupContinuation(asRedis(redis), '+5926001001', first.registrationProof)).resolves.toBe(false);
     await expect(issueSignupContinuation(asRedis(redis), '+5926001001', generation)).resolves.not.toBeNull();
+  });
+
+  it('the development bypass discards an outstanding real code without invalidating its issued proof', async () => {
+    const redis = new ScriptRedis();
+    const phone = '+5926001001';
+    await storeSignupOtp(asRedis(redis), phone, '111111');
+
+    const generation = await armDevelopmentSignupGeneration(asRedis(redis), phone);
+    const continuation = await issueSignupContinuation(asRedis(redis), phone, generation);
+    expect(continuation).not.toBeNull();
+
+    await expect(verifySignupOtp(asRedis(redis), phone, '111111')).resolves.toMatchObject({ valid: false });
+    await expect(consumeSignupContinuation(asRedis(redis), phone, continuation!.registrationProof)).resolves.toBe(true);
+  });
+
+  it('an outstanding real code cannot consume a bypass generation while its account lookup is paused', async () => {
+    const redis = new ScriptRedis();
+    const phone = '+5926001001';
+    await storeSignupOtp(asRedis(redis), phone, '111111');
+
+    // Arming represents successful bypass verification. Before its handler
+    // resumes from user lookup to mint the continuation, the older real code
+    // must already be gone and therefore unable to consume this generation.
+    const generation = await armDevelopmentSignupGeneration(asRedis(redis), phone);
+    await expect(verifySignupOtp(asRedis(redis), phone, '111111')).resolves.toMatchObject({ valid: false });
+    await expect(issueSignupContinuation(asRedis(redis), phone, generation)).resolves.not.toBeNull();
   });
 
   it('expires and rejects malformed input without evaluating a Redis script', async () => {
