@@ -524,12 +524,15 @@ export async function riderRoutes(app: FastifyInstance) {
     }
 
     // Verification gate: the country's MOVER checklist must be fully approved.
-    // Legacy documentsVerified flag grandfathers pre-checklist accounts.
+    // Legacy documentsVerified only grandfathers types never filed; a flag
+    // cannot override expired, revoked or purged checklist evidence.
     // Fast-fail preview for honest copy — the AUTHORITATIVE check re-runs
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
-    const verified = rider.documentsVerified
-      || await verification.isRoleVerified(request.user.userId, 'MOVER');
-    if (!verified) {
+    const documents = await verification.getMoverDocumentStatus(request.user.userId, {
+      vehicleType: rider.vehicleType,
+      legacyVerified: rider.documentsVerified,
+    });
+    if (!documents.allowed) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
     }
 
@@ -581,8 +584,8 @@ export async function riderRoutes(app: FastifyInstance) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
 
-      const snapshots = await tx.$queryRaw<Array<{ currentOrderId: string | null; documentsVerified: boolean; updatedAt: Date }>>`
-        SELECT "currentOrderId", "documentsVerified", "updatedAt"
+      const snapshots = await tx.$queryRaw<Array<{ currentOrderId: string | null; documentsVerified: boolean; vehicleType: VehicleType; updatedAt: Date }>>`
+        SELECT "currentOrderId", "documentsVerified", "vehicleType", "updatedAt"
         FROM "riders"
         WHERE "id" = ${rider.id}
         FOR UPDATE
@@ -596,9 +599,11 @@ export async function riderRoutes(app: FastifyInstance) {
       // revocation committing after the preview above can no longer slip a
       // stale "verified" through to the online write. The legacy flag comes
       // from the LOCKED profile snapshot, not the preview.
-      const liveVerified = snapshot.documentsVerified
-        || await verification.isRoleVerified(request.user.userId, 'MOVER', tx);
-      if (!liveVerified) {
+      const liveDocuments = await verification.getMoverDocumentStatus(request.user.userId, {
+        vehicleType: snapshot.vehicleType,
+        legacyVerified: snapshot.documentsVerified,
+      }, tx);
+      if (!liveDocuments.allowed) {
         throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
       }
       const retiredDriverId = await lockAndRetireDriverSupply(tx, request.user.userId);
