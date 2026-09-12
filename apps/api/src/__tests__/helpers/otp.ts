@@ -57,6 +57,19 @@ export async function loginWithOtp(
   });
 }
 
+/** Complete a new-user OTP ceremony and return its single-use signup capability. */
+export async function registrationProofFor(app: FastifyInstance, phone: string): Promise<string> {
+  const response = await loginWithOtp(app, phone);
+  if (response.statusCode !== 200) {
+    throw new Error(`verify-otp failed for ${phone}: ${response.statusCode} ${response.body}`);
+  }
+  const proof = response.json().data?.registrationProof;
+  if (typeof proof !== 'string' || !proof) {
+    throw new Error(`verify-otp did not issue a registration proof for new phone ${phone}`);
+  }
+  return proof;
+}
+
 /** A 6-digit code guaranteed not to equal the real one. */
 export function wrongCode(realCode: string): string {
   return realCode === '000000' ? '111111' : '000000';

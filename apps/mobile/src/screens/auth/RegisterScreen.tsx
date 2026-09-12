@@ -15,6 +15,7 @@ import { BrandCheckbox, LabeledInput, PillButton, Screen, T } from '../../kit';
 export function RegisterScreen() {
   const route = useRoute<any>();
   const phone: string = route.params?.phone ?? '';
+  const registrationProof: string = route.params?.registrationProof ?? '';
   const { setAuth, intent, countryCode } = useAuthStore();
 
   const [firstName, setFirstName] = useState('');
@@ -28,6 +29,7 @@ export function RegisterScreen() {
     mutationFn: () =>
       authApi.register({
         phone,
+        registrationProof,
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         ...(email.trim() ? { email: email.trim() } : {}),
@@ -43,10 +45,12 @@ export function RegisterScreen() {
     },
   });
 
-  const err = register.isError
+  const err = !registrationProof
+    ? 'Verify your phone again to continue registration.'
+    : register.isError
     ? ((register.error as any)?.response?.data?.error?.message ?? 'Registration failed. Try again.')
     : undefined;
-  const valid = firstName.trim().length >= 2 && lastName.trim().length >= 2 && agreed;
+  const valid = !!registrationProof && firstName.trim().length >= 2 && lastName.trim().length >= 2 && agreed;
 
   return (
     <Screen style={{ backgroundColor: color.surface.base }}>

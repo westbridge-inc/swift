@@ -9,7 +9,16 @@ import { sendStepUpOtp, verifyStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
-import { browserClientOf, clearSessionCookies, refreshCredentialOf, setSessionCookies, withoutTokens } from './browser-session';
+import {
+  browserClientOf,
+  clearSessionCookies,
+  clearSignupContinuationCookie,
+  refreshCredentialOf,
+  setSessionCookies,
+  setSignupContinuationCookie,
+  signupContinuationOf,
+  withoutTokens,
+} from './browser-session';
 import { browserSessionCounter } from '../../plugins/observability';
 
 const sendOtpSchema = z.object({
@@ -26,6 +35,7 @@ const registerSchema = z.object({
   firstName: z.string().min(1).max(50),
   lastName: z.string().min(1).max(50),
   email: z.string().email().optional(),
+  registrationProof: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
   role: z.enum(['CUSTOMER', 'MOVER', 'VENDOR']).default('CUSTOMER'),
   countryCode: z.string().length(2).default('GY'),
   /// SWIFT-AUD-D9-03: recorded consent. Optional so shipped clients keep
@@ -94,8 +104,16 @@ export async function authRoutes(app: FastifyInstance) {
       ipAddress: request.ip,
       userAgent: request.headers['user-agent'] || '',
     });
+    reply.header('Cache-Control', 'no-store, max-age=0');
+    if (browserClientOf(request) && 'registrationProof' in result && typeof result.registrationProof === 'string') {
+      setSignupContinuationCookie(reply, result.registrationProof);
+      const { registrationProof: _proof, ...safeResult } = result;
+      void _proof;
+      return reply.send({ success: true, data: safeResult });
+    }
     // [A-01 / W-01] A browser client gets its session as HttpOnly cookies and no credential in the body.
     if (browserClientOf(request) && 'tokens' in result && result.tokens) {
+      clearSignupContinuationCookie(reply);
       setSessionCookies(reply, result.tokens);
       return reply.send({ success: true, data: withoutTokens(result) });
     }
@@ -119,11 +137,18 @@ export async function authRoutes(app: FastifyInstance) {
     if (process.env['CONSENT_REQUIRED'] !== '0' && body.acceptTerms !== true) {
       throw new AppError(400, 'CONSENT_REQUIRED', 'You must accept the Terms of Service and Privacy Policy to create an account');
     }
+    const registrationProof = signupContinuationOf(request);
+    if (!registrationProof) {
+      throw new AppError(403, 'REGISTRATION_PROOF_REQUIRED', 'Verify your phone again to continue registration');
+    }
+    if (browserClientOf(request)) clearSignupContinuationCookie(reply);
     const result = await authService.register({
       ...body,
+      registrationProof,
       deviceId: (request.headers['x-device-id'] as string) || null,
       ipAddress: request.ip || null,
     });
+    reply.header('Cache-Control', 'no-store, max-age=0');
     // [W-01] Registration issues a session exactly as verify-otp does, so a
     // browser must receive it exactly as verify-otp gives it: HttpOnly cookies
     // and no credential in the body. Without this the web app's signup handed

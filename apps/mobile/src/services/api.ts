@@ -244,6 +244,7 @@ export const authApi = {
   pricing: (country?: string) => api.get('/auth/pricing', { params: country ? { country } : undefined }),
   register: (data: {
     phone: string;
+    registrationProof: string;
     firstName: string;
     lastName: string;
     email?: string;

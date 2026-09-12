@@ -28,12 +28,15 @@ export const BROWSER_CLIENTS = new Set(['admin-web', 'web']);
 
 export const ACCESS_COOKIE = 'swift_at';
 export const REFRESH_COOKIE = 'swift_rt';
+export const SIGNUP_CONTINUATION_COOKIE = 'swift_signup';
 /** The refresh cookie is sent only to the auth routes — never to an ordinary API call. */
 export const REFRESH_COOKIE_PATH = '/api/v1/auth';
 export const ACCESS_COOKIE_PATH = '/api/v1';
+export const SIGNUP_CONTINUATION_COOKIE_PATH = '/api/v1/auth';
 /** Matches the refresh session's life (30 days); the access cookie carries the 15-minute JWT and expires with it. */
 export const REFRESH_COOKIE_MAX_AGE_S = 30 * 24 * 3600;
 export const ACCESS_COOKIE_MAX_AGE_S = 15 * 60;
+export const SIGNUP_CONTINUATION_COOKIE_MAX_AGE_S = 10 * 60;
 
 export function browserClientOf(request: Pick<FastifyRequest, 'headers'>): string | null {
   const raw = request.headers[BROWSER_CLIENT_HEADER];
@@ -114,6 +117,30 @@ export function refreshCredentialOf(request: Pick<FastifyRequest, 'headers' | 'b
   return cookie;
 }
 
+/**
+ * Registration authority for this request. Native clients carry the opaque
+ * continuation in the body. Named browser clients can use only the HttpOnly
+ * cookie behind the same client-header + origin gate as session cookies, so a
+ * page script never receives the signup credential in a response body.
+ */
+export function signupContinuationOf(request: Pick<FastifyRequest, 'headers' | 'body'>): string | null {
+  if (!browserClientOf(request)) {
+    const body = (request.body ?? {}) as { registrationProof?: unknown };
+    return typeof body.registrationProof === 'string' && body.registrationProof
+      ? body.registrationProof
+      : null;
+  }
+
+  const proof = parseCookies(request.headers['cookie'])[SIGNUP_CONTINUATION_COOKIE];
+  if (!proof) return null;
+  const origin = originOf(request);
+  if (!origin || !allowedBrowserOrigins().has(origin)) {
+    browserSessionCounter.labels('cookie_rejected_origin').inc();
+    return null;
+  }
+  return proof;
+}
+
 // The runtime posture comes from THE parser, never a bare NODE_ENV comparison —
 // `runtime-mode.ts` exists because "is this production?" was answered a dozen
 // different ways, and a census enforces it. A cookie's `Secure` flag is exactly
@@ -126,9 +153,19 @@ function cookie(name: string, value: string, path: string, maxAgeS: number, env?
   return parts.join('; ');
 }
 
+function appendSetCookies(reply: FastifyReply, values: string[]): void {
+  const present = reply.getHeader('Set-Cookie');
+  const current = present == null
+    ? []
+    : Array.isArray(present)
+      ? present.map(String)
+      : [String(present)];
+  reply.header('Set-Cookie', [...current, ...values]);
+}
+
 /** Issue the session as cookies. Called only in cookie mode; the body carries no credential. */
 export function setSessionCookies(reply: FastifyReply, tokens: { accessToken: string; refreshToken: string }, env?: Record<string, string | undefined>): void {
-  reply.header('Set-Cookie', [
+  appendSetCookies(reply, [
     cookie(ACCESS_COOKIE, tokens.accessToken, ACCESS_COOKIE_PATH, ACCESS_COOKIE_MAX_AGE_S, env),
     cookie(REFRESH_COOKIE, tokens.refreshToken, REFRESH_COOKIE_PATH, REFRESH_COOKIE_MAX_AGE_S, env),
   ]);
@@ -136,11 +173,35 @@ export function setSessionCookies(reply: FastifyReply, tokens: { accessToken: st
 }
 
 export function clearSessionCookies(reply: FastifyReply, env?: Record<string, string | undefined>): void {
-  reply.header('Set-Cookie', [
+  appendSetCookies(reply, [
     cookie(ACCESS_COOKIE, '', ACCESS_COOKIE_PATH, 0, env),
     cookie(REFRESH_COOKIE, '', REFRESH_COOKIE_PATH, 0, env),
   ]);
   browserSessionCounter.labels('cookie_cleared').inc();
+}
+
+export function setSignupContinuationCookie(
+  reply: FastifyReply,
+  registrationProof: string,
+  env?: Record<string, string | undefined>,
+): void {
+  appendSetCookies(reply, [cookie(
+    SIGNUP_CONTINUATION_COOKIE,
+    registrationProof,
+    SIGNUP_CONTINUATION_COOKIE_PATH,
+    SIGNUP_CONTINUATION_COOKIE_MAX_AGE_S,
+    env,
+  )]);
+}
+
+export function clearSignupContinuationCookie(reply: FastifyReply, env?: Record<string, string | undefined>): void {
+  appendSetCookies(reply, [cookie(
+    SIGNUP_CONTINUATION_COOKIE,
+    '',
+    SIGNUP_CONTINUATION_COOKIE_PATH,
+    0,
+    env,
+  )]);
 }
 
 /** In cookie mode the tokens leave the response body; only the rest of the payload is returned. */
