@@ -29,6 +29,7 @@ import {
   serverRecords,
   serverText,
 } from '../earner-data';
+import { errorMessage } from '../../../lib/apiError';
 
 /** Thin domain wrapper over the kit's StatTile [Wave 3 part 2]: this screen's
  *  tiles always show money-or-dash with a job-count detail line. */
@@ -141,6 +142,9 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
       </T>
       {rows.map((row, index) => {
         const id = serverText(row['id']);
+        // The ledger row is the authority for both the number on screen and the
+        // amount attested to the server. There is no editable amount field.
+        const amount = serverNumber(row['amount']);
         const vendorName = serverText(serverRecord(row['vendor'])?.['name']);
         const orderNumber = serverText(row['orderNumber']);
         const createdAt = serverDate(row['createdAt']);
@@ -148,7 +152,7 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
         const meta = [orderNumber ? `#${orderNumber}` : undefined, createdAt ? dateLabel(createdAt) : undefined]
           .filter((part): part is string => !!part)
           .join(' · ');
-        const canConfirm = !!id && (status === 'OWED' || status === 'STORE_CONFIRMED');
+        const canConfirm = !!id && amount != null && (status === 'OWED' || status === 'STORE_CONFIRMED');
         return (
           <View key={id ?? `cash-row-${index}`}>
             {index > 0 ? (
@@ -169,7 +173,7 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
                 ) : null}
                 {meta ? <T variant="caption" tone="muted">{meta}</T> : null}
               </View>
-              <T variant="numM" style={{ marginLeft: space.md }}>{moneyOrDash(row['amount'])}</T>
+              <T variant="numM" style={{ marginLeft: space.md }}>{moneyOrDash(amount)}</T>
             </View>
             {status === 'RIDER_CONFIRMED' ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
@@ -187,10 +191,10 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
                 variant="soft"
                 size="sm"
                 style={{ alignSelf: 'flex-start', marginTop: space.sm }}
-                loading={confirm.isPending && confirm.variables === id}
+                loading={confirm.isPending && confirm.variables?.id === id}
                 disabled={confirm.isPending}
                 onPress={() => {
-                  if (id) confirm.mutate(id);
+                  if (id && amount != null) confirm.mutate({ id, amount });
                 }}
               />
             ) : null}
@@ -199,7 +203,7 @@ function StoreOwesYouCard({ ledger }: { ledger: unknown }) {
       })}
       {confirm.isError ? (
         <T variant="caption" tone="error" style={{ marginTop: space.md }}>
-          We couldn&apos;t confirm that cash handover. Try again.
+          {errorMessage(confirm.error, "We couldn't confirm that cash handover. Try again.")}
         </T>
       ) : null}
     </Card>

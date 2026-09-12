@@ -819,7 +819,8 @@ export const riderApi = {
   demand: (p: Point) => api.get(`/rider/demand?lat=${p.lat}&lng=${p.lng}`),
   // MMG cash ledger — delivery fees stores owe me (customer paid the store)
   cashSettlements: () => api.get('/rider/cash-settlements'),
-  confirmCashSettlement: (id: string) => api.post(`/rider/cash-settlements/${id}/confirm`, {}),
+  confirmCashSettlement: (id: string, amount: number) =>
+    api.post(`/rider/cash-settlements/${id}/confirm`, { amount }),
   history: (params?: { page?: number; limit?: number }) => api.get('/rider/orders', { params }),
   stats: () => api.get('/rider/stats'),
   subscription: () => api.get('/rider/subscription'),
@@ -926,7 +927,8 @@ export const vendorApi = {
   lowStock: () => api.get('/vendor/items/low-stock'),
   // MMG cash ledger — delivery fees this store owes riders
   cashSettlements: () => api.get('/vendor/cash-settlements'),
-  confirmCashSettlement: (id: string) => api.post(`/vendor/cash-settlements/${id}/confirm`, {}),
+  confirmCashSettlement: (id: string, amount: number) =>
+    api.post(`/vendor/cash-settlements/${id}/confirm`, { amount }),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),

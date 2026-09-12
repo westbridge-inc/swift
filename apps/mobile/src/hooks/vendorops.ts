@@ -423,7 +423,7 @@ export function useVendorCashSettlements(enabled = true) {
 export function useConfirmVendorCashSettlement() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: (id: string) => unwrap(vendorApi.confirmCashSettlement(id)),
+    mutationFn: ({ id, amount }: { id: string; amount: number }) => unwrap(vendorApi.confirmCashSettlement(id, amount)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'cash-settlements'] }),
   });
 }
@@ -903,4 +903,3 @@ export function useVendorTier<T = any>() {
     refetchInterval: 60000,
   });
 }
-

@@ -545,7 +545,7 @@ export function useConfirmCashSettlement() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: (id: string) => unwrap(riderApi.confirmCashSettlement(id)),
+    mutationFn: ({ id, amount }: { id: string; amount: number }) => unwrap(riderApi.confirmCashSettlement(id, amount)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover', 'cash-settlements'] }),
   });
   return pv ? PV.previewMutation() : m;

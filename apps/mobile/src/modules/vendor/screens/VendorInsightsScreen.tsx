@@ -559,7 +559,12 @@ function RiderFeesOwedCard() {
       <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
         MMG orders — the delivery fee came to you with the customer&apos;s payment. Hand it to the rider in cash (usually at pickup).
       </T>
-      {rows.map((r) => (
+      {rows.map((r) => {
+        // The server-minted ledger row supplies both the displayed number and
+        // the attestation body. Operators never type or reconstruct the amount.
+        const amount = numericFact(r.amount);
+        const formattedAmount = amount == null ? '—' : money(amount);
+        return (
         <View key={r.id} style={{ paddingTop: space.md, marginTop: space.md, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <View style={{ flex: 1 }}>
@@ -571,7 +576,7 @@ function RiderFeesOwedCard() {
               </T>
             </View>
             <T variant="label" weight="bold" style={{ marginLeft: space.md }}>
-              {money(r.amount)}
+              {formattedAmount}
             </T>
           </View>
           {r.status === 'STORE_CONFIRMED' ? (
@@ -585,35 +590,38 @@ function RiderFeesOwedCard() {
                   The rider confirmed receiving it — mark it paid to close it out.
                 </T>
               ) : null}
-              <PillButton
-                label="Mark paid"
-                variant="soft"
-                size="sm"
-                style={{ alignSelf: 'flex-start', marginTop: space.sm }}
-                loading={confirm.isPending && confirm.variables === r.id}
-                disabled={confirm.isPending}
-                onPress={() => {
-                  // [MOB-046] One tap used to record a cash payment with no
-                  // confirmation and no visible failure. This is an attestation
-                  // that money left the till and reached a named person: it
-                  // names them and the amount, because a mis-tap on the wrong
-                  // row is the same mistake as not paying at all.
-                  const prompt = markPaidPrompt(r, money(r.amount));
-                  Alert.alert(prompt.title, prompt.body, [
-                    { text: 'Not yet', style: 'cancel' },
-                    {
-                      text: prompt.confirm,
-                      onPress: () => confirm.mutate(r.id, {
-                        onError: (mutationError) => Alert.alert('Not recorded', errorMessage(mutationError)),
-                      }),
-                    },
-                  ]);
-                }}
-              />
+              {amount != null ? (
+                <PillButton
+                  label="Mark paid"
+                  variant="soft"
+                  size="sm"
+                  style={{ alignSelf: 'flex-start', marginTop: space.sm }}
+                  loading={confirm.isPending && confirm.variables?.id === r.id}
+                  disabled={confirm.isPending}
+                  onPress={() => {
+                    // [MOB-046] One tap used to record a cash payment with no
+                    // confirmation and no visible failure. This is an attestation
+                    // that money left the till and reached a named person: it
+                    // names them and the amount, because a mis-tap on the wrong
+                    // row is the same mistake as not paying at all.
+                    const prompt = markPaidPrompt(r, formattedAmount);
+                    Alert.alert(prompt.title, prompt.body, [
+                      { text: 'Not yet', style: 'cancel' },
+                      {
+                        text: prompt.confirm,
+                        onPress: () => confirm.mutate({ id: r.id, amount }, {
+                          onError: (mutationError) => Alert.alert('Not recorded', errorMessage(mutationError)),
+                        }),
+                      },
+                    ]);
+                  }}
+                />
+              ) : null}
             </>
           )}
         </View>
-      ))}
+        );
+      })}
     </Card>
   );
 }
