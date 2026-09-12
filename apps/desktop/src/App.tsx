@@ -10,7 +10,6 @@ import {
   setNativeOperatorMenuEnabled,
   verifyAdminLogin,
 } from './lib/api';
-import AgentDesk from './modules/AgentDesk';
 import Compliance from './modules/Compliance';
 import Health from './modules/Health';
 import Home from './modules/Home';
@@ -33,7 +32,6 @@ type ModuleKey =
   | 'support'
   | 'people'
   | 'vendors'
-  | 'agent'
   | 'safety'
   | 'moderation'
   | 'compliance'
@@ -48,7 +46,6 @@ const MODULE_META: Record<ModuleKey, { title: string; subtitle: string }> = {
   support: { title: 'Support', subtitle: 'Open in-app requests' },
   people: { title: 'People', subtitle: 'Accounts and operating status' },
   vendors: { title: 'Businesses', subtitle: 'Partners, papers and subscriptions' },
-  agent: { title: 'Agent desk', subtitle: 'The machine proposes; a person decides' },
   safety: { title: 'Safety', subtitle: 'Live alerts, cases and the evidence vault' },
   moderation: { title: 'Reports', subtitle: 'Content awaiting a moderation decision' },
   compliance: { title: 'Compliance', subtitle: 'Live gates, evidence and review cases' },
@@ -89,7 +86,6 @@ const NAV_GROUPS: Array<{
   {
     label: 'System',
     items: [
-      { key: 'agent', label: 'Agent desk', glyph: '✦' },
       { key: 'health', label: 'Health', glyph: '∿' },
     ],
   },
@@ -583,7 +579,6 @@ export default function App() {
           {module === 'today' && <Home go={setModule} />}
           {module === 'review' && <ReviewCenter />}
           {module === 'ops' && <LiveOps />}
-          {module === 'agent' && <AgentDesk />}
           {module === 'stuck' && <StuckOrders />}
           {module === 'money' && <Money />}
           {module === 'support' && <Support />}
