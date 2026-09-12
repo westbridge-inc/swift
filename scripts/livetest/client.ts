@@ -2,13 +2,13 @@
 // Talks to a RUNNING Swift API over HTTP only (never the DB). Node 20 `fetch`.
 //
 // Auth model (probed against the live API):
-//   verify-otp {phone, code:"000000"} — under DEV_OTP_BYPASS this both SKIPS the
-//     stored-OTP check and still sets the `otp_verified:` flag register reads, so
+//   verify-otp {phone, code:"000000"} — under DEV_OTP_BYPASS this skips the
+//     stored-OTP check but still mints the one-use signup continuation, so
 //     send-otp is unnecessary. Skipping it also halves calls against the shared
 //     5/min OTP rate bucket (send-otp + verify-otp both use it).
 //     - existing account -> { isNewUser:false, user, tokens }  (login)
-//     - new account      -> { isNewUser:true, phone }          (must register)
-//   register {phone, firstName, lastName, role, countryCode, acceptTerms}
+//     - new account      -> { isNewUser:true, phone, registrationProof }
+//   register {phone, registrationProof, firstName, lastName, role, countryCode, acceptTerms}
 //     -> { user, tokens }
 //   partner/become {role, business?|vehicle?}  (vendors/movers)
 
@@ -58,8 +58,17 @@ export async function signupOrLogin(
   if (vd?.tokens?.accessToken) {
     return { token: vd.tokens.accessToken, userId: vd.user?.id ?? vd.user?.userId ?? '' };
   }
+  if (!vd?.isNewUser || typeof vd.registrationProof !== 'string') {
+    throw new Error(`verify-otp did not return a session or signup continuation for ${phone}: ${v.status} ${v.text.slice(0, 200)}`);
+  }
   const reg = await POST('/auth/register', {
-    phone, firstName: who.firstName, lastName: who.lastName, role: who.role, countryCode: 'GY', acceptTerms: true,
+    phone,
+    registrationProof: vd.registrationProof,
+    firstName: who.firstName,
+    lastName: who.lastName,
+    role: who.role,
+    countryCode: 'GY',
+    acceptTerms: true,
   });
   const rd = reg.json?.data;
   if (!rd?.tokens?.accessToken) {

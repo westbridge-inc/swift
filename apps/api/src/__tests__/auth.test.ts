@@ -6,7 +6,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { requestOtp, loginWithOtp, wrongCode } from './helpers/otp';
+import { requestOtp, loginWithOtp, registrationProofFor, wrongCode } from './helpers/otp';
 import { LEGAL_VERSION } from '../modules/legal/legal.routes';
 
 // ---------------------------------------------------------------------------
@@ -179,22 +179,33 @@ describe('Auth Routes', () => {
 
   describe('POST /api/v1/auth/register', () => {
     const testPhone = '+5929998877';
+    const continuationPhones = [
+      '+5929998876',
+      '+5929998875',
+      '+5929998874',
+      '+5929998873',
+      '+5929998872',
+      '+5929998871',
+    ];
 
     afterAll(async () => {
       // Cleanup: delete test user and related records
-      const user = await app.prisma.user.findUnique({ where: { phone: testPhone } });
-      if (user) {
-        await app.prisma.session.deleteMany({ where: { userId: user.id } });
-        await app.prisma.customer.deleteMany({ where: { userId: user.id } });
-        await app.prisma.user.delete({ where: { id: user.id } });
+      for (const phone of [testPhone, ...continuationPhones]) {
+        const user = await app.prisma.user.findUnique({ where: { phone } });
+        if (user) {
+          await app.prisma.session.deleteMany({ where: { userId: user.id } });
+          await app.prisma.customer.deleteMany({ where: { userId: user.id } });
+          await app.prisma.user.delete({ where: { id: user.id } });
+        }
       }
     });
 
     it('creates a new user and returns tokens', async () => {
       // OTP at signup is mandatory — prove phone ownership first
-      await loginWithOtp(app, testPhone);
+      const registrationProof = await registrationProofFor(app, testPhone);
       const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
         phone: testPhone,
+        registrationProof,
         firstName: 'Test',
         lastName: 'User',
       });
@@ -209,15 +220,150 @@ describe('Auth Routes', () => {
       expect(body.data.tokens.refreshToken).toBeDefined();
     });
 
-    it('rejects duplicate phone', async () => {
+    it('does not reveal an existing phone to a caller without its signup continuation', async () => {
       const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
         phone: '+5926003000', // Existing test customer
+        registrationProof: 'A'.repeat(43),
         firstName: 'Dup',
         lastName: 'User',
       });
-      expect(res.statusCode).toBe(409);
+      expect(res.statusCode).toBe(403);
       const body = res.json();
-      expect(body.error.code).toBe('USER_EXISTS');
+      expect(body.error.code).toBe('REGISTRATION_PROOF_REQUIRED');
+    });
+
+    it('[CST-192-01] knowing a verified phone is insufficient without the device continuation', async () => {
+      const phone = continuationPhones[0]!;
+      const registrationProof = await registrationProofFor(app, phone);
+      const stolen = await inject('POST', '/api/v1/auth/register', {
+        phone,
+        firstName: 'Other',
+        lastName: 'Device',
+        acceptTerms: true,
+      });
+      expect(stolen.statusCode).toBe(403);
+      expect(stolen.json().error.code).toBe('REGISTRATION_PROOF_REQUIRED');
+      expect(await app.prisma.user.findUnique({ where: { phone } })).toBeNull();
+
+      const owner = await inject('POST', '/api/v1/auth/register', {
+        phone,
+        registrationProof,
+        firstName: 'Verified',
+        lastName: 'Device',
+        acceptTerms: true,
+      });
+      expect(owner.statusCode, owner.body).toBe(201);
+    });
+
+    it('[CST-192-01] a continuation is phone-bound and a wrong-phone attempt does not burn it', async () => {
+      const phone = continuationPhones[1]!;
+      const otherPhone = continuationPhones[2]!;
+      const registrationProof = await registrationProofFor(app, phone);
+      const wrongPhone = await inject('POST', '/api/v1/auth/register', {
+        phone: otherPhone,
+        registrationProof,
+        firstName: 'Wrong',
+        lastName: 'Phone',
+        acceptTerms: true,
+      });
+      expect(wrongPhone.statusCode).toBe(403);
+      expect(await app.prisma.user.findUnique({ where: { phone: otherPhone } })).toBeNull();
+
+      const rightPhone = await inject('POST', '/api/v1/auth/register', {
+        phone,
+        registrationProof,
+        firstName: 'Right',
+        lastName: 'Phone',
+        acceptTerms: true,
+      });
+      expect(rightPhone.statusCode, rightPhone.body).toBe(201);
+    });
+
+    it('[CST-192-01] two concurrent registrations can spend a continuation only once', async () => {
+      const phone = continuationPhones[3]!;
+      const registrationProof = await registrationProofFor(app, phone);
+      const payload = { phone, registrationProof, firstName: 'One', lastName: 'Winner', acceptTerms: true };
+      const results = await Promise.all([
+        inject('POST', '/api/v1/auth/register', payload),
+        inject('POST', '/api/v1/auth/register', payload),
+      ]);
+      expect(results.map((response) => response.statusCode).sort()).toEqual([201, 403]);
+      expect(results.find((response) => response.statusCode === 403)?.json().error.code)
+        .toBe('REGISTRATION_PROOF_REQUIRED');
+      expect(await app.prisma.user.count({ where: { phone } })).toBe(1);
+    });
+
+    it('[CST-192-01] the newest successful OTP ceremony supersedes the older continuation', async () => {
+      const phone = continuationPhones[4]!;
+      const oldProof = await registrationProofFor(app, phone);
+      const newProof = await registrationProofFor(app, phone);
+      const oldAttempt = await inject('POST', '/api/v1/auth/register', {
+        phone,
+        registrationProof: oldProof,
+        firstName: 'Old',
+        lastName: 'Proof',
+        acceptTerms: true,
+      });
+      expect(oldAttempt.statusCode).toBe(403);
+      expect(await app.prisma.user.findUnique({ where: { phone } })).toBeNull();
+
+      const newest = await inject('POST', '/api/v1/auth/register', {
+        phone,
+        registrationProof: newProof,
+        firstName: 'New',
+        lastName: 'Proof',
+        acceptTerms: true,
+      });
+      expect(newest.statusCode, newest.body).toBe(201);
+    });
+
+    it('[CST-192-01] a paused older verifier cannot mint after the newer ceremony wins', async () => {
+      const phone = continuationPhones[5]!;
+      const oldCode = await requestOtp(app, phone);
+
+      let reachedLookup!: () => void;
+      let resumeLookup!: () => void;
+      const atLookup = new Promise<void>((resolve) => { reachedLookup = resolve; });
+      const resume = new Promise<void>((resolve) => { resumeLookup = resolve; });
+      const originalFindUnique = app.prisma.user.findUnique.bind(app.prisma.user);
+      const lookup = vi.spyOn(app.prisma.user, 'findUnique').mockImplementationOnce((async (...args: unknown[]) => {
+        const found = await originalFindUnique(...(args as [Parameters<typeof originalFindUnique>[0]]));
+        reachedLookup();
+        await resume;
+        return found;
+      }) as never);
+
+      let oldRequest: ReturnType<typeof inject> | undefined;
+      let oldResponse!: Awaited<ReturnType<typeof app.inject>>;
+      let newProof = '';
+      try {
+        oldRequest = inject('POST', '/api/v1/auth/verify-otp', { phone, code: oldCode });
+        await atLookup;
+
+        const newCode = await requestOtp(app, phone);
+        const newResponse = await inject('POST', '/api/v1/auth/verify-otp', { phone, code: newCode });
+        expect(newResponse.statusCode, newResponse.body).toBe(200);
+        newProof = newResponse.json().data.registrationProof;
+        expect(newProof).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+        resumeLookup();
+        oldResponse = await oldRequest;
+      } finally {
+        resumeLookup();
+        if (oldRequest && !oldResponse) oldResponse = await oldRequest;
+        lookup.mockRestore();
+      }
+
+      expect(oldResponse.statusCode, oldResponse.body).toBe(400);
+      expect(oldResponse.json().error.code).toBe('INVALID_OTP');
+      const registered = await inject('POST', '/api/v1/auth/register', {
+        phone,
+        registrationProof: newProof,
+        firstName: 'Newer',
+        lastName: 'Ceremony',
+        acceptTerms: true,
+      });
+      expect(registered.statusCode, registered.body).toBe(201);
     });
 
     // SWIFT-AUD-D9-03: DPA-2023 consent must be demonstrable — the acceptance
@@ -241,9 +387,10 @@ describe('Auth Routes', () => {
       });
 
       it('stamps acceptedTermsAt + the served legal version when the client accepts', async () => {
-        await loginWithOtp(app, consentPhone);
+        const registrationProof = await registrationProofFor(app, consentPhone);
         const res = await inject('POST', '/api/v1/auth/register', {
           phone: consentPhone,
+          registrationProof,
           firstName: 'Consent',
           lastName: 'Given',
           acceptTerms: true,
@@ -276,9 +423,10 @@ describe('Auth Routes', () => {
       });
 
       it('[F-021-05] consent is required BY DEFAULT — a consent-less registration is refused', async () => {
-        await loginWithOtp(app, noConsentPhone);
+        const registrationProof = await registrationProofFor(app, noConsentPhone);
         const res = await inject('POST', '/api/v1/auth/register', {
           phone: noConsentPhone,
+          registrationProof,
           firstName: 'Old',
           lastName: 'Client',
         });
@@ -289,8 +437,10 @@ describe('Auth Routes', () => {
       it('the compat kill-switch (CONSENT_REQUIRED=0) admits old clients and fabricates nothing', async () => {
         process.env['CONSENT_REQUIRED'] = '0';
         try {
+          const registrationProof = await registrationProofFor(app, noConsentPhone);
           const res = await inject('POST', '/api/v1/auth/register', {
             phone: noConsentPhone,
+            registrationProof,
             firstName: 'Old',
             lastName: 'Client',
           });
@@ -347,9 +497,10 @@ describe('Auth Routes', () => {
     it('registration response carries no credential or lockout internals', async () => {
       const phone = '+5929998866';
       try {
-        await loginWithOtp(app, phone);
+        const registrationProof = await registrationProofFor(app, phone);
         const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
           phone,
+          registrationProof,
           firstName: 'Sanitize',
           lastName: 'Check',
         });

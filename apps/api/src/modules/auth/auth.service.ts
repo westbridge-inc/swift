@@ -5,7 +5,7 @@ import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/cl
 import { AppError } from '../../utils/errors';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
 import { countryFromPhone } from '../../utils/phone-country';
-import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
+import { generateOtp, checkOtpRateLimit } from '../../utils/otp';
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
@@ -28,6 +28,14 @@ import {
   disconnectUserSockets as disconnectAuthorizationUserSockets,
 } from '../../utils/socket-revocation';
 import { isDevelopment, isProduction } from '../../utils/runtime-mode';
+import {
+  armDevelopmentSignupGeneration,
+  consumeSignupContinuation,
+  consumeSignupOtpGeneration,
+  issueSignupContinuation,
+  storeSignupOtp,
+  verifySignupOtp,
+} from './signup-continuation';
 
 interface DeviceInfo {
   deviceId: string;
@@ -38,9 +46,6 @@ interface DeviceInfo {
 
 /** Public signup roles (locked model) mapped to internal UserRole values. */
 export type SignupRole = 'CUSTOMER' | 'MOVER' | 'VENDOR';
-
-const OTP_VERIFIED_PREFIX = 'otp_verified:';
-const OTP_VERIFIED_TTL = 600; // 10 min window between verify-otp and register
 
 const MAX_FAILED_LOGINS = 5;
 const LOCKOUT_MINUTES = 15;
@@ -115,8 +120,9 @@ export class AuthService {
 
     const otp = generateOtp();
 
-    // Store in Redis with 5-min TTL
-    await storeOtp(this.app.redis, phone, otp);
+    // Store the code and its ceremony generation atomically in one Redis
+    // Cluster slot. A later send supersedes both together.
+    await storeSignupOtp(this.app.redis, phone, otp);
 
     if (isDevelopment()) {
       this.app.log.info(`[DEV] OTP for ${phone}: ${otp}`);
@@ -152,16 +158,23 @@ export class AuthService {
       !isProduction() &&
       process.env['DEV_OTP_BYPASS'] === '1' &&
       code === '000000';
+    let signupOtpGeneration: string | undefined;
     if (review) {
       const result = await verifyReviewCode(this.app.redis, phone, code, review);
       if (!result.valid) {
         throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
       }
     } else if (!devBypass) {
-      const result = await verifyOtp(this.app.redis, phone, code);
+      const result = await verifySignupOtp(this.app.redis, phone, code);
       if (!result.valid) {
         throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
       }
+      signupOtpGeneration = result.generation;
+    } else {
+      signupOtpGeneration = await armDevelopmentSignupGeneration(this.app.redis, phone);
+    }
+    if (!review && !signupOtpGeneration) {
+      throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
     }
 
     // Find existing user
@@ -180,10 +193,22 @@ export class AuthService {
     }
 
     if (!user) {
-      // Phone ownership proven — open a short registration window.
-      // register() requires this flag, so signups are OTP-mandatory (L1).
-      await this.app.redis.set(`${OTP_VERIFIED_PREFIX}${phone}`, '1', 'EX', OTP_VERIFIED_TTL);
-      return { isNewUser: true, phone };
+      // Phone ownership proven. The caller receives one unpredictable,
+      // purpose-bound continuation; knowing the phone is no longer enough to
+      // claim this signup. A later successful OTP ceremony supersedes it.
+      if (!signupOtpGeneration) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+      const continuation = await issueSignupContinuation(this.app.redis, phone, signupOtpGeneration);
+      if (!continuation) {
+        throw new AppError(400, 'INVALID_OTP', 'A newer verification code was requested. Verify the latest code.');
+      }
+      return { isNewUser: true, phone, ...continuation };
+    }
+
+    if (signupOtpGeneration) {
+      const current = await consumeSignupOtpGeneration(this.app.redis, phone, signupOtpGeneration);
+      if (!current) {
+        throw new AppError(400, 'INVALID_OTP', 'A newer verification code was requested. Verify the latest code.');
+      }
     }
 
     const tokens = await this.createSession(user.id, user.activeRole, deviceInfo, 'OTP');
@@ -220,6 +245,7 @@ export class AuthService {
     firstName: string;
     lastName: string;
     email?: string;
+    registrationProof: string;
     role?: SignupRole;
     countryCode?: string;
     acceptTerms?: boolean;
@@ -228,16 +254,22 @@ export class AuthService {
     deviceId?: string | null;
     ipAddress?: string | null;
   }) {
+    // Consume caller authority before any account lookup or write. This is a
+    // single Redis script: two callers presenting the same proof cannot both
+    // pass, and a proof minted for another normalized phone has different
+    // cluster-slot keys. A later failure intentionally requires a fresh OTP.
+    const authorized = await consumeSignupContinuation(
+      this.app.redis,
+      data.phone,
+      data.registrationProof,
+    );
+    if (!authorized) {
+      throw new AppError(403, 'REGISTRATION_PROOF_REQUIRED', 'Verify your phone again to continue registration');
+    }
+
     const existing = await this.app.prisma.user.findUnique({ where: { phone: data.phone } });
     if (existing) {
       throw new AppError(409, 'USER_EXISTS', 'User with this phone already exists');
-    }
-
-    // OTP at signup is MANDATORY (trust level L1) — verify-otp for this phone
-    // must have succeeded within the registration window.
-    const otpVerified = await this.app.redis.get(`${OTP_VERIFIED_PREFIX}${data.phone}`);
-    if (!otpVerified) {
-      throw new AppError(403, 'OTP_REQUIRED', 'Verify your phone with an OTP before registering');
     }
 
     if (data.email) {
@@ -307,9 +339,6 @@ export class AuthService {
       }
       return created;
     });
-
-    // Single-use registration window
-    await this.app.redis.del(`${OTP_VERIFIED_PREFIX}${data.phone}`);
 
     // Identity-integrity capture (trial-integrity §2.1) — silent, fire-and-
     // forget: PHONE (STRONG) + EMAIL (SOFT) + the §5 SignupAttempt velocity
@@ -540,7 +569,7 @@ export class AuthService {
 
   /** Reset = prove phone ownership again via OTP, then rotate everything. */
   async resetPassword(phone: string, code: string, newPassword: string) {
-    const result = await verifyOtp(this.app.redis, phone, code);
+    const result = await verifySignupOtp(this.app.redis, phone, code);
     if (!result.valid) {
       throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
     }
@@ -554,6 +583,9 @@ export class AuthService {
       // error a wrong OTP would, so an attacker (who somehow has a valid code)
       // can't enumerate which phone numbers have accounts.
       throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+    }
+    if (!result.generation || !(await consumeSignupOtpGeneration(this.app.redis, phone, result.generation))) {
+      throw new AppError(400, 'INVALID_OTP', 'A newer verification code was requested. Verify the latest code.');
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 12);

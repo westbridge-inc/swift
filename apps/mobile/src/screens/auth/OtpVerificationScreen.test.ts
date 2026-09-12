@@ -6,6 +6,10 @@ const source = readFileSync(
   join(process.cwd(), 'src/screens/auth/OtpVerificationScreen.tsx'),
   'utf8',
 );
+const registerSource = readFileSync(
+  join(process.cwd(), 'src/screens/auth/RegisterScreen.tsx'),
+  'utf8',
+);
 
 describe('OTP verification accessibility and automation contract', () => {
   it('exposes a stable, labelled code-entry target without making visual cells separate controls', () => {
@@ -26,5 +30,17 @@ describe('OTP verification accessibility and automation contract', () => {
     expect(source).toContain('testID="otp-verify"');
     expect(source).toContain('accessibilityRole="alert"');
     expect(source).toContain('accessibilityLiveRegion="assertive"');
+  });
+
+  it('hands the server-issued signup capability directly to registration and never persists it', () => {
+    expect(source).toContain("typeof data.registrationProof === 'string' ? data.registrationProof : ''");
+    expect(source).toMatch(/navigation\.navigate\('Register',\s*\{[\s\S]*registrationProof/);
+    expect(registerSource).toContain("route.params?.registrationProof ?? ''");
+    expect(registerSource).toMatch(/authApi\.register\(\{[\s\S]*registrationProof/);
+    expect(registerSource).toContain('const valid = !!registrationProof');
+    expect(registerSource).toContain('const mustVerifyAgain = !registrationProof || register.isError');
+    expect(registerSource).toContain('testID="register-verify-phone-again"');
+    expect(registerSource).toContain("navigation.reset({ index: 0, routes: [{ name: 'PhoneEntry' }] })");
+    expect(source + registerSource).not.toMatch(/(?:AsyncStorage|SecureStore|localStorage).*registrationProof/);
   });
 });

@@ -4,6 +4,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { authRoutes } from '../modules/auth/auth.routes';
+import { registrationProofFor } from './helpers/otp';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { countryFromPhone } from '../utils/phone-country';
 import { TRIAL_DAYS } from '../modules/subscription/subscription.service';
@@ -104,11 +105,11 @@ describe('public pricing (price on the door)', () => {
 describe('signup lands in the phone country', () => {
   it('a Trinidad number registers as TT even if the client claims GY', async () => {
     const phone = `+1868555${String(Math.floor(Math.random() * 9000) + 1000)}`;
-    // open the registration window the way verify-otp does
-    await app.redis.set(`otp_verified:${phone}`, '1', 'EX', 600);
+    const registrationProof = await registrationProofFor(app, phone);
 
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone,
+      registrationProof,
       firstName: 'Port',
       lastName: 'OfSpain',
       countryCode: 'GY', // spoof attempt — the dial prefix must win
@@ -121,9 +122,10 @@ describe('signup lands in the phone country', () => {
 
   it('a Guyana number stays GY', async () => {
     const phone = `+592655${String(Math.floor(Math.random() * 9000) + 1000)}`;
-    await app.redis.set(`otp_verified:${phone}`, '1', 'EX', 600);
+    const registrationProof = await registrationProofFor(app, phone);
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone,
+      registrationProof,
       firstName: 'George',
       lastName: 'Town',
     });
