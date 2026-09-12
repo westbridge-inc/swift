@@ -3,7 +3,7 @@ import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf } from './subjects';
-import { BUCKET_OF } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
 import { approvedEvidenceFor, anyChecklistEvidenceFor } from './evidence';
@@ -25,11 +25,11 @@ import { NotificationService, notifyAdmins, tenantOfUser } from '../notification
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { assertExternalProcessingPermitted } from '../legal/processor-register';
 import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApproval, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
-import { registryCode } from './doc-registry';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
+import { approvedIdentityDocumentNumber } from './identity-signal-policy';
 import {
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
@@ -48,27 +48,8 @@ export const IDENTITY_DOC_TYPE = 'identity_l2';
  *  photo"), through the same KycProvider.verifyIdentity seam the L2 flow uses. */
 const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
 
-/** Auto-approved documents must still LAPSE (the "verified ≠ valid now" rule).
- *  A human reviewer keys the real printed expiry; the automatic path applies a
- *  conservative default so the daily sweep + reminders always have a date.
- *  Days by docType; absent = non-expiring (e.g. business registration). */
-export const AUTO_APPROVE_EXPIRY_DAYS: Record<string, number> = {
-  police_clearance: 365,   // Certificate of Character — commonly re-issued yearly
-  fitness_cert: 365,       // annual fitness
-  vehicle_insurance: 365,  // annual policy
-  hire_car_permit: 365,    // annual occupational permit
-  road_service_licence: 365, // annual commercial road-service licence
-  food_handler_cert: 365,  // annual health cert
-  gra_restaurant_licence: 365,
-  // [DOC-1 §18.1] the addendum's annual Guyana licences (submittable through a category gate)
-  liquor_licence: 365,
-  sanitary_certificate: 365,
-  trade_licence: 365,
-  drivers_licence: 3 * 365,
-  vehicle_registration: 3 * 365,
-  // [DOC-1 §3.2 · P3-2] the unregistered trader's self-declaration is valid 365 days from signing
-  self_declaration_unregistered: 365,
-};
+// Compatibility export for existing callers; the policy itself is registry data.
+export { AUTO_APPROVE_EXPIRY_DAYS } from './doc-registry';
 
 /**
  * [A-19] Which document types carry a printed expiry.
@@ -538,16 +519,21 @@ export class VerificationService {
 
     await this.recordDecision(userId, doc.id, docType, doc.status, result.reason);
 
-    // Identity-integrity capture (silent): the analyzer's parsed document
-    // number is hashed and discarded — never stored raw. AWAITED so the
-    // signal exists before afterApproval reaches the trial decision; the
-    // service swallows its own failures (capture never breaks verification).
-    if (result.extracted?.documentNumber) {
+    // Identity-integrity capture (silent): only an APPROVED identity type may
+    // turn the analyzer's parsed number into HARD evidence. Rejected/pending
+    // OCR is not identity proof. AWAITED so the signal exists before
+    // afterApproval reaches the trial decision; the service swallows its own
+    // failures (capture never breaks verification).
+    const identityDocumentNumber = approvedIdentityDocumentNumber(
+      docType,
+      doc.status,
+      result.extracted?.documentNumber,
+    );
+    if (identityDocumentNumber) {
       const { IdentityService } = await import('../integrity/identity.service');
-      const { normalizeDocNumber } = await import('../integrity/normalize');
       await new IdentityService(this.prisma).capture({
         accountId: userId, actorRole: roleKey,
-        type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(result.extracted.documentNumber), source: 'AI_ID_ANALYZER',
+        type: 'ID_DOC_NUMBER', normalizedValue: identityDocumentNumber, source: 'AI_ID_ANALYZER',
       });
     }
 
@@ -621,13 +607,17 @@ export class VerificationService {
 
     await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason);
 
-    // Identity-integrity capture (silent) — hash-and-discard, never stored raw.
-    if (result.extracted?.documentNumber) {
+    // Only the approved L2 verdict may turn OCR into HARD identity evidence.
+    const identityDocumentNumber = approvedIdentityDocumentNumber(
+      IDENTITY_DOC_TYPE,
+      doc.status,
+      result.extracted?.documentNumber,
+    );
+    if (identityDocumentNumber) {
       const { IdentityService } = await import('../integrity/identity.service');
-      const { normalizeDocNumber } = await import('../integrity/normalize');
       await new IdentityService(this.prisma).capture({
         accountId: userId, actorRole: 'CUSTOMER',
-        type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(result.extracted.documentNumber), source: 'AI_ID_ANALYZER',
+        type: 'ID_DOC_NUMBER', normalizedValue: identityDocumentNumber, source: 'AI_ID_ANALYZER',
       });
     }
 
