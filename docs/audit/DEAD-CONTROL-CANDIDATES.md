@@ -32,8 +32,10 @@ suitable as a blocking CI gate in its present form.
 ## D8 — 23 scanner-reported declaration-only export leads
 
 The scanner considered a narrowed consumer graph. Exact whole-repository search
-has already proved three claims false; the other 20 remain
-`NEEDS_CALL_GRAPH_EVIDENCE`. `deletion_allowed` is `false` for every item.
+proved three claims false. A second semantic tranche classified the other 20:
+9 are disconnected controls/contracts that need wiring decisions, 10 are
+bounded cleanup candidates, and 1 remains uncertain. `deletion_allowed` is
+`false` for every item.
 
 | Symbol | Location | Risk if wrongly removed |
 |---|---|---|
@@ -80,10 +82,103 @@ These three are **KEEP / scanner false positive** on baseline `d51a1b0e`:
 Their consumers sit outside the scanner's narrowed `apps/api/src` graph. This
 is direct evidence that the detector cannot authorize cleanup. Exact `rg -w`
 over the repository found declaration-only occurrences for the other 20 names,
-but that proves neither runtime irrelevance nor whether a disconnected safety,
-retry, privacy, telemetry, or validation control should be wired instead of
-deleted. They remain report-only candidates pending product and behavioral
-evidence.
+but that alone proves neither runtime irrelevance nor whether a disconnected
+safety, retry, privacy, telemetry, or validation control should be wired
+instead of deleted.
+
+### Exact-repository correction — second semantic tranche
+
+This tranche inspected the declaring implementation, nearby runtime authority,
+production consumers, tests and duplicate literals. The result is a decision
+queue, not cleanup permission:
+
+| Classification | Count | Symbols |
+|---|---:|---|
+| `MISSING_OR_UNWIRED_CONTROL` | 9 | `RETRY_CLASS`, `blockedAuthorIds`, `SAFE_ACTIONS`, `scanEventsLostTotal`, `escrowProof`, `ordersPlacedCounter`, `RATING_TEXT_MAX`, `REPLY_TEXT_MAX`, `isDocStateViolation` |
+| `BOUNDED_CLEANUP_CANDIDATE` | 10 | `captureDocumentNumber`, `capturePlate`, `EXPIRING_DOC_TYPES`, `SEED_RUN_ID`, `SOS_ESCALATION_ENFORCED_AT`, `isSafetyTag`, `isCappedTier`, `entityFor`, `terminalityOf`, `UnauthorizedError` |
+| `UNCERTAIN` | 1 | `effectiveDocState` |
+
+The material disconnected controls are:
+
+- `RETRY_CLASS` at `apps/api/src/modules/billing/failure-taxonomy.ts:23`
+  declares that dunning consumes retry classes, but `billing.service.ts:12`
+  imports only the failure mappers. Terminal failures at
+  `billing.service.ts:374-384,1518-1529` flow into the generic counter and
+  daily retry/suspension path at `:1442-1456`, so the table's
+  `NO_AUTO_RETRY` and `NO_RETRY` distinctions have no consumer. The separately
+  coded `TIMEOUT_UNKNOWN` poller path at `:324-345` and amount-mismatch hold at
+  `:1194-1221` do exist and have focused tests; this finding does not claim
+  those behaviors are absent. The unused table and contradictory no-retry
+  outcomes remain an S1 billing-policy gap, not dead code.
+- `captureDocumentNumber` and `capturePlate` at
+  `apps/api/src/modules/integrity/capture-hooks.ts:96,108` are unused wrappers,
+  not missing integrity controls. Verification directly awaits
+  `IdentityService.capture()` for document numbers at
+  `modules/verification/verification.service.ts:548-551,628-631` and for plates
+  at `:1763-1766`; `modules/integrity/backfill.ts:54-58` also captures legacy
+  plates. The wrappers are cleanup/export-narrowing candidates only. End-to-end
+  collision tests remain certification evidence, not a reason to call the
+  active capture paths absent.
+- **Adjacent active-control finding (not a D8 conclusion):** the direct path on
+  this baseline admits every processor `documentNumber` as the HARD
+  `ID_DOC_NUMBER` signal at `verification.service.ts:541-551`, even when the
+  submitted type is a vehicle registration, insurance policy, permit or other
+  non-identity document, and it admits rejected/pending OCR even though that
+  HARD signal can union accounts and revoke later trials. It also tests only
+  the raw value before normalization, so punctuation-only values collapse to
+  one empty HMAC in
+  `integrity/normalize.ts:23-30` and `integrity/identity.service.ts:82-95`.
+  Those S1 identity-merge hazards are isolated in the registered
+  `CODEX-SECURITY-IDENTITY-SIGNAL-SAFETY-2026-09-12` lane. Country-less mutable
+  plate evidence and unversioned `IDENTITY_SALT` rotation remain separate OPEN
+  design/migration questions; neither is made safe by deleting the wrappers.
+- `blockedAuthorIds` at
+  `apps/api/src/modules/moderation/user-block.service.ts:67` promises
+  directional visibility, while the vendor-review reader at
+  `apps/api/src/modules/rating/rating.service.ts:348-370` does not consult it.
+  The bounded repair is isolated in the registered
+  `CODEX-PRODUCT-BLOCKED-REVIEW-VISIBILITY-2026-09-12` lane; this audit branch
+  does not absorb that product change.
+- `SAFE_ACTIONS` at `apps/api/src/modules/agent/agent.service.ts:32` is not the
+  gate used at `:250-288`; the executor switch at `:297-373` currently rejects
+  unknown actions, but the model schema, declared safety set and executor are
+  three lists that can drift. One generated authority plus negative tests is
+  required before claiming the declared allowlist is enforced.
+- `scanEventsLostTotal` (`modules/qr/scan-log.ts:64`) and
+  `ordersPlacedCounter` (`plugins/observability.ts:116`) have no metrics reader
+  or increment respectively. QR loss and successful checkout volume are not
+  observable through the controls their declarations promise.
+- `escrowProof` at `modules/safety/deletion-hold.ts:464` is never invoked, so
+  deletion evidence does not yet prove a non-PII digest of the pre-shred escrow
+  payload. `isDocStateViolation` at `modules/verification/doc-state.ts:121`
+  likewise does not map database trigger refusals to the promised route-level
+  409 contract.
+- Rating text limits are divergent: the unused constants at
+  `modules/rating/rating-math.ts:17-18` declare 600/400, while driver comments
+  allow 500 (`modules/driver/driver.routes.ts:905`), service ratings allow 1000
+  (`modules/services/services.routes.ts:53`), and vendor replies allow 1000
+  (`modules/vendor/vendor.routes.ts:227`). This needs an explicit product
+  boundary and endpoint tests, not mechanical constant wiring.
+- `EXPIRING_DOC_TYPES` at
+  `modules/verification/verification.service.ts:80` is unused server-side while
+  the active `docTypeExpires` derives from `AUTO_APPROVE_EXPIRY_DAYS`. The admin
+  page has a local list at `apps/admin/src/app/verification/page.tsx:22,129`,
+  but `page.test.tsx:427-442` already pins it key-for-key to the server map.
+  The unused API array is therefore a cleanup candidate, not evidence that
+  expiry enforcement or drift detection is absent.
+- `SEED_RUN_ID` at `modules/ops/purge-plan.ts:35` is an unused declaration and
+  cleanup candidate. Repeated `seed-demo` literals exist in
+  `apps/api/prisma/seed.ts:31,48,554,574,611`, but purge selection at
+  `modules/ops/purge-plan.ts:101,233` accepts any non-null `syntheticRunId`;
+  the constant does not govern classification and no drift defect is claimed.
+
+The ten bounded cleanup candidates have no named production/test consumer and
+duplicate an authority that is in use elsewhere. They still require a separate
+small removal/export-narrowing change, bundle/call-graph proof, affected tests
+and independent review. `effectiveDocState` stays `UNCERTAIN` until a database
+census proves whether legacy null-state rows exist and a route-level projection
+test proves the fallback is or is not needed. No item in this tranche is
+authorized for deletion by this ledger.
 
 ## D8 — confirmed false-positive class
 
