@@ -90,15 +90,18 @@ async function browserLogin(): Promise<{ jar: Jar; raw: string[]; body: Record<s
 }
 
 describe('[A-01] the sign-in response carries the session as HttpOnly cookies and no credential', () => {
-  it('a browser client gets two HttpOnly SameSite=Strict cookies, the refresh cookie scoped to the auth path, and a body without tokens; a native client still gets tokens in the body and no cookie', async () => {
+  it('a browser client gets the session pair plus an explicit stale-signup deletion, and a body without tokens; a native client still gets tokens in the body and no cookie', async () => {
     const { jar, raw, body } = await browserLogin();
-    expect(raw).toHaveLength(2);
+    expect(raw).toHaveLength(3);
     for (const line of raw) {
       expect(line).toMatch(/HttpOnly/);
       expect(line).toMatch(/SameSite=Strict/);
     }
+    const signupLine = raw.find((l) => l.startsWith(`${SIGNUP_CONTINUATION_COOKIE}=`))!;
     const accessLine = raw.find((l) => l.startsWith(`${ACCESS_COOKIE}=`))!;
     const refreshLine = raw.find((l) => l.startsWith(`${REFRESH_COOKIE}=`))!;
+    expect(signupLine).toContain('Path=/api/v1/auth;');
+    expect(signupLine).toContain('Max-Age=0');
     expect(accessLine).toContain('Path=/api/v1;');
     // the refresh cookie travels ONLY to the auth routes — a literal, so a widened constant cannot pass by tautology
     expect(refreshLine).toContain('Path=/api/v1/auth;');
@@ -279,7 +282,11 @@ describe('[A-01] the cookie is marked Secure where it travels over the network',
   /** The Set-Cookie strings the API would send under a given environment. */
   const issued = (env: Record<string, string | undefined>): string[] => {
     let sent: string[] = [];
-    const reply = { header: (_name: string, value: string[]) => { sent = value; } } as unknown as Parameters<typeof setSessionCookies>[0];
+    const reply = {
+      getHeader: (_name: string) => sent.length ? sent : undefined,
+      header: (_name: string, value: string | string[]) => { sent = ([] as string[]).concat(value); return reply; },
+      removeHeader: (_name: string) => { sent = []; return reply; },
+    } as unknown as Parameters<typeof setSessionCookies>[0];
     setSessionCookies(reply, { accessToken: 'a.a.a', refreshToken: 'r.r.r' }, env);
     return sent;
   };
