@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
+import { resolveVerificationObject, verificationObjectUnavailable } from '../modules/verification/object-authority';
 
 /**
  * [F-026-02] The durable census of storage objects the platform still owes a
@@ -55,6 +56,11 @@ export async function retryStorageOrphans(
   let purged = 0;
   for (const row of rows) {
     try {
+      // Historical census rows are not deletion capabilities. Re-prove the
+      // subject and metadata, and refuse anything claimed by a submission.
+      // Public/legacy or already shredded rows stay open for reconciliation.
+      if (!row.userId) throw verificationObjectUnavailable();
+      await resolveVerificationObject(db, { fileKey: row.key, userId: row.userId });
       await storage.delete(row.key);
       await db.storageOrphan.update({ where: { id: row.id }, data: { purgedAt: new Date() } });
       purged += 1;

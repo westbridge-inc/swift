@@ -4,6 +4,7 @@ import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { recordStorageOrphan } from '../../lib/storage-orphans';
+import { isOwnedAvatarKey } from '../verification/object-authority';
 import { AppError } from '../../utils/errors';
 import { sendStepUpOtp, verifyStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
@@ -257,14 +258,17 @@ export async function authRoutes(app: FastifyInstance) {
       });
       throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
     }
-    // [F-026-02] The write landed — purge the replaced selfie object. Same
-    // legacy-URL guard as account deletion: absolute URLs aren't our keys.
+    // [F-026-02] The write landed — only a server-issued selfie in this
+    // subject's avatar namespace is deletion authority. Census unproven
+    // pointers for reconciliation without granting the retry worker authority.
     const oldKey = prior?.avatar;
-    if (oldKey && oldKey !== url && !oldKey.startsWith('http://') && !oldKey.startsWith('https://')) {
+    if (oldKey && oldKey !== url && isOwnedAvatarKey(oldKey, request.user.userId)) {
       await getStorageProvider().delete(oldKey).catch(async (purgeErr) => {
         app.log.error({ err: purgeErr, userId: request.user.userId, key: oldKey }, '[F-026-02] replaced selfie purge failed — censused');
         await recordStorageOrphan(app.prisma, app.log, { key: oldKey, reason: 'REPLACED_SELFIE_DELETE_FAILED', userId: request.user.userId, tenantId: prior?.tenantId });
       });
+    } else if (oldKey && oldKey !== url) {
+      await recordStorageOrphan(app.prisma, app.log, { key: oldKey, reason: 'REPLACED_SELFIE_AUTHORITY_UNPROVEN', userId: request.user.userId, tenantId: prior?.tenantId });
     }
     const user = await app.prisma.user.findUniqueOrThrow({
       where: { id: request.user.userId },

@@ -8,6 +8,7 @@ import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
 import { partnerObligations, verdictFor, refusalMessage, windDownPartner } from './partner-wind-down';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
+import { isOwnedAvatarKey } from '../verification/object-authority';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — the DPA-2023 rights of access, portability and erasure,
@@ -312,7 +313,7 @@ export class AccountService {
       // mark in one transaction. Erasure must complete for the person, so a
       // FAILED probe is recorded as FAILED and the bytes are filed as a
       // storage orphan for the retry sweep — never silently swallowed.
-      const evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, doc.fileUrl) : NOTHING_STORED;
+      const evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }) : NOTHING_STORED;
       if (evidence.probe === 'FAILED' && doc.fileUrl) {
         await recordStorageOrphan(prisma, this.app.log, { key: doc.fileUrl, reason: 'ERASURE_PURGE_PROBE_FAILED', userId, tenantId: doc.user.tenantId });
       }
@@ -329,9 +330,8 @@ export class AccountService {
     //     which is PUBLIC for the local provider. Nulling the column (step 4)
     //     leaves the object reachable — a DPA deletion-barrier breach. Delete
     //     the object here, before the column is cleared, so the census still
-    //     knows the key. Absolute-URL / signed-URL legacy values aren't our
-    //     keys to delete; bare keys and /uploads paths are. A failure is
-    //     LOGGED (not silently swallowed) so an orphan is discoverable.
+    //     knows the key. Only the server-issued avatar namespace of this
+    //     subject proves deletion authority; unproven pointers stay censused.
     // [F-026-02] Opportunistic retry of earlier orphans — account deletion is
     // a natural, already-privileged moment to work the census down without a
     // dedicated worker (IDV-1's sweeper takes standing ownership later).
@@ -339,7 +339,7 @@ export class AccountService {
 
     const avatarRow = await prisma.user.findUnique({ where: { id: userId }, select: { avatar: true, tenantId: true } });
     const rawAvatar = avatarRow?.avatar;
-    if (rawAvatar && !rawAvatar.startsWith('http://') && !rawAvatar.startsWith('https://')) {
+    if (rawAvatar && isOwnedAvatarKey(rawAvatar, userId)) {
       // Pass the stored value as-is: the provider's resolveKey normalises the
       // "/uploads/" prefix and refuses path escapes (same call the doc loop uses).
       await storage.delete(rawAvatar).catch(async (err) => {
@@ -348,6 +348,8 @@ export class AccountService {
         // durably so the deletion barrier survives this failure.
         await recordStorageOrphan(prisma, this.app.log, { key: rawAvatar, reason: 'ACCOUNT_DELETION_DELETE_FAILED', userId, tenantId: avatarRow?.tenantId });
       });
+    } else if (rawAvatar) {
+      await recordStorageOrphan(prisma, this.app.log, { key: rawAvatar, reason: 'ACCOUNT_AVATAR_AUTHORITY_UNPROVEN', userId, tenantId: avatarRow?.tenantId });
     }
 
     // 1b. Identity-integrity purge (trial-integrity spec Part 8, DPA 2023):

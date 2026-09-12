@@ -30,6 +30,7 @@ import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber } from './identity-signal-policy';
+import { resolveSignupSelfie, resolveVerificationObject } from './object-authority';
 import {
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
@@ -277,6 +278,7 @@ export class VerificationService {
       if (!status || ['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(status)) {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
       }
+      await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId });
       // [DOC-1 P5-1] Every submission walks the machine from CAPTURED (T1): the row
       // is born PENDING/CAPTURED and the verdict is REACHED by transitions the trigger
       // judges. The ledger lands first, so T8's guard (no blocking FAIL) and T17's
@@ -404,6 +406,7 @@ export class VerificationService {
     if (['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(user.status)) {
       throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
     }
+    await resolveVerificationObject(this.prisma, { fileKey: fileUrl, userId });
 
     // Movers (riders + taxi drivers) may submit any doc required for a vehicle
     // class they actually hold; other roles validate against their named
@@ -457,11 +460,9 @@ export class VerificationService {
     // it, the processor is registered and a transfer basis is recorded. Local engines pass through.
     assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, docType), this.kyc.engine);
     if (IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled()) {
-      if (!user.avatar || !user.selfieCapturedAt) {
-        throw new AppError(400, 'SELFIE_REQUIRED', 'Take your profile selfie before submitting your ID — we match the two faces.');
-      }
+      const selfieUrl = await resolveSignupSelfie(this.prisma, userId);
       // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
-      result = await extractWithLadder(() => this.kyc.verifyIdentity({ userId, idDocumentUrl: fileUrl, selfieUrl: user.avatar! }));
+      result = await extractWithLadder(() => this.kyc.verifyIdentity({ userId, idDocumentUrl: fileUrl, selfieUrl }));
     } else {
       result = await extractWithLadder(() => this.kyc.verifyDocument({ userId, docType, fileUrl }));
     }
@@ -566,6 +567,8 @@ export class VerificationService {
     if (user.trustLevel !== 'L1') {
       throw new AppError(409, 'ALREADY_VERIFIED', 'Identity is already verified');
     }
+    await resolveVerificationObject(this.prisma, { fileKey: idDocumentUrl, userId });
+    await resolveVerificationObject(this.prisma, { fileKey: selfieUrl, userId });
 
     // [DOC-1 §0.5 · FD-D5] Biometric off → the L2 identity document is verified
     // document-only; the selfie is not sent anywhere.
@@ -1028,7 +1031,7 @@ export class VerificationService {
     });
     if (!doc || doc.state !== 'COMMITTED' || doc.legalHoldId || doc.imagePurgedAt || !doc.fileUrl) return 'NOT_PURGED';
     const storage = getStorageProvider();
-    const evidence = await shredAndProbe(this.prisma, storage, doc.fileUrl);
+    const evidence = await shredAndProbe(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
     const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
     if (evidence.probe === 'FAILED') {
       await writeDeletionReceipt(this.prisma, receipt);
@@ -1600,9 +1603,7 @@ export class VerificationService {
     fileKey: string,
     result: T,
   ): Promise<T & { collided?: boolean }> {
-    if (!fileKey) return result;
-    const mine = await this.prisma.encryptedObject.findUnique({ where: { fileKey }, select: { sha256: true } });
-    if (!mine) return result; // no envelope row (no KEK configured): nothing to compare
+    const mine = await resolveVerificationObject(this.prisma, { fileKey, userId });
     const other = await this.prisma.encryptedObject.findFirst({
       where: { sha256: mine.sha256, createdBy: { not: userId } },
       select: { createdBy: true },
@@ -1658,7 +1659,7 @@ export class VerificationService {
   ): Promise<'PURGED' | 'PROBE_FAILED' | 'NOT_PURGED'> {
     const now = opts.now ?? new Date();
     const storage = getStorageProvider();
-    const evidence = doc.fileUrl ? await shredAndProbe(this.prisma, storage, doc.fileUrl) : NOTHING_STORED;
+    const evidence = doc.fileUrl ? await shredAndProbe(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id }) : NOTHING_STORED;
     const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
     if (evidence.probe === 'FAILED') {
       await writeDeletionReceipt(this.prisma, receipt);
