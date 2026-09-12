@@ -30,6 +30,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
+import { approvedIdentityDocumentNumber } from './identity-signal-policy';
 import {
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
@@ -538,16 +539,21 @@ export class VerificationService {
 
     await this.recordDecision(userId, doc.id, docType, doc.status, result.reason);
 
-    // Identity-integrity capture (silent): the analyzer's parsed document
-    // number is hashed and discarded — never stored raw. AWAITED so the
-    // signal exists before afterApproval reaches the trial decision; the
-    // service swallows its own failures (capture never breaks verification).
-    if (result.extracted?.documentNumber) {
+    // Identity-integrity capture (silent): only an APPROVED identity type may
+    // turn the analyzer's parsed number into HARD evidence. Rejected/pending
+    // OCR is not identity proof. AWAITED so the signal exists before
+    // afterApproval reaches the trial decision; the service swallows its own
+    // failures (capture never breaks verification).
+    const identityDocumentNumber = approvedIdentityDocumentNumber(
+      docType,
+      doc.status,
+      result.extracted?.documentNumber,
+    );
+    if (identityDocumentNumber) {
       const { IdentityService } = await import('../integrity/identity.service');
-      const { normalizeDocNumber } = await import('../integrity/normalize');
       await new IdentityService(this.prisma).capture({
         accountId: userId, actorRole: roleKey,
-        type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(result.extracted.documentNumber), source: 'AI_ID_ANALYZER',
+        type: 'ID_DOC_NUMBER', normalizedValue: identityDocumentNumber, source: 'AI_ID_ANALYZER',
       });
     }
 
@@ -621,13 +627,17 @@ export class VerificationService {
 
     await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason);
 
-    // Identity-integrity capture (silent) — hash-and-discard, never stored raw.
-    if (result.extracted?.documentNumber) {
+    // Only the approved L2 verdict may turn OCR into HARD identity evidence.
+    const identityDocumentNumber = approvedIdentityDocumentNumber(
+      IDENTITY_DOC_TYPE,
+      doc.status,
+      result.extracted?.documentNumber,
+    );
+    if (identityDocumentNumber) {
       const { IdentityService } = await import('../integrity/identity.service');
-      const { normalizeDocNumber } = await import('../integrity/normalize');
       await new IdentityService(this.prisma).capture({
         accountId: userId, actorRole: 'CUSTOMER',
-        type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(result.extracted.documentNumber), source: 'AI_ID_ANALYZER',
+        type: 'ID_DOC_NUMBER', normalizedValue: identityDocumentNumber, source: 'AI_ID_ANALYZER',
       });
     }
 
