@@ -30,7 +30,7 @@ The baseline was measured from a clean worktree at the pinned SHA.
 
 | Measure | Current result | Meaning |
 |---|---:|---|
-| Files outside `.git` | 1,990 | Repository census, including configuration and prose |
+| Files outside `.git` | 1,989 tracked files | Repository census at the pinned baseline, including configuration and prose |
 | TypeScript files / lines | 1,263 / 251,558 | Includes tests |
 | TSX files / lines | 326 / 62,200 | Includes tests |
 | JavaScript files / lines | 17 / 1,516 | Mostly tooling |
@@ -39,7 +39,7 @@ The baseline was measured from a clean worktree at the pinned SHA.
 | Production-like TS/TSX/JS files / lines | 876 / 177,692 | Excludes conventional test, fixture, and mock paths |
 | Test TS/TSX lines | 134,443 | A large test corpus is present; coverage quality still needs grading |
 | API route census before detector repair | 0 routes, exit 0 | Vacuous green caused by reading `server.ts` |
-| Static route-declaration census after bounded repair | 567 declaration sites/patterns; 96 reachability leads | Includes composition-root routes and one dynamic pattern; it is not a runtime Fastify count |
+| Static route-declaration census after bounded repair | 573 static paths/patterns; 99 reachability leads | Includes app.ts plus registered helper/plugin source and statically expanded finite loops; manifest SHA-256 `98ae1e4211764c892f50c7a4b8431cb6380391bca2b87471f8455f4f25231e0b`; it is not a runtime Fastify count |
 | Raw-Prisma test candidates | 64 of 520 test files | Boundary-review leads; many are deliberate harnesses |
 | Export scanner candidates | 224 of 1,768 exports | 201 are used in their defining file; its narrowed graph called 23 declaration-only, but exact whole-repository search already refuted 3, leaving at most 20 first-pass leads |
 | Dependency override leads | 35 ranged overrides | 30 labelled redundant and 5 inapplicable by a simplistic detector; no removal authorized |
@@ -118,7 +118,7 @@ Before deleting or building broadly:
 
 The route detector was the first proven dead control: it inspected the obsolete
 composition file and returned a clean empty result. Its bounded repair is kept
-report-only until its 96 candidates are reviewed and false-positive classes are
+report-only until its 99 candidates are reviewed and false-positive classes are
 documented.
 
 ## Phase 1 — dead code, scraps, and duplicate systems
@@ -443,7 +443,7 @@ The audit produces:
   driver-cancel control, web appointment blockage, and mobile reverse-geocode
   absence are current static contract leads requiring dedicated remediation or
   product-scope decisions.
-- The 96 route reachability leads, 64 raw-Prisma test leads, at most 20 remaining
+- The 99 route reachability leads, 64 raw-Prisma test leads, at most 20 remaining
   declaration-only export leads, and dependency override leads are unclassified;
   none authorizes deletion. Three of the export scanner's 23 claims are already
   refuted by consumers outside its narrowed graph.

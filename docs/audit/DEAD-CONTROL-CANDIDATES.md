@@ -24,7 +24,7 @@ suitable as a blocking CI gate in its present form.
 | Detector | Eligible population | Raw leads | Verified interpretation |
 |---|---:|---:|---|
 | Route reachability, original | 0 routes | 0 | Vacuous result: it read `server.ts`; composition lives in `app.ts` |
-| Route reachability, repaired | 567 static declaration sites/patterns | 96 | Path-prefix text leads; webhooks, direct browser pages, internal routes, and honest placeholders can be valid |
+| Route reachability, repaired | 573 static paths/patterns | 99 | Path-prefix text leads; webhooks, direct browser pages, internal routes, and honest placeholders can be valid; manifest SHA-256 `98ae1e4211764c892f50c7a4b8431cb6380391bca2b87471f8455f4f25231e0b` |
 | D5 dependency overrides | 35 ranged entries | 30 “redundant”, 5 “inapplicable” | Hygiene leads only; detector does not prove the pnpm graph or vulnerability state |
 | D6 raw Prisma in tests | 520 test files | 64 occurrences | Some are intentional DDL/RLS harnesses; others lack exact-role boundary proof |
 | D8 exported symbols | 1,768 exports / 350 production files | 224 | 201 are consumed in their own file; the narrowed graph called 23 declaration-only, but whole-repository search refuted 3 |
@@ -193,16 +193,18 @@ tested under its exact role. A generic `scoped-exempt` comment is not proof.
 
 ## Route reachability leads
 
-The repaired detector now reads `apps/api/src/app.ts`, includes composition-root
-declarations, supports prefixless/default-export plugins and finite-loop route
-patterns, refuses a zero-route census, and reads production files in all four
-client trees. It reports 567 static route declaration sites/patterns and 96 with
-no client path-prefix text match. Tests, fixtures, and mocks are excluded. This
-is still a raw text heuristic: it ignores HTTP method, stops comparison at the
-first route parameter, and can count comments or unrelated string literals.
-Accordingly it has both false-positive and false-negative classes and is not a
-runtime Fastify route count. The largest unmatched bucket is admin (58), followed
-by vendor (11), verification (5), auth (4), and customer (4).
+The repaired detector now reads `apps/api/src/app.ts`, includes its registered
+relative helper/plugin source, supports prefixless/default-export plugins and
+statically expands finite literal loops, refuses a zero-route census, and reads
+production files in all four client trees. It reports 573 static route
+paths/patterns and 99 reachability leads (manifest SHA-256
+`98ae1e4211764c892f50c7a4b8431cb6380391bca2b87471f8455f4f25231e0b`).
+Tests, fixtures, and mocks are excluded. This is still a raw text
+heuristic: it ignores HTTP method, stops comparison at the first route parameter,
+and can count comments or unrelated string literals. Accordingly it has both
+false-positive and false-negative classes and is not a runtime Fastify route
+count. The largest unmatched bucket is admin (58), followed by vendor (11),
+verification (5), auth (4), and customer (4).
 
 Immediate manual-review leads:
 
@@ -220,7 +222,7 @@ Immediate manual-review leads:
 The next detector version must inventory both directions, preserve HTTP method,
 understand template literals/client base URLs, carry allowlisted server-to-server
 and direct-navigation reasons, and emit a machine-readable manifest. Until then,
-the 96 entries are reviewed manually and the detector remains non-blocking.
+the 99 entries are reviewed manually and the detector remains non-blocking.
 
 ## Required proof for any cleanup PR
 

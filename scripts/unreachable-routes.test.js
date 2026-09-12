@@ -21,6 +21,17 @@ test('reads prefixed and root-mounted plugins from the app composition root', ()
   assert.equal(registrations.get('qrResolverRoutes'), '');
 });
 
+test('refuses dynamic prefixes and unsupported registration options', () => {
+  assert.throws(
+    () => registrationPrefixes("await app.register(ridesRoutes, { prefix: routePrefix });"),
+    /expected a literal \{ prefix: '\.\.\.' \}/,
+  );
+  assert.throws(
+    () => registrationPrefixes("await app.register(ridesRoutes, { prefix: '/api/v1/rides', logLevel: 'debug' });"),
+    /expected a literal \{ prefix: '\.\.\.' \}/,
+  );
+});
+
 test('recognises named and default async route plugins', () => {
   assert.equal(
     routePluginName('export async function ridesRoutes(app) {}'),
@@ -45,7 +56,15 @@ test('extracts prefixed and root routes without importing the API', () => {
   ]);
 });
 
-test('normalises a finite-loop template route and rejects unparsed route calls', () => {
+test('expands a finite-loop template route and rejects unparsed route calls', () => {
+  const finite = moduleRoutes(
+    "const FOLDERS = ['items', 'avatars'] as const; for (const folder of FOLDERS) app.get(`/uploads/${folder}/*`, async () => {});",
+    '',
+    '/repo/apps/api/src/utils/public-uploads.ts',
+    '/repo',
+  );
+  assert.deepEqual(finite.map((route) => route.full), ['/uploads/items/*', '/uploads/avatars/*']);
+
   const dynamic = moduleRoutes(
     'app.put(`/orders/:id/${slug}`, async () => {});',
     '/api/v1/rider',
@@ -88,10 +107,10 @@ test('current Swift composition yields a substantial route census', () => {
     .update(routes.map(({ verb, full, file }) => `${verb}\t${full}\t${file}`).sort().join('\n'))
     .digest('hex');
 
-  assert.equal(routes.length, 567, 'route-declaration baseline changed; review and update intentionally');
+  assert.equal(routes.length, 573, 'route-declaration baseline changed; review and update intentionally');
   assert.equal(
     manifestHash,
-    'd7e08836f51a842a75f9d48a2aa427ebcb7bcf47068322529814d855402b3f4f',
+    '98ae1e4211764c892f50c7a4b8431cb6380391bca2b87471f8455f4f25231e0b',
     'route-declaration manifest changed; inspect the exact added, removed, or moved route before updating',
   );
   assert.equal(prefixes.get('ridesRoutes'), '/api/v1/rides');
@@ -101,4 +120,10 @@ test('current Swift composition yields a substantial route census', () => {
   assert.ok(signatures.has('GET /s/:code'));
   assert.ok(signatures.has('POST /api/v1/courier/order'));
   assert.ok(signatures.has('PUT /api/v1/rider/orders/:id/:dynamic'));
+  assert.ok(signatures.has('GET /live'));
+  assert.ok(signatures.has('GET /ready'));
+  assert.ok(signatures.has('GET /metrics'));
+  assert.ok(signatures.has('GET /uploads/items/*'));
+  assert.ok(signatures.has('GET /uploads/avatars/*'));
+  assert.ok(signatures.has('GET /uploads/vehicles/*'));
 });
