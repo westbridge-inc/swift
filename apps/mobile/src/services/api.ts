@@ -846,6 +846,9 @@ export const driverApi = {
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
   accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
+  /** Give an accepted, pre-custody ride back to dispatch. The server keeps the
+   * passenger's ride alive, frees this driver, and matches another driver. */
+  handback: (id: string, reason: string) => api.post(`/driver/rides/${id}/cancel`, { reason }),
   // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
   acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
