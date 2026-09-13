@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { money, moneyIn, moneyOrDash } from './money';
+import { money, moneyExact, moneyIn, moneyOrDash } from './money';
 
 // ---------------------------------------------------------------------------
 // [UI-MONEY-1] One currency, one spelling.
@@ -104,5 +104,13 @@ describe('[UI-MONEY-1] the canonical formatter keeps every capability it absorbe
     expect(moneyIn(2.6)).toBe('$3');
     expect(moneyOrDash(2.4)).toBe('$2');
     expect(moneyIn(2.6, 'USD')).toBe('USD 3');
+  });
+
+  it('preserves two-decimal server authority only for explicit attestations', () => {
+    expect(moneyExact(417)).toBe('$417');
+    expect(moneyExact(417.2)).toBe('$417.20');
+    expect(moneyExact(417.25)).toBe('$417.25');
+    expect(moneyExact(417.25, 'USD')).toBe('USD 417.25');
+    expect(() => moneyExact(Number.NaN)).toThrow('finite amount');
   });
 });
