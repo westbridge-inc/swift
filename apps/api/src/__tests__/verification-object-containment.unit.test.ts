@@ -487,11 +487,13 @@ describe('review corrections: deletion obligations and retry progress', () => {
     for (const name of ['order', 'serviceJob']) h.db[name] = { count: vi.fn(async () => 0) };
     for (const name of ['sosAlert', 'incidentCase', 'evidenceBundle']) h.db[name] = { findMany: vi.fn(async () => []) };
     h.db.platformConfig = { upsert: vi.fn() };
-    const matches = (doc: any, where: any) => Object.entries(where ?? {}).every(([field, value]: [string, any]) => {
+    const matches = (doc: any, where: any): boolean => Object.entries(where ?? {}).every(([field, value]: [string, any]) => {
+      if (field === 'OR') return value.some((clause: any) => matches(doc, clause));
+      if (field === 'AND') return value.every((clause: any) => matches(doc, clause));
       if (value !== null && typeof value === 'object') {
         if ('not' in value && doc[field] === value.not) return false;
         if ('in' in value && !value.in.includes(doc[field])) return false;
-        if ('gt' in value && !(doc[field] > value.gt)) return false;
+        if ('gt' in value && !(doc[field] !== null && doc[field] > value.gt)) return false;
         if ('lt' in value && !(doc[field] !== null && doc[field] < value.lt)) return false;
         return true;
       }
@@ -539,6 +541,118 @@ describe('review corrections: deletion obligations and retry progress', () => {
     };
     return { ...h, doc, run, field, assertErased };
   }
+
+  function retentionRaceHarness() {
+    const h = erasureRaceHarness();
+    Object.assign(h.person, { activeRole: 'CUSTOMER', lastMoverRole: null });
+    Object.assign(h.doc, { role: 'CUSTOMER', docType: 'national_id' });
+    h.db.$queryRaw.mockImplementation(async (query: unknown, userId: string) => {
+      const user = h.people.get(userId);
+      return String(query).includes('FROM "users"') && user ? [{ ...user }] : [];
+    });
+    h.db.countryConfig = { findUnique: vi.fn(async () => ({ code: 'GY', dataRetentionDays: 365 })) };
+    h.db.docType.findUnique.mockResolvedValue({ persistRetentionDays: null, amlRecordClass: 'NOT_APPLICABLE' });
+    h.db.deviceToken.updateMany = vi.fn(async () => ({ count: 0 }));
+    return h;
+  }
+
+  async function ban(h: ReturnType<typeof retentionRaceHarness>) {
+    const routes = await handlers(h, adminRoutes);
+    return routes.get('put /users/:id/ban')!({
+      params: { id: A }, body: { reason: 'Synthetic regression' },
+      user: { userId: 'reviewer', role: 'SUPER_ADMIN' }, headers: {}, ip: '127.0.0.1',
+    });
+  }
+
+  it('F-224-01: actual admin ban/status/scheduler cannot postpone pending account erasure', async () => {
+    const h = retentionRaceHarness(); const meta = h.objects.get(key(A))!; h.objects.delete(key(A));
+    const scheduled = vi.spyOn(VerificationService.prototype, 'scheduleDocumentRetention');
+    await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE' });
+    const cutoff = h.doc.retentionExpiresAt!.getTime();
+    vi.setSystemTime(new Date(Date.now() + 1));
+    await expect(ban(h)).resolves.toMatchObject({ success: true, data: { status: 'BANNED' } });
+    expect(scheduled).toHaveBeenCalledExactlyOnceWith(A);
+    expect(h.db.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'BAN_USER' }) }));
+    expect(h.person.phone).toBe(`deleted:${A}`);
+    expect(h.doc.retentionExpiresAt!.getTime()).toBe(cutoff);
+    // Missing metadata stays pending, even after the actual ban path ran.
+    await expect(h.service.purgeExpiredDocuments()).rejects.toMatchObject(unavailable);
+    expect(h.doc.purgedAt).toBeNull(); expect(h.run.wrappedDek).not.toBeNull(); expect(h.field.valueCt).not.toBeNull();
+    expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
+    h.objects.set(key(A), meta);
+    await expect(h.service.purgeExpiredDocuments()).resolves.toBe(1); h.assertErased();
+  });
+
+  it.each(['cutoff-first', 'scheduler-first'])('F-224-01: paused production scheduler/cutoff %s preserves the erasure deadline', async (order) => {
+    const h = retentionRaceHarness(); const meta = h.objects.get(key(A))!; h.objects.delete(key(A));
+    let reached!: () => void; const policyRead = new Promise<void>((resolve) => { reached = resolve; });
+    let resume!: () => void; const gate = new Promise<void>((resolve) => { resume = resolve; });
+    h.db.docType.findUnique.mockImplementationOnce(async () => { reached(); await gate; return { persistRetentionDays: null, amlRecordClass: 'NOT_APPLICABLE' }; });
+    // The only current HTTP caller bans first, so the before-cutoff order is
+    // exercised through the same production scheduling service directly.
+    const scheduling = h.service.scheduleDocumentRetention(A);
+    try {
+      await policyRead;
+      if (order === 'scheduler-first') { resume(); await scheduling; }
+      await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ status: 'PENDING_DOCUMENT_ERASURE' });
+      const cutoff = h.doc.retentionExpiresAt!.getTime();
+      vi.setSystemTime(new Date(Date.now() + 1)); resume(); await scheduling;
+      expect(h.doc.retentionExpiresAt!.getTime()).toBe(cutoff);
+      h.objects.set(key(A), meta);
+      await expect(h.service.purgeExpiredDocuments()).resolves.toBe(1); h.assertErased();
+    } finally { resume(); await scheduling; }
+  });
+
+  it.each([
+    ['null', null, 365, 1], ['due', -1, -1, 0], ['earlier ordinary', 30, 30, 0],
+    ['equal', 365, 365, 0], ['later ordinary', 730, 365, 1],
+  ] as const)('F-224-01: scheduling %s preserves the earliest deadline and is idempotent', async (_name, beforeDays, afterDays, changed) => {
+    const h = retentionRaceHarness(); const now = Date.now(); const day = 86_400_000;
+    h.doc.retentionExpiresAt = beforeDays === null ? null : new Date(now + beforeDays * day);
+    await expect(h.service.scheduleDocumentRetention(A)).resolves.toBe(changed);
+    expect(h.doc.retentionExpiresAt!.getTime()).toBe(now + afterDays * day);
+    vi.setSystemTime(new Date(now + day));
+    await expect(h.service.scheduleDocumentRetention(A)).resolves.toBe(0);
+    expect(h.doc.retentionExpiresAt!.getTime()).toBe(now + afterDays * day);
+    expect(storage.delete).not.toHaveBeenCalled(); expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [45, 'NOT_APPLICABLE', 45], [365, 'CDD_ENTITY', 2555], [3000, 'CDD_ENTITY', 3000],
+  ])('F-224-01: a new policy clock keeps registry %s / AML %s duration %s', async (days, amlRecordClass, expected) => {
+    const h = retentionRaceHarness(); const now = Date.now(); h.doc.retentionExpiresAt = null;
+    h.db.docType.findUnique.mockResolvedValue({ persistRetentionDays: days, amlRecordClass });
+    await expect(h.service.scheduleDocumentRetention(A)).resolves.toBe(1);
+    expect(h.doc.retentionExpiresAt!.getTime()).toBe(now + Number(expected) * 86_400_000);
+    expect(h.run.wrappedDek).not.toBeNull(); expect(h.field.valueCt).not.toBeNull();
+    expect(storage.delete).not.toHaveBeenCalled();
+  });
+
+  it.each([365, 3000])('F-224-01: an applicable AML class retains the existing floor/registry extension for %s days', async (registryDays) => {
+    const h = retentionRaceHarness(); const now = Date.now();
+    h.doc.retentionExpiresAt = new Date(now - 1); // older clock before AML reclassification
+    h.db.docType.findUnique.mockResolvedValue({ persistRetentionDays: registryDays, amlRecordClass: 'CDD_ENTITY' });
+    await expect(h.service.scheduleDocumentRetention(A)).resolves.toBe(1);
+    expect(h.doc.retentionExpiresAt!.getTime()).toBe(now + Math.max(registryDays, 2555) * 86_400_000);
+    await expect(eraseDocumentsFor(h.db, h.service, A)).resolves.toEqual([
+      expect.objectContaining({ documentId: h.doc.id, outcome: 'REFUSED', ground: 'AML_RECORD' }),
+    ]);
+    expect(h.run.wrappedDek).not.toBeNull(); expect(h.field.valueCt).not.toBeNull();
+    expect(storage.delete).not.toHaveBeenCalled(); expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
+  });
+
+  it('F-224-01: scheduling preserves held/purged/other-subject rows without granting purge authority', async () => {
+    const h = retentionRaceHarness(); const before = Date.now() - 1;
+    Object.assign(h.doc, { retentionExpiresAt: new Date(before), legalHoldId: 'synthetic-hold' });
+    const purged = { ...h.doc, id: 'already-purged', legalHoldId: null, purgedAt: new Date(before), retentionExpiresAt: null };
+    const other = { ...h.doc, id: 'other-subject', userId: B, legalHoldId: null, retentionExpiresAt: null };
+    h.documents.push(purged, other);
+    await expect(h.service.scheduleDocumentRetention(A)).resolves.toBe(0);
+    expect(h.doc.retentionExpiresAt!.getTime()).toBe(before); expect(h.doc.legalHoldId).toBe('synthetic-hold');
+    expect(purged.retentionExpiresAt).toBeNull(); expect(other.retentionExpiresAt).toBeNull();
+    await expect(h.service.purgeExpiredDocuments()).resolves.toBe(0);
+    expect(storage.delete).not.toHaveBeenCalled(); expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
+  });
 
   it('F-220-01: a reaper after committed cutoff cannot complete erasure while retaining extracted values', async () => {
     const h = erasureRaceHarness(); let first = true;

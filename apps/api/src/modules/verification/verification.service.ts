@@ -1566,7 +1566,8 @@ export class VerificationService {
   // -------------------------------------------------------------------------
 
   /** Schedule a leaving participant's documents for deletion after the
-   *  country's retention window. Idempotent; skips already-purged rows. */
+   *  country's retention window. Non-AML clocks are only added or shortened;
+   *  AML scheduling retains its existing policy behavior. Skips purged rows. */
   async scheduleDocumentRetention(userId: string): Promise<number> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -1579,13 +1580,33 @@ export class VerificationService {
     // the registry's persistRetentionDays, the AML switch's seven years, or the country
     // default — never one flat date for everything the person ever submitted.
     const docs = await this.prisma.verificationDocument.findMany({ where: { userId, purgedAt: null }, select: { id: true, docType: true, role: true } });
-    let count = 0;
+    const deadlines: Array<{ id: string; at: Date; amlRecord: boolean }> = [];
     for (const d of docs) {
       const ruling = await retentionDaysFor(this.prisma, { countryCode: user.countryCode, docType: d.docType, role: d.role, countryDefaultDays: config.dataRetentionDays });
-      const res = await this.prisma.verificationDocument.updateMany({ where: { id: d.id, purgedAt: null }, data: { retentionExpiresAt: new Date(Date.now() + ruling.days * 24 * 60 * 60 * 1000) } });
-      count += res.count;
+      deadlines.push({ id: d.id, at: new Date(Date.now() + ruling.days * 24 * 60 * 60 * 1000), amlRecord: ruling.amlRecord });
     }
-    return count;
+    return this.prisma.$transaction(async (tx) => {
+      // [F-224-01] Serialize with account cutoff and final purge, including a
+      // scheduler whose policy reads began before deletion committed.
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "users" WHERE "id" = ${userId}
+        FOR UPDATE /* verification-retention-schedule-authority */
+      `;
+      if (!locked[0]) return 0;
+      let count = 0;
+      for (const d of deadlines) {
+        // The deadline predicate is evaluated by the UPDATE, not a prior
+        // snapshot. Ordinary scheduling cannot extend an erasure/earlier
+        // clock. Preserve the pre-existing AML extension instead of deciding
+        // new precedence between erasure and a legally required AML window.
+        const res = await tx.verificationDocument.updateMany({
+          where: { id: d.id, userId, purgedAt: null, ...(!d.amlRecord && { OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: d.at } }] }) },
+          data: { retentionExpiresAt: d.at },
+        });
+        count += res.count;
+      }
+      return count;
+    });
   }
 
   /**

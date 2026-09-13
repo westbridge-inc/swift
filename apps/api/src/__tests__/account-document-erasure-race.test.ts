@@ -1,5 +1,5 @@
-/** F-220-01: real PostgreSQL transaction/row-lock barriers for the account
- * cutoff and document reaper. Normal API CI only; the no-service config does
+/** F-220-01 / F-224-01: real PostgreSQL transaction/row-lock barriers for the
+ * account cutoff, retention scheduler and reaper. Normal API CI only; the no-service config does
  * not include this file. Object bytes are synthetic in-memory storage; ORM
  * reads, writes, row locks, triggers and transaction rollback use the test DB.
  */
@@ -11,6 +11,11 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { AccountService } from '../modules/user/account.service';
 import { VerificationService } from '../modules/verification/verification.service';
+import { adminRoutes } from '../modules/admin/admin.routes';
+import { runWithTenant } from '../plugins/tenant-context';
+import { retentionDaysFor } from '../modules/verification/retention-policy';
+import { registryCode } from '../modules/verification/doc-registry';
+import { eraseDocumentsFor } from '../modules/verification/dsar';
 import type { NotificationService } from '../modules/notification/notification.service';
 import type { KycProvider } from '../providers/kyc/kyc-provider';
 
@@ -28,6 +33,7 @@ vi.mock('../providers/storage/storage-provider', () => ({
 
 let app: FastifyInstance;
 const users: string[] = [];
+const policyCodes: string[] = [];
 const signal = () => {
   let release!: () => void;
   const reached = new Promise<void>((resolve) => { release = resolve; });
@@ -48,6 +54,7 @@ afterAll(async () => {
   await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: users } } });
   await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
   await app.prisma.user.deleteMany({ where: { id: { in: users } } });
+  await app.prisma.docType.deleteMany({ where: { code: { in: policyCodes } } });
   await app.close();
 });
 
@@ -114,32 +121,49 @@ async function fixture(metadataAvailable = true) {
 // Instrument only scheduling around real interactive transactions. Every
 // callback and lock still reaches the same Prisma transaction/connection.
 function transactions(db: PrismaClient, hooks: {
+  backend?: (pid: number) => void;
   afterCommit?: () => Promise<void>;
   afterUserUpdate?: () => Promise<void>;
+  afterRetentionLock?: () => Promise<void>;
+  afterRetentionWrite?: (result: { count: number }) => Promise<void>;
   purgeLockAttempted?: () => void;
   failFieldShred?: boolean;
 }): PrismaClient {
   return new Proxy(db, { get(target, property) {
     if (property !== '$transaction') return Reflect.get(target, property);
     return async (body: (tx: Prisma.TransactionClient) => Promise<unknown>, ...options: unknown[]) => {
-      const result = await Reflect.apply(target.$transaction, target, [async (tx: Prisma.TransactionClient) => body(new Proxy(tx, {
-        get(transaction, member) {
-          if (member === 'user' && hooks.afterUserUpdate) return new Proxy(transaction.user, { get(delegate, operation) {
-            if (operation !== 'update') return Reflect.get(delegate, operation);
-            return async (args: Prisma.UserUpdateArgs) => { const value = await delegate.update(args); await hooks.afterUserUpdate!(); return value; };
-          } });
-          if (member === '$queryRaw' && hooks.purgeLockAttempted) return (...args: unknown[]) => {
-            const pending = Reflect.apply(transaction.$queryRaw, transaction, args);
-            if (String(args[0]).includes('verification-document-purge-authority')) hooks.purgeLockAttempted!();
-            return pending;
-          };
-          if (member === 'extractedField' && hooks.failFieldShred) return new Proxy(transaction.extractedField, { get(delegate, operation) {
-            if (operation === 'updateMany') return async () => { throw new Error('synthetic field-shred failure'); };
-            return Reflect.get(delegate, operation);
-          } });
-          return Reflect.get(transaction, member);
-        },
-      })), ...options]);
+      const result = await Reflect.apply(target.$transaction, target, [async (tx: Prisma.TransactionClient) => {
+        if (hooks.backend) {
+          const [backend] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+          hooks.backend(backend!.pid);
+        }
+        return body(new Proxy(tx, {
+          get(transaction, member) {
+            if (member === 'user' && hooks.afterUserUpdate) return new Proxy(transaction.user, { get(delegate, operation) {
+              if (operation !== 'update') return Reflect.get(delegate, operation);
+              return async (args: Prisma.UserUpdateArgs) => { const value = await delegate.update(args); await hooks.afterUserUpdate!(); return value; };
+            } });
+            if (member === '$queryRaw' && (hooks.purgeLockAttempted || hooks.afterRetentionLock)) return async (...args: unknown[]) => {
+              const pending = Reflect.apply(transaction.$queryRaw, transaction, args);
+              if (String(args[0]).includes('verification-document-purge-authority')) hooks.purgeLockAttempted?.();
+              const value = await pending;
+              if (String(args[0]).includes('verification-retention-schedule-authority')) await hooks.afterRetentionLock?.();
+              return value;
+            };
+            if (member === 'verificationDocument' && hooks.afterRetentionWrite) return new Proxy(transaction.verificationDocument, { get(delegate, operation) {
+              if (operation !== 'updateMany') return Reflect.get(delegate, operation);
+              return async (args: Prisma.VerificationDocumentUpdateManyArgs) => {
+                const result = await delegate.updateMany(args); await hooks.afterRetentionWrite!(result); return result;
+              };
+            } });
+            if (member === 'extractedField' && hooks.failFieldShred) return new Proxy(transaction.extractedField, { get(delegate, operation) {
+              if (operation === 'updateMany') return async () => { throw new Error('synthetic field-shred failure'); };
+              return Reflect.get(delegate, operation);
+            } });
+            return Reflect.get(transaction, member);
+          },
+        }));
+      }, ...options]);
       await hooks.afterCommit?.(); return result;
     };
   } }) as PrismaClient;
@@ -218,5 +242,181 @@ describe('F-220-01 account erasure/reaper PostgreSQL barriers', () => {
     expect(await app.prisma.deletionReceipt.count({ where: { submissionId: h.doc.id } })).toBe(0);
     // The already-shredded image remains an explicit unresolved obligation;
     // this test does not claim the separate partial-shred recovery is solved.
+  });
+});
+
+// Observe the server's actual lock wait, not merely invocation of a lazy
+// PrismaPromise. Scope the query to the two known test-transaction backends.
+async function blockedBy(waiter: () => number | undefined, blocker: number) {
+  await expect.poll(async () => {
+    const pid = waiter(); if (pid === undefined) return false;
+    const [row] = await app.prisma.$queryRaw<Array<{ blockers: number[] }>>`SELECT pg_blocking_pids(${pid}) AS blockers`;
+    return row!.blockers.includes(blocker);
+  }, { interval: 10, timeout: 2000 }).toBe(true);
+}
+
+async function invokeBan(h: Awaited<ReturnType<typeof fixture>>) {
+  const admin = await app.prisma.user.create({ data: {
+    phone: `synthetic-retention-admin:${nanoid(20)}`, firstName: 'Synthetic', lastName: 'Admin',
+    roles: ['SUPER_ADMIN'], activeRole: 'SUPER_ADMIN', tenantId: h.user.tenantId,
+  } }); users.push(admin.id);
+  type Handler = (request: unknown) => Promise<unknown>;
+  const routes = new Map<string, Handler>();
+  const host: Record<string, unknown> = { prisma: h.db, log: app.log, io: {}, prefix: '', addHook: () => {} };
+  for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
+    host[method] = (path: string, ...args: unknown[]) => { routes.set(`${method} ${path}`, args.at(-1) as Handler); };
+  }
+  await adminRoutes(host as unknown as FastifyInstance);
+  // Actual registered handler/status authority/scheduler; authentication and
+  // transport are supplied boundaries, not an HTTP middleware certification.
+  return runWithTenant(h.user.tenantId, () => routes.get('put /users/:id/ban')!({
+    params: { id: h.user.id }, body: { reason: 'Synthetic retention regression' },
+    user: { userId: admin.id, role: 'SUPER_ADMIN' }, headers: {}, ip: '127.0.0.1',
+  }));
+}
+
+describe('F-224-01 monotonic retention at PostgreSQL authority boundaries', () => {
+  it('actual admin ban keeps missing-metadata erasure pending and restored metadata immediately recoverable', async () => {
+    const h = await fixture(false);
+    await expect(h.account().deleteAccount(h.user.id)).resolves.toMatchObject({ status: 'PENDING_DOCUMENT_ERASURE' });
+    const cutoff = (await h.state()).retentionExpiresAt;
+    await invokeBan(h);
+    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: h.user.id } })).toMatchObject({ status: 'BANNED', phone: `deleted:${h.user.id}` });
+    expect((await h.state()).retentionExpiresAt).toEqual(cutoff);
+    await h.advancePastCutoff();
+    await expect(h.verification().purgeExpiredDocuments()).rejects.toMatchObject({ code: 'VERIFICATION_OBJECT_UNAVAILABLE' });
+    expect(await app.prisma.deletionReceipt.count({ where: { submissionId: h.doc.id } })).toBe(0);
+    await h.metadata();
+    await expect(h.verification().purgeExpiredDocuments()).resolves.toBe(1); await h.assertErased();
+  });
+
+  it.each(['cutoff-first', 'scheduler-first'])('observes the real user-lock wait with %s and never postpones cutoff', async (order) => {
+    const h = await fixture(false);
+    await app.prisma.verificationDocument.update({ where: { id: h.doc.id }, data: { retentionExpiresAt: null } });
+    const held = signal(); const release = signal(); const finishAccount = signal();
+    let accountPid: number | undefined; let schedulerPid: number | undefined; let first = true;
+    const accountDb = transactions(h.db, {
+      backend: (pid) => { accountPid = pid; },
+      afterUserUpdate: async () => {
+        if (first && order === 'cutoff-first') { first = false; held.release(); await release.reached; }
+      },
+      afterCommit: async () => { await finishAccount.reached; },
+    });
+    const schedulerDb = transactions(h.db, {
+      backend: (pid) => { schedulerPid = pid; },
+      afterRetentionLock: async () => {
+        if (order === 'scheduler-first') { held.release(); await release.reached; }
+      },
+    });
+    let deleting: Promise<unknown> | undefined; let scheduling: Promise<number> | undefined;
+    try {
+      if (order === 'cutoff-first') {
+        deleting = h.account(accountDb).deleteAccount(h.user.id);
+        await reachBeforeCompletion(held, deleting);
+        scheduling = h.verification(schedulerDb).scheduleDocumentRetention(h.user.id);
+        await blockedBy(() => schedulerPid, accountPid!);
+      } else {
+        scheduling = h.verification(schedulerDb).scheduleDocumentRetention(h.user.id);
+        await reachBeforeCompletion(held, scheduling);
+        deleting = h.account(accountDb).deleteAccount(h.user.id);
+        await blockedBy(() => accountPid, schedulerPid!);
+      }
+      expect((await h.state()).retentionExpiresAt).toBeNull(); // no uncommitted clock leaked
+      release.release();
+      await expect(scheduling).resolves.toBe(order === 'cutoff-first' ? 0 : 1);
+      finishAccount.release();
+      await expect(deleting).resolves.toMatchObject({ status: 'PENDING_DOCUMENT_ERASURE' });
+      const cutoff = (await h.state()).retentionExpiresAt!;
+      expect(cutoff.getTime()).toBeLessThanOrEqual(Date.now());
+      await h.metadata(); await h.advancePastCutoff();
+      await expect(h.verification().purgeExpiredDocuments()).resolves.toBe(1); await h.assertErased();
+    } finally { release.release(); finishAccount.release(); await Promise.allSettled([deleting, scheduling]); }
+  });
+
+  it('a rolled-back cutoff releases its waiting scheduler without retaining a false erasure marker or due clock', async () => {
+    const h = await fixture(false); const held = signal(); const release = signal();
+    await app.prisma.verificationDocument.update({ where: { id: h.doc.id }, data: { retentionExpiresAt: null } });
+    let accountPid: number | undefined; let schedulerPid: number | undefined;
+    const deleting = h.account(transactions(h.db, {
+      backend: (pid) => { accountPid = pid; },
+      afterUserUpdate: async () => { held.release(); await release.reached; throw new Error('synthetic cutoff rollback'); },
+    })).deleteAccount(h.user.id);
+    // Observe rejection immediately, including when a failed barrier releases it.
+    const rejected = expect(deleting).rejects.toThrow('synthetic cutoff rollback');
+    let scheduling: Promise<number> | undefined;
+    try {
+      await reachBeforeCompletion(held, deleting);
+      scheduling = h.verification(transactions(h.db, { backend: (pid) => { schedulerPid = pid; } })).scheduleDocumentRetention(h.user.id);
+      await blockedBy(() => schedulerPid, accountPid!);
+      release.release(); await rejected; await expect(scheduling).resolves.toBe(1);
+      expect(await app.prisma.user.findUniqueOrThrow({ where: { id: h.user.id } })).toMatchObject({ status: 'ACTIVE', phone: h.user.phone });
+      const row = await h.state(); expect(row.retentionExpiresAt!.getTime()).toBeGreaterThan(Date.now());
+      expect(row.purgedAt).toBeNull(); expect(row.extractionRuns[0]!.wrappedDek).not.toBeNull();
+      expect(row.extractionRuns[0]!.fields[0]!.valueCt).not.toBeNull();
+      expect(await app.prisma.deletionReceipt.count({ where: { submissionId: h.doc.id } })).toBe(0);
+    } finally { release.release(); await Promise.allSettled([rejected, scheduling]); }
+  });
+
+  it('a scheduler write failure rolls back its whole batch, leaving all existing deadlines and erasure material intact', async () => {
+    const h = await fixture();
+    await app.prisma.verificationDocument.update({ where: { id: h.doc.id }, data: { retentionExpiresAt: null } });
+    const second = await app.prisma.verificationDocument.create({ data: {
+      userId: h.user.id, role: 'CUSTOMER', docType: 'national_id', fileUrl: '', status: 'REJECTED',
+    } });
+    let stagedWrites = 0;
+    const failing = h.verification(transactions(h.db, { afterRetentionWrite: async (result) => {
+      stagedWrites += result.count; throw new Error('synthetic retention rollback');
+    } }));
+    await expect(failing.scheduleDocumentRetention(h.user.id)).rejects.toThrow('synthetic retention rollback');
+    expect(stagedWrites).toBe(1);
+    expect((await h.state()).retentionExpiresAt).toBeNull();
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: second.id } })).retentionExpiresAt).toBeNull();
+    const row = await h.state(); expect(row.purgedAt).toBeNull();
+    expect(row.extractionRuns[0]!.wrappedDek).not.toBeNull(); expect(row.extractionRuns[0]!.fields[0]!.valueCt).not.toBeNull();
+    expect(objects.has(h.doc.fileUrl)).toBe(true);
+    expect(await app.prisma.deletionReceipt.count({ where: { submissionId: h.doc.id } })).toBe(0);
+  });
+
+  it.each(['null', 'due', 'earlier', 'equal', 'later'])('the atomic UPDATE preserves the earliest %s clock and repeated scheduling changes nothing', async (kind) => {
+    const h = await fixture(); const config = await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: h.user.countryCode } });
+    const ruling = await retentionDaysFor(h.db, { countryCode: h.user.countryCode, docType: h.doc.docType, role: h.doc.role, countryDefaultDays: config.dataRetentionDays });
+    expect(ruling.amlRecord).toBe(false);
+    const now = Date.now(); const proposed = now + ruling.days * 86_400_000;
+    const existing = kind === 'null' ? null : new Date(kind === 'due' ? now - 1 : proposed + (kind === 'earlier' ? -1000 : kind === 'later' ? 1000 : 0));
+    await app.prisma.verificationDocument.update({ where: { id: h.doc.id }, data: { retentionExpiresAt: existing } });
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(now));
+    await expect(h.verification().scheduleDocumentRetention(h.user.id)).resolves.toBe(kind === 'null' || kind === 'later' ? 1 : 0);
+    const earliest = existing === null ? proposed : Math.min(existing.getTime(), proposed);
+    expect((await h.state()).retentionExpiresAt!.getTime()).toBe(earliest);
+    vi.setSystemTime(new Date(now + 86_400_000));
+    await expect(h.verification().scheduleDocumentRetention(h.user.id)).resolves.toBe(0);
+    expect((await h.state()).retentionExpiresAt!.getTime()).toBe(earliest);
+  });
+
+  it.each([365, 3000])('a newly applicable AML class preserves the pre-existing %s-day policy extension and DSAR refusal', async (registryDays) => {
+    const h = await fixture(); const legacyCode = `f224_aml_${nanoid(12)}`;
+    const code = registryCode(h.user.countryCode, legacyCode);
+    await app.prisma.docType.create({ data: {
+      code, legacyCode, countryCode: h.user.countryCode, displayName: 'Synthetic AML fixture',
+      bucket: 'BUSINESS', subjectKind: 'BUSINESS', issuer: 'Synthetic', imagePolicy: 'PERSIST',
+      persistRetentionDays: registryDays, amlRecordClass: 'NOT_APPLICABLE', hasExpiry: false, extractionProfile: 'UNPROFILED',
+    } }); policyCodes.push(code);
+    const now = Date.now();
+    await app.prisma.verificationDocument.update({ where: { id: h.doc.id }, data: { docType: legacyCode, retentionExpiresAt: new Date(now - 1) } });
+    // Only this isolated synthetic policy row changes; no seeded market row.
+    await app.prisma.docType.update({ where: { code }, data: { amlRecordClass: 'CDD_ENTITY' } });
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(now));
+    await expect(h.verification().scheduleDocumentRetention(h.user.id)).resolves.toBe(1);
+    expect((await h.state()).retentionExpiresAt!.getTime()).toBe(now + Math.max(registryDays, 2555) * 86_400_000);
+    // This correction does not change the old AML restart semantics either.
+    vi.setSystemTime(new Date(now + 86_400_000));
+    await expect(h.verification().scheduleDocumentRetention(h.user.id)).resolves.toBe(1);
+    expect((await h.state()).retentionExpiresAt!.getTime()).toBe(now + (Math.max(registryDays, 2555) + 1) * 86_400_000);
+    await expect(eraseDocumentsFor(h.db, h.verification(), h.user.id)).resolves.toEqual([
+      expect.objectContaining({ documentId: h.doc.id, outcome: 'REFUSED', ground: 'AML_RECORD' }),
+    ]);
+    const row = await h.state(); expect(row.purgedAt).toBeNull(); expect(row.extractionRuns[0]!.wrappedDek).not.toBeNull();
+    expect(row.extractionRuns[0]!.fields[0]!.valueCt).not.toBeNull(); expect(objects.has(h.doc.fileUrl)).toBe(true);
+    expect(await app.prisma.deletionReceipt.count({ where: { submissionId: h.doc.id } })).toBe(0);
   });
 });

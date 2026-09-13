@@ -415,3 +415,150 @@ to `7d5902e9d0edac974e4fbe2541a9242467ed6277`; no fetch/merge/rebase/push occurr
 here. The coordination correction report binds the local commit/tree.
 A later normal main merge, fresh independent exact-head Astra review and
 all current-head/current-base CI gates are required before publication.
+
+## REPORT-224 F-224-01 correction — ordinary retention cannot postpone erasure
+
+Starting head `fea3b92916170ff023470d90a06eb417b0eb11ba`, tree
+`a0bc84f6659bdbd23d6fc94516f4f22dda1fbdcc`, contains exact current main
+`7d5902e9d0edac974e4fbe2541a9242467ed6277`. REPORT-224 accepted the earlier
+F-220-01 race repair but reproduced a new integration gap: the real admin
+ban handler's ordinary retention scheduling replaced a pending erasure's
+due clock with another 365 days. Merely mutating status in a test had not
+exercised that caller. This section is implementation evidence, not approval.
+
+The scheduler still obtains its country/type ruling through the existing
+policy function. It commits deadline writes in one transaction after taking
+the same user FOR UPDATE lock as cutoff and final purge. For non-AML records,
+each UPDATE itself requires a null or later existing deadline; an earlier
+deadline is neither read from a stale snapshot nor replaced. If scheduling
+wins the lock first, later cutoff makes the document due. If cutoff wins,
+scheduling retains that due clock. Repeated ordinary scheduling returns zero
+changed rows. The handler ignores this count; new/shortened clocks count as
+before. Missing authority still remains pending, never a passing receipt.
+
+AML is an explicit exception, not a new legal-precedence decision. The ruling
+now also exposes the same existing AML classification it already reads.
+`source` alone is insufficient: a 3,000-day AML registry policy reports
+REGISTRY because it already exceeds the seven-year floor. AML updates retain
+their pre-existing replacement/restart behavior and exact max-of-policy
+duration; only non-AML scheduling is monotonic. No floor, registry value,
+country default, legal-hold rule, DSAR refusal or schema was changed.
+
+Fourteen no-service additions execute actual services and the registered
+admin handler with a supplied principal. They cover missing metadata after
+actual ban, restoration without login, both paused scheduling/cutoff orders,
+null/due/earlier/equal/later clocks, repeat scheduling, held/purged/other-subject
+exclusions, registry/AML clocks and AML reclassification plus DSAR refusal.
+The before-cutoff scheduler control calls the production service directly:
+the current sole HTTP caller bans first, and a ban before a new account
+deletion would make that deletion ineligible. No impossible unlocked HTTP
+schedule is claimed. The no-service delegates implement OR/AND predicates
+and distinguish user/rider/driver raw queries; they do not certify DB locks.
+
+Commands (worktree root, Node v20.19.6 first on PATH):
+
+```sh
+pnpm --filter @swift/api exec vitest run --config vitest.containment.config.ts src/__tests__/verification-object-containment.unit.test.ts -t F-224-01
+pnpm --filter @swift/api exec vitest run --config vitest.containment.config.ts src/__tests__/verification-object-containment.unit.test.ts -t 'applicable AML'
+pnpm --filter @swift/api exec vitest run --config vitest.containment.config.ts src/__tests__/verification-object-containment.unit.test.ts
+pnpm --filter @swift/api exec vitest run --config vitest.containment.config.ts
+pnpm --filter @swift/mobile test
+pnpm --filter @swift/api type-check
+pnpm --filter @swift/api lint
+```
+
+Actual red/green results (2026-09-12 local UTC-04:00):
+
+- Valid pre-production red, 21:24:16: 8 failed / 4 passed / 106 skipped
+  (118), 2.32s, exit 1. Actual admin ban and cutoff-first stale scheduler both
+  replaced epoch 1789214400000 with 1820750400001 (+365 days and 1ms).
+  The preceding run also exposed an incomplete synthetic raw-query delegate
+  that returned a user as a rider; it was fixed before the valid red above.
+- A blanket-minimum interim was deliberately rejected after a new AML control
+  failed 2 / 118 skipped (120), 21:30:26, 2.23s, exit 1. That interim is not
+  the committed correction; existing AML extension behavior is preserved.
+- Final focused: 120 passed, 21:31:05, 2.44s, exit 0.
+- Final no-service API: 17 files / 212 tests passed, 21:32:08, 14.57s, exit 0.
+- Full API lint: exit 0, no diagnostics. The final coordination report binds
+  source/scripts typecheck, full mobile, hygiene and the exact commit/tree.
+
+Twelve further normal-CI PostgreSQL cases extend the four F-220-01 cases in
+`account-document-erasure-race.test.ts` (16 total). They use real transactions
+and exact backend IDs; `pg_blocking_pids` must observe the expected blocker
+in both orders before either transaction is released. They also cover
+cutoff rollback while the scheduler waits, whole scheduler-batch rollback,
+actual registered ban, all five ordinary-clock cases and two isolated AML
+reclassification cases. The latter create only their own synthetic registry
+rows, never mutate seeded market policy. These 16 tests were NOT executed
+locally. No normal API test target lock was bypassed; the earlier 99-suite
+affected/adjacent DB census remains service-backed CI-only/UNVERIFIED.
+
+An exact-source AML compatibility replay ran from `apps/api`:
+
+```sh
+PATH=/Users/westbridgeinc/.nvm/versions/node/v20.19.6/bin:$PATH NODE_ENV=test node --import tsx <<'JS'
+const assert = require('node:assert/strict'), {execFileSync} = require('node:child_process'), Module = require('node:module'), path = require('node:path'), ts = require('typescript');
+const base = 'fea3b92916170ff023470d90a06eb417b0eb11ba';
+function original(relative, exported) {
+  const filename = path.resolve(relative), m = new Module(filename, module);
+  m.filename = filename; m.paths = Module._nodeModulePaths(path.dirname(filename));
+  const source = execFileSync('git', ['show', base + ':apps/api/' + relative], {encoding:'utf8'});
+  m._compile(ts.transpileModule(source, {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText, filename);
+  return m.exports[exported];
+}
+const Previous = original('src/modules/verification/verification.service.ts', 'VerificationService');
+const Current = require('./src/modules/verification/verification.service.ts').VerificationService;
+const oldPolicy = original('src/modules/verification/retention-policy.ts', 'retentionDaysFor');
+const currentPolicy = require('./src/modules/verification/retention-policy.ts').retentionDaysFor;
+const DAY=86400000, start=Date.parse('2026-09-12T12:00:00Z'); let clock=start;
+const realNow=Date.now; Date.now=()=>clock;
+function fixture(registryDays, amlRecordClass, deadline) {
+  const row={id:'synthetic-doc',userId:'synthetic-subject',docType:'synthetic',role:'CUSTOMER',purgedAt:null,retentionExpiresAt:deadline};
+  const db={user:{findUnique:async()=>({countryCode:'GY'})},countryConfig:{findUnique:async()=>({code:'GY',dataRetentionDays:365})},docType:{findUnique:async()=>({persistRetentionDays:registryDays,amlRecordClass})},verificationDocument:{findMany:async()=>[{...row}],updateMany:async({where,data})=>{if(where.OR && !where.OR.some(c=>c.retentionExpiresAt===null?row.retentionExpiresAt===null:row.retentionExpiresAt!==null&&row.retentionExpiresAt>c.retentionExpiresAt.gt))return{count:0};Object.assign(row,data);return{count:1};}},$queryRaw:async()=>[{id:row.userId}]};
+  db.$transaction=async fn=>fn(db); return {row,db};
+}
+(async()=>{
+  let schedules=0,policyRulings=0;
+  for(const aml of ['NOT_APPLICABLE','CDD_IDENTITY','CDD_ENTITY','TRANSACTION_LINKED'])for(const registry of [null,365,2555,3000]){
+    const h=fixture(registry,aml,null),input={countryCode:'GY',docType:'synthetic',role:'CUSTOMER',countryDefaultDays:365};
+    const old=await oldPolicy(h.db,input),fresh=await currentPolicy(h.db,input),{amlRecord,...same}=fresh;
+    assert.deepEqual(same,old); assert.equal(amlRecord,aml!=='NOT_APPLICABLE');policyRulings++;
+    if(aml==='NOT_APPLICABLE')continue;
+    for(const deadline of [null,new Date(start-1),new Date(start+4000*DAY)]){
+      const before=fixture(registry,aml,deadline),after=fixture(registry,aml,deadline);
+      const a=new Previous(before.db,{},{}),b=new Current(after.db,{},{});
+      for(const offset of [0,DAY]){
+        clock=start+offset;
+        assert.equal(await b.scheduleDocumentRetention(after.row.userId),await a.scheduleDocumentRetention(before.row.userId));
+        assert.deepEqual(after.row.retentionExpiresAt,before.row.retentionExpiresAt); schedules++;
+      }
+    }
+  }
+  console.log(JSON.stringify({exactRejectedHead:base,unchangedPolicyRulings:policyRulings,identicalAmlScheduleResults:schedules,realServices:true,syntheticDelegatesOnly:true}));
+})().finally(()=>{Date.now=realNow;}).catch(error=>{console.error(error);process.exitCode=1;});
+JS
+```
+
+Actual output, exit 0:
+
+```json
+{"exactRejectedHead":"fea3b92916170ff023470d90a06eb417b0eb11ba","unchangedPolicyRulings":16,"identicalAmlScheduleResults":72,"realServices":true,"syntheticDelegatesOnly":true}
+```
+
+Separate OPEN policy/legal boundary: AccountService's unheld account-erasure
+loop does not consult AML classification, whereas document DSAR refuses AML
+records and retention scheduling applies its floor. REPORT-202 already left
+the underlying legal classification, start event and expiry UNVERIFIED.
+The interaction of immediate whole-account deletion with an applicable AML
+obligation needs its own record-specific policy decision and bounded repair;
+this patch neither resolves nor certifies that precedence.
+
+All cash-main/client bytes, account cutoff/F-220 final-purge behavior, alias
+and object authority, orphan-tail progress, declaration preflight, holds,
+DSAR policy, normal CI/test-lock configuration and schema/migrations remain
+unchanged. Structural lineage, historical/full erasure, partial-shred recovery
+and committed purge/legal-hold fencing remain OPEN. The coordination report
+binds the local commit/tree; fresh independent exact-head Astra review and
+all current-head/current-base CI gates remain mandatory. No service/provider,
+credential/customer-data, production/deployment, simulator or Git publication
+action occurred during this correction.
