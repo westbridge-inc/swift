@@ -1,6 +1,7 @@
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
 import type { FastifyInstance } from 'fastify';
+import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, AgentActionStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
@@ -4871,7 +4872,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const doc = await tenantPrisma.verificationDocument.findUnique({
       where: { id },
-      select: { id: true, fileUrl: true, purgedAt: true, docType: true },
+      select: { id: true, userId: true, fileUrl: true, purgedAt: true, docType: true },
     });
     if (!doc) throw new NotFoundError('VerificationDocument', id);
     if (doc.purgedAt || !doc.fileUrl) {
@@ -4880,26 +4881,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const ttlSeconds = 300;
 
-    // Envelope-encrypted documents (spec §5): the bucket object is ciphertext,
-    // so a plain signed URL would render garbage. Mint the audited, expiring
-    // decrypt-render path instead. Legacy plaintext objects keep signed URLs.
-    const encrypted = await app.prisma.encryptedObject.findUnique({
-      where: { fileKey: doc.fileUrl },
-      select: { wrappedDek: true, shreddedAt: true },
-    });
-    if (encrypted) {
-      if (!encrypted.wrappedDek || encrypted.shreddedAt) {
-        throw new AppError(410, 'DOCUMENT_SHREDDED', 'This document was crypto-shredded and cannot be recovered');
-      }
-      const minted = mintRenderPath(id, ttlSeconds);
-      await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
-      return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
-    }
-
-    const url = await getStorageProvider().getSignedUrl(doc.fileUrl, ttlSeconds);
-    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds }, request);
-
-    return { success: true, data: { url, expiresInSeconds: ttlSeconds } };
+    await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
+    const minted = mintRenderPath(id, ttlSeconds);
+    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
+    return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
   });
 
   // ─── Retail returns ──────────────────────────────────────────

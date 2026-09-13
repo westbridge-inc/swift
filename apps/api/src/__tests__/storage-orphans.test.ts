@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { recordStorageOrphan, retryStorageOrphans } from '../lib/storage-orphans';
+import { ownedVerificationFixture } from './helpers/verification-object';
 
 // ---------------------------------------------------------------------------
 // [F-026-02] The storage-deletion census: a failed object delete must land in
@@ -12,24 +13,27 @@ import { recordStorageOrphan, retryStorageOrphans } from '../lib/storage-orphans
 const prisma = new PrismaClient();
 const log = { error: () => undefined };
 const marker = nanoid(8).toLowerCase();
-const key = (n: string) => `avatars/test-${marker}/${n}.jpg`;
+const userId = `test-${marker}`;
+const keys = new Map<string, string>();
+const key = (n: string) => keys.get(n) ?? `avatars/test-${marker}/${n}.jpg`;
 
 afterAll(async () => {
   await prisma.storageOrphan.deleteMany({ where: { key: { contains: `test-${marker}` } } });
   await prisma.$disconnect();
 });
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
+  for (const name of ['a', 'ok', 'bad']) keys.set(name, await ownedVerificationFixture(prisma, userId, name));
 });
 
 describe('storage-orphan census', () => {
   it('records a failed delete durably, one open row per key', async () => {
-    await recordStorageOrphan(prisma, log, { key: key('a'), reason: 'SELFIE_UNWIND_DELETE_FAILED', userId: 'u-1' });
+    await recordStorageOrphan(prisma, log, { key: key('a'), reason: 'VERIFICATION_UNWIND_DELETE_FAILED', userId });
     const row = await prisma.storageOrphan.findUnique({ where: { key: key('a') } });
     expect(row).not.toBeNull();
     expect(row!.purgedAt).toBeNull();
-    expect(row!.reason).toBe('SELFIE_UNWIND_DELETE_FAILED');
+    expect(row!.reason).toBe('VERIFICATION_UNWIND_DELETE_FAILED');
   });
 
   it('re-orphaning the same key re-opens its row instead of failing the unique', async () => {
@@ -41,8 +45,8 @@ describe('storage-orphan census', () => {
   });
 
   it('retry purges what it can, closes those rows, and leaves failures open', async () => {
-    await recordStorageOrphan(prisma, log, { key: key('ok'), reason: 'ACCOUNT_DELETION_DELETE_FAILED' });
-    await recordStorageOrphan(prisma, log, { key: key('bad'), reason: 'ACCOUNT_DELETION_DELETE_FAILED' });
+    await recordStorageOrphan(prisma, log, { key: key('ok'), reason: 'ACCOUNT_DELETION_DELETE_FAILED', userId });
+    await recordStorageOrphan(prisma, log, { key: key('bad'), reason: 'ACCOUNT_DELETION_DELETE_FAILED', userId });
 
     const deleted: string[] = [];
     const storage = {
