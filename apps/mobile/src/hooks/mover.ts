@@ -34,6 +34,7 @@ import {
   unwrapOptionalMoverProfile,
 } from '../lib/moverProfile';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
+import { confirmRiderCashSettlement } from './cashSettlement';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -545,7 +546,7 @@ export function useConfirmCashSettlement() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: (id: string) => unwrap(riderApi.confirmCashSettlement(id)),
+    mutationFn: confirmRiderCashSettlement,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover', 'cash-settlements'] }),
   });
   return pv ? PV.previewMutation() : m;
