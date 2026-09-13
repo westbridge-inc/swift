@@ -15,7 +15,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { VerificationService, docTypeExpires, resolveApprovalExpiry } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
-import { loginWithOtp } from './helpers/otp';
+import { registrationProofFor } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
@@ -80,9 +80,10 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, 
 }
 
 async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR') {
-  await loginWithOtp(app, phone);
+  const registrationProof = await registrationProofFor(app, phone);
   const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
     phone,
+    registrationProof,
     firstName: 'Step4',
     lastName: role,
     role,

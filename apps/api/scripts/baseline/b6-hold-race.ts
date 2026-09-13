@@ -85,8 +85,15 @@ async function ensureRoster() {
   let v = await http('POST', '/auth/verify-otp', { phone: CUSTOMER_PHONE, code: '000000' });
   let token = pickToken(v.json);
   if (!token && v.json?.data?.isNewUser) {
+    const registrationProof = v.json?.data?.registrationProof;
+    if (typeof registrationProof !== 'string') throw new Error('missing signup continuation for baseline customer');
     const r = await http('POST', '/auth/register', {
-      phone: CUSTOMER_PHONE, firstName: 'ELV1', lastName: 'Customer', role: 'CUSTOMER', acceptTerms: true,
+      phone: CUSTOMER_PHONE,
+      registrationProof,
+      firstName: 'ELV1',
+      lastName: 'Customer',
+      role: 'CUSTOMER',
+      acceptTerms: true,
     });
     token = pickToken(r.json);
     if (!token) {

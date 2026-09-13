@@ -34,16 +34,17 @@ async function cleanup() {
 
 async function signupCustomer(phone: string): Promise<string> {
   const code = await requestOtp(app, phone);
-  await app.inject({
+  const verified = await app.inject({
     method: 'POST',
     url: '/api/v1/auth/verify-otp',
     payload: { phone, code },
     headers: { 'content-type': 'application/json' },
   });
+  const registrationProof = JSON.parse(verified.body).data.registrationProof;
   const reg = await app.inject({
     method: 'POST',
     url: '/api/v1/auth/register',
-    payload: { phone, firstName: 'Test', lastName: 'Partner', countryCode: 'GY', role: 'CUSTOMER', acceptTerms: true },
+    payload: { phone, registrationProof, firstName: 'Test', lastName: 'Partner', countryCode: 'GY', role: 'CUSTOMER', acceptTerms: true },
     headers: { 'content-type': 'application/json' },
   });
   return JSON.parse(reg.body).data.tokens.accessToken;
