@@ -86,6 +86,7 @@ describe('[W-01] nothing a script can read', () => {
     const [, signupInit] = signup.mock.calls[0]!;
     expect(signupInit?.credentials).toBe('include');
     expect((signupInit?.headers as Record<string, string>)['X-Swift-Client']).toBe('web');
+    expect(JSON.parse(String(signupInit?.body))).not.toHaveProperty('registrationProof');
   });
 
   it('a sign-up the server answers with a user but no tokens still signs the person in — the body carries no credential by design', async () => {

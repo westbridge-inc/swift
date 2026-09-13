@@ -10,7 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { requestOtp } from './helpers/otp';
 import {
-  ACCESS_COOKIE, ACCESS_COOKIE_PATH, REFRESH_COOKIE, REFRESH_COOKIE_PATH, allowedBrowserOrigins, parseCookies, resetBrowserOriginsForTests, setSessionCookies,
+  ACCESS_COOKIE, ACCESS_COOKIE_PATH, REFRESH_COOKIE, REFRESH_COOKIE_PATH, SIGNUP_CONTINUATION_COOKIE, allowedBrowserOrigins, parseCookies, resetBrowserOriginsForTests, setSessionCookies,
 } from '../modules/auth/browser-session';
 import { browserSessionCounter } from '../plugins/observability';
 
@@ -90,15 +90,18 @@ async function browserLogin(): Promise<{ jar: Jar; raw: string[]; body: Record<s
 }
 
 describe('[A-01] the sign-in response carries the session as HttpOnly cookies and no credential', () => {
-  it('a browser client gets two HttpOnly SameSite=Strict cookies, the refresh cookie scoped to the auth path, and a body without tokens; a native client still gets tokens in the body and no cookie', async () => {
+  it('a browser client gets the session pair plus an explicit stale-signup deletion, and a body without tokens; a native client still gets tokens in the body and no cookie', async () => {
     const { jar, raw, body } = await browserLogin();
-    expect(raw).toHaveLength(2);
+    expect(raw).toHaveLength(3);
     for (const line of raw) {
       expect(line).toMatch(/HttpOnly/);
       expect(line).toMatch(/SameSite=Strict/);
     }
+    const signupLine = raw.find((l) => l.startsWith(`${SIGNUP_CONTINUATION_COOKIE}=`))!;
     const accessLine = raw.find((l) => l.startsWith(`${ACCESS_COOKIE}=`))!;
     const refreshLine = raw.find((l) => l.startsWith(`${REFRESH_COOKIE}=`))!;
+    expect(signupLine).toContain('Path=/api/v1/auth;');
+    expect(signupLine).toContain('Max-Age=0');
     expect(accessLine).toContain('Path=/api/v1;');
     // the refresh cookie travels ONLY to the auth routes — a literal, so a widened constant cannot pass by tautology
     expect(refreshLine).toContain('Path=/api/v1/auth;');
@@ -279,7 +282,11 @@ describe('[A-01] the cookie is marked Secure where it travels over the network',
   /** The Set-Cookie strings the API would send under a given environment. */
   const issued = (env: Record<string, string | undefined>): string[] => {
     let sent: string[] = [];
-    const reply = { header: (_name: string, value: string[]) => { sent = value; } } as unknown as Parameters<typeof setSessionCookies>[0];
+    const reply = {
+      getHeader: (_name: string) => sent.length ? sent : undefined,
+      header: (_name: string, value: string | string[]) => { sent = ([] as string[]).concat(value); return reply; },
+      removeHeader: (_name: string) => { sent = []; return reply; },
+    } as unknown as Parameters<typeof setSessionCookies>[0];
     setSessionCookies(reply, { accessToken: 'a.a.a', refreshToken: 'r.r.r' }, env);
     return sent;
   };
@@ -320,24 +327,32 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
     const code = await requestOtp(app, newPhone);
     const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', headers: WEB, payload: { phone: newPhone, code } });
     expect(verified.statusCode, verified.body).toBe(200);
+    expect(verified.headers['cache-control']).toContain('no-store');
     expect(verified.json().data.isNewUser).toBe(true);
+    expect(verified.json().data.registrationProof).toBeUndefined();
+    const jar: Jar = {};
+    const verifiedCookies = applySetCookies(jar, verified).raw;
+    expect(verifiedCookies).toHaveLength(1);
+    expect(verifiedCookies[0]).toMatch(/^swift_signup=.*Path=\/api\/v1\/auth; Max-Age=600; HttpOnly; SameSite=Strict/);
 
     const res = await app.inject({
-      method: 'POST', url: '/api/v1/auth/register', headers: WEB,
+      method: 'POST', url: '/api/v1/auth/register', headers: { ...WEB, cookie: cookieHeader(jar) },
       payload: { phone: newPhone, firstName: 'New', lastName: `Web${RUN}`, acceptTerms: true },
     });
     expect(res.statusCode, res.body).toBe(201);
+    expect(res.headers['cache-control']).toContain('no-store');
     const created = res.json().data.user;
     userIds.push(created.id);
 
-    const jar: Jar = {};
     const { raw } = applySetCookies(jar, res);
-    expect(raw).toHaveLength(2);
+    expect(raw).toHaveLength(3);
     for (const line of raw) {
       expect(line, line).toMatch(/HttpOnly/);
       expect(line, line).toMatch(/SameSite=Strict/);
     }
     expect(raw.find((l) => l.startsWith(`${REFRESH_COOKIE}=`))).toContain('Path=/api/v1/auth;');
+    expect(raw.find((l) => l.startsWith(`${SIGNUP_CONTINUATION_COOKIE}=`))).toContain('Max-Age=0');
+    expect(jar[SIGNUP_CONTINUATION_COOKIE]).toBeUndefined();
     // nothing a script can read: no tokens in the body, and neither cookie's
     // value appears anywhere in it
     expect(res.json().data.tokens).toBeUndefined();
@@ -356,13 +371,16 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
   it('a native client registering still gets tokens in the body and no cookie — the apps are untouched', async () => {
     const nativePhone = `+59279${String(Math.floor(Math.random() * 90000) + 10000)}`;
     const code = await requestOtp(app, nativePhone);
-    await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: nativePhone, code } });
+    const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: nativePhone, code } });
+    expect(verified.headers['cache-control']).toContain('no-store');
+    const registrationProof = verified.json().data.registrationProof;
     const res = await app.inject({
       method: 'POST', url: '/api/v1/auth/register',
-      payload: { phone: nativePhone, firstName: 'New', lastName: `Native${RUN}`, acceptTerms: true },
+      payload: { phone: nativePhone, registrationProof, firstName: 'New', lastName: `Native${RUN}`, acceptTerms: true },
     });
     expect(res.statusCode, res.body).toBe(201);
     userIds.push(res.json().data.user.id);
+    expect(res.headers['cache-control']).toContain('no-store');
     expect(res.json().data.tokens.accessToken).toBeTruthy();
     expect(res.headers['set-cookie']).toBeUndefined();
   });
