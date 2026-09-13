@@ -338,3 +338,80 @@ verification.test.ts
 - Reviewer/viewer governance, legal content/policy changes, production readiness and launch approval are outside scope. No schema, migration, consent policy or normal CI configuration was changed.
 - No independent review of the corrected head, full DB/Redis-backed API CI, current-base integration/recheck, push, PR or merge has occurred. Current-main normal merge, fresh exact-head independent review and all required current-head/current-base CI gates remain mandatory.
 - No production/deployment/credential/customer-data/provider contact, Claude-owned source edit, protected-simulator action, direct-main push, force push, rebase or history rewrite was performed.
+
+## REPORT-220 F-220-01 correction — 2026-09-12 lane
+
+The earlier sequential recovery claim above is superseded by REPORT-220's
+independent S1 interleaving proof. On starting head
+`89b2942564344fcf8d488da79758b336bdd78ee2` (tree
+`8cc1c72a80a8d29423fa7ffd5e77adbd029e951e`), a reaper could retire the due
+document and write CONFIRMED_ABSENT while retaining its extraction-run DEK
+and field ciphertext. This section records the bounded local correction,
+not independent approval or full-erasure certification.
+
+Account preflight now commits the exact `deleted:${userId}` phone tombstone
+with the due clocks and DEACTIVATED cutoff. Its original phone has already
+been captured by any authorized safety escrow. The final cleanup repeats
+the tombstone idempotently. Cleanup remains keyed by user ID; the number
+becomes available for reuse at cutoff instead of at final personal cleanup.
+
+`purgeDocumentNow` reads the exact marker from the user row in its existing
+final FOR UPDATE query. A matching marker OR explicit DSAR field-erasure
+option requires extraction-run/field shredding in the same transaction as
+document retirement and the receipt. Reaper candidate snapshots no longer
+choose field-erasure semantics. DEACTIVATED has only account-deletion
+writers, but admin ban can replace it; the marker survives that transition.
+An ordinary banned/suspended/active account, a deactivated account without
+the marker, another subject's marker and a suffix alias do not acquire
+field-erasure intent. Existing legal holds still exclude the document.
+
+Commands below ran from this worktree with Node v20.19.6 on PATH:
+
+```sh
+PATH=/Users/westbridgeinc/.nvm/versions/node/v20.19.6/bin:$PATH pnpm --filter @swift/api exec vitest run --config vitest.containment.config.ts src/__tests__/verification-object-containment.unit.test.ts -t F-220-01
+PATH=/Users/westbridgeinc/.nvm/versions/node/v20.19.6/bin:$PATH pnpm --filter @swift/api exec vitest run --config vitest.containment.config.ts src/__tests__/verification-object-containment.unit.test.ts
+PATH=/Users/westbridgeinc/.nvm/versions/node/v20.19.6/bin:$PATH pnpm --filter @swift/api exec vitest run --config vitest.containment.config.ts
+PATH=/Users/westbridgeinc/.nvm/versions/node/v20.19.6/bin:$PATH pnpm --filter @swift/mobile test
+PATH=/Users/westbridgeinc/.nvm/versions/node/v20.19.6/bin:$PATH pnpm --filter @swift/api type-check
+PATH=/Users/westbridgeinc/.nvm/versions/node/v20.19.6/bin:$PATH pnpm --filter @swift/api lint
+```
+
+Actual results:
+
+- First command, before production edits, 20:54:47: 6 failed / 4 passed /
+  92 skipped (102), exit 1. The failures included cutoff before cleanup,
+  both metadata-restoration schedules, absent cutoff marker and both locked
+  exact-marker cases. Concrete run DEK and field ciphertext remained.
+- Final focused file, 21:00:08: 106 passed, exit 0. All prior 92 cases remain;
+  14 additions cover the interleavings, exact-marker/status controls, safety
+  escrow and legal-hold exclusion. Query results copy user snapshots and
+  honor document predicates. An initial post-fix harness error indexed the
+  later empty sweep; it was corrected without changing erasure assertions.
+- Final no-service API, 21:01:35: 17 files / 198 tests passed, 16.30s, exit 0.
+- Full mobile, 20:59:34: 131 files / 1,163 tests passed, 9.99s, exit 0.
+- API typecheck (`tsc --noEmit && tsc -p tsconfig.scripts.json`) and full
+  API lint (`eslint 'src/**/*.{ts,tsx}' 'scripts/**/*.ts'`): exit 0, no diagnostics.
+
+`account-document-erasure-race.test.ts` adds four normal-CI PostgreSQL tests:
+cutoff visibility before cleanup, metadata recovery during independent
+cleanup, a stale candidate at the real user-lock barrier, and rollback of
+document/run/field/receipt state on a field-shred failure. They use the real
+test Prisma connection and transactions with synthetic storage, and retain
+the normal target lock. They were NOT run locally. Add this file to the
+98-suite affected/adjacent census above; all database evidence remains
+UNVERIFIED until normal API CI runs it. The rollback case deliberately does
+not claim recovery of an already-shredded image.
+
+The source corrections for lexical aliases, literal S3/R2 authority, orphan
+tail progress, declaration preflight, signup coexistence and all mobile
+bytes remain unchanged from the starting head. No schema/migration,
+document-state, identity policy, normal CI or target-lock change was made.
+Structural lineage, general deletion/recovery sagas, historical/full erasure
+and committed purge/legal-hold fencing remain OPEN.
+
+The pinned implementation base remains
+`9fb74a687e00c9c3a528cab10a4979e6e52c9a9b`. During this correction, main advanced
+to `7d5902e9d0edac974e4fbe2541a9242467ed6277`; no fetch/merge/rebase/push occurred
+here. The coordination correction report binds the local commit/tree.
+A later normal main merge, fresh independent exact-head Astra review and
+all current-head/current-base CI gates are required before publication.

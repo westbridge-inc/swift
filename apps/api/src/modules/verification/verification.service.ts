@@ -1629,7 +1629,7 @@ export class VerificationService {
     // final check; the committed purge/legal-hold fence is separate work.
     const due = await this.prisma.verificationDocument.findMany({
       where: { retentionExpiresAt: { lt: now }, purgedAt: null, legalHoldId: null },
-      select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true, status: true, phone: true } } },
+      select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
     if (due.length === 0) { await recordReaperRun(this.prisma, now); return 0; }
 
@@ -1637,10 +1637,9 @@ export class VerificationService {
     let unavailable = false;
     for (const doc of due) {
       try {
-        // A completed account cutoff/tombstone with a still-due document is
-        // an erasure obligation, so recovery includes the extracted values.
-        const shredFields = doc.user.status === 'DEACTIVATED' && doc.user.phone.startsWith('deleted:');
-        const outcome = await this.purgeDocumentNow(doc, 'reaper', { requireRetentionElapsed: true, shredFields, now });
+        // Account-erasure intent is read at the final locked transition, not
+        // from this earlier candidate snapshot.
+        const outcome = await this.purgeDocumentNow(doc, 'reaper', { requireRetentionElapsed: true, shredFields: false, now });
         if (outcome === 'PURGED') purged += 1;
       } catch (error) {
         if (!(error instanceof AppError) || error.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw error;
@@ -1677,8 +1676,8 @@ export class VerificationService {
       return 'PROBE_FAILED';
     }
     const transitioned = await this.prisma.$transaction(async (tx) => {
-      const users = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT "id" FROM "users"
+      const users = await tx.$queryRaw<Array<{ id: string; phone: string }>>`
+        SELECT "id", "phone" FROM "users"
         WHERE "id" = ${doc.userId}
         FOR UPDATE /* verification-document-purge-authority */
       `;
@@ -1690,7 +1689,11 @@ export class VerificationService {
       if (won.count !== 1) return false;
       // The receipt commits with the purge or not at all.
       await writeDeletionReceipt(tx, receipt);
-      if (opts.shredFields) {
+      // Account deletion commits this exact marker with its due clocks under
+      // the same user lock. Consume it even if the caller snapshot predates
+      // deletion or a later admin ban replaced DEACTIVATED. A different
+      // subject's marker never grants field-erasure authority.
+      if (opts.shredFields || users[0].phone === `deleted:${doc.userId}`) {
         // Crypto-shred: without the run DEK every stored value is unrecoverable; the rows
         // (field codes, verdicts, blind indexes) remain as the custody record (§20.3).
         await tx.extractionRun.updateMany({ where: { submissionId: doc.id }, data: { wrappedDek: null } });

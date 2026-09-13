@@ -199,12 +199,14 @@ export class AccountService {
       // Cut public/action authority before any fallible retention work. The
       // relational ACTIVE check is authoritative; the profile flag is a second
       // fail-closed barrier for old clients and background consumers.
-      // Commit the outstanding document obligations WITH the cutoff. Even a
-      // legacy key or metadata outage leaves the document/pointer unpurged and
-      // due for the existing background reaper, without requiring user auth.
+      // Commit the outstanding document obligations and exact erasure marker
+      // WITH the cutoff. The reaper consumes that marker under this user lock;
+      // it cannot retire a newly due document as ordinary image retention.
+      // Status alone is insufficient: a later admin ban can replace it. Safety
+      // escrow above has already captured any needed contact authority.
       await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
       await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
-      await tx.user.update({ where: { id: userId }, data: { status: 'DEACTIVATED' } });
+      await tx.user.update({ where: { id: userId }, data: { status: 'DEACTIVATED', phone: `deleted:${userId}` } });
       return { alreadyComplete: false, hold };
     });
     if (preflight.alreadyComplete) return { deleted: true };

@@ -20,6 +20,7 @@ import * as declaration from '../modules/vendor/unregistered-declaration';
 import * as kyc from '../providers/kyc/kyc-provider';
 import { decryptBuffer, getKeyProvider } from '../providers/storage/envelope';
 import { DECLARATION_DOC_TYPE } from '../modules/verification/doc-registry';
+import { openEscrow } from '../modules/safety/deletion-hold';
 
 const storage = vi.hoisted(() => ({
   upload: vi.fn(), getObject: vi.fn(), delete: vi.fn(), getSignedUrl: vi.fn(),
@@ -476,15 +477,31 @@ describe('review corrections: deletion obligations and retry progress', () => {
   function accountHarness() {
     const h = harness();
     const person = Object.assign(h.people.get(A)!, { phone: 'synthetic-phone', firstName: 'Synthetic', lastName: 'Subject', email: 'subject@example.invalid', roles: ['CUSTOMER'] });
-    h.db.user.findUniqueOrThrow = vi.fn(async () => person);
+    h.db.user.findUniqueOrThrow = vi.fn(async () => ({ ...person }));
+    h.db.user.findUnique.mockImplementation(async ({ where }: any) => ({ ...h.people.get(where.id) }));
     h.db.user.update.mockImplementation(async ({ data }: any) => { Object.assign(person, data); return person; });
+    h.db.$queryRaw.mockImplementation(async (_query: unknown, userId: string) => {
+      const user = h.people.get(userId); return user ? [{ ...user }] : [];
+    });
     h.db.serviceProvider.updateMany = vi.fn(async () => ({ count: 0 }));
     for (const name of ['order', 'serviceJob']) h.db[name] = { count: vi.fn(async () => 0) };
     for (const name of ['sosAlert', 'incidentCase', 'evidenceBundle']) h.db[name] = { findMany: vi.fn(async () => []) };
     h.db.platformConfig = { upsert: vi.fn() };
+    const matches = (doc: any, where: any) => Object.entries(where ?? {}).every(([field, value]: [string, any]) => {
+      if (value !== null && typeof value === 'object') {
+        if ('not' in value && doc[field] === value.not) return false;
+        if ('in' in value && !value.in.includes(doc[field])) return false;
+        if ('gt' in value && !(doc[field] > value.gt)) return false;
+        if ('lt' in value && !(doc[field] !== null && doc[field] < value.lt)) return false;
+        return true;
+      }
+      return doc[field] === value;
+    });
+    h.db.verificationDocument.findMany.mockImplementation(async (query: any) => referencePage(
+      h.documents.filter((doc) => matches(doc, query.where)), query, 'id',
+    ).map((doc) => ({ ...doc, user: { ...h.people.get(doc.userId) } })));
     h.db.verificationDocument.updateMany.mockImplementation(async ({ where, data }: any) => {
-      const selected = h.documents.filter((d) => (!where.id || d.id === where.id) && d['purgedAt'] === null
-        && (where.legalHoldId && 'not' in where.legalHoldId ? d['legalHoldId'] !== null : where.legalHoldId !== null || d['legalHoldId'] === null));
+      const selected = h.documents.filter((doc) => matches(doc, where));
       for (const d of selected) Object.assign(d, data);
       return { count: selected.length };
     });
@@ -493,6 +510,155 @@ describe('review corrections: deletion obligations and retry progress', () => {
     });
     return { ...h, person };
   }
+
+  function erasureRaceHarness() {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-12T12:00:00Z'));
+    const h = accountHarness(); const doc = h.poison(); doc.fileUrl = key(A);
+    doc.retentionExpiresAt = new Date(Date.now() + 86_400_000);
+    h.person.avatar = '';
+    const run = { wrappedDek: Buffer.alloc(60, 2) as Buffer | null };
+    const field = { valueCt: Buffer.from('synthetic field ciphertext') as Buffer | null };
+    for (const [table, row] of [['extractionRun', run], ['extractedField', field]] as const) {
+      h.db[table].updateMany.mockImplementation(async ({ where, data }: any) => {
+        expect(where).toEqual({ submissionId: doc.id }); Object.assign(row, data); return { count: 1 };
+      });
+    }
+    let objectPresent = true;
+    storage.getObject.mockImplementation(async () => {
+      if (!objectPresent) throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+      return Buffer.from('synthetic image ciphertext');
+    });
+    storage.delete.mockImplementation(async () => { objectPresent = false; });
+    const assertErased = () => {
+      expect({ runDek: run.wrappedDek, fieldCiphertext: field.valueCt }).toEqual({ runDek: null, fieldCiphertext: null });
+      expect(doc.purgedAt).toBeInstanceOf(Date); expect(doc.fileUrl).toBe('');
+      expect(h.db.deletionReceipt.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ data: expect.objectContaining({
+        submissionId: doc.id, verificationProbeResult: 'CONFIRMED_ABSENT',
+      }) }));
+      expect(h.objects.get(key(B))!.wrappedDek).not.toBeNull();
+    };
+    return { ...h, doc, run, field, assertErased };
+  }
+
+  it('F-220-01: a reaper after committed cutoff cannot complete erasure while retaining extracted values', async () => {
+    const h = erasureRaceHarness(); let first = true;
+    h.db.$transaction.mockImplementation(async (callback: any) => {
+      const cutoff = first; first = false;
+      const result = await callback(h.db);
+      if (cutoff) {
+        expect(h.person.status).toBe('DEACTIVATED');
+        expect(h.doc.retentionExpiresAt!.getTime()).toBe(Date.now());
+        expect(h.person.firstName).toBe('Synthetic'); // independent cleanup has not run
+        vi.setSystemTime(new Date(Date.now() + 1));
+        await expect(h.service.purgeExpiredDocuments()).resolves.toBe(1);
+        h.assertErased();
+      }
+      return result;
+    });
+    await expect(h.account.deleteAccount(A)).resolves.toEqual({ deleted: true });
+    h.assertErased();
+    await expect(h.service.purgeExpiredDocuments()).resolves.toBe(0);
+  });
+
+  it.each(['before-final-cleanup', 'after-final-cleanup'])('F-220-01: metadata recovery %s preserves field erasure despite a copied reaper snapshot', async (schedule) => {
+    const h = erasureRaceHarness(); const meta = h.objects.get(key(A))!; h.objects.delete(key(A));
+    let reaping: Promise<number> | undefined;
+    let resumeRead!: () => void;
+    const readPaused = new Promise<void>((resolve) => { resumeRead = resolve; });
+    h.db.storageOrphan.findMany.mockImplementationOnce(async () => {
+      expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ documentId: h.doc.id }), expect.stringContaining('erasure pending'));
+      expect(h.person.status).toBe('DEACTIVATED'); expect(h.person.firstName).toBe('Synthetic');
+      h.objects.set(key(A), meta);
+      vi.setSystemTime(new Date(Date.now() + 1));
+      let sawSnapshot!: () => void;
+      const selected = new Promise<void>((resolve) => { sawSnapshot = resolve; });
+      const findMany = h.db.verificationDocument.findMany.getMockImplementation()!;
+      h.db.verificationDocument.findMany.mockImplementation(async (query: any) => {
+        const rows = await findMany(query);
+        if (query.where?.retentionExpiresAt && rows.length > 0) {
+          expect(rows[0].user).not.toBe(h.person);
+          sawSnapshot();
+          if (schedule === 'after-final-cleanup') await readPaused;
+        }
+        return rows;
+      });
+      reaping = h.service.purgeExpiredDocuments();
+      await selected;
+      if (schedule === 'before-final-cleanup') await expect(reaping).resolves.toBe(1);
+      return [];
+    });
+    try {
+      await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1 });
+      expect(h.person).toMatchObject({ phone: `deleted:${A}`, firstName: 'Deleted', status: 'DEACTIVATED' });
+      resumeRead();
+      await expect(reaping).resolves.toBe(1);
+      h.assertErased();
+      await expect(h.service.purgeExpiredDocuments()).resolves.toBe(0);
+    } finally {
+      resumeRead(); await reaping;
+    }
+  });
+
+  it('F-220-01: the exact erasure marker commits with cutoff and survives a later administrative ban', async () => {
+    const h = erasureRaceHarness(); let first = true;
+    h.db.$transaction.mockImplementation(async (callback: any) => {
+      const cutoff = first; first = false;
+      const result = await callback(h.db);
+      if (cutoff) {
+        expect(h.person.phone).toBe(`deleted:${A}`);
+        h.person.status = 'BANNED';
+        vi.setSystemTime(new Date(Date.now() + 1));
+        await expect(h.service.purgeExpiredDocuments()).resolves.toBe(1);
+        h.assertErased();
+      }
+      return result;
+    });
+    await expect(h.account.deleteAccount(A)).resolves.toEqual({ deleted: true });
+  });
+
+  it.each([
+    ['DEACTIVATED', `deleted:${A}`, true], ['BANNED', `deleted:${A}`, true],
+    ['ACTIVE', 'synthetic-phone', false], ['BANNED', 'synthetic-phone', false],
+    ['SUSPENDED', 'synthetic-phone', false], ['DEACTIVATED', 'synthetic-phone', false],
+    ['DEACTIVATED', `deleted:${B}`, false], ['DEACTIVATED', `deleted:${A}:suffix`, false],
+  ])('F-220-01: final locked %s / %s governs extracted values independently of caller snapshot', async (status, phone, erased) => {
+    const h = erasureRaceHarness(); h.person.status = status as string; h.person.phone = phone as string;
+    // The caller has only a stale candidate. A false ordinary-retention hint
+    // cannot override the exact account erasure intent on the locked user.
+    await expect(h.service.purgeDocumentNow(h.doc, 'reaper', { requireRetentionElapsed: false, shredFields: false })).resolves.toBe('PURGED');
+    if (erased) h.assertErased();
+    else {
+      expect(h.run.wrappedDek).not.toBeNull(); expect(h.field.valueCt).not.toBeNull();
+      expect(h.db.extractionRun.updateMany).not.toHaveBeenCalled();
+    }
+  });
+
+  it('F-220-01: early tombstoning preserves the original phone in the already-authorized safety escrow', async () => {
+    const h = accountHarness(); h.person.avatar = '';
+    vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64')); resetKeyProviderForTests();
+    h.db.sosAlert.findMany.mockResolvedValue([{ id: 'synthetic-alert' }]);
+    h.db.emergencyContact.findMany = vi.fn(async () => []);
+    h.db.safetyDeletionHold = {
+      findUnique: vi.fn(async () => null),
+      create: vi.fn(async ({ data }: any) => ({ id: 'synthetic-hold', ...data })),
+    };
+    await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: true, status: 'PENDING_SAFETY_HOLD', holdId: 'synthetic-hold' });
+    const sealed = h.db.safetyDeletionHold.create.mock.calls[0][0].data;
+    expect(sealed.dekWrapped).toBe(true);
+    expect(await openEscrow(sealed)).toMatchObject({ firstName: 'Synthetic', phone: 'synthetic-phone' });
+    expect(h.db.safetyDeletionHold.create.mock.invocationCallOrder[0]).toBeLessThan(h.db.user.update.mock.invocationCallOrder[0]);
+    expect(h.person.phone).toBe(`deleted:${A}`);
+  });
+
+  it('F-220-01: an account erasure marker does not bypass an existing document legal hold', async () => {
+    const h = erasureRaceHarness(); h.person.phone = `deleted:${A}`; h.person.status = 'DEACTIVATED';
+    Object.assign(h.doc, { legalHoldId: 'synthetic-hold', retentionExpiresAt: new Date(0) });
+    await expect(h.service.purgeExpiredDocuments()).resolves.toBe(0);
+    expect(h.doc.purgedAt).toBeNull(); expect(h.doc.fileUrl).toBe(key(A));
+    expect(h.run.wrappedDek).not.toBeNull(); expect(h.field.valueCt).not.toBeNull();
+    expect(storage.getObject).not.toHaveBeenCalled(); expect(storage.delete).not.toHaveBeenCalled();
+    expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
+  });
 
   it.each(['legacy', 'metadata-missing', 'metadata-outage'])('keeps %s as a pending obligation and completes independent cleanup after real deactivation', async (fault) => {
     const h = accountHarness(); const doc = h.poison();
