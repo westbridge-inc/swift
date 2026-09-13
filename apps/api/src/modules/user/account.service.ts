@@ -137,6 +137,7 @@ export class AccountService {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
         // late write landed — fall through and RE-SWEEP (every purge step is
         // idempotent), instead of short-circuiting on the marker.
+        await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
         return { alreadyComplete: false, resweep: true, hold: null };
       }
       if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
@@ -198,6 +199,10 @@ export class AccountService {
       // Cut public/action authority before any fallible retention work. The
       // relational ACTIVE check is authoritative; the profile flag is a second
       // fail-closed barrier for old clients and background consumers.
+      // Commit the outstanding document obligations WITH the cutoff. Even a
+      // legacy key or metadata outage leaves the document/pointer unpurged and
+      // due for the existing background reaper, without requiring user auth.
+      await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
       await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
       await tx.user.update({ where: { id: userId }, data: { status: 'DEACTIVATED' } });
       return { alreadyComplete: false, hold };
@@ -308,14 +313,27 @@ export class AccountService {
       where: { userId, purgedAt: null, legalHoldId: null },
       select: { id: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
+    let pendingDocuments = 0;
     for (const doc of docs) {
-      // [DOC-INV-7] Delete, shred, PROBE, and write the receipt with the purge
-      // mark in one transaction. Erasure must complete for the person, so a
-      // FAILED probe is recorded as FAILED and the bytes are filed as a
-      // storage orphan for the retry sweep — never silently swallowed.
-      const evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }) : NOTHING_STORED;
+      // [DOC-INV-7] Passing evidence closes the document with its receipt in
+      // one transaction. An authority refusal or FAILED probe retains the
+      // due pointer; it cannot prevent the other personal-data cleanup.
+      let evidence;
+      try {
+        evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }) : NOTHING_STORED;
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw error;
+        // Refusal is an unresolved obligation, never proof of destruction.
+        // The retained row + due clock committed above are the retry census.
+        pendingDocuments += 1;
+        this.app.log.warn({ userId, documentId: doc.id }, 'account document erasure pending: object authority unavailable');
+        continue;
+      }
       if (evidence.probe === 'FAILED' && doc.fileUrl) {
         await recordStorageOrphan(prisma, this.app.log, { key: doc.fileUrl, reason: 'ERASURE_PURGE_PROBE_FAILED', userId, tenantId: doc.user.tenantId });
+        await writeDeletionReceipt(prisma, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
+        pendingDocuments += 1;
+        continue;
       }
       await prisma.$transaction(async (tx) => {
         await tx.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
@@ -409,6 +427,14 @@ export class AccountService {
         lastKnownLng: null,
       },
     });
+
+    if (pendingDocuments > 0) {
+      return {
+        deleted: false, status: 'PENDING_DOCUMENT_ERASURE' as const, pendingDocuments,
+        message: 'Your account is closed. Some document erasure is pending; no further sign-in is needed.',
+        ...(preflight.hold && { holdId: preflight.hold.holdId, holdReasons: preflight.hold.reasons }),
+      };
+    }
 
     // [AG-XF-013] The receipt names the hold when there is one. Everything the
     // person asked to be erased HAS been erased; what remains is an encrypted

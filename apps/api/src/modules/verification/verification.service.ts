@@ -30,7 +30,7 @@ import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber } from './identity-signal-policy';
-import { resolveSignupSelfie, resolveVerificationObject } from './object-authority';
+import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import {
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
@@ -1624,20 +1624,31 @@ export class VerificationService {
    *  clear the fileKey, and leave an auditable purgedAt marker. Daily job. */
   async purgeExpiredDocuments(): Promise<number> {
     const now = new Date();
-    // [DOC-1 §9.4 · DOC-INV-14] A document under a legal hold is never selected —
-    // and the compare-and-set below re-checks it under the person's row lock,
-    // so a hold placed between this read and the purge still wins.
+    // [DOC-1 §9.4 · DOC-INV-14] Exclude legal holds here and recheck at the
+    // final DB transition. Irreversible storage actions still precede that
+    // final check; the committed purge/legal-hold fence is separate work.
     const due = await this.prisma.verificationDocument.findMany({
       where: { retentionExpiresAt: { lt: now }, purgedAt: null, legalHoldId: null },
-      select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
+      select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true, status: true, phone: true } } },
     });
     if (due.length === 0) { await recordReaperRun(this.prisma, now); return 0; }
 
     let purged = 0;
+    let unavailable = false;
     for (const doc of due) {
-      const outcome = await this.purgeDocumentNow(doc, 'reaper', { requireRetentionElapsed: true, shredFields: false, now });
-      if (outcome === 'PURGED') purged += 1;
+      try {
+        // A completed account cutoff/tombstone with a still-due document is
+        // an erasure obligation, so recovery includes the extracted values.
+        const shredFields = doc.user.status === 'DEACTIVATED' && doc.user.phone.startsWith('deleted:');
+        const outcome = await this.purgeDocumentNow(doc, 'reaper', { requireRetentionElapsed: true, shredFields, now });
+        if (outcome === 'PURGED') purged += 1;
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw error;
+        unavailable = true; // retain the pointer/clock; process the other due rows
+      }
     }
+    // Keep the existing job failure/page and stale-heartbeat signal honest.
+    if (unavailable) throw verificationObjectUnavailable();
     // [DOC-1 §9.2 · P9-2] The heartbeat the lag check reads — written only here, only after a completed sweep.
     await recordReaperRun(this.prisma, now);
     return purged;
@@ -1649,8 +1660,8 @@ export class VerificationService {
    * compare-and-set under the person's row lock, the receipt in the same
    * transaction, and the projections. The reaper calls it at retention; a
    * data-subject erasure (Part XXV) calls it on request and also crypto-shreds
-   * the extracted field VALUES (the run DEKs) — the reaper never does, because
-   * §9 keeps extracted fields to the record's lifecycle, not the image's.
+   * the extracted field VALUES (the run DEKs). Ordinary retention keeps them
+   * to the record's lifecycle; recovery of account erasure shreds them too.
    */
   async purgeDocumentNow(
     doc: { id: string; userId: string; fileUrl: string; docType: string; user: { tenantId: string } },

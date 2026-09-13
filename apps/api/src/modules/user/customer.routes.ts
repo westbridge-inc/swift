@@ -748,18 +748,19 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
    *  client must log the user out afterwards; every session is already revoked. */
-  app.delete('/account', async (request: AuthRequest) => {
+  app.delete('/account', async (request: AuthRequest, reply) => {
     const result = await account.deleteAccount(request.user.userId);
+    if (!result.deleted) reply.code(202);
     // Leave an audit trail (the de-identified row is retained, so its id stays a
-    // valid FK). Best-effort — the erasure itself has already committed.
+    // valid FK). Best-effort; a pending document obligation is not completion.
     await app.prisma.auditLog
       .create({
         data: {
           userId: request.user.userId,
-          action: 'ACCOUNT_SELF_DELETED',
+          action: result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
           entity: 'User',
           entityId: request.user.userId,
-          changes: { reason: 'DPA right to erasure (self-serve)' },
+          changes: { reason: 'DPA right to erasure (self-serve)', ...(result.status === 'PENDING_DOCUMENT_ERASURE' && { status: result.status, pendingDocuments: result.pendingDocuments }) },
         },
       })
       .catch(() => {});

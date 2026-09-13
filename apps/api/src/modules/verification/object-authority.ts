@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { localStorageBaseDir, resolveLocalStorageKey, storageProviderKind } from '../../providers/storage/storage-key';
 
 export type VerificationObjectStore = Pick<PrismaClient, 'encryptedObject' | 'verificationDocument'>;
 export interface VerificationObjectReference {
@@ -28,6 +29,39 @@ function ownedKey(key: string, userId: string, folder: string): string | null {
   return filename.test(name) ? relative : null;
 }
 
+const CENSUS_PAGE_SIZE = 100;
+const CENSUS_MAX_PAGES = 100;
+
+/** Local keys have infinitely many textual aliases; an IN-list cannot prove
+ * exclusivity. Scan the two existing reference tables in bounded pages, keep
+ * at most two matches, and refuse authority if the complete census exceeds
+ * the bound. This temporary containment cost ends only with structural keys. */
+async function localReferences<T>(
+  read: (after: string | undefined) => Promise<T[]>,
+  cursor: (row: T) => string,
+  key: (row: T) => string,
+  fileKey: string,
+): Promise<T[]> {
+  const baseDir = localStorageBaseDir();
+  const physical = resolveLocalStorageKey(fileKey, baseDir);
+  const matches: T[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < CENSUS_MAX_PAGES; page++) {
+    const rows = await read(after);
+    for (const row of rows) {
+      let same = false;
+      try { same = resolveLocalStorageKey(key(row), baseDir) === physical; } catch { /* invalid keys cannot resolve in this adapter */ }
+      if (same) matches.push(row);
+      if (matches.length === 2) return matches;
+    }
+    if (rows.length < CENSUS_PAGE_SIZE) return matches;
+    const next = cursor(rows[rows.length - 1]!);
+    if (next === after) throw verificationObjectUnavailable();
+    after = next;
+  }
+  throw verificationObjectUnavailable();
+}
+
 /** Existing-metadata containment, not a substitute for structural object lineage
  * or a committed purge fence. Only one exact metadata row and one expected
  * submission (or no submission at intake) may authorize this object. These two
@@ -37,13 +71,20 @@ export async function resolveVerificationObject(db: VerificationObjectStore, ref
   try {
     const relative = ownedKey(ref.fileKey, ref.userId, 'verification');
     if (!relative || !relative.endsWith('.enc')) throw verificationObjectUnavailable();
-    // Local storage aliases these two forms. Refuse ambiguous metadata or
-    // references in either spelling, including a legacy pointer on another user.
-    const aliases = [relative, `/uploads/${relative}`, `uploads/${relative}`];
-    const [objects, documents] = await Promise.all([
-      db.encryptedObject.findMany({ where: { fileKey: { in: aliases } }, take: 2 }),
-      db.verificationDocument.findMany({ where: { fileUrl: { in: aliases } }, select: { id: true, userId: true, fileUrl: true }, take: 2 }),
-    ]);
+    const [objects, documents] = storageProviderKind() === 'local'
+      ? await Promise.all([
+        localReferences((after) => db.encryptedObject.findMany({
+          where: after ? { fileKey: { gt: after } } : {}, orderBy: { fileKey: 'asc' }, take: CENSUS_PAGE_SIZE,
+        }), (row) => row.fileKey, (row) => row.fileKey, ref.fileKey),
+        localReferences((after) => db.verificationDocument.findMany({
+          where: after ? { id: { gt: after } } : {}, orderBy: { id: 'asc' },
+          select: { id: true, userId: true, fileUrl: true }, take: CENSUS_PAGE_SIZE,
+        }), (row) => row.id, (row) => row.fileUrl, ref.fileKey),
+      ])
+      : await Promise.all([
+        db.encryptedObject.findMany({ where: { fileKey: { in: [ref.fileKey] } }, take: 2 }),
+        db.verificationDocument.findMany({ where: { fileUrl: { in: [ref.fileKey] } }, select: { id: true, userId: true, fileUrl: true }, take: 2 }),
+      ]);
     const object = objects[0];
     if (objects.length !== 1 || !object || object.fileKey !== ref.fileKey || object.createdBy !== ref.userId
       || object.shreddedAt !== null || !object.wrappedDek?.length || object.iv.length !== 12 || object.authTag.length !== 16

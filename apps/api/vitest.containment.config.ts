@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
 
-// Explicitly in-memory tests only. The database suite keeps its target lock.
+// Explicitly service-free tests only (storage adapter uses its own temp files).
+// The database suite keeps its target lock.
 export default defineConfig({
   test: {
     include: [
@@ -18,6 +19,8 @@ export default defineConfig({
       'src/__tests__/admin-audit-inline-census.test.ts',
       'src/__tests__/integrity-founder-guard.test.ts',
       'src/__tests__/admin-config-truth.test.ts',
+      'src/__tests__/image-metadata-strip.test.ts',
+      'src/__tests__/order-status-single-source.test.ts',
     ],
     fileParallelism: false,
     env: { NODE_ENV: 'test', KYC_PROVIDER: 'sandbox' },
