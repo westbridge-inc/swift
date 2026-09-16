@@ -250,7 +250,10 @@ describe('F-220-01 account erasure/reaper PostgreSQL barriers', () => {
 async function blockedBy(waiter: () => number | undefined, blocker: number) {
   await expect.poll(async () => {
     const pid = waiter(); if (pid === undefined) return false;
-    const [row] = await app.prisma.$queryRaw<Array<{ blockers: number[] }>>`SELECT pg_blocking_pids(${pid}) AS blockers`;
+    // Prisma binds JavaScript integers as int8; pg_blocking_pids accepts a
+    // PostgreSQL backend PID (int4). Keep this witness typed like the server
+    // value instead of repeatedly calling a non-existent bigint overload.
+    const [row] = await app.prisma.$queryRaw<Array<{ blockers: number[] }>>`SELECT pg_blocking_pids(${pid}::integer) AS blockers`;
     return row!.blockers.includes(blocker);
   }, { interval: 10, timeout: 2000 }).toBe(true);
 }
