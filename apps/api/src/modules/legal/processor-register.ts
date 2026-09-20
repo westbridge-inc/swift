@@ -170,7 +170,11 @@ export const NON_PROCESSOR_DIRS: Readonly<Record<string, string>> = {
 
 /** Outbound host literals in source that are not processors, with the reason. */
 export const NON_PROCESSOR_HOSTS: Readonly<Record<string, string>> = {
-  'swift.gy': 'own domain', 'app.swift.gy': 'own domain', 'api.swift.gy': 'own domain',
+  'swift.gy': 'own legacy domain',
+  'app.swift.gy': 'own legacy application domain',
+  'api.swift.gy': 'own API domain',
+  'swiftgy.com': 'own canonical public website and universal-link domain',
+  'www.swiftgy.com': 'own canonical public website alias',
   'officialgazette.gov.gy': 'public read (commencement watch fetches public notices; sends nothing)',
   'www.parliament.gov.gy': 'public read (commencement watch)',
   'play.google.com': 'link rendered to users; no server call',
