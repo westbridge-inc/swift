@@ -11,6 +11,7 @@ import {
 import { getSignedUrl as presignS3 } from '@aws-sdk/s3-request-presigner';
 import { stripImageMetadata } from '../../utils/images';
 import { storageSigningKeys } from '../../utils/signing-keys';
+import { localStorageBaseDir, resolveLocalStorageKey, storageProviderKind } from './storage-key';
 
 // ---------------------------------------------------------------------------
 // StorageProvider — hard rule 4: swappable interface. Raw documents live in
@@ -49,17 +50,24 @@ function sanitizeForStorage(input: { buffer: Buffer; filename: string; mimeType:
 
 const DEFAULT_TTL_SECONDS = 300;
 
+/** Shared by both adapters so tests can prove the exact server-issued object
+ * name contract without performing filesystem or provider I/O. Callers that
+ * require a constrained extension must provide a canonical filename. */
+export function createOpaqueStorageName(filename: string): string {
+  const ext = path.extname(filename) || '.bin';
+  return `${nanoid(16)}${ext}`;
+}
+
 /** Local-disk adapter for dev/test. Files land under UPLOAD_DIR (gitignored). */
 export class LocalStorageProvider implements StorageProvider {
-  private baseDir = process.env['UPLOAD_DIR'] ?? path.join(process.cwd(), 'uploads');
+  private baseDir = localStorageBaseDir();
   // [M-37] Resolved through the keyring: production never falls open to the repository default.
   private get signingSecret(): string { return storageSigningKeys().current.secret; }
   private publicBase = process.env['API_PUBLIC_URL'] ?? '';
 
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
     const safe = sanitizeForStorage(input);
-    const ext = path.extname(safe.filename) || '.bin';
-    const name = `${nanoid(16)}${ext}`;
+    const name = createOpaqueStorageName(safe.filename);
     const dir = path.join(this.baseDir, safe.folder);
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, name), safe.buffer);
@@ -81,12 +89,7 @@ export class LocalStorageProvider implements StorageProvider {
    *  Defence-in-depth: keys come from the DB (nanoid names), but a poisoned key
    *  must never let getObject/delete read or unlink outside the uploads dir. */
   private resolveKey(fileKey: string): string {
-    const rel = fileKey.replace(/^\/?uploads\//, '');
-    const full = path.resolve(this.baseDir, rel);
-    if (full !== this.baseDir && !full.startsWith(this.baseDir + path.sep)) {
-      throw new Error('Invalid file key: path escapes the uploads directory');
-    }
-    return full;
+    return resolveLocalStorageKey(fileKey, this.baseDir);
   }
 
   async delete(fileKey: string): Promise<void> {
@@ -119,8 +122,7 @@ export class S3StorageProvider implements StorageProvider {
 
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
     const safe = sanitizeForStorage(input);
-    const ext = path.extname(safe.filename) || '.bin';
-    const key = `${safe.folder}/${nanoid(16)}${ext}`;
+    const key = `${safe.folder}/${createOpaqueStorageName(safe.filename)}`;
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
@@ -156,7 +158,7 @@ export class S3StorageProvider implements StorageProvider {
 
 /** Provider selection is config, not code. */
 export function getStorageProvider(): StorageProvider {
-  const provider = process.env['STORAGE_PROVIDER'] ?? 'local';
+  const provider = storageProviderKind();
   switch (provider) {
     case 'local':
       return new LocalStorageProvider();

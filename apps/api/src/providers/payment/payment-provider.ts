@@ -104,12 +104,44 @@ const CURRENCY_NUMERIC: Record<string, string> = {
   XCD: '951',
 };
 
-interface PowerTranzResponse {
-  Approved?: boolean;
-  TransactionIdentifier?: string;
-  IsoResponseCode?: string;
-  ResponseMessage?: string;
-  Errors?: Array<{ Message?: string }>;
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function canonicalProviderRef(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function isAmbiguousHttpStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function isSuccessfulHttpStatus(status: number): boolean {
+  return status >= 200 && status < 300;
+}
+
+function powerTranzDeclineReason(data: Record<string, unknown>): string {
+  if (typeof data['ResponseMessage'] === 'string') return data['ResponseMessage'];
+  const errors = data['Errors'];
+  if (Array.isArray(errors) && isJsonObject(errors[0]) && typeof errors[0]['Message'] === 'string') {
+    return errors[0]['Message'];
+  }
+  if (typeof data['IsoResponseCode'] === 'string') return data['IsoResponseCode'];
+  return 'Declined';
+}
+
+function stripeChargeErrorReason(data: Record<string, unknown>): string | undefined {
+  const error = data['error'];
+  if (!isJsonObject(error)) return undefined;
+  if (typeof error['decline_code'] === 'string') return error['decline_code'];
+  if (typeof error['message'] === 'string') return error['message'];
+  return undefined;
+}
+
+function stripeRefundErrorReason(data: Record<string, unknown>): string | undefined {
+  const error = data['error'];
+  if (!isJsonObject(error)) return undefined;
+  return typeof error['message'] === 'string' ? error['message'] : undefined;
 }
 
 /**
@@ -117,8 +149,9 @@ interface PowerTranzResponse {
  * (recurring weekly fees on a stored card token), so — exactly like the
  * sandbox — it NEVER throws: transport errors, timeouts, non-OK responses and
  * declines all resolve to a ChargeResult, leaving the billing retry/suspend
- * logic in control (a transient gateway outage becomes a soft `failed`, which
- * the daily retry cycle absorbs before the 3-strike suspend).
+ * logic in control. Outcomes that may have taken effect at the gateway are
+ * `unknown`, never declines: billing must reconcile them before another
+ * instruction is issued.
  *
  * Card capture/tokenization is done through PowerTranz's hosted SPI/3-DS flow
  * (PCI) — raw PAN never touches our servers — so tokenizeCard is unsupported
@@ -191,16 +224,29 @@ export class PowerTranzPaymentProvider implements PaymentProvider {
         body: JSON.stringify(body),
       });
       if (!res.ok) {
-        // [M-02] A 5xx is ambiguous — the sale MAY have been processed; a 4xx
-        // was refused before processing.
-        return { status: res.status >= 500 ? 'unknown' : 'failed', providerRef: '', reason: `Gateway HTTP ${res.status}` };
+        // [M-02] A timeout, rate limit, or 5xx is ambiguous — the instruction
+        // MAY have been processed. Other 4xx responses are definitive refusal.
+        const ambiguous = isAmbiguousHttpStatus(res.status);
+        return { status: ambiguous ? 'unknown' : 'failed', providerRef: '', reason: `Gateway HTTP ${res.status}` };
       }
-      const data = (await res.json()) as PowerTranzResponse;
-      if (data.Approved) {
-        return { status: 'succeeded', providerRef: data.TransactionIdentifier ?? '' };
+      const data: unknown = await res.json();
+      if (!isJsonObject(data)) {
+        return { status: 'unknown', providerRef: '', reason: 'Malformed gateway response' };
       }
-      const reason = data.ResponseMessage ?? data.Errors?.[0]?.Message ?? data.IsoResponseCode ?? 'Declined';
-      return { status: 'failed', providerRef: data.TransactionIdentifier ?? '', reason };
+      const providerRef = canonicalProviderRef(data['TransactionIdentifier']);
+      if (data['Approved'] === true) {
+        // Approval without the processor's canonical reference may represent a
+        // real capture, but cannot be reconciled or safely refunded. Never
+        // convert that ambiguous provider response into a booked success.
+        if (!providerRef) {
+          return { status: 'unknown', providerRef: '', reason: 'Approved response missing TransactionIdentifier' };
+        }
+        return { status: 'succeeded', providerRef };
+      }
+      if (data['Approved'] === false) {
+        return { status: 'failed', providerRef, reason: powerTranzDeclineReason(data) };
+      }
+      return { status: 'unknown', providerRef, reason: 'Malformed Approved response' };
     } catch {
       // [M-02] Unreachable / timed out — UNKNOWN, never a decline: the sale
       // may have gone through. Billing retrieves before it ever retries.
@@ -230,15 +276,11 @@ interface StripePaymentIntent extends StripeErrorBody {
   id?: string;
   status?: string; // 'succeeded' | 'requires_action' | 'requires_payment_method' | …
 }
-interface StripeRefund extends StripeErrorBody {
-  id?: string;
-  status?: string; // 'succeeded' | 'pending' | 'failed'
-}
 
 /**
  * Stripe adapter. Same contract as the others: `chargeToken` NEVER throws —
- * declines, gateway errors and timeouts all resolve to a soft `failed` that
- * the billing retry/3-strike-suspend cycle absorbs.
+ * definitive declines resolve to `failed`; transport and server outcomes that
+ * may have taken effect resolve to `unknown` for reconciliation.
  *
  * Card capture is client-side (Stripe.js / mobile SDK → SetupIntent →
  * PaymentMethod attached to a Customer); raw PAN never touches our servers,
@@ -281,15 +323,39 @@ export class StripePaymentProvider implements PaymentProvider {
       off_session: 'true', // merchant-initiated recurring — no 3-DS challenge
       ...(input.description ? { description: input.description } : {}),
     });
-    const data = await this.post<StripePaymentIntent>('/v1/payment_intents', body, input.idempotencyKey);
+    const response = await this.post('/v1/payment_intents', body, input.idempotencyKey);
     // [M-02] Unreachable / timed out — UNKNOWN, never a decline: Stripe may
     // have created and confirmed the intent. Billing retrieves before a retry.
-    if (!data) return { status: 'unknown', providerRef: '', reason: 'Gateway unreachable' };
-    if (data.status === 'succeeded') {
-      return { status: 'succeeded', providerRef: data.id ?? '' };
+    if (!response) return { status: 'unknown', providerRef: '', reason: 'Gateway unreachable' };
+    const providerRef = isJsonObject(response.data)
+      ? canonicalProviderRef(response.data['id'])
+      : '';
+    if (response.status === 409 || isAmbiguousHttpStatus(response.status)) {
+      return { status: 'unknown', providerRef, reason: `Gateway HTTP ${response.status}` };
     }
-    const reason = data.error?.decline_code ?? data.error?.message ?? data.status ?? 'Declined';
-    return { status: 'failed', providerRef: data.id ?? '', reason };
+    const data = response.data;
+    if (!isJsonObject(data)) {
+      return { status: 'unknown', providerRef: '', reason: 'Malformed gateway response' };
+    }
+    const status = typeof data['status'] === 'string' ? data['status'] : undefined;
+    const errorReason = stripeChargeErrorReason(data);
+    const terminalFailure = status === 'canceled' || status === 'requires_payment_method';
+    if (!isSuccessfulHttpStatus(response.status)) {
+      if (terminalFailure || (!status && errorReason)) {
+        return { status: 'failed', providerRef, reason: errorReason ?? status ?? 'Declined' };
+      }
+      return { status: 'unknown', providerRef, reason: `Gateway HTTP ${response.status}` };
+    }
+    if (status === 'succeeded') {
+      if (!providerRef) {
+        return { status: 'unknown', providerRef: '', reason: 'Succeeded response missing PaymentIntent id' };
+      }
+      return { status: 'succeeded', providerRef };
+    }
+    if (terminalFailure) {
+      return { status: 'failed', providerRef, reason: errorReason ?? status ?? 'Declined' };
+    }
+    return { status: 'unknown', providerRef, reason: status ?? 'Malformed gateway response' };
   }
 
   /** [M-01] The truth of an instruction: by the PaymentIntent id when we have
@@ -329,17 +395,49 @@ export class StripePaymentProvider implements PaymentProvider {
       payment_intent: input.providerRef,
       amount: String(toProviderMinor(input.amount, input.currencyCode, 'stripe.refund')),
     });
-    const data = await this.post<StripeRefund>('/v1/refunds', body, input.idempotencyKey);
-    if (!data) return { status: 'failed', providerRef: '', reason: 'Gateway unreachable' };
-    if (data.status === 'succeeded' || data.status === 'pending') {
-      return { status: 'succeeded', providerRef: data.id ?? '' };
+    const response = await this.post('/v1/refunds', body, input.idempotencyKey);
+    // The refund may have reached Stripe even when transport fails or Stripe
+    // returns a server error. A new instruction under a new key could refund
+    // twice, so preserve ambiguity for reconciliation.
+    if (!response) return { status: 'unknown', providerRef: '', reason: 'Gateway unreachable' };
+    const providerRef = isJsonObject(response.data)
+      ? canonicalProviderRef(response.data['id'])
+      : '';
+    if (response.status === 409 || isAmbiguousHttpStatus(response.status)) {
+      return { status: 'unknown', providerRef, reason: `Gateway HTTP ${response.status}` };
     }
-    return { status: 'failed', providerRef: data.id ?? '', reason: data.error?.message ?? data.status ?? 'Refund failed' };
+    const data = response.data;
+    if (!isJsonObject(data)) {
+      return { status: 'unknown', providerRef: '', reason: 'Malformed gateway response' };
+    }
+    const status = typeof data['status'] === 'string' ? data['status'] : undefined;
+    const errorReason = stripeRefundErrorReason(data);
+    if (!isSuccessfulHttpStatus(response.status)) {
+      if (status === 'failed' || (!status && errorReason)) {
+        return { status: 'failed', providerRef, reason: errorReason ?? status ?? 'Refund failed' };
+      }
+      return { status: 'unknown', providerRef, reason: `Gateway HTTP ${response.status}` };
+    }
+    if (status === 'succeeded') {
+      if (!providerRef) {
+        return { status: 'unknown', providerRef: '', reason: 'Successful response missing Refund id' };
+      }
+      return { status: 'succeeded', providerRef };
+    }
+    if (status === 'failed') {
+      return { status: 'failed', providerRef, reason: errorReason ?? status ?? 'Refund failed' };
+    }
+    return { status: 'unknown', providerRef, reason: status ?? 'Malformed gateway response' };
   }
 
-  /** Single form-encoded POST. Null only on transport failure; HTTP error
-   *  bodies are returned so the caller can surface Stripe's reason. */
-  private async post<T>(path: string, body: URLSearchParams, idempotencyKey: string): Promise<T | null> {
+  /** Single form-encoded POST. Null means no trustworthy HTTP response was
+   *  available; otherwise the status stays attached so callers cannot mistake
+   *  a server error body for a definitive decline. */
+  private async post(
+    path: string,
+    body: URLSearchParams,
+    idempotencyKey: string,
+  ): Promise<{ status: number; data: unknown } | null> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), STRIPE_TIMEOUT_MS);
     try {
@@ -353,9 +451,9 @@ export class StripePaymentProvider implements PaymentProvider {
         },
         body: body.toString(),
       });
-      return (await res.json()) as T;
+      return { status: res.status, data: await res.json() };
     } catch {
-      return null; // unreachable / timed out — soft failure, next cycle retries
+      return null; // unreachable / timed out — ambiguous; reconcile before any retry
     } finally {
       clearTimeout(timer);
     }
