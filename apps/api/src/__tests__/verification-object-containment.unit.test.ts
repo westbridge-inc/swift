@@ -8,13 +8,13 @@ import { AccountService } from '../modules/user/account.service';
 import { eraseDocumentsFor } from '../modules/verification/dsar';
 import { retryStorageOrphans } from '../lib/storage-orphans';
 import type { NotificationService } from '../modules/notification/notification.service';
-import { resolveSignupSelfie, resolveVerificationObject } from '../modules/verification/object-authority';
+import { isOwnedAvatarKey, resolveSignupSelfie, resolveVerificationObject } from '../modules/verification/object-authority';
 import { shredAndProbe } from '../modules/verification/purge-receipt';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { mintRenderPath, resetKeyProviderForTests } from '../providers/storage/envelope';
-import { LocalStorageProvider } from '../providers/storage/storage-provider';
+import { createOpaqueStorageName, LocalStorageProvider } from '../providers/storage/storage-provider';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import * as consent from '../modules/legal/consent.service';
@@ -39,8 +39,8 @@ const key = (owner: string, name = 'a') => `/uploads/verification/${owner}/${nam
 const avatar = (owner: string) => `/uploads/avatars/${owner}/${'s'.repeat(16)}.jpg`;
 const unavailable = { code: 'VERIFICATION_OBJECT_UNAVAILABLE' };
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
-const uploadRequest = (userId: string) => ({ user: { userId }, file: async () => ({
-  mimetype: 'image/png', filename: 'image.png', toBuffer: async () => png,
+const uploadRequest = (userId: string, filename = 'image.png', mimetype = 'image/png') => ({ user: { userId }, file: async () => ({
+  mimetype, filename, toBuffer: async () => png,
 }) });
 
 // Model the delegates' query contract, including ordered keyset scans. No
@@ -345,6 +345,39 @@ describe('verification object containment at real service boundaries', () => {
     const h = harness(); vi.stubEnv('FEATURE_BIOMETRIC_FACE_MATCH', '1');
     await h.service.submitDocument(A, 'MOVER', 'national_id', key(A), '1');
     expect(h.provider.verifyIdentity).toHaveBeenCalledWith({ userId: A, idDocumentUrl: key(A), selfieUrl: avatar(A) });
+  });
+
+  it.each([
+    ['selfie.', 'image/png', 'swift-selfie.png'],
+    ['selfie.j p g', 'image/jpeg', 'swift-selfie.jpg'],
+    ['selfie.写真', 'image/webp', 'swift-selfie.webp'],
+    ['ordinary-client-name.png', 'image/png', 'swift-selfie.png'],
+  ])('canonicalizes multipart selfie filename %s from the validated MIME type', async (filename, mimetype, expectedFilename) => {
+    const h = harness();
+    const next = avatar(A).replace('ssssssssssssssss', 'nnnnnnnnnnnnnnnn');
+    storage.upload.mockResolvedValueOnce({ url: next });
+    h.db.user.updateMany = vi.fn(async ({ data }: any) => { Object.assign(h.people.get(A)!, data); return { count: 1 }; });
+    storage.getObject.mockRejectedValue(Object.assign(new Error('absent'), { code: 'ENOENT' }));
+    const routes = await handlers(h, authRoutes);
+    await routes.get('post /selfie')!(uploadRequest(A, filename, mimetype), { send: vi.fn() });
+    expect(storage.upload).toHaveBeenCalledWith(expect.objectContaining({
+      filename: expectedFilename,
+      mimeType: mimetype,
+      folder: `avatars/${A}`,
+    }));
+  });
+
+  it.each([
+    ['local', 'swift-selfie.jpg'],
+    ['local', 'swift-selfie.png'],
+    ['local', 'swift-selfie.webp'],
+    ['s3', 'swift-selfie.jpg'],
+    ['r2', 'swift-selfie.webp'],
+  ])('the %s adapter name derived from %s satisfies avatar authority', (provider, filename) => {
+    vi.stubEnv('STORAGE_PROVIDER', provider);
+    const name = createOpaqueStorageName(filename);
+    const key = provider === 'local' ? `/uploads/avatars/${A}/${name}` : `avatars/${A}/${name}`;
+    expect(isOwnedAvatarKey(key, A)).toBe(true);
   });
 
   it.each([avatar(B), key(B), key(A), 'https://example.invalid/photo.jpg', '/uploads/avatars/subject-a/../subject-b/ssssssssssssssss.jpg'])('poisoned persisted signup selfie %s is refused with a retake instruction', async (value) => {

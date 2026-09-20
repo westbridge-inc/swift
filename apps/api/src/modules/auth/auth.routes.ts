@@ -88,6 +88,16 @@ const otpRateLimit = {
   },
 };
 
+// The storage adapters preserve the supplied filename extension. Avatar
+// authority deliberately accepts only the exact server-issued
+// nanoid-plus-alphanumeric-extension shape, so never let a multipart filename
+// choose that extension. The validated MIME type is the authority here.
+const SELFIE_FILENAME_BY_MIME: Readonly<Record<string, string>> = {
+  'image/jpeg': 'swift-selfie.jpg',
+  'image/png': 'swift-selfie.png',
+  'image/webp': 'swift-selfie.webp',
+};
+
 export async function authRoutes(app: FastifyInstance) {
   const authService = new AuthService(app);
 
@@ -233,7 +243,8 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/selfie', { preHandler: [app.authenticate], ...authRateLimit }, async (request, reply) => {
     const file = await request.file();
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach a selfie image');
-    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+    const canonicalFilename = SELFIE_FILENAME_BY_MIME[file.mimetype];
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype) || !canonicalFilename) {
       throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
     }
 
@@ -245,7 +256,7 @@ export async function authRoutes(app: FastifyInstance) {
     const storage = getStorageProvider();
     const { url } = await storage.upload({
       buffer,
-      filename: file.filename,
+      filename: canonicalFilename,
       mimeType: file.mimetype,
       folder: `avatars/${request.user.userId}`,
     });

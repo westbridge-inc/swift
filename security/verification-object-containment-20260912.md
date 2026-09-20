@@ -640,3 +640,32 @@ refuses destructive avatar cleanup/completion. Structural provider-independent
 object lineage or a sanctioned same-transaction system authority is still
 required before that deployment posture can drain these obligations. The safe
 failure is pending erasure, never a false success or cross-tenant delete.
+
+### Exact-head review correction
+
+Independent review of `9ee51e2b310f9eaab3880672bddd63d7894d9a67`
+found one further S2 blocker: `/auth/selfie` supplied the untrusted multipart
+filename to both storage adapters, which preserve `path.extname`. A valid image
+named `selfie.`, `selfie.j p g` or `selfie.写真` could therefore mint a new
+avatar key that the strict authority predicate would permanently refuse.
+
+The route now selects `swift-selfie.jpg`, `.png` or `.webp` solely from the
+already allowlisted MIME type. Both adapters share the same opaque-name
+derivation helper, allowing regression tests to prove that every local, S3 and
+R2 key generated from those canonical filenames satisfies the unchanged
+authority predicate. Hostile multipart names no longer choose persisted key
+syntax.
+
+Post-correction local evidence, using the bundled Node runtime because the
+machine's Homebrew Node 25 binary was missing `libada.3.dylib`:
+
+| Check | Actual result |
+| --- | --- |
+| Focused containment regression | 1 file / 147 tests passed |
+| Complete no-service containment configuration | 17 files / 239 tests passed |
+| API source + scripts typecheck | exit 0 |
+| Full API lint | exit 0, no diagnostics |
+| Diff hygiene | `git diff --check`; exit 0 |
+
+The prior exact-head approval is invalidated. A fresh immutable-head review and
+fresh CI on the new commit remain mandatory before merge.

@@ -50,6 +50,14 @@ function sanitizeForStorage(input: { buffer: Buffer; filename: string; mimeType:
 
 const DEFAULT_TTL_SECONDS = 300;
 
+/** Shared by both adapters so tests can prove the exact server-issued object
+ * name contract without performing filesystem or provider I/O. Callers that
+ * require a constrained extension must provide a canonical filename. */
+export function createOpaqueStorageName(filename: string): string {
+  const ext = path.extname(filename) || '.bin';
+  return `${nanoid(16)}${ext}`;
+}
+
 /** Local-disk adapter for dev/test. Files land under UPLOAD_DIR (gitignored). */
 export class LocalStorageProvider implements StorageProvider {
   private baseDir = localStorageBaseDir();
@@ -59,8 +67,7 @@ export class LocalStorageProvider implements StorageProvider {
 
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
     const safe = sanitizeForStorage(input);
-    const ext = path.extname(safe.filename) || '.bin';
-    const name = `${nanoid(16)}${ext}`;
+    const name = createOpaqueStorageName(safe.filename);
     const dir = path.join(this.baseDir, safe.folder);
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, name), safe.buffer);
@@ -115,8 +122,7 @@ export class S3StorageProvider implements StorageProvider {
 
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
     const safe = sanitizeForStorage(input);
-    const ext = path.extname(safe.filename) || '.bin';
-    const key = `${safe.folder}/${nanoid(16)}${ext}`;
+    const key = `${safe.folder}/${createOpaqueStorageName(safe.filename)}`;
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
