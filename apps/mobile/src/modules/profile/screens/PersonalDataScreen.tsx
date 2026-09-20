@@ -95,7 +95,10 @@ export function PersonalDataScreen() {
       const res = await customerApi.deleteAccount(owner);
       const current = requireAuthSessionForPrincipal(owner);
       setConfirmDelete(false);
-      toast.success('Your account has been deleted.');
+      const deletion = res.data?.data;
+      toast.success(deletion?.status === 'PENDING_DOCUMENT_ERASURE'
+        ? deletion.message ?? 'Your account is closed. Document erasure is pending; no further sign-in is needed.'
+        : 'Your account has been deleted.');
       logoutIfCurrent(current);
       return res;
     },

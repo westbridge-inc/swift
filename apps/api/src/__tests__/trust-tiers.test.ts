@@ -11,6 +11,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService } from '../modules/order/order.service';
+import { ownedVerificationFixture } from './helpers/verification-object';
 
 // ---------------------------------------------------------------------------
 // Trust-tier completion (master plan §5): L2 before the FIRST taxi ride; L3
@@ -203,7 +204,7 @@ describe('Auto-approved KYC documents lapse', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'police_clearance',
-      fileUrl: 'storage://t/auto-approve/clearance.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, u.userId, 'auto-approve-clearance'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, u.token);
@@ -220,7 +221,7 @@ describe('Auto-approved KYC documents lapse', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'RESTAURANT',
       docType: 'business_registration',
-      fileUrl: 'storage://t/auto-approve/bizreg.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, u.userId, 'auto-approve-bizreg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, u.token);
