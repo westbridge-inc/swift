@@ -9,6 +9,7 @@ import { log } from '../../utils/logger';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { tripShareCounter, tripShareGauge } from '../../plugins/observability';
 import type { NotificationService } from '../notification/notification.service';
+import { publicWebOrigin } from '../../lib/public-origin';
 
 // Trip Share (safety spec §6) — a tokenized PUBLIC live-trip page. The token
 // is 128-bit CSPRNG and grants ONLY the public payload below, never API
@@ -96,7 +97,7 @@ export class TripShareService {
     });
     tripShareCounter.labels('minted').inc();
 
-    const url = `${process.env['APP_PUBLIC_URL'] ?? 'https://swift.gy'}/trip/${token}`;
+    const url = `${publicWebOrigin()}/trip/${token}`;
     if (opts.sendToPhone) {
       const allowed = await checkOtpRateLimit(this.redis, `tripshare:${opts.sendToPhone}`);
       if (!allowed) throw new AppError(429, 'RATE_LIMITED', 'That number was just sent a link. Try again in a minute.');

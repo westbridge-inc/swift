@@ -25,7 +25,7 @@ grantSuiteCapability('ddl');
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
-const WEB = 'https://web.swift.test';
+const WEB = 'https://swiftgy.com';
 
 let app: FastifyInstance;
 let qrService: QrService;

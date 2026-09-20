@@ -1,4 +1,5 @@
 import { randomInt } from 'crypto';
+import { publicWebOrigin } from '../../lib/public-origin';
 
 // ---------------------------------------------------------------------------
 // QR growth engine — pure core. Short codes, slugs, and the scan decision
@@ -135,8 +136,8 @@ export function redirectTargetFor(
   }
 }
 
-/** The web origin printed QR codes point at. Reuses the codebase's existing
- *  public-web key (the old /vendor/qr route established it). */
+/** The web origin printed QR codes point at. This is a fixed public boundary,
+ * never the API origin and never a process-selected redirect host. */
 export function publicWebBase(): string {
-  return (process.env['APP_PUBLIC_URL'] ?? 'https://swift.gy').replace(/\/+$/, '');
+  return publicWebOrigin();
 }

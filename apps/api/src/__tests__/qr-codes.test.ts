@@ -18,7 +18,7 @@ import { hashScanIp, parseUserAgent } from '../modules/qr/scan-log';
 // that must never let client input steer a 302.
 // ---------------------------------------------------------------------------
 
-const BASE = 'https://swift.gy';
+const BASE = 'https://swiftgy.com';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const liveQr = (over: Partial<QrLookup> = {}): QrLookup => ({
@@ -128,9 +128,9 @@ describe('classifyScan — the decision table, row by row', () => {
 describe('redirectTargetFor — server-constructed targets only', () => {
   it('WEB_RENDER goes to the CURRENT slug with src/c (and sanitized t)', () => {
     expect(redirectTargetFor('WEB_RENDER', liveQr(), { base: BASE, template: 'tabletent' }))
-      .toBe('https://swift.gy/store/green-bowl-x7k2m9?src=qr&c=BCDFGHJKMN&t=tabletent');
+      .toBe('https://swiftgy.com/store/green-bowl-x7k2m9?src=qr&c=BCDFGHJKMN&t=tabletent');
     expect(redirectTargetFor('WEB_RENDER', liveQr(), { base: BASE, template: null }))
-      .toBe('https://swift.gy/store/green-bowl-x7k2m9?src=qr&c=BCDFGHJKMN');
+      .toBe('https://swiftgy.com/store/green-bowl-x7k2m9?src=qr&c=BCDFGHJKMN');
   });
 
   it('hostile template values are dropped by the allowlist, never echoed', () => {
@@ -142,19 +142,19 @@ describe('redirectTargetFor — server-constructed targets only', () => {
 
   it('RETIRED links to the current store page only when the store is live', () => {
     expect(redirectTargetFor('RETIRED_PAGE', liveQr({ status: 'DEACTIVATED' }), { base: BASE }))
-      .toBe('https://swift.gy/qr/retired?store=green-bowl-x7k2m9');
+      .toBe('https://swiftgy.com/qr/retired?store=green-bowl-x7k2m9');
     expect(redirectTargetFor('RETIRED_PAGE', liveQr({ status: 'DEACTIVATED', entity: null }), { base: BASE }))
-      .toBe('https://swift.gy/qr/retired');
+      .toBe('https://swiftgy.com/qr/retired');
   });
 
   it('UNAVAILABLE and NOT_FOUND are fixed branded pages', () => {
     expect(redirectTargetFor('UNAVAILABLE_PAGE', liveQr({ entity: null }), { base: BASE }))
-      .toBe('https://swift.gy/qr/unavailable');
-    expect(redirectTargetFor('NOT_FOUND', null, { base: BASE })).toBe('https://swift.gy/qr/not-found');
+      .toBe('https://swiftgy.com/qr/unavailable');
+    expect(redirectTargetFor('NOT_FOUND', null, { base: BASE })).toBe('https://swiftgy.com/qr/not-found');
   });
 
   it('a trailing slash on the base cannot double up', () => {
-    expect(redirectTargetFor('NOT_FOUND', null, { base: 'https://swift.gy/' })).toBe('https://swift.gy/qr/not-found');
+    expect(redirectTargetFor('NOT_FOUND', null, { base: 'https://swiftgy.com/' })).toBe('https://swiftgy.com/qr/not-found');
   });
 });
 

@@ -9,7 +9,8 @@
 // trailing dot, an encoded separator or an unknown custom-scheme authority is
 // NOT ours — the link policy (linkPolicy.ts) says so first, and says why.
 
-import { classifyLink, policyFrom, type LinkDecision, type LinkPolicy, type LinkVerdict } from './linkPolicy';
+import { classifyLink, policyFrom, restrictPolicy, type LinkDecision, type LinkPolicy, type LinkVerdict } from './linkPolicy';
+import { CANONICAL_PUBLIC_SITE_ORIGIN, resolveLinkBuildChannel } from './publicOrigin';
 
 export type LinkDestination =
   | { kind: 'store'; slug: string; code: string | null }
@@ -19,24 +20,65 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,79}$/;
 const CODE_RE = /^[23456789bcdfghjkmnpqrstvwxyz]{10}$/i;
 
 // ---------------------------------------------------------------------------
-// The build's policy: the production hosts come from the ONE web origin the
-// app already hands out in its own links (EXPO_PUBLIC_WEB_URL, the same value
-// services/api.ts uses); preview hosts are explicit per build channel; plain
-// http is tolerated for a loopback host in development builds only.
+// The build's policy: production links are the one public-web origin declared
+// for Swift, never an API host or a mutable EXPO_PUBLIC_WEB_URL. Preview hosts
+// are an explicit, separately restricted allowlist; plain http is tolerated
+// for loopback only in a development build.
 // ---------------------------------------------------------------------------
 
 declare const __DEV__: boolean | undefined;
 
 let policy: LinkPolicy | null = null;
 
+export function linkPolicyForBuild(opts: {
+  isDev: boolean;
+  channel?: string | undefined;
+  webUrl?: string | undefined;
+  previewHosts?: string | null | undefined;
+}): LinkPolicy {
+  if (opts.isDev) {
+    return policyFrom({
+      webUrl: opts.webUrl ?? 'http://localhost:3001',
+      previewHosts: opts.previewHosts ?? null,
+      scheme: 'swift',
+      isDev: true,
+    });
+  }
+
+  const channel = resolveLinkBuildChannel(opts.channel);
+  if (channel === 'production') {
+    // An absent, stale, API, or hostile public origin opens nothing.  Do not
+    // substitute the legacy swift.gy domain in a release.
+    if (opts.webUrl !== CANONICAL_PUBLIC_SITE_ORIGIN) {
+      return policyFrom({ webUrl: '', scheme: 'swift', isDev: false });
+    }
+    return policyFrom({ webUrl: CANONICAL_PUBLIC_SITE_ORIGIN, scheme: 'swift', isDev: false });
+  }
+
+  if (channel === 'preview') {
+    // Preview must name each host explicitly.  It does not inherit the live
+    // public domain, otherwise a staging build could handle a production link.
+    const candidate = policyFrom({
+      webUrl: CANONICAL_PUBLIC_SITE_ORIGIN,
+      previewHosts: opts.previewHosts ?? null,
+      scheme: 'swift',
+      isDev: false,
+    });
+    return restrictPolicy(candidate, candidate.previewHosts);
+  }
+
+  // A release artifact with no declared link channel is fail-closed.
+  return policyFrom({ webUrl: '', scheme: 'swift', isDev: false });
+}
+
 export function defaultLinkPolicy(): LinkPolicy {
   if (!policy) {
     const isDev = typeof __DEV__ !== 'undefined' && __DEV__ === true;
-    policy = policyFrom({
-      webUrl: process.env['EXPO_PUBLIC_WEB_URL'] ?? (isDev ? 'http://localhost:3001' : 'https://swift.gy'),
-      previewHosts: process.env['EXPO_PUBLIC_LINK_PREVIEW_HOSTS'] ?? null,
-      scheme: 'swift',
+    policy = linkPolicyForBuild({
       isDev,
+      channel: process.env['EXPO_PUBLIC_LINK_ENV'],
+      webUrl: process.env['EXPO_PUBLIC_WEB_URL'],
+      previewHosts: process.env['EXPO_PUBLIC_LINK_PREVIEW_HOSTS'] ?? null,
     });
   }
   return policy;

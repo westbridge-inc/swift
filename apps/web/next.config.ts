@@ -5,6 +5,7 @@ import {
   type BrowserApiMode,
   buildBrowserContentSecurityPolicy,
   resolveConfiguredBrowserApiOrigin,
+  resolveConfiguredUpstreamApiOrigin,
 } from './src/lib/browser-api-origin';
 
 // The public face of Swift — marketing + (coming) customer web + operator
@@ -21,6 +22,7 @@ export default function createNextConfig(phase: string): NextConfig {
   const linting = process.argv.includes('lint');
   const browserApiMode: BrowserApiMode = phase === PHASE_DEVELOPMENT_SERVER || linting ? 'development' : 'production';
   const browserApiOrigin = resolveConfiguredBrowserApiOrigin(browserApiMode);
+  const upstreamApiOrigin = resolveConfiguredUpstreamApiOrigin(browserApiMode);
   const csp = buildBrowserContentSecurityPolicy(browserApiMode);
 
   return {
@@ -69,14 +71,17 @@ export default function createNextConfig(phase: string): NextConfig {
     },
 
     async rewrites() {
-      const api = browserApiOrigin;
       return [
         { source: '/.well-known/apple-app-site-association', destination: '/well-known/apple-app-site-association' },
         { source: '/.well-known/assetlinks.json', destination: '/well-known/assetlinks.json' },
-        // The printed QR URL is {APP_PUBLIC_URL}/s/{code}; the web domain
-        // proxies it to the API's public resolver (302 passes through). Only
-        // wired when the build knows its API — dev keeps the route local.
-        { source: '/s/:code', destination: `${api}/s/:code` },
+        // Browser API traffic stays on the public site so its Strict cookies
+        // remain same-site. The server-side rewrite is the only bridge to the
+        // separately registered API upstream; it forwards API responses,
+        // including Set-Cookie, back under the public-site host.
+        { source: '/api/v1/:path*', destination: `${upstreamApiOrigin}/api/v1/:path*` },
+        // The printed QR URL is {APP_PUBLIC_URL}/s/{code}; the public site
+        // proxies it to the API resolver (its 302 passes through).
+        { source: '/s/:code', destination: `${upstreamApiOrigin}/s/:code` },
       ];
     },
     async headers() {

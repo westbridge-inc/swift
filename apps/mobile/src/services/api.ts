@@ -13,6 +13,7 @@ import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
 } from './apiOrigin';
+import { CANONICAL_PUBLIC_SITE_ORIGIN } from '../lib/publicOrigin';
 
 // Build-time override (set per EAS build profile, e.g. preview→staging,
 // production→prod). Development follows the current Expo/Metro bundle host so
@@ -30,13 +31,12 @@ export const API_URL = resolveApiOrigin({
   bundleScriptUrl: getReactNativeBundleScriptUrl(sourceCodeModule),
 });
 
-/** [B9] Where PUBLIC share links point — the web app, never the API. Used by
- *  parcel tracking (`/track/:token`); trip shares join it when they move off
- *  the text-only share. Overridable per EAS profile like API_URL. (`__DEV__`
- *  is typeof-guarded: unlike API_URL's, this line actually evaluates in the
- *  node test env, where the RN global does not exist.) */
+/** [B9] Where PUBLIC share links point — the web app, never the API. Release
+ * links are intentionally not environment-steerable: a mutable public value
+ * once let a release fall back to swift.gy. Development remains loopback-only.
+ * (`__DEV__` is typeof-guarded because node tests do not define the RN global.) */
 // eslint-disable-next-line no-undef
-export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swift.gy');
+export const WEB_URL = typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : CANONICAL_PUBLIC_SITE_ORIGIN;
 
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,

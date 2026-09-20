@@ -281,7 +281,8 @@ jobs:
       - run: pnpm --filter @swift/web build
         env:
           NEXT_PUBLIC_ALLOW_SITE_TOKENS: '1'
-          NEXT_PUBLIC_API_URL: https://api.swiftgy.com
+          NEXT_PUBLIC_API_URL: https://swiftgy.com
+          API_URL: https://api.swift.gy
       # [GRD-1 §2 / WS-15] See the admin job: the inlining happens at build
       # time, so the artefact is the only place the leak is real.
       # [SCR-006] What the build IS: its manifest (every file's digest, the entrypoints, the commit), so the gate

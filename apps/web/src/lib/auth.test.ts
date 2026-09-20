@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { mockApi, API_ORIGIN } from '@/test/test-utils';
+import { RELEASE_BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 
 // ---------------------------------------------------------------------------
 // [W-01] THE CUSTOMER AND VENDOR WEB APP HOLDS NO CREDENTIAL.
@@ -127,6 +128,69 @@ describe('[W-01] nothing a script can read', () => {
 });
 
 describe('[W-01] every request carries the client name and the cookies; a 401 refreshes once', () => {
+  it('production keeps the complete Strict-cookie lifecycle on the public same-site transport', async () => {
+    // This is a browser-client contract, not a fake cookie jar: the real
+    // browser decides whether it attaches an HttpOnly Strict cookie. The
+    // critical assertion is that every lifecycle request reaches the exact
+    // public-site origin whose Next rewrite returns that cookie, never the
+    // cross-site API upstream.
+    vi.stubEnv('NEXT_PUBLIC_API_URL', RELEASE_BROWSER_API_ORIGIN);
+    try {
+      vi.resetModules();
+      const auth = await import('@/lib/auth');
+      const customer = await import('@/lib/customer');
+      let homeReads = 0;
+      const fetchMock = mockApi(({ url }) => {
+        if (url.pathname.endsWith('/auth/register')) {
+          return { status: 201, body: { success: true, data: { user: { id: 'c1' } } } };
+        }
+        if (url.pathname.endsWith('/auth/verify-otp')) {
+          return { body: { success: true, data: { isNewUser: false, user: { id: 'c1', roles: ['CUSTOMER'] } } } };
+        }
+        if (url.pathname.endsWith('/auth/me')) {
+          return { body: signedInAs('c1').body };
+        }
+        if (url.pathname.endsWith('/customer/home')) {
+          homeReads += 1;
+          return homeReads === 1
+            ? { status: 401, body: { success: false } }
+            : { body: { success: true, data: { ok: true } } };
+        }
+        if (url.pathname.endsWith('/auth/refresh')) {
+          return { body: { success: true, data: { session: 'cookie' } } };
+        }
+        if (url.pathname.endsWith('/auth/logout')) {
+          return { body: { success: true, data: {} } };
+        }
+        throw new Error(`unexpected browser lifecycle request: ${url.pathname}`);
+      });
+
+      await customer.registerAccount({ phone: '+5926001010', firstName: 'New', lastName: 'Customer', role: 'CUSTOMER' });
+      await customer.verifyCustomerLogin('+5926001010', '246810');
+      await auth.sessionProbe();
+      await auth.apiFetch('/api/v1/customer/home'); // first 401, then refresh + retry
+      await auth.logout();
+
+      const paths = fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname);
+      expect(paths).toEqual([
+        '/api/v1/auth/register',
+        '/api/v1/auth/verify-otp',
+        '/api/v1/auth/me',
+        '/api/v1/customer/home',
+        '/api/v1/auth/refresh',
+        '/api/v1/customer/home',
+        '/api/v1/auth/logout',
+      ]);
+      for (const [input, init] of fetchMock.mock.calls) {
+        expect(new URL(String(input)).origin).toBe(RELEASE_BROWSER_API_ORIGIN);
+        expect(init?.credentials).toBe('include');
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
+
   it('a 401 triggers exactly one refresh — no body, because the cookie IS the credential — and the request is retried', async () => {
     const auth = await loadAuth();
     let calls = 0;
