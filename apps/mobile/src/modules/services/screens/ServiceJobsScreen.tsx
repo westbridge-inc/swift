@@ -1,8 +1,8 @@
 /** @jsxImportSource react */
-import React, { useState } from 'react';
-import { RefreshControl, ScrollView, TextInput, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { AppState, RefreshControl, ScrollView, TextInput, View } from 'react-native';
 import { color, font, fontSize, radius, space } from '@swift/ui';
-import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot, useCompleteJob } from '../../../hooks';
+import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot, useStartJob, useCompleteJob } from '../../../hooks';
 // [B3] The emergency path for BOTH people on a service job — the provider
 // working inside a stranger's home, and the customer whose home it is. Every
 // other in-flight surface had a button; this one had nothing.
@@ -10,7 +10,16 @@ import { SosCeremony } from '../../safety/SosCeremony';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
-import { money } from '../../../lib/money';
+import { moneyExact } from '../../../lib/money';
+import {
+  armServiceJobDueWakeup,
+  localServiceJobDateTime,
+  parseServiceQuoteInput,
+  serviceJobDueDelayMs,
+  serviceJobErrorMessage,
+  serviceJobScheduleDays,
+  showsServiceJobAgreedPrice,
+} from '../../../lib/serviceJobPresentation';
 import { Card, Chip, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
@@ -22,36 +31,29 @@ const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 
   CANCELLED: { label: 'Cancelled', tone: 'neutral' },
 };
 
-/** Next 7 days as chips — no datetime-picker dependency needed. */
-function upcomingDays(): Array<{ key: string; label: string; date: Date }> {
-  const days: Array<{ key: string; label: string; date: Date }> = [];
-  for (let i = 0; i < 7; i++) {
-    const d = new Date();
-    d.setDate(d.getDate() + i);
-    d.setSeconds(0, 0);
-    const label = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toLocaleDateString([], { weekday: 'short', day: 'numeric' });
-    days.push({ key: d.toISOString().slice(0, 10), label, date: d });
-  }
-  return days;
-}
 const HOURS = ['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
 
 /** Quote acceptance = picking a slot (QUOTED → SCHEDULED on the API). */
 function ScheduleSheet({ job, onDone }: { job: any; onDone: () => void }) {
   const schedule = useScheduleJob();
-  const days = upcomingDays();
+  const days = serviceJobScheduleDays();
   const [dayKey, setDayKey] = useState<string>(days[0]!.key);
   const [time, setTime] = useState<string>('09:00');
   const [pastErr, setPastErr] = useState(false);
 
   const confirm = () => {
-    const scheduledFor = new Date(`${dayKey}T${time}:00`);
+    const scheduledFor = localServiceJobDateTime(dayKey, time);
     if (scheduledFor.getTime() < Date.now()) {
       setPastErr(true);
       return;
     }
     setPastErr(false);
-    schedule.mutate({ id: job.id, scheduledFor: scheduledFor.toISOString() }, { onSuccess: onDone });
+    schedule.mutate({
+      id: job.id,
+      scheduledFor: scheduledFor.toISOString(),
+      expectedUpdatedAt: String(job.updatedAt),
+      expectedQuoteAmount: Number(job.quoteAmount),
+    }, { onSuccess: onDone });
   };
 
   return (
@@ -86,7 +88,7 @@ function ScheduleSheet({ job, onDone }: { job: any; onDone: () => void }) {
       ) : null}
       {schedule.isError ? (
         <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
-          {(schedule.error as any)?.response?.data?.message ?? 'Couldn’t schedule. Try again.'}
+          {serviceJobErrorMessage(schedule.error, 'Couldn’t schedule. Try again.')}
         </T>
       ) : null}
     </View>
@@ -135,8 +137,15 @@ function ProviderActions({ job }: { job: any }) {
   const quote = useQuoteJob();
   const confirm = useConfirmJob();
   const decline = useDeclineSlot();
+  const start = useStartJob();
   const complete = useCompleteJob();
   const [amount, setAmount] = useState('');
+  const quoteAmount = parseServiceQuoteInput(amount);
+  const expectedUpdatedAt = String(job.updatedAt);
+  const expectedScheduledFor = job.scheduledFor ? String(job.scheduledFor) : '';
+  const error = quote.error ?? confirm.error ?? decline.error ?? start.error ?? complete.error;
+  const errorText = error ? serviceJobErrorMessage(error, 'The job changed. Refresh and try again.') : null;
+  const startIsDue = useServiceJobStartDue(expectedScheduledFor);
 
   if (job.status === 'REQUESTED') {
     return (
@@ -158,38 +167,120 @@ function ProviderActions({ job }: { job: any }) {
             onChangeText={setAmount}
             placeholder="Quote (GYD)"
             placeholderTextColor={color.text.muted}
-            keyboardType="number-pad"
+            keyboardType="decimal-pad"
             // [Wave 3] Tokens, not raw font literals.
             style={{ fontFamily: font.body, fontSize: fontSize.base, color: color.text.primary, paddingVertical: 0 }}
           />
         </View>
         <PillButton
           // [#947's grammar] Disabled says the ask.
-          label={Number(amount) > 0 ? 'Send quote' : 'Enter an amount'}
+          label={quoteAmount != null ? 'Send quote' : 'Enter a valid amount'}
           size="md"
           loading={quote.isPending}
-          disabled={!(Number(amount) > 0)}
-          onPress={() => quote.mutate({ id: job.id, amount: Number(amount) })}
+          disabled={quoteAmount == null}
+          onPress={() => {
+            if (quoteAmount != null) quote.mutate({ id: job.id, amount: quoteAmount, expectedUpdatedAt });
+          }}
         />
+        {errorText ? <T variant="caption" tone="error">{errorText}</T> : null}
       </View>
     );
   }
   if (job.status === 'SCHEDULED' && !job.providerConfirmedAt) {
     return (
       <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
-        <PillButton label="Confirm time" size="md" style={{ flex: 1 }} loading={confirm.isPending} onPress={() => confirm.mutate(job.id)} />
-        <PillButton label="Can’t make it" variant="outline" size="md" style={{ flex: 1 }} loading={decline.isPending} onPress={() => decline.mutate(job.id)} />
+        <PillButton
+          label="Confirm time"
+          size="md"
+          style={{ flex: 1 }}
+          loading={confirm.isPending}
+          onPress={() => confirm.mutate({ id: job.id, expectedUpdatedAt, expectedScheduledFor })}
+        />
+        <PillButton
+          label="Can’t make it"
+          variant="outline"
+          size="md"
+          style={{ flex: 1 }}
+          loading={decline.isPending}
+          onPress={() => decline.mutate({ id: job.id, expectedUpdatedAt, expectedScheduledFor })}
+        />
+        {errorText ? <T variant="caption" tone="error">{errorText}</T> : null}
       </View>
     );
   }
   if (job.status === 'SCHEDULED' && job.providerConfirmedAt) {
     return (
       <View style={{ marginTop: space.md }}>
-        <PillButton label="Mark job complete" size="md" loading={complete.isPending} onPress={() => complete.mutate(job.id)} />
+        {startIsDue ? (
+          <PillButton
+            label="Start job"
+            size="md"
+            loading={start.isPending}
+            onPress={() => start.mutate({ id: job.id, expectedUpdatedAt, expectedScheduledFor })}
+          />
+        ) : (
+          <T variant="caption" tone="muted">Start becomes available at the agreed time.</T>
+        )}
+        {errorText ? <T variant="caption" tone="error" style={{ marginTop: space.sm }}>{errorText}</T> : null}
+      </View>
+    );
+  }
+  if (job.status === 'IN_PROGRESS') {
+    return (
+      <View style={{ marginTop: space.md }}>
+        <PillButton
+          label="Mark job complete"
+          size="md"
+          loading={complete.isPending}
+          onPress={() => complete.mutate({ id: job.id, expectedUpdatedAt })}
+        />
+        {errorText ? <T variant="caption" tone="error" style={{ marginTop: space.sm }}>{errorText}</T> : null}
       </View>
     );
   }
   return null;
+}
+
+/**
+ * React Native may suspend timers while backgrounded. Re-arm from the
+ * server-provided scheduled instant whenever the app becomes active, so the
+ * Start action appears without requiring a list refresh.
+ */
+function useServiceJobStartDue(scheduledFor: string): boolean {
+  const [isDue, setIsDue] = useState(() => serviceJobDueDelayMs(scheduledFor, Date.now()) <= 0);
+
+  useEffect(() => {
+    if (!Number.isFinite(serviceJobDueDelayMs(scheduledFor, Date.now()))) {
+      setIsDue(false);
+      return undefined;
+    }
+    let cancelWakeup: () => void = () => {};
+    const arm = () => {
+      cancelWakeup();
+      const delay = serviceJobDueDelayMs(scheduledFor, Date.now());
+      setIsDue(delay <= 0);
+      cancelWakeup = Number.isFinite(delay) && delay > 0
+        ? armServiceJobDueWakeup(
+            scheduledFor,
+            Date.now,
+            (callback, delayMs) => setTimeout(callback, delayMs),
+            clearTimeout,
+            () => setIsDue(true),
+          )
+        : () => undefined;
+    };
+
+    arm();
+    const appState = AppState.addEventListener('change', (state) => {
+      if (state === 'active') arm();
+    });
+    return () => {
+      cancelWakeup();
+      appState.remove();
+    };
+  }, [scheduledFor]);
+
+  return isDue;
 }
 
 /** [B3] The job states where someone is coming or already on site — the
@@ -226,7 +317,7 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
       {job.status === 'QUOTED' && job.quoteAmount != null ? (
         <View style={{ marginTop: space.md, borderRadius: radius.md, paddingHorizontal: space.lg, paddingVertical: space.md, backgroundColor: color.brand[50] }}>
           <T variant="body" weight="bold" tone="deep">
-            Quote: {money(job.quoteAmount)}
+            Quote: {moneyExact(Number(job.quoteAmount))}
           </T>
           <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
             Cash on completion — accept by booking a time.
@@ -234,15 +325,17 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
         </View>
       ) : null}
 
-      {job.status === 'SCHEDULED' && job.quoteAmount != null ? (
+      {showsServiceJobAgreedPrice(job.status) && job.quoteAmount != null ? (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}>
           <T variant="label" tone="muted" style={{ flex: 1 }}>
-            Agreed price: {money(job.quoteAmount)} · cash on completion
+            Agreed price: {moneyExact(Number(job.quoteAmount))} · cash paid directly to the provider
           </T>
-          <TonePill
-            label={job.providerConfirmedAt ? 'Time confirmed' : 'Awaiting confirmation'}
-            tone={job.providerConfirmedAt ? 'success' : 'neutral'}
-          />
+          {job.status === 'SCHEDULED' ? (
+            <TonePill
+              label={job.providerConfirmedAt ? 'Time confirmed' : 'Awaiting confirmation'}
+              tone={job.providerConfirmedAt ? 'success' : 'neutral'}
+            />
+          ) : null}
         </View>
       ) : null}
 
@@ -263,7 +356,7 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
             onPress={() => navigation.navigate('Conversation', { roomId: job.chatRoomId, title: 'Job chat' })}
           />
         ) : null}
-        {isCustomer && ['REQUESTED', 'QUOTED'].includes(job.status) ? (
+        {['REQUESTED', 'QUOTED', 'SCHEDULED', 'IN_PROGRESS'].includes(job.status) ? (
           <PillButton label="Cancel" variant="outline" size="md" style={{ flex: 1 }} loading={cancel.isPending} onPress={() => setConfirmCancel(true)} />
         ) : null}
       </View>
@@ -303,20 +396,28 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
       <PopupCard visible={confirmCancel} onClose={() => setConfirmCancel(false)}>
         <IconChip icon="x-circle" size={56} tone="error" />
         <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
-          Cancel request?
+          Cancel job?
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          This withdraws the job request.
+          {isCustomer
+            ? 'The provider will be told immediately and any reserved time will be released.'
+            : 'The customer will be told immediately so they can choose another provider.'}
         </T>
         <PillButton
           label="Cancel job"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-          onPress={() => {
-            setConfirmCancel(false);
-            cancel.mutate(job.id);
-          }}
+          loading={cancel.isPending}
+          onPress={() => cancel.mutate(
+            { id: job.id, expectedUpdatedAt: String(job.updatedAt) },
+            { onSuccess: () => setConfirmCancel(false) },
+          )}
         />
         <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmCancel(false)} />
+        {cancel.isError ? (
+          <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
+            {serviceJobErrorMessage(cancel.error, 'The job changed. Refresh and try again.')}
+          </T>
+        ) : null}
       </PopupCard>
     </Card>
   );

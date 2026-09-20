@@ -109,13 +109,28 @@ async function quotedJob(
   }, customer.token);
   expect(created.statusCode).toBe(201);
   const jobId = created.json().data.id as string;
-  const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 15000 }, provider.token);
+  const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, {
+    amount: 15000,
+    expectedUpdatedAt: created.json().data.updatedAt,
+  }, provider.token);
   expect(quoted.statusCode).toBe(200);
   return jobId;
 }
 
-function schedule(jobId: string, when: Date, token: string) {
-  return inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: when.toISOString() }, token);
+async function commandState(jobId: string) {
+  const job = await jobRow(jobId);
+  return {
+    expectedUpdatedAt: job.updatedAt.toISOString(),
+    expectedScheduledFor: job.scheduledFor?.toISOString(),
+    expectedQuoteAmount: Number(job.quoteAmount),
+  };
+}
+
+async function schedule(jobId: string, when: Date, token: string) {
+  return inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, {
+    scheduledFor: when.toISOString(),
+    ...await commandState(jobId),
+  }, token);
 }
 
 function liveJobsAt(providerId: string, when: Date) {
@@ -275,7 +290,7 @@ describe('Services — double-booking a provider is impossible at the data layer
     expect((await schedule(jobA, slot, first.token)).statusCode).toBe(200);
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(409);
 
-    const declined = await inject('POST', `/api/v1/services/jobs/${jobA}/decline-slot`, undefined, provider.token);
+    const declined = await inject('POST', `/api/v1/services/jobs/${jobA}/decline-slot`, await commandState(jobA), provider.token);
     expect(declined.statusCode).toBe(200);
 
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(200);
@@ -293,7 +308,7 @@ describe('Services — double-booking a provider is impossible at the data layer
     expect((await schedule(jobA, slot, first.token)).statusCode).toBe(200);
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(409);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/cancel`, undefined, first.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/cancel`, await commandState(jobA), first.token)).statusCode).toBe(200);
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(200);
 
     expect(await liveJobsAt(provider.providerId, slot)).toBe(1);
@@ -312,7 +327,21 @@ describe('Services — double-booking a provider is impossible at the data layer
     const slot = nextSlot();
 
     expect((await schedule(jobA, slot, first.token)).statusCode).toBe(200);
-    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/complete`, undefined, provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/confirm`, await commandState(jobA), provider.token)).statusCode).toBe(200);
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobA },
+      data: { scheduledFor: new Date(Date.now() - HOUR) },
+    }));
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/start`, await commandState(jobA), provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/complete`, await commandState(jobA), provider.token)).statusCode).toBe(200);
+    // Put the completed fixture back on the originally held hour. If terminal
+    // rows were still part of the partial unique key, the next schedule would
+    // now fail even though the completed history remains at that exact slot.
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobA },
+      data: { scheduledFor: slot },
+    }));
+    expect((await jobRow(jobA)).scheduledFor?.toISOString()).toBe(slot.toISOString());
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(200);
     expect(await liveJobsAt(provider.providerId, slot)).toBe(1);
   });
@@ -323,15 +352,23 @@ describe('Services — double-booking a provider is impossible at the data layer
     const jobId = await quotedJob(provider, customer);
     const morning = nextSlot();
     const afternoon = nextSlot();
+    const expected = await commandState(jobId);
 
     const [a, b] = await Promise.all([
-      schedule(jobId, morning, customer.token),
-      schedule(jobId, afternoon, customer.token),
+      inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: morning.toISOString(), ...expected }, customer.token),
+      inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: afternoon.toISOString(), ...expected }, customer.token),
     ]);
 
-    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 400]);
-    const loser = a.statusCode === 400 ? a : b;
-    expect(loser.json().error.code).toBe('BAD_STATE');
+    // Request arrival relative to the initial read is deliberately not
+    // scheduler-controlled: a loser that read before the winner reaches the
+    // exact-generation CAS and returns SERVICE_JOB_CHANGED; a loser that read
+    // after the winner correctly returns BAD_STATE. The service-free
+    // transition unit test separately forces updateMany.count=0 and proves the
+    // CAS path without depending on HTTP scheduling.
+    expect([a.statusCode, b.statusCode].filter((code) => code === 200)).toHaveLength(1);
+    const loser = a.statusCode === 200 ? b : a;
+    expect([400, 409]).toContain(loser.statusCode);
+    expect(loser.json().error.code).toBe(loser.statusCode === 409 ? 'SERVICE_JOB_CHANGED' : 'BAD_STATE');
 
     // Exactly one of the two times is held, and it is the winner's.
     const held = await jobRow(jobId);
@@ -349,9 +386,9 @@ describe('Services — closing a job is never silent', () => {
     const jobId = await quotedJob(provider, customer);
     const slot = nextSlot();
     expect((await schedule(jobId, slot, customer.token)).statusCode).toBe(200);
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, undefined, provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, undefined, customer.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, await commandState(jobId), customer.token)).statusCode).toBe(200);
 
     const told = await notificationFor(provider.userId, 'booking_cancelled', jobId);
     expect(told).not.toBeNull();
@@ -370,7 +407,7 @@ describe('Services — closing a job is never silent', () => {
     const slot = nextSlot();
     expect((await schedule(jobId, slot, customer.token)).statusCode).toBe(200);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, undefined, provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, await commandState(jobId), provider.token)).statusCode).toBe(200);
 
     const told = await notificationFor(customer.userId, 'booking_cancelled', jobId);
     expect(told).not.toBeNull();
@@ -383,7 +420,7 @@ describe('Services — closing a job is never silent', () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const jobId = await quotedJob(provider, customer);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, undefined, customer.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, await commandState(jobId), customer.token)).statusCode).toBe(200);
 
     const told = await notificationFor(provider.userId, 'booking_cancelled', jobId);
     expect(told).not.toBeNull();
@@ -397,9 +434,14 @@ describe('Services — closing a job is never silent', () => {
     const jobId = await quotedJob(provider, customer);
     const slot = nextSlot();
     expect((await schedule(jobId, slot, customer.token)).statusCode).toBe(200);
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, undefined, provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, undefined, provider.token)).statusCode).toBe(200);
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobId },
+      data: { scheduledFor: new Date(Date.now() - HOUR) },
+    }));
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, await commandState(jobId), provider.token)).statusCode).toBe(200);
 
     const customerNudge = await notificationFor(customer.userId, 'booking_completed', jobId);
     const providerNudge = await notificationFor(provider.userId, 'booking_completed', jobId);
@@ -408,5 +450,38 @@ describe('Services — closing a job is never silent', () => {
     // Swift never holds the money: the customer pays the provider directly.
     expect(customerNudge!.body).toContain('Pay cash directly');
     expect(providerNudge!.body).toContain('Rate your customer');
+  });
+
+  it('simultaneous complete and cancel commands have one terminal winner and never resurrect the job', async () => {
+    const provider = await makeVerifiedProvider();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const jobId = await quotedJob(provider, customer);
+    expect((await schedule(jobId, nextSlot(), customer.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobId },
+      data: { scheduledFor: new Date(Date.now() - HOUR) },
+    }));
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+
+    const expected = await commandState(jobId);
+    const [complete, cancel] = await Promise.all([
+      inject('POST', `/api/v1/services/jobs/${jobId}/complete`, expected, provider.token),
+      inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, expected, customer.token),
+    ]);
+    expect([complete.statusCode, cancel.statusCode].filter((code) => code === 200)).toHaveLength(1);
+    const loser = complete.statusCode === 200 ? cancel : complete;
+    expect([400, 409]).toContain(loser.statusCode);
+    expect(['BAD_STATE', 'SERVICE_JOB_CHANGED']).toContain(loser.json().error.code);
+
+    const winnerStatus = complete.statusCode === 200 ? 'COMPLETED' : 'CANCELLED';
+    expect((await jobRow(jobId)).status).toBe(winnerStatus);
+
+    // A delayed copy of the losing command remains stale after the winner.
+    const staleRetry = complete.statusCode === 200
+      ? await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, expected, customer.token)
+      : await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, expected, provider.token);
+    expect([400, 409]).toContain(staleRetry.statusCode);
+    expect((await jobRow(jobId)).status).toBe(winnerStatus);
   });
 });

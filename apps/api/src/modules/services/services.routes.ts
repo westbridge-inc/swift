@@ -20,7 +20,12 @@ import {
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getTenantId } from '../../plugins/prisma';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { deactivateRoom } from '../chat/chat-authority';
+import {
+  assertServiceJobStartDue,
+  serviceQuoteAmountSchema,
+  transitionServiceJob,
+} from './service-job-transition';
+import { runTenantBoundServiceJobTransaction } from './service-job-transaction';
 
 // ---------------------------------------------------------------------------
 // Module S: Services (spec §4.6) — hire verified professionals. A ServiceJob is
@@ -48,8 +53,13 @@ const jobRequestSchema = z.object({
   description: z.string().trim().min(10).max(2000),
   photos: z.array(z.string().max(2048)).max(10).optional(),
 });
-const quoteSchema = z.object({ amount: z.number().positive().max(100_000_000) });
-const scheduleSchema = z.object({ scheduledFor: z.coerce.date() });
+const transitionGenerationSchema = z.object({ expectedUpdatedAt: z.coerce.date() });
+const quoteSchema = transitionGenerationSchema.extend({ amount: serviceQuoteAmountSchema });
+const scheduleSchema = transitionGenerationSchema.extend({
+  scheduledFor: z.coerce.date(),
+  expectedQuoteAmount: serviceQuoteAmountSchema,
+});
+const scheduledTransitionSchema = transitionGenerationSchema.extend({ expectedScheduledFor: z.coerce.date() });
 const rateSchema = z.object({ score: z.number().int().min(1).max(5), comment: z.string().max(1000).optional() });
 
 export async function servicesRoutes(app: FastifyInstance) {
@@ -57,6 +67,10 @@ export async function servicesRoutes(app: FastifyInstance) {
   const optionalAuth = { preHandler: [app.authenticateOptional] };
   const ratingService = new RatingService(app.prisma, app.io);
   const notifications = new NotificationService(app.prisma, app.io);
+
+  async function publishPersisted(ids: string[]): Promise<void> {
+    await Promise.all(ids.map((id) => notifications.publishPersisted(id)));
+  }
 
   function authenticatedTenant(): string {
     const tenantId = getTenantId();
@@ -387,7 +401,7 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   app.post('/jobs/:id/quote', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { amount } = quoteSchema.parse(request.body);
+    const { amount, expectedUpdatedAt } = quoteSchema.parse(request.body);
     const job = await jobForUser(id, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can quote');
     if (!['REQUESTED', 'QUOTED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', `Cannot quote a ${job.status.toLowerCase()} job`);
@@ -396,32 +410,49 @@ export async function servicesRoutes(app: FastifyInstance) {
     // expire, be rejected, or be purged between the request and the quote.
     // The write is a state CAS, not a read-then-unconditional update.
     // (Completion/decline of already-contracted work keeps its own policy.)
-    const updated = await app.prisma.$transaction(async (tx) => {
-      const users = await tx.$queryRaw<Array<{ id: string; status: string }>>`
+    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(tx, async (boundTx) => {
+      const users = await boundTx.$queryRaw<Array<{ id: string; status: string }>>`
         SELECT "id", "status" FROM "users" WHERE "id" = ${request.user.userId} FOR UPDATE
       `;
       if (!users[0] || users[0].status !== 'ACTIVE') {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your account is not active — contact support before taking new work.');
       }
-      if (!(await isProviderVerified(tx, request.user.userId))) {
+      if (!(await isProviderVerified(boundTx, request.user.userId))) {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your verification has lapsed — renew your documents before taking new work.');
       }
-      const cas = await tx.serviceJob.updateMany({
-        where: { id, status: { in: ['REQUESTED', 'QUOTED'] }, provider: { userId: request.user.userId } },
-        data: { quoteAmount: amount, status: 'QUOTED' },
+      return transitionServiceJob(boundTx, {
+        jobId: id,
+        actorUserId: request.user.userId,
+        expectedUpdatedAt,
+        from: job.status,
+        to: 'QUOTED',
+        guard: { provider: { userId: request.user.userId } },
+        // The boundary above proves two-decimal precision. Persist the
+        // canonical decimal string so Prisma never has to infer money from a
+        // binary floating-point value.
+        data: { quoteAmount: amount.toFixed(2) },
+        action: 'SERVICE_JOB_QUOTED',
+        audit: { amount },
+        notices: [{
+          userId: job.customerId,
+          type: 'ORDER_UPDATE',
+          title: 'Quote received',
+          body: `Your provider quoted GYD ${amount.toLocaleString('en-GY')} — review it before choosing a time.`,
+          data: { kind: 'booking_quoted', jobId: id },
+        }],
       });
-      if (cas.count === 0) throw new AppError(400, 'BAD_STATE', 'This job just changed — refresh it');
-      return tx.serviceJob.findUniqueOrThrow({ where: { id } });
-    });
-    return { success: true, data: updated };
+    }));
+    await publishPersisted(transitioned.notificationIds);
+    return { success: true, data: transitioned.job };
   });
 
   app.post('/jobs/:id/schedule', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { scheduledFor } = scheduleSchema.parse(request.body);
+    const { scheduledFor, expectedQuoteAmount, expectedUpdatedAt } = scheduleSchema.parse(request.body);
     const job = await jobForUser(id, request.user.userId);
     if (job.customerId !== request.user.userId) throw new AppError(403, 'CUSTOMER_ONLY', 'Only the customer can schedule');
     if (job.status !== 'QUOTED') throw new AppError(400, 'BAD_STATE', 'Agree a quote before scheduling');
+    if (scheduledFor.getTime() <= Date.now()) throw new AppError(400, 'INVALID_SCHEDULE', 'Choose a time in the future.');
     // [S0] A provider has ONE body: two customers cannot hold the same slot.
     // The judge is the partial unique index on ("providerId", "scheduledFor")
     // for live jobs (service_job_slot_exclusivity migration) — a read-then-check
@@ -431,14 +462,26 @@ export async function servicesRoutes(app: FastifyInstance) {
     // that left QUOTED while we were reading fails cleanly rather than being
     // silently overwritten.
     // The provider still ACCEPTS the slot (§4.3) — providerConfirmedAt starts null.
-    const updated = await app.prisma.$transaction(async (tx) => {
-      const cas = await tx.serviceJob.updateMany({
-        where: { id, status: 'QUOTED', customerId: request.user.userId },
-        data: { scheduledFor, status: 'SCHEDULED', providerConfirmedAt: null },
+    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(tx, async (boundTx) => {
+      return transitionServiceJob(boundTx, {
+        jobId: id,
+        actorUserId: request.user.userId,
+        expectedUpdatedAt,
+        from: 'QUOTED',
+        to: 'SCHEDULED',
+        guard: { customerId: request.user.userId, quoteAmount: expectedQuoteAmount },
+        data: { scheduledFor, providerConfirmedAt: null },
+        action: 'SERVICE_JOB_SCHEDULED',
+        audit: { scheduledFor: scheduledFor.toISOString(), acceptedQuoteAmount: expectedQuoteAmount },
+        notices: [{
+          userId: job.provider.userId,
+          type: 'ORDER_UPDATE',
+          title: 'Booking to confirm',
+          body: `Your quote was accepted for ${slotLabel(scheduledFor)} — confirm or suggest another time.`,
+          data: { kind: 'booking_to_confirm', jobId: id },
+        }],
       });
-      if (cas.count === 0) throw new AppError(400, 'BAD_STATE', 'This job just changed — refresh it');
-      return tx.serviceJob.findUniqueOrThrow({ where: { id } });
-    }).catch((error: unknown) => {
+    })).catch((error: unknown) => {
       // The unique violation IS the double-booking answer — same translation
       // BookingService makes for appointment slots.
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
@@ -446,126 +489,216 @@ export async function servicesRoutes(app: FastifyInstance) {
       }
       throw error;
     });
-    await notifications.send({
-      userId: job.provider.userId,
-      type: 'ORDER_UPDATE',
-      title: 'Booking to confirm',
-      body: `Your quote was accepted for ${slotLabel(scheduledFor)} — confirm or suggest another time.`,
-      data: { kind: 'booking_to_confirm', jobId: id },
-    });
-    return { success: true, data: updated };
+    await publishPersisted(transitioned.notificationIds);
+    return { success: true, data: transitioned.job };
   });
 
   /** POST /jobs/:id/confirm — the provider accepts the customer's slot (§4.3). */
   app.post('/jobs/:id/confirm', auth, async (request) => {
     const { id } = request.params as { id: string };
+    const { expectedScheduledFor, expectedUpdatedAt } = scheduledTransitionSchema.parse(request.body);
     const job = await jobForUser(id, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can confirm');
     if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to confirm');
     // [STRAND-8 / EV-ACT-25] Affirming the slot is the last acceptance gate
     // for NEW work — re-prove live authority and bind the state in the write.
-    const updated = await app.prisma.$transaction(async (tx) => {
-      const users = await tx.$queryRaw<Array<{ id: string; status: string }>>`
+    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(tx, async (boundTx) => {
+      const users = await boundTx.$queryRaw<Array<{ id: string; status: string }>>`
         SELECT "id", "status" FROM "users" WHERE "id" = ${request.user.userId} FOR UPDATE
       `;
       if (!users[0] || users[0].status !== 'ACTIVE') {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your account is not active — contact support before taking new work.');
       }
-      if (!(await isProviderVerified(tx, request.user.userId))) {
+      if (!(await isProviderVerified(boundTx, request.user.userId))) {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your verification has lapsed — renew your documents before confirming new work.');
       }
-      const cas = await tx.serviceJob.updateMany({
-        where: { id, status: 'SCHEDULED', provider: { userId: request.user.userId } },
-        data: { providerConfirmedAt: new Date() },
+      const confirmedAt = new Date();
+      return transitionServiceJob(boundTx, {
+        jobId: id,
+        actorUserId: request.user.userId,
+        expectedUpdatedAt,
+        from: 'SCHEDULED',
+        to: 'SCHEDULED',
+        guard: {
+          provider: { userId: request.user.userId },
+          scheduledFor: expectedScheduledFor,
+          providerConfirmedAt: null,
+        },
+        data: { providerConfirmedAt: confirmedAt },
+        action: 'SERVICE_JOB_SLOT_CONFIRMED',
+        audit: { scheduledFor: expectedScheduledFor.toISOString(), confirmedAt: confirmedAt.toISOString() },
+        notices: [{
+          userId: job.customerId,
+          type: 'ORDER_UPDATE',
+          title: 'Booking confirmed',
+          body: 'Your provider confirmed the time — see you then. Pay cash on completion.',
+          data: { kind: 'booking_confirmed', jobId: id },
+        }],
       });
-      if (cas.count === 0) throw new AppError(400, 'BAD_STATE', 'This job just changed — refresh it');
-      return tx.serviceJob.findUniqueOrThrow({ where: { id } });
-    });
-    await notifications.send({
-      userId: job.customerId,
-      type: 'ORDER_UPDATE',
-      title: 'Booking confirmed',
-      body: 'Your provider confirmed the time — see you then. Pay cash on completion.',
-      data: { kind: 'booking_confirmed', jobId: id },
-    });
-    return { success: true, data: updated };
+    }));
+    await publishPersisted(transitioned.notificationIds);
+    return { success: true, data: transitioned.job };
   });
 
   /** POST /jobs/:id/decline-slot — the provider can't make that time; the job
    *  returns to QUOTED so the customer picks another slot (never a dead end). */
   app.post('/jobs/:id/decline-slot', auth, async (request) => {
     const { id } = request.params as { id: string };
+    const { expectedScheduledFor, expectedUpdatedAt } = scheduledTransitionSchema.parse(request.body);
     const job = await jobForUser(id, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can decline');
     if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to decline');
-    const updated = await app.prisma.serviceJob.update({
-      where: { id },
-      data: { status: 'QUOTED', scheduledFor: null, providerConfirmedAt: null },
-    });
-    await notifications.send({
-      userId: job.customerId,
-      type: 'ORDER_UPDATE',
-      title: 'Time didn’t work',
-      body: 'The provider can’t make that slot — pick another time for your job.',
-      data: { kind: 'booking_slot_declined', jobId: id },
-    });
-    return { success: true, data: updated };
+    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(
+      tx,
+      (boundTx) => transitionServiceJob(boundTx, {
+        jobId: id,
+        actorUserId: request.user.userId,
+        expectedUpdatedAt,
+        from: 'SCHEDULED',
+        to: 'QUOTED',
+        guard: {
+          provider: { userId: request.user.userId },
+          scheduledFor: expectedScheduledFor,
+          providerConfirmedAt: null,
+        },
+        data: { scheduledFor: null, providerConfirmedAt: null },
+        action: 'SERVICE_JOB_SLOT_DECLINED',
+        audit: { scheduledFor: expectedScheduledFor.toISOString() },
+        notices: [{
+          userId: job.customerId,
+          type: 'ORDER_UPDATE',
+          title: 'Time didn’t work',
+          body: 'The provider can’t make that slot — pick another time for your job.',
+          data: { kind: 'booking_slot_declined', jobId: id },
+        }],
+      }),
+    ));
+    await publishPersisted(transitioned.notificationIds);
+    return { success: true, data: transitioned.job };
+  });
+
+  /** The provider explicitly starts confirmed work at or after the agreed time. */
+  app.post('/jobs/:id/start', auth, async (request) => {
+    const { id } = request.params as { id: string };
+    const { expectedScheduledFor, expectedUpdatedAt } = scheduledTransitionSchema.parse(request.body);
+    const job = await jobForUser(id, request.user.userId);
+    if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can start');
+    const startedAt = new Date();
+    assertServiceJobStartDue(expectedScheduledFor, startedAt);
+    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(
+      tx,
+      (boundTx) => transitionServiceJob(boundTx, {
+        jobId: id,
+        actorUserId: request.user.userId,
+        expectedUpdatedAt,
+        from: 'SCHEDULED',
+        to: 'IN_PROGRESS',
+        guard: {
+          provider: { userId: request.user.userId },
+          providerConfirmedAt: { not: null },
+          AND: [
+            { scheduledFor: expectedScheduledFor },
+            { scheduledFor: { lte: startedAt } },
+          ],
+        },
+        action: 'SERVICE_JOB_STARTED',
+        audit: { scheduledFor: expectedScheduledFor.toISOString(), startedAt: startedAt.toISOString() },
+        notices: [{
+          userId: job.customerId,
+          type: 'ORDER_UPDATE',
+          title: 'Job started',
+          body: 'Your provider marked the agreed job as started.',
+          data: { kind: 'booking_started', jobId: id },
+        }],
+        now: startedAt,
+      }),
+    ));
+    await publishPersisted(transitioned.notificationIds);
+    return { success: true, data: transitioned.job };
   });
 
   app.post('/jobs/:id/complete', auth, async (request) => {
     const { id } = request.params as { id: string };
+    const { expectedUpdatedAt } = transitionGenerationSchema.parse(request.body);
     const job = await jobForUser(id, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can complete');
-    if (!['SCHEDULED', 'IN_PROGRESS'].includes(job.status)) throw new AppError(400, 'BAD_STATE', `Cannot complete a ${job.status.toLowerCase()} job`);
-    const updated = await app.prisma.serviceJob.update({ where: { id }, data: { status: 'COMPLETED', completedAt: new Date() } });
-    if (job.chatRoomId) await deactivateRoom(app.prisma, job.chatRoomId); // [R048-004] compare-and-set: closed exactly once
-    // [S0] Completion used to close the chat room and say nothing to anyone.
-    // The two-way rating (§4.6) is the only trust signal this marketplace has,
-    // and nobody rates a job they were never told had ended. Both sides get the
-    // nudge; the customer's also states the payment reality — cash, direct to
-    // the provider, because Swift never holds the money.
-    for (const [userId, body] of [
-      [job.customerId, 'Your provider marked this job complete. Pay cash directly to them, then rate how it went.'],
-      [job.provider.userId, 'You marked this job complete. Rate your customer to close it out.'],
-    ] as Array<[string, string]>) {
-      await notifications.send({
-        userId,
-        type: 'ORDER_UPDATE',
-        title: 'Job complete — how did it go?',
-        body,
-        data: { kind: 'booking_completed', jobId: id },
-      });
-    }
-    return { success: true, data: updated };
+    if (job.status !== 'IN_PROGRESS') throw new AppError(400, 'BAD_STATE', `Cannot complete a ${job.status.toLowerCase()} job`);
+    const completedAt = new Date();
+    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(
+      tx,
+      (boundTx) => transitionServiceJob(boundTx, {
+        jobId: id,
+        actorUserId: request.user.userId,
+        expectedUpdatedAt,
+        from: 'IN_PROGRESS',
+        to: 'COMPLETED',
+        guard: { provider: { userId: request.user.userId } },
+        data: { completedAt },
+        action: 'SERVICE_JOB_COMPLETED',
+        audit: { completedAt: completedAt.toISOString() },
+        closeChatRoomId: job.chatRoomId,
+        notices: [
+          {
+            userId: job.customerId,
+            type: 'ORDER_UPDATE',
+            title: 'Job complete — how did it go?',
+            body: 'Your provider marked this job complete. Pay cash directly to them, then rate how it went.',
+            data: { kind: 'booking_completed', jobId: id },
+          },
+          {
+            userId: job.provider.userId,
+            type: 'ORDER_UPDATE',
+            title: 'Job complete — how did it go?',
+            body: 'You marked this job complete. Rate your customer to close it out.',
+            data: { kind: 'booking_completed', jobId: id },
+          },
+        ],
+        now: completedAt,
+      }),
+    ));
+    await publishPersisted(transitioned.notificationIds);
+    return { success: true, data: transitioned.job };
   });
 
   app.post('/jobs/:id/cancel', auth, async (request) => {
     const { id } = request.params as { id: string };
+    const { expectedUpdatedAt } = transitionGenerationSchema.parse(request.body);
     const job = await jobForUser(id, request.user.userId);
     if (['COMPLETED', 'CANCELLED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', 'This job is already closed');
-    const updated = await app.prisma.serviceJob.update({ where: { id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
-    if (job.chatRoomId) await deactivateRoom(app.prisma, job.chatRoomId); // [R048-004] compare-and-set: closed exactly once
-    // [S0] Cancellation used to be SILENT. A provider who confirmed Tuesday
-    // 09:00 and blocked their whole day was never told the customer had gone —
-    // they showed up. The other side is always told, and the message states the
-    // slot only when one was actually held (a job cancelled at REQUESTED/QUOTED
-    // never had a time; inventing one would be the UI lying).
     const cancelledByCustomer = job.customerId === request.user.userId;
     const when = job.scheduledFor ? slotLabel(job.scheduledFor) : null;
-    await notifications.send({
-      userId: cancelledByCustomer ? job.provider.userId : job.customerId,
-      type: 'ORDER_UPDATE',
-      title: 'Job cancelled',
-      body: cancelledByCustomer
-        ? (when
-          ? `The customer cancelled the job booked for ${when} — that time is free again.`
-          : 'The customer cancelled this job request — no visit is happening.')
-        : (when
-          ? `Your provider cancelled the job booked for ${when} — choose another provider or time.`
-          : 'Your provider cancelled this job request — choose another provider.'),
-      data: { kind: 'booking_cancelled', jobId: id },
-    });
-    return { success: true, data: updated };
+    const cancelledAt = new Date();
+    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(
+      tx,
+      (boundTx) => transitionServiceJob(boundTx, {
+        jobId: id,
+        actorUserId: request.user.userId,
+        expectedUpdatedAt,
+        from: job.status,
+        to: 'CANCELLED',
+        guard: { OR: [{ customerId: request.user.userId }, { provider: { userId: request.user.userId } }] },
+        data: { cancelledAt },
+        action: 'SERVICE_JOB_CANCELLED',
+        audit: { cancelledAt: cancelledAt.toISOString(), cancelledBy: cancelledByCustomer ? 'CUSTOMER' : 'PROVIDER' },
+        closeChatRoomId: job.chatRoomId,
+        notices: [{
+          userId: cancelledByCustomer ? job.provider.userId : job.customerId,
+          type: 'ORDER_UPDATE',
+          title: 'Job cancelled',
+          body: cancelledByCustomer
+            ? (when
+              ? `The customer cancelled the job booked for ${when} — that time is free again.`
+              : 'The customer cancelled this job request — no visit is happening.')
+            : (when
+              ? `Your provider cancelled the job booked for ${when} — choose another provider or time.`
+              : 'Your provider cancelled this job request — choose another provider.'),
+          data: { kind: 'booking_cancelled', jobId: id },
+        }],
+        now: cancelledAt,
+      }),
+    ));
+    await publishPersisted(transitioned.notificationIds);
+    return { success: true, data: transitioned.job };
   });
 
   /** POST /jobs/:id/rate — two-way rating on a completed job. */
