@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 
 /**
  * Test-setup DDL installer for db-push environments: raw-SQL guards (triggers, policies,
@@ -29,12 +29,20 @@ import type { PrismaClient } from '@prisma/client';
  */
 const INSTALL_LOCK = 7_741_990_001n; // arbitrary app-unique advisory key
 const LOCK_TIMEOUT = '4s';
+const MAX_ATTEMPTS = 5;
+const TRANSACTION_MAX_WAIT_MS = 10_000;
+const TRANSACTION_TIMEOUT_MS = 90_000;
+
+type DdlTransaction = Pick<
+  Prisma.TransactionClient,
+  '$executeRawUnsafe' | '$queryRawUnsafe'
+>;
 
 const ENABLE_RLS = /^\s*ALTER\s+TABLE\s+"?([A-Za-z0-9_]+)"?\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY/i;
 const FORCE_RLS = /^\s*ALTER\s+TABLE\s+"?([A-Za-z0-9_]+)"?\s+FORCE\s+ROW\s+LEVEL\s+SECURITY/i;
 
 /** What the database already has, read once, so the skip costs one query per install. */
-async function currentState(prisma: PrismaClient) {
+async function currentState(prisma: DdlTransaction) {
   const rls = await prisma.$queryRawUnsafe<Array<{ relname: string; enabled: boolean; forced: boolean }>>(
     `SELECT c.relname, c.relrowsecurity AS enabled, c.relforcerowsecurity AS forced
        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -44,6 +52,13 @@ async function currentState(prisma: PrismaClient) {
     enabled: new Set(rls.filter((r) => r.enabled).map((r) => r.relname)),
     forced: new Set(rls.filter((r) => r.forced).map((r) => r.relname)),
   };
+}
+
+function databaseCode(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const value = err as { code?: unknown; meta?: { code?: unknown } };
+  if (typeof value.meta?.code === 'string') return value.meta.code;
+  return typeof value.code === 'string' ? value.code : undefined;
 }
 
 const UNDOES_RLS = /(DISABLE\s+ROW\s+LEVEL\s+SECURITY|NO\s+FORCE\s+ROW\s+LEVEL\s+SECURITY)/i;
@@ -58,34 +73,34 @@ function alreadyApplied(ddl: string, state: Awaited<ReturnType<typeof currentSta
 }
 
 export async function installDdl(prisma: PrismaClient, statements: string[]): Promise<void> {
-  await prisma.$executeRawUnsafe(`SELECT pg_advisory_lock(${INSTALL_LOCK})`);
-  try {
-    const state = await currentState(prisma);
-    // If anything in this batch turns RLS off again, the snapshot cannot be trusted: run it all.
-    const batchUndoes = statements.some((ddl) => UNDOES_RLS.test(ddl));
-    const pending = batchUndoes ? statements : statements.filter((ddl) => !alreadyApplied(ddl, state));
-    if (pending.length === 0) return;
-    await prisma.$executeRawUnsafe(`SET lock_timeout = '${LOCK_TIMEOUT}'`);
+  for (let attempt = 1; ; attempt += 1) {
     try {
-      for (const ddl of pending) {
-        for (let attempt = 1; ; attempt++) {
-          try {
-            await prisma.$executeRawUnsafe(ddl);
-            break;
-          } catch (err) {
-            const code = (err as { meta?: { code?: string }; code?: string })?.meta?.code
-              ?? (err as { code?: string })?.code;
-            // 40P01 deadlock · 55P03 lock_not_available (what lock_timeout raises)
-            const retryable = code === '40P01' || code === '55P03';
-            if (!retryable || attempt >= 5) throw err;
-            await new Promise((r) => setTimeout(r, 150 * attempt));
-          }
+      await prisma.$transaction(async (tx) => {
+        // Every operation below must share one pinned connection. SET LOCAL and
+        // the xact-scoped lock are automatically cleared even when a statement fails.
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`);
+        await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${INSTALL_LOCK})`);
+
+        const state = await currentState(tx);
+        // If anything in this batch turns RLS off again, the snapshot cannot be trusted: run it all.
+        const batchUndoes = statements.some((ddl) => UNDOES_RLS.test(ddl));
+        const pending = batchUndoes ? statements : statements.filter((ddl) => !alreadyApplied(ddl, state));
+        for (const ddl of pending) {
+          await tx.$executeRawUnsafe(ddl);
         }
-      }
-    } finally {
-      await prisma.$executeRawUnsafe('SET lock_timeout = DEFAULT');
+      }, {
+        maxWait: TRANSACTION_MAX_WAIT_MS,
+        timeout: TRANSACTION_TIMEOUT_MS,
+      });
+      return;
+    } catch (err) {
+      const code = databaseCode(err);
+      // 40P01 deadlock · 55P03 lock_not_available · P2034 Prisma write conflict/deadlock.
+      // PostgreSQL aborts a transaction after a statement error, so retry the whole
+      // atomic batch on a new connection instead of continuing inside the failed one.
+      const retryable = code === '40P01' || code === '55P03' || code === 'P2034';
+      if (!retryable || attempt >= MAX_ATTEMPTS) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 150 * attempt));
     }
-  } finally {
-    await prisma.$executeRawUnsafe(`SELECT pg_advisory_unlock(${INSTALL_LOCK})`);
   }
 }

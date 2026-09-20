@@ -24,7 +24,7 @@ import { getStorageProvider } from '../providers/storage/storage-provider';
 // verification-hardening.test.ts (expiry sweep, GEI licence, SLA). This file
 // pins what those do not, so the REWIRE in Movement 0's plan has a floor:
 //   1. the upload gate — mime allowlist and magic-byte sniff refuse before storage
-//   2. the plaintext fallback when no MASTER_KEK is configured
+//   2. fail-closed upload when no MASTER_KEK is configured
 //   3. the render path never lets a document be cached (Cache-Control: no-store)
 //   4. the approval expiry rule [A-19]: an expiring type needs a printed date,
 //      never a past one; a non-expiring type stores none
@@ -129,15 +129,12 @@ describe('test_characterization_legacy_upload_paths', () => {
     });
   });
 
-  describe('2. without MASTER_KEK the object is stored as-is and no envelope row is written', () => {
-    it('plaintext fallback', async () => {
+  describe('2. without MASTER_KEK no unproven plaintext upload is issued', () => {
+    it('refuses with an honest retryable server error', async () => {
       const res = await uploadAs(moverToken, PNG_1x1, 'image/png');
-      expect(res.statusCode, res.body).toBe(200);
-      const { url } = res.json().data as { url: string };
-      uploadedKeys.push(url);
-      expect(url).toContain(`verification/${userIds[1]}`);
-      expect(url.endsWith('.enc')).toBe(false);
-      expect(await app.prisma.encryptedObject.findUnique({ where: { fileKey: url } })).toBeNull();
+      expect(res.statusCode, res.body).toBe(503);
+      expect(res.json().error.code).toBe('VERIFICATION_UPLOAD_UNAVAILABLE');
+      expect(await app.prisma.encryptedObject.count({ where: { createdBy: userIds[1] } })).toBe(0);
     });
   });
 
