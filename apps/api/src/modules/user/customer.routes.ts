@@ -760,7 +760,14 @@ export async function customerRoutes(app: FastifyInstance) {
           action: result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
           entity: 'User',
           entityId: request.user.userId,
-          changes: { reason: 'DPA right to erasure (self-serve)', ...(result.status === 'PENDING_DOCUMENT_ERASURE' && { status: result.status, pendingDocuments: result.pendingDocuments }) },
+          changes: {
+            reason: 'DPA right to erasure (self-serve)',
+            ...(result.status === 'PENDING_DOCUMENT_ERASURE' && {
+              status: result.status,
+              pendingDocuments: result.pendingDocuments,
+              pendingAvatarObjects: result.pendingAvatarObjects,
+            }),
+          },
         },
       })
       .catch(() => {});

@@ -2915,7 +2915,8 @@ model SanTombstone {
 /// [F-026-02] Durable census of storage objects still owed a deletion —
 /// failed unwind/account-deletion deletes and replaced selfie pointers.
 /// One open row per key (upsert re-opens); purgedAt closes it. Retried
-/// opportunistically at account deletion; IDV-1 Phase 2 owns the sweeper.
+/// by account deletion and the standing verification sweep; IDV-1 Phase 2
+/// may later absorb this compatibility census into its richer register.
 model StorageOrphan {
   id        String    @id @default(cuid())
   tenantId  String    @default("swift-default")

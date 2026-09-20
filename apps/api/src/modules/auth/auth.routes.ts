@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
-import { recordStorageOrphan } from '../../lib/storage-orphans';
+import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
 import { AppError } from '../../utils/errors';
 import { sendStepUpOtp, verifyStepUp, STEP_UP_TTL_S } from './step-up';
@@ -242,7 +242,8 @@ export async function authRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
-    const { url } = await getStorageProvider().upload({
+    const storage = getStorageProvider();
+    const { url } = await storage.upload({
       buffer,
       filename: file.filename,
       mimeType: file.mimetype,
@@ -258,42 +259,77 @@ export async function authRoutes(app: FastifyInstance) {
     // [F-026-02] Capture the PRIOR pointer before it is overwritten: the old
     // selfie object must be purged (or censused) — a replacement upload used
     // to strand it with no discoverable key.
-    const prior = await app.prisma.user.findUnique({
-      where: { id: request.user.userId },
-      select: { avatar: true, tenantId: true },
-    });
-    let selfieWrite: { count: number };
+    let observedTenant: string | undefined;
+    let swap: {
+      count: number;
+      cleanupOrphanId: string | null;
+    };
     try {
-      selfieWrite = await app.prisma.user.updateMany({
-        where: { id: request.user.userId, status: { notIn: ['DEACTIVATED', 'BANNED', 'SUSPENDED'] } },
-        data: { avatar: url, selfieCapturedAt: new Date() },
+      swap = await app.prisma.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "users" WHERE "id" = ${request.user.userId}
+          FOR UPDATE /* signup-selfie-pointer-authority */
+        `;
+        if (!locked[0]) throw new AppError(404, 'NOT_FOUND', 'Account not found');
+        const prior = await tx.user.findUniqueOrThrow({
+          where: { id: request.user.userId },
+          select: { avatar: true, tenantId: true },
+        });
+        observedTenant = prior.tenantId;
+        const selfieWrite = await tx.user.updateMany({
+          where: { id: request.user.userId, status: { notIn: ['DEACTIVATED', 'BANNED', 'SUSPENDED'] } },
+          data: { avatar: url, selfieCapturedAt: new Date() },
+        });
+        if (selfieWrite.count === 0) {
+          const orphan = await queueStorageOrphan(tx, {
+            key: url,
+            reason: isOwnedAvatarKey(url, request.user.userId)
+              ? 'SELFIE_UNWIND_DELETE_PENDING'
+              : 'SELFIE_UNWIND_AUTHORITY_UNPROVEN',
+            userId: request.user.userId,
+            tenantId: prior.tenantId,
+          });
+          return { count: 0, cleanupOrphanId: orphan.id };
+        }
+        const oldKey = prior.avatar;
+        if (!oldKey || oldKey === url) return { count: 1, cleanupOrphanId: null };
+        const orphan = await queueStorageOrphan(tx, {
+          key: oldKey,
+          reason: isOwnedAvatarKey(oldKey, request.user.userId)
+            ? 'REPLACED_SELFIE_DELETE_PENDING'
+            : 'REPLACED_SELFIE_AUTHORITY_UNPROVEN',
+          userId: request.user.userId,
+          tenantId: prior.tenantId,
+        });
+        return { count: 1, cleanupOrphanId: orphan.id };
       });
     } catch (err) {
-      await getStorageProvider().delete(url).catch(async (cleanupErr) => {
-        app.log.error({ err: cleanupErr, userId: request.user.userId, key: url }, '[F-024-08] selfie cleanup after failed write also failed — orphaned key');
-        // [F-026-02] A log line is not a census — the sweep needs the key.
-        await recordStorageOrphan(app.prisma, app.log, { key: url, reason: 'SELFIE_UNWIND_DELETE_FAILED', userId: request.user.userId, tenantId: prior?.tenantId });
+      // A transaction error is ambiguous at the client boundary. Queue the
+      // just-uploaded object; the retry authority will delete it only if no
+      // committed User pointer references it. If the DB is also unavailable,
+      // preserve the original error and emit the last-resort census failure.
+      await queueStorageOrphan(app.prisma, {
+        key: url,
+        reason: isOwnedAvatarKey(url, request.user.userId)
+          ? 'SELFIE_UNWIND_DELETE_FAILED'
+          : 'SELFIE_UNWIND_AUTHORITY_UNPROVEN',
+        userId: request.user.userId,
+        tenantId: observedTenant,
+      }).then(async (orphan) => {
+        await retryStorageOrphan(app.prisma, storage, app.log, orphan.id);
+      }).catch(async (cleanupErr) => {
+        app.log.error({ err: cleanupErr, userId: request.user.userId, key: url }, '[F-024-08] selfie cleanup census failed after pointer transaction error');
+        await recordStorageOrphan(app.prisma, app.log, {
+          key: url, reason: 'SELFIE_UNWIND_DELETE_FAILED', userId: request.user.userId, tenantId: observedTenant,
+        });
       });
       throw err;
     }
-    if (selfieWrite.count === 0) {
-      await getStorageProvider().delete(url).catch(async (cleanupErr) => {
-        app.log.error({ err: cleanupErr, userId: request.user.userId, key: url }, '[F-024-08] selfie cleanup after inactive-account refusal failed — orphaned key');
-        await recordStorageOrphan(app.prisma, app.log, { key: url, reason: 'SELFIE_UNWIND_DELETE_FAILED', userId: request.user.userId, tenantId: prior?.tenantId });
-      });
-      throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
+    if (swap.cleanupOrphanId) {
+      await retryStorageOrphan(app.prisma, storage, app.log, swap.cleanupOrphanId);
     }
-    // [F-026-02] The write landed — only a server-issued selfie in this
-    // subject's avatar namespace is deletion authority. Census unproven
-    // pointers for reconciliation without granting the retry worker authority.
-    const oldKey = prior?.avatar;
-    if (oldKey && oldKey !== url && isOwnedAvatarKey(oldKey, request.user.userId)) {
-      await getStorageProvider().delete(oldKey).catch(async (purgeErr) => {
-        app.log.error({ err: purgeErr, userId: request.user.userId, key: oldKey }, '[F-026-02] replaced selfie purge failed — censused');
-        await recordStorageOrphan(app.prisma, app.log, { key: oldKey, reason: 'REPLACED_SELFIE_DELETE_FAILED', userId: request.user.userId, tenantId: prior?.tenantId });
-      });
-    } else if (oldKey && oldKey !== url) {
-      await recordStorageOrphan(app.prisma, app.log, { key: oldKey, reason: 'REPLACED_SELFIE_AUTHORITY_UNPROVEN', userId: request.user.userId, tenantId: prior?.tenantId });
+    if (swap.count === 0) {
+      throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
     }
     const user = await app.prisma.user.findUniqueOrThrow({
       where: { id: request.user.userId },

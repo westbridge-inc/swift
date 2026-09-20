@@ -1,4 +1,10 @@
-import { recordStorageOrphan, retryStorageOrphans } from '../../lib/storage-orphans';
+import {
+  openAvatarErasureObligationIds,
+  queueStorageOrphan,
+  recordStorageOrphan,
+  retryStorageOrphan,
+  retryStorageOrphans,
+} from '../../lib/storage-orphans';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
 import type { ServiceJobStatus } from '@prisma/client';
@@ -131,14 +137,27 @@ export class AccountService {
       if (!locked[0]) throw new AppError(404, 'NOT_FOUND', 'Account not found');
       const user = await tx.user.findUniqueOrThrow({
         where: { id: userId },
-        select: { id: true, phone: true, roles: true, status: true },
+        select: { id: true, phone: true, roles: true, status: true, avatar: true, tenantId: true },
       });
+      const queueAvatarBeforePointerClear = async () => {
+        if (!user.avatar) return null;
+        return queueStorageOrphan(tx, {
+          key: user.avatar,
+          reason: isOwnedAvatarKey(user.avatar, userId)
+            ? 'ACCOUNT_DELETION_DELETE_PENDING'
+            : 'ACCOUNT_AVATAR_AUTHORITY_UNPROVEN',
+          userId,
+          tenantId: user.tenantId,
+        });
+      };
       if (user.status === 'DEACTIVATED' && user.phone.startsWith('deleted:')) {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
         // late write landed — fall through and RE-SWEEP (every purge step is
         // idempotent), instead of short-circuiting on the marker.
         await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
-        return { alreadyComplete: false, resweep: true, hold: null };
+        const avatarOrphan = await queueAvatarBeforePointerClear();
+        if (avatarOrphan) await tx.user.update({ where: { id: userId }, data: { avatar: null } });
+        return { alreadyComplete: false, resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
       if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
@@ -206,8 +225,12 @@ export class AccountService {
       // escrow above has already captured any needed contact authority.
       await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
       await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
-      await tx.user.update({ where: { id: userId }, data: { status: 'DEACTIVATED', phone: `deleted:${userId}` } });
-      return { alreadyComplete: false, hold };
+      const avatarOrphan = await queueAvatarBeforePointerClear();
+      await tx.user.update({
+        where: { id: userId },
+        data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
+      });
+      return { alreadyComplete: false, hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if (preflight.alreadyComplete) return { deleted: true };
     if ((preflight as { resweep?: boolean }).resweep) {
@@ -352,25 +375,39 @@ export class AccountService {
     //     the object here, before the column is cleared, so the census still
     //     knows the key. Only the server-issued avatar namespace of this
     //     subject proves deletion authority; unproven pointers stay censused.
-    // [F-026-02] Opportunistic retry of earlier orphans — account deletion is
-    // a natural, already-privileged moment to work the census down without a
-    // dedicated worker (IDV-1's sweeper takes standing ownership later).
-    await retryStorageOrphans(prisma, storage, this.app.log).catch(() => undefined);
-
-    const avatarRow = await prisma.user.findUnique({ where: { id: userId }, select: { avatar: true, tenantId: true } });
-    const rawAvatar = avatarRow?.avatar;
-    if (rawAvatar && isOwnedAvatarKey(rawAvatar, userId)) {
-      // Pass the stored value as-is: the provider's resolveKey normalises the
-      // "/uploads/" prefix and refuses path escapes (same call the doc loop uses).
-      await storage.delete(rawAvatar).catch(async (err) => {
-        this.app.log.error({ err, userId, key: rawAvatar }, '[F-024-08] avatar object delete failed on account deletion — orphaned key');
-        // [F-026-02] Nulling the column erases the only pointer — census it
-        // durably so the deletion barrier survives this failure.
-        await recordStorageOrphan(prisma, this.app.log, { key: rawAvatar, reason: 'ACCOUNT_DELETION_DELETE_FAILED', userId, tenantId: avatarRow?.tenantId });
-      });
-    } else if (rawAvatar) {
-      await recordStorageOrphan(prisma, this.app.log, { key: rawAvatar, reason: 'ACCOUNT_AVATAR_AUTHORITY_UNPROVEN', userId, tenantId: avatarRow?.tenantId });
+    // The pointer and durable obligation were committed together under the
+    // User lock in preflight. Only a provider-canonical, globally unreferenced
+    // key with a confirmed-absence probe can close that exact row. A failed or
+    // quarantined row keeps the account response pending.
+    const avatarOrphanId = (preflight as { avatarOrphanId?: string | null }).avatarOrphanId;
+    let exactAvatarObligationClosed = avatarOrphanId === null || avatarOrphanId === undefined;
+    if (avatarOrphanId) {
+      exactAvatarObligationClosed = await retryStorageOrphan(prisma, storage, this.app.log, avatarOrphanId);
     }
+
+    // A standing verification worker also drains this census. This bounded
+    // pass opportunistically repairs older obligations without making account
+    // deletion of another person the only recovery mechanism.
+    await retryStorageOrphans(prisma, storage, this.app.log).catch(() => undefined);
+    const openAvatarObligations = new Set<string>();
+    try {
+      for (const id of await openAvatarErasureObligationIds(prisma, userId)) openAvatarObligations.add(id);
+      // Upsert preserves prior provenance. If the exact row returned during
+      // preflight belongs to another subject/tenant, the subject census above
+      // intentionally will not find it; unless this invocation proved it
+      // closed, it still blocks a truthful completion response.
+      if (avatarOrphanId && !exactAvatarObligationClosed) {
+        const exact = await prisma.storageOrphan.findUnique({
+          where: { id: avatarOrphanId }, select: { purgedAt: true },
+        }).catch(() => null);
+        if (!exact?.purgedAt) openAvatarObligations.add(avatarOrphanId);
+      }
+    } catch (error) {
+      // Failure to prove an empty global census is pending erasure, not success.
+      openAvatarObligations.add(avatarOrphanId ?? `unproven-avatar-census:${userId}`);
+      this.app.log.error({ err: error, userId }, 'account avatar-erasure completion census failed');
+    }
+    const pendingAvatarObjects = openAvatarObligations.size;
 
     // 1b. Identity-integrity purge (trial-integrity spec Part 8, DPA 2023):
     //     the account's identity signals — hashed keys, cluster membership,
@@ -430,10 +467,11 @@ export class AccountService {
       },
     });
 
-    if (pendingDocuments > 0) {
+    if (pendingDocuments > 0 || pendingAvatarObjects > 0) {
       return {
-        deleted: false, status: 'PENDING_DOCUMENT_ERASURE' as const, pendingDocuments,
-        message: 'Your account is closed. Some document erasure is pending; no further sign-in is needed.',
+        deleted: false, status: 'PENDING_DOCUMENT_ERASURE' as const,
+        pendingDocuments, pendingAvatarObjects,
+        message: 'Your account is closed. Some personal-data erasure is pending; no further sign-in is needed.',
         ...(preflight.hold && { holdId: preflight.hold.holdId, holdReasons: preflight.hold.reasons }),
       };
     }

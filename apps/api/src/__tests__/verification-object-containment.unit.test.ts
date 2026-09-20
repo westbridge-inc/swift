@@ -1,5 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VerificationService } from '../modules/verification/verification.service';
 import { AccountService } from '../modules/user/account.service';
@@ -50,6 +52,38 @@ function referencePage(rows: any[], query: any, column: string) {
     .sort((a, b) => a[column] < b[column] ? -1 : a[column] > b[column] ? 1 : 0).slice(0, query.take);
 }
 
+function rawSecurityCensus(people: Map<string, any>, orphans: Map<string, any>, query: unknown, values: unknown[]) {
+  const sql = String(query);
+  if (sql.includes('avatar-global-census-visibility') || sql.includes('avatar-obligation-global-census-visibility')) {
+    return [{ active: false }];
+  }
+  if (sql.includes('avatar-global-census-page')) {
+    const after = String(values[0] ?? '');
+    const take = Number(values[1]);
+    return [...people.values()]
+      .filter((person) => person.avatar !== null && person.id > after)
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .slice(0, take)
+      .map(({ id, avatar: value }) => ({ id, avatar: value }));
+  }
+  if (sql.includes('avatar-global-census-exact')) {
+    const fileKey = String(values[0]);
+    return [...people.values()]
+      .filter((person) => person.avatar === fileKey)
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .slice(0, 2)
+      .map(({ id, avatar: value }) => ({ id, avatar: value }));
+  }
+  if (sql.includes('avatar-obligation-global-census')) {
+    const userId = String(values[0]);
+    return [...orphans.values()]
+      .filter((row) => row.userId === userId && row.purgedAt === null)
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map(({ id, key: fileKey, reason, userId: owner }) => ({ id, key: fileKey, reason, userId: owner }));
+  }
+  return undefined;
+}
+
 function harness() {
   const people = new Map([A, B].map((id) => [id, {
     id, tenantId: id === A ? 'tenant-a' : 'tenant-b', countryCode: 'GY', trustLevel: 'L1',
@@ -61,8 +95,22 @@ function harness() {
     sha256: 'a'.repeat(64), sizeBytes: 1, mimeType: 'image/jpeg', createdAt: new Date(),
   }]));
   const documents: Array<{ id: string; userId: string; fileUrl: string } & Record<string, any>> = [];
+  const orphans = new Map<string, any>();
   const db: any = {
-    user: { findUnique: vi.fn(async ({ where }: any) => people.get(where.id)), update: vi.fn(), findMany: vi.fn(async () => []) },
+    user: {
+      findUnique: vi.fn(async ({ where }: any) => people.get(where.id)),
+      findUniqueOrThrow: vi.fn(async ({ where }: any) => {
+        const person = people.get(where.id); if (!person) throw new Error('not found'); return { ...person };
+      }),
+      update: vi.fn(),
+      findMany: vi.fn(async ({ where, take }: any) => [...people.values()]
+        .filter((person) => person.avatar !== null
+          && (!where?.id?.gt || person.id > where.id.gt)
+          && (where?.avatar?.not !== null || person.avatar !== null)
+          && (!where?.avatar || typeof where.avatar !== 'string' || person.avatar === where.avatar))
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .slice(0, take)),
+    },
     encryptedObject: {
       findUnique: vi.fn(async ({ where }: any) => objects.get(where.fileKey) ?? null),
       findMany: vi.fn(async (query: any) => referencePage([...objects.values()], query, 'fileKey')),
@@ -84,7 +132,32 @@ function harness() {
         && (!query.where?.retentionExpiresAt || d['retentionExpiresAt'] < query.where.retentionExpiresAt.lt)), query, 'id')),
       create: vi.fn(), update: vi.fn(), updateMany: vi.fn(async () => ({ count: 0 })),
     },
-    storageOrphan: { findMany: vi.fn(async () => []), update: vi.fn(), upsert: vi.fn() },
+    storageOrphan: {
+      findUnique: vi.fn(async ({ where }: any) => where.id
+        ? orphans.get(where.id) ?? null
+        : [...orphans.values()].find((row) => row.key === where.key) ?? null),
+      findMany: vi.fn(async ({ where, take }: any) => [...orphans.values()]
+        .filter((row) => row.purgedAt === null && row.createdAt <= where.createdAt.lte
+          && (!where.OR || row.createdAt > where.OR[0].createdAt.gt
+            || (row.createdAt.getTime() === where.OR[1].createdAt.getTime() && row.id > where.OR[1].id.gt)))
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id))
+        .slice(0, take)),
+      update: vi.fn(async ({ where, data }: any) => {
+        const row = orphans.get(where.id); if (row) Object.assign(row, data); return row;
+      }),
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        const row = orphans.get(where.id);
+        if (!row || row.purgedAt !== where.purgedAt || row.key !== where.key || row.reason !== where.reason
+          || row.userId !== where.userId || row.tenantId !== where.tenantId) return { count: 0 };
+        Object.assign(row, data); return { count: 1 };
+      }),
+      upsert: vi.fn(async ({ where, create, update }: any) => {
+        const prior = [...orphans.values()].find((row) => row.key === where.key);
+        if (prior) { Object.assign(prior, update); return prior; }
+        const row = { id: `orphan-${orphans.size + 1}`, createdAt: new Date(), purgedAt: null, ...create, userId: create.userId ?? null };
+        orphans.set(row.id, row); return row;
+      }),
+    },
     auditLog: { create: vi.fn() }, deletionReceipt: { create: vi.fn(), findFirst: vi.fn() },
     vendor: { count: vi.fn(async () => 0) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
     serviceProvider: { findUnique: vi.fn(async () => null) }, vendorOwner: { findUnique: vi.fn(async () => null) },
@@ -93,7 +166,8 @@ function harness() {
     extractionRun: { updateMany: vi.fn() }, extractedField: { updateMany: vi.fn() },
     integritySettings: { findUnique: vi.fn() },
     $transaction: vi.fn(async (fn: any) => fn(db)),
-    $queryRaw: vi.fn(async () => [{ id: A, status: 'ACTIVE', tenantId: 'tenant-a', countryCode: 'GY' }]),
+    $queryRaw: vi.fn(async (query: unknown, ...values: unknown[]) => rawSecurityCensus(people, orphans, query, values)
+      ?? [{ id: String(values[0] ?? A), status: 'ACTIVE', tenantId: 'tenant-a', countryCode: 'GY' }]),
   };
   for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart']) {
     db[name] = { deleteMany: vi.fn() };
@@ -126,7 +200,16 @@ function harness() {
   storage.getObject.mockResolvedValue(Buffer.from('ciphertext'));
   storage.delete.mockResolvedValue(undefined);
   storage.upload.mockImplementation(async ({ folder }: any) => ({ url: `/uploads/${folder}/${'a'.repeat(16)}.enc` }));
-  return { db, people, objects, documents, provider, service, capture, account, poison, log };
+  return { db, people, objects, documents, orphans, provider, service, capture, account, poison, log };
+}
+
+function addOrphan(h: ReturnType<typeof harness>, row: Record<string, unknown>) {
+  const stored = {
+    id: 'orphan', tenantId: 'tenant-a', reason: 'ERASURE_PURGE_PROBE_FAILED',
+    userId: A, createdAt: new Date(0), purgedAt: null, ...row,
+  };
+  h.orphans.set(stored.id as string, stored);
+  return stored;
 }
 
 afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllEnvs(); vi.useRealTimers(); resetKeyProviderForTests(); });
@@ -176,7 +259,7 @@ describe('verification object containment at real service boundaries', () => {
       h.db.$transaction.mockResolvedValueOnce({ alreadyComplete: false, resweep: true, hold: null });
       action = h.account.deleteAccount(A);
     } else {
-      h.db.storageOrphan.findMany.mockResolvedValue([{ id: 'orphan', key: key(B), userId: A }]);
+      addOrphan(h, { key: key(B) });
       action = retryStorageOrphans(h.db, storage, h.log);
     }
     if (sink === 'orphan') await expect(action).resolves.toBe(0);
@@ -187,7 +270,7 @@ describe('verification object containment at real service boundaries', () => {
     expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();
     expect(h.db.verificationDocument.update).not.toHaveBeenCalled();
     expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
-    expect(h.db.storageOrphan.update).not.toHaveBeenCalled();
+    expect(h.db.storageOrphan.updateMany).not.toHaveBeenCalled();
   });
 
   it.each(['mint', 'render'])('poisoned document cannot reach admin %s dereference', async (operation) => {
@@ -273,18 +356,19 @@ describe('verification object containment at real service boundaries', () => {
 
   it('poisoned account avatar cannot delete a verification object', async () => {
     const h = harness(); h.people.get(A)!.avatar = key(B);
-    h.db.$transaction.mockResolvedValueOnce({ alreadyComplete: false, resweep: true, hold: null });
-    await h.account.deleteAccount(A);
+    const orphan = addOrphan(h, { key: key(B), reason: 'ACCOUNT_AVATAR_AUTHORITY_UNPROVEN' });
+    h.db.$transaction.mockResolvedValueOnce({ alreadyComplete: false, resweep: true, hold: null, avatarOrphanId: orphan.id });
+    await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, pendingAvatarObjects: 1 });
     expect(storage.delete).not.toHaveBeenCalled();
-    expect(h.db.storageOrphan.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ key: key(B), userId: A, reason: 'ACCOUNT_AVATAR_AUTHORITY_UNPROVEN' }) }));
+    expect(h.orphans.get(orphan.id)).toMatchObject({ key: key(B), userId: A, reason: 'ACCOUNT_AVATAR_AUTHORITY_UNPROVEN', purgedAt: null });
   });
 
   it.each([key(B), avatar(B), avatar(A)])('signup selfie replacement only deletes the subject-owned avatar (%s)', async (prior) => {
     const h = harness(); h.people.get(A)!.avatar = prior;
     const next = avatar(A).replace('ssssssssssssssss', 'nnnnnnnnnnnnnnnn');
     storage.upload.mockResolvedValueOnce({ url: next });
-    h.db.user.updateMany = vi.fn(async () => ({ count: 1 }));
-    h.db.user.findUniqueOrThrow = vi.fn(async () => ({ ...h.people.get(A), avatar: next }));
+    h.db.user.updateMany = vi.fn(async ({ data }: any) => { Object.assign(h.people.get(A)!, data); return { count: 1 }; });
+    storage.getObject.mockRejectedValue(Object.assign(new Error('absent'), { code: 'ENOENT' }));
     const routes = await handlers(h, authRoutes);
     await routes.get('post /selfie')!(uploadRequest(A), { send: vi.fn() });
     expect(h.db.user.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: A }), data: expect.objectContaining({ avatar: next }) }));
@@ -328,16 +412,131 @@ describe('verification object containment at real service boundaries', () => {
     expect(h.db.verificationDocument.create).not.toHaveBeenCalled();
   });
 
-  it.each([undefined, A])('unbound/public orphan remains open without deletion authority (%s)', async (userId) => {
-    const h = harness(); h.db.storageOrphan.findMany.mockResolvedValue([{ id: 'orphan', key: avatar(A), userId }]);
+  it('an unbound avatar orphan remains open without deletion authority', async () => {
+    const h = harness(); addOrphan(h, {
+      key: avatar(A), userId: undefined, reason: 'REPLACED_SELFIE_DELETE_FAILED',
+    });
     expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(0);
-    expect(storage.delete).not.toHaveBeenCalled(); expect(h.db.storageOrphan.update).not.toHaveBeenCalled();
+    expect(storage.delete).not.toHaveBeenCalled(); expect(h.db.storageOrphan.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('an eligible replaced selfie retries only after its pointer moved and absence is confirmed', async () => {
+    const h = harness();
+    const old = avatar(A);
+    h.people.get(A)!.avatar = old.replace('ssssssssssssssss', 'nnnnnnnnnnnnnnnn');
+    addOrphan(h, { key: old, reason: 'REPLACED_SELFIE_DELETE_FAILED' });
+    storage.getObject.mockRejectedValue(Object.assign(new Error('absent'), { code: 'ENOENT' }));
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(1);
+    expect(storage.delete).toHaveBeenCalledWith(old);
+    expect(storage.getObject).toHaveBeenCalledWith(old);
+    expect(h.db.storageOrphan.updateMany).toHaveBeenCalledOnce();
+    expect(h.db.encryptedObject.findMany).not.toHaveBeenCalled();
+  });
+
+  it('an eligible avatar orphan stays open while the exact pointer is current', async () => {
+    const h = harness(); addOrphan(h, { key: avatar(A), reason: 'REPLACED_SELFIE_DELETE_FAILED' });
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(0);
+    expect(storage.delete).not.toHaveBeenCalled(); expect(h.db.storageOrphan.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a foreign current physical alias keeps an eligible local avatar orphan open', async () => {
+    const h = harness();
+    const old = avatar(A);
+    h.people.get(A)!.avatar = old.replace('ssssssssssssssss', 'nnnnnnnnnnnnnnnn');
+    h.people.get(B)!.avatar = old.replace('/avatars/subject-a/', '/avatars/subject-a/spare/../');
+    addOrphan(h, { key: old, reason: 'REPLACED_SELFIE_DELETE_FAILED' });
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(0);
+    expect(storage.delete).not.toHaveBeenCalled(); expect(h.db.storageOrphan.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a request-tenant-filtered User delegate cannot hide a foreign-tenant physical alias', async () => {
+    const h = harness();
+    const old = avatar(A);
+    h.people.get(A)!.avatar = old.replace('ssssssssssssssss', 'nnnnnnnnnnnnnnnn');
+    h.people.get(B)!.avatar = old.replace('/avatars/subject-a/', '/avatars/subject-a/spare/../');
+    h.db.user.findMany.mockImplementation(async ({ where, take }: any) => [...h.people.values()]
+      .filter((person) => person.tenantId === 'tenant-a'
+        && person.avatar !== null
+        && (!where?.id?.gt || person.id > where.id.gt))
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .slice(0, take));
+    addOrphan(h, { key: old, reason: 'REPLACED_SELFIE_DELETE_FAILED' });
+    storage.getObject.mockRejectedValue(Object.assign(new Error('absent'), { code: 'ENOENT' }));
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(0);
+    expect(storage.delete).not.toHaveBeenCalled();
+    expect(h.db.storageOrphan.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses avatar deletion when PostgreSQL reports a filtered same-connection census', async () => {
+    const h = harness();
+    const raw = h.db.$queryRaw.getMockImplementation()!;
+    h.db.$queryRaw.mockImplementation(async (query: unknown, ...values: unknown[]) =>
+      String(query).includes('avatar-global-census-visibility') ? [{ active: true }] : raw(query, ...values));
+    const old = avatar(A);
+    h.people.get(A)!.avatar = old.replace('ssssssssssssssss', 'nnnnnnnnnnnnnnnn');
+    addOrphan(h, { key: old, reason: 'REPLACED_SELFIE_DELETE_FAILED' });
+    storage.getObject.mockRejectedValue(Object.assign(new Error('absent'), { code: 'ENOENT' }));
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(0);
+    expect(storage.delete).not.toHaveBeenCalled();
+  });
+
+  it.each(['REPLACED_SELFIE_AUTHORITY_UNPROVEN', 'UNKNOWN_REASON'])('an untrusted avatar reason %s never becomes deletion authority', async (reason) => {
+    const h = harness(); (h.people.get(A) as any).avatar = null;
+    addOrphan(h, { key: avatar(A), reason });
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(0);
+    expect(storage.delete).not.toHaveBeenCalled(); expect(h.db.storageOrphan.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['local', avatar(A).slice('/uploads/'.length)],
+    ['local', avatar(A).replace('/avatars/', '/avatars//')],
+    ['s3', avatar(A)],
+  ])('provider %s refuses noncanonical avatar key %s', async (provider, fileKey) => {
+    vi.stubEnv('STORAGE_PROVIDER', provider);
+    const h = harness(); (h.people.get(A) as any).avatar = null;
+    addOrphan(h, { key: fileKey, reason: 'REPLACED_SELFIE_DELETE_FAILED' });
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(0);
+    expect(storage.delete).not.toHaveBeenCalled(); expect(h.db.storageOrphan.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('S3 retries only its literal canonical subject key', async () => {
+    vi.stubEnv('STORAGE_PROVIDER', 's3');
+    const h = harness(); (h.people.get(A) as any).avatar = null;
+    const objectKey = avatar(A).slice('/uploads/'.length);
+    addOrphan(h, { key: objectKey, reason: 'REPLACED_SELFIE_DELETE_FAILED' });
+    storage.getObject.mockRejectedValue(Object.assign(new Error('absent'), { name: 'NoSuchKey' }));
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(1);
+    expect(storage.delete).toHaveBeenCalledExactlyOnceWith(objectKey);
+  });
+
+  it('a tenant-mismatched avatar row and a readable post-delete object stay open', async () => {
+    const h = harness(); h.people.get(A)!.avatar = avatar(A).replace('ssssssssssssssss', 'nnnnnnnnnnnnnnnn');
+    const row = addOrphan(h, { key: avatar(A), tenantId: 'tenant-b', reason: 'REPLACED_SELFIE_DELETE_FAILED' });
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(0);
+    expect(storage.delete).not.toHaveBeenCalled();
+    Object.assign(row, { tenantId: 'tenant-a' });
+    storage.delete.mockResolvedValue(undefined);
+    storage.getObject.mockResolvedValue(Buffer.from('still readable'));
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(0);
+    expect(storage.delete).toHaveBeenCalledWith(avatar(A));
+    expect(h.db.storageOrphan.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('an unknown provider 404 is not proof that the exact avatar object is absent', async () => {
+    const h = harness(); (h.people.get(A) as any).avatar = null;
+    const row = addOrphan(h, { key: avatar(A), reason: 'REPLACED_SELFIE_DELETE_FAILED' });
+    storage.delete.mockRejectedValue(new Error('delete routing failed'));
+    storage.getObject.mockRejectedValue({ name: 'NoSuchBucket', $metadata: { httpStatusCode: 404 } });
+    expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(0);
+    expect(row.purgedAt).toBeNull();
+    expect(h.db.storageOrphan.updateMany).not.toHaveBeenCalled();
   });
 
   it('an owned unclaimed envelope orphan can retry after revalidation', async () => {
-    const h = harness(); h.db.storageOrphan.findMany.mockResolvedValue([{ id: 'orphan', key: key(A), userId: A }]);
+    const h = harness(); addOrphan(h, { key: key(A) });
+    storage.getObject.mockRejectedValue(Object.assign(new Error('absent'), { code: 'ENOENT' }));
     expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(1);
-    expect(storage.delete).toHaveBeenCalledWith(key(A)); expect(h.db.storageOrphan.update).toHaveBeenCalledOnce();
+    expect(storage.delete).toHaveBeenCalledWith(key(A)); expect(h.db.storageOrphan.updateMany).toHaveBeenCalledOnce();
   });
 });
 
@@ -465,13 +664,19 @@ describe('review corrections: deletion obligations and retry progress', () => {
   it('HTTP deletion reports 202 and records pending state rather than a completed deletion event', async () => {
     const h = harness();
     h.db.auditLog.create.mockResolvedValue({});
-    vi.spyOn(AccountService.prototype, 'deleteAccount').mockResolvedValue({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1, message: 'Document erasure pending.' });
+    vi.spyOn(AccountService.prototype, 'deleteAccount').mockResolvedValue({
+      deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1,
+      pendingAvatarObjects: 1, message: 'Personal-data erasure pending.',
+    });
     const routes = await handlers(h, customerRoutes);
     const reply = { code: vi.fn() };
     const result = await routes.get('delete /account')!({ user: { userId: A } }, reply);
     expect(result).toMatchObject({ success: true, data: { deleted: false, status: 'PENDING_DOCUMENT_ERASURE' } });
     expect(reply.code).toHaveBeenCalledWith(202);
-    expect(h.db.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'ACCOUNT_SELF_DELETION_PENDING' }) }));
+    expect(h.db.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      action: 'ACCOUNT_SELF_DELETION_PENDING',
+      changes: expect.objectContaining({ pendingDocuments: 1, pendingAvatarObjects: 1 }),
+    }) }));
   });
 
   function accountHarness() {
@@ -480,8 +685,20 @@ describe('review corrections: deletion obligations and retry progress', () => {
     h.db.user.findUniqueOrThrow = vi.fn(async () => ({ ...person }));
     h.db.user.findUnique.mockImplementation(async ({ where }: any) => ({ ...h.people.get(where.id) }));
     h.db.user.update.mockImplementation(async ({ data }: any) => { Object.assign(person, data); return person; });
-    h.db.$queryRaw.mockImplementation(async (_query: unknown, userId: string) => {
-      const user = h.people.get(userId); return user ? [{ ...user }] : [];
+    h.db.$queryRaw.mockImplementation(async (query: unknown, ...values: unknown[]) => {
+      const census = rawSecurityCensus(h.people, h.orphans, query, values);
+      if (census) return census;
+      const id = String(values[0] ?? A);
+      if (String(query).includes('storage_orphans')) return h.orphans.has(id) ? [{ id }] : [];
+      const user = h.people.get(id); return user ? [{ ...user }] : [];
+    });
+    let avatarPresent = true;
+    storage.delete.mockImplementation(async (fileKey: string) => {
+      if (fileKey === avatar(A)) avatarPresent = false;
+    });
+    storage.getObject.mockImplementation(async (fileKey: string) => {
+      if (fileKey === avatar(A) && !avatarPresent) throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+      return Buffer.from('ciphertext');
     });
     h.db.serviceProvider.updateMany = vi.fn(async () => ({ count: 0 }));
     for (const name of ['order', 'serviceJob']) h.db[name] = { count: vi.fn(async () => 0) };
@@ -541,6 +758,85 @@ describe('review corrections: deletion obligations and retry progress', () => {
     };
     return { ...h, doc, run, field, assertErased };
   }
+
+  it('account deletion stays pending when avatar absence cannot be proved', async () => {
+    const h = accountHarness();
+    storage.delete.mockResolvedValue(undefined);
+    storage.getObject.mockResolvedValue(Buffer.from('avatar-still-present'));
+    await expect(h.account.deleteAccount(A)).resolves.toMatchObject({
+      deleted: false,
+      status: 'PENDING_DOCUMENT_ERASURE',
+      pendingDocuments: 0,
+      pendingAvatarObjects: 1,
+    });
+    expect(h.person).toMatchObject({ status: 'DEACTIVATED', avatar: null, phone: `deleted:${A}` });
+    expect(h.db.storageOrphan.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ key: avatar(A), userId: A, tenantId: 'tenant-a' }),
+    }));
+    expect(storage.getObject).toHaveBeenCalledWith(avatar(A));
+  });
+
+  it('an account-deletion re-sweep stays pending while any prior avatar erasure obligation is open', async () => {
+    const h = accountHarness();
+    storage.delete.mockResolvedValue(undefined);
+    storage.getObject.mockResolvedValue(Buffer.from('avatar-still-present'));
+    await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, pendingAvatarObjects: 1 });
+    expect(h.person.avatar).toBeNull();
+    await expect(h.account.deleteAccount(A)).resolves.toMatchObject({
+      deleted: false,
+      status: 'PENDING_DOCUMENT_ERASURE',
+      pendingDocuments: 0,
+      pendingAvatarObjects: 1,
+    });
+  });
+
+  it('historical quarantined avatar obligations keep a later account re-sweep pending', async () => {
+    const h = accountHarness();
+    Object.assign(h.person, { status: 'DEACTIVATED', phone: `deleted:${A}`, avatar: null });
+    addOrphan(h, { id: 'historical-avatar', key: avatar(A), reason: 'REPLACED_SELFIE_AUTHORITY_UNPROVEN' });
+    await expect(h.account.deleteAccount(A)).resolves.toMatchObject({
+      deleted: false,
+      status: 'PENDING_DOCUMENT_ERASURE',
+      pendingAvatarObjects: 1,
+    });
+    expect(storage.delete).not.toHaveBeenCalledWith(avatar(A));
+  });
+
+  it('conflicting orphan provenance rolls back pointer clearing on every account-deletion attempt', async () => {
+    const h = accountHarness();
+    addOrphan(h, {
+      id: 'conflicting-owner', key: avatar(A), userId: B, tenantId: 'tenant-a',
+      reason: 'REPLACED_SELFIE_DELETE_FAILED',
+    });
+    await expect(h.account.deleteAccount(A)).rejects.toThrow('conflicting storage-orphan provenance');
+    expect(h.person).toMatchObject({ status: 'ACTIVE', avatar: avatar(A), phone: 'synthetic-phone' });
+    await expect(h.account.deleteAccount(A)).rejects.toThrow('conflicting storage-orphan provenance');
+    expect(h.person).toMatchObject({ status: 'ACTIVE', avatar: avatar(A), phone: 'synthetic-phone' });
+    expect(storage.delete).not.toHaveBeenCalled();
+  });
+
+  it('account completion remains pending when PostgreSQL cannot prove a global orphan census', async () => {
+    const h = accountHarness();
+    Object.assign(h.person, { status: 'DEACTIVATED', phone: `deleted:${A}`, avatar: null });
+    const raw = h.db.$queryRaw.getMockImplementation()!;
+    h.db.$queryRaw.mockImplementation(async (query: unknown, ...values: unknown[]) =>
+      String(query).includes('avatar-obligation-global-census-visibility') ? [{ active: true }] : raw(query, ...values));
+    await expect(h.account.deleteAccount(A)).resolves.toMatchObject({
+      deleted: false,
+      status: 'PENDING_DOCUMENT_ERASURE',
+      pendingAvatarObjects: 1,
+    });
+  });
+
+  it('standing avatar recovery runs before a fallible document purge can abort the sweep', () => {
+    const queue = readFileSync(join(__dirname, '..', 'jobs', 'queue.ts'), 'utf8');
+    const expirySweep = queue.slice(queue.indexOf("if (job.name === 'expiry-sweep')"), queue.indexOf("if (job.name === 'compliance-sample')"));
+    const orphanRetry = expirySweep.indexOf('retryStorageOrphans(');
+    const documentPurge = expirySweep.indexOf('verification.purgeExpiredDocuments()');
+    expect(orphanRetry).toBeGreaterThan(-1);
+    expect(documentPurge).toBeGreaterThan(-1);
+    expect(orphanRetry).toBeLessThan(documentPurge);
+  });
 
   function retentionRaceHarness() {
     const h = erasureRaceHarness();
@@ -791,7 +1087,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     expect(h.db.verificationDocument.updateMany.mock.invocationCallOrder[0]).toBeLessThan(h.db.user.update.mock.invocationCallOrder[0]);
     for (const table of ['session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
     expect(storage.delete).toHaveBeenCalledExactlyOnceWith(avatar(A));
-    expect(storage.getObject).not.toHaveBeenCalled();
+    expect(storage.getObject).toHaveBeenCalledWith(avatar(A));
     expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();
     expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
     expect(h.db.extractionRun.updateMany).not.toHaveBeenCalled();
@@ -821,8 +1117,13 @@ describe('review corrections: deletion obligations and retry progress', () => {
 
   it('repeated bounded orphan scans reach eligible tails while retaining failed oldest rows', async () => {
     const h = harness();
-    const rows = Array.from({ length: 13 }, (_, i) => ({ id: String(i).padStart(3, '0'), createdAt: new Date(0), purgedAt: null as Date | null, userId: A, key: i < 6 ? avatar(A) + i : key(A, String(i)) }));
+    const rows = Array.from({ length: 13 }, (_, i) => ({
+      id: String(i).padStart(3, '0'), tenantId: 'tenant-a', createdAt: new Date(0), purgedAt: null as Date | null,
+      userId: A, key: i < 6 ? avatar(A) + i : key(A, String(i)), reason: 'ERASURE_PURGE_PROBE_FAILED',
+    }));
+    for (const row of rows) h.orphans.set(row.id, row);
     for (const row of rows.slice(6)) h.objects.set(row.key, { ...h.objects.get(key(A))!, fileKey: row.key });
+    storage.getObject.mockRejectedValue(Object.assign(new Error('absent'), { code: 'ENOENT' }));
     h.db.storageOrphan.findMany.mockImplementation(async ({ take, where, orderBy, cursor, skip }: any) => {
       expect(take).toBeLessThanOrEqual(5);
       expect(orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }]);
@@ -831,7 +1132,6 @@ describe('review corrections: deletion obligations and retry progress', () => {
         && (!where.OR || r.createdAt > where.OR[0].createdAt.gt
           || (r.createdAt.getTime() === where.OR[1].createdAt.getTime() && r.id > where.OR[1].id.gt))).slice(0, take);
     });
-    h.db.storageOrphan.update.mockImplementation(async ({ where }: any) => { rows.find((r) => r.id === where.id)!.purgedAt = new Date(); });
     const counts = [];
     for (let run = 0; run < 3; run++) counts.push(await retryStorageOrphans(h.db, storage, h.log));
     expect(counts).toEqual([5, 2, 0]);

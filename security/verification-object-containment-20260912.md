@@ -562,3 +562,81 @@ binds the local commit/tree; fresh independent exact-head Astra review and
 all current-head/current-base CI gates remain mandatory. No service/provider,
 credential/customer-data, production/deployment, simulator or Git publication
 action occurred during this correction.
+
+## REPORT-231 avatar-erasure correction — 2026-09-19 local candidate
+
+The published exact head `07c70e2bfdf3d86906ef4e0caa7a4e59165c56ca`
+had 13/13 green CI checks but was correctly rejected by independent exact-head
+review: every production avatar orphan was routed through verification-envelope
+authority, could never drain, and account deletion could still claim success.
+Old CI is therefore superseded and cannot authorize merge.
+
+Failing tests were written before this production correction. The focused
+service-free replay observed three genuine failures: a request-tenant-filtered
+User delegate hid a foreign-tenant physical alias (`received 1`, expected 0), a
+second account-deletion request returned `{deleted:true}` while the prior avatar
+obligation remained open, and the scheduled orphan drain occurred after the
+fallible document reaper. Actual red: 3 failed / 130 passed (133), exit 1.
+
+The resulting correction now:
+
+- gives avatars their own provider-canonical authority (local
+  `/uploads/avatars/<subject>/<16>.<ext>`; S3/R2
+  `avatars/<subject>/<16>.<ext>`), separate from encrypted verification
+  envelopes;
+- performs the global current-pointer/physical-alias census with raw SQL and
+  first proves `row_security_active('users'::regclass) = false` on the same
+  transaction connection; filtered, missing or erroneous visibility evidence
+  refuses deletion;
+- accepts only the closed historical/pending avatar reason allowlist as delete
+  authority, locks User then StorageOrphan, re-reads immutable provenance,
+  deletes and post-probes, and closes only the exact row with CAS;
+- treats only explicit `ENOENT`, `NoSuchKey` or `NotFound` as absence; an
+  arbitrary 404/`NoSuchBucket` remains open;
+- queues the old pointer in the same transaction as selfie replacement or
+  account pointer clearing, and rejects conflicting subject/tenant provenance
+  so the pointer mutation rolls back rather than becoming an invocation-local
+  obligation that the next request forgets;
+- derives account completion from every open subject avatar obligation plus
+  the exact preflight row, with the global StorageOrphan census and
+  `row_security_active('storage_orphans'::regclass)` proof sharing one
+  transaction connection; inability to prove an empty census returns pending;
+- returns 202/pending through the existing route/audit/mobile contract until
+  both document and avatar obligations are discharged; and
+- runs a bounded standing orphan stage before the fallible document purge,
+  containing and paging its own failure so neither erasure stream starves the
+  other.
+
+The real-PostgreSQL additions cover serialized concurrent selfie replacement,
+provider-canonical old/current pointers, cross-tenant alias refusal, confirmed
+absence, retry and immutable provenance. `storage-orphans.test.ts` now cleans
+its exact census after each case; its prior open verification row could
+otherwise make the avatar count assertion nondeterministic. Those DB cases are
+held locally because both assigned services were actually unavailable:
+`pg_isready -h 127.0.0.1 -p 5434 -t 5` returned `no response`; Redis 6382/14
+returned `Connection refused`. Normal CI must provision the security namespace,
+replay migrations and execute them.
+
+Final local evidence on the dirty candidate, Node 20.19.6:
+
+| Check | Actual result |
+| --- | --- |
+| Focused authority/account/queue correction | 1 file / 138 tests passed |
+| Complete no-service containment configuration | 17 files / 230 tests passed; 9.92s |
+| API source + scripts typecheck | `tsc --noEmit && tsc -p tsconfig.scripts.json`; exit 0 |
+| Full API lint | exit 0, no diagnostics |
+| Mobile pending-deletion contract | 1 file / 2 tests passed |
+| Mobile typecheck and full lint | both exit 0, no diagnostics |
+| Diff hygiene | `git diff --check`; exit 0 |
+
+Three independent pre-commit Astra review passes found five initial issues and
+two follow-on issues; all seven were corrected and the final pass reported no
+remaining blocker in scope. This is not the merge review: after commit/push, a
+new reviewer must inspect the immutable exact head and fresh current-base CI.
+
+Explicit residual: under a NOBYPASSRLS connection where PostgreSQL reports RLS
+active for either census table, this compatibility implementation intentionally
+refuses destructive avatar cleanup/completion. Structural provider-independent
+object lineage or a sanctioned same-transaction system authority is still
+required before that deployment posture can drain these obligations. The safe
+failure is pending erasure, never a false success or cross-tenant delete.
