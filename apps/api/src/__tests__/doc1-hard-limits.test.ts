@@ -10,6 +10,7 @@
  * Nothing here is skipped, and nothing here pretends.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { recordExternalProcessingDecision } from '../modules/verification/external-processing';
 import { assertExternalProcessingPermitted } from '../modules/legal/processor-register';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -68,6 +69,7 @@ beforeAll(async () => {
     avatar: `avatars/${RUN}/selfie.jpg`, selfieCapturedAt: new Date(),
   } }));
   userId = u.id;
+  await signupSelfieFixture(app.prisma, userId);
 });
 
 afterAll(async () => {
@@ -81,7 +83,7 @@ afterAll(async () => {
 
 const service = (kyc: KycProvider) => new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), kyc);
 const submitOwnerId = (kyc: KycProvider, tag: string) =>
-  runWithTenant('swift-default', () => service(kyc).submitDocument(userId, 'RESTAURANT', 'owner_national_id', `documents/${RUN}/${tag}.jpg`, 'v1'));
+  runWithTenant('swift-default', async () => service(kyc).submitDocument(userId, 'RESTAURANT', 'owner_national_id', await ownedVerificationFixture(app.prisma, userId, tag), 'v1'));
 
 describe('[DOC-1 §0.5] hard limits', () => {
   it.fails('[1] PERSONAL bytes are not persisted beyond the IDV-1 transient intake TTL — VIOLATED BY DECISION (CONFLICT-DOC-2): images persist to the retention clock', () => {

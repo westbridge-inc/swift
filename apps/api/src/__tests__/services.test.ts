@@ -15,6 +15,7 @@ import {
 } from '../modules/services/services.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { ownedVerificationFixture } from './helpers/verification-object';
 
 // ---------------------------------------------------------------------------
 // Services (spec §4.6). Provider profile + qualification badge +
@@ -318,7 +319,7 @@ describe('Services — provider verification + qualification badge', () => {
       const submitted = await inject('POST', '/api/v1/verification/documents', {
         role: 'SERVICE_PROVIDER',
         docType,
-        fileUrl: `storage://test/auto-approve-${docType}.jpg`,
+        fileUrl: await ownedVerificationFixture(app.prisma, provider.userId, `auto-approve-${docType}`),
         consent: true,
         privacyNoticeVersion: 'v1',
       }, provider.token);
