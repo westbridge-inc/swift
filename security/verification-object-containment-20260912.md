@@ -669,3 +669,55 @@ machine's Homebrew Node 25 binary was missing `libada.3.dylib`:
 
 The prior exact-head approval is invalidated. A fresh immutable-head review and
 fresh CI on the new commit remain mandatory before merge.
+
+### Verification multipart filename correction — 2026-09-19
+
+Immutable independent review `REPORT-PR1247-A9590861-INDEPENDENT-REVIEW-20260919.md`
+returned REQUEST CHANGES for F-PR1247-A959-01 (S2) on
+`a9590861b6a25d4e1cabeeddab6a1cfa4f9eaa7f`. The verification upload route,
+separately from the selfie route, appended `.enc` to an untrusted multipart
+filename. Real Fastify multipart normalizes `""`, `"/"` and `"."` to empty;
+the resulting dotfile `.enc` has no extension, so both adapters issue `.bin`.
+The strict authority resolver then correctly refuses the successfully uploaded
+object. The independent report remains unchanged.
+
+The route now supplies the server-selected `verification.enc`. The shared
+adapter naming helper still creates an opaque random basename; tenant/subject
+folder, encryption, envelope metadata and authority requirements are unchanged.
+
+Added 48 regression cases using the actual Fastify multipart parser and upload
+handler, shared adapter name helper, actual authority resolver and submission
+entrypoint: local/S3/R2 key forms × empty/slash/dot/normal names × all four
+allowed MIME types. Provider object I/O and Prisma delegates remain in memory;
+JPEG/WebP/PDF payloads are synthetic signature fixtures, not codec validation.
+Each success must produce an owned manageable `.enc` object, decrypt to the
+original bytes, reach document submission, and refuse another subject.
+
+Failing-tests-first command from `apps/api`, before changing the production
+route (Node 20.19.6):
+
+```sh
+NODE_ENV=test KYC_PROVIDER=sandbox /Users/westbridgeinc/.nvm/versions/node/v20.19.6/bin/node --input-type=module -e 'import { startVitest } from "vitest/node"; const ctx = await startVitest("test", ["src/__tests__/verification-object-containment.unit.test.ts"], { config: false, watch: false, cache: false, fileParallelism: false, testNamePattern: "real multipart upload remains manageable" }, { configFile: false, test: { include: ["src/__tests__/verification-object-containment.unit.test.ts"], env: { NODE_ENV: "test", KYC_PROVIDER: "sandbox" }, deps: { optimizer: { enabled: false } } } }); const failed = process.exitCode; await ctx.close(); process.exitCode = failed;'
+```
+
+Actual result: exit 1, `36 failed | 12 passed | 147 skipped (195)`.
+The 36 invalid-name cases received `.bin`; all 12 normal-name controls passed.
+The name filter isolated the new regressions for this red proof; the complete
+suite was subsequently run after correction.
+
+Post-correction command from `apps/api`:
+
+```sh
+PATH=/Users/westbridgeinc/.nvm/versions/node/v20.19.6/bin:$PATH pnpm exec vitest run --config vitest.containment.config.ts
+```
+
+Actual result: exit 0, `Test Files 17 passed (17)`, `Tests 287 passed (287)`,
+duration 33.28s. Full API lint (`pnpm run lint` with the same PATH) exited 0
+without diagnostics. API source and scripts typecheck (`pnpm run type-check`,
+which executes `tsc --noEmit && tsc -p tsconfig.scripts.json`, with the same PATH)
+exited 0 without diagnostics. `git diff --check` exited 0 without output.
+
+No DB/Redis/provider/production/customer-data/simulator action was performed.
+Existing structural-lineage, historical/unsubmitted-object erasure,
+partial-shred retry, legal-hold fencing and AML-policy limitations remain open.
+Fresh immutable-head review and current-base CI are required before merge.

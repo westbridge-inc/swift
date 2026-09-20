@@ -313,6 +313,51 @@ describe('verification object containment at real service boundaries', () => {
     expect(storage.upload).not.toHaveBeenCalled(); expect(h.db.encryptedObject.create).not.toHaveBeenCalled();
   });
 
+  it.each(['local', 's3', 'r2'].flatMap((provider) =>
+    ['', '/', '.', 'normal.png'].flatMap((filename) =>
+      ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'].map((mimetype) => ({ provider, filename, mimetype }))),
+  ))('real multipart upload remains manageable for $provider / "$filename" / $mimetype', async ({ provider, filename, mimetype }) => {
+    const { default: Fastify } = await import('fastify');
+    const { default: multipart } = await import('@fastify/multipart');
+    const h = harness(); h.objects.clear();
+    vi.stubEnv('STORAGE_PROVIDER', provider);
+    vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64')); resetKeyProviderForTests();
+    // Exercise the name derivation shared by the real adapters, not a fixed
+    // .enc URL that would conceal parser-normalized empty client filenames.
+    storage.upload.mockImplementation(async ({ folder, filename: storedName, buffer }: any) => {
+      storage.getObject.mockResolvedValue(buffer);
+      return { url: `${provider === 'local' ? '/uploads/' : ''}${folder}/${createOpaqueStorageName(storedName)}` };
+    });
+    const content = mimetype === 'application/pdf' ? Buffer.from('%PDF-1.7\nsynthetic document')
+      : mimetype === 'image/jpeg' ? Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 8, 0, 0, 0, 0, 0, 0])
+      : mimetype === 'image/webp' ? Buffer.from('RIFF\x04\x00\x00\x00WEBP', 'binary') : png;
+    const routes = await handlers(h, verificationRoutes);
+    const app = Fastify(); await app.register(multipart);
+    app.post('/upload', async (request) => {
+      request.user = { userId: A } as typeof request.user;
+      return routes.get('post /upload')!(request);
+    });
+    try {
+      const payload = Buffer.concat([
+        Buffer.from(`--filename-contract\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mimetype}\r\n\r\n`),
+        content, Buffer.from('\r\n--filename-contract--\r\n'),
+      ]);
+      const response = await app.inject({ method: 'POST', url: '/upload',
+        headers: { 'content-type': 'multipart/form-data; boundary=filename-contract' }, payload });
+      expect(response.statusCode).toBe(200);
+      const { url } = response.json().data;
+      expect(url).toMatch(/\.enc$/);
+      expect(h.objects.size).toBe(1);
+      const meta = await resolveVerificationObject(h.db, { fileKey: url, userId: A });
+      expect(meta).toMatchObject({ createdBy: A, mimeType: mimetype, sizeBytes: content.length });
+      const dek = await getKeyProvider()!.unwrapDek(Buffer.from(meta.wrappedDek!));
+      expect(decryptBuffer(storage.upload.mock.calls[0]![0].buffer, dek, Buffer.from(meta.iv), Buffer.from(meta.authTag))).toEqual(content);
+      await expect(h.service.submitDocument(A, 'MOVER', 'vehicle_registration', url, '1')).resolves.toMatchObject({ userId: A, fileUrl: url });
+      expect(h.provider.verifyDocument).toHaveBeenCalledOnce();
+      await expect(resolveVerificationObject(h.db, { fileKey: url, userId: B })).rejects.toMatchObject(unavailable);
+    } finally { await app.close(); }
+  });
+
   it.each(['metadata', 'missing-storage', 'storage-error', 'invalid-envelope'])('admin render fails closed on %s without exposing storage errors', async (fault) => {
     const h = harness(); const doc = h.poison(); doc.fileUrl = key(A);
     vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64')); resetKeyProviderForTests();

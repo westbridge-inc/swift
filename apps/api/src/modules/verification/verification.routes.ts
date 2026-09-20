@@ -150,7 +150,10 @@ export async function verificationRoutes(app: FastifyInstance) {
       const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
       const { url } = await storage.upload({
         buffer: ciphertext,
-        filename: `${file.filename}.enc`,
+        // Multipart normalizes empty/path-only names to ''. Appending .enc
+        // would then make a dotfile, which adapters name .bin. The envelope
+        // extension is server-owned and must satisfy object authority.
+        filename: 'verification.enc',
         mimeType: 'application/octet-stream',
         folder: `verification/${request.user.userId}`,
       });
