@@ -44,7 +44,23 @@ class FakeIndex implements SearchIndexLike {
 }
 class FakeClient implements SearchClientLike {
   indexes = new Map<string, FakeIndex>();
-  async createIndex(uid: string) { this.index(uid); return { taskUid: 1 }; }
+  primaryKeys = new Map<string, string | null>();
+  async createIndex(uid: string, options?: { primaryKey?: string }) {
+    this.index(uid);
+    this.primaryKeys.set(uid, options?.primaryKey ?? null);
+    return { taskUid: 1 };
+  }
+  async getRawIndex(uid: string) {
+    if (!this.indexes.has(uid)) {
+      throw { cause: { code: 'index_not_found' } };
+    }
+    return { uid, primaryKey: this.primaryKeys.get(uid) ?? null };
+  }
+  async updateIndex(uid: string, options?: { primaryKey?: string }) {
+    this.index(uid);
+    this.primaryKeys.set(uid, options?.primaryKey ?? null);
+    return { taskUid: 1 };
+  }
   index(uid: string): FakeIndex { let i = this.indexes.get(uid); if (!i) { i = new FakeIndex(uid); this.indexes.set(uid, i); } return i; }
 }
 

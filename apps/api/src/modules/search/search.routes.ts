@@ -107,18 +107,26 @@ export async function searchRoutes(app: FastifyInstance) {
           itemHitFromSearchDoc,
         );
 
-        return {
-          success: true,
-          data: {
-            vendors,
-            items,
-            meta: {
-              vendorCount: vendorResults.estimatedTotalHits,
-              itemCount: itemResults.estimatedTotalHits,
-              processingTimeMs: vendorResults.processingTimeMs + itemResults.processingTimeMs,
+        // A successful HTTP response is not proof that the index is current.
+        // A legacy index with no primary key accepts the enqueue request, then
+        // fails it asynchronously and stays empty. Trust positive hits; verify
+        // an all-empty answer against Postgres so a healthy-but-empty or stale
+        // engine cannot manufacture a false "No matches" for live catalogue.
+        if (vendors.length > 0 || items.length > 0) {
+          return {
+            success: true,
+            data: {
+              vendors,
+              items,
+              meta: {
+                vendorCount: vendorResults.estimatedTotalHits,
+                itemCount: itemResults.estimatedTotalHits,
+                processingTimeMs: vendorResults.processingTimeMs + itemResults.processingTimeMs,
+              },
             },
-          },
-        };
+          };
+        }
+        app.log.warn('Meilisearch returned no hits — verifying against DB');
       } catch (err) {
         // Meili went down AFTER boot (timeout or error) — don't 500; fall
         // through to the DB query below (pre-launch audit M3).
