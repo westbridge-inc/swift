@@ -175,9 +175,11 @@ export type MarketItem = {
  * decides — it is the only side that can see the whole catalogue, and a
  * threshold duplicated here would eventually disagree with the one there.
  *
- * Hidden while unknown, on purpose: a tab that pops in after a network round
- * trip is worse than one that appears on the next launch, and the failure mode
- * we are avoiding is showing an empty market, not hiding a full one.
+ * The navigation shell stays mounted while the verdict is unknown or
+ * temporarily unavailable. It hides Market only after a valid server response
+ * explicitly returns `visible:false`; this prevents startup/network failures
+ * from removing a route the customer may already be using. The server remains
+ * the sole authority for the launch-depth threshold.
  */
 export function useMarketDepth() {
   return useQuery<PublicMarketDepth>({

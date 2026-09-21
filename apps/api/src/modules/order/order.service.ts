@@ -182,13 +182,15 @@ export { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus };
 
 // ---------------------------------------------------------------------------
 // [SPS-F-0016 / LB-015] The MMG payment-first law. An MMG marketplace order is
-// paid customer→store OUTSIDE Swift, and only the store can attest the money
-// landed (vendor confirm-payment → paymentStatus CAPTURED). Until then the
-// order may not move through fulfilment: not accepted, prepared, readied,
-// claimed/assigned, taken into custody, delivered, self-delivered, or
+// paid customer→store OUTSIDE Swift. The store may attest receipt
+// (vendor confirm-payment → CLAIMED), while provider reconciliation may supply
+// confirmed evidence (→ CAPTURED). Until one of those money-landed states
+// exists, the order may not move through fulfilment: not accepted, prepared,
+// readied, claimed/assigned, taken into custody, delivered, self-delivered, or
 // pickup-completed. The negative paths (CANCELLED / REFUNDED / FAILED) stay
 // open, and the store's confirm-payment action never passes through here — it
-// IS the capture. TAXI is out of scope: fares settle driver-direct at the kerb.
+// records the store's claim. TAXI is out of scope: fares settle driver-direct
+// at the kerb.
 // ---------------------------------------------------------------------------
 /** [DOC-1 §31.5 · P31-2] On the store's own wallet, money "moved" is either the provider's capture or the store's claim. */
 export const MMG_MONEY_MOVED: ReadonlySet<string> = new Set(['CAPTURED', 'CLAIMED']);

@@ -27,13 +27,14 @@ const mmgRef = () => `MMGT${Math.random().toString(36).slice(2, 12).toUpperCase(
 
 // ---------------------------------------------------------------------------
 // [SPS-F-0016 / LB-015] The MMG payment-first law. An MMG marketplace order is
-// paid customer→store OUTSIDE Swift, and only the store can attest the money
-// landed (POST /orders/:id/confirm-payment → paymentStatus CAPTURED). Until
-// then the order must not move through fulfilment — not accepted, prepared,
-// readied, claimed, delivered, self-delivered, or pickup-completed. The store's
-// payment confirmation itself must stay possible while PENDING (it is the
-// capture), and authorized negative paths (vendor/admin/system, plus a customer
-// still inside the vendor-silent hold) stay open. One domain error:
+// paid customer→store OUTSIDE Swift. The store can attest receipt
+// (POST /orders/:id/confirm-payment → CLAIMED); provider reconciliation can
+// separately establish CAPTURED. Until either money-landed state exists, the
+// order must not move through fulfilment — not accepted, prepared, readied,
+// claimed, delivered, self-delivered, or pickup-completed. Store attestation
+// must stay possible while PENDING, and authorized negative paths
+// (vendor/admin/system, plus a customer still inside the vendor-silent hold)
+// stay open. One domain error:
 // MMG_PAYMENT_PENDING.
 // ---------------------------------------------------------------------------
 
