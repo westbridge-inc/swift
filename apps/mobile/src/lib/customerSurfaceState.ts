@@ -52,10 +52,10 @@ export function homePlaceholderForCoordinateChange<T>(
   }
 
   const samePrincipal = previousKey[2] === nextKey[2];
-  const wasUnlocated = previousKey[3] === null && previousKey[4] === null;
-  const isNowLocated = nextKey[3] !== null && nextKey[4] !== null;
+  const coordinatesChanged = previousKey[3] !== nextKey[3]
+    || previousKey[4] !== nextKey[4];
 
-  return samePrincipal && wasUnlocated && isNowLocated
+  return samePrincipal && coordinatesChanged
     ? previousData
     : undefined;
 }

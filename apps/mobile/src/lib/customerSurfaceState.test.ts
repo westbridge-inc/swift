@@ -19,21 +19,26 @@ function axiosFailure(status?: number): unknown {
 describe('customer Home cache boundary', () => {
   const previous = { activeOrder: { id: 'order-a' } };
 
-  it('keeps the same principal Home only while location becomes known', () => {
+  it('keeps the same principal Home while location becomes known or changes', () => {
     const next = customerHomeKey(7, 6.801, -58.155);
     expect(homePlaceholderForCoordinateChange(
       previous,
       customerHomeKey(7),
       next,
     )).toBe(previous);
+    expect(homePlaceholderForCoordinateChange(
+      previous,
+      customerHomeKey(7, 6.8, -58.15),
+      next,
+    )).toBe(previous);
   });
 
-  it('never carries Home across principals, known locations or foreign keys', () => {
+  it('never carries Home across principals, an unchanged key or foreign keys', () => {
     const next = customerHomeKey(8, 6.801, -58.155);
     expect(homePlaceholderForCoordinateChange(previous, customerHomeKey(7), next)).toBeUndefined();
     expect(homePlaceholderForCoordinateChange(
       previous,
-      customerHomeKey(8, 6.8, -58.15),
+      next,
       next,
     )).toBeUndefined();
     expect(homePlaceholderForCoordinateChange(previous, ['orders'], next)).toBeUndefined();
