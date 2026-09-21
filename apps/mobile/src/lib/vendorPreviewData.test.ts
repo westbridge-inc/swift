@@ -112,6 +112,8 @@ describe('vendorPreview store', () => {
 
     expect(setup).toContain('onPress={() => onPreview()}');
     expect(setup).toContain('onSwitch={onLeave}');
+    expect(setup).toContain('label="Back to Swift"');
+    expect(setup).toContain('onPress={onLeave}');
     expect(stack).toContain('onPreview={() => enterPreview()}');
     expect(stack).toContain('onLeave={chooseAnotherExperience}');
   });

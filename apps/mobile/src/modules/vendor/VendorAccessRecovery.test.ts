@@ -9,13 +9,13 @@ const code = (value: string) => value
 
 describe('revoked vendor access recovery', () => {
   it('keeps forbidden access out of the vendor dashboard', () => {
-    expect(code(STACK)).toMatch(/failure === 'forbidden'[\s\S]*!hasVendorOwnerAuthority[\s\S]*<BusinessSetup \/>[\s\S]*<VendorAccessRecovery/);
+    expect(code(STACK)).toMatch(/failure === 'forbidden'[\s\S]*!hasVendorOwnerAuthority[\s\S]*<BusinessSetup onLeave=\{chooseAnotherExperience\} \/>[\s\S]*<VendorAccessRecovery/);
     expect(code(STACK)).not.toContain("failure === 'forbidden' ? 'This account cannot open that store");
   });
 
   it('routes a first-time seller to the real become-partner flow', () => {
     expect(code(STACK)).toMatch(/roles[^\n]*includes\('VENDOR_OWNER'\)/);
-    expect(code(STACK)).toMatch(/if \(!hasVendorOwnerAuthority\) return <BusinessSetup \/>/);
+    expect(code(STACK)).toMatch(/if \(!hasVendorOwnerAuthority\) return <BusinessSetup onLeave=\{chooseAnotherExperience\} \/>/);
   });
 
   it('clears the selected store and store-bound cache before retrying', () => {

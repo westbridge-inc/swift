@@ -135,7 +135,7 @@ function VendorRoot() {
       // destination is the real become-partner flow, which creates that role
       // and store server-side. A claimed owner that is refused still gets the
       // containment/recovery screen below.
-      if (!hasVendorOwnerAuthority) return <BusinessSetup />;
+      if (!hasVendorOwnerAuthority) return <BusinessSetup onLeave={chooseAnotherExperience} />;
       return (
         <VendorAccessRecovery
           onRetry={retryVendorAccess}
@@ -158,7 +158,7 @@ function VendorRoot() {
       </Screen>
     );
   }
-  if (!store) return <BusinessSetup />;
+  if (!store) return <BusinessSetup onLeave={chooseAnotherExperience} />;
   const suspensionSource = store.suspensionSource == null ? null : String(store.suspensionSource).toUpperCase();
   // [MOB-038] A blocked subscription blocks, whether or not it was mirrored
   // onto the store row. Requiring store.status === 'SUSPENDED' left a store

@@ -73,7 +73,7 @@ function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active
   );
 }
 
-export function BusinessSetup() {
+export function BusinessSetup({ onLeave }: { onLeave: () => void }) {
   const become = useBecomePartner();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const { latitude, longitude, status: locationStatus } = useLocationStore();
@@ -122,6 +122,7 @@ export function BusinessSetup() {
       <TabHeader title="Sell on Swift" onSwitch={() => setSwitcherOpen(true)} />
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        <PillButton label="Back to Swift" variant="outline" onPress={onLeave} style={{ marginBottom: space.lg }} />
         <T variant="title">List your business</T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
           Reach customers across town and keep 100% of every sale — Swift charges a flat weekly fee, never commission.
@@ -239,6 +240,7 @@ export function VendorOnboarding({
           Swift's experience picker without deleting the account or store. */}
       <TabHeader title={store.name} onSwitch={onLeave} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        <PillButton label="Back to Swift" variant="outline" onPress={onLeave} style={{ marginBottom: space.lg }} />
         <PricingCard kind="vendor" />
         <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
