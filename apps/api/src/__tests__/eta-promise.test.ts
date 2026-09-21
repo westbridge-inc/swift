@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { readFileSync } from 'node:fs';
@@ -235,8 +235,18 @@ describe('the promise, the pad, the revision, the report — against the databas
     expect(row).toMatchObject({ shadow: true, outcome: 'BELOW_TARGET' });
     expect(row!.sentence).toMatch(/^Over 28 days, 10 promises kept 80% of the time against a 85% target; 0% were revised out loud\.$/);
 
-    const res = await app.inject({ method: 'GET', url: '/api/v1/admin/algo/eta/report?days=28', headers: { authorization: `Bearer ${adminToken}` } });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.realisedOnTimeRate).toBe(0.8);
+    // The route owns its server clock. Freeze Date only for this parity check;
+    // otherwise this fixed historical fixture eventually ages out of the
+    // route's real 28-day window while the direct report above still uses the
+    // declared August 30 instant.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-08-30T12:00:00Z'));
+    try {
+      const res = await app.inject({ method: 'GET', url: '/api/v1/admin/algo/eta/report?days=28', headers: { authorization: `Bearer ${adminToken}` } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data.realisedOnTimeRate).toBe(0.8);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
