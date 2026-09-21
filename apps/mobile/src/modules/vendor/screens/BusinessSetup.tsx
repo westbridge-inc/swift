@@ -222,18 +222,32 @@ export function BusinessSetup() {
   );
 }
 
-export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: () => void }) {
+export function VendorOnboarding({
+  store,
+  onPreview,
+  onLeave,
+}: {
+  store: any;
+  onPreview: () => void;
+  onLeave: () => void;
+}) {
   // Poll while onboarding so an approval reflects within seconds.
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType, undefined, { poll: true });
   return (
     <Screen>
-      <TabHeader title={store.name} />
+      {/* A pending business is a role, not a navigation prison. This returns to
+          Swift's experience picker without deleting the account or store. */}
+      <TabHeader title={store.name} onSwitch={onLeave} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <PricingCard kind="vendor" />
         <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}
-        <PillButton label="Preview your dashboard" variant="soft" style={{ marginTop: space.lg }} onPress={onPreview} />
+        {/* Wrap the callback: React Native supplies a press event to onPress,
+            while enterPreview's optional argument is a business-type string.
+            Passing it through directly turned the event into previewType and
+            crashed CATALOGUE[type]. */}
+        <PillButton label="Preview your dashboard" variant="soft" style={{ marginTop: space.lg }} onPress={() => onPreview()} />
         <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
           Look around while you wait — selling unlocks the moment you&apos;re approved.
         </T>

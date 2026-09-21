@@ -170,7 +170,11 @@ function VendorRoot() {
       {billingSuspended ? (
         <VendorBillingSuspended store={store} stores={stores} myRole={myRole} />
       ) : store.status !== 'ACTIVE' && !preview ? (
-        <VendorOnboarding store={store} onPreview={enterPreview} />
+        <VendorOnboarding
+          store={store}
+          onPreview={() => enterPreview()}
+          onLeave={chooseAnotherExperience}
+        />
       ) : (
         <VendorTabs />
       )}
