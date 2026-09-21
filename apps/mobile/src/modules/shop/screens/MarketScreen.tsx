@@ -5,7 +5,7 @@ import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, radius, space } from '@swift/ui';
-import { useDiscoveryCategories, useMarketItems, useAddToCart, type MarketItem } from '../../../hooks/customer';
+import { useDiscoveryCategories, useMarketItems, useAddToCart, useCart, type MarketItem } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { itemPhoto } from '../../../lib/images';
@@ -23,6 +23,7 @@ import {
   TonePill,
 } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
+import { browseCartSummary } from '../browse-cart-presentation';
 
 /**
  * THE MARKET TAB — A CATALOGUE, NOT A DIRECTORY [MKT G2].
@@ -97,6 +98,8 @@ export function MarketScreen() {
   });
   const feed = useMarketItems({ category });
   const addToCart = useAddToCart();
+  const cart = useCart<any>();
+  const cartSummary = browseCartSummary(cart.data);
 
   // RETAIL only: this tab is goods. A food category chip here would filter the
   // feed to nothing and read as "we have no tools".
@@ -201,7 +204,10 @@ export function MarketScreen() {
           keyExtractor={(i) => i.id}
           numColumns={2}
           columnWrapperStyle={{ gap: space.lg, paddingHorizontal: GUTTER }}
-          contentContainerStyle={{ gap: space.lg, paddingBottom: space['3xl'] }}
+          contentContainerStyle={{
+            gap: space.lg,
+            paddingBottom: cartSummary ? insets.bottom + space['5xl'] * 2 : space['3xl'],
+          }}
           showsVerticalScrollIndicator={false}
           ListHeaderComponent={
             // The eyebrow states something TRUE about the section — the kit's
@@ -340,6 +346,46 @@ export function MarketScreen() {
           }
         />
       )}
+
+      {cartSummary ? (
+        <Pressable
+          onPress={() => navigation.navigate('Cart')}
+          accessibilityRole="button"
+          accessibilityLabel={`View cart. ${cartSummary.itemCount} ${cartSummary.itemCount === 1 ? 'item' : 'items'}.`}
+          style={{
+            position: 'absolute',
+            left: GUTTER,
+            right: GUTTER,
+            bottom: insets.bottom + space.lg,
+          }}
+        >
+          {({ pressed }) => (
+            <View
+              style={{
+                height: 52,
+                borderRadius: radius.full,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                paddingHorizontal: space.xl,
+                backgroundColor: color.brand[500],
+                opacity: pressed ? 0.9 : 1,
+                ...elevation.floating,
+              }}
+            >
+              <T variant="body" weight="bold" tone="onBrand">
+                View cart
+              </T>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs }}>
+                <T variant="body" weight="bold" tone="onBrand">
+                  {cartSummary.itemCount} item{cartSummary.itemCount === 1 ? '' : 's'} ·
+                </T>
+                <Money amount={cartSummary.subtotalCustomer} tone="onBrand" />
+              </View>
+            </View>
+          )}
+        </Pressable>
+      ) : null}
     </View>
   );
 }
