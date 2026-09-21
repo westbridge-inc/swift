@@ -115,4 +115,12 @@ describe('rootNavigatorBoundaryKey', () => {
     expect(rootEntryGate(fresh)).toBe('role-picker');
     expect(rootEntryGate({ ...fresh, wantsAuth: true })).toBe('auth');
   });
+
+  it('resets the same Main route when an authenticated account switches experiences', () => {
+    const vendor = rootNavigatorBoundaryKey(7, 'main', 'vendor');
+    const customer = rootNavigatorBoundaryKey(7, 'main', 'customer');
+    const advertiser = rootNavigatorBoundaryKey(7, 'main', 'advertiser');
+
+    expect(new Set([vendor, customer, advertiser]).size).toBe(3);
+  });
 });

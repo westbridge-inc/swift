@@ -15,8 +15,17 @@ export interface RootEntryState {
  * callbacks whenever an interactive login/logout creates a new principal
  * boundary. Token refresh does not change this generation, so ordinary session
  * continuity keeps its navigation state. */
-export function rootNavigatorBoundaryKey(sessionGeneration: number): string {
-  return `principal-${sessionGeneration}`;
+export function rootNavigatorBoundaryKey(
+  sessionGeneration: number,
+  entryGate: RootEntryGate = 'main',
+  intent: RootIntent | null = null,
+): string {
+  // `Main` is one React Navigation route name whose component changes with the
+  // selected experience. Without the experience in the boundary, switching
+  // Vendor -> Customer/Advertiser can retain the mounted Vendor stack even
+  // though Zustand already carries the new intent.
+  const surface = entryGate === 'main' ? (intent ?? 'customer') : entryGate;
+  return `principal-${sessionGeneration}:surface-${surface}`;
 }
 
 /**
