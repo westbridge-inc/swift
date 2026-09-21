@@ -5,7 +5,7 @@ import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrde
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { lineTotal, orderTotal, promoDiscount, promoCapacity, allocatePromo, allocateAcrossLines, type PromoAllocation } from '../../utils/order-total';
-import { canCancelMarketplaceOrder, isFreeCancellation, isMarketplaceOrderType, LATE_CANCEL_FEE } from './cancel-policy';
+import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
 import {
@@ -2013,19 +2013,6 @@ export class OrderService {
           // (PENDING; READY_FOR_PICKUP for a courier, which is born there)
           // inside the window.
           const freeCancellation = isFreeCancellation(order, now);
-          // A recorded-but-uncollected GYD 500 marker did not constrain a
-          // customer at all: an accepted meal or appointment could still be
-          // cancelled with one tap and the committed business simply lost the
-          // work. Marketplace cancellation is unilateral only inside the
-          // server-owned free window. This is checked on the LOCKED row, not
-          // only projected into the UI, so a stale client cannot bypass it.
-          if (isMarketplaceOrderType(order.orderType) && !canCancelMarketplaceOrder(order, now)) {
-            throw new AppError(
-              409,
-              'CANCELLATION_WINDOW_CLOSED',
-              'The cancellation window has closed. Contact the business or Swift support to resolve this order.',
-            );
-          }
           const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
 
           // The row lock makes this update and every dependent release below one

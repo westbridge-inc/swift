@@ -11,7 +11,7 @@ import { deliveryFeeFromRates, expressDeliveryFee, type DeliveryRates } from '..
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
-import { LATE_CANCEL_FEE, isFreeCancellation, isMarketplaceOrderType, freeCancellationExpiresAt } from '../order/cancel-policy';
+import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache } from './home-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
@@ -2233,19 +2233,14 @@ export async function customerRoutes(app: FastifyInstance) {
     // [REPORT-006 F-006-01] Captured MMG orders can't cancel in-app (the store
     // holds the money and settles refunds directly) — the button must not
     // offer what the locked cancel path will refuse.
-    const statusAllowsCancellation = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
+    const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
       && !(order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED');
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
     // — the fee shown here and the marker recorded there can never drift
     // again. The hold exemption, the assignment guard and the scheduled-slot
     // branch all live inside it; this file no longer restates any of them.
-    const freeCancellation = statusAllowsCancellation && isFreeCancellation(order, previewNow);
-    // Marketplace customers get one unilateral in-app exit: the server-owned
-    // free window. After it closes the business/support path owns resolution;
-    // the UI must not advertise a write the locked service will refuse.
-    const canCancel = statusAllowsCancellation
-      && (!isMarketplaceOrderType(order.orderType) || freeCancellation);
+    const freeCancellation = canCancel && isFreeCancellation(order, previewNow);
 
     // Timeline
     const timeline = order.statusHistory.map((sh) => ({

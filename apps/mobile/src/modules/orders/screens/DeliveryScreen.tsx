@@ -1167,7 +1167,7 @@ export function DeliveryScreen() {
                         marker on a cash platform — Swift never collects it;
                         saying "charged" would be a false financial fact. */}
                     {cancelFee > 0
-                      ? `Late-cancellation fee recorded: ${money(cancelFee)} (not collected by Swift).`
+                      ? `Late cancellation recorded: ${money(cancelFee)}. Swift did not charge it in the app.`
                       : 'No cancellation fee.'}
                   </T>
                 ) : null}
@@ -1399,7 +1399,9 @@ export function DeliveryScreen() {
               : 'This stops the rider search and cancels the pickup request. It can’t be undone.'
             : mmgCancellationAmbiguous
               ? 'Cancelling stops fulfilment. If you already sent the MMG payment, the store refunds you directly.'
-              : 'Cancelling stops fulfilment. The server preview is shown below; the final outcome is confirmed when cancellation completes.'}
+              : o.fulfillment === 'APPOINTMENT'
+                ? 'Cancelling releases this time slot. We’ll confirm the result before leaving this screen.'
+                : 'Cancelling stops fulfilment. We’ll confirm the result before leaving this screen.'}
         </T>
         {cancelPreviewFresh && o.orderType === 'COURIER' ? (
           <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
@@ -1417,8 +1419,8 @@ export function DeliveryScreen() {
             </DecorativeIcon>
             <T variant="label" tone={cancelPreviewFee > 0 ? 'warning' : 'info'} style={{ flex: 1 }}>
               {cancelPreviewFee > 0
-                ? `Server preview: ${money(cancelPreviewFee)} would be recorded if you cancel now. Swift does not collect it.`
-                : 'Server preview: no cancellation fee.'}
+                ? `Current estimate: ${money(cancelPreviewFee)} may be recorded on this order. You won’t be charged through Swift.`
+                : 'No cancellation fee.'}
             </T>
           </View>
         ) : null}

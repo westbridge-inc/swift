@@ -199,31 +199,27 @@ describe('free window = nothing committed [cancel-policy]', () => {
     expect(row.lateCancelFeeDue).toBe(0);
   });
 
-  it('a scheduled marketplace order whose free window closed requires resolution instead of an unenforced marker', async () => {
+  it('a scheduled order whose slot is imminent pays, like any other', async () => {
     const id = await makeCancellableOrder(60, {
       orderType: 'FOOD_DELIVERY',
       status: 'PENDING',
       scheduledFor: new Date(Date.now() + 2 * 60_000),
     });
-    await expect(orders.cancelOrder(id, customerId, 'too late')).rejects.toMatchObject({
-      statusCode: 409,
-      code: 'CANCELLATION_WINDOW_CLOSED',
-    });
-    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, lateCancelFeeDue: true } });
-    expect(row).toMatchObject({ status: 'PENDING', lateCancelFeeDue: 0 });
+    const res = await orders.cancelOrder(id, customerId, 'too late');
+    expect(res.cancellationFee).toBe(500);
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { lateCancelFeeDue: true } });
+    expect(row.lateCancelFeeDue).toBe(500);
   });
 
-  it('the COURIER carve-out does NOT leak to marketplace — prepared goods cannot be unilaterally cancelled', async () => {
+  it('the COURIER carve-out does NOT leak to marketplace — vendor-prepped READY_FOR_PICKUP pays', async () => {
     const id = await makeCancellableOrder(3, {
       orderType: 'FOOD_DELIVERY',
       status: 'READY_FOR_PICKUP',
     });
-    await expect(orders.cancelOrder(id, customerId, 'no longer hungry')).rejects.toMatchObject({
-      statusCode: 409,
-      code: 'CANCELLATION_WINDOW_CLOSED',
-    });
-    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, lateCancelFeeDue: true } });
-    expect(row).toMatchObject({ status: 'READY_FOR_PICKUP', lateCancelFeeDue: 0 });
+    const res = await orders.cancelOrder(id, customerId, 'no longer hungry');
+    expect(res.cancellationFee).toBe(500);
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { lateCancelFeeDue: true } });
+    expect(row.lateCancelFeeDue).toBe(500);
   });
 });
 
