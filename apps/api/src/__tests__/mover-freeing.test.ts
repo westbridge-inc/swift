@@ -13,6 +13,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService } from '../modules/order/order.service';
 import { DispatchService, sweepStaleMovers } from '../modules/dispatch/dispatch.service';
+import { FloatService } from '../modules/dispatch/float.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 
 // ---------------------------------------------------------------------------
@@ -155,6 +156,7 @@ async function makeOrder(
     orderType?: 'FOOD_DELIVERY' | 'TAXI';
     taxiFareTotal?: number;
     subtotalBase?: number;
+    holdExpiresAt?: Date | null;
     at?: { lat: number; lng: number };
     /** [AF-MOB-001] How long ago the mover reported arriving. Default is past
      *  the grace window; pass 0 to sit inside it. */
@@ -182,6 +184,7 @@ async function makeOrder(
       deliveryFee: opts.orderType === 'TAXI' ? 0 : 500,
       totalAmount: opts.taxiFareTotal ?? (opts.subtotalBase ?? 1000) + 500,
       paymentMethod: 'CASH',
+      ...(opts.holdExpiresAt !== undefined ? { holdExpiresAt: opts.holdExpiresAt } : {}),
       ...(opts.taxiFareTotal != null ? { taxiFareTotal: opts.taxiFareTotal } : {}),
       ...(opts.riderId ? { riderId: opts.riderId } : {}),
       ...(opts.driverId ? { driverId: opts.driverId } : {}),
@@ -366,11 +369,13 @@ describe('handover frees the rider', () => {
 // 2. cancelOrder: float release + driver freeing (paths that skip updateStatus)
 // ---------------------------------------------------------------------------
 describe('cancelOrder frees movers and float', () => {
-  it('atomically releases a direct assignment that commits after cancellation starts', async () => {
+  it('re-checks a direct assignment committed after the authorized preview and refuses the stale late cancel', async () => {
     const vendor = await makeVendor();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider({ online: true });
-    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED');
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', {
+      holdExpiresAt: new Date(Date.now() + 4 * 60_000),
+    });
 
     let assignmentStaged!: () => void;
     let resumeAssignment!: () => void;
@@ -379,25 +384,8 @@ describe('cancelOrder frees movers and float', () => {
     const releaseAssignment = new Promise<void>((resolve) => { resumeAssignment = resolve; });
     const atCancellationRead = new Promise<void>((resolve) => { cancellationRead = resolve; });
 
-    const originalStage = OrderService.prototype.stageDirectRiderAssignment;
-    const stageSpy = vi
-      .spyOn(OrderService.prototype, 'stageDirectRiderAssignment')
-      .mockImplementationOnce(async function (
-        this: OrderService,
-        tx,
-        input,
-      ) {
-        const staged = await originalStage.call(this, tx, input);
-        // The direct-accept transaction now owns Order + Rider + float, but is
-        // deliberately uncommitted so cancelOrder's first read sees the old,
-        // unassigned row — the exact stale-read production interleaving.
-        assignmentStaged();
-        await releaseAssignment;
-        return staged;
-      });
-
     // Signal only the customer-owned cancellation preview. The board-grab's
-    // own preflight findFirst has already completed before assignmentStaged.
+    // transaction below does not call findFirst, so this barrier is exact.
     type RaceFindFirst = (args: {
       where?: { id?: string; customerId?: string };
       [key: string]: unknown;
@@ -414,24 +402,50 @@ describe('cancelOrder frees movers and float', () => {
     let acceptResponse;
     let cancellationResult;
     try {
-      const acceptPending = inject('POST', `/api/v1/rider/orders/${order.id}/accept`, {}, rider.token);
+      // Stage an uncommitted business+rider commitment on the Order row. The
+      // customer's first, ownership-only preview sees the old PENDING/held
+      // snapshot. This test proves the later transactional authority re-read
+      // observes the committed assignment; it does not claim to instrument or
+      // prove the exact lock-attempt interleaving.
+      const acceptPending = app.prisma.$transaction(async (tx) => {
+        await tx.order.update({ where: { id: order.id }, data: { status: 'ACCEPTED' } });
+        expect(await new FloatService(tx).commit(tx, rider.riderId, 1000)).toBe(true);
+        const staged = await orderService.stageDirectRiderAssignment(tx, {
+          orderId: order.id,
+          riderId: rider.riderId,
+          changedBy: rider.userId,
+          moverUserId: rider.userId,
+          note: 'deterministic customer-cancel race',
+        });
+        assignmentStaged();
+        await releaseAssignment;
+        return staged;
+      });
       await atAssignmentStage;
 
-      const cancellationPending = orderService.cancelOrder(order.id, customer.userId, 'changed my mind');
+      const cancellationPending = orderService.cancelOrder(order.id, customer.userId, 'changed my mind')
+        .then(
+          (value) => ({ value, error: null }),
+          (error: unknown) => ({ value: null, error }),
+        );
       await atCancellationRead;
-      // Old behavior now used the stale riderId=null snapshot after its status
-      // CAS and leaked both the committed float and busy Rider pointer. The new
-      // transaction waits, re-reads the committed assignment, and releases it.
+      // The preview passed on PENDING + active hold. Let assignment commit;
+      // cancellation must then refuse from its fresh transactional row.
       resumeAssignment();
       [acceptResponse, cancellationResult] = await Promise.all([acceptPending, cancellationPending]);
     } finally {
       resumeAssignment();
       findSpy.mockRestore();
-      stageSpy.mockRestore();
     }
 
-    expect(acceptResponse!.statusCode).toBe(200);
-    expect(cancellationResult).toMatchObject({ message: 'Order cancelled' });
+    // The assignment command intentionally returns the public assignment
+    // snapshot, which does not expose riderId. The canonical row assertion
+    // below proves the persisted rider pointer.
+    expect(acceptResponse).toMatchObject({ status: 'RIDER_ASSIGNED' });
+    expect(cancellationResult).toMatchObject({
+      value: null,
+      error: expect.objectContaining({ code: 'CANCELLATION_WINDOW_CLOSED', statusCode: 409 }),
+    });
 
     const [cancelled, freed, statusLogs] = await Promise.all([
       app.prisma.order.findUniqueOrThrow({
@@ -448,14 +462,17 @@ describe('cancelOrder frees movers and float', () => {
         select: { status: true },
       }),
     ]);
-    expect(cancelled).toEqual({ status: 'CANCELLED', riderId: rider.riderId });
+    expect(cancelled).toEqual({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });
+    // Stacking capacity is greater than one in this fixture, so one committed
+    // leg still leaves room for another. The live-leg pointer and float are
+    // the authoritative proof that the rejected cancellation released nothing.
     expect(freed.isAvailable).toBe(true);
-    expect(freed.currentOrderId).toBeNull();
-    expect(Number(freed.committedFloat)).toBe(0);
-    expect(statusLogs.map((entry) => entry.status)).toEqual(['RIDER_ASSIGNED', 'CANCELLED']);
+    expect(freed.currentOrderId).toBe(order.id);
+    expect(Number(freed.committedFloat)).toBe(1000);
+    expect(statusLogs.map((entry) => entry.status)).toEqual(['RIDER_ASSIGNED']);
   });
 
-  it('customer cancel after rider assignment releases the committed float', async () => {
+  it('customer cancel after rider assignment leaves the committed float and mover reservation intact', async () => {
     const vendor = await makeVendor();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider({ committedFloat: 1000 });
@@ -465,12 +482,15 @@ describe('cancelOrder frees movers and float', () => {
       data: { isAvailable: false, currentOrderId: order.id },
     });
 
-    await orderService.cancelOrder(order.id, customer.userId, 'changed my mind');
+    await expect(orderService.cancelOrder(order.id, customer.userId, 'changed my mind'))
+      .rejects.toMatchObject({ code: 'CANCELLATION_WINDOW_CLOSED', statusCode: 409 });
 
     const freed = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
-    expect(freed.isAvailable).toBe(true);
-    expect(freed.currentOrderId).toBeNull();
-    expect(Number(freed.committedFloat)).toBe(0);
+    expect(freed.isAvailable).toBe(false);
+    expect(freed.currentOrderId).toBe(order.id);
+    expect(Number(freed.committedFloat)).toBe(1000);
+    await expect(app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }))
+      .resolves.toMatchObject({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });
   });
 
   it('taxi cancel after driver assignment frees the driver', async () => {

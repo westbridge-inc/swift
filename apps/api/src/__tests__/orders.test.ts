@@ -728,6 +728,10 @@ describe('Appointments — booked at acceptance, never double-held', () => {
     const order = res.json().data.order;
     createdOrderIds.push(order.id);
 
+    const detail = await inject('GET', `/api/v1/customer/orders/${order.id}`, undefined, cust.token);
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().data.canCancel).toBe(true);
+
     // Deterministic shape of the race: the cancellation commits first.
     const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'changed plans' }, cust.token);
     expect(cancel.statusCode).toBe(200);
@@ -807,11 +811,27 @@ describe('Appointments — booked at acceptance, never double-held', () => {
     expect(db.deliveryLng).toBe(vendorRow.longitude);
   });
 
-  it('cancelling an accepted appointment frees the slot', async () => {
+  it('an accepted appointment requires provider resolution; provider rejection frees the slot', async () => {
     const first = await app.prisma.booking.findFirstOrThrow({
       where: { itemId: haircutId, slotStart: slot, status: 'CONFIRMED' },
     });
-    await orderService.cancelOrder(first.orderId!, customer.userId, 'changed my mind');
+    const detail = await inject('GET', `/api/v1/customer/orders/${first.orderId}`, undefined, customer.token);
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().data.canCancel).toBe(false);
+
+    await expect(orderService.cancelOrder(first.orderId!, customer.userId, 'changed my mind'))
+      .rejects.toMatchObject({ code: 'CANCELLATION_WINDOW_CLOSED', statusCode: 409 });
+
+    const stillConfirmed = await app.prisma.booking.findUniqueOrThrow({ where: { id: first.id } });
+    expect(stillConfirmed.status).toBe('CONFIRMED');
+
+    const providerReject = await inject(
+      'PUT',
+      `/api/v1/vendor/orders/${first.orderId}/reject`,
+      { reason: 'provider cannot host this appointment' },
+      service.token,
+    );
+    expect(providerReject.statusCode).toBe(200);
 
     const freed = await app.prisma.booking.findUniqueOrThrow({ where: { id: first.id } });
     expect(freed.status).toBe('CANCELLED');

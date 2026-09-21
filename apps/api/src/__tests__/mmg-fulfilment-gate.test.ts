@@ -32,7 +32,8 @@ const mmgRef = () => `MMGT${Math.random().toString(36).slice(2, 12).toUpperCase(
 // then the order must not move through fulfilment — not accepted, prepared,
 // readied, claimed, delivered, self-delivered, or pickup-completed. The store's
 // payment confirmation itself must stay possible while PENDING (it is the
-// capture), and the negative paths (cancel/refund) stay open. One domain error:
+// capture), and authorized negative paths (vendor/admin/system, plus a customer
+// still inside the vendor-silent hold) stay open. One domain error:
 // MMG_PAYMENT_PENDING.
 // ---------------------------------------------------------------------------
 
@@ -88,7 +89,7 @@ let rider: { userId: string; token: string };
 let riderId: string;
 let customer: { userId: string; token: string };
 
-async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: PaymentStatus; fee?: number; tip?: number; withRider?: boolean } = {}) {
+async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: PaymentStatus; fee?: number; tip?: number; withRider?: boolean; holdExpiresAt?: Date | null } = {}) {
   const fee = opts.fee ?? 300;
   const tip = opts.tip ?? 200;
   const order = await app.prisma.order.create({
@@ -100,6 +101,7 @@ async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: Payment
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
       deliveryFee: fee, tipAmount: tip, totalAmount: 1000 + fee + tip,
       paymentMethod: 'MOBILE_MONEY', paymentStatus: opts.paymentStatus ?? 'PENDING',
+      ...(opts.holdExpiresAt !== undefined ? { holdExpiresAt: opts.holdExpiresAt } : {}),
     },
   });
   return order;
@@ -114,6 +116,19 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, token: string, payl
       authorization: `Bearer ${token}`,
       ...(vendor ? { 'x-vendor-id': vendor } : {}),
     },
+  });
+}
+
+function adminCancel(orderId: string, reason: string) {
+  return app.inject({
+    method: 'PUT',
+    url: `/api/v1/admin/orders/${orderId}/cancel`,
+    headers: {
+      'x-swift-reason': TEST_ADMIN_REASON,
+      authorization: `Bearer ${adminToken}`,
+      'content-type': 'application/json',
+    },
+    payload: { reason },
   });
 }
 
@@ -265,26 +280,23 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
     expect(notices).toBe(1); // exactly one — held no longer suppresses it
   });
 
-  it('cancelling unattested MMG says the truth and tells the STORE a refund may be owed [REPORT-007-v4 F-02]', async () => {
+  it('an accepted unattested MMG order requires store/support resolution and leaves no cancellation evidence', async () => {
     const order = await makeMmgOrder('ACCEPTED', { withRider: false }); // payment PENDING
+    const detail = await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().data.canCancel).toBe(false);
+
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'changed my mind' });
-    expect(res.statusCode).toBe(200);
-    // Customer copy never asserts "no charge" on MMG — the platform cannot know.
-    expect(res.json().data.message).toContain('the store refunds you directly');
-    expect(res.json().data.message).not.toContain('no charge');
-    // Immutable evidence records the ambiguity in the SAME commit…
-    const log = await app.prisma.orderStatusLog.findFirstOrThrow({
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('CANCELLATION_WINDOW_CLOSED');
+    await expect(app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }))
+      .resolves.toMatchObject({ status: 'ACCEPTED', paymentStatus: 'PENDING' });
+    expect(await app.prisma.orderStatusLog.count({
       where: { orderId: order.id, status: 'CANCELLED' },
-      orderBy: { createdAt: 'desc' },
-    });
-    expect(log.note).toContain('UNATTESTED');
-    // …and the party holding the money is told a refund may be owed.
-    const notice = await app.prisma.notification.findFirst({
-      where: { userId: vendorOwner.userId, title: 'Cancelled order may hold an MMG payment' },
-      orderBy: { createdAt: 'desc' },
-    });
-    expect(notice).not.toBeNull();
-    expect(notice!.body).toContain(order.orderNumber);
+    })).toBe(0);
+    expect(await app.prisma.notification.count({
+      where: { userId: vendorOwner.userId, title: 'Cancelled order may hold an MMG payment', body: { contains: order.orderNumber } },
+    })).toBe(0);
   });
 });
 
@@ -514,15 +526,22 @@ describe('capture responses never leak verifier secrets [REPORT-005 F-005-04]', 
 });
 
 describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmintable [REPORT-006 F-006-01]', () => {
-  it('capture-first: a customer cannot cancel a captured MMG order (409 MMG_CANCEL_UNAVAILABLE)', async () => {
-    const order = await makeMmgOrder('ACCEPTED', { paymentStatus: 'CAPTURED', withRider: false });
-    const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'changed my mind' });
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error?.code ?? res.json().code).toBe('MMG_CANCEL_UNAVAILABLE');
-    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(fresh.status).toBe('ACCEPTED');
-    expect(fresh.paymentStatus).toBe('CAPTURED');
-  });
+  it.each(['CLAIMED', 'CAPTURED'] as const)(
+    'money-first (%s): detail and mutation both refuse customer cancellation',
+    async (paymentStatus) => {
+      const order = await makeMmgOrder('ACCEPTED', { paymentStatus, withRider: false });
+      const detail = await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().data.canCancel).toBe(false);
+
+      const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'changed my mind' });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error?.code ?? res.json().code).toBe('MMG_CANCEL_UNAVAILABLE');
+      const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(fresh.status).toBe('ACCEPTED');
+      expect(fresh.paymentStatus).toBe(paymentStatus);
+    },
+  );
 
   it('capture-first: the vendor cannot reject a captured MMG order either (canonical seam gate)', async () => {
     const order = await makeMmgOrder('ACCEPTED', { paymentStatus: 'CAPTURED', withRider: false });
@@ -584,16 +603,41 @@ describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmi
     expect(log.note).toContain('UNATTESTED');
   });
 
-  it('concurrent CLAIM vs cancel (stress): whatever interleaving wins, CANCELLED + (CLAIMED|CAPTURED) never exists', async () => {
-    // [F-106-05] SUPPLEMENTAL STRESS, not the correctness proof. Uncontrolled
-    // Promise.all rounds cannot prove both lock orders occurred; the two
-    // FORCED-ORDER tests below are the proof, and this samples the real race
-    // on top of them.
+  it('a held order is invisible to the business while the customer can still withdraw it', async () => {
+    const order = await makeMmgOrder('PENDING', {
+      withRider: false,
+      holdExpiresAt: new Date(Date.now() + 4 * 60_000),
+    });
+    const hiddenClaim = await inject(
+      'POST',
+      `/api/v1/vendor/orders/${order.id}/confirm-payment`,
+      vendorOwner.token,
+      { reference: mmgRef() },
+      vendorId,
+    );
+    expect(hiddenClaim.statusCode).toBe(404);
+
+    const cancel = await inject(
+      'POST',
+      `/api/v1/customer/orders/${order.id}/cancel`,
+      customer.token,
+      { reason: 'withdrew before business notification' },
+    );
+    expect(cancel.statusCode).toBe(200);
+    await expect(app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }))
+      .resolves.toMatchObject({ status: 'CANCELLED', paymentStatus: 'PENDING' });
+  });
+
+  it('concurrent CLAIM vs authorized ops cancel (stress): whatever wins, CANCELLED + money-landed never exists', async () => {
+    // [F-106-05] SUPPLEMENTAL STRESS. Uncontrolled Promise.all rounds cannot
+    // prove both lock orders occurred. The sequential cases below prove both
+    // committed outcomes, not lock ordering; deterministic lock contention is
+    // separate evidence and must not be inferred from either group.
     for (let round = 0; round < 3; round += 1) {
-      const order = await makeMmgOrder('ACCEPTED', { withRider: false }); // payment PENDING
+      const order = await makeMmgOrder('PENDING', { withRider: false });
       const [confirm, cancel] = await Promise.all([
         inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId),
-        inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'raced' }),
+        adminCancel(order.id, 'raced against provider claim'),
       ]);
       const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
       // [DOC-1 §31.5 · F-103-01b] MONEY LANDED IS TWO STATES, NOT ONE.
@@ -614,7 +658,7 @@ describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmi
         // the store's claim won → the cancel must have refused
         expect(confirm.statusCode, shot).toBe(200);
         expect(cancel.statusCode, shot).toBe(409);
-        expect(fresh.status, shot).toBe('ACCEPTED');
+        expect(fresh.status, shot).toBe('PENDING');
         expect(fresh.paymentStatus, shot).toBe('CLAIMED');
       } else {
         // cancel won → the claim must have refused
@@ -789,27 +833,27 @@ describe('[F-103-01] a disputed MMG claim closes the door at every rider surface
 // and asking only about CAPTURED is what let this test read as a flake for so
 // long (F-103-01b).
 // ---------------------------------------------------------------------------
-describe('[F-106-05] claim vs cancel, each COMMIT order forced (sequential, not contended)', () => {
+describe('[F-106-05] claim vs authorized cancel, each COMMIT order forced (sequential, not contended)', () => {
   const forbidden = (o: { status: string; paymentStatus: string }) =>
     o.status === 'CANCELLED' && (o.paymentStatus === 'CLAIMED' || o.paymentStatus === 'CAPTURED');
 
   it('CLAIM commits first: the cancel is refused and the money state stands', async () => {
-    const order = await makeMmgOrder('ACCEPTED', { withRider: false });
+    const order = await makeMmgOrder('PENDING', { withRider: false });
     const claim = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(claim.statusCode, claim.body).toBe(200);
-    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'forced-claim-first' });
+    const cancel = await adminCancel(order.id, 'forced claim first');
 
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(cancel.statusCode, 'a claimed order cannot then be cancelled by the customer').toBe(409);
-    expect(fresh.status).toBe('ACCEPTED');
+    expect(cancel.statusCode, 'a claimed order cannot then be cancelled by operations').toBe(409);
+    expect(fresh.status).toBe('PENDING');
     expect(fresh.paymentStatus).toBe('CLAIMED');
     expect(forbidden(fresh)).toBe(false);
     expect(await app.prisma.auditLog.count({ where: { entityId: order.id, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED' } }), 'the claim is on the record exactly once').toBe(1);
   });
 
   it('CANCEL commits first: the claim is refused and no money state is minted', async () => {
-    const order = await makeMmgOrder('ACCEPTED', { withRider: false });
-    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'forced-cancel-first' });
+    const order = await makeMmgOrder('PENDING', { withRider: false });
+    const cancel = await adminCancel(order.id, 'forced cancel first');
     expect(cancel.statusCode, cancel.body).toBe(200);
     const claim = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
 

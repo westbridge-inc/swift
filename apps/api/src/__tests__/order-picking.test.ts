@@ -474,10 +474,10 @@ describe('substitution approval is exactly-once and lifecycle-bound [REPORT-006 
     expect(['APPROVED', 'REJECTED']).toContain(line.subStatus);
   });
 
-  it('cancel-then-approve mutates nothing: closed order refuses and stock is counted once', async () => {
+  it('vendor-reject-then-approve mutates nothing: closed order refuses and stock is counted once', async () => {
     const { item, sub, order, lineId } = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 700 });
-    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'changed my mind' });
-    expect(cancel.statusCode).toBe(200);
+    const rejectOrder = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, owner.token, { reason: 'cannot fulfil' });
+    expect(rejectOrder.statusCode).toBe(200);
     const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${lineId}/substitution`, customer.token, { approve: true });
     expect(approve.statusCode).toBe(409);
     expect(approve.json().error?.code ?? approve.json().code).toBe('NOT_PICKABLE');
@@ -486,7 +486,7 @@ describe('substitution approval is exactly-once and lifecycle-bound [REPORT-006 
     const subStock = await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } });
     const origStock = await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } });
     expect(subStock.stockQuantity).toBe(10); // substitute never moved
-    expect(origStock.stockQuantity).toBe(11); // cancellation restocked the original EXACTLY once
+    expect(origStock.stockQuantity).toBe(11); // vendor rejection restocked the original EXACTLY once
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(Number(fresh.totalAmount)).toBe(800); // money untouched after death
   });
@@ -580,8 +580,8 @@ describe('refunding an APPROVED substitution returns the SUBSTITUTE [REPORT-007-
   });
 });
 
-describe('cancellation restock is substitution-aware [REPORT-006 F-006-05]', () => {
-  it('a refunded line restocks ONCE at picking — cancellation must not restock it again', async () => {
+describe('authorized closure restock is substitution-aware [REPORT-006 F-006-05]', () => {
+  it('a refunded line restocks ONCE at picking — vendor rejection must not restock it again', async () => {
     const item = await makeItem({ name: `Once ${nanoid(6)}`, price: 600, stock: 10 });
     const keep = await makeItem({ name: `Keep ${nanoid(6)}`, price: 400, stock: 10 });
     const order = await makeOrderWithLines(
@@ -596,14 +596,14 @@ describe('cancellation restock is substitution-aware [REPORT-006 F-006-05]', () 
     expect(refund.statusCode).toBe(200);
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
 
-    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'raced the refund' });
-    expect(cancel.statusCode).toBe(200);
+    const rejectOrder = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, owner.token, { reason: 'raced the refund' });
+    expect(rejectOrder.statusCode).toBe(200);
     // The refunded line stays at 11 (NOT 12); the live line restocks once.
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: keep.id } })).stockQuantity).toBe(11);
   });
 
-  it('cancelling after an approved substitution returns the SUBSTITUTE to the shelf, not the original again', async () => {
+  it('vendor rejection after an approved substitution returns the SUBSTITUTE to the shelf, not the original again', async () => {
     const item = await makeItem({ name: `Swap ${nanoid(6)}`, price: 500, stock: 10 });
     const sub = await makeItem({ name: `SwapSub ${nanoid(6)}`, price: 500, stock: 10 });
     const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 500 }], 'PREPARING');
@@ -617,9 +617,9 @@ describe('cancellation restock is substitution-aware [REPORT-006 F-006-05]', () 
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } })).stockQuantity).toBe(9);
 
-    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'after swap' });
-    expect(cancel.statusCode).toBe(200);
-    // Cancellation returns the SUBSTITUTE (9→10); the original stays at 11 —
+    const rejectOrder = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, owner.token, { reason: 'after swap' });
+    expect(rejectOrder.statusCode).toBe(200);
+    // Vendor rejection returns the SUBSTITUTE (9→10); the original stays at 11 —
     // the old itemId-blind restock pushed the original to 12 and stranded the
     // substitute at 9 forever.
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);

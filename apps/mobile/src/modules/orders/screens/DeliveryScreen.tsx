@@ -28,6 +28,7 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
+import { appointmentCancellationResolutionCopy } from '../cancellationCopy';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -678,6 +679,7 @@ export function DeliveryScreen() {
   // cancel surfaces must never promise "no charge"; they say what is true and
   // point at the party who holds the money.
   const mmgCancellationAmbiguous = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'PENDING';
+  const marketplaceOrder = o.orderType === 'FOOD_DELIVERY' || o.orderType === 'GROCERY_DELIVERY';
   const rider = o.rider;
   const items: any[] = o.items ?? [];
   const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
@@ -749,7 +751,7 @@ export function DeliveryScreen() {
   const holdCancellationCaption = o.orderType === 'COURIER'
     ? 'Changed your mind? Cancel before a rider accepts. Swift does not collect or hold courier payment.'
     : o.fulfillment === 'APPOINTMENT'
-      ? 'Changed your mind? Cancel before the provider starts — the app shows any cost before you confirm.'
+      ? 'Changed your mind? Withdraw this booking request before it reaches the provider.'
       : holdRingCaption(mmgCancellationAmbiguous);
   const pendingSummary = o.orderType === 'COURIER'
     ? 'Waiting for an eligible rider to accept'
@@ -1361,6 +1363,16 @@ export function DeliveryScreen() {
             />
           ) : null}
 
+          {!o.canCancel && !terminal && (marketplaceOrder || o.fulfillment === 'APPOINTMENT') ? (
+            <View style={{ marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
+              <T variant="label" tone="info">
+                {o.fulfillment === 'APPOINTMENT'
+                  ? appointmentCancellationResolutionCopy(o.status)
+                  : 'The free cancellation window has closed. Contact the business or Swift support if the order now needs to change.'}
+              </T>
+            </View>
+          ) : null}
+
           {/* Something wrong with this order? Open a tracked support ticket
               pre-tied to it, instead of an email into the void. */}
           <PillButton
@@ -1397,11 +1409,13 @@ export function DeliveryScreen() {
             ? rider
               ? 'This cancels the pickup and puts the assigned rider back in the dispatch pool. It can’t be undone.'
               : 'This stops the rider search and cancels the pickup request. It can’t be undone.'
+            : o.orderType === 'TAXI'
+              ? 'This cancels your ride request. We’ll confirm the result before leaving this screen.'
             : mmgCancellationAmbiguous
               ? 'Cancelling stops fulfilment. If you already sent the MMG payment, the store refunds you directly.'
               : o.fulfillment === 'APPOINTMENT'
-                ? 'Cancelling releases this time slot. We’ll confirm the result before leaving this screen.'
-                : 'Cancelling stops fulfilment. We’ll confirm the result before leaving this screen.'}
+                ? 'This withdraws the booking request before the provider accepts it. No time slot has been confirmed yet.'
+                : 'This withdraws the order before the business sees it. We’ll confirm the result before leaving this screen.'}
         </T>
         {cancelPreviewFresh && o.orderType === 'COURIER' ? (
           <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>

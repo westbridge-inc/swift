@@ -5,7 +5,13 @@ import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrde
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { lineTotal, orderTotal, promoDiscount, promoCapacity, allocatePromo, allocateAcrossLines, type PromoAllocation } from '../../utils/order-total';
-import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
+import {
+  canCustomerCancelMarketplaceOrder,
+  isFreeCancellation,
+  isMarketplaceOrderType,
+  LATE_CANCEL_FEE,
+  type CancellationSnapshot,
+} from './cancel-policy';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
 import {
@@ -186,6 +192,72 @@ export { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus };
 // ---------------------------------------------------------------------------
 /** [DOC-1 §31.5 · P31-2] On the store's own wallet, money "moved" is either the provider's capture or the store's claim. */
 export const MMG_MONEY_MOVED: ReadonlySet<string> = new Set(['CAPTURED', 'CLAIMED']);
+
+export type CustomerCancellationDenial = {
+  statusCode: 400 | 409;
+  code: 'IN_TRANSIT' | 'INVALID_STATUS' | 'MMG_CANCEL_UNAVAILABLE' | 'CANCELLATION_WINDOW_CLOSED';
+  message: string;
+};
+
+export type CustomerCancellationSnapshot = CancellationSnapshot & {
+  status: OrderStatus;
+  paymentMethod: string;
+  paymentStatus: string;
+  ridePinVerified: boolean;
+  ridePinVerifiedAt: Date | null;
+};
+
+/**
+ * One customer-command authority for both the detail projection and the
+ * locked mutation. A GET can still race a later state change, so the locked
+ * POST remains authoritative; for the same snapshot they cannot disagree.
+ * Vendor/admin/system cancellations use the canonical transition seam and do
+ * not route through this customer-only policy.
+ */
+export function customerCancellationDenial(
+  order: CustomerCancellationSnapshot,
+  now: Date = new Date(),
+): CustomerCancellationDenial | null {
+  if (
+    IN_TRANSIT.includes(order.status)
+    || (
+      order.orderType === 'TAXI'
+      && ORDER_TRANSITIONS.CANCELLED.includes(order.status)
+      && hasTaxiPassengerCustody(order)
+    )
+  ) {
+    return {
+      statusCode: 400,
+      code: 'IN_TRANSIT',
+      message: 'Order is already on its way and cannot be cancelled',
+    };
+  }
+  if (!ORDER_TRANSITIONS.CANCELLED.includes(order.status)) {
+    return {
+      statusCode: 400,
+      code: 'INVALID_STATUS',
+      message: `This order is ${order.status} and cannot be cancelled`,
+    };
+  }
+  if (order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus)) {
+    const message = order.paymentStatus === 'CLAIMED'
+      ? 'The store has recorded this MMG payment as received. Contact the store or Swift support to resolve any cancellation or refund — Swift never holds the money.'
+      : 'MMG has confirmed this payment to the store. Contact the store or Swift support to resolve any cancellation or refund — Swift never holds the money.';
+    return {
+      statusCode: 409,
+      code: 'MMG_CANCEL_UNAVAILABLE',
+      message,
+    };
+  }
+  if (isMarketplaceOrderType(order.orderType) && !canCustomerCancelMarketplaceOrder(order, now)) {
+    return {
+      statusCode: 409,
+      code: 'CANCELLATION_WINDOW_CLOSED',
+      message: 'The cancellation window has closed. Contact the business or Swift support to resolve this order.',
+    };
+  }
+  return null;
+}
 const MMG_GATED_TARGETS: ReadonlySet<OrderStatus> = new Set([
   'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
   'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
@@ -1922,9 +1994,9 @@ export class OrderService {
 
   async cancelOrder(orderId: string, userId: string, reason?: string) {
     // Fast authorization/existence read. The transaction below deliberately
-    // re-locks and re-reads the order: a direct rider assignment may commit
-    // between these two reads, and cancellation must release THAT fresh
-    // assignment rather than acting on this preview.
+    // re-locks and re-reads the order so a state or payment transition between
+    // the two reads cannot be undone from a stale preview. Only cancellation
+    // paths that remain authorized after that locked read may release work.
     const preview = await this.prisma.order.findFirst({
       where: { id: orderId, customerId: userId },
       include: {
@@ -1935,15 +2007,9 @@ export class OrderService {
 
     if (!preview) throw new AppError(404, 'NOT_FOUND', 'Order not found');
 
-    if (
-      IN_TRANSIT.includes(preview.status)
-      || (
-        preview.orderType === 'TAXI'
-        && ORDER_TRANSITIONS.CANCELLED.includes(preview.status)
-        && hasTaxiPassengerCustody(preview)
-      )
-    ) {
-      throw new AppError(400, 'IN_TRANSIT', 'Order is already on its way and cannot be cancelled');
+    const previewDenial = customerCancellationDenial(preview);
+    if (previewDenial) {
+      throw new AppError(previewDenial.statusCode, previewDenial.code, previewDenial.message);
     }
 
     type CancellationOrder = NonNullable<typeof preview>;
@@ -1974,44 +2040,19 @@ export class OrderService {
             },
           });
           if (!order) throw new AppError(404, 'NOT_FOUND', 'Order not found');
-          if (
-            IN_TRANSIT.includes(order.status)
-            || (
-              order.orderType === 'TAXI'
-              && ORDER_TRANSITIONS.CANCELLED.includes(order.status)
-              && hasTaxiPassengerCustody(order)
-            )
-          ) {
-            throw new AppError(400, 'IN_TRANSIT', 'Order is already on its way and cannot be cancelled');
-          }
-          if (!ORDER_TRANSITIONS.CANCELLED.includes(order.status)) {
-            throw new AppError(400, 'INVALID_STATUS', `This order is ${order.status} and cannot be cancelled`);
-          }
-          // [REPORT-006 F-006-01] Checked from the LOCKED row: a vendor
-          // capture serializes on this same orders lock, so cancel-after-
-          // capture refuses here and capture-after-cancel refuses in the
-          // capture CAS — CANCELLED+CAPTURED can no longer be minted in
-          // either commit order. PENDING MMG stays cancellable (the only
-          // exit from an unpaid MMG order); if external money landed
-          // unattested, the capture path's closed-order refusal directs the
-          // store to refund directly.
-          if (order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus)) {
-            throw new AppError(
-              409,
-              'MMG_CANCEL_UNAVAILABLE',
-              'This order is already paid by MMG to the store. The store cancels and refunds you directly — Swift never holds the money.',
-            );
-          }
-
           const now = new Date();
+          // Re-evaluate every denial from the freshly locked row. This closes
+          // both directions of the race: a vendor/mover/MMG commitment that
+          // wins after the preview denies the stale customer write, while a
+          // cancellation that locks first commits before those actors can.
+          const denial = customerCancellationDenial(order, now);
+          if (denial) throw new AppError(denial.statusCode, denial.code, denial.message);
           // heldNow keeps ONE job: a held order was never shown to the vendor,
           // so the vendor-board socket below stays silent about it.
           const heldNow = isHeld(order, now) && !order.riderId && !order.driverId;
-          // THE one policy predicate, shared with the customer preview
-          // [cancel-policy.ts]: free ⟺ nothing was committed — no mover holds
-          // the job, and the order is held or still in its uncommitted status
-          // (PENDING; READY_FOR_PICKUP for a courier, which is born there)
-          // inside the window.
+          // Marketplace reaches here only during its active vendor-silent
+          // hold, so its fee is necessarily zero. Taxi/courier retain the
+          // broader fee-marker policy below.
           const freeCancellation = isFreeCancellation(order, now);
           const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
 

@@ -262,10 +262,10 @@ describe('release worker', () => {
     expect(released).not.toContain(early.id);
   });
 
-  it('a cancel that won the race means the release no-ops (no vendor notify)', async () => {
-    const due = await makeHeldOrder({ holdMsFromNow: -5_000 });
-    // Customer cancels a millisecond before the tick.
-    await inject('POST', `/api/v1/customer/orders/${due.id}/cancel`, customer.token, {});
+  it('customer cancellation before the hold deadline makes release a no-op (no vendor notify)', async () => {
+    const due = await makeHeldOrder({ holdMsFromNow: 120_000 });
+    const cancelled = await inject('POST', `/api/v1/customer/orders/${due.id}/cancel`, customer.token, {});
+    expect(cancelled.statusCode).toBe(200);
     const { released } = await orders.releaseDueHeldOrders(async () => {});
     expect(released).not.toContain(due.id);
     const note = await app.prisma.notification.findFirst({

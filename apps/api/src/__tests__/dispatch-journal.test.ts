@@ -221,6 +221,7 @@ describe('search journal (§3)', () => {
         deliveryAddress: 'x', deliveryLat: EMPTY.lat, deliveryLng: EMPTY.lng,
         subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 300, totalAmount: 1300,
         paymentMethod: 'CASH' as never,
+        holdExpiresAt: new Date(Date.now() + 2 * 60_000),
       },
     });
     orderIds.push(order.id);

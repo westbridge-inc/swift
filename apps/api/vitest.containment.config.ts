@@ -21,6 +21,7 @@ export default defineConfig({
       'src/__tests__/admin-config-truth.test.ts',
       'src/__tests__/image-metadata-strip.test.ts',
       'src/__tests__/order-status-single-source.test.ts',
+      'src/__tests__/customer-cancellation-authority.test.ts',
     ],
     fileParallelism: false,
     env: { NODE_ENV: 'test', KYC_PROVIDER: 'sandbox' },

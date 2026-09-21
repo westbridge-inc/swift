@@ -99,6 +99,7 @@ async function makeAppointmentOrder(customerUserId: string, vendorId: string, it
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `SCH-${nanoid(10)}`, orderType: 'FOOD_DELIVERY',
+      fulfillment: 'APPOINTMENT', appointmentSlot: slot,
       customerId: customerUserId, vendorId, status,
       deliveryAddress: 'chair', deliveryLat: 6.8, deliveryLng: -58.15,
       subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000,
@@ -182,6 +183,11 @@ describe('SCH-C: every order death frees its slot', () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const slot = slotTomorrow(12);
     const { order, booking } = await makeAppointmentOrder(customer.userId, vendor.id, item.id, slot, 'PENDING');
+
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { holdExpiresAt: new Date(Date.now() + 4 * 60_000) },
+    });
 
     await orders.cancelOrder(order.id, customer.userId, 'changed my mind');
     await expectSlotFreedAndResellable(booking.id, item.id, slot, customer.userId);
