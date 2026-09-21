@@ -22,7 +22,7 @@ import { CartScreen } from '../modules/cart/screens/CartScreen';
 import { OrdersHistoryScreen } from '../modules/orders/screens/OrdersHistoryScreen';
 import { MarketScreen } from '../modules/shop/screens/MarketScreen';
 import { useMarketDepth } from '../hooks/customer';
-import { classifyMarketDepth } from '../lib/customerSurfaceState';
+import { shouldMountMarketTab } from '../lib/customerSurfaceState';
 import { DeliveryScreen } from '../modules/orders/screens/DeliveryScreen';
 import { FeedbackScreen } from '../modules/orders/screens/FeedbackScreen';
 import { ChatListScreen } from '../modules/chat/screens/ChatListScreen';
@@ -78,7 +78,7 @@ const TAB_ICON: Record<string, TabGlyphName> = {
 
 function HomeTabs() {
   const depth = useMarketDepth();
-  const marketVisible = classifyMarketDepth(depth.data, depth.isError) === 'visible';
+  const marketVisible = shouldMountMarketTab(depth.data, depth.isError);
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
@@ -126,7 +126,8 @@ function HomeTabs() {
           The tab used to mount unconditionally while market.routes.ts carried a
           comment claiming it "stays hidden below ~150 items" — the comment was
           true of the design and false of the code, and the tab shipped with one
-          store in it. The SERVER decides now; hidden while unknown. */}
+          store in it. The SERVER decides now; only a confirmed `visible:false`
+          response hides it. Startup and transient errors keep navigation stable. */}
       {marketVisible ? <Tab.Screen name="Market" component={MarketScreen} /> : null}
       <Tab.Screen name="Cart" component={CartScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />

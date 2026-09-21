@@ -6,6 +6,7 @@ import {
   decodePublicMarketDepth,
   homePlaceholderForCoordinateChange,
   retryTransientReadOnce,
+  shouldMountMarketTab,
 } from './customerSurfaceState';
 
 function axiosFailure(status?: number): unknown {
@@ -100,5 +101,12 @@ describe('public Market depth boundary', () => {
     expect(classifyMarketDepth({ visible: false, items: 149, vendors: 2 }, false)).toBe('hidden');
     expect(classifyMarketDepth({ visible: true, items: 150, vendors: 2 }, false)).toBe('visible');
     expect(classifyMarketDepth({ visible: true, items: 150, vendors: 2 }, true)).toBe('visible');
+  });
+
+  it('mounts Market unless the server explicitly confirms it is hidden', () => {
+    expect(shouldMountMarketTab(undefined, false)).toBe(true);
+    expect(shouldMountMarketTab(undefined, true)).toBe(true);
+    expect(shouldMountMarketTab({ visible: true, items: 150, vendors: 2 }, false)).toBe(true);
+    expect(shouldMountMarketTab({ visible: false, items: 149, vendors: 2 }, false)).toBe(false);
   });
 });

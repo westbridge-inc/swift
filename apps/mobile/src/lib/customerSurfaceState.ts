@@ -145,3 +145,12 @@ export function classifyMarketDepth(
   if (data) return data.visible ? 'visible' : 'hidden';
   return isError ? 'unavailable' : 'unknown';
 }
+
+/** Keep the route stable through startup and transient failures. Only a
+ * confirmed server decision may remove Market from the navigator. */
+export function shouldMountMarketTab(
+  data: PublicMarketDepth | undefined,
+  isError: boolean,
+): boolean {
+  return classifyMarketDepth(data, isError) !== 'hidden';
+}
