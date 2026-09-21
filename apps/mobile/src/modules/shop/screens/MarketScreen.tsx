@@ -90,16 +90,17 @@ export function MarketScreen() {
   const locationFix = grantedLocationFix(latitude, longitude, status);
   const [category, setCategory] = useState<string | undefined>(undefined);
 
-  const rail = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
+  const rail = useDiscoveryCategories({
+    vertical: 'RETAIL',
+    lat: locationFix?.latitude,
+    lng: locationFix?.longitude,
+  });
   const feed = useMarketItems({ category });
   const addToCart = useAddToCart();
 
   // RETAIL only: this tab is goods. A food category chip here would filter the
   // feed to nothing and read as "we have no tools".
-  const chips = useMemo(
-    () => (rail.data?.categories ?? []).filter((c) => c.vertical === 'RETAIL'),
-    [rail.data],
-  );
+  const chips = rail.data?.categories ?? [];
 
   const items: MarketItem[] = useMemo(
     () => ((feed.data?.pages as { items: MarketItem[] }[] | undefined) ?? []).flatMap((p) => p.items),
@@ -166,6 +167,7 @@ export function MarketScreen() {
                 key={c.slug ?? 'all'}
                 label={c.name}
                 selected={category === c.slug}
+                tint={MARKET_TINT}
                 onPress={() => setCategory(c.slug)}
               />
             ))}

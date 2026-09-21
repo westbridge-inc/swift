@@ -8,7 +8,7 @@ import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../../../services/api';
 import { color, radius, space } from '@swift/ui';
-import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
+import { useDiscoveryCategories, useHome, useToggleFavorite, type DiscoveryRail } from '../../../hooks/customer';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../kit/pressable-scale';
@@ -307,8 +307,13 @@ export function HomeScreen() {
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
   // spec 6.2). Flag off → both absent/present exactly as before (CAT-G).
-  const discovery = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
+  const discovery = useDiscoveryCategories({
+    vertical: 'FOOD',
+    lat: locationFix?.latitude,
+    lng: locationFix?.longitude,
+  });
   const railLive = !!discovery.data?.enabled && (discovery.data?.categories.length ?? 0) >= CAT_RAIL_MIN_CHIPS;
+  const railPending = discovery.isLoading && !discovery.data;
 
   // Ads hydrate independently (§13.4): home content NEVER waits on this call,
   // and an ad-free answer collapses the slots so sections close up. Launch is
@@ -331,6 +336,16 @@ export function HomeScreen() {
     }
     toggleFav.mutate({ vendorId, isFavorite });
   };
+  const openDiscoveryCategory = React.useCallback(
+    (category: DiscoveryRail['categories'][number]) => {
+      navigation.navigate('CategoryFeed', { slug: category.slug, fallbackName: category.name });
+    },
+    [navigation],
+  );
+  const openCategoryDirectory = React.useCallback(
+    () => navigation.navigate('CategoryGrid'),
+    [navigation],
+  );
 
   const feed = home.data;
   const featured: any[] = feed?.featured ?? [];
@@ -590,9 +605,9 @@ export function HomeScreen() {
             have open stores behind them (laws D/E). */}
         <CategoryRail
           data={discovery.data}
-          loading={false}
-          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
-          onSeeAll={() => navigation.navigate('CategoryGrid')}
+          loading={railPending}
+          onChip={openDiscoveryCategory}
+          onSeeAll={openCategoryDirectory}
         />
 
         {/* Tier 1 — hero video slot (§13.1). Present only when sold+live. */}
@@ -682,7 +697,7 @@ export function HomeScreen() {
 
             {/* Find by Category — superseded by the rail when it is live
                 (spec 6.2: one category system on Home, ever). */}
-            {!railLive && categories.length > 0 ? (
+            {!railPending && !railLive && categories.length > 0 ? (
               <>
                 <SectionHeader
                   size="lg"

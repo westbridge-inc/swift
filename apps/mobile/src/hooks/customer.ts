@@ -99,12 +99,20 @@ export type DiscoveryRail = {
   categories: Array<{ slug: string; name: string; emoji: string; iconKey: string | null; kind: string; vertical: string; availableVendors: number }>;
 };
 
+export type DiscoveryVertical = 'FOOD' | 'GROCERY' | 'RETAIL';
+
+type DiscoveryCategoryQuery = {
+  vertical: DiscoveryVertical;
+  lat?: number;
+  lng?: number;
+};
+
 /** The category rail (#17) — flag-gated server-side; silent on failure (the
  *  rail is garnish, Home never shows an error for it). */
-export function useDiscoveryCategories(lat?: number, lng?: number) {
+export function useDiscoveryCategories({ vertical, lat, lng }: DiscoveryCategoryQuery) {
   return useQuery<DiscoveryRail>({
-    queryKey: ['discovery', 'categories', lat?.toFixed?.(2), lng?.toFixed?.(2)],
-    queryFn: () => unwrap<DiscoveryRail>(discoveryApi.categories({ lat, lng })),
+    queryKey: ['discovery', 'categories', vertical, lat?.toFixed?.(2), lng?.toFixed?.(2)],
+    queryFn: () => unwrap<DiscoveryRail>(discoveryApi.categories({ vertical, lat, lng })),
     staleTime: 60_000,
     retry: false,
   });
