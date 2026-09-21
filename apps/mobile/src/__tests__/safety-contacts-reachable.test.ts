@@ -71,4 +71,14 @@ describe('the emergency-contact chain is connected end to end [S15]', () => {
     expect(screen).toContain('will NOT be alerted');
     expect(screen).toMatch(/verifiedAt/);
   });
+
+  it('the add form stretches inside the centred popup instead of collapsing to its icons', () => {
+    const screen = read('modules/safety/screens/EmergencyContactsScreen.tsx');
+    expect(screen).toContain("<View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.sm }}>");
+    expect(screen).toContain('accessibilityLabel="Emergency contact name"');
+    expect(screen).toContain('accessibilityLabel="Emergency contact phone number"');
+    expect(screen).toContain('accessibilityLabel="Relationship to emergency contact, optional"');
+    expect(screen).toContain('autoComplete="name"');
+    expect(screen).toContain('autoComplete="tel"');
+  });
 });
