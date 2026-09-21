@@ -12,6 +12,7 @@ import { useAppStore } from '../../../stores/appStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
+import { searchPresentation } from '../search-presentation';
 import {
   Chip,
   EmptyState,
@@ -183,10 +184,12 @@ export function SearchScreen() {
   // browse endpoint's substring match — exact spelling or nothing, and a dish
   // that lives inside a menu was unfindable ("greens" ≠ "green", "pepperpot"
   // returned no store). /search brings typo tolerance, ranking, and DISHES.
-  // Its schema covers the two catalogue verticals; Shops/Services text
-  // queries stay on the browse path until the engine indexes them.
+  // Items now carry their vendor vertical as an indexed facet, so every chip
+  // uses this one engine instead of silently falling back to vendor-name-only
+  // substring search for Shops and Services.
   const text = debounced.trim();
-  const engineMode = text.length >= 2 && (!type || type === 'RESTAURANT' || type === 'SUPERMARKET');
+  const engineMode = text.length >= 2;
+  const presentation = searchPresentation(type);
 
   const params = useMemo(() => {
     const p: Record<string, string> = {};
@@ -204,11 +207,11 @@ export function SearchScreen() {
   }, [debounced, type, sort, openNow, deviceLatitude, deviceLongitude]);
 
   const vendors = useVendors<any[]>(searching && !engineMode ? params : undefined);
-  const engine = useSearch<any>(engineMode ? text : '', engineMode ? { type, lat: deviceLatitude, lng: deviceLongitude } : undefined);
-  const suggestionsQ = useSearchSuggestions<any[]>(engineMode ? text : '');
+  const engine = useSearch<any>(engineMode ? text : '', engineMode ? { type, lat: deviceLatitude, lng: deviceLongitude, open: openNow } : undefined);
+  const suggestionsQ = useSearchSuggestions<any[]>(engineMode ? text : '', type);
   // Trending fuels the no-matches invitation — an empty result must open a
   // door, not dead-end. EARNED ranking (most-ordered across open stores).
-  const trendingQ = useSearchTrending<any[]>(engineMode);
+  const trendingQ = useSearchTrending<any[]>(type, engineMode);
   const home = useHome<any>(deviceLatitude, deviceLongitude);
   const popularItems: any[] = home.data?.popularItems ?? [];
 
@@ -282,7 +285,7 @@ export function SearchScreen() {
             <TextInput
               value={q}
               onChangeText={setQ}
-              placeholder="Restaurants, groceries, dishes…"
+              placeholder={presentation.placeholder}
               placeholderTextColor={color.text.muted}
               returnKeyType="search"
               autoFocus={!!route.params?.focus}
@@ -431,7 +434,7 @@ export function SearchScreen() {
                           {i > 0 ? <Divider /> : null}
                           <ResultRow
                             image={itemPhoto(it)}
-                            glyph="food"
+                            glyph={presentation.itemGlyph}
                             name={it.name}
                             sub={it.vendorName}
                             trailing={<Money amount={it.basePrice} />}
@@ -444,8 +447,9 @@ export function SearchScreen() {
                 ) : null}
               </ScrollView>
             ) : engineMode ? (
-              // [B2] Engine results: PLACES then DISHES — the second section is
-              // the whole point ("pepperpot" now finds the dish, not silence).
+              // [B2] Engine results: places then their orderable catalogue. The
+              // label and glyph follow the selected vertical; a haircut or
+              // phone case must never be rendered as a dish.
               <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] }}>
                 {results.length > 0 ? (
                   <>
@@ -473,14 +477,14 @@ export function SearchScreen() {
                 ) : null}
                 {dishes.length > 0 ? (
                   <>
-                    <SectionHeader title="Dishes" style={{ marginTop: results.length ? space['2xl'] : 0 }} />
+                    <SectionHeader title={presentation.itemSection} style={{ marginTop: results.length ? space['2xl'] : 0 }} />
                     <View style={{ marginTop: space.sm }}>
                       {dishes.map((it: any, i: number) => (
                         <React.Fragment key={it.id}>
                           {i > 0 ? <Divider /> : null}
                           <ResultRow
                             image={itemPhoto(it)}
-                            glyph="food"
+                            glyph={presentation.itemGlyph}
                             name={it.name}
                             sub={it.categoryName ? `${it.vendorName} · ${it.categoryName}` : it.vendorName}
                             trailing={<Money amount={it.basePrice} />}

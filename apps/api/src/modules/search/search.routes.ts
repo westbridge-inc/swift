@@ -28,8 +28,9 @@ type VendorHit = {
 
 const searchQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),
-  type: z.enum(['RESTAURANT', 'SUPERMARKET']).optional(),
+  type: z.enum(['RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE']).optional(),
   cuisine: z.string().max(50).optional(),
+  open: z.enum(['true', 'false']).transform((value) => value === 'true').optional(),
   lat: z.coerce.number().min(-90).max(90).optional(),
   lng: z.coerce.number().min(-180).max(180).optional(),
   limit: z.coerce.number().int().min(1).max(50).default(10),
@@ -37,13 +38,14 @@ const searchQuerySchema = z.object({
 
 const suggestionsQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),
+  type: z.enum(['RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE']).optional(),
 });
 
 const nearbyQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90),
   lng: z.coerce.number().min(-180).max(180),
   radius: z.coerce.number().positive().max(50).default(5),
-  type: z.enum(['RESTAURANT', 'SUPERMARKET']).optional(),
+  type: z.enum(['RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE']).optional(),
 });
 
 export async function searchRoutes(app: FastifyInstance) {
@@ -67,7 +69,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
   // Universal search — searches vendors AND items
   app.get('/search', { preHandler: [app.authenticate] }, async (request) => {
-    const { q, type, cuisine, lat, lng, limit: parsedLimit } = searchQuerySchema.parse(request.query);
+    const { q, type, cuisine, open, lat, lng, limit: parsedLimit } = searchQuerySchema.parse(request.query);
     // [R048-003] ONE tenant per request — the caller's, as auth bound it. Carried into the
     // index filter (server-built) and into every DB fallback query below.
     const tenantId = requireRequestTenant(request);
@@ -79,8 +81,8 @@ export async function searchRoutes(app: FastifyInstance) {
     if (searchService) {
       try {
         const [vendorResults, itemResults] = await Promise.all([
-          searchService.searchVendors(tenantId, q, { type, cuisine, openOnly: true, limit: parsedLimit }),
-          searchService.searchItems(tenantId, q, { limit: parsedLimit }),
+          searchService.searchVendors(tenantId, q, { type, cuisine, openOnly: open === true, limit: parsedLimit }),
+          searchService.searchItems(tenantId, q, { vendorType: type, cuisine, openOnly: open === true, limit: parsedLimit }),
         ]);
 
         const vendors: VendorHit[] = (vendorResults.hits as Record<string, unknown>[]).map((h) => ({
@@ -152,6 +154,8 @@ export async function searchRoutes(app: FastifyInstance) {
             { tags: { hasSome: [q] } },
           ],
           ...(type && { vendorType: type }),
+          ...(cuisine && { cuisineTypes: { has: cuisine } }),
+          ...(open === true && { isCurrentlyOpen: true }),
         },
         select: {
           id: true,
@@ -176,7 +180,12 @@ export async function searchRoutes(app: FastifyInstance) {
         where: {
           isAvailable: true,
           // the relation filter is not reached by the tenant-scoping extension: the tenant is named here
-          vendor: visibleVendorInTenant(tenantId),
+          vendor: {
+            ...visibleVendorInTenant(tenantId),
+            ...(type && { vendorType: type }),
+            ...(cuisine && { cuisineTypes: { has: cuisine } }),
+            ...(open === true && { isCurrentlyOpen: true }),
+          },
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
@@ -238,20 +247,28 @@ export async function searchRoutes(app: FastifyInstance) {
 
   // Suggestions / autocomplete
   app.get('/search/suggestions', { preHandler: [app.authenticate] }, async (request) => {
-    const { q } = suggestionsQuerySchema.parse(request.query);
+    const { q, type } = suggestionsQuerySchema.parse(request.query);
     if (!q || q.length < 2) return { success: true, data: [] };
     const tenantId = requireRequestTenant(request);
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
-        where: { ...visibleVendorInTenant(tenantId), name: { contains: q, mode: 'insensitive' } },
+        where: {
+          ...visibleVendorInTenant(tenantId),
+          ...(type && { vendorType: type }),
+          name: { contains: q, mode: 'insensitive' },
+        },
         select: { name: true, vendorType: true },
         take: 5,
       }),
       app.prisma.item.findMany({
         // [B2] This query had NO vendor predicate at all — a banned store's
         // dish names kept autocompleting for every customer who typed.
-        where: { isAvailable: true, vendor: visibleVendorInTenant(tenantId), name: { contains: q, mode: 'insensitive' } },
+        where: {
+          isAvailable: true,
+          vendor: { ...visibleVendorInTenant(tenantId), ...(type && { vendorType: type }) },
+          name: { contains: q, mode: 'insensitive' },
+        },
         select: { name: true },
         take: 5,
       }),
@@ -273,9 +290,13 @@ export async function searchRoutes(app: FastifyInstance) {
   // totalOrdered alone. isCurrentlyOpen stays: this feeds discovery moments
   // ("worth trying right now"), and a closed store isn't tryable right now.
   app.get('/search/trending', { preHandler: [app.authenticate] }, async (request) => {
+    const { type } = suggestionsQuerySchema.pick({ type: true }).parse(request.query);
     const tenantId = requireRequestTenant(request);
     const items = await app.prisma.item.findMany({
-      where: { isAvailable: true, vendor: { ...visibleVendorInTenant(tenantId), isCurrentlyOpen: true } },
+      where: {
+        isAvailable: true,
+        vendor: { ...visibleVendorInTenant(tenantId), isCurrentlyOpen: true, ...(type && { vendorType: type }) },
+      },
       // The shared select again. Trending is the Market tab's fallback rail, so
       // its cards land in the SAME component as the feed's; the fifth hand-built
       // copy of this shape lived here and served an item with no `isNew` and no

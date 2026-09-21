@@ -27,9 +27,9 @@ export const customerKeys = {
   // a store favourited — invalidates this, not one lat/lng variant.
   homeAll: ['customer', 'home'] as const,
   vendors: (params?: Record<string, string>) => ['customer', 'vendors', params ?? {}] as const,
-  search: (q: string, type?: string, lat?: number, lng?: number) => ['customer', 'search', q, type ?? null, lat ?? null, lng ?? null] as const,
-  searchSuggestions: (q: string) => ['customer', 'search-suggestions', q] as const,
-  searchTrending: ['customer', 'search-trending'] as const,
+  search: (q: string, type?: string, lat?: number, lng?: number, open?: boolean) => ['customer', 'search', q, type ?? null, lat ?? null, lng ?? null, open ?? null] as const,
+  searchSuggestions: (q: string, type?: string) => ['customer', 'search-suggestions', q, type ?? null] as const,
+  searchTrending: (type?: string) => ['customer', 'search-trending', type ?? null] as const,
   vendor: (id: string) => ['customer', 'vendor', id] as const,
   orders: ['customer', 'orders'] as const,
   order: (id: string) => ['customer', 'order', id] as const,
@@ -197,9 +197,9 @@ export function useVendors<T = any>(params?: Record<string, string>) {
  *  screen's old path was a substring filter that returned nothing for a
  *  plural, a misspelling, or a dish name; this is the finished engine that
  *  sat with zero callers on any surface. */
-export function useSearch<T = any>(q: string, opts?: { type?: string; lat?: number; lng?: number }) {
+export function useSearch<T = any>(q: string, opts?: { type?: string; lat?: number; lng?: number; open?: boolean }) {
   return useQuery<T>({
-    queryKey: customerKeys.search(q, opts?.type, opts?.lat, opts?.lng),
+    queryKey: customerKeys.search(q, opts?.type, opts?.lat, opts?.lng, opts?.open),
     queryFn: () => unwrap<T>(customerApi.search(q, opts)),
     enabled: q.trim().length >= 2,
     // Type-ahead cadence: keep the previous page while the next keystroke's
@@ -208,10 +208,10 @@ export function useSearch<T = any>(q: string, opts?: { type?: string; lat?: numb
   });
 }
 
-export function useSearchSuggestions<T = any>(q: string) {
+export function useSearchSuggestions<T = any>(q: string, type?: string) {
   return useQuery<T>({
-    queryKey: customerKeys.searchSuggestions(q),
-    queryFn: () => unwrap<T>(customerApi.searchSuggestions(q)),
+    queryKey: customerKeys.searchSuggestions(q, type),
+    queryFn: () => unwrap<T>(customerApi.searchSuggestions(q, type)),
     enabled: q.trim().length >= 2,
     placeholderData: keepPreviousData,
   });
@@ -219,10 +219,10 @@ export function useSearchSuggestions<T = any>(q: string) {
 
 /** Most-ordered dishes across open stores — EARNED ranking (totalOrdered),
  *  never the vendor-set isPopular checkbox. Feeds the no-matches invitation. */
-export function useSearchTrending<T = any>(enabled = true) {
+export function useSearchTrending<T = any>(type?: string, enabled = true) {
   return useQuery<T>({
-    queryKey: customerKeys.searchTrending,
-    queryFn: () => unwrap<T>(customerApi.searchTrending()),
+    queryKey: customerKeys.searchTrending(type),
+    queryFn: () => unwrap<T>(customerApi.searchTrending(type)),
     enabled,
     staleTime: 60_000,
   });

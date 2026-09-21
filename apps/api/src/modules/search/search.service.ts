@@ -127,7 +127,7 @@ export class SearchService {
     const itemIndex = this.client.index(ITEM_INDEX);
     await this.awaitTask(itemIndex.updateSettings({
       searchableAttributes: ['name', 'description', 'vendorName', 'categoryName', 'dietaryTags'],
-      filterableAttributes: ['tenantId', 'entityId', 'vendorId', 'isAvailable', 'isPopular', 'dietaryTags', 'basePrice', 'categories'],
+      filterableAttributes: ['tenantId', 'entityId', 'vendorId', 'vendorType', 'vendorCuisineTypes', 'vendorIsCurrentlyOpen', 'isAvailable', 'isPopular', 'dietaryTags', 'basePrice', 'categories'],
       sortableAttributes: ['basePrice', 'totalOrdered', 'name'],
       rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
     }), `configure ${ITEM_INDEX}`);
@@ -234,7 +234,16 @@ export class SearchService {
       // unverified or dead-tenant operator's dishes into the index.
       where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL },
       include: {
-        vendor: { select: { name: true, status: true, tenantId: true } },
+        vendor: {
+          select: {
+            name: true,
+            status: true,
+            tenantId: true,
+            vendorType: true,
+            cuisineTypes: true,
+            isCurrentlyOpen: true,
+          },
+        },
         category: { select: { name: true } },
       },
     });
@@ -335,6 +344,9 @@ export class SearchService {
 
   async searchItems(tenantId: string, query: string, options?: {
     vendorId?: string;
+    vendorType?: string;
+    cuisine?: string;
+    openOnly?: boolean;
     dietary?: string;
     maxPrice?: number;
     limit?: number;
@@ -343,6 +355,9 @@ export class SearchService {
   }) {
     const clauses: FilterClause[] = [{ attribute: 'isAvailable', op: '=', value: true }];
     if (options?.vendorId) clauses.push({ attribute: 'vendorId', op: '=', value: options.vendorId });
+    if (options?.vendorType) clauses.push({ attribute: 'vendorType', op: '=', value: options.vendorType });
+    if (options?.cuisine) clauses.push({ attribute: 'vendorCuisineTypes', op: '=', value: options.cuisine });
+    if (options?.openOnly) clauses.push({ attribute: 'vendorIsCurrentlyOpen', op: '=', value: true });
     if (options?.dietary) clauses.push({ attribute: 'dietaryTags', op: '=', value: options.dietary });
     if (options?.maxPrice !== undefined) clauses.push({ attribute: 'basePrice', op: '<=', value: options.maxPrice });
     const filter = buildScopedFilter(tenantId, clauses);
@@ -434,7 +449,16 @@ export class SearchService {
         // switched-off operator's DISHES stay searchable — the exact shape of
         // the #790 defect, where a deactivated operator's dish sat above the
         // fold while their store was already hidden.
-        vendor: { select: { name: true, tenantId: true, ...VISIBLE_VENDOR_SELECT } },
+        vendor: {
+          select: {
+            name: true,
+            tenantId: true,
+            vendorType: true,
+            cuisineTypes: true,
+            isCurrentlyOpen: true,
+            ...VISIBLE_VENDOR_SELECT,
+          },
+        },
         category: { select: { name: true } },
       },
     });
