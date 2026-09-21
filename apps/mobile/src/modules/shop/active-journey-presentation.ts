@@ -1,4 +1,4 @@
-import { orderStatusLabel, orderSubtitle } from '../../lib/orderStatus';
+import { orderStatusLabel, orderSubtitle, serviceOrderStatusLabel } from '../../lib/orderStatus';
 
 type ActiveJourney = {
   orderType?: string | null;
@@ -39,19 +39,7 @@ function journeyStatus(order: ActiveJourney): string {
     return 'Ready for rider pickup';
   }
   if (order.vendor?.vendorType === 'SERVICE') {
-    const serviceStatus: Record<string, string> = {
-      PENDING: 'Waiting for provider',
-      ACCEPTED: 'Accepted by provider',
-      PREPARING: 'Provider is preparing',
-      READY_FOR_PICKUP: 'Provider is ready',
-      OUT_FOR_DELIVERY: 'Provider on the way',
-      DELIVERED: 'Service completed',
-      COMPLETED: 'Service completed',
-      CANCELLED: 'Service cancelled',
-      REJECTED: 'Provider declined',
-      FAILED: 'Service could not be completed',
-    };
-    return serviceStatus[order.status ?? ''] ?? 'In progress';
+    return serviceOrderStatusLabel(order.status);
   }
   return orderStatusLabel(order.status, order.orderType);
 }

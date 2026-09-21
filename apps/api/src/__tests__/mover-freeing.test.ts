@@ -366,7 +366,7 @@ describe('handover frees the rider', () => {
 // 2. cancelOrder: float release + driver freeing (paths that skip updateStatus)
 // ---------------------------------------------------------------------------
 describe('cancelOrder frees movers and float', () => {
-  it('atomically releases a direct assignment that commits after cancellation starts', async () => {
+  it('re-reads a direct assignment that commits after cancellation starts and refuses the stale late cancel', async () => {
     const vendor = await makeVendor();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider({ online: true });
@@ -417,7 +417,11 @@ describe('cancelOrder frees movers and float', () => {
       const acceptPending = inject('POST', `/api/v1/rider/orders/${order.id}/accept`, {}, rider.token);
       await atAssignmentStage;
 
-      const cancellationPending = orderService.cancelOrder(order.id, customer.userId, 'changed my mind');
+      const cancellationPending = orderService.cancelOrder(order.id, customer.userId, 'changed my mind')
+        .then(
+          (value) => ({ value, error: null }),
+          (error: unknown) => ({ value: null, error }),
+        );
       await atCancellationRead;
       // Old behavior now used the stale riderId=null snapshot after its status
       // CAS and leaked both the committed float and busy Rider pointer. The new
@@ -431,7 +435,10 @@ describe('cancelOrder frees movers and float', () => {
     }
 
     expect(acceptResponse!.statusCode).toBe(200);
-    expect(cancellationResult).toMatchObject({ message: 'Order cancelled' });
+    expect(cancellationResult).toMatchObject({
+      value: null,
+      error: expect.objectContaining({ code: 'CANCELLATION_WINDOW_CLOSED', statusCode: 409 }),
+    });
 
     const [cancelled, freed, statusLogs] = await Promise.all([
       app.prisma.order.findUniqueOrThrow({
@@ -448,14 +455,17 @@ describe('cancelOrder frees movers and float', () => {
         select: { status: true },
       }),
     ]);
-    expect(cancelled).toEqual({ status: 'CANCELLED', riderId: rider.riderId });
+    expect(cancelled).toEqual({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });
+    // Stacking capacity is greater than one in this fixture, so one committed
+    // leg still leaves room for another. The live-leg pointer and float are
+    // the authoritative proof that the rejected cancellation released nothing.
     expect(freed.isAvailable).toBe(true);
-    expect(freed.currentOrderId).toBeNull();
-    expect(Number(freed.committedFloat)).toBe(0);
-    expect(statusLogs.map((entry) => entry.status)).toEqual(['RIDER_ASSIGNED', 'CANCELLED']);
+    expect(freed.currentOrderId).toBe(order.id);
+    expect(Number(freed.committedFloat)).toBe(1000);
+    expect(statusLogs.map((entry) => entry.status)).toEqual(['RIDER_ASSIGNED']);
   });
 
-  it('customer cancel after rider assignment releases the committed float', async () => {
+  it('customer cancel after rider assignment leaves the committed float and mover reservation intact', async () => {
     const vendor = await makeVendor();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider({ committedFloat: 1000 });
@@ -465,12 +475,15 @@ describe('cancelOrder frees movers and float', () => {
       data: { isAvailable: false, currentOrderId: order.id },
     });
 
-    await orderService.cancelOrder(order.id, customer.userId, 'changed my mind');
+    await expect(orderService.cancelOrder(order.id, customer.userId, 'changed my mind'))
+      .rejects.toMatchObject({ code: 'CANCELLATION_WINDOW_CLOSED', statusCode: 409 });
 
     const freed = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
-    expect(freed.isAvailable).toBe(true);
-    expect(freed.currentOrderId).toBeNull();
-    expect(Number(freed.committedFloat)).toBe(0);
+    expect(freed.isAvailable).toBe(false);
+    expect(freed.currentOrderId).toBe(order.id);
+    expect(Number(freed.committedFloat)).toBe(1000);
+    await expect(app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }))
+      .resolves.toMatchObject({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });
   });
 
   it('taxi cancel after driver assignment frees the driver', async () => {
