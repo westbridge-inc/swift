@@ -80,7 +80,7 @@ export function RatingMeta({
 
   if (extra) {
     segments.push(
-      <T key="extra" variant="caption" tone="muted">
+      <T key="extra" variant="caption" tone="muted" numberOfLines={1} style={{ flexShrink: 1 }}>
         {extra}
       </T>,
     );
@@ -89,7 +89,7 @@ export function RatingMeta({
   if (segments.length === 0) return null;
 
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
       {segments.map((seg, i) => (
         <React.Fragment key={i}>
           {i > 0 ? <MetaDot /> : null}
@@ -162,23 +162,18 @@ export function FoodCard({
           <T variant="label" weight="semibold" numberOfLines={1}>
             {name}
           </T>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            {priceLabel ? (
-              // MONEY IN INK [100x pass §5]: "Prices were brand-red everywhere
-              // — red stops meaning 'act' when it also means '$2,500'. Money is
-              // now ink, tabular Bricolage; red is reserved for the rail, the
-              // flagship tile, and CTAs." The numM variant is already the
-              // tabular face; only the colour changes.
-              <T variant="numM">
-                {priceLabel}
-              </T>
-            ) : (
-              <View />
-            )}
-            {/* RatingMeta now returns null when it has nothing to say, so this
-                no longer needs to guess. The old guard dropped the WHOLE line
-                whenever rating was absent — which is why the Popular rail never
-                showed a store name the API had been sending all along. */}
+          {priceLabel ? (
+            // Money and merchant metadata cannot share a shrinking row on a
+            // two-column card: long GYD prices and store names drew through one
+            // another on real devices. Each fact keeps one bounded line.
+            <T variant="numM" numberOfLines={1}>
+              {priceLabel}
+            </T>
+          ) : null}
+          {/* RatingMeta returns null when it has nothing to say. When present,
+              it gets its own bounded line so the vendor and ETA stay readable
+              without competing with the amount above. */}
+          <View style={{ minHeight: 18, minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
             <RatingMeta rating={rating} bucket={ratingBucket} topRated={topRated} extra={meta} />
           </View>
         </View>
