@@ -978,6 +978,10 @@ export async function customerRoutes(app: FastifyInstance) {
               // store" on Home. That client fix was already correct; it was
               // defeated here, at the select, where nothing failed.
               orderType: true,
+              // Home must distinguish a pickup or appointment from a delivery.
+              // `orderType` alone cannot: SERVICE appointments currently share
+              // the store-order enum, and pickup is a fulfillment choice.
+              fulfillment: true,
               vendor: { select: { id: true, name: true, logoUrl: true } },
               // The hold — the window in which the store has not been told yet.
               // `holdExpiresAt` and `placedAt` are its two ends, and the client's

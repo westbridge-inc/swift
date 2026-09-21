@@ -77,6 +77,7 @@ async function makeOrder(opts: {
   customerId: string;
   orderType: 'TAXI' | 'FOOD_DELIVERY';
   holdExpiresAt?: Date | null;
+  fulfillment?: 'DELIVERY' | 'PICKUP' | 'APPOINTMENT';
 }) {
   const order = await app.prisma.order.create({
     data: {
@@ -89,6 +90,7 @@ async function makeOrder(opts: {
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
       deliveryFee: 0, totalAmount: 1000,
       paymentMethod: 'CASH',
+      ...(opts.fulfillment ? { fulfillment: opts.fulfillment } : {}),
       ...(opts.holdExpiresAt !== undefined ? { holdExpiresAt: opts.holdExpiresAt } : {}),
     },
   });
@@ -174,6 +176,18 @@ describe('Home sends the order TYPE, so the card can use the right words', () =>
 
     const activeOrder = await fetchActiveOrder(customer.token, customer.id);
     expect(activeOrder.orderType).toBe('FOOD_DELIVERY');
+  });
+
+  it('sends fulfillment so Home can identify pickup and appointment journeys', async () => {
+    const customer = await makeCustomer();
+    await makeOrder({
+      customerId: customer.id,
+      orderType: 'FOOD_DELIVERY',
+      fulfillment: 'APPOINTMENT',
+    });
+
+    const activeOrder = await fetchActiveOrder(customer.token, customer.id);
+    expect(activeOrder.fulfillment).toBe('APPOINTMENT');
   });
 });
 

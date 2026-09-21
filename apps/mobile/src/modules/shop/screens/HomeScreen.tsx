@@ -20,11 +20,12 @@ import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
+import { activeJourneyName, activeJourneyPresentation } from '../active-journey-presentation';
 // [F-264] itemPhoto/vendorPhoto return null rather than inventing a stock
 // photo. `itemImage` used to hand "Mauby" a picture of a cheeseburger.
 import { categoryPhoto, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
-import { orderStatusLabel, orderSubtitle } from '../../../lib/orderStatus';
+import { orderSubtitle } from '../../../lib/orderStatus';
 import { promiseLine } from '../../../lib/promise';
 // ONE hold authority, shared with the tracking screen — never a second
 // countdown that could disagree with it about whether the window is open.
@@ -197,6 +198,8 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
   // range is an absolute window and stays true out of the cache); a passed
   // window is never shown as still coming.
   const promise = promiseLine(order.promise, now);
+  const journey = activeJourneyPresentation(order);
+  const journeyName = activeJourneyName(order);
 
   return (
     <View style={{ paddingHorizontal: GUTTER, marginTop: space.lg }}>
@@ -217,8 +220,8 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
               />
               <T variant="body" weight="semibold">
                 {hold
-                  ? `Held — goes to ${order.vendor?.name ?? 'the store'} in ${mmss}`
-                  : orderStatusLabel(order.status, order.orderType)}
+                  ? `${journeyName} held — goes to ${order.vendor?.name ?? 'the store'} in ${mmss}`
+                  : journey.title}
               </T>
             </View>
             <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
@@ -230,7 +233,7 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
                   // What stays true on any clock is that the store has not been
                   // told yet — the cost, if any, is shown before confirming.
                   `The store hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
-                : orderSubtitle(order.vendor?.name, order.orderNumber)}
+                : journey.subtitle}
             </T>
             {promise && !hold ? (
               <T variant="caption" style={{ marginTop: 4 }}>
