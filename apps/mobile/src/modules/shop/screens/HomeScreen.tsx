@@ -14,6 +14,7 @@ import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../kit/pressable-scale';
 import { Scrim } from '../../../kit/scrim';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { classifyHomeSurface } from '../../../lib/customerSurfaceState';
 import { locationPrimer } from '../../../lib/location-primer';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { haptic } from '../../../lib/haptics';
@@ -307,6 +308,13 @@ export function HomeScreen() {
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
   const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
+  const homeSurface = classifyHomeSurface({
+    hasData: home.data !== undefined,
+    status: home.status,
+    fetchStatus: home.fetchStatus,
+    isFetching: home.isFetching,
+    isPlaceholderData: home.isPlaceholderData,
+  });
   const toggleFav = useToggleFavorite();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
@@ -508,6 +516,36 @@ export function HomeScreen() {
           <RefreshControl refreshing={home.isRefetching} onRefresh={() => home.refetch()} tintColor={color.brand[500]} />
         }
       >
+        {homeSurface === 'stale-error' ? (
+          <View style={{ paddingHorizontal: GUTTER, paddingVertical: space.md }}>
+            <T variant="label" tone="muted">
+              Couldn’t refresh. Showing the last results.
+            </T>
+            <PillButton
+              label="Retry"
+              size="sm"
+              onPress={() => { void home.refetch(); }}
+              style={{ marginTop: space.sm, alignSelf: 'flex-start' }}
+            />
+          </View>
+        ) : homeSurface === 'stale-paused' ? (
+          <View style={{ paddingHorizontal: GUTTER, paddingVertical: space.md }}>
+            <T variant="label" tone="muted">
+              Showing saved results while Swift waits for a connection.
+            </T>
+          </View>
+        ) : homeSurface === 'stale-location' ? (
+          <View style={{ paddingHorizontal: GUTTER, paddingVertical: space.md }}>
+            <T variant="label" tone="muted">
+              Showing your previous Home while stores update for this location.
+            </T>
+          </View>
+        ) : homeSurface === 'refreshing' ? (
+          <View style={{ paddingHorizontal: GUTTER, paddingVertical: space.sm }}>
+            <T variant="caption" tone="muted">Refreshing…</T>
+          </View>
+        ) : null}
+
         {/* THE LIVE ORDER, FIRST — and it used to say so while rendering fourth.
             This block carried the comment "Live order first — the thing you
             actually care about right now" from a position BELOW the tiles, below
@@ -626,10 +664,19 @@ export function HomeScreen() {
           </View>
         ) : null}
 
-        {home.isLoading ? (
-          <LoadingBlock style={{ paddingTop: 96 }} />
-        ) : home.isError ? (
-          <ErrorState onRetry={() => home.refetch()} style={{ paddingTop: 48 }} />
+        {homeSurface === 'initial-loading' ? (
+          <View style={{ alignItems: 'center', gap: space.md, paddingTop: 96 }}>
+            <LoadingBlock style={{ flex: 0, padding: 0 }} />
+            <T variant="label" tone="muted">Loading stores and services…</T>
+          </View>
+        ) : homeSurface === 'initial-paused' ? (
+          <ErrorState
+            message="Swift is waiting for a connection. Reconnect and try again."
+            onRetry={() => { void home.refetch(); }}
+            style={{ paddingTop: 48 }}
+          />
+        ) : homeSurface === 'initial-error' ? (
+          <ErrorState onRetry={() => { void home.refetch(); }} style={{ paddingTop: 48 }} />
         ) : (
           <>
             {/* Order again — the fastest path to the next order */}

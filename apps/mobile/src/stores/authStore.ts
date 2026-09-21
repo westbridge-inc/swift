@@ -4,7 +4,7 @@ import * as Crypto from 'expo-crypto';
 import type { User } from '@swift/types';
 import type { AdEventScope } from '../lib/adsCore';
 import { retireAdEventScope } from '../lib/adsQueue';
-import { queryClient } from '../lib/queryClient';
+import { clearPrincipalQueryCache } from '../lib/queryClient';
 import { zustandStorage } from '../lib/storage';
 import { landingIntent } from '../lib/roleLanding';
 import { normalizePersistedAuth, recordHydration, type HydrationReason } from '../lib/authHydration';
@@ -136,7 +136,7 @@ function finishLocalLogout(session: AuthSessionSnapshot | null): void {
       generation: session.generation,
     });
   }
-  queryClient.clear();
+  clearPrincipalQueryCache();
   // Appointment selections are session-scoped. Clear them synchronously so a
   // shared-device login can never submit the previous account's chosen slot.
   useBookingStore.getState().clear();
@@ -300,7 +300,7 @@ export const useAuthStore = create<AuthState>()(
           // principal generation has advanced, so persisted background work
           // keyed to the old boundary is stale (moverBackgroundRuntime treats a
           // signed-out rehydration as cleanup-pending).
-          queryClient.clear();
+          clearPrincipalQueryCache();
           useBookingStore.getState().clear();
           useStoreSwitcher.getState().setSelectedStore(null);
           track('auth_hydration_normalized', { reason });

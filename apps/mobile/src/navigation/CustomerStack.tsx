@@ -22,6 +22,7 @@ import { CartScreen } from '../modules/cart/screens/CartScreen';
 import { OrdersHistoryScreen } from '../modules/orders/screens/OrdersHistoryScreen';
 import { MarketScreen } from '../modules/shop/screens/MarketScreen';
 import { useMarketDepth } from '../hooks/customer';
+import { classifyMarketDepth } from '../lib/customerSurfaceState';
 import { DeliveryScreen } from '../modules/orders/screens/DeliveryScreen';
 import { FeedbackScreen } from '../modules/orders/screens/FeedbackScreen';
 import { ChatListScreen } from '../modules/chat/screens/ChatListScreen';
@@ -77,7 +78,7 @@ const TAB_ICON: Record<string, TabGlyphName> = {
 
 function HomeTabs() {
   const depth = useMarketDepth();
-  const marketVisible = depth.data?.visible === true;
+  const marketVisible = classifyMarketDepth(depth.data, depth.isError) === 'visible';
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({

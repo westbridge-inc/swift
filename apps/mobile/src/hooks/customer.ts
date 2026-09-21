@@ -3,10 +3,18 @@ import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClie
 import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
 import { recordCheckoutOutcome, stableBodyHash, type CheckoutPrincipal } from '../lib/checkoutAttempt';
-import { getAuthSessionSnapshot } from '../stores/authStore';
+import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
 import { isAxiosError } from 'axios';
 import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
+import {
+  PUBLIC_MARKET_DEPTH_KEY,
+  customerHomeKey,
+  decodePublicMarketDepth,
+  homePlaceholderForCoordinateChange,
+  retryTransientReadOnce,
+  type PublicMarketDepth,
+} from '../lib/customerSurfaceState';
 
 /**
  * Thin React Query wrappers over `customerApi`. Every consumer screen reads data
@@ -21,7 +29,7 @@ async function unwrap<T = any>(p: Promise<any>): Promise<T> {
 export const customerKeys = {
   profile: ['customer', 'profile'] as const,
   addresses: ['customer', 'addresses'] as const,
-  home: (lat?: number, lng?: number) => ['customer', 'home', lat ?? null, lng ?? null] as const,
+  home: customerHomeKey,
   // The PREFIX of every Home feed, whatever coordinates it was fetched for.
   // Anything that changes what Home should show — an order placed, cancelled,
   // a store favourited — invalidates this, not one lat/lng variant.
@@ -91,7 +99,23 @@ export function useSetDefaultAddress() {
 }
 
 export function useHome<T = any>(lat?: number, lng?: number) {
-  return useQuery<T>({ queryKey: customerKeys.home(lat, lng), queryFn: () => unwrap<T>(customerApi.getHome(lat, lng)) });
+  const generation = useAuthStore((state) => state.sessionGeneration);
+  const queryKey = customerKeys.home(generation, lat, lng);
+
+  return useQuery<T>({
+    queryKey,
+    queryFn: () => unwrap<T>(customerApi.getHome(
+      queryKey[3] ?? undefined,
+      queryKey[4] ?? undefined,
+    )),
+    placeholderData: (previousData, previousQuery) =>
+      homePlaceholderForCoordinateChange(
+        previousData,
+        previousQuery?.queryKey,
+        queryKey,
+      ),
+    retry: retryTransientReadOnce,
+  });
 }
 
 export type DiscoveryRail = {
@@ -156,13 +180,16 @@ export type MarketItem = {
  * we are avoiding is showing an empty market, not hiding a full one.
  */
 export function useMarketDepth() {
-  return useQuery({
-    queryKey: ['market', 'depth'],
+  return useQuery<PublicMarketDepth>({
+    queryKey: PUBLIC_MARKET_DEPTH_KEY,
     queryFn: async () => {
       const res = await marketApi.depth();
-      return (res?.data?.data ?? null) as { visible: boolean; items: number; vendors: number } | null;
+      const depth = decodePublicMarketDepth(res?.data?.data);
+      if (!depth) throw new Error('Invalid market-depth response');
+      return depth;
     },
     staleTime: 5 * 60_000,
+    retry: retryTransientReadOnce,
   });
 }
 
