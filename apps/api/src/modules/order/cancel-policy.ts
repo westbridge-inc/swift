@@ -7,9 +7,11 @@
 // "must match" comment) — the exact drift class where a customer is shown one
 // fee and "charged" another. Import from here or don't touch the policy.
 //
-// ADR: the fee is flat and announced-but-uncollected (cash-only platform —
-// Swift can't collect it); its role is deterrence + the risk-score signal.
-// Founder decision 2026-07-20: record it as a marker, keep displaying it.
+// Taxi/courier still use the flat announced-but-uncollected marker below.
+// Marketplace food/grocery/store/service orders do not: their unilateral
+// customer cancellation ends with the free window and is refused afterwards.
+// Keeping the distinction here prevents an unenforced marker from being
+// mistaken for protection of a business that has already committed work.
 // ---------------------------------------------------------------------------
 
 /** Minutes after placing during which a PENDING order cancels free. Under
@@ -18,6 +20,25 @@ export const FREE_CANCEL_WINDOW_MIN = 5;
 
 /** Flat late-cancellation fee (GYD, integer). */
 export const LATE_CANCEL_FEE = 500;
+
+/** Marketplace Orders are the restaurant/grocery/store/service order spine.
+ * SERVICE vendors still persist through FOOD_DELIVERY today, so the policy
+ * must key on the order family rather than the client-facing business label.
+ * Taxi and courier own separate cancellation contracts. */
+export function isMarketplaceOrderType(orderType: string): boolean {
+  return orderType === 'FOOD_DELIVERY' || orderType === 'GROCERY_DELIVERY';
+}
+
+/** The customer may unilaterally cancel a marketplace order only while the
+ * server says its free window is genuinely open. An uncollected "fee marker"
+ * is not enforcement: once the business/mover has committed, resolution moves
+ * to the business/support path and this write must refuse. */
+export function canCancelMarketplaceOrder(
+  order: CancellationSnapshot,
+  now: Date = new Date(),
+): boolean {
+  return isMarketplaceOrderType(order.orderType) && isFreeCancellation(order, now);
+}
 
 /** The fields the free-cancellation decision reads. Structural on purpose:
  *  both the charge path (order.service) and the customer preview

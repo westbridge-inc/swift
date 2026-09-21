@@ -20,7 +20,7 @@ import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
-import { activeJourneyName, activeJourneyPresentation } from '../active-journey-presentation';
+import { activeJourneyName, activeJourneyPresentation, activeJourneyRecipient } from '../active-journey-presentation';
 // [F-264] itemPhoto/vendorPhoto return null rather than inventing a stock
 // photo. `itemImage` used to hand "Mauby" a picture of a cheeseburger.
 import { categoryPhoto, itemPhoto, vendorPhoto } from '../../../lib/images';
@@ -200,6 +200,7 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
   const promise = promiseLine(order.promise, now);
   const journey = activeJourneyPresentation(order);
   const journeyName = activeJourneyName(order);
+  const journeyRecipient = activeJourneyRecipient(order);
 
   return (
     <View style={{ paddingHorizontal: GUTTER, marginTop: space.lg }}>
@@ -232,7 +233,7 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
                   // that clock is the app making a money claim it cannot keep.
                   // What stays true on any clock is that the store has not been
                   // told yet — the cost, if any, is shown before confirming.
-                  `The store hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
+                  `The ${journeyRecipient} hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
                 : journey.subtitle}
             </T>
             {promise && !hold ? (

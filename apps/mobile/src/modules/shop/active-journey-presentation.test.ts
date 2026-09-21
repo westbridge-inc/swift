@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activeJourneyPresentation } from './active-journey-presentation';
+import { activeJourneyPresentation, activeJourneyRecipient } from './active-journey-presentation';
 
 describe('Home active-journey identity', () => {
   it('does not disguise a courier request as a generic order', () => {
@@ -37,5 +37,16 @@ describe('Home active-journey identity', () => {
       orderNumber: 'SW-42',
       vendor: { name: 'Fresh Mart' },
     }).subtitle).toBe('Fresh Mart · #SW-42');
+  });
+
+  it('never labels a service business as food when a legacy order enum is FOOD_DELIVERY', () => {
+    expect(activeJourneyPresentation({
+      orderType: 'FOOD_DELIVERY',
+      fulfillment: 'DELIVERY',
+      status: 'PENDING',
+      orderNumber: 'SW-SERVICE-1',
+      vendor: { name: 'Sharp Cuts Barbershop', vendorType: 'SERVICE' },
+    }).title).toBe('Service order · Waiting for provider');
+    expect(activeJourneyRecipient({ vendor: { vendorType: 'SERVICE' } })).toBe('provider');
   });
 });
