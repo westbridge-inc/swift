@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { FlatList, View } from 'react-native';
+import { FlatList, ScrollView, View } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useDiscoveryCategories, useVendors } from '../../../hooks/customer';
@@ -20,7 +20,7 @@ import { Chip, EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen,
 export function CategoryFeedScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
-  const { slug, name, emoji } = route.params as { slug: string; name: string; emoji: string };
+  const { slug, fallbackName } = route.params as { slug: string; fallbackName?: string };
   const { latitude, longitude, status } = useLocationStore();
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
@@ -28,11 +28,17 @@ export function CategoryFeedScreen() {
     category: slug,
     ...(locationFix ? { lat: String(locationFix.latitude), lng: String(locationFix.longitude) } : {}),
   });
-  const rail = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
+  const rail = useDiscoveryCategories({
+    vertical: 'FOOD',
+    lat: locationFix?.latitude,
+    lng: locationFix?.longitude,
+  });
 
   const vendors: any[] = vendorsQ.data?.data ?? vendorsQ.data ?? [];
   const open = vendors.filter((v) => v.isCurrentlyOpen);
   const closed = vendors.filter((v) => !v.isCurrentlyOpen);
+  const currentCategory = (rail.data?.categories ?? []).find((c) => c.slug === slug);
+  const name = currentCategory?.name ?? fallbackName ?? 'Category';
   const siblings = (rail.data?.categories ?? []).filter((c) => c.slug !== slug).slice(0, 3);
 
   const row = (v: any) => (
@@ -54,7 +60,7 @@ export function CategoryFeedScreen() {
 
   return (
     <Screen>
-      <Header title={`${emoji} ${name}`} />
+      <Header title={name} />
       {vendorsQ.isLoading ? (
         <LoadingBlock />
       ) : vendorsQ.isError ? (
@@ -71,15 +77,19 @@ export function CategoryFeedScreen() {
               <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
                 Open now instead
               </T>
-              <View style={{ flexDirection: 'row', gap: space.sm }}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ gap: space.sm, paddingHorizontal: space['2xl'] }}
+              >
                 {siblings.map((c) => (
                   <Chip
                     key={c.slug}
-                    label={`${c.emoji} ${c.name}`}
-                    onPress={() => navigation.setParams({ slug: c.slug, name: c.name, emoji: c.emoji })}
+                    label={c.name}
+                    onPress={() => navigation.setParams({ slug: c.slug, fallbackName: c.name })}
                   />
                 ))}
-              </View>
+              </ScrollView>
             </View>
           ) : null}
         </View>

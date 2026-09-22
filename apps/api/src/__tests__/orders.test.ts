@@ -720,24 +720,57 @@ describe('Appointments — booked at acceptance, never double-held', () => {
     expect(db.status).toBe('PENDING');
   });
 
-  it('cancel-then-accept leaves NO booking behind — the reservation rides the accept transaction [REPORT-007-v4 F-05]', async () => {
+  it('customer cancellation during the hold wins; vendor accept stays blind and creates no booking', async () => {
     const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const raceSlot = new Date(slot.getTime() + 4 * 60 * 60_000); // 15:00 — inside the 09:00–17:00 window
-    const res = await checkoutAppointment(cust, raceSlot);
+    // This race requires an order the customer is genuinely authorised to
+    // cancel. CI intentionally disables LIFECYCLE_V2 for flag-agnostic tests,
+    // which otherwise creates a legacy/null hold that marketplace authority
+    // now correctly fails closed. Enable the server-owned hold only while this
+    // order is created, then restore the exact prior environment value.
+    const previousLifecycle = process.env['LIFECYCLE_V2'];
+    const previousHoldMinutes = process.env['ORDER_HOLD_MINUTES'];
+    process.env['LIFECYCLE_V2'] = '1';
+    process.env['ORDER_HOLD_MINUTES'] = '5';
+    const res = await (async () => {
+      try {
+        return await checkoutAppointment(cust, raceSlot);
+      } finally {
+        if (previousLifecycle === undefined) delete process.env['LIFECYCLE_V2'];
+        else process.env['LIFECYCLE_V2'] = previousLifecycle;
+        if (previousHoldMinutes === undefined) delete process.env['ORDER_HOLD_MINUTES'];
+        else process.env['ORDER_HOLD_MINUTES'] = previousHoldMinutes;
+      }
+    })();
     expect(res.statusCode).toBe(200);
     const order = res.json().data.order;
     createdOrderIds.push(order.id);
 
+    const cancellable = await app.prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { holdExpiresAt: true },
+    });
+    expect(cancellable.holdExpiresAt?.getTime()).toBeGreaterThan(Date.now());
+
+    const detail = await inject('GET', `/api/v1/customer/orders/${order.id}`, undefined, cust.token);
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().data.canCancel).toBe(true);
+
     // Deterministic shape of the race: the cancellation commits first.
     const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'changed plans' }, cust.token);
     expect(cancel.statusCode).toBe(200);
+    const cancelled = await app.prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { status: true, cancelledBy: true },
+    });
+    expect(cancelled).toEqual({ status: 'CANCELLED', cancelledBy: cust.userId });
 
     const accept = await inject('PUT', `/api/v1/vendor/orders/${order.id}/accept`, {}, service.token);
-    expect(accept.statusCode).toBeGreaterThanOrEqual(400);
-    // Pre-fix, reserveSlot ran BEFORE the locked transition and the lost race
-    // left an orphan CONFIRMED booking blocking the chair forever. The
-    // reservation now rides the same Order-lock transaction, so the refusal
-    // rolls it back too.
+    // The still-open hold keeps this cancelled order invisible to the vendor.
+    // This sequential case proves the customer-first outcome only; it makes
+    // no claim about a concurrent accept/cancel lock interleaving.
+    expect(accept.statusCode).toBe(404);
+    expect(accept.json().error.code).toBe('NOT_FOUND');
     const bookings = await app.prisma.booking.count({ where: { orderId: order.id, status: { not: 'CANCELLED' } } });
     expect(bookings).toBe(0);
   });
@@ -807,11 +840,27 @@ describe('Appointments — booked at acceptance, never double-held', () => {
     expect(db.deliveryLng).toBe(vendorRow.longitude);
   });
 
-  it('cancelling an accepted appointment frees the slot', async () => {
+  it('an accepted appointment requires provider resolution; provider rejection frees the slot', async () => {
     const first = await app.prisma.booking.findFirstOrThrow({
       where: { itemId: haircutId, slotStart: slot, status: 'CONFIRMED' },
     });
-    await orderService.cancelOrder(first.orderId!, customer.userId, 'changed my mind');
+    const detail = await inject('GET', `/api/v1/customer/orders/${first.orderId}`, undefined, customer.token);
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().data.canCancel).toBe(false);
+
+    await expect(orderService.cancelOrder(first.orderId!, customer.userId, 'changed my mind'))
+      .rejects.toMatchObject({ code: 'CANCELLATION_WINDOW_CLOSED', statusCode: 409 });
+
+    const stillConfirmed = await app.prisma.booking.findUniqueOrThrow({ where: { id: first.id } });
+    expect(stillConfirmed.status).toBe('CONFIRMED');
+
+    const providerReject = await inject(
+      'PUT',
+      `/api/v1/vendor/orders/${first.orderId}/reject`,
+      { reason: 'provider cannot host this appointment' },
+      service.token,
+    );
+    expect(providerReject.statusCode).toBe(200);
 
     const freed = await app.prisma.booking.findUniqueOrThrow({ where: { id: first.id } });
     expect(freed.status).toBe('CANCELLED');

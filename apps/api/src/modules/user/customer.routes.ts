@@ -25,7 +25,7 @@ import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { visibleVendorRelForCaller, visibleVendorForCaller } from '../vendor/vendor-visibility';
 import { compileStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { createHash, randomInt } from 'node:crypto';
-import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
+import { customerCancellationDenial, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
@@ -978,7 +978,14 @@ export async function customerRoutes(app: FastifyInstance) {
               // store" on Home. That client fix was already correct; it was
               // defeated here, at the select, where nothing failed.
               orderType: true,
-              vendor: { select: { id: true, name: true, logoUrl: true } },
+              // Home must distinguish a pickup or appointment from a delivery.
+              // `orderType` alone cannot: SERVICE appointments currently share
+              // the store-order enum, and pickup is a fulfillment choice.
+              fulfillment: true,
+              // vendorType is the vertical authority for SERVICE businesses.
+              // Their legacy persisted orderType is FOOD_DELIVERY, so dropping
+              // this field makes a barbershop card claim to be a food order.
+              vendor: { select: { id: true, name: true, logoUrl: true, vendorType: true } },
               // The hold — the window in which the store has not been told yet.
               // `holdExpiresAt` and `placedAt` are its two ends, and the client's
               // `holdRingWindow` refuses to draw anything unless BOTH came from
@@ -2223,12 +2230,10 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Delivery progress info
     const hasBeenRated = orderRatings.length > 0;
-    // [REPORT-006 F-006-01] Captured MMG orders can't cancel in-app (the store
-    // holds the money and settles refunds directly) — the button must not
-    // offer what the locked cancel path will refuse.
-    const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
-      && !(order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED');
     const previewNow = new Date();
+    // Exact same-snapshot authority as the locked customer command. The POST
+    // still rechecks under lock because state may change after this response.
+    const canCancel = customerCancellationDenial(order, previewNow) == null;
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
     // — the fee shown here and the marker recorded there can never drift
     // again. The hold exemption, the assignment guard and the scheduled-slot
@@ -2331,8 +2336,9 @@ export async function customerRoutes(app: FastifyInstance) {
         hasBeenRated,
         canCancel,
         freeCancellationWindow: freeCancellation,
-        // What a cancel would cost right now (0 inside the free window) — so
-        // the app shows the fee BEFORE the customer confirms.
+        // Marketplace customer cancellation is available only during its free
+        // vendor-silent hold. Taxi/courier may still expose their own late
+        // marker through the shared fee predicate.
         cancellationFee: canCancel && !freeCancellation ? LATE_CANCEL_FEE : 0,
         // Held orders: the free window IS the hold; otherwise the legacy clock.
         // Only promised while the cancel is ACTUALLY free right now — a mover

@@ -8,23 +8,25 @@ import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../../../services/api';
 import { color, radius, space } from '@swift/ui';
-import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
+import { useDiscoveryCategories, useHome, useToggleFavorite, type DiscoveryRail } from '../../../hooks/customer';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../kit/pressable-scale';
 import { Scrim } from '../../../kit/scrim';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { classifyHomeSurface } from '../../../lib/customerSurfaceState';
 import { locationPrimer } from '../../../lib/location-primer';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
+import { activeJourneyName, activeJourneyPresentation, activeJourneyRecipient } from '../active-journey-presentation';
 // [F-264] itemPhoto/vendorPhoto return null rather than inventing a stock
 // photo. `itemImage` used to hand "Mauby" a picture of a cheeseburger.
 import { categoryPhoto, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
-import { orderStatusLabel, orderSubtitle } from '../../../lib/orderStatus';
+import { orderSubtitle } from '../../../lib/orderStatus';
 import { promiseLine } from '../../../lib/promise';
 // ONE hold authority, shared with the tracking screen — never a second
 // countdown that could disagree with it about whether the window is open.
@@ -197,6 +199,9 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
   // range is an absolute window and stays true out of the cache); a passed
   // window is never shown as still coming.
   const promise = promiseLine(order.promise, now);
+  const journey = activeJourneyPresentation(order);
+  const journeyName = activeJourneyName(order);
+  const journeyRecipient = activeJourneyRecipient(order);
 
   return (
     <View style={{ paddingHorizontal: GUTTER, marginTop: space.lg }}>
@@ -217,8 +222,8 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
               />
               <T variant="body" weight="semibold">
                 {hold
-                  ? `Held — goes to ${order.vendor?.name ?? 'the store'} in ${mmss}`
-                  : orderStatusLabel(order.status, order.orderType)}
+                  ? `${journeyName} held — goes to ${order.vendor?.name ?? 'the store'} in ${mmss}`
+                  : journey.title}
               </T>
             </View>
             <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
@@ -229,8 +234,8 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
                   // that clock is the app making a money claim it cannot keep.
                   // What stays true on any clock is that the store has not been
                   // told yet — the cost, if any, is shown before confirming.
-                  `The store hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
-                : orderSubtitle(order.vendor?.name, order.orderNumber)}
+                  `The ${journeyRecipient} hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
+                : journey.subtitle}
             </T>
             {promise && !hold ? (
               <T variant="caption" style={{ marginTop: 4 }}>
@@ -303,12 +308,24 @@ export function HomeScreen() {
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
   const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
+  const homeSurface = classifyHomeSurface({
+    hasData: home.data !== undefined,
+    status: home.status,
+    fetchStatus: home.fetchStatus,
+    isFetching: home.isFetching,
+    isPlaceholderData: home.isPlaceholderData,
+  });
   const toggleFav = useToggleFavorite();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
   // spec 6.2). Flag off → both absent/present exactly as before (CAT-G).
-  const discovery = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
+  const discovery = useDiscoveryCategories({
+    vertical: 'FOOD',
+    lat: locationFix?.latitude,
+    lng: locationFix?.longitude,
+  });
   const railLive = !!discovery.data?.enabled && (discovery.data?.categories.length ?? 0) >= CAT_RAIL_MIN_CHIPS;
+  const railPending = discovery.isLoading && !discovery.data;
 
   // Ads hydrate independently (§13.4): home content NEVER waits on this call,
   // and an ad-free answer collapses the slots so sections close up. Launch is
@@ -331,6 +348,16 @@ export function HomeScreen() {
     }
     toggleFav.mutate({ vendorId, isFavorite });
   };
+  const openDiscoveryCategory = React.useCallback(
+    (category: DiscoveryRail['categories'][number]) => {
+      navigation.navigate('CategoryFeed', { slug: category.slug, fallbackName: category.name });
+    },
+    [navigation],
+  );
+  const openCategoryDirectory = React.useCallback(
+    () => navigation.navigate('CategoryGrid'),
+    [navigation],
+  );
 
   const feed = home.data;
   const featured: any[] = feed?.featured ?? [];
@@ -489,6 +516,36 @@ export function HomeScreen() {
           <RefreshControl refreshing={home.isRefetching} onRefresh={() => home.refetch()} tintColor={color.brand[500]} />
         }
       >
+        {homeSurface === 'stale-error' ? (
+          <View style={{ paddingHorizontal: GUTTER, paddingVertical: space.md }}>
+            <T variant="label" tone="muted">
+              Couldn’t refresh. Showing the last results.
+            </T>
+            <PillButton
+              label="Retry"
+              size="sm"
+              onPress={() => { void home.refetch(); }}
+              style={{ marginTop: space.sm, alignSelf: 'flex-start' }}
+            />
+          </View>
+        ) : homeSurface === 'stale-paused' ? (
+          <View style={{ paddingHorizontal: GUTTER, paddingVertical: space.md }}>
+            <T variant="label" tone="muted">
+              Showing saved results while Swift waits for a connection.
+            </T>
+          </View>
+        ) : homeSurface === 'stale-location' ? (
+          <View style={{ paddingHorizontal: GUTTER, paddingVertical: space.md }}>
+            <T variant="label" tone="muted">
+              Showing your previous Home while stores update for this location.
+            </T>
+          </View>
+        ) : homeSurface === 'refreshing' ? (
+          <View style={{ paddingHorizontal: GUTTER, paddingVertical: space.sm }}>
+            <T variant="caption" tone="muted">Refreshing…</T>
+          </View>
+        ) : null}
+
         {/* THE LIVE ORDER, FIRST — and it used to say so while rendering fourth.
             This block carried the comment "Live order first — the thing you
             actually care about right now" from a position BELOW the tiles, below
@@ -590,9 +647,9 @@ export function HomeScreen() {
             have open stores behind them (laws D/E). */}
         <CategoryRail
           data={discovery.data}
-          loading={false}
-          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
-          onSeeAll={() => navigation.navigate('CategoryGrid')}
+          loading={railPending}
+          onChip={openDiscoveryCategory}
+          onSeeAll={openCategoryDirectory}
         />
 
         {/* Tier 1 — hero video slot (§13.1). Present only when sold+live. */}
@@ -607,10 +664,19 @@ export function HomeScreen() {
           </View>
         ) : null}
 
-        {home.isLoading ? (
-          <LoadingBlock style={{ paddingTop: 96 }} />
-        ) : home.isError ? (
-          <ErrorState onRetry={() => home.refetch()} style={{ paddingTop: 48 }} />
+        {homeSurface === 'initial-loading' ? (
+          <View style={{ alignItems: 'center', gap: space.md, paddingTop: 96 }}>
+            <LoadingBlock style={{ flex: 0, padding: 0 }} />
+            <T variant="label" tone="muted">Loading stores and services…</T>
+          </View>
+        ) : homeSurface === 'initial-paused' ? (
+          <ErrorState
+            message="Swift is waiting for a connection. Reconnect and try again."
+            onRetry={() => { void home.refetch(); }}
+            style={{ paddingTop: 48 }}
+          />
+        ) : homeSurface === 'initial-error' ? (
+          <ErrorState onRetry={() => { void home.refetch(); }} style={{ paddingTop: 48 }} />
         ) : (
           <>
             {/* Order again — the fastest path to the next order */}
@@ -682,7 +748,7 @@ export function HomeScreen() {
 
             {/* Find by Category — superseded by the rail when it is live
                 (spec 6.2: one category system on Home, ever). */}
-            {!railLive && categories.length > 0 ? (
+            {!railPending && !railLive && categories.length > 0 ? (
               <>
                 <SectionHeader
                   size="lg"

@@ -64,6 +64,25 @@ const FROM_A_STORE: Record<string, string> = {
   ARRIVED: 'Your rider has arrived',
 };
 
+/**
+ * Services still use the historical FOOD_DELIVERY database enum, but their
+ * customer wording is not food wording. Keep that temporary vocabulary beside
+ * the canonical order vocabulary so screens cannot grow a second status map
+ * while the schema migration remains a separate decision.
+ */
+const FROM_A_SERVICE_PROVIDER: Record<string, string> = {
+  PENDING: 'Waiting for provider',
+  ACCEPTED: 'Accepted by provider',
+  PREPARING: 'Provider is preparing',
+  READY_FOR_PICKUP: 'Provider is ready',
+  OUT_FOR_DELIVERY: 'Provider on the way',
+  DELIVERED: 'Service completed',
+  COMPLETED: 'Service completed',
+  CANCELLED: 'Service cancelled',
+  REJECTED: 'Provider declined',
+  FAILED: 'Service could not be completed',
+};
+
 export function orderStatusLabel(status: string | null | undefined, kind?: string | null): string {
   const s = String(status ?? '').toUpperCase();
   if (!s) return 'In progress';
@@ -75,6 +94,12 @@ export function orderStatusLabel(status: string | null | undefined, kind?: strin
   // described with the other vertical's words — fall through to the honest
   // fallback instead of borrowing a label that would be actively misleading.
   return table[s] ?? 'In progress';
+}
+
+export function serviceOrderStatusLabel(status: string | null | undefined): string {
+  const s = String(status ?? '').toUpperCase();
+  if (!s) return 'In progress';
+  return FROM_A_SERVICE_PROVIDER[s] ?? 'In progress';
 }
 
 /**

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { customerHomeKey } from '../../../lib/customerSurfaceState';
+import { appointmentCancellationResolutionCopy } from '../cancellationCopy';
 
 // ---------------------------------------------------------------------------
 // The client half of "cancelling an order must take it off Home".
@@ -29,14 +31,13 @@ describe('homeAll is a real prefix, not a look-alike', () => {
   it('every Home key starts with it, whatever the coordinates', () => {
     // If someone renamed the feed key and forgot the prefix, invalidating the
     // prefix would silently match nothing. This is the assertion that fails.
-    const home = /home:\s*\(lat\?: number, lng\?: number\) => \[([^\]]+)\]/.exec(KEYS);
     const all = /homeAll:\s*\[([^\]]+)\]/.exec(KEYS);
-    expect(home, 'customerKeys.home must exist').toBeTruthy();
+    expect(KEYS).toMatch(/home:\s*customerHomeKey/);
     expect(all, 'customerKeys.homeAll must exist').toBeTruthy();
-    const homeParts = home![1]!.split(',').map((x) => x.trim());
     const allParts = all![1]!.split(',').map((x) => x.trim());
-    expect(homeParts.slice(0, allParts.length)).toEqual(allParts);
     expect(allParts).toEqual(["'customer'", "'home'"]);
+    expect(customerHomeKey(42, 6.801, -58.155).slice(0, 2)).toEqual(['customer', 'home']);
+    expect(customerHomeKey(42).slice(0, 2)).toEqual(['customer', 'home']);
   });
 });
 
@@ -62,6 +63,20 @@ describe('the order screen’s cancel invalidates Home', () => {
 
   it('invalidates the prefix, never a single coordinate variant', () => {
     expect(cancelBlock).not.toMatch(/customerKeys\.home\(/);
+  });
+});
+
+describe('appointment cancellation resolution copy', () => {
+  it('does not describe a still-pending request as accepted', () => {
+    expect(appointmentCancellationResolutionCopy('PENDING')).toBe(
+      'This booking request is now with the provider. Contact the provider or Swift support if it needs to change.',
+    );
+  });
+
+  it('describes an accepted appointment as accepted', () => {
+    expect(appointmentCancellationResolutionCopy('ACCEPTED')).toBe(
+      'The provider has accepted this booking. Contact the provider or Swift support if it now needs to change.',
+    );
   });
 });
 

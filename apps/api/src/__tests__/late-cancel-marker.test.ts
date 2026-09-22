@@ -187,39 +187,45 @@ describe('free window = nothing committed [cancel-policy]', () => {
     expect(freed.isAvailable).toBe(true);
   });
 
-  it("a scheduled order booked for tomorrow is free an hour after booking — through the real service", async () => {
+  it("a scheduled marketplace order cannot use its future slot to bypass the expired vendor-silent hold", async () => {
     const id = await makeCancellableOrder(60, {
       orderType: 'FOOD_DELIVERY',
       status: 'PENDING',
       scheduledFor: new Date(Date.now() + 34 * 60 * 60_000),
     });
-    const res = await orders.cancelOrder(id, customerId, 'plans changed');
-    expect(res.cancellationFee).toBe(0);
-    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { lateCancelFeeDue: true } });
-    expect(row.lateCancelFeeDue).toBe(0);
+    await expect(orders.cancelOrder(id, customerId, 'plans changed')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CANCELLATION_WINDOW_CLOSED',
+    });
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, lateCancelFeeDue: true } });
+    expect(row).toMatchObject({ status: 'PENDING', lateCancelFeeDue: 0 });
   });
 
-  it('a scheduled order whose slot is imminent pays, like any other', async () => {
+  it('a scheduled marketplace order whose hold closed requires business/support resolution', async () => {
     const id = await makeCancellableOrder(60, {
       orderType: 'FOOD_DELIVERY',
       status: 'PENDING',
       scheduledFor: new Date(Date.now() + 2 * 60_000),
     });
-    const res = await orders.cancelOrder(id, customerId, 'too late');
-    expect(res.cancellationFee).toBe(500);
-    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { lateCancelFeeDue: true } });
-    expect(row.lateCancelFeeDue).toBe(500);
+    await expect(orders.cancelOrder(id, customerId, 'too late')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CANCELLATION_WINDOW_CLOSED',
+    });
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, lateCancelFeeDue: true } });
+    expect(row).toMatchObject({ status: 'PENDING', lateCancelFeeDue: 0 });
   });
 
-  it('the COURIER carve-out does NOT leak to marketplace — vendor-prepped READY_FOR_PICKUP pays', async () => {
+  it('the COURIER carve-out does NOT leak to marketplace — prepared goods cannot be unilaterally cancelled', async () => {
     const id = await makeCancellableOrder(3, {
       orderType: 'FOOD_DELIVERY',
       status: 'READY_FOR_PICKUP',
     });
-    const res = await orders.cancelOrder(id, customerId, 'no longer hungry');
-    expect(res.cancellationFee).toBe(500);
-    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { lateCancelFeeDue: true } });
-    expect(row.lateCancelFeeDue).toBe(500);
+    await expect(orders.cancelOrder(id, customerId, 'no longer hungry')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CANCELLATION_WINDOW_CLOSED',
+    });
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, lateCancelFeeDue: true } });
+    expect(row).toMatchObject({ status: 'READY_FOR_PICKUP', lateCancelFeeDue: 0 });
   });
 });
 

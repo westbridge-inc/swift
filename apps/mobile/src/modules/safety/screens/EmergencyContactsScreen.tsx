@@ -211,34 +211,53 @@ export function EmergencyContactsScreen() {
 
       <PopupCard visible={adding} onClose={() => setAdding(false)}>
         <PopupTitle>Add an emergency contact</PopupTitle>
-        <T variant="caption" tone="muted">
-          We text them a 6-digit code now. Ask them to read it back to you, so we know the number
-          is right before an emergency depends on it.
-        </T>
-        <LabeledInput label="Their name" icon="user" placeholder="e.g. Anita" value={name} onChangeText={setName} />
-        <LabeledInput
-          label="Their phone"
-          icon="phone"
-          placeholder="+5926001234"
-          value={phone}
-          onChangeText={setPhone}
-          keyboardType="phone-pad"
-        />
-        <LabeledInput
-          label="Relationship (optional)"
-          icon="heart"
-          placeholder="Sister, partner, neighbour…"
-          value={relationship}
-          onChangeText={setRelationship}
-          error={addError}
-        />
-        {/* [#947's grammar] Disabled says the ask. */}
-        <PillButton
-          label={canAdd ? 'Send the code' : 'Enter their name and full number'}
-          loading={add.isPending}
-          disabled={!canAdd}
-          onPress={submitAdd}
-        />
+        {/* PopupCard centres direct children. A form without a full-width
+            wrapper therefore shrink-wraps each LabeledInput to its icon/label
+            on narrow iPhones, hiding both the value and placeholder. The form
+            is one stretching child; its fields and action inherit that width. */}
+        <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.sm }}>
+          <T variant="caption" tone="muted">
+            We text them a 6-digit code now. Ask them to read it back to you, so we know the number
+            is right before an emergency depends on it.
+          </T>
+          <LabeledInput
+            label="Their name"
+            icon="user"
+            placeholder="e.g. Anita"
+            value={name}
+            onChangeText={setName}
+            accessibilityLabel="Emergency contact name"
+            autoComplete="name"
+            textContentType="name"
+          />
+          <LabeledInput
+            label="Their phone"
+            icon="phone"
+            placeholder="+5926001234"
+            value={phone}
+            onChangeText={setPhone}
+            keyboardType="phone-pad"
+            accessibilityLabel="Emergency contact phone number"
+            autoComplete="tel"
+            textContentType="telephoneNumber"
+          />
+          <LabeledInput
+            label="Relationship (optional)"
+            icon="heart"
+            placeholder="Sister, partner, neighbour…"
+            value={relationship}
+            onChangeText={setRelationship}
+            accessibilityLabel="Relationship to emergency contact, optional"
+            error={addError}
+          />
+          {/* [#947's grammar] Disabled says the ask. */}
+          <PillButton
+            label={canAdd ? 'Send the code' : 'Enter their name and full number'}
+            loading={add.isPending}
+            disabled={!canAdd}
+            onPress={submitAdd}
+          />
+        </View>
       </PopupCard>
 
       <PopupCard visible={verifying != null} onClose={() => { setVerifying(null); setCode(''); }}>

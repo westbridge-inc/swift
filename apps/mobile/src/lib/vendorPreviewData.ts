@@ -1,4 +1,4 @@
-import type { VendorPreviewType } from '../stores/vendorPreview';
+import { normalizeVendorPreviewType, type VendorPreviewType } from '../stores/vendorPreview';
 
 /**
  * Per-business-type SAMPLE data for the vendor PREVIEW (vendor excellence R4).
@@ -108,7 +108,13 @@ const LOYALTY_BASE: Record<VendorPreviewType, { totalCustomers: number; repeatCu
   SERVICE: { totalCustomers: 76, repeatCustomers: 34, totalOrders: 158 },
 };
 
-export function vendorPreviewDataset(type: VendorPreviewType): VendorPreviewDataset {
+export function vendorPreviewDataset(requestedType: unknown): VendorPreviewDataset {
+  // Runtime values do not inherit TypeScript's union. In particular, passing a
+  // React Native onPress callback through directly supplied a press-event
+  // object here and `CATALOGUE[event]` was undefined. Normalise again at the
+  // fixture boundary so hot-reload state or any future caller cannot crash the
+  // whole business navigator.
+  const type = normalizeVendorPreviewType(requestedType);
   const now = Date.now();
   const store = {
     id: 'pv-store',

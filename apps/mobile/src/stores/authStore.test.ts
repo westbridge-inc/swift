@@ -21,7 +21,7 @@ vi.mock('../lib/storage', () => ({
     removeItem: (key: string) => storageData.delete(key),
   },
 }));
-vi.mock('../lib/queryClient', () => ({ queryClient: { clear: clearQueryClient } }));
+vi.mock('../lib/queryClient', () => ({ clearPrincipalQueryCache: clearQueryClient }));
 vi.mock('../lib/adsQueue', () => ({ retireAdEventScope }));
 vi.mock('expo-crypto', () => ({
   randomUUID: () => `test-ad-scope-${++scopeSequence.value}`,

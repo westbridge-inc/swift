@@ -40,6 +40,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 let app: FastifyInstance;
 const createdUserIds: string[] = [];
 const createdOrderIds: string[] = [];
+const createdVendorIds: string[] = [];
+const createdOwnerIds: string[] = [];
 
 const PHONE_PREFIX = '+59200812';
 
@@ -77,23 +79,51 @@ async function makeOrder(opts: {
   customerId: string;
   orderType: 'TAXI' | 'FOOD_DELIVERY';
   holdExpiresAt?: Date | null;
+  fulfillment?: 'DELIVERY' | 'PICKUP' | 'APPOINTMENT';
+  vendorId?: string;
 }) {
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `SW-AOC-${nanoid(8).toUpperCase()}`,
       orderType: opts.orderType,
       customerId: opts.customerId,
+      ...(opts.vendorId ? { vendorId: opts.vendorId } : {}),
       status: 'PENDING',
       deliveryAddress: '1 Contract Street, Georgetown',
       deliveryLat: 6.8013, deliveryLng: -58.1551,
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
       deliveryFee: 0, totalAmount: 1000,
       paymentMethod: 'CASH',
+      ...(opts.fulfillment ? { fulfillment: opts.fulfillment } : {}),
       ...(opts.holdExpiresAt !== undefined ? { holdExpiresAt: opts.holdExpiresAt } : {}),
     },
   });
   createdOrderIds.push(order.id);
   return order;
+}
+
+async function makeServiceVendor(userId: string) {
+  const owner = await app.prisma.vendorOwner.create({ data: { userId } });
+  createdOwnerIds.push(owner.id);
+  const vendor = await app.prisma.vendor.create({
+    data: {
+      ownerId: owner.id,
+      name: 'Sharp Cuts Barbershop',
+      slug: `sharp-cuts-aoc-${nanoid(8).toLowerCase()}`,
+      vendorType: 'SERVICE',
+      phone: `${PHONE_PREFIX}99`,
+      addressLine1: '1 Service Street',
+      city: 'Georgetown',
+      region: 'Demerara-Mahaica',
+      latitude: 6.8013,
+      longitude: -58.1551,
+      status: 'ACTIVE',
+      isVerified: true,
+      isCurrentlyOpen: true,
+    },
+  });
+  createdVendorIds.push(vendor.id);
+  return vendor;
 }
 
 /** The feed is cached for 60s under a tenant-prefixed per-user key. A residual
@@ -145,6 +175,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
+  await app.prisma.vendor.deleteMany({ where: { id: { in: createdVendorIds } } });
+  await app.prisma.vendorOwner.deleteMany({ where: { id: { in: createdOwnerIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   await app.close();
@@ -174,6 +206,35 @@ describe('Home sends the order TYPE, so the card can use the right words', () =>
 
     const activeOrder = await fetchActiveOrder(customer.token, customer.id);
     expect(activeOrder.orderType).toBe('FOOD_DELIVERY');
+  });
+
+  it('sends fulfillment so Home can identify pickup and appointment journeys', async () => {
+    const customer = await makeCustomer();
+    await makeOrder({
+      customerId: customer.id,
+      orderType: 'FOOD_DELIVERY',
+      fulfillment: 'APPOINTMENT',
+    });
+
+    const activeOrder = await fetchActiveOrder(customer.token, customer.id);
+    expect(activeOrder.fulfillment).toBe('APPOINTMENT');
+  });
+
+  it('sends the business type so a service order cannot be labelled as food', async () => {
+    const customer = await makeCustomer();
+    const vendor = await makeServiceVendor(customer.id);
+    await makeOrder({
+      customerId: customer.id,
+      vendorId: vendor.id,
+      orderType: 'FOOD_DELIVERY',
+      fulfillment: 'DELIVERY',
+    });
+
+    const activeOrder = await fetchActiveOrder(customer.token, customer.id);
+    expect(activeOrder.vendor).toMatchObject({
+      name: 'Sharp Cuts Barbershop',
+      vendorType: 'SERVICE',
+    });
   });
 });
 

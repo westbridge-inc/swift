@@ -133,7 +133,7 @@ export function RootNavigator() {
       }}
     >
       <Stack.Navigator
-        key={rootNavigatorBoundaryKey(sessionGeneration)}
+        key={rootNavigatorBoundaryKey(sessionGeneration, entryGate, intent)}
         screenOptions={{ headerShown: false }}
       >
         {entryGate === 'auth' ? (

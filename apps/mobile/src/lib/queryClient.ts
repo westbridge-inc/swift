@@ -1,6 +1,11 @@
 import { QueryClient, MutationCache } from '@tanstack/react-query';
 import { toast } from '../kit/toast';
 import { errorMessage } from './apiError';
+import {
+  PUBLIC_MARKET_DEPTH_KEY,
+  decodePublicMarketDepth,
+  type PublicMarketDepth,
+} from './customerSurfaceState';
 
 export { errorMessage };
 
@@ -32,3 +37,26 @@ export const queryClient = new QueryClient({
     mutations: { retry: false },
   },
 });
+
+/**
+ * Clear everything owned by the current principal while retaining only the
+ * server-validated public Market depth aggregate. Home, orders, profiles and
+ * mutations are never allowed to cross an account boundary.
+ */
+export function clearPrincipalQueryCache(
+  client: QueryClient = queryClient,
+): void {
+  const prior = client.getQueryState<PublicMarketDepth>(PUBLIC_MARKET_DEPTH_KEY);
+  const retained = decodePublicMarketDepth(prior?.data);
+  const updatedAt = prior?.dataUpdatedAt;
+
+  client.clear();
+
+  if (retained && updatedAt !== undefined) {
+    client.setQueryData<PublicMarketDepth>(
+      PUBLIC_MARKET_DEPTH_KEY,
+      retained,
+      { updatedAt },
+    );
+  }
+}

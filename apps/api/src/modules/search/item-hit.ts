@@ -124,6 +124,11 @@ export type ItemSearchDoc = {
   description: string;
   vendorId: string;
   vendorName: string;
+  /** Search-only vendor facets. They do not ride the public ItemHit wire
+   * shape, but they let one item index serve every marketplace vertical. */
+  vendorType: string;
+  vendorCuisineTypes: string[];
+  vendorIsCurrentlyOpen: boolean;
   categoryName: string;
   basePrice: number;
   imageUrl: string | null;
@@ -141,7 +146,13 @@ type ItemDocRow = {
   name: string;
   description: string | null;
   vendorId: string;
-  vendor: { name: string; tenantId: string };
+  vendor: {
+    name: string;
+    tenantId: string;
+    vendorType: string;
+    cuisineTypes: string[];
+    isCurrentlyOpen: boolean;
+  };
   category: { name: string };
   basePrice: unknown;
   imageUrl: string | null;
@@ -166,6 +177,9 @@ export function toItemSearchDoc(row: ItemDocRow, categories: string[]): ItemSear
     description: row.description || '',
     vendorId: row.vendorId,
     vendorName: row.vendor.name,
+    vendorType: row.vendor.vendorType,
+    vendorCuisineTypes: row.vendor.cuisineTypes,
+    vendorIsCurrentlyOpen: row.vendor.isCurrentlyOpen,
     categoryName: row.category.name,
     basePrice: Number(row.basePrice),
     imageUrl: row.imageUrl,

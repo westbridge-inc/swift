@@ -11,7 +11,7 @@ import { searchIndexDocsGauge, searchScopeCounter } from '../../plugins/observab
  *  test can hand in a recording double and prove every document carries its
  *  tenant and every query carries the tenant filter, without a Meili process. */
 export interface SearchIndexLike {
-  addDocuments(docs: Record<string, unknown>[]): Promise<unknown>;
+  addDocuments(docs: Record<string, unknown>[], options?: { primaryKey?: string }): Promise<unknown>;
   deleteDocument(id: string): Promise<unknown>;
   deleteDocuments(params: string[] | { filter: string | string[] }): Promise<unknown>;
   getDocuments(params: { fields?: string[]; limit?: number; offset?: number }): Promise<{ results: Array<Record<string, unknown>>; total?: number }>;
@@ -20,7 +20,37 @@ export interface SearchIndexLike {
 }
 export interface SearchClientLike {
   createIndex(uid: string, options?: { primaryKey?: string }): Promise<unknown>;
+  getRawIndex(uid: string): Promise<{ uid: string; primaryKey?: string | null }>;
+  updateIndex(uid: string, options?: { primaryKey?: string }): Promise<unknown>;
   index(uid: string): SearchIndexLike;
+}
+
+type SearchTaskResult = {
+  taskUid?: number;
+  uid?: number;
+  status?: string;
+  error?: { code?: string; message?: string } | null;
+};
+
+type WaitableSearchTask = Promise<unknown> & {
+  waitTask?: (options?: { timeout?: number; interval?: number }) => Promise<SearchTaskResult>;
+};
+
+function meiliErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== 'object') return null;
+  const direct = (error as { code?: unknown }).code;
+  if (typeof direct === 'string') return direct;
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause && typeof cause === 'object' && typeof (cause as { code?: unknown }).code === 'string') {
+    return (cause as { code: string }).code;
+  }
+  return null;
+}
+
+function searchTaskFailure(result: SearchTaskResult, operation: string): Error | null {
+  if (result.status !== 'failed' && result.status !== 'canceled') return null;
+  const detail = result.error?.message ?? result.error?.code ?? result.status;
+  return new Error(`Meilisearch ${operation} did not complete: ${detail}`);
 }
 
 /** One reconcile page: Meilisearch's getDocuments cap is 1000 per call. */
@@ -44,35 +74,63 @@ export class SearchService {
     }) as unknown as SearchClientLike);
   }
 
-  async initialize(): Promise<void> {
-    // Create indexes with settings
+  /** Meilisearch write calls only ACKNOWLEDGE that a task was queued. Awaiting
+   *  the returned Promise is not proof that indexing/settings succeeded. The
+   *  SDK's waitTask extension is therefore part of every write boundary. Test
+   *  doubles without it may return a terminal task directly. */
+  private async awaitTask(task: Promise<unknown>, operation: string): Promise<void> {
+    const waitable = task as WaitableSearchTask;
+    const result = waitable.waitTask
+      ? await waitable.waitTask({ timeout: 15_000, interval: 50 })
+      : await task as SearchTaskResult;
+    const failure = searchTaskFailure(result ?? {}, operation);
+    if (failure) throw failure;
+  }
+
+  private async ensureIndex(uid: string): Promise<void> {
+    let info: { uid: string; primaryKey?: string | null };
     try {
-      await this.client.createIndex(VENDOR_INDEX, { primaryKey: 'id' });
-    } catch {
-      // Index may already exist
-    }
-    try {
-      await this.client.createIndex(ITEM_INDEX, { primaryKey: 'id' });
-    } catch {
-      // Index may already exist
+      info = await this.client.getRawIndex(uid);
+    } catch (error) {
+      if (meiliErrorCode(error) !== 'index_not_found') throw error;
+      await this.awaitTask(this.client.createIndex(uid, { primaryKey: 'id' }), `create ${uid}`);
+      info = await this.client.getRawIndex(uid);
     }
 
+    if (info.primaryKey == null) {
+      await this.awaitTask(this.client.updateIndex(uid, { primaryKey: 'id' }), `set primary key for ${uid}`);
+      info = await this.client.getRawIndex(uid);
+    }
+
+    if (info.primaryKey !== 'id') {
+      throw new Error(`Meilisearch index ${uid} has primary key ${String(info.primaryKey)}, expected id`);
+    }
+  }
+
+  async initialize(): Promise<void> {
+    // Legacy local/staging indexes can exist with a NULL primary key. Merely
+    // re-sending createIndex then swallowing "already exists" leaves them
+    // permanently unable to ingest documents. Inspect and repair that exact
+    // non-destructive state; a conflicting non-null key fails closed.
+    await this.ensureIndex(VENDOR_INDEX);
+    await this.ensureIndex(ITEM_INDEX);
+
     const vendorIndex = this.client.index(VENDOR_INDEX);
-    await vendorIndex.updateSettings({
+    await this.awaitTask(vendorIndex.updateSettings({
       searchableAttributes: ['name', 'description', 'cuisineTypes', 'tags', 'city'],
       // [R048-003] tenantId is the partition every query names; entityId lets a doc be removed by its own id.
       filterableAttributes: ['tenantId', 'entityId', 'vendorType', 'status', 'isCurrentlyOpen', 'cuisineTypes', 'averageRating', 'city', 'store_categories', 'derived_categories', 'top_rated'],
       sortableAttributes: ['averageRating', 'totalOrders', 'name', 'display_rating', 'rating_count'],
       rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
-    });
+    }), `configure ${VENDOR_INDEX}`);
 
     const itemIndex = this.client.index(ITEM_INDEX);
-    await itemIndex.updateSettings({
+    await this.awaitTask(itemIndex.updateSettings({
       searchableAttributes: ['name', 'description', 'vendorName', 'categoryName', 'dietaryTags'],
-      filterableAttributes: ['tenantId', 'entityId', 'vendorId', 'isAvailable', 'isPopular', 'dietaryTags', 'basePrice', 'categories'],
+      filterableAttributes: ['tenantId', 'entityId', 'vendorId', 'vendorType', 'vendorCuisineTypes', 'vendorIsCurrentlyOpen', 'isAvailable', 'isPopular', 'dietaryTags', 'basePrice', 'categories'],
       sortableAttributes: ['basePrice', 'totalOrdered', 'name'],
       rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
-    });
+    }), `configure ${ITEM_INDEX}`);
   }
 
   /** Discovery facet slugs (#17 6.4) per vendor: chosen vs derived. */
@@ -157,7 +215,10 @@ export class SearchService {
       top_rated: surfaces.get(v.id)?.topRated ?? false,
     }));
 
-    await this.client.index(VENDOR_INDEX).addDocuments(docs);
+    await this.awaitTask(
+      this.client.index(VENDOR_INDEX).addDocuments(docs, { primaryKey: 'id' }),
+      `index ${VENDOR_INDEX} documents`,
+    );
     // [R048-003] Full sync is a RECONCILE: a document whose row is no longer visible (a
     // disabled operator, a suspended store, a deleted row) is removed — atomically with
     // respect to this sync — never left for someone to happen to re-index later.
@@ -173,7 +234,16 @@ export class SearchService {
       // unverified or dead-tenant operator's dishes into the index.
       where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL },
       include: {
-        vendor: { select: { name: true, status: true, tenantId: true } },
+        vendor: {
+          select: {
+            name: true,
+            status: true,
+            tenantId: true,
+            vendorType: true,
+            cuisineTypes: true,
+            isCurrentlyOpen: true,
+          },
+        },
         category: { select: { name: true } },
       },
     });
@@ -181,7 +251,10 @@ export class SearchService {
     const itemSlugs = await this.itemCategorySlugs(items.map((i) => i.id));
     const docs = items.map((i) => toItemSearchDoc(i, itemSlugs.get(i.id) ?? []));
 
-    await this.client.index(ITEM_INDEX).addDocuments(docs);
+    await this.awaitTask(
+      this.client.index(ITEM_INDEX).addDocuments(docs, { primaryKey: 'id' }),
+      `index ${ITEM_INDEX} documents`,
+    );
     await this.reconcile(ITEM_INDEX, new Set(docs.map((d) => d.id)));
     this.publishParity(ITEM_INDEX, docs.map((d) => d.tenantId));
     return docs.length;
@@ -229,7 +302,7 @@ export class SearchService {
       if (page.results.length < RECONCILE_PAGE) break;
     }
     if (stale.length > 0) {
-      await index.deleteDocuments(stale);
+      await this.awaitTask(index.deleteDocuments(stale), `delete stale ${indexName} documents`);
       searchScopeCounter.labels('stale_docs_removed').inc(stale.length);
     }
     return stale.length;
@@ -271,6 +344,9 @@ export class SearchService {
 
   async searchItems(tenantId: string, query: string, options?: {
     vendorId?: string;
+    vendorType?: string;
+    cuisine?: string;
+    openOnly?: boolean;
     dietary?: string;
     maxPrice?: number;
     limit?: number;
@@ -279,6 +355,9 @@ export class SearchService {
   }) {
     const clauses: FilterClause[] = [{ attribute: 'isAvailable', op: '=', value: true }];
     if (options?.vendorId) clauses.push({ attribute: 'vendorId', op: '=', value: options.vendorId });
+    if (options?.vendorType) clauses.push({ attribute: 'vendorType', op: '=', value: options.vendorType });
+    if (options?.cuisine) clauses.push({ attribute: 'vendorCuisineTypes', op: '=', value: options.cuisine });
+    if (options?.openOnly) clauses.push({ attribute: 'vendorIsCurrentlyOpen', op: '=', value: true });
     if (options?.dietary) clauses.push({ attribute: 'dietaryTags', op: '=', value: options.dietary });
     if (options?.maxPrice !== undefined) clauses.push({ attribute: 'basePrice', op: '<=', value: options.maxPrice });
     const filter = buildScopedFilter(tenantId, clauses);
@@ -308,14 +387,17 @@ export class SearchService {
     // run a full re-index.
     if (!vendor) {
       // its tenant is unknown now, so the removal is by entity id — a filter, never a guessed document id
-      await this.client.index(VENDOR_INDEX).deleteDocuments({ filter: renderClause({ attribute: 'entityId', op: '=', value: vendorId }) });
+      await this.awaitTask(
+        this.client.index(VENDOR_INDEX).deleteDocuments({ filter: renderClause({ attribute: 'entityId', op: '=', value: vendorId }) }),
+        `remove missing ${VENDOR_INDEX} document`,
+      );
       return;
     }
 
     if (isVendorVisible(vendor)) {
       const discovery = await this.vendorCategorySlugs([vendor.id]);
       const surface = (await ratingSurfaces(this.prisma, 'VENDOR', [vendor.id])).get(vendor.id);
-      await this.client.index(VENDOR_INDEX).addDocuments([{
+      await this.awaitTask(this.client.index(VENDOR_INDEX).addDocuments([{
         id: docId(vendor.tenantId, vendor.id),
         entityId: vendor.id,
         tenantId: vendor.tenantId,
@@ -343,9 +425,12 @@ export class SearchService {
         display_rating: surface?.displayRating ?? null,
         rating_count: surface?.ratingCount ?? 0,
         top_rated: surface?.topRated ?? false,
-      }]);
+      }], { primaryKey: 'id' }), `index ${VENDOR_INDEX} document`);
     } else {
-      await this.client.index(VENDOR_INDEX).deleteDocument(docId(vendor.tenantId, vendor.id));
+      await this.awaitTask(
+        this.client.index(VENDOR_INDEX).deleteDocument(docId(vendor.tenantId, vendor.id)),
+        `delete hidden ${VENDOR_INDEX} document`,
+      );
     }
   }
 
@@ -364,7 +449,16 @@ export class SearchService {
         // switched-off operator's DISHES stay searchable — the exact shape of
         // the #790 defect, where a deactivated operator's dish sat above the
         // fold while their store was already hidden.
-        vendor: { select: { name: true, tenantId: true, ...VISIBLE_VENDOR_SELECT } },
+        vendor: {
+          select: {
+            name: true,
+            tenantId: true,
+            vendorType: true,
+            cuisineTypes: true,
+            isCurrentlyOpen: true,
+            ...VISIBLE_VENDOR_SELECT,
+          },
+        },
         category: { select: { name: true } },
       },
     });
@@ -375,12 +469,19 @@ export class SearchService {
 
     if (live.length > 0) {
       const itemSlugs = await this.itemCategorySlugs(live.map((i) => i.id));
-      await this.client.index(ITEM_INDEX).addDocuments(
-        live.map((i) => toItemSearchDoc(i, itemSlugs.get(i.id) ?? [])),
+      await this.awaitTask(
+        this.client.index(ITEM_INDEX).addDocuments(
+          live.map((i) => toItemSearchDoc(i, itemSlugs.get(i.id) ?? [])),
+          { primaryKey: 'id' },
+        ),
+        `index ${ITEM_INDEX} documents`,
       );
     }
     if (gone.length > 0) {
-      await this.client.index(ITEM_INDEX).deleteDocuments(gone.map((i) => docId(i.vendor.tenantId, i.id)));
+      await this.awaitTask(
+        this.client.index(ITEM_INDEX).deleteDocuments(gone.map((i) => docId(i.vendor.tenantId, i.id))),
+        `delete hidden ${ITEM_INDEX} documents`,
+      );
     }
     return live.length;
   }
@@ -389,6 +490,9 @@ export class SearchService {
    *  row is gone from the DB, so no sweep could find it later). */
   async removeItemDoc(itemId: string): Promise<void> {
     // the row may already be gone, so its tenant is unknown: remove by entity id
-    await this.client.index(ITEM_INDEX).deleteDocuments({ filter: renderClause({ attribute: 'entityId', op: '=', value: itemId }) });
+    await this.awaitTask(
+      this.client.index(ITEM_INDEX).deleteDocuments({ filter: renderClause({ attribute: 'entityId', op: '=', value: itemId }) }),
+      `remove missing ${ITEM_INDEX} document`,
+    );
   }
 }

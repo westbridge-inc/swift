@@ -3,10 +3,18 @@ import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClie
 import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
 import { recordCheckoutOutcome, stableBodyHash, type CheckoutPrincipal } from '../lib/checkoutAttempt';
-import { getAuthSessionSnapshot } from '../stores/authStore';
+import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
 import { isAxiosError } from 'axios';
 import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
+import {
+  PUBLIC_MARKET_DEPTH_KEY,
+  customerHomeKey,
+  decodePublicMarketDepth,
+  homePlaceholderForCoordinateChange,
+  retryTransientReadOnce,
+  type PublicMarketDepth,
+} from '../lib/customerSurfaceState';
 
 /**
  * Thin React Query wrappers over `customerApi`. Every consumer screen reads data
@@ -21,15 +29,15 @@ async function unwrap<T = any>(p: Promise<any>): Promise<T> {
 export const customerKeys = {
   profile: ['customer', 'profile'] as const,
   addresses: ['customer', 'addresses'] as const,
-  home: (lat?: number, lng?: number) => ['customer', 'home', lat ?? null, lng ?? null] as const,
+  home: customerHomeKey,
   // The PREFIX of every Home feed, whatever coordinates it was fetched for.
   // Anything that changes what Home should show — an order placed, cancelled,
   // a store favourited — invalidates this, not one lat/lng variant.
   homeAll: ['customer', 'home'] as const,
   vendors: (params?: Record<string, string>) => ['customer', 'vendors', params ?? {}] as const,
-  search: (q: string, type?: string, lat?: number, lng?: number) => ['customer', 'search', q, type ?? null, lat ?? null, lng ?? null] as const,
-  searchSuggestions: (q: string) => ['customer', 'search-suggestions', q] as const,
-  searchTrending: ['customer', 'search-trending'] as const,
+  search: (q: string, type?: string, lat?: number, lng?: number, open?: boolean) => ['customer', 'search', q, type ?? null, lat ?? null, lng ?? null, open ?? null] as const,
+  searchSuggestions: (q: string, type?: string) => ['customer', 'search-suggestions', q, type ?? null] as const,
+  searchTrending: (type?: string) => ['customer', 'search-trending', type ?? null] as const,
   vendor: (id: string) => ['customer', 'vendor', id] as const,
   orders: ['customer', 'orders'] as const,
   order: (id: string) => ['customer', 'order', id] as const,
@@ -91,7 +99,23 @@ export function useSetDefaultAddress() {
 }
 
 export function useHome<T = any>(lat?: number, lng?: number) {
-  return useQuery<T>({ queryKey: customerKeys.home(lat, lng), queryFn: () => unwrap<T>(customerApi.getHome(lat, lng)) });
+  const generation = useAuthStore((state) => state.sessionGeneration);
+  const queryKey = customerKeys.home(generation, lat, lng);
+
+  return useQuery<T>({
+    queryKey,
+    queryFn: () => unwrap<T>(customerApi.getHome(
+      queryKey[3] ?? undefined,
+      queryKey[4] ?? undefined,
+    )),
+    placeholderData: (previousData, previousQuery) =>
+      homePlaceholderForCoordinateChange(
+        previousData,
+        previousQuery?.queryKey,
+        queryKey,
+      ),
+    retry: retryTransientReadOnce,
+  });
 }
 
 export type DiscoveryRail = {
@@ -99,12 +123,20 @@ export type DiscoveryRail = {
   categories: Array<{ slug: string; name: string; emoji: string; iconKey: string | null; kind: string; vertical: string; availableVendors: number }>;
 };
 
+export type DiscoveryVertical = 'FOOD' | 'GROCERY' | 'RETAIL';
+
+type DiscoveryCategoryQuery = {
+  vertical: DiscoveryVertical;
+  lat?: number;
+  lng?: number;
+};
+
 /** The category rail (#17) — flag-gated server-side; silent on failure (the
  *  rail is garnish, Home never shows an error for it). */
-export function useDiscoveryCategories(lat?: number, lng?: number) {
+export function useDiscoveryCategories({ vertical, lat, lng }: DiscoveryCategoryQuery) {
   return useQuery<DiscoveryRail>({
-    queryKey: ['discovery', 'categories', lat?.toFixed?.(2), lng?.toFixed?.(2)],
-    queryFn: () => unwrap<DiscoveryRail>(discoveryApi.categories({ lat, lng })),
+    queryKey: ['discovery', 'categories', vertical, lat?.toFixed?.(2), lng?.toFixed?.(2)],
+    queryFn: () => unwrap<DiscoveryRail>(discoveryApi.categories({ vertical, lat, lng })),
     staleTime: 60_000,
     retry: false,
   });
@@ -143,18 +175,23 @@ export type MarketItem = {
  * decides — it is the only side that can see the whole catalogue, and a
  * threshold duplicated here would eventually disagree with the one there.
  *
- * Hidden while unknown, on purpose: a tab that pops in after a network round
- * trip is worse than one that appears on the next launch, and the failure mode
- * we are avoiding is showing an empty market, not hiding a full one.
+ * The navigation shell stays mounted while the verdict is unknown or
+ * temporarily unavailable. It hides Market only after a valid server response
+ * explicitly returns `visible:false`; this prevents startup/network failures
+ * from removing a route the customer may already be using. The server remains
+ * the sole authority for the launch-depth threshold.
  */
 export function useMarketDepth() {
-  return useQuery({
-    queryKey: ['market', 'depth'],
+  return useQuery<PublicMarketDepth>({
+    queryKey: PUBLIC_MARKET_DEPTH_KEY,
     queryFn: async () => {
       const res = await marketApi.depth();
-      return (res?.data?.data ?? null) as { visible: boolean; items: number; vendors: number } | null;
+      const depth = decodePublicMarketDepth(res?.data?.data);
+      if (!depth) throw new Error('Invalid market-depth response');
+      return depth;
     },
     staleTime: 5 * 60_000,
+    retry: retryTransientReadOnce,
   });
 }
 
@@ -189,9 +226,9 @@ export function useVendors<T = any>(params?: Record<string, string>) {
  *  screen's old path was a substring filter that returned nothing for a
  *  plural, a misspelling, or a dish name; this is the finished engine that
  *  sat with zero callers on any surface. */
-export function useSearch<T = any>(q: string, opts?: { type?: string; lat?: number; lng?: number }) {
+export function useSearch<T = any>(q: string, opts?: { type?: string; lat?: number; lng?: number; open?: boolean }) {
   return useQuery<T>({
-    queryKey: customerKeys.search(q, opts?.type, opts?.lat, opts?.lng),
+    queryKey: customerKeys.search(q, opts?.type, opts?.lat, opts?.lng, opts?.open),
     queryFn: () => unwrap<T>(customerApi.search(q, opts)),
     enabled: q.trim().length >= 2,
     // Type-ahead cadence: keep the previous page while the next keystroke's
@@ -200,10 +237,10 @@ export function useSearch<T = any>(q: string, opts?: { type?: string; lat?: numb
   });
 }
 
-export function useSearchSuggestions<T = any>(q: string) {
+export function useSearchSuggestions<T = any>(q: string, type?: string) {
   return useQuery<T>({
-    queryKey: customerKeys.searchSuggestions(q),
-    queryFn: () => unwrap<T>(customerApi.searchSuggestions(q)),
+    queryKey: customerKeys.searchSuggestions(q, type),
+    queryFn: () => unwrap<T>(customerApi.searchSuggestions(q, type)),
     enabled: q.trim().length >= 2,
     placeholderData: keepPreviousData,
   });
@@ -211,10 +248,10 @@ export function useSearchSuggestions<T = any>(q: string) {
 
 /** Most-ordered dishes across open stores — EARNED ranking (totalOrdered),
  *  never the vendor-set isPopular checkbox. Feeds the no-matches invitation. */
-export function useSearchTrending<T = any>(enabled = true) {
+export function useSearchTrending<T = any>(type?: string, enabled = true) {
   return useQuery<T>({
-    queryKey: customerKeys.searchTrending,
-    queryFn: () => unwrap<T>(customerApi.searchTrending()),
+    queryKey: customerKeys.searchTrending(type),
+    queryFn: () => unwrap<T>(customerApi.searchTrending(type)),
     enabled,
     staleTime: 60_000,
   });

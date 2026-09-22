@@ -44,7 +44,23 @@ class FakeIndex implements SearchIndexLike {
 }
 class FakeClient implements SearchClientLike {
   indexes = new Map<string, FakeIndex>();
-  async createIndex(uid: string) { this.index(uid); return { taskUid: 1 }; }
+  primaryKeys = new Map<string, string | null>();
+  async createIndex(uid: string, options?: { primaryKey?: string }) {
+    this.index(uid);
+    this.primaryKeys.set(uid, options?.primaryKey ?? null);
+    return { taskUid: 1 };
+  }
+  async getRawIndex(uid: string) {
+    if (!this.indexes.has(uid)) {
+      throw { cause: { code: 'index_not_found' } };
+    }
+    return { uid, primaryKey: this.primaryKeys.get(uid) ?? null };
+  }
+  async updateIndex(uid: string, options?: { primaryKey?: string }) {
+    this.index(uid);
+    this.primaryKeys.set(uid, options?.primaryKey ?? null);
+    return { taskUid: 1 };
+  }
   index(uid: string): FakeIndex { let i = this.indexes.get(uid); if (!i) { i = new FakeIndex(uid); this.indexes.set(uid, i); } return i; }
 }
 
@@ -124,7 +140,13 @@ describe('[R048-003] every index document carries its tenant, under a tenant-pre
     expect(vendors.docs.get(docId(TENANT_A, a.vendor.id))).toMatchObject({ entityId: a.vendor.id, tenantId: TENANT_A, name: 'Alpha Store' });
     expect(vendors.docs.get(docId(TENANT_B, b.vendor.id))).toMatchObject({ entityId: b.vendor.id, tenantId: TENANT_B });
     expect(vendors.docs.has(docId(TENANT_DEAD, dead.vendor.id))).toBe(false);
-    expect(items.docs.get(docId(TENANT_A, a.item.id))).toMatchObject({ entityId: a.item.id, tenantId: TENANT_A, vendorId: a.vendor.id });
+    expect(items.docs.get(docId(TENANT_A, a.item.id))).toMatchObject({
+      entityId: a.item.id,
+      tenantId: TENANT_A,
+      vendorId: a.vendor.id,
+      vendorType: 'STORE',
+      vendorIsCurrentlyOpen: true,
+    });
     expect(items.docs.get(docId(TENANT_B, b.item.id))).toMatchObject({ entityId: b.item.id, tenantId: TENANT_B });
     expect(items.docs.has(docId(TENANT_DEAD, dead.item.id))).toBe(false);
     // no document anywhere without a tenant
@@ -170,9 +192,25 @@ describe('[R048-003] every query carries the tenant clause, built by the server'
     await service.searchVendors(TENANT_A, 'alpha', { type: 'STORE', cuisine: 'creole', openOnly: true, limit: 5 });
     const v = client.index(VENDOR_INDEX).searches.at(-1)!;
     expect(v.options?.['filter']).toEqual([`tenantId = "${TENANT_A}"`, 'vendorType = "STORE"', 'cuisineTypes = "creole"', 'isCurrentlyOpen = true']);
-    await service.searchItems(TENANT_B, 'widget', { dietary: 'vegan', maxPrice: 2500, vendorId: b.vendor.id });
+    await service.searchItems(TENANT_B, 'widget', {
+      dietary: 'vegan',
+      maxPrice: 2500,
+      vendorId: b.vendor.id,
+      vendorType: 'STORE',
+      cuisine: 'creole',
+      openOnly: true,
+    });
     const i = client.index(ITEM_INDEX).searches.at(-1)!;
-    expect(i.options?.['filter']).toEqual([`tenantId = "${TENANT_B}"`, 'isAvailable = true', `vendorId = "${b.vendor.id}"`, 'dietaryTags = "vegan"', 'basePrice <= 2500']);
+    expect(i.options?.['filter']).toEqual([
+      `tenantId = "${TENANT_B}"`,
+      'isAvailable = true',
+      `vendorId = "${b.vendor.id}"`,
+      'vendorType = "STORE"',
+      'vendorCuisineTypes = "creole"',
+      'vendorIsCurrentlyOpen = true',
+      'dietaryTags = "vegan"',
+      'basePrice <= 2500',
+    ]);
     await expect(service.searchVendors('', 'alpha')).rejects.toBeInstanceOf(FilterValueRejected);
   });
 

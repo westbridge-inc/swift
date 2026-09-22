@@ -94,13 +94,20 @@ async function makeOrder(
   customerId: string,
   vendorId: string,
   status: OrderStatus,
-  opts: { riderId?: string; itemId?: string; qty?: number; placedAtMinutesAgo?: number } = {},
+  opts: {
+    orderType?: 'FOOD_DELIVERY' | 'GROCERY_DELIVERY';
+    riderId?: string;
+    itemId?: string;
+    qty?: number;
+    placedAtMinutesAgo?: number;
+    holdExpiresAt?: Date | null;
+  } = {},
 ) {
   const placedAt = new Date(Date.now() - (opts.placedAtMinutesAgo ?? 0) * 60_000);
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `CX-${nanoid(10)}`,
-      orderType: 'FOOD_DELIVERY',
+      orderType: opts.orderType ?? 'FOOD_DELIVERY',
       customerId,
       vendorId,
       status,
@@ -115,6 +122,7 @@ async function makeOrder(
       totalAmount: 1000,
       paymentMethod: 'CASH',
       ...(opts.riderId ? { riderId: opts.riderId } : {}),
+      ...(opts.holdExpiresAt !== undefined ? { holdExpiresAt: opts.holdExpiresAt } : {}),
     },
   });
   if (opts.itemId) {
@@ -496,9 +504,68 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
 });
 
 describe('Customer cancels an order — POST /customer/orders/:id/cancel', () => {
-  it('is free within 5 minutes while still PENDING', async () => {
+  it.each(['FOOD_DELIVERY', 'GROCERY_DELIVERY'] as const)(
+    'projects and enforces the same active-hold cancellation authority for %s',
+    async (orderType) => {
+      const vendor = await makeVendor();
+      const free = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', {
+        orderType,
+        placedAtMinutesAgo: 1,
+        holdExpiresAt: new Date(Date.now() + 4 * 60_000),
+      });
+      const closed = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', {
+        orderType,
+        placedAtMinutesAgo: 1,
+        holdExpiresAt: new Date(Date.now() - 1_000),
+      });
+
+      const [freeDetail, closedDetail] = await Promise.all([
+        inject('GET', `/api/v1/customer/orders/${free.id}`, undefined, customer.token),
+        inject('GET', `/api/v1/customer/orders/${closed.id}`, undefined, customer.token),
+      ]);
+
+      expect(freeDetail.statusCode).toBe(200);
+      expect(freeDetail.json().data).toMatchObject({
+        canCancel: true,
+        freeCancellationWindow: true,
+        cancellationFee: 0,
+      });
+      expect(freeDetail.json().data.freeCancellationExpiresAt).toEqual(expect.any(String));
+
+      expect(closedDetail.statusCode).toBe(200);
+      expect(closedDetail.json().data).toMatchObject({
+        canCancel: false,
+        freeCancellationWindow: false,
+        cancellationFee: 0,
+        freeCancellationExpiresAt: null,
+      });
+
+      const freeCancel = await inject(
+        'POST',
+        `/api/v1/customer/orders/${free.id}/cancel`,
+        { reason: 'changed my mind' },
+        customer.token,
+      );
+      expect(freeCancel.statusCode).toBe(200);
+      expect(freeCancel.json().data.cancellationFee).toBe(0);
+
+      const closedCancel = await inject(
+        'POST',
+        `/api/v1/customer/orders/${closed.id}/cancel`,
+        { reason: 'too late' },
+        customer.token,
+      );
+      expect(closedCancel.statusCode).toBe(409);
+      expect(closedCancel.json().error.code).toBe('CANCELLATION_WINDOW_CLOSED');
+    },
+  );
+
+  it('is free while PENDING inside the server-owned hold', async () => {
     const vendor = await makeVendor();
-    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', { placedAtMinutesAgo: 1 });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', {
+      placedAtMinutesAgo: 1,
+      holdExpiresAt: new Date(Date.now() + 4 * 60_000),
+    });
 
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'changed my mind' }, customer.token);
     expect(res.statusCode).toBe(200);
@@ -508,27 +575,38 @@ describe('Customer cancels an order — POST /customer/orders/:id/cancel', () =>
     expect(cancelled.status).toBe('CANCELLED');
   });
 
-  it('charges the cancellation fee once the vendor has accepted', async () => {
+  it('refuses unilateral cancellation once the vendor has accepted', async () => {
     const vendor = await makeVendor();
     const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', { placedAtMinutesAgo: 1 });
 
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, {}, customer.token);
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.cancellationFee).toBe(500);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('CANCELLATION_WINDOW_CLOSED');
+    await expect(app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }))
+      .resolves.toMatchObject({ status: 'ACCEPTED', lateCancelFeeDue: 0 });
   });
 
-  it('charges the fee even while PENDING once the free window has passed', async () => {
+  it('refuses unilateral cancellation once the vendor-silent hold has passed', async () => {
     const vendor = await makeVendor();
-    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', { placedAtMinutesAgo: 10 });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', {
+      placedAtMinutesAgo: 1,
+      holdExpiresAt: new Date(Date.now() - 1_000),
+    });
 
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, {}, customer.token);
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.cancellationFee).toBe(500);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('CANCELLATION_WINDOW_CLOSED');
+    await expect(app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }))
+      .resolves.toMatchObject({ status: 'PENDING', lateCancelFeeDue: 0 });
   });
 
   it('cannot cancel once the order is in transit', async () => {
     const vendor = await makeVendor();
     const order = await makeOrder(customer.userId, vendor.vendorId, 'PICKED_UP');
+
+    const detail = await inject('GET', `/api/v1/customer/orders/${order.id}`, undefined, customer.token);
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().data.canCancel).toBe(false);
 
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, {}, customer.token);
     expect(res.statusCode).toBe(400);
@@ -541,6 +619,10 @@ describe('Customer cancels an order — POST /customer/orders/:id/cancel', () =>
   it('cannot cancel a taxi after PIN handoff while status is still DRIVER_ARRIVED', async () => {
     const driver = await makeTaxiDriver();
     const order = await makeVerifiedArrivedTaxi(customer.userId, driver.driverId);
+
+    const detail = await inject('GET', `/api/v1/customer/orders/${order.id}`, undefined, customer.token);
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().data.canCancel).toBe(false);
 
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, {}, customer.token);
     expect(res.statusCode).toBe(400);
@@ -558,7 +640,7 @@ describe('Customer cancels an order — POST /customer/orders/:id/cancel', () =>
     expect(profile.currentRideId).toBe(order.id);
   });
 
-  it('restocks a tracked item and frees the rider on cancellation', async () => {
+  it('does not restock committed goods or free an assigned rider through a late customer cancel', async () => {
     const vendor = await makeVendor();
     const rider = await makeRider();
     const item = await app.prisma.item.create({
@@ -574,21 +656,25 @@ describe('Customer cancels an order — POST /customer/orders/:id/cancel', () =>
     });
 
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, {}, customer.token);
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('CANCELLATION_WINDOW_CLOSED');
 
     const restocked = await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } });
-    expect(restocked.stockQuantity).toBe(4); // 2 back on the shelf
+    expect(restocked.stockQuantity).toBe(2); // committed stock remains committed
 
     const freed = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
-    expect(freed.isAvailable).toBe(true);
-
-    await app.prisma.item.delete({ where: { id: item.id } });
+    expect(freed.isAvailable).toBe(false);
+    await expect(app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }))
+      .resolves.toMatchObject({ status: 'ACCEPTED', riderId: rider.riderId });
   });
 
   it("cannot cancel another customer's order", async () => {
     const vendor = await makeVendor();
     const other = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', { placedAtMinutesAgo: 1 });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', {
+      placedAtMinutesAgo: 1,
+      holdExpiresAt: new Date(Date.now() + 4 * 60_000),
+    });
 
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, {}, other.token);
     expect(res.statusCode).toBe(404); // scoped to customerId — not even visible

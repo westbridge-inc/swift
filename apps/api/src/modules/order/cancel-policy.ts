@@ -7,9 +7,11 @@
 // "must match" comment) — the exact drift class where a customer is shown one
 // fee and "charged" another. Import from here or don't touch the policy.
 //
-// ADR: the fee is flat and announced-but-uncollected (cash-only platform —
-// Swift can't collect it); its role is deterrence + the risk-score signal.
-// Founder decision 2026-07-20: record it as a marker, keep displaying it.
+// Taxi/courier still use the flat announced-but-uncollected marker below.
+// Marketplace food/grocery/store/service orders do not: their unilateral
+// customer cancellation ends with the vendor-silent hold. Keeping that
+// distinction here prevents a non-enforceable marker from being mistaken for
+// protection of a business or mover that has already committed work.
 // ---------------------------------------------------------------------------
 
 /** Minutes after placing during which a PENDING order cancels free. Under
@@ -32,6 +34,40 @@ export type CancellationSnapshot = {
   /** Set at checkout when the customer picks a future slot. Null = "now". */
   scheduledFor: Date | null;
 };
+
+/** Marketplace orders share the vendor-notification hold. SERVICE vendors are
+ * still persisted on the FOOD_DELIVERY spine, so the order family—not the
+ * storefront label—is the durable discriminator here. Taxi and courier keep
+ * their own cancellation contracts. */
+export function isMarketplaceOrderType(orderType: string): boolean {
+  return orderType === 'FOOD_DELIVERY' || orderType === 'GROCERY_DELIVERY';
+}
+
+/**
+ * The customer's unilateral marketplace cancellation authority.
+ *
+ * The five-minute hold is not merely a pricing window: the vendor has not been
+ * told about the order yet. Once that exact server-owned window closes—or any
+ * business/mover commitment appears—the customer must resolve the order with
+ * the business or support. A recorded-but-uncollected GYD 500 marker is not
+ * compensation and therefore cannot authorize a destructive late cancel.
+ *
+ * Fail closed for legacy/null hold timestamps. `isFreeCancellation` is wider
+ * by design (taxi/courier and scheduled-price semantics) and must not be used
+ * as marketplace authority: a far-future scheduled order can remain "free"
+ * there after its vendor-silent hold has already ended.
+ */
+export function canCustomerCancelMarketplaceOrder(
+  order: CancellationSnapshot,
+  now: Date = new Date(),
+): boolean {
+  return isMarketplaceOrderType(order.orderType)
+    && order.status === 'PENDING'
+    && order.riderId == null
+    && order.driverId == null
+    && order.holdExpiresAt != null
+    && order.holdExpiresAt > now;
+}
 
 /**
  * THE one free-cancellation predicate — the charge path and the customer

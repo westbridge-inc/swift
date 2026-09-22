@@ -31,6 +31,8 @@ import { VendorItemEditorScreen } from './screens/VendorItemEditorScreen';
 import { VendorInsightsScreen } from './screens/VendorInsightsScreen';
 import { VendorAccountScreen } from './screens/VendorAccountScreen';
 import { VendorScheduleScreen } from './screens/VendorScheduleScreen';
+import { VendorAccessRecovery } from './screens/VendorAccessRecovery';
+import { useAuthStore } from '../../stores/authStore';
 
 const Stack = createNativeStackNavigator();
 
@@ -48,9 +50,13 @@ function VendorWentLiveLayer({ status }: { status: string }) {
 function VendorRoot() {
   const { owner, store, stores, isLoading, state: profileState, failure, refetch } = useVendorProfile();
   const qc = useQueryClient();
+  const authUser = useAuthStore((s) => s.user) as ({ roles?: string[]; vendorOwner?: unknown } | null);
+  const hasVendorOwnerAuthority = !!authUser?.vendorOwner || (authUser?.roles ?? []).includes('VENDOR_OWNER');
   const myRole = safeVendorRole(owner?.myRole);
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
+  const setIntent = useAuthStore((s) => s.setIntent);
+  const logout = useAuthStore((s) => s.logout);
   const [repairingSelection, setRepairingSelection] = useState(false);
   const { preview, previewType, enterPreview, exitPreview } = useVendorPreview();
   // Preview is a per-store choice: switching stores lands on that store's
@@ -84,6 +90,28 @@ function VendorRoot() {
     ]).finally(() => setRepairingSelection(false));
   }, [stores, validSelection, selectedStoreId, setSelectedStore, qc]);
 
+  const retryVendorAccess = () => {
+    setRepairingSelection(true);
+    disconnectSocket();
+    setSelectedStore(null);
+    void qc.resetQueries({ queryKey: ['vendor'] })
+      .finally(() => setRepairingSelection(false));
+  };
+
+  const openCustomerSwift = () => {
+    disconnectSocket();
+    setSelectedStore(null);
+    qc.removeQueries({ queryKey: ['vendor'] });
+    setIntent('customer');
+  };
+
+  const chooseAnotherExperience = () => {
+    disconnectSocket();
+    setSelectedStore(null);
+    qc.removeQueries({ queryKey: ['vendor'] });
+    setIntent(null);
+  };
+
   useEffect(() => {
     if (store) track('vendor_suite_opened', { vendorType: String(store.vendorType ?? '') });
   }, [store?.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -101,21 +129,36 @@ function VendorRoot() {
   // (or a well-formed owner with no stores); everything else says so, and
   // offers the one thing that helps: try again.
   if (profileState === 'error') {
+    if (failure === 'forbidden') {
+      // A signed-in customer choosing Business for the first time is not a
+      // revoked merchant. They have no vendor authority yet, so the only safe
+      // destination is the real become-partner flow, which creates that role
+      // and store server-side. A claimed owner that is refused still gets the
+      // containment/recovery screen below.
+      if (!hasVendorOwnerAuthority) return <BusinessSetup onLeave={chooseAnotherExperience} />;
+      return (
+        <VendorAccessRecovery
+          onRetry={retryVendorAccess}
+          onOpenSwift={openCustomerSwift}
+          onChooseExperience={chooseAnotherExperience}
+          onSignOut={logout}
+        />
+      );
+    }
     return (
       <Screen>
         <ErrorState
           message={
             failure === 'unauthorized' ? 'Your session ended. Sign in again to open your store.'
-              : failure === 'forbidden' ? 'This account cannot open that store. Ask the owner to add you again.'
-                : failure === 'malformed' ? "Swift could not read your store's details. This is our problem, not yours — try again."
-                  : "Swift can't reach your store right now. Your orders are safe; try again in a moment."
+              : failure === 'malformed' ? "Swift could not read your store's details. This is our problem, not yours — try again."
+                : "Swift can't reach your store right now. Your orders are safe; try again in a moment."
           }
           onRetry={refetch}
         />
       </Screen>
     );
   }
-  if (!store) return <BusinessSetup />;
+  if (!store) return <BusinessSetup onLeave={chooseAnotherExperience} />;
   const suspensionSource = store.suspensionSource == null ? null : String(store.suspensionSource).toUpperCase();
   // [MOB-038] A blocked subscription blocks, whether or not it was mirrored
   // onto the store row. Requiring store.status === 'SUSPENDED' left a store
@@ -127,7 +170,11 @@ function VendorRoot() {
       {billingSuspended ? (
         <VendorBillingSuspended store={store} stores={stores} myRole={myRole} />
       ) : store.status !== 'ACTIVE' && !preview ? (
-        <VendorOnboarding store={store} onPreview={enterPreview} />
+        <VendorOnboarding
+          store={store}
+          onPreview={() => enterPreview()}
+          onLeave={chooseAnotherExperience}
+        />
       ) : (
         <VendorTabs />
       )}

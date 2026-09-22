@@ -37,6 +37,7 @@ async function makeVendorWithItem(opts: {
   isVerified: boolean;
   tenantId: string;
   open?: boolean;
+  cuisineTypes?: string[];
   itemName: string;
   totalOrdered?: number;
   isPopular?: boolean;
@@ -65,6 +66,7 @@ async function makeVendorWithItem(opts: {
       status: opts.status ?? 'ACTIVE',
       acceptingOrders: true,
       isCurrentlyOpen: opts.open ?? true,
+      cuisineTypes: opts.cuisineTypes ?? ['Chinese'],
       isVerified: opts.isVerified,
     },
   });
@@ -92,6 +94,8 @@ let deadTenant!: { vendorId: string; itemId: string };
 let suspended!: { vendorId: string; itemId: string };
 let earned!: { vendorId: string; itemId: string };
 let checkbox!: { vendorId: string; itemId: string };
+let closed!: { vendorId: string; itemId: string };
+let wrongCuisine!: { vendorId: string; itemId: string };
 
 beforeAll(async () => {
   // Dead port → SearchService.initialize() fails → routes provably take the
@@ -136,6 +140,8 @@ beforeAll(async () => {
   // real row so rank position is provable.
   earned = await makeVendorWithItem({ isVerified: true, tenantId: alive, itemName: `${NEEDLE} earned dish`, totalOrdered: 9_000_000, isPopular: false });
   checkbox = await makeVendorWithItem({ isVerified: true, tenantId: alive, itemName: `${NEEDLE} checkbox dish`, totalOrdered: 1, isPopular: true });
+  closed = await makeVendorWithItem({ isVerified: true, tenantId: alive, open: false, itemName: `${NEEDLE} closed dish` });
+  wrongCuisine = await makeVendorWithItem({ isVerified: true, tenantId: alive, cuisineTypes: ['Italian'], itemName: `${NEEDLE} italian dish` });
 
   const customer = await app.prisma.user.create({
     data: {
@@ -188,6 +194,20 @@ describe('search wears the ONE visibility predicate [B2]', () => {
     expect(itemVendors).not.toContain(unverified.vendorId);
     expect(itemVendors).not.toContain(deadTenant.vendorId);
     expect(itemVendors).not.toContain(suspended.vendorId);
+  });
+
+  it('/search (fallback) preserves vertical, cuisine, and open-now filters for vendors and items', async () => {
+    const res = await get(`/api/v1/search?q=${NEEDLE}&type=RESTAURANT&cuisine=Chinese&open=true&limit=50`);
+    expect(res.statusCode).toBe(200);
+    const { data } = res.json() as { data: { vendors: { id: string }[]; items: { vendorId: string }[] } };
+    const vendorIds = data.vendors.map((v) => v.id);
+    const itemVendorIds = data.items.map((i) => i.vendorId);
+    expect(vendorIds).toContain(good.vendorId);
+    expect(itemVendorIds).toContain(good.vendorId);
+    expect(vendorIds).not.toContain(closed.vendorId);
+    expect(itemVendorIds).not.toContain(closed.vendorId);
+    expect(vendorIds).not.toContain(wrongCuisine.vendorId);
+    expect(itemVendorIds).not.toContain(wrongCuisine.vendorId);
   });
 
   it('/search/suggestions no longer autocompletes a hidden store’s dishes', async () => {

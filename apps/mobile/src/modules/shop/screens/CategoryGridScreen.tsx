@@ -1,16 +1,17 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { ScrollView, Pressable, View } from 'react-native';
+import { ScrollView, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import { color, fontSize, radius, space } from '@swift/ui';
-import { useDiscoveryCategories } from '../../../hooks/customer';
+import { space } from '@swift/ui';
+import { useDiscoveryCategories, type DiscoveryRail } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { EmptyState, ErrorState, Header, LoadingBlock, Screen, T } from '../../../kit';
+import { DiscoveryCategoryCard } from '../DiscoveryCategoryCard';
 
 // ---------------------------------------------------------------------------
-// "See all →" (#17 6.1): the full category grid, grouped by kind — the same
-// blush-tile language as the rail. Only categories with open stores appear
+// The full category directory, grouped by kind and built from the exact same
+// market-ticket component as Home. Only categories with open stores appear
 // (law D holds upstream), so every tap lands somewhere real.
 // ---------------------------------------------------------------------------
 
@@ -26,7 +27,17 @@ export function CategoryGridScreen() {
   const navigation = useNavigation<any>();
   const { latitude, longitude, status } = useLocationStore();
   const locationFix = grantedLocationFix(latitude, longitude, status);
-  const railQ = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
+  const railQ = useDiscoveryCategories({
+    vertical: 'FOOD',
+    lat: locationFix?.latitude,
+    lng: locationFix?.longitude,
+  });
+  const openCategory = React.useCallback(
+    (category: DiscoveryRail['categories'][number]) => {
+      navigation.navigate('CategoryFeed', { slug: category.slug, fallbackName: category.name });
+    },
+    [navigation],
+  );
 
   const categories = railQ.data?.categories ?? [];
   const groups = Object.entries(
@@ -52,35 +63,14 @@ export function CategoryGridScreen() {
               <T variant="body" weight="semibold" style={{ marginBottom: space.md }}>
                 {KIND_LABEL[kind] ?? kind}
               </T>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md }}>
                 {cats.map((c) => (
-                  <Pressable
+                  <DiscoveryCategoryCard
                     key={c.slug}
-                    onPress={() => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
-                    accessibilityRole="button"
-                    accessibilityLabel={c.name}
-                  >
-                    {({ pressed }) => (
-                      <View style={{ width: 76, alignItems: 'center', opacity: pressed ? 0.7 : 1 }}>
-                        <View
-                          style={{
-                            width: 64,
-                            height: 64,
-                            borderRadius: radius.xl,
-                            backgroundColor: color.brand[50],
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                          }}
-                        >
-                          {/* Emoji glyph metric, derived from the scale. */}
-                          <T style={{ fontSize: fontSize.base * 2, lineHeight: fontSize.base * 2 + space.sm }}>{c.emoji}</T>
-                        </View>
-                        <T variant="caption" center numberOfLines={2} style={{ marginTop: space.xs }}>
-                          {c.name}
-                        </T>
-                      </View>
-                    )}
-                  </Pressable>
+                    category={c}
+                    variant="grid"
+                    onSelect={openCategory}
+                  />
                 ))}
               </View>
             </View>

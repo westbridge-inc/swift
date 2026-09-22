@@ -92,6 +92,31 @@ describe('vendorPreview store', () => {
     expect(useVendorPreview.getState().previewType).toBeNull();
     useVendorPreview.getState().exitPreview();
   });
+
+  it('never treats a React Native press event as a preview business type', () => {
+    useVendorPreview.getState().enterPreview({ nativeEvent: {} } as never);
+    expect(useVendorPreview.getState().preview).toBe(true);
+    expect(useVendorPreview.getState().previewType).toBeNull();
+    useVendorPreview.getState().exitPreview();
+
+    // Defence in depth for stale fast-refresh state or an untyped future call:
+    // the fixture boundary remains total instead of indexing undefined.
+    expect(() => vendorPreviewDataset({ nativeEvent: {} })).not.toThrow();
+    expect(vendorPreviewDataset({ nativeEvent: {} }).store.vendorType).toBe('RESTAURANT');
+  });
+
+  it('wraps pending-dashboard preview and provides a non-destructive way back to Swift', async () => {
+    const { readFileSync } = await import('node:fs');
+    const setup = readFileSync(new URL('../modules/vendor/screens/BusinessSetup.tsx', import.meta.url), 'utf8');
+    const stack = readFileSync(new URL('../modules/vendor/VendorStack.tsx', import.meta.url), 'utf8');
+
+    expect(setup).toContain('onPress={() => onPreview()}');
+    expect(setup).toContain('onSwitch={onLeave}');
+    expect(setup).toContain('label="Back to Swift"');
+    expect(setup).toContain('onPress={onLeave}');
+    expect(stack).toContain('onPreview={() => enterPreview()}');
+    expect(stack).toContain('onLeave={chooseAnotherExperience}');
+  });
 });
 
 // ---------------------------------------------------------------------------

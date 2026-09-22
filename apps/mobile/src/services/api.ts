@@ -352,10 +352,10 @@ export const customerApi = {
     api.post(`/customer/ratings/${ratingId}/report`, { reason, ...(note ? { note } : {}) }),
   // [B2] The search ENGINE — typo tolerance, ranking, and dishes. One wire
   // contract whichever backend answered (the route normalizes Meili + DB).
-  search: (q: string, opts?: { type?: string; lat?: number; lng?: number }) =>
+  search: (q: string, opts?: { type?: string; lat?: number; lng?: number; open?: boolean }) =>
     api.get('/search', { params: { q, ...opts } }),
-  searchSuggestions: (q: string) => api.get('/search/suggestions', { params: { q } }),
-  searchTrending: () => api.get('/search/trending'),
+  searchSuggestions: (q: string, type?: string) => api.get('/search/suggestions', { params: { q, type } }),
+  searchTrending: (type?: string) => api.get('/search/trending', { params: { type } }),
   getVendor: (id: string) => api.get(`/customer/vendors/${id}`),
   getVendorReviews: (id: string) => api.get(`/customer/vendors/${id}/reviews`),
   getItemSlots: (itemId: string, date: string) => api.get(`/customer/items/${itemId}/slots`, { params: { date } }),

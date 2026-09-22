@@ -182,16 +182,19 @@ describe('conversion and rider claims are mutually exclusive on one locked money
     }
   });
 
-  it('cancel-then-convert: a dead order cannot convert (status bound under the lock)', async () => {
+  it('system-close-then-convert: a dead order cannot convert (status bound under the lock)', async () => {
     process.env['DISPATCH_EXHAUSTION'] = '1';
     const order = await makeOrder();
-    const cancel = await app.inject({
-      method: 'POST',
-      url: `/api/v1/customer/orders/${order.id}/cancel`,
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      payload: { reason: 'nvm' },
+    const { OrderService } = await import('../modules/order/order.service');
+    await new OrderService(app.prisma, app.io).transitionOrderAtomically({
+      orderId: order.id,
+      target: 'CANCELLED',
+      allowedFrom: ['PREPARING'],
+      changedBy: 'convert-to-pickup.test',
+      note: 'synthetic system closure for dead-order conversion proof',
+      cancellation: { by: null, reason: 'synthetic system closure' },
+      releaseStaleMoverPointer: true,
     });
-    expect(cancel.statusCode).toBe(200);
     const res = await convert(order.id);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('INVALID_STATUS');

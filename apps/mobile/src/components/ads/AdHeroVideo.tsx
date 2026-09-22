@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, View, StyleSheet } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
@@ -7,6 +7,7 @@ import { color, radius, space } from '@swift/ui';
 import { T } from '../../kit';
 import { AdChip } from './AdChip';
 import { useAdViewability } from './useAdViewability';
+import { shouldPrimeHeroVideo } from './hero-video-gate';
 import { trackAdEvent, openAdDestination } from '../../lib/ads';
 import type { AdEventScope, AdServeItem } from '../../lib/adsCore';
 
@@ -43,6 +44,7 @@ export function AdHeroVideo({
 }) {
   const track = trackable ? item.impressionToken : undefined;
   const [videoFailed, setVideoFailed] = useState(false);
+  const [videoPrimed, setVideoPrimed] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
   const [muted, setMuted] = useState(true);
   const [remaining, setRemaining] = useState<number | null>(null);
@@ -54,40 +56,78 @@ export function AdHeroVideo({
     trackAdEvent(track, 'IMPRESSION', trackingScope);
   }, [track, trackingScope]);
 
-  const useVideo = item.kind === 'VIDEO' && !!videoModule && !videoFailed;
+  const videoEligible = item.kind === 'VIDEO' && !!videoModule && !videoFailed;
+  const useVideo = videoEligible && videoPrimed;
 
   // One hook drives both the viewable event and the play/pause visibility gate.
   const playerRef = useRef<import('expo-video').VideoPlayer | null>(null);
-  const { ref } = useAdViewability({
-    enabled: !!track || useVideo,
-    keepMeasuring: useVideo,
-    onViewable: () => trackAdEvent(track, 'VIEWABLE_IMPRESSION', trackingScope),
-    onVisibility: (fraction) => {
-      visibleRef.current = fraction;
-      const player = playerRef.current;
-      if (!player) return;
-      try {
-        if (fraction >= 0.5 && !player.playing) {
-          player.play();
-          if (!startedRef.current) {
-            startedRef.current = true;
-            trackAdEvent(track, 'VIDEO_START', trackingScope);
-          }
-        } else if (fraction < 0.5 && player.playing) {
-          player.pause();
+  const videoPrimedRef = useRef(false);
+  const syncPlayerForVisibility = useCallback((player: import('expo-video').VideoPlayer | null, fraction: number) => {
+    if (!player) return;
+    try {
+      if (fraction >= 0.5 && !player.playing) {
+        player.play();
+        if (!startedRef.current) {
+          startedRef.current = true;
+          trackAdEvent(track, 'VIDEO_START', trackingScope);
         }
-      } catch {
-        setVideoFailed(true);
+      } else if (fraction < 0.5 && player.playing) {
+        player.pause();
       }
-    },
+    } catch {
+      setVideoFailed(true);
+    }
+  }, [track, trackingScope]);
+
+  const handleVisibility = useCallback((fraction: number) => {
+    visibleRef.current = fraction;
+    if (!videoPrimedRef.current && shouldPrimeHeroVideo(fraction)) {
+      videoPrimedRef.current = true;
+      setVideoPrimed(true);
+    }
+    syncPlayerForVisibility(playerRef.current, fraction);
+  }, [syncPlayerForVisibility]);
+
+  const handleViewable = useCallback(() => {
+    trackAdEvent(track, 'VIEWABLE_IMPRESSION', trackingScope);
+  }, [track, trackingScope]);
+
+  const { ref } = useAdViewability({
+    enabled: !!track || videoEligible,
+    keepMeasuring: videoEligible,
+    onViewable: handleViewable,
+    onVisibility: handleVisibility,
   });
 
-  const onPress = () => {
+  const onPress = useCallback(() => {
     trackAdEvent(track, 'CLICK', trackingScope);
     void openAdDestination(item.destination);
-  };
+  }, [item.destination, track, trackingScope]);
 
-  if (posterFailed && (!useVideo || videoFailed)) return null; // end of the ladder — collapse
+  const handlePlayer = useCallback((player: import('expo-video').VideoPlayer | null) => {
+    playerRef.current = player;
+    syncPlayerForVisibility(player, visibleRef.current);
+  }, [syncPlayerForVisibility]);
+
+  const handleProgress = useCallback((position: number, duration: number) => {
+    if (duration <= 0) return;
+    setRemaining(Math.max(0, Math.ceil(duration - position)));
+    const fraction = position / duration;
+    for (const q of QUARTILES) {
+      if (fraction >= q.at && !firedQuartiles.current.has(q.event)) {
+        firedQuartiles.current.add(q.event);
+        trackAdEvent(track, q.event, trackingScope);
+      }
+    }
+    if (fraction >= 0.98 && !firedQuartiles.current.has('VIDEO_COMPLETE')) {
+      firedQuartiles.current.add('VIDEO_COMPLETE');
+      trackAdEvent(track, 'VIDEO_COMPLETE', trackingScope);
+    }
+  }, [track, trackingScope]);
+
+  const handleVideoError = useCallback(() => setVideoFailed(true), []);
+
+  if (posterFailed && (!videoEligible || videoFailed)) return null; // end of the ladder — collapse
 
   return (
     <View ref={ref} collapsable={false}>
@@ -111,26 +151,9 @@ export function AdHeroVideo({
             module={videoModule}
             uri={item.mediaUrl}
             muted={muted}
-            onPlayer={(p) => {
-              playerRef.current = p;
-            }}
-            onProgress={(position, duration) => {
-              if (duration > 0) {
-                setRemaining(Math.max(0, Math.ceil(duration - position)));
-                const frac = position / duration;
-                for (const q of QUARTILES) {
-                  if (frac >= q.at && !firedQuartiles.current.has(q.event)) {
-                    firedQuartiles.current.add(q.event);
-                    trackAdEvent(track, q.event, trackingScope);
-                  }
-                }
-                if (frac >= 0.98 && !firedQuartiles.current.has('VIDEO_COMPLETE')) {
-                  firedQuartiles.current.add('VIDEO_COMPLETE');
-                  trackAdEvent(track, 'VIDEO_COMPLETE', trackingScope);
-                }
-              }
-            }}
-            onError={() => setVideoFailed(true)}
+            onPlayer={handlePlayer}
+            onProgress={handleProgress}
+            onError={handleVideoError}
           />
         ) : null}
         <AdChip advertiserName={item.advertiserName} />
@@ -176,7 +199,7 @@ function HeroPlayer({
   module: NonNullable<typeof videoModule>;
   uri: string;
   muted: boolean;
-  onPlayer: (p: import('expo-video').VideoPlayer) => void;
+  onPlayer: (p: import('expo-video').VideoPlayer | null) => void;
   onProgress: (position: number, duration: number) => void;
   onError: () => void;
 }) {
@@ -188,6 +211,7 @@ function HeroPlayer({
 
   useEffect(() => {
     onPlayer(player);
+    return () => onPlayer(null);
   }, [player, onPlayer]);
 
   useEffect(() => {
