@@ -24,8 +24,10 @@ key path:
 The provisioner checks free disk, creates or reuses the deploy account and
 key, applies key-only SSH and UFW rules for TCP 22/80/443, enables security
 updates and time sync, installs Docker Engine/Compose, PostgreSQL client tools
-and AWS CLI, and creates swap only when needed. It refuses unknown UFW allow
-rules. Docker membership grants root-equivalent host access: grant the deploy
+and AWS CLI, and creates swap only when needed. It checks active and saved UFW
+rules, including IPv6 and rate-limited permits, and refuses extra permitted
+ports for operator review. Docker membership grants root-equivalent host
+access: grant the deploy
 account to trusted operators only. Retain the root session, establish a fresh
 SSH login as swift-deploy with its key, and check there:
 

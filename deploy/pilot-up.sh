@@ -83,18 +83,8 @@ docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA"
 "${COMPOSE[@]}" up -d --force-recreate migrate
 MIGRATE_ID="$("${COMPOSE[@]}" ps -a -q migrate)"
 [ -n "$MIGRATE_ID" ] || die "migration container was not created"
-for _ in $(seq 1 120); do
-  STATE="$(docker inspect -f '{{.State.Status}}' "$MIGRATE_ID")"
-  if [ "$STATE" = exited ]; then
-    CODE="$(docker inspect -f '{{.State.ExitCode}}' "$MIGRATE_ID")"
-    [ "$CODE" = 0 ] || die "migrate-deploy exited with status $CODE"
-    break
-  fi
-  [ "$STATE" = running ] || [ "$STATE" = created ] || die "migrate-deploy entered state $STATE"
-  sleep 2
-done
-[ "$(docker inspect -f '{{.State.Status}}' "$MIGRATE_ID")" = exited ] ||
-  die "migrate-deploy timed out"
+. "$HERE/wait-for-migration.sh"
+wait_for_migration "$MIGRATE_ID" || die "migration did not complete successfully"
 
 "${COMPOSE[@]}" up -d --no-deps --force-recreate api worker
 "${COMPOSE[@]}" up -d --no-deps --force-recreate caddy

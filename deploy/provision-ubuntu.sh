@@ -72,15 +72,41 @@ fi
 rm -f "$SSHD_PREVIOUS"
 systemctl reload ssh
 
-# Do not remove unknown firewall rules automatically. An existing extra ALLOW
-# needs review rather than a surprise firewall reset over a remote session.
-while read -r target action _; do
-  [ "$action" = ALLOW ] || continue
-  case "$target" in
-    22/tcp|80/tcp|443/tcp) ;;
-    *) die "UFW has an extra public ALLOW rule for $target; review it first" ;;
+# Do not remove unknown firewall rules automatically. `status` omits saved
+# rules while inactive, so inspect both the stored and active inventories.
+UFW_STORED="$(ufw show added)" || die "UFW stored rules could not be read"
+[[ "$UFW_STORED" == 'Added user rules'* ]] || die "UFW stored rules format is unknown"
+while IFS= read -r rule; do
+  case "$rule" in
+    'Added user rules'*|'') continue ;;
+    'ufw allow 22/tcp'|'ufw allow 80/tcp'|'ufw allow 443/tcp'|\
+    'ufw limit 22/tcp'|'ufw limit 80/tcp'|'ufw limit 443/tcp'|\
+    'ufw allow 22/tcp (v6)'|'ufw allow 80/tcp (v6)'|'ufw allow 443/tcp (v6)'|\
+    'ufw limit 22/tcp (v6)'|'ufw limit 80/tcp (v6)'|'ufw limit 443/tcp (v6)') ;;
+    'ufw deny '*|'ufw reject '*) ;;
+    *) die "UFW has an unreviewed stored rule: $rule" ;;
   esac
-done < <(ufw status)
+done <<< "$UFW_STORED"
+
+UFW_STATUS="$(ufw status)" || die "UFW active rules could not be read"
+[[ "$UFW_STATUS" == 'Status: active'* || "$UFW_STATUS" == 'Status: inactive'* ]] ||
+  die "UFW active rules format is unknown"
+while IFS= read -r rule; do
+  case "$rule" in
+    'Status: active'|'Status: inactive'|'') continue ;;
+  esac
+  if [[ "$rule" =~ ^To[[:space:]]+Action[[:space:]]+From$ ||
+        "$rule" =~ ^-+[[:space:]]+-+[[:space:]]+-+$ ]]; then
+    continue
+  fi
+  if [[ "$rule" =~ ^(22|80|443)/tcp([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?[[:space:]]+Anywhere([[:space:]]+\(v6\))?$ ]]; then
+    continue
+  fi
+  if [[ "$rule" =~ [[:space:]]+(DENY|REJECT)([[:space:]]+IN)?[[:space:]]+ ]]; then
+    continue
+  fi
+  die "UFW has an unreviewed active rule: $rule"
+done <<< "$UFW_STATUS"
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow 22/tcp

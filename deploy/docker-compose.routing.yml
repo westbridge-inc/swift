@@ -1,5 +1,7 @@
 # Private routing/geocoding stack for the single-host staging pilot.
 # The network is created by pilot-up.sh. No service publishes a host port.
+# These services have no built-in authentication. Never publish their ports:
+# UFW alone does not shield Docker-published ports from public access.
 # Build the Guyana OSRM data with setup-routing.sh before starting this file.
 # Geocoding is opt-in and needs substantial disk; VROOM is opt-in (planner).
 

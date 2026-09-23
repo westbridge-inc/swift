@@ -46,6 +46,7 @@ echo
 echo "OSRM data ready. The staging sequence deploy/pilot-up.sh starts routing privately."
 echo
 echo "The API reaches these only on swift-pilot-private:"
+echo "Routing services have no built-in authentication; do not publish their Docker ports."
 echo "  MAPS_PROVIDER=osrm    OSRM_URL=http://osrm:5000"
 echo "  BATCH_PLANNER=vroom   VROOM_URL=http://vroom:3000 (optional planner profile)"
 echo "  PLACES_PROVIDER=osm   PHOTON_URL=http://photon:2322  NOMINATIM_URL=http://nominatim:8080 (optional geocoding profile)"

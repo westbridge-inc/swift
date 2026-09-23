@@ -68,13 +68,8 @@ case "${1:-up}" in
     docker compose up -d --force-recreate migrate
     MIGRATE_ID="$(docker compose ps -a -q migrate)"
     [[ -n "$MIGRATE_ID" ]] || { echo "migration container missing" >&2; exit 1; }
-    for _ in $(seq 1 120); do
-      STATE="$(docker inspect -f '{{.State.Status}}' "$MIGRATE_ID")"
-      [[ "$STATE" = exited ]] && break
-      [[ "$STATE" = running ]] || { echo "migration state: $STATE" >&2; exit 1; }
-      sleep 2
-    done
-    [[ "$(docker inspect -f '{{.State.ExitCode}}' "$MIGRATE_ID")" = 0 ]] || { echo "migration failed" >&2; exit 1; }
+    . ./wait-for-migration.sh
+    wait_for_migration "$MIGRATE_ID" || { echo "migration did not complete successfully" >&2; exit 1; }
     docker compose up -d --no-deps api worker
     wait_ready
     ;;
