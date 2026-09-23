@@ -33,20 +33,34 @@ function order(over: Record<string, unknown>) {
     customerId: 'customer-1', pickupLat: 6.8, pickupLng: -58.15, taxiPassengerCount: null, subtotalBase: 3000,
     paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', tenantId: 'tenant-a', readyAt: null,
     foodAgeHeldAt: null, foodAgeWaivedAt: null, mmgClaimMismatchAt: null,
+    // #1266 delivery authority: a committed platform-rider generation, no dispatch hold.
+    holdExpiresAt: null, fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: 1,
     totalAmount: 3500, subtotalCustomer: 3000, deliveryFee: 500, serviceFee: 0, taxAmount: 0, tipAmount: 0, discount: 0,
     vendor: { name: 'Cutoff Diner', owner: { userId: 'owner-user' } }, items: [],
     ...over,
   };
 }
 
-function harness(row: Record<string, unknown>, liveOffer: string | null = null) {
+/** Reaching the first offer step (the live-offer read) ends the run here: what
+ *  follows is the offer protocol itself, not the gate under test. */
+const OFFER_STEP = 'reached the first offer step';
+
+function harness(row: Record<string, unknown>) {
   const redisReads: string[] = [];
   const prisma = {
     order: { findUnique: async ({ where }: { where: { id: string } }) => (where.id === row['id'] ? structuredClone(row) : null) },
     // No configured row: every tunable resolves to its shipped default.
     algoConfig: { findFirst: async () => null },
   };
-  const redis = { get: async (key: string) => { redisReads.push(key); return key.startsWith('dispatch:offer:') ? liveOffer : null; } };
+  const redis = {
+    get: async (key: string) => {
+      redisReads.push(key);
+      if (key.startsWith('dispatch:offer:')) throw new Error(OFFER_STEP);
+      return null;
+    },
+    // #1266 initialises the delivery generation's search state once, atomically.
+    eval: async () => 1,
+  };
   const dispatch = new DispatchService(prisma as never, redis as never, {} as never, {} as never);
   return { dispatch, redisReads };
 }
@@ -74,7 +88,7 @@ describe('the food-age cutoff runs before the direct-MMG offer gate [R4 · F-PR1
     ['unpaid', {}],
     ['disputed', DISPUTED],
   ])('a %s MMG order still in time is not offered: the gate stands before any offer step', async (_label, over) => {
-    const { dispatch, redisReads } = harness(order({ readyAt: ready(20), ...over }), 'rider-9:attempt-1');
+    const { dispatch, redisReads } = harness(order({ readyAt: ready(20), ...over }));
     expect(await dispatch.dispatchOrder('order-mmg-1')).toEqual({});
     expect(rescue.retired).toEqual([]);
     expect(redisReads, 'not even the live-offer read').toEqual([]);
@@ -88,8 +102,8 @@ describe('the food-age cutoff runs before the direct-MMG offer gate [R4 · F-PR1
   });
 
   it('positive control: a paid, undisputed MMG order in time passes the gate and reaches the offer step', async () => {
-    const { dispatch, redisReads } = harness(order({ readyAt: ready(20), paymentStatus: 'CLAIMED' }), 'rider-9:attempt-1');
-    expect(await dispatch.dispatchOrder('order-mmg-1')).toEqual({ offered: 'rider-9' });
+    const { dispatch, redisReads } = harness(order({ readyAt: ready(20), paymentStatus: 'CLAIMED' }));
+    await expect(dispatch.dispatchOrder('order-mmg-1')).rejects.toThrow(OFFER_STEP);
     expect(redisReads).toEqual(['dispatch:offer:order-mmg-1']);
     expect(rescue.retired).toEqual([]);
   });
