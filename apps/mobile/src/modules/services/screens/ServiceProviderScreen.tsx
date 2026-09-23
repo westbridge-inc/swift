@@ -4,6 +4,7 @@ import { ScrollView, View } from 'react-native';
 import { color, space } from '@swift/ui';
 import {
   Card,
+  Chip,
   EmptyState,
   ErrorState,
   Header,
@@ -22,6 +23,8 @@ import {
   useVerificationStatus,
 } from '../../../hooks';
 import { useAuthStore } from '../../../stores/authStore';
+import { useServiceCatalog } from '../useServiceCatalog';
+import { customerServiceCategories, providerVerificationPresentation, SERVICE_GROUP_LABELS, selectedServiceCategory, serviceRequestTrade } from '../serviceCatalogPresentation';
 import {
   enterServiceProvider,
   serviceProviderScreenMode,
@@ -45,7 +48,11 @@ function ProviderProfileForm({
   const save = useSaveServiceProvider();
   const [trade, setTrade] = useState(existing?.trade ?? '');
   const [bio, setBio] = useState(existing?.bio ?? '');
-  const valid = trade.trim().length >= 2;
+  const catalog = useServiceCatalog();
+  const categories = catalog.data?.categories ?? [];
+  const selectableCategories = customerServiceCategories(categories);
+  const category = selectedServiceCategory(categories, trade);
+  const valid = !!serviceRequestTrade(categories, trade) && !catalog.isError;
   const message = (save.error as any)?.response?.data?.error?.message;
 
   const submit = () => {
@@ -67,14 +74,31 @@ function ProviderProfileForm({
           </T>
         </View>
       </View>
-      <LabeledInput
-        label="Trade or service"
-        value={trade}
-        onChangeText={setTrade}
-        placeholder="Electrician, cleaner, carpenter…"
-        autoCapitalize="words"
-        maxLength={60}
-      />
+      {catalog.isPending ? <LoadingBlock /> : catalog.isError ? (
+        <ErrorState message="We couldn’t load service choices." onRetry={() => void catalog.refetch()} />
+      ) : Object.entries(SERVICE_GROUP_LABELS).filter(([group]) =>
+        selectableCategories.some((option) => option.group === group)).map(([group, label]) => (
+        <View key={group} style={{ gap: space.sm }}>
+          <T variant="label" weight="semibold">{label}</T>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
+            {selectableCategories.filter((option) => option.group === group).map((option) => (
+              <Chip key={option.id} label={option.label} selected={trade === option.id} onPress={() => setTrade(option.id)} />
+            ))}
+          </View>
+        </View>
+      ))}
+      {category ? (
+        <View style={{ gap: space.sm }}>
+          <T variant="label" weight="semibold">Checks for {category.label.toLowerCase()}</T>
+          {category.availabilityMessage ? <T variant="caption" tone="muted">{category.availabilityMessage}</T> : null}
+          {category.documents.map((document) => (
+            <T key={document.key} variant="caption" tone="muted">
+              {document.label}{document.status === 'POLICY_REVIEW_REQUIRED' ? ' — requirements under review' : ''}
+            </T>
+          ))}
+          <T variant="caption" tone="muted">{catalog.data?.documentNotice}</T>
+        </View>
+      ) : null}
       <LabeledInput
         label="About your work (optional)"
         value={bio}
@@ -91,7 +115,7 @@ function ProviderProfileForm({
       ) : null}
       {/* [#947's grammar] Disabled says the ask. */}
       <PillButton
-        label={!valid ? 'Name your trade first' : existing ? 'Save changes' : 'Create provider profile'}
+        label={!category ? 'Choose your service first' : !valid ? 'This service is not open yet' : existing ? 'Save changes' : 'Create provider profile'}
         disabled={!valid}
         loading={save.isPending}
         onPress={submit}
@@ -112,6 +136,7 @@ function ProviderDashboard({
   const [editing, setEditing] = useState(false);
   const statusQuery = useVerificationStatus<any>('SERVICE_PROVIDER', undefined, { poll: true });
   const status = statusQuery.data;
+  const presentation = providerVerificationPresentation(status, provider.isVerified);
 
   // The approval path persists public listability before returning. Refresh the
   // profile projection as soon as the shared checklist reports completion.
@@ -126,20 +151,18 @@ function ProviderDashboard({
       keyboardShouldPersistTaps="handled"
     >
       <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-        <IconChip icon={provider.isVerified ? 'check-circle' : 'shield'} />
+        <IconChip icon={presentation.live ? 'check-circle' : 'shield'} />
         <View style={{ flex: 1 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm }}>
             <T variant="heading">{provider.trade}</T>
             <TonePill
-              label={provider.isVerified ? 'Live' : status?.roleVerified ? 'Activating' : 'Not live yet'}
-              tone={provider.isVerified ? 'success' : 'neutral'}
+              label={presentation.label}
+              tone={presentation.live ? 'success' : 'neutral'}
             />
             {provider.certified ? <TonePill label="Certified" tone="success" /> : null}
           </View>
           <T variant="label" tone="muted" style={{ marginTop: 4 }}>
-            {provider.isVerified
-              ? 'Customers can find you and send job requests.'
-              : 'Complete the required checks below before customers can find you.'}
+            {presentation.description}
           </T>
           {provider.bio ? (
             <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
@@ -220,7 +243,7 @@ function AuthenticatedServiceProviderScreen({ navigation }: any) {
           <View>
             <T variant="title">Earn with your skills</T>
             <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
-              Create your profile, complete the country-required checks, then receive job requests from Swift customers.
+              Choose your service, create your profile, and complete the required checks before receiving customer requests.
             </T>
           </View>
           <ProviderProfileForm onSaved={() => void profile.refetch()} />

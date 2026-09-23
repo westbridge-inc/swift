@@ -11,6 +11,7 @@ import {
 } from '../stores/authStore';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import type { AuthSessionSnapshot } from '../lib/authSession';
+import { verificationRefetchInterval } from './verificationPolling';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -30,7 +31,7 @@ export function useVerificationStatus<T = any>(role: string, vehicleType?: strin
     // Onboarding screens poll so an approval flips the app to "live" within
     // seconds, not on the next cold refetch. Stops itself once verified.
     refetchInterval: opts?.poll
-      ? (query) => ((query.state.data as any)?.roleVerified ? false : 15000)
+      ? (query) => verificationRefetchInterval(query.state.data as { roleVerified?: boolean; categoryUnavailable?: boolean } | undefined)
       : undefined,
   });
   return previewMover ? previewQuery(PREVIEW_VERIFICATION) : q;

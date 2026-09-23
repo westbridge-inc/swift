@@ -9,3 +9,4 @@ export * from './finance';
 export * from './api';
 export * from './websocket';
 export * from './cart';
+export type { ServiceBookingMode, ServiceCategoryDocument, ServiceCategory, ServiceCatalog } from './service-catalog';
