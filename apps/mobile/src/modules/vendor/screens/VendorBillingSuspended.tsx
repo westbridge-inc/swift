@@ -10,6 +10,7 @@ import { GUTTER } from '../shared';
 import { disconnectSocket } from '../../../services/socket';
 import { useVendorSubscription } from '../../../hooks/vendorops';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
+import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { type VendorMemberRole, TabHeader, VendorBillingNotice } from '../shared';
 
 export function VendorBillingSuspended({ store, stores, myRole }: { store: any; stores: any[]; myRole?: VendorMemberRole }) {
@@ -17,6 +18,7 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
   const qc = useQueryClient();
   const setSelectedStore = useStoreSwitcher((state) => state.setSelectedStore);
   const [switchingStore, setSwitchingStore] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const isOwner = myRole === 'OWNER';
   const subQ = useVendorSubscription(isOwner);
   const sub = subQ.data ?? (isOwner ? store?.subscription : null);
@@ -38,7 +40,9 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
 
   return (
     <Screen>
-      <TabHeader title={store.name} eyebrow="ACCOUNT PAUSED · ORDERS OFF" statusTone="warning" />
+      {/* A paused store pauses selling, not the person: Swift stays one tap away. */}
+      <TabHeader title={store.name} eyebrow="ACCOUNT PAUSED · ORDERS OFF" statusTone="warning" onSwitch={() => setSwitcherOpen(true)} />
+      <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView
         contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
         showsVerticalScrollIndicator={false}

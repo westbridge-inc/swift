@@ -18,7 +18,7 @@ import { navigationRef, safeNavigate } from './navigationRef';
 import { installNotificationTapRouter, flushPendingNavigation } from '../services/notification-router';
 import { installDeepLinkHandler, flushPendingDeepLink } from '../services/deep-links';
 import { ensureFirstLaunchClaim, flushAttributedDestination } from '../services/attribution';
-import { rootEntryGate, rootNavigatorBoundaryKey } from './rootEntryGate';
+import { previewBypassForIntent, rootEntryGate, rootNavigatorBoundaryKey } from './rootEntryGate';
 import {
   discardAuthContinuation,
   flushAuthContinuation,
@@ -80,7 +80,8 @@ export function RootNavigator() {
   // peek (previewType null), which stays signed-in.
   const moverPreview = useMoverPreview((s) => s.preview);
   const vendorSamplePreview = useVendorPreview((s) => s.previewType) != null;
-  const anyPreview = moverPreview || vendorSamplePreview;
+  // Each preview opens only its own stack (see previewBypassForIntent).
+  const anyPreview = previewBypassForIntent(intent, { moverPreview, vendorSamplePreview });
   // Mandatory signup selfie (master plan §3): every signed-in account must
   // carry a camera-captured profile photo before using the app. Guests browse
   // untouched; the API enforces the same rule on orders/rides/go-online.
