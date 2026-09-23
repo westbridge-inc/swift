@@ -1,133 +1,64 @@
-import { screen, waitFor, render } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { screen, render } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import TaxiPage from './page';
 import * as customer from '@/lib/customer';
 import * as geolocate from '@/lib/geolocate';
 
-// ---------------------------------------------------------------------------
-// [W-18] A DRIVER IS SENT TO THE PLACE ON THE SCREEN.
-//
-// Pick a destination, then edit the visible text without choosing again: the
-// page kept the previously chosen coordinates and submitted them, and named
-// them in the confirmation. The passenger watched a driver head to the address
-// they had just replaced, and nothing on screen revealed the swap.
-//
-// The field cannot produce that state any more — but the PAGE has to read the
-// submittable point rather than the raw selection, and that is what this
-// asserts, by driving the page the way a passenger does.
-// ---------------------------------------------------------------------------
-
-const LAMAHA = { placeId: 'p-lamaha', primary: '42 Lamaha Street', secondary: 'Georgetown', lat: 6.81, lng: -58.16 };
-
+// The pilot removes booking entirely. Keep the former W-17/W-18 regression
+// scenarios under the stronger invariant: no location, quote or dispatch call
+// is possible, including with a valid price or stale destination in the URL.
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
 beforeEach(() => {
   vi.spyOn(geolocate, 'currentCoords').mockResolvedValue({ lat: 6.80, lng: -58.15 } as never);
-  vi.spyOn(customer, 'activeRide').mockResolvedValue(null as never);
-  vi.spyOn(customer, 'rideAvailability').mockResolvedValue({ level: 'HIGH', gate: false } as never);
-  vi.spyOn(customer, 'rideEstimate').mockResolvedValue({ durationMin: 12, distanceKm: 4.2, tiers: [{ rideClass: 'ECONOMY', fare: 1800 }] } as never);
-  vi.spyOn(customer, 'placesAutocomplete').mockResolvedValue([LAMAHA] as never);
-  vi.spyOn(customer, 'placeDetails').mockResolvedValue({ lat: LAMAHA.lat, lng: LAMAHA.lng } as never);
+  vi.spyOn(customer, 'activeRide').mockResolvedValue(null);
+  vi.spyOn(customer, 'rideAvailability').mockResolvedValue({ level: 'GOOD', gate: false });
+  vi.spyOn(customer, 'rideEstimate').mockResolvedValue({ tiers: [{ rideClass: 'ECONOMY', fare: 1800 }] });
+  vi.stubGlobal('fetch', vi.fn());
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-const box = () => screen.getByPlaceholderText('Search address…');
+function expectMobileOnly() {
+  const { container } = render(<TaxiPage />);
+  expect(screen.getByText(/Taxi rides are booked in the Swift mobile app/)).toBeTruthy();
+  expect(container.querySelector('input, button, form')).toBeNull();
+  expect(geolocate.currentCoords).not.toHaveBeenCalled();
+  expect(customer.rideEstimate).not.toHaveBeenCalled();
+  expect(customer.rideAvailability).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+}
 
-describe('[W-18] the taxi request goes where the screen says', () => {
-  it('a chosen destination enables the request and prices THAT route', async () => {
-    const user = userEvent.setup();
-    render(<TaxiPage />);
-    await waitFor(() => expect(screen.getByText('Current location')).toBeTruthy());
-
-    await user.type(box(), '42 Lam');
-    await user.click(await screen.findByRole('button', { name: /42 Lamaha Street/ }));
-
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Request ride' })).toBeTruthy());
-    await waitFor(() => expect(customer.rideEstimate).toHaveBeenCalledWith(
-      expect.objectContaining({ dropoff: expect.objectContaining({ lat: LAMAHA.lat, lng: LAMAHA.lng }) }),
-    ));
+describe('[W-18] no destination can dispatch a web taxi during the pilot', () => {
+  it('a chosen destination cannot enable a request or price a route', () => {
+    window.history.replaceState({}, '', '/taxi?dropoff=6.81,-58.16');
+    expectMobileOnly();
   });
 
-  it('EDITING the destination after choosing takes the request away — no stale coordinates can be sent', async () => {
-    const user = userEvent.setup();
-    const requestRide = vi.spyOn(customer, 'requestRide').mockResolvedValue({ id: 'ride-1' } as never);
-    render(<TaxiPage />);
-    await waitFor(() => expect(screen.getByText('Current location')).toBeTruthy());
-
-    await user.type(box(), '42 Lam');
-    await user.click(await screen.findByRole('button', { name: /42 Lamaha Street/ }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Request ride' })).toBeTruthy());
-
-    // The passenger changes their mind and types over it without choosing.
-    await user.type(box(), ' and a bit');
-
-    await waitFor(() => {
-      const cta = screen.getByRole('button', { name: 'Set your destination' }) as HTMLButtonElement;
-      expect(cta.disabled).toBe(true);
-    });
-    expect(requestRide).not.toHaveBeenCalled();
+  it('editing the destination cannot send stale coordinates', () => {
+    window.history.replaceState({}, '', '/taxi?dropoff=6.81,-58.16&address=Changed');
+    expectMobileOnly();
   });
 
-  it('the fare disappears with the destination — a price never outlives the route it was for', async () => {
-    const user = userEvent.setup();
-    render(<TaxiPage />);
-    await waitFor(() => expect(screen.getByText('Current location')).toBeTruthy());
-
-    await user.type(box(), '42 Lam');
-    await user.click(await screen.findByRole('button', { name: /42 Lamaha Street/ }));
-    await waitFor(() => expect(screen.getByText('Economy')).toBeTruthy());
-
-    await user.type(box(), 'x');
-    await waitFor(() => expect(screen.queryByText('Economy')).toBeNull());
+  it('a price never outlives its route: no web fare is offered', () => {
+    expectMobileOnly();
+    expect(screen.queryByText('Economy')).toBeNull();
   });
 });
 
-
-// ---------------------------------------------------------------------------
-// [W-17] NO PRICE, NO RIDE — and a dependency that failed says so.
-//
-// The page swallowed every failure: `rideAvailability(...).catch(() => {})`,
-// `activeRide(...).catch(() => {})`, and an estimate failure that simply hid
-// the price block while the Request button stayed live. An outage rendered
-// exactly like a healthy market, and a ride could be ordered with no price
-// shown anywhere.
-// ---------------------------------------------------------------------------
-describe('[W-17] a ride is not ordered on a price nobody saw', () => {
-  it('a failed estimate blocks the request and says why — it used to just hide the price', async () => {
-    vi.spyOn(customer, 'rideEstimate').mockRejectedValue(new Error('pricing down'));
-    const requestRide = vi.spyOn(customer, 'requestRide').mockResolvedValue({ id: 'ride-1' } as never);
-    const user = userEvent.setup();
-    render(<TaxiPage />);
-    await waitFor(() => expect(screen.getByText('Current location')).toBeTruthy());
-
-    await user.type(box(), '42 Lam');
-    await user.click(await screen.findByRole('button', { name: /42 Lamaha Street/ }));
-
-    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
-    const cta = screen.getByRole('button', { name: 'Waiting for a price…' }) as HTMLButtonElement;
-    expect(cta.disabled).toBe(true);
-    await user.click(cta);
-    expect(requestRide).not.toHaveBeenCalled();
+describe('[W-17] neither missing nor valid pricing can enable web booking', () => {
+  it('a failed estimate cannot enable booking', () => {
+    vi.mocked(customer.rideEstimate).mockRejectedValue(new Error('pricing down'));
+    expectMobileOnly();
   });
 
-  it('a failed availability read is stated — an outage is not a quiet night', async () => {
-    vi.spyOn(customer, 'rideAvailability').mockRejectedValue(new Error('availability down'));
-    render(<TaxiPage />);
-    await waitFor(() => expect(screen.getByText('Current location')).toBeTruthy());
-    await waitFor(() => expect(screen.getByText(/this is our problem, not a quiet night/)).toBeTruthy());
+  it('failed availability cannot turn the restriction into a quiet-market retry', () => {
+    vi.mocked(customer.rideAvailability).mockRejectedValue(new Error('availability down'));
+    expectMobileOnly();
+    expect(screen.queryByText(/Try anyway|Notify me when/)).toBeNull();
   });
 
-  it('with a price, the request goes through — the gate is the price, not a permanent block', async () => {
-    const requestRide = vi.spyOn(customer, 'requestRide').mockResolvedValue({ id: 'ride-1' } as never);
-    const user = userEvent.setup();
-    render(<TaxiPage />);
-    await waitFor(() => expect(screen.getByText('Current location')).toBeTruthy());
-
-    await user.type(box(), '42 Lam');
-    await user.click(await screen.findByRole('button', { name: /42 Lamaha Street/ }));
-    await user.click(await screen.findByRole('button', { name: 'Request ride' }));
-
-    await waitFor(() => expect(requestRide).toHaveBeenCalledTimes(1));
+  it('even with a valid price the pilot requires the mobile app', () => {
+    expectMobileOnly();
+    expect(screen.getByRole('link', { name: 'Open Swift app' }).getAttribute('href')).toBe('swift://');
   });
 });

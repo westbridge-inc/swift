@@ -99,10 +99,12 @@ export function bearerOrCookieToken(request: Pick<FastifyRequest, 'headers'>): s
 
 /** The JWT plugin verifies the Authorization header: when a request carries no Bearer but a
  *  cookie credential that passes the gate, the cookie becomes that header for this request. */
-export function adoptCookieCredential(request: FastifyRequest): void {
-  if (typeof request.headers.authorization === 'string' && request.headers.authorization.startsWith('Bearer ')) return;
+export function adoptCookieCredential(request: FastifyRequest): 'bearer' | 'cookie' | null {
+  if (typeof request.headers.authorization === 'string' && request.headers.authorization.startsWith('Bearer ')) return 'bearer';
   const token = bearerOrCookieToken(request);
-  if (token) request.headers.authorization = `Bearer ${token}`;
+  if (!token) return null;
+  request.headers.authorization = `Bearer ${token}`;
+  return 'cookie';
 }
 
 /** The refresh credential for the auth routes: the body's token (native apps) or the refresh cookie (browsers, same gate). */
