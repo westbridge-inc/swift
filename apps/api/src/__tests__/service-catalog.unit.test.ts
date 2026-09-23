@@ -3,10 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   canonicalServiceTrade, publicServiceCatalog, requireCanonicalServiceTrade,
   SERVICE_TRADE_CATALOG, qualificationTypeMatchesTrade,
-} from './service-catalog';
-import { providerChecklist } from './services.service';
-import { serviceCatalogRoutes } from './service-catalog.routes';
-import { VerificationService } from '../verification/verification.service';
+} from '../modules/services/service-catalog';
+import { providerChecklist } from '../modules/services/services.service';
+import { serviceCatalogRoutes } from '../modules/services/service-catalog.routes';
+import { VerificationService } from '../modules/verification/verification.service';
 
 describe('service catalogue authority', () => {
   it('serves every canonical category through the actual route without personal data', async () => {
