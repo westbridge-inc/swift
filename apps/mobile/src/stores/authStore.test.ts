@@ -131,6 +131,13 @@ beforeEach(() => {
 });
 
 describe('authStore session boundaries', () => {
+  it('clears a fresh guest Home cache before interactive login', () => {
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    expect(clearQueryClient).toHaveBeenCalledOnce();
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+  });
+
   it.each(priorIntents)(
     'returns a signed-out %s session to the experience picker while retaining country',
     (intent) => {
