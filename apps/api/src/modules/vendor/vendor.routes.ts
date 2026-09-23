@@ -2401,7 +2401,11 @@ export async function vendorRoutes(app: FastifyInstance) {
       success: true,
       data: {
         rowCount: normalized.length,
-        preview: normalized.slice(0, 10),
+        // [F-1218-01] EVERY proposed row, not a capped preview. The parser is
+        // conservative and the vendor's confirmation is the last guard — but a
+        // row they were never shown is a row they cannot refuse. The CSV below
+        // imports exactly this list, so this list is what they see.
+        preview: normalized,
         normalizedCsv: toImportCsv(normalized as never),
         source: 'menu-pdf',
       },

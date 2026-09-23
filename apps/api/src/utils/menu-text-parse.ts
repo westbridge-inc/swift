@@ -22,6 +22,12 @@
 // ("Pepperpot  1800  (served with bread)") is NOT read — TRAILING_PRICE
 // anchors at end of line — and is left for the vendor rather than guessed at.
 //     STARTERS                      <- a category header: no price, short
+//
+// A name that ends in a digit, then a space, then a three-digit group
+// ("Combo 2 500" — which is what a PDF text layer makes of "Combo 2   500")
+// has two readings, "Combo 2" at 500 and "Combo" at 2,500, and is read
+// NEITHER way. A currency mark, a leader, or a group the name's digit cannot
+// join ("Combo 2 1,500") settles it; nothing else is allowed to.
 // ---------------------------------------------------------------------------
 
 export interface MenuDraft {
@@ -61,8 +67,30 @@ const MAX_NAME = 150;
 const MAX_DESCRIPTION = 500;
 const MAX_CATEGORY = 80;
 
-/** A trailing money token: optional currency mark, digits with , or space groups, optional decimals. */
-const TRAILING_PRICE = /(?:^|[\s.·…-])((?:G?\$|GYD|\$)?)\s*(\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.(\d{1,2}))?\s*$/;
+/** A currency mark: "$", "G$", "GYD". */
+const CURRENCY = String.raw`(?:G?\$|GYD)`;
+/**
+ * A trailing money token: separator, optional currency mark, the amount, optional
+ * decimals. The amount has two shapes, and they are not interchangeable:
+ *
+ *  ANCHORED — digits grouped by spaces or commas ("1 500", "1,500") read as ONE
+ *             amount only when a currency mark says where the amount starts
+ *             ("G$1 500"). Without that anchor a spaced group is not a number:
+ *             "Combo 2 500" is also "Combo 2" at 500, and a PDF text layer —
+ *             which collapses the column gap that would have decided it —
+ *             produces exactly this shape. Space grouping used to be accepted
+ *             unanchored, and its presence was then read as a STRONG money
+ *             signal: the item "Combo" at 2,500 (independent review of #1218).
+ *  PLAIN    — comma-grouped or unbroken digits ("1,500", "1500"): one number on
+ *             its own, with or without a currency mark.
+ *
+ * Groups: 1–2 the anchored currency and amount, 3–4 the plain ones, 5 the cents.
+ */
+const TRAILING_PRICE = new RegExp(
+  String.raw`(?:^|[\s.·…-])(?:(${CURRENCY})\s*(\d{1,3}(?:[,\s]\d{3})+)|(${CURRENCY}?)\s*(\d{1,3}(?:,\d{3})+|\d+))(?:\.(\d{1,2}))?\s*$`,
+);
+/** An amount whose every group is three digits: one more group in front of it would still be a number. */
+const JOINABLE_GROUPS = /^\d{3}(?:,\d{3})*$/;
 /** Leading list numbering a menu often carries: "1.", "12)", "-", "•". */
 const LEADING_ORNAMENT = /^\s*(?:\d{1,3}\s*[.)\]]|[-–—•*·])\s*/;
 /** Dotted or dashed leaders between a name and its price. */
@@ -117,9 +145,10 @@ export function parseMenuText(text: string, opts: { defaultCategory?: string } =
       continue;
     }
 
-    const currency = priceMatch[1] ?? '';
-    const digits = priceMatch[2] ?? '';
-    const cents = priceMatch[3] ?? '';
+    // Exactly one of the two amount shapes matched: anchored (1–2) or plain (3–4).
+    const currency = priceMatch[1] ?? priceMatch[3] ?? '';
+    const digits = priceMatch[2] ?? priceMatch[4] ?? '';
+    const cents = priceMatch[5] ?? '';
     const whole = digits.replace(/[,\s]/g, '');
     const basePrice = Number(cents ? `${whole}.${cents}` : whole);
     if (!Number.isFinite(basePrice) || basePrice < MIN_PRICE || basePrice > MAX_PRICE) continue;
@@ -139,7 +168,8 @@ export function parseMenuText(text: string, opts: { defaultCategory?: string } =
     //  LEADER  — a dotted/dashed run, an explicit menu convention.
     //  GAP     — plain whitespace of two or more. The weakest, and the one a
     //            spaced number sequence or a column of prose also produces.
-    const strongMoney = Boolean(currency) || Boolean(cents) || /[,\s]/.test(digits);
+    // A spaced group only ever matches ANCHORED, so the currency mark is its signal.
+    const strongMoney = Boolean(currency) || Boolean(cents) || /,/.test(digits);
     // A leader is a RUN. One hyphen is punctuation inside a token, not a menu
     // convention — "WhatsApp orders 592-600-1234" is the case that proves it.
     const leaderMoney = gap.length >= 2 && /[.·…_-]/.test(gap);
@@ -154,6 +184,11 @@ export function parseMenuText(text: string, opts: { defaultCategory?: string } =
       if (basePrice < BARE_INTEGER_FLOOR) continue;
       if (/\d$/.test(beforePrice)) continue;
     }
+    // "Combo 2 500.00", "Meal for 2 750,000": is the 2 the end of the name, or
+    // the thousands of the amount? The tail is plainly money, and that still
+    // does not decide it. Only a currency mark, a leader, or a leading group
+    // the name's digit cannot join ("Combo 2 1,500") does. Not guessed: skipped.
+    if (!currency && !leaderMoney && /\d$/.test(beforePrice) && JOINABLE_GROUPS.test(digits)) continue;
     const withoutOrnament = beforePrice.replace(LEADING_ORNAMENT, '');
     const { name, description } = splitNameAndDescription(withoutOrnament);
     // A price with no name is a subtotal, a page number, or a stray column.

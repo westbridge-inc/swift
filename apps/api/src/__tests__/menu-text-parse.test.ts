@@ -77,6 +77,30 @@ describe('[NO-AI] parseMenuText reads a menu instead of imagining one', () => {
     expect(drafts.map((d) => [d.name, d.basePrice])).toEqual([['Combo 2', 1500], ['Combo 3', 1800]]);
   });
 
+  it('[F-1218-01] never reads a space-separated digit run as one amount unless a currency mark anchors it', () => {
+    // A PDF text layer collapses the column gap, so "Combo 2   500" arrives
+    // as "Combo 2 500". Read as a space-grouped number that is the item "Combo"
+    // at 2,500 — a wrong price on a live product (independent review of #1218).
+    // The line has two readings and shows nothing that picks one: not read.
+    expect(parseMenuText('Combo 2 500')).toEqual([]);
+    expect(parseMenuText('Meal for 2 750')).toEqual([]);
+    // A currency mark says where the amount STARTS, so a spaced group after it
+    // is one amount — and a name that ends in a digit stays whole.
+    expect(parseMenuText('Fish Cakes G$1 200').map((d) => [d.name, d.basePrice])).toEqual([['Fish Cakes', 1200]]);
+    expect(parseMenuText('Combo 2 $500').map((d) => [d.name, d.basePrice])).toEqual([['Combo 2', 500]]);
+  });
+
+  it('[F-1218-01] a digit-final name, a plain space and a three-digit group stay ambiguous even when the tail is plainly money', () => {
+    // Decimals or grouping prove the TAIL is money; they do not say whether the
+    // "2" belongs to the name or to the amount. Neither reading is guessed.
+    expect(parseMenuText('Combo 2 500.00')).toEqual([]);
+    expect(parseMenuText('Meal for 2 750,000')).toEqual([]);
+    // A leading group the name's digits cannot join settles it: "2 1,500" is
+    // no number, so "Combo 2" is the name.
+    expect(parseMenuText('Combo 2 1,500').map((d) => [d.name, d.basePrice])).toEqual([['Combo 2', 1500]]);
+    expect(parseMenuText('Combo 2 1500.00').map((d) => [d.name, d.basePrice])).toEqual([['Combo 2', 1500]]);
+  });
+
   it('refuses a price outside anything a menu line can mean', () => {
     const drafts = parseMenuText([
       'Suspiciously Cheap   0',

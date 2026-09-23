@@ -4,6 +4,7 @@ import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
 import ExcelJS from 'exceljs';
+import PDFDocument from 'pdfkit';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -225,6 +226,36 @@ describe('Menu PDF parsing (§3.1) — fails closed', () => {
     expect(data.preview.map((p) => p.basePrice)).toEqual([500, 2500]);
     expect(data.preview.map((p) => p.category)).toEqual(['STARTERS', 'MAINS']);
     // A PARSE is not an import: the vendor still confirms.
+    expect(await app.prisma.item.count({ where: { vendorId } })).toBe(before);
+  });
+
+  it('[F-1218-01] a real menu PDF: every proposed row comes back for inspection, and a numbered name is never cut at its digit', async () => {
+    // pdfkit's text layer collapses the column gap ("Combo 2   500" arrives as
+    // "Combo 2 500"), the shape independent review used to put "Combo" at
+    // 2,500 in row six — past everything the confirm card showed. The route
+    // must return every row it proposes, and must not propose that one.
+    const doc = new PDFDocument();
+    const chunks: Buffer[] = [];
+    const done = new Promise<void>((resolve) => {
+      doc.on('data', (chunk: Buffer) => chunks.push(chunk));
+      doc.on('end', resolve);
+    });
+    const lines = ['Dish A   $500', 'Dish B   $500', 'Dish C   $500', 'Dish D   $500', 'Dish E   $500', 'Combo 2   500', 'Meal for 2   750', 'Combo 3   $1,800'];
+    for (const line of lines) doc.text(line);
+    doc.end();
+    await done;
+
+    const before = await app.prisma.item.count({ where: { vendorId } });
+    const res = await postFile('/api/v1/vendor/items/import/menu-parse', owner.token, 'menu.pdf', 'application/pdf', Buffer.concat(chunks));
+    expect(res.statusCode, res.body).toBe(200);
+    const data = res.json().data as { rowCount: number; preview: Array<{ name: string; basePrice: number }>; normalizedCsv: string };
+    // Every row the confirm CSV would import is on the preview the vendor sees.
+    expect(data.preview).toHaveLength(data.rowCount);
+    expect(data.normalizedCsv.split('\n')).toHaveLength(data.rowCount + 1); // header + one line per row
+    expect(data.preview.map((p) => [p.name, p.basePrice])).toEqual([
+      ['Dish A', 500], ['Dish B', 500], ['Dish C', 500], ['Dish D', 500], ['Dish E', 500], ['Combo 3', 1800],
+    ]);
+    expect(data.normalizedCsv).not.toMatch(/,2500,|,2750,/);
     expect(await app.prisma.item.count({ where: { vendorId } })).toBe(before);
   });
 });
