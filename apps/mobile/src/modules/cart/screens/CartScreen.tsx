@@ -23,6 +23,7 @@ import { useBookingStore } from '../../../stores/bookingStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { openMmgPaymentAction } from '../../../lib/payLink';
 import { haptic } from '../../../lib/haptics';
 import { toast } from '../../../kit/toast';
@@ -304,14 +305,6 @@ export function CartScreen() {
   // at the counter — it must NEVER demand a delivery address. Address is for
   // delivery carts and home-visit bookings only.
   const needsAddress = (!apptOnly && !pickup) || homeVisit;
-  // Slot ISOs carry local wall-clock time on their UTC face (same convention
-  // as the slot picker) — format in UTC or the time shifts by the device TZ.
-  const fmtSlot = (iso: string) => {
-    const d = new Date(iso);
-    const day = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
-    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' });
-    return `${day}, ${time}`;
-  };
 
   const onOrder = (extra?: Record<string, unknown>) => {
     // [E01] The pickup choice applies to EVERY vendor in the basket (the
@@ -797,7 +790,7 @@ export function CartScreen() {
                     <View key={i.itemId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <Feather name="calendar" size={13} color={color.text.muted} />
                       <T variant="caption" tone="muted">
-                        {i.name} — {fmtSlot(appointments[i.itemId]!.slotStart)}
+                        {i.name} — {formatAppointmentSlot(appointments[i.itemId]!.slotStart)}
                         {appointments[i.itemId]!.mode === 'MOBILE' ? ' · at your address' : ''}
                       </T>
                     </View>

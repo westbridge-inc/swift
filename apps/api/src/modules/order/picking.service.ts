@@ -5,6 +5,7 @@ import { FloatService } from '../dispatch/float.service';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
+import { mmgClaimLockObserver } from './mmg-claim.service';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
  *  status. CAPTURED is money the store already received; PENDING is only the
@@ -129,7 +130,8 @@ export class PickingService {
     const line = await this.getLine(orderId, lineId);
     // [SPS-F-0016 / REPORT-004 F-004-05] Ticking a line IS preparing the order
     // — gated for unpaid MMG like every other affirmative prep action.
-    // Unticking (corrective) stays open.
+    // Unticking (corrective) stays open. This preview check only answers
+    // early; the authority is the same gate on the LOCKED row below.
     if (picked) assertMmgFulfilmentAllowed(line.order, 'PREPARING');
     if (line.subStatus === 'PENDING') {
       throw new AppError(409, 'SUBSTITUTION_OPEN', 'Resolve the substitution before picking this line');
@@ -140,19 +142,48 @@ export class PickingService {
     // [REPORT-006 F-006-05] The write re-binds live order lifecycle and line
     // state — a cancellation or line closure committing after the preview
     // matches nothing instead of mutating a closed order.
-    const updated = await this.prisma.orderItem.updateMany({
-      where: {
-        id: lineId,
-        subStatus: { notIn: ['PENDING', 'REFUNDED', 'REJECTED'] },
-        order: { status: { in: PICKABLE_STATES as PickableStatus[] } },
-      },
-      data: { picked },
+    // [ORDER-SPINE S1-6] And it commits under the order-row lock the direct-MMG
+    // claim authority takes, with the MMG gate re-run on the locked row: a
+    // customer's "I did not pay" committing after the preview is seen here.
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const order = await this.lockPickableOrder(tx, orderId);
+      if (picked) assertMmgFulfilmentAllowed(order, 'PREPARING');
+      return tx.orderItem.updateMany({
+        where: {
+          id: lineId,
+          orderId,
+          subStatus: { notIn: ['PENDING', 'REFUNDED', 'REJECTED'] },
+          order: { status: { in: PICKABLE_STATES as PickableStatus[] } },
+        },
+        data: { picked },
+      });
     });
     if (updated.count === 0) {
       throw new AppError(409, 'NOT_PICKABLE', 'This line just changed — refresh the order');
     }
     this.emitPickState(line.order.vendorId, orderId, lineId, { picked });
     return this.prisma.orderItem.findUnique({ where: { id: lineId } });
+  }
+
+  /**
+   * [ORDER-SPINE S1-6] The fence an affirmative pick-list write commits under:
+   * the SAME order-row lock the direct-MMG claim authority, cancellation and
+   * the canonical transitions take, then the live row read through it. A
+   * customer's denial either commits first — and the gate on this row refuses
+   * — or waits for this write, which then preceded the dispute.
+   */
+  private async lockPickableOrder(tx: Prisma.TransactionClient, orderId: string) {
+    await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${orderId} FOR UPDATE`;
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { status: true, paymentMethod: true, paymentStatus: true, orderType: true, mmgClaimMismatchAt: true },
+    });
+    if (!order) throw new NotFoundError('Order', orderId);
+    await mmgClaimLockObserver.afterLock?.({ orderId, actor: 'PICK' });
+    if (!PICKABLE_STATES.includes(order.status)) {
+      throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${order.status}`);
+    }
+    return order;
   }
 
   /**
@@ -163,6 +194,7 @@ export class PickingService {
   async proposeSubstitution(orderId: string, lineId: string, substituteItemId: string, changedBy: string) {
     const line = await this.getLine(orderId, lineId);
     // [SPS-F-0016] Proposing a substitute is affirmative preparation — gated.
+    // (Early answer only; the authority is the gate on the locked row below.)
     assertMmgFulfilmentAllowed(line.order, 'PREPARING');
     if (line.picked) throw new AppError(409, 'ALREADY_PICKED', 'This line is already picked');
     if (line.subStatus !== 'NONE') {
@@ -183,30 +215,37 @@ export class PickingService {
       throw new AppError(400, 'WRONG_GROUP', 'Substitutes must come from the same substitution group');
     }
 
-    // [REPORT-006 F-006-05] Lifecycle + line state bound in the write: a
-    // customer cancellation between preview and write leaves nothing to
-    // propose on — no PENDING question ever opens on a closed order.
-    const updated = await this.prisma.orderItem.updateMany({
-      where: {
-        id: lineId,
-        subStatus: 'NONE',
-        picked: false,
-        order: { status: { in: PICKABLE_STATES as PickableStatus[] } },
-      },
-      data: {
-        subStatus: 'PENDING',
-        substituteItemId,
-        substituteName: substitute.name,
-        substitutePrice: substitute.basePrice,
-      },
+    // [REPORT-006 F-006-05 · ORDER-SPINE S1-6] Proposing a substitute is
+    // affirmative preparation: the MMG gate runs on the LOCKED order row, and
+    // the proposal commits with its status-log evidence under that lock, bound
+    // to live lifecycle and line state. A cancellation or a customer's "I did
+    // not pay" committing after the preview leaves nothing to propose on.
+    await this.prisma.$transaction(async (tx) => {
+      const order = await this.lockPickableOrder(tx, orderId);
+      assertMmgFulfilmentAllowed(order, 'PREPARING');
+      const updated = await tx.orderItem.updateMany({
+        where: {
+          id: lineId,
+          orderId,
+          subStatus: 'NONE',
+          picked: false,
+          order: { status: { in: PICKABLE_STATES as PickableStatus[] } },
+        },
+        data: {
+          subStatus: 'PENDING',
+          substituteItemId,
+          substituteName: substitute.name,
+          substitutePrice: substitute.basePrice,
+        },
+      });
+      if (updated.count === 0) {
+        throw new AppError(409, 'SUBSTITUTION_EXISTS', 'This line just changed — refresh the order');
+      }
+      await tx.orderStatusLog.create({
+        data: { orderId, status: order.status as PickableStatus, changedBy, note: `Substitution proposed: ${line.name} → ${substitute.name}` },
+      });
     });
-    if (updated.count === 0) {
-      throw new AppError(409, 'SUBSTITUTION_EXISTS', 'This line just changed — refresh the order');
-    }
-
-    await this.prisma.orderStatusLog.create({
-      data: { orderId, status: line.order.status as PickableStatus, changedBy, note: `Substitution proposed: ${line.name} → ${substitute.name}` },
-    });
+    // Only the committed winner speaks.
     this.io.to(`order:${orderId}`).emit('order:substitution', {
       orderId,
       lineId,

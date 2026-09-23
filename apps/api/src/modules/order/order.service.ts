@@ -24,6 +24,7 @@ import {
   MOVER_HOLDING_STATUSES,
   ORDER_TRANSITIONS,
   RECOVERY_TRANSITIONS,
+  isAppointmentStatus,
 } from './order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
@@ -1733,6 +1734,15 @@ export class OrderService {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
     }
+    // A BOOKING is confirmed, completed or cancelled — never prepared, marked
+    // ready, handed to a rider or delivered [order-status.ts BOOKING_LAW]. The
+    // kitchen routes refuse it first, but this is the locked seam every caller
+    // passes (ops, agent, admin, an older client), so the same law is enforced
+    // on the fresh row here: a booking that reached PREPARING got "Food Ready!"
+    // and could no longer be completed (complete-appointment requires ACCEPTED).
+    if (source.fulfillment === 'APPOINTMENT' && !isAppointmentStatus(input.target)) {
+      throw new AppError(409, 'NOT_A_KITCHEN_ORDER', `A booking is confirmed and completed, never moved to ${input.target}`);
+    }
     // [REPORT-014 F-014-02] The acting rider must own the LOCKED row — a
     // release/reassignment that committed after the route's ownership
     // pre-read loses here, not after a fabricated DELIVERED terminal.
@@ -2174,13 +2184,20 @@ export class OrderService {
     // is absence of the store's attestation, not proof the customer's external
     // transfer didn't happen. The platform cannot know, so it says what is
     // true and points at the party who holds the money.
+    // The result is the banner the customer reads first (the tracking screen
+    // shows the server's message before its own fallback). A booking is a
+    // booking and its money is with the PROVIDER — the noun and the party
+    // follow the committed row's fulfillment; the fee and the MMG uncertainty
+    // above are the server's and are unchanged. Food keeps its exact words.
+    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : 'Order';
+    const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
     if (order.paymentMethod === 'MOBILE_MONEY') {
       return {
-        message: 'Order cancelled. If you already sent the MMG payment, the store refunds you directly.',
+        message: `${noun} cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`,
         cancellationFee,
       };
     }
-    return { message: freeCancellation ? 'Order cancelled — no charge' : 'Order cancelled', cancellationFee };
+    return { message: freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`, cancellationFee };
   }
 
   async updateStatus(
@@ -2239,7 +2256,15 @@ export class OrderService {
         // [ALG-03] Shadow: what the prep-time learner WOULD predict, written beside
         // the accept for the nightly grade. Fire-and-forget; never in the way.
         void shadowPredictAtAccept(this.prisma, orderId);
-        await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        // A booking is CONFIRMED, not "being prepared": the provider reserved
+        // the customer's slot inside this transition. Kitchen words on a
+        // haircut were the phone's first sign that a SERVICE booking was riding
+        // the food order spine.
+        if (order.fulfillment === 'APPOINTMENT') {
+          await this.notifications.bookingConfirmed(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        } else {
+          await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        }
         break;
       case 'PREPARING':
         await this.notifications.orderPreparing(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);

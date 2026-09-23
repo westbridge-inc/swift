@@ -14,9 +14,11 @@ import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
 import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/observability';
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
+import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
+import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
 import { VerificationService } from '../verification/verification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -1605,6 +1607,13 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!);
+    // A booking has no kitchen: it is confirmed, then completed with
+    // complete-appointment. Marking it "preparing" sent the customer kitchen
+    // pushes for a haircut and stranded it (complete-appointment requires
+    // ACCEPTED). The canonical transition refuses this too, for every caller.
+    if (order.fulfillment === 'APPOINTMENT') {
+      throw new AppError(400, 'NOT_A_KITCHEN_ORDER', 'A booking is not prepared — confirm it, then mark it complete.');
+    }
     if (order.status === 'ACCEPTED') {
       const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
       return { success: true, data: updated };
@@ -1621,6 +1630,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!);
+    // A booking is never "ready for pickup" — see /preparing above; a booking
+    // that already sits in PREPARING is not reopened into the kitchen path.
+    if (order.fulfillment === 'APPOINTMENT') {
+      throw new AppError(400, 'NOT_A_KITCHEN_ORDER', 'A booking is not marked ready — confirm it, then mark it complete.');
+    }
     // Grocery/goods picking gate (§5.3): the bag never closes with an open
     // question in it — every line picked, or its substitution resolved.
     // Restaurants don't shelf-pick, so only quantity-tracked store types gate.
@@ -1875,8 +1889,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     // CAPTURED under their lock and refuse. The CAS keeps lifecycle + payment
     // predicates as defense in depth, and two concurrent confirm taps by store
     // staff still have exactly one winner (no duplicate push).
+    // [ORDER-SPINE S1-6] It is also the lock the customer's claim and an
+    // operator's decision take (order/mmg-claim.service.ts): the three
+    // commands on one order's payment claims serialize here, in either order.
+    const now = new Date();
     const capture = await app.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} AND "tenantId" = ${order.tenantId} FOR UPDATE`;
       // [REPORT-005 F-005-04] The vendor is the pickup-code VERIFIER: every
       // read here must omit handover secrets exactly like resolveOwnedOrder,
       // or this response hands the verifier the code (and the ride PIN).
@@ -1884,12 +1902,18 @@ export async function vendorRoutes(app: FastifyInstance) {
         where: { id: order.id },
         omit: HANDOVER_SECRETS_OMIT,
       });
+      await mmgClaimLockObserver.afterLock?.({ orderId: order.id, actor: 'STORE' });
       if (ORDER_CLOSED_STATUSES.includes(locked.status)) throw orderClosedError();
       // [W-25] the preview above is UX; THIS is the authority — a payment that
       // failed or was reversed between the tap and the lock is refused here
       assertMmgAttestable(locked);
-      if (locked.paymentStatus === 'CAPTURED' || locked.paymentStatus === 'CLAIMED') {
-        return { won: false, order: locked }; // idempotent under the lock
+      // [S1-6] The claim is decided on the LOCKED row: a repeat tap writes
+      // nothing; an attempt an operator rejected cannot be revived; and a
+      // durable customer denial — or a different reference — becomes the
+      // disagreement in the SAME statement that writes CLAIMED.
+      const decision = decideStoreMmgClaim(locked, reference, now);
+      if (decision.kind === 'ALREADY_CLAIMED') {
+        return { won: false, order: locked, notice: null as MmgClaimNotice | null, outboxId: null as string | null }; // idempotent under the lock
       }
       // [DOC-1 §31.5 · DOC-INV-48 · P31-2] The store's word is a CLAIM. It lands as CLAIMED —
       // never CAPTURED, which is reserved for a provider's own evidence — so nothing
@@ -1899,8 +1923,9 @@ export async function vendorRoutes(app: FastifyInstance) {
           id: order.id,
           paymentStatus: { notIn: ['CAPTURED', 'CLAIMED'] },
           status: { notIn: ORDER_CLOSED_STATUSES as OrderStatus[] },
+          mmgClaimRevision: locked.mmgClaimRevision,
         },
-        data: { paymentStatus: 'CLAIMED' },
+        data: { paymentStatus: 'CLAIMED', ...decision.data },
       });
       // [LB-015 / REPORT-004 F-004-08] The capture and its evidence row commit
       // or vanish together, the evidence records the FRESH lifecycle status
@@ -1911,6 +1936,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         where: { id: order.id },
         omit: HANDOVER_SECRETS_OMIT,
       });
+      let notice: MmgClaimNotice | null = null;
+      let outboxId: string | null = null;
       if (cas.count > 0) {
         // [W-25] The capture and the evidence behind it commit together: the
         // provider reference, who attested and when, plus an audit row naming
@@ -1939,21 +1966,29 @@ export async function vendorRoutes(app: FastifyInstance) {
           userId: request.user.userId, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED', entity: 'Order', entityId: order.id,
           changes: { reference, amount: String(fresh.totalAmount), claim: 'payment_claimed_by_vendor' },
         } });
+        // [S1-6] The disagreement's evidence and the durable notice obligation
+        // commit with the claim; the customer is told what the STORE said.
+        ({ notice, outboxId } = await stageStoreMmgClaim(tx, { facts: fresh, decision, actorId: request.user.userId, reference, now }));
+        // Answer with the row as it now stands, attestation evidence included.
+        const claimedRow = await tx.order.findUniqueOrThrow({ where: { id: order.id }, omit: HANDOVER_SECRETS_OMIT });
+        return { won: true, order: claimedRow, notice, outboxId };
       }
-      return { won: cas.count > 0, order: fresh };
+      return { won: false, order: fresh, notice, outboxId };
     });
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
     const updated = capture.order;
-    app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED' });
-    // The socket covers an open order screen; the notification survives it.
-    await notifications.send({
-      userId: order.customerId,
-      type: 'PAYMENT_RECEIVED',
-      title: 'Payment received',
-      body: `Your MMG payment for order #${order.orderNumber} is confirmed.`,
-      data: { orderId: order.id, kind: 'mmg_payment_confirmed' },
+    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+      orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
+      mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
     });
+    // The socket covers an open order screen; the notification survives it. It
+    // is delivered from the obligation committed above, in the STORE's words —
+    // never as a confirmation, and as a dispute notice when the claims disagree.
+    if (capture.notice && capture.outboxId) {
+      await completeMmgClaimNotice({ prisma: app.prisma, notifications }, { outboxId: capture.outboxId, notice: capture.notice })
+        .catch((err: unknown) => request.log.error({ err, orderId: order.id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
     return { success: true, data: updated };
   });
 
@@ -2148,14 +2183,19 @@ export async function vendorRoutes(app: FastifyInstance) {
     // learn their order was declined (it just silently vanished).
     // [REPORT-010 F-03] An unattested-MMG decline carries the refund guidance
     // — the customer may have already paid the store's link.
+    // A booking is declined by its PROVIDER: the words follow the appointment
+    // fulfillment, exactly as the acceptance push does, so a haircut is never
+    // "an order declined by the store". Food, grocery and retail keep theirs.
+    const booking = order.fulfillment === 'APPOINTMENT';
+    const decliner = booking ? 'the provider' : 'the store';
     const mmgGuidance = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING'
-      ? ' If you already sent the MMG payment, the store refunds you directly.'
+      ? ` If you already sent the MMG payment, ${decliner} refunds you directly.`
       : '';
     await notifications.send({
       userId: updated.customer.id,
       type: 'ORDER_UPDATE',
-      title: 'Order declined',
-      body: `Your order ${updated.orderNumber} was declined by the store. ${reason}${mmgGuidance}`.trim(),
+      title: booking ? 'Booking declined' : 'Order declined',
+      body: `Your ${booking ? 'booking' : 'order'} ${updated.orderNumber} was declined by ${decliner}. ${reason}${mmgGuidance}`.trim(),
       data: { orderId: order.id, status: 'CANCELLED' },
     });
 
@@ -2959,10 +2999,17 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.get('/bookings', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const { from, to } = z
-      .object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() })
+      .object({ from: z.string().optional(), to: z.string().optional() })
       .parse(request.query);
-    const start = from ?? new Date(new Date().setHours(0, 0, 0, 0));
-    const end = to ?? new Date(start.getTime() + 14 * 24 * 60 * 60 * 1000);
+    const start = from
+      ? isDateOnly(from) ? startOfGuyanaDay(from) : z.coerce.date().parse(from)
+      : startOfGuyanaDay(guyanaDayKey(new Date()));
+    const baseKey = guyanaDayKey(start);
+    const [year, month, day] = baseKey.split('-').map(Number);
+    const endKey = new Date(Date.UTC(year!, month! - 1, day! + 14)).toISOString().slice(0, 10);
+    const end = to
+      ? isDateOnly(to) ? startOfGuyanaDay(to) : z.coerce.date().parse(to)
+      : startOfGuyanaDay(endKey);
     const bookings = await app.prisma.booking.findMany({
       where: { item: { vendorId }, slotStart: { gte: start, lt: end }, status: { not: 'CANCELLED' } },
       select: {
@@ -3005,7 +3052,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { from, to } = z
       .object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() })
       .parse(request.query ?? {});
-    const start = from ?? new Date(new Date().setUTCHours(0, 0, 0, 0));
+    const start = from ?? new Date(`${guyanaDayKey(new Date())}T00:00:00.000Z`);
     const end = to ?? new Date(start.getTime() + 30 * 24 * 60 * 60 * 1000);
     const exceptions = await app.prisma.bookingException.findMany({
       where: { vendorId, date: { gte: start, lte: end } },

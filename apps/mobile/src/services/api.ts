@@ -333,6 +333,13 @@ export const customerApi = {
   // Live verdict on an out-of-stock substitution the store proposed (§5.3).
   decideSubstitution: (orderId: string, lineId: string, approve: boolean) =>
     api.post(`/customer/orders/${orderId}/items/${lineId}/substitution`, { approve }),
+  // [ORDER-SPINE S1-6] The customer's own words about a direct-MMG payment:
+  // "I paid" (optionally with the wallet's reference) or "I didn't pay". The
+  // server records them beside the store's claim and holds the order when the
+  // two disagree. Unwrapped at the seam; a reference travels only with "I paid".
+  claimOrderPayment: (id: string, claim: { paid: boolean; reference?: string }) =>
+    api.post(`/customer/orders/${id}/payment-claim`, claim.paid && claim.reference ? { paid: true, reference: claim.reference } : { paid: claim.paid })
+      .then((res) => (res.data?.data ?? {}) as { orderId?: string; paymentStatus?: string; mismatch?: boolean; replayed?: boolean; mmgClaim?: unknown }),
   // Redeem a referral code (writes referredBy). `token` lets a just-registered
   // user redeem before the auth store has propagated.
   redeemReferral: (code: string, token?: string) =>
