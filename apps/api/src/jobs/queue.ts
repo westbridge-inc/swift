@@ -6,6 +6,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { captureError, opsPageCounter, osrmOutcomeCounter } from '../plugins/observability';
 import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
+import { GUYANA_TZ } from '../modules/prep/prep-time';
 import { runWithTenant } from '../plugins/tenant-context';
 import {
   requireActiveDiscoveryTenant,
@@ -2320,8 +2321,9 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 30,
   });
 
-  // Vendor↔rider collusion affinity scan (SWIFT-164): weekly, Monday 06:00 —
-  // after tier-recalc (05:00), before the human's week starts.
+  // Vendor↔rider collusion affinity scan (SWIFT-164): weekly, Monday 06:00
+  // UTC (02:00 in Guyana) — before the human's week starts. It does not
+  // depend on tier-recalc, which runs at 05:00 Guyana time (09:00 UTC).
   await queues.verificationQueue.add('collusion-affinity-scan', {}, {
     repeat: { pattern: '0 6 * * 1' },
     removeOnComplete: 10,
@@ -2336,9 +2338,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 30,
   });
 
-  // Vendor tier recalculation from catalogue size: weekly, Monday 05:00
+  // Partner tier recalculation (vendors by catalogue size, movers by vehicle):
+  // weekly, Monday 05:00 IN GUYANA. The zone is pinned to the platform's
+  // timezone authority: a bare cron rule reads the worker's clock, and on a
+  // UTC host that is 01:00 Georgetown — a different week boundary for a
+  // weekly fee. Changing the rule's options registers a new repeatable in
+  // Redis; an old zone-less registration must be removed at rollout.
   await queues.subscriptionQueue.add('tier-recalc', {}, {
-    repeat: { pattern: '0 5 * * 1' },
+    repeat: { pattern: '0 5 * * 1', tz: GUYANA_TZ },
     removeOnComplete: 10,
     removeOnFail: 10,
   });

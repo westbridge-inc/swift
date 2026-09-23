@@ -1,4 +1,5 @@
 import type { VendorPreviewType } from '../stores/vendorPreview';
+import { vendorQuote, type PartnerPricing } from './partnerPricing';
 
 /**
  * Per-business-type SAMPLE data for the vendor PREVIEW (vendor excellence R4).
@@ -7,8 +8,12 @@ import type { VendorPreviewType } from '../stores/vendorPreview';
  * clearly labelled and read-only (mutations no-op; the existing preview banner +
  * locked controls apply). Illustrative Georgetown data, round GYD figures; the
  * screens render it through their normal paths, so preview never drifts from
- * production.
+ * production. The one live number is the weekly fee: it comes from the public
+ * price list (see `vendorPreviewSubscription`), never from this file.
  */
+
+/** The sample stores are Georgetown businesses priced in GYD. */
+export const VENDOR_PREVIEW_MARKET = 'GY';
 
 const TYPE_LABEL: Record<VendorPreviewType, string> = {
   RESTAURANT: 'Georgetown Grill',
@@ -146,7 +151,8 @@ export function vendorPreviewDataset(type: VendorPreviewType): VendorPreviewData
     busyHours: [11, 12, 13, 18, 19, 20].map((h) => ({ hour: h, orders: 6 + (h % 5) })),
     popularItems: items.slice(0, 3).map((it, i) => ({ name: it.name, count: 40 - i * 8, revenue: (40 - i * 8) * it.basePrice })),
     hours: DAY_LABELS.map((d) => ({ day: d, open: '09:00', close: '21:00', closed: false })),
-    subscription: { status: 'ACTIVE', type: 'VENDOR', weeklyRate: type === 'RESTAURANT' ? 20000 : 15000, currencyCode: 'GYD', currentPeriodEnd: aheadIso(5 * DAY, now), nextBillingDate: aheadIso(5 * DAY, now) },
+    // No fee of its own — `vendorPreviewSubscription` bills the live quote.
+    subscription: { status: 'ACTIVE', type: 'VENDOR', currencyCode: 'GYD', currentPeriodEnd: aheadIso(5 * DAY, now), nextBillingDate: aheadIso(5 * DAY, now) },
     // useVendorMenu shape: categories with items (grocery/goods) or a flat menu.
     menu: { categories: [{ id: 'pv-cat', name: type === 'SERVICE' ? 'Services' : type === 'SUPERMARKET' ? 'Groceries' : 'Menu', items }] },
     // A fully-approved store so the dashboard shows the working experience.
@@ -164,6 +170,19 @@ export function vendorPreviewDataset(type: VendorPreviewType): VendorPreviewData
       repeatRate: Math.round((LOYALTY_BASE[type].repeatCustomers / LOYALTY_BASE[type].totalCustomers) * 100),
     },
   };
+}
+
+/**
+ * The sample store's subscription billed at the live quote for its business
+ * type and its sample catalogue, counted the way the biller counts (available
+ * items) — what a real store like it would be charged — or null while there is
+ * no valid quote: the fee is absent, never zero.
+ */
+export function vendorPreviewSubscription(dataset: VendorPreviewDataset, pricing: PartnerPricing | null | undefined) {
+  const items: Array<{ isAvailable?: boolean }> = (dataset.menu?.categories ?? []).flatMap((c: { items?: unknown[] }) => c.items ?? []);
+  const activeItems = items.filter((item) => item.isAvailable === true).length;
+  const quote = vendorQuote(pricing, dataset.store.vendorType, activeItems);
+  return quote ? { ...dataset.subscription, weeklyRate: quote.rate } : null;
 }
 
 // ---------------------------------------------------------------------------

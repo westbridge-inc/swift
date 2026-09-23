@@ -1,4 +1,6 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { VendorType } from '@prisma/client';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 
 /**
@@ -20,9 +22,7 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
  * why it was never called from the other two. Exporting it here is the fix.
  */
 
-/** Sixty seconds. The feed carries `holdExpiresAt` as an ABSOLUTE instant so
- *  a cached copy stays exactly true for its whole life; what it cannot stay
- *  true about is whether the order still exists — hence the invalidators. */
+/** Discovery may be up to sixty seconds old. Orders are read on every request. */
 export const HOME_CACHE_TTL = 60;
 
 /**
@@ -46,7 +46,43 @@ export const HOME_CACHE_TTL = 60;
  */
 export function homeCacheKey(userId: string | undefined, lat: number | undefined, lng: number | undefined): string {
   const geo = `${lat ?? 'x'}:${lng ?? 'x'}`;
-  return userId ? `home:${userId}:${geo}` : tenantCacheKey(`home:guest:${geo}`);
+  // A key version isolates old full-feed writers/readers during rolling deploys.
+  // Keep home:<userId>: as the prefix so all existing invalidators still match.
+  return userId ? `home:${userId}:discovery:v2:${geo}` : tenantCacheKey(`home:guest:discovery:v2:${geo}`);
+}
+
+// Validate the discovery fields consumed by Home before treating a hit as data.
+// Vendor rows retain their existing extra public card fields; no order section
+// is accepted at the envelope level. Corrupt/old JSON is a normal cache miss.
+const categorySchema = z.object({ id: z.string(), name: z.string(), imageUrl: z.string().nullable() }).strict();
+const discoverySchema = z.object({
+  vendors: z.array(z.object({
+    id: z.string(), name: z.string(), vendorType: z.nativeEnum(VendorType),
+    latitude: z.number().finite(), longitude: z.number().finite(),
+    averageRating: z.number().finite(), totalOrders: z.number().int().nonnegative(),
+    isCurrentlyOpen: z.boolean(), acceptingOrders: z.boolean(), isFavorite: z.boolean(),
+    distanceKm: z.number().finite().nullable(), etaMin: z.number().finite().nullable(),
+    deliveryFee: z.number().finite().nullable(),
+    displayRating: z.number().finite().nullable(), ratingBucket: z.string(),
+    ratingCount: z.number().int().nonnegative(), topRated: z.boolean(),
+    categories: z.array(categorySchema).max(5),
+  }).passthrough()).max(500),
+  popularItems: z.array(z.object({
+    id: z.string(), name: z.string(), imageUrl: z.string().nullable(), price: z.number().finite(),
+    vendorId: z.string(), vendorName: z.string(), vendorType: z.nativeEnum(VendorType).nullable(),
+    etaMin: z.number().finite().nullable(),
+  }).strict()).max(10),
+  categories: z.array(categorySchema).max(2500),
+}).strict();
+
+export function parseHomeDiscovery(raw: string | null) {
+  if (!raw) return null;
+  try {
+    const parsed = discoverySchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -58,7 +94,8 @@ export function homeCacheKey(userId: string | undefined, lat: number | undefined
  * whole Redis instance for the length of the scan.
  *
  * Call sites wrap this in `.catch(() => {})`: a cache that fails to clear must
- * degrade to "stale for up to a minute", never to a failed order action.
+ * leave discovery stale for up to a minute, never fail an order action.
+ * Order truth is read independently and is not affected by cache invalidation.
  */
 export async function invalidateHomeCache(app: FastifyInstance, userId: string): Promise<void> {
   // Built from the same shape as homeCacheKey, and from the userId ALONE —

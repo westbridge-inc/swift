@@ -11,6 +11,24 @@ export interface RootEntryState {
   needsSelfie: boolean;
 }
 
+export interface PreviewFlags {
+  moverPreview: boolean;
+  vendorSamplePreview: boolean;
+}
+
+/**
+ * A read-only preview skips country and sign-in ONLY for the stack it
+ * previews. The flags outlive their own stack (a guest's "Log out" in the
+ * driver preview returns to the welcome with that preview still on), so OR-ing
+ * them opened any earner stack signed out — the business one then failed its
+ * profile read with a 401 a guest cannot refresh.
+ */
+export function previewBypassForIntent(intent: RootIntent | null, flags: PreviewFlags): boolean {
+  if (intent === 'mover') return flags.moverPreview;
+  if (intent === 'vendor') return flags.vendorSamplePreview;
+  return false;
+}
+
 /** React Navigation must discard screen-local forms, picked media and pending
  * callbacks whenever an interactive login/logout creates a new principal
  * boundary. Token refresh does not change this generation, so ordinary session

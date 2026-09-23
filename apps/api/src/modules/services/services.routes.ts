@@ -21,6 +21,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { getTenantId } from '../../plugins/prisma';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { deactivateRoom } from '../chat/chat-authority';
+import { isServiceCategoryOperational } from './service-catalog';
 
 // ---------------------------------------------------------------------------
 // Module S: Services (spec §4.6) — hire verified professionals. A ServiceJob is
@@ -165,6 +166,7 @@ export async function servicesRoutes(app: FastifyInstance) {
       data: {
         ...provider,
         tradeLabel: serviceTradeLabel(provider.trade),
+        categoryUnavailable: trade === null || !isServiceCategoryOperational(trade),
         selfSkilled: !certified,
         certified,
       },

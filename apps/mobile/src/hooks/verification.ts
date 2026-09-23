@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { authApi, verificationApi, partnerApi, type VehicleKind } from '../services/api';
+import { verificationApi, partnerApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
+import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
 import { PREVIEW_VERIFICATION, previewQuery } from '../lib/moverPreviewData';
 import {
   AuthSessionBoundaryError,
@@ -11,6 +12,7 @@ import {
 } from '../stores/authStore';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import type { AuthSessionSnapshot } from '../lib/authSession';
+import { verificationRefetchInterval } from './verificationPolling';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -30,26 +32,14 @@ export function useVerificationStatus<T = any>(role: string, vehicleType?: strin
     // Onboarding screens poll so an approval flips the app to "live" within
     // seconds, not on the next cold refetch. Stops itself once verified.
     refetchInterval: opts?.poll
-      ? (query) => ((query.state.data as any)?.roleVerified ? false : 15000)
+      ? (query) => verificationRefetchInterval(query.state.data as { roleVerified?: boolean; categoryUnavailable?: boolean } | undefined)
       : undefined,
   });
   return previewMover ? previewQuery(PREVIEW_VERIFICATION) : q;
 }
 
 /** Public weekly price list for the partner pitch ("N days free, then X/week"). */
-export function usePartnerPricing(countryCode?: string) {
-  return useQuery({
-    queryKey: ['pricing', countryCode ?? 'GY'],
-    queryFn: () => unwrap<{
-      countryCode: string;
-      currencyCode: string;
-      currencySymbol: string;
-      trialDays: number;
-      weekly: { mover: number | null; moverHeavy: number | null; serviceVendor: number | null; smallVendor: number | null; largeVendor: number | null; departmentVendor: number | null };
-    }>(authApi.pricing(countryCode)),
-    staleTime: 60 * 60 * 1000,
-  });
-}
+export { usePartnerPricing } from './partnerPricing';
 
 export function useBecomePartner() {
   const qc = useQueryClient();
@@ -98,6 +88,10 @@ export function useBecomePartner() {
         }
       }
       requireAuthSessionForPrincipal(owner);
+      // The store exists: its List-your-business draft is done. Cleared here,
+      // not by the screen — a per-call observer callback never runs once the
+      // screen has unmounted — and only for the account that submitted it.
+      if (data.role === 'VENDOR') useBusinessSetupDraft.getState().clearIfOwner(owner);
       void qc.invalidateQueries({ queryKey: ['verification'] });
       void qc.invalidateQueries({ queryKey: ['vendor'] });
       void qc.invalidateQueries({ queryKey: ['mover'] });

@@ -73,9 +73,8 @@ const FAQ: QA[] = [
     q: 'Is there an iPhone or Android app?',
     a: (
       <>
-        Not yet — and we will not put a store badge on this page until there genuinely is one. Swift
-        runs in your phone&apos;s browser today: everything works, including tracking your order live.
-        The apps are in progress and this answer changes the day they ship.
+        Store ordering and order tracking work in your phone&apos;s browser. Taxi rides require the Swift mobile app
+        during the pilot, including the safety PIN and SOS. Store download links will appear here when available.
       </>
     ),
   },
@@ -83,7 +82,7 @@ const FAQ: QA[] = [
     q: 'How do I know the driver is the right person?',
     a: (
       <>
-        Every taxi ride uses a six-digit code. Your driver asks you for it and enters it before the
+        Every taxi ride uses a six-digit code in the Swift mobile app. Your driver asks you for it and enters it before the
         trip starts, so both of you know you have the right person. On a trip you can share your
         route with someone, and the emergency button dials 911 directly.
       </>

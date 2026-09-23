@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
@@ -8,6 +8,8 @@ import { SwiftMark } from '../../../components/SwiftLogo';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useVerificationStatus, useBecomePartner } from '../../../hooks';
+import { usePartnerPricing } from '../../../hooks/partnerPricing';
+import { moverQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
 import { API_URL, DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useAuthStore } from '../../../stores/authStore';
@@ -15,9 +17,10 @@ import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { GUTTER } from '../shared';
 
 // The full Guyana fleet, small → large. Order matches the vehicle-class
-// taxonomy on the server (config/vehicle-classes). Only CAR provisions a taxi
-// Driver (and collects vehicle details below); the rest register a delivery/
-// courier Rider — details and commercial docs follow in the Documents step.
+// taxonomy on the server (config/vehicle-classes). Cars, wagon cars and buses
+// provision a taxi Driver (and collect vehicle details below); bicycles,
+// motorbikes, canters and box trucks register a delivery/courier Rider —
+// details and commercial docs follow in the Documents step.
 const VTYPES: { key: VehicleKind; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
   { key: 'BICYCLE', label: 'Bicycle', icon: 'bike', hint: 'Small deliveries' },
   { key: 'MOTORCYCLE', label: 'Motorbike', icon: 'moped', hint: 'Deliveries' },
@@ -93,8 +96,22 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
   const [agree, setAgree] = useState(false);
   const needsDetails = DRIVER_VEHICLE_KINDS.includes(vt);
   const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate);
+  // [PR1270-S2-04] The price on the door is a condition of the door: the
+  // vehicle is saved only against a weekly fee that was fetched successfully,
+  // is the one the card above shows for THIS vehicle, and is current. The list
+  // is read fresh here, never from an hour-old cache. Loading, a failed fetch,
+  // no quote for the vehicle, or a stale quote disables the button and says so.
+  const user = useAuthStore((s) => s.user) as { countryCode?: string } | null;
+  const pricing = usePartnerPricing(user?.countryCode, true, { fresh: true });
+  const gate = quoteGate(pricing, (p) => moverQuote(p, vt));
+  const stale = !gate.ok && gate.why === 'stale';
+  const { refetch: refetchPricing } = pricing;
+  useEffect(() => {
+    if (stale) void refetchPricing();
+  }, [stale, refetchPricing]);
 
   const submit = () => {
+    if (!gate.ok) return; // guarded by the button, restated so no call site can bypass it
     become.mutate(
       {
         role: 'MOVER',
@@ -152,11 +169,12 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
           Couldn&apos;t save. Try again.
         </T>
       ) : null}
-      {/* [#947's grammar] Disabled says the ask. */}
+      {/* [#947's grammar] Disabled says the ask — the fee first, because
+          without a fee on the door there is nothing to agree to. */}
       <PillButton
-        label={!valid ? 'Fill in the vehicle details' : !agree ? 'Agree to the Mover Agreement first' : 'Save vehicle'}
+        label={!gate.ok ? QUOTE_GATE_COPY[gate.why] : !valid ? 'Fill in the vehicle details' : !agree ? 'Agree to the Mover Agreement first' : 'Save vehicle'}
         loading={become.isPending}
-        disabled={!valid || !agree}
+        disabled={!gate.ok || !valid || !agree}
         style={{ marginTop: space.md }}
         onPress={submit}
       />
@@ -205,9 +223,11 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
           <ValuePill icon="calendar-check" label="Flat weekly fee" />
         </View>
 
-        {/* The price on the door — what "flat weekly fee" actually costs. */}
+        {/* The price on the door — what "flat weekly fee" actually costs for
+            the vehicle picked below: a taxi driver, a delivery rider and a
+            heavy-delivery rider each read their own rate. */}
         <View style={{ marginTop: space.lg }}>
-          <PricingCard kind="mover" />
+          <PricingCard kind="mover" vehicleType={vt} />
         </View>
 
         <View style={{ marginTop: space.xl }}>
