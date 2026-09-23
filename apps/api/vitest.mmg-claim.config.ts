@@ -13,6 +13,7 @@ export default defineConfig({
       'src/__tests__/mmg-claim-state.unit.test.ts',
       'src/__tests__/mmg-claim-picking-fence.unit.test.ts',
       'src/__tests__/mmg-claim-notice-retry.unit.test.ts',
+      'src/__tests__/mmg-claim-dispatch-cutoff.unit.test.ts',
     ],
     testTimeout: 10_000,
     fileParallelism: false,

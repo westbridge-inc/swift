@@ -98,6 +98,17 @@ const vendorStep = (orderId: string, step: 'preparing' | 'ready') => app.inject(
 const pickLine = (orderId: string, lineId: string) => app.inject({ method: 'PUT', url: `/api/v1/vendor/orders/${orderId}/items/${lineId}/picked`, payload: { picked: true }, headers: { ...json, authorization: `Bearer ${vendorToken}`, 'x-vendor-id': vendorId } });
 const proposeSub = (orderId: string, lineId: string, substituteItemId: string) => app.inject({ method: 'POST', url: `/api/v1/vendor/orders/${orderId}/items/${lineId}/substitute`, payload: { substituteItemId }, headers: { ...json, authorization: `Bearer ${vendorToken}`, 'x-vendor-id': vendorId } });
 const board = () => app.inject({ method: 'GET', url: '/api/v1/rider/orders/available', headers: { authorization: `Bearer ${riderToken}` } });
+/** [R4 · F-PR1262-SOL-03] The ids the rider board lists. It answers
+ *  `{ success, data: Order[] }`; any other shape fails here rather than
+ *  reading as an empty board, so neither "not listed" nor "listed" can pass
+ *  on a misread. */
+async function boardIds(): Promise<string[]> {
+  const res = await board();
+  expect(res.statusCode, res.body).toBe(200);
+  const listed: unknown = res.json().data;
+  expect(Array.isArray(listed), `rider board shape: ${res.body.slice(0, 200)}`).toBe(true);
+  return (listed as Array<{ id: string }>).map((o) => o.id);
+}
 const riderGrab = (orderId: string) => app.inject({ method: 'POST', url: `/api/v1/rider/orders/${orderId}/accept`, payload: {}, headers: { ...json, authorization: `Bearer ${riderToken}` } });
 const customerView = (orderId: string) => app.inject({ method: 'GET', url: `/api/v1/customer/orders/${orderId}`, headers: { authorization: `Bearer ${customerToken}` } });
 const row = (id: string) => system(() => app.prisma.order.findUniqueOrThrow({ where: { id } }));
@@ -355,10 +366,7 @@ describe('an unresolved disagreement fails closed at every fulfilment boundary',
 
   it('the rider board does not list it, a direct claim is refused, and dispatch offers it to nobody', async () => {
     const order = await disputed('READY_FOR_PICKUP');
-    const listed = await board();
-    expect(listed.statusCode, listed.body).toBe(200);
-    const ids = ((listed.json().data?.orders ?? listed.json().data ?? []) as Array<{ id: string }>).map((o) => o.id);
-    expect(ids).not.toContain(order.id);
+    expect(await boardIds()).not.toContain(order.id);
     const grab = await riderGrab(order.id);
     expect(grab.statusCode).toBe(409);
     expect((await row(order.id)).riderId).toBeNull();
@@ -370,8 +378,7 @@ describe('an unresolved disagreement fails closed at every fulfilment boundary',
     const { mmgClaimRevision } = await row(order.id);
     const decided = await resolve(order.id, { resolution: 'CUSTOMER_PAID', note: 'Statement shows the transfer', expectedClaimRevision: mmgClaimRevision });
     expect(decided.statusCode, decided.body).toBe(200);
-    const relisted = ((await board()).json().data?.orders ?? []) as Array<{ id: string }>;
-    expect(relisted.map((o) => o.id)).toContain(order.id);
+    expect(await boardIds()).toContain(order.id);
     const offered = await dispatch.dispatchOrder(order.id);
     // Some online rider now holds the card (ours is ~150 m away; a leftover
     // online fixture from another suite may rank first — either proves it).

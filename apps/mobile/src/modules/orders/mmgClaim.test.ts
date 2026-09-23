@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mmgClaimPresentation, parseMmgClaimView, type MmgClaimView } from './mmgClaim';
+import { boundMmgClaim, mmgClaimPresentation, parseMmgClaimView, sendBoundMmgClaim, type MmgClaimView, type PendingMmgClaim } from './mmgClaim';
 
 // ---------------------------------------------------------------------------
 // [ORDER-SPINE S1-6] The customer's own words about a direct-MMG payment.
@@ -103,5 +103,26 @@ describe('what the customer is shown, and what they can say', () => {
       const text = [p.title, p.body, ...p.actions.flatMap((a) => [a.label, a.confirm?.title ?? '', a.confirm?.body ?? ''])].join(' ');
       expect(text).not.toMatch(/Swift (holds|verified|confirms|will refund|refunds)/i);
     }
+  });
+});
+
+describe('a confirmation is bound to the order it was opened on [R4 · F-PR1262-SOL-01]', () => {
+  const deny = mmgClaimPresentation(base).actions.find((a) => !a.paid)!;
+  const pending: PendingMmgClaim = { orderId: 'order-A', action: deny };
+
+  it('is shown only while the screen shows that order', () => {
+    expect(boundMmgClaim(pending, 'order-A')).toBe(pending);
+    expect(boundMmgClaim(pending, 'order-B')).toBeNull();
+    expect(boundMmgClaim(pending, '')).toBeNull();
+    expect(boundMmgClaim(pending, undefined)).toBeNull();
+    expect(boundMmgClaim(null, 'order-A')).toBeNull();
+  });
+
+  it('is sent to its own order with its own choice — and not at all once the screen shows another order', () => {
+    const sent: Array<{ orderId: string; paid: boolean }> = [];
+    expect(sendBoundMmgClaim(pending, 'order-B', (claim) => sent.push(claim))).toBe(false);
+    expect(sent).toEqual([]);
+    expect(sendBoundMmgClaim(pending, 'order-A', (claim) => sent.push(claim))).toBe(true);
+    expect(sent).toEqual([{ orderId: 'order-A', paid: false }]);
   });
 });

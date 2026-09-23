@@ -28,7 +28,7 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
-import { parseMmgClaimView, type MmgClaimAction } from '../mmgClaim';
+import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 
 const GUTTER = space['2xl'];
@@ -388,9 +388,15 @@ export function DeliveryScreen() {
   // [ORDER-SPINE S1-6] The customer's own claim about a direct-MMG payment —
   // their only first-party door to "I didn't pay". That statement can pause
   // the order, so it is confirmed first; the order refetches either way.
-  const claimPayment = useClaimMmgPayment(orderId);
-  const [pendingMmgClaim, setPendingMmgClaim] = useState<MmgClaimAction | null>(null);
-  const mmgClaimFailed = (error: any) => {
+  const claimPayment = useClaimMmgPayment();
+  // [R4 · F-PR1262-SOL-01] The confirmation carries the order it was opened
+  // on. It is shown only while this screen still shows that order, and it is
+  // sent to that order — never to whichever order a reused screen shows now.
+  const [pendingMmgClaim, setPendingMmgClaim] = useState<PendingMmgClaim | null>(null);
+  const confirmingMmgClaim = boundMmgClaim(pendingMmgClaim, orderId);
+  const mmgClaimSending = claimPayment.isPending && claimPayment.variables?.orderId === orderId;
+  const mmgClaimFailed = (error: any, claim: { orderId: string }) => {
+    if (claim.orderId !== activeOrderIdRef.current) return;
     const serverMessage = error?.response?.data?.error?.message;
     toast.error('That didn’t go through', typeof serverMessage === 'string' ? serverMessage : 'Check your connection and try again.');
   };
@@ -609,6 +615,7 @@ export function DeliveryScreen() {
     setCancelPreviewOrderId(null);
     setCancelMessage(null);
     setCancelFee(null);
+    setPendingMmgClaim(null);
     lastCourierServerFixAt.current = null;
     prevStatus.current = null;
     prevStatusRef.current = undefined;
@@ -1353,13 +1360,13 @@ export function DeliveryScreen() {
           {mmgClaim && !cancelled && !failed ? (
             <MmgPaymentClaimCard
               view={mmgClaim}
-              pending={claimPayment.isPending}
+              pending={mmgClaimSending}
               onClaim={(action) => {
                 if (action.confirm) {
-                  setPendingMmgClaim(action);
+                  setPendingMmgClaim({ orderId, action });
                   return;
                 }
-                claimPayment.mutate({ paid: action.paid }, { onError: mmgClaimFailed });
+                claimPayment.mutate({ orderId, paid: action.paid }, { onError: mmgClaimFailed });
               }}
             />
           ) : null}
@@ -1470,34 +1477,34 @@ export function DeliveryScreen() {
       {/* [ORDER-SPINE S1-6] "I didn't pay" can pause the order for a person to
           check, so it is a deliberate second tap — never a single stray one. */}
       <PopupCard
-        visible={pendingMmgClaim !== null}
-        onClose={() => { if (!claimPayment.isPending) setPendingMmgClaim(null); }}
+        visible={confirmingMmgClaim !== null}
+        onClose={() => { if (!mmgClaimSending) setPendingMmgClaim(null); }}
       >
         <IconChip icon="alert-circle" size={56} />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          {pendingMmgClaim?.confirm?.title ?? ''}
+          {confirmingMmgClaim?.action.confirm?.title ?? ''}
         </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
-          {pendingMmgClaim?.confirm?.body ?? ''}
+          {confirmingMmgClaim?.action.confirm?.body ?? ''}
         </T>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
-            label={pendingMmgClaim?.confirm?.confirmLabel ?? 'Confirm'}
+            label={confirmingMmgClaim?.action.confirm?.confirmLabel ?? 'Confirm'}
             size="md"
-            loading={claimPayment.isPending}
+            loading={mmgClaimSending}
             onPress={() => {
-              if (!pendingMmgClaim) return;
-              claimPayment.mutate({ paid: pendingMmgClaim.paid }, {
-                onSettled: () => setPendingMmgClaim(null),
+              const sent = sendBoundMmgClaim(pendingMmgClaim, orderId, (claim) => claimPayment.mutate(claim, {
+                onSettled: () => setPendingMmgClaim((current) => (current?.orderId === claim.orderId ? null : current)),
                 onError: mmgClaimFailed,
-              });
+              }));
+              if (!sent) setPendingMmgClaim(null);
             }}
           />
           <PillButton
             label="Go back"
             variant="soft"
             size="md"
-            disabled={claimPayment.isPending}
+            disabled={mmgClaimSending}
             onPress={() => setPendingMmgClaim(null)}
           />
         </View>

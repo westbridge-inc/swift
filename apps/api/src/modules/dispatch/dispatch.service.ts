@@ -885,11 +885,6 @@ export class DispatchService {
         // [TA-S0-001 hold] Held for a person: too old to deliver and already
         // paid by MMG. Not ours to offer until an operator decides.
         if (order.foodAgeHeldAt) return {};
-        // [ORDER-SPINE S1-6 · cross-lane gate invariant 8] Direct-MMG work nobody
-        // has said is paid, or whose two payment claims disagree, is not offered:
-        // both assignment writes refuse it under the row lock, so a card would
-        // only be a ghost a rider is penalised for ignoring.
-        if (mmgDispatchBlocked(order)) return {};
       } else {
         if (order.driverId) return {};
         if (order.status !== 'PENDING') return {};
@@ -908,6 +903,17 @@ export class DispatchService {
           return { exhausted: true };
         }
       }
+
+      // [ORDER-SPINE S1-6 · cross-lane gate invariant 8] Direct-MMG work nobody
+      // has said is paid, or whose two payment claims disagree, is not offered:
+      // both assignment writes refuse it under the row lock, so a card would
+      // only be a ghost a rider is penalised for ignoring. [R4 · F-PR1262-SOL-02]
+      // It sits AFTER the food-age cutoff and before every offer step: an order
+      // too old to deliver is still settled by the dispatch event (the cutoff's
+      // CAS cancels unpaid money and holds claimed or captured money, a
+      // disputed order included, for a person) instead of waiting unoffered for
+      // the next sweep.
+      if (pool === 'RIDER' && mmgDispatchBlocked(order)) return {};
 
       // One live offer at a time
       const existing = await this.redis.get(offerKey(orderId));

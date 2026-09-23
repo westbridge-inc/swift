@@ -75,6 +75,35 @@ export interface MmgClaimPresentation {
   actions: MmgClaimAction[];
 }
 
+/** [R4 · F-PR1262-SOL-01] A confirmation the customer opened, bound to the
+ *  order it was opened on. React Navigation reuses the order screen for
+ *  another order, so the order is part of the pending state — never read
+ *  from whatever the screen shows when the customer confirms. */
+export interface PendingMmgClaim {
+  orderId: string;
+  action: MmgClaimAction;
+}
+
+/** The pending confirmation the screen may show while it shows `orderId`: the
+ *  one opened on this order, or none. Evaluated in the very render the route
+ *  changes, so order A's confirmation is gone before any reset effect runs. */
+export function boundMmgClaim(pending: PendingMmgClaim | null, orderId: string | null | undefined): PendingMmgClaim | null {
+  return pending !== null && typeof orderId === 'string' && orderId !== '' && pending.orderId === orderId ? pending : null;
+}
+
+/** Send the confirmed claim to the order it was opened on, only while the
+ *  screen still shows that order. Returns whether anything was sent. */
+export function sendBoundMmgClaim(
+  pending: PendingMmgClaim | null,
+  orderId: string | null | undefined,
+  send: (claim: { orderId: string; paid: boolean }) => void,
+): boolean {
+  const claim = boundMmgClaim(pending, orderId);
+  if (!claim) return false;
+  send({ orderId: claim.orderId, paid: claim.action.paid });
+  return true;
+}
+
 export const I_PAID = 'I paid the store';
 export const I_DID_NOT_PAY = 'I didn’t pay';
 

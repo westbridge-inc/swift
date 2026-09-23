@@ -21,6 +21,7 @@ import { NotificationService, notifyAdmins } from '../modules/notification/notif
 import { CHECKOUT_OUTBOX_VERSION, checkoutOutboxId, drainCheckoutOutbox } from '../modules/order/checkout-outbox';
 import * as claim from '../modules/order/mmg-claim.service';
 import type { MmgClaimNotice } from '../modules/order/mmg-claim.service';
+import { runWithTenant } from '../plugins/tenant-context';
 
 type Row = Record<string, any>;
 const T0 = new Date('2026-09-22T10:00:00.000Z');
@@ -317,15 +318,54 @@ describe('an incomplete dispute notice stays owed until delivered', () => {
 //
 // A retried obligation re-runs its operator page. The inbox dedupe collapses
 // it into the first delivery (no second row, no second push); the ADMIN_OPS
-// tracking row that `/alerts/health` counts as one sent alert must collapse
-// with it, or every sweep of a still-owed dispute reports a page nobody was
-// sent. Everything on the operator path is production code: the drain's
-// default `pageAdmins`, `notifyAdmins`, `NotificationService.send` and
-// `publishPersisted`, and the `/alerts/health` handler `adminRoutes`
-// registers. Only storage and transport are in memory: an inbox with its
-// (userId, dedupeKey) unique index, an `alert_deliveries` table whose primary
-// key a plain insert violates and `skipDuplicates` (ON CONFLICT DO NOTHING)
-// passes over, and a socket and push channel that record what they carry.
+// tracking row — the sent evidence any reader of `alert_deliveries` counts —
+// must collapse with it, or every sweep of a still-owed dispute manufactures a
+// page nobody was sent. Everything on the operator path is production code:
+// the drain's default `pageAdmins`, `notifyAdmins`, `NotificationService.send`
+// and `publishPersisted`, and the `/alerts/health` handler `adminRoutes`
+// registers, read through the admin routes' own tenant child scope. [R4 ·
+// F-PR1262-SOL-04] That scoped read counts only rows about the tenant's own
+// orders sent to the tenant's own users (REPORT-007), so it counts no ADMIN_OPS
+// page at all — the page's subject is its kind — and these tests pin exactly
+// that, beside a positive control it does count. Only storage and transport
+// are in memory: an inbox with its (userId, dedupeKey) unique index, an
+// `alert_deliveries` table whose primary key a plain insert violates and
+// `skipDuplicates` (ON CONFLICT DO NOTHING) passes over, and a socket and push
+// channel that record what they carry.
+
+/** The filters the scoped health read sends: its `sentAt` window and the
+ *  child scope's `AND` of `in` lists. Anything else fails loudly. */
+function alertMatches(row: Row, where: Row): boolean {
+  return Object.entries(where).every(([key, cond]) => {
+    if (key === 'AND') return (cond as Row[]).every((c) => alertMatches(row, c));
+    if (key === 'OR') return (cond as Row[]).some((c) => alertMatches(row, c));
+    if (cond instanceof Date || cond === null || typeof cond !== 'object') return row[key] === cond;
+    const unmodelled = Object.keys(cond).filter((op) => op !== 'in' && op !== 'gte');
+    if (unmodelled.length > 0) throw new Error(`unmodelled alertDelivery filter on ${key}: ${unmodelled.join(', ')}`);
+    if ('in' in cond && !(cond['in'] as unknown[]).includes(row[key])) return false;
+    if ('gte' in cond && !((row[key] as Date).getTime() >= (cond['gte'] as Date).getTime())) return false;
+    return true;
+  });
+}
+
+/** Prisma's query extension as `adminRoutes` declares one: a model's hook
+ *  (`$allOperations`, or one named operation) wraps that model's operations,
+ *  and its `query` runs the base operation with the hook's arguments. */
+function extendWithQueryHooks(base: Row, extension: { query?: Record<string, Row> }): Row {
+  const extended: Row = { ...base };
+  for (const [model, hooks] of Object.entries(extension.query ?? {})) {
+    const delegate = base[model] as Row | undefined;
+    if (!delegate) continue;
+    extended[model] = Object.fromEntries(Object.entries(delegate).map(([operation, run]) => {
+      const hook = (hooks['$allOperations'] ?? hooks[operation]) as ((p: Row) => Promise<unknown>) | undefined;
+      const query = (args: Row) => (run as (a: Row) => Promise<unknown>)(args);
+      return [operation, hook ? (args: Row = {}) => hook({ model, operation, args, query }) : query];
+    }));
+  }
+  return extended;
+}
+
+const TENANTS = ['tenant-a', 'swift-default', 'tenant-b'] as const;
 
 function personMatches(person: Row, where: Row): boolean {
   return Object.entries(where).every(([key, cond]) => {
@@ -354,8 +394,18 @@ class OperatorPathDb extends FakeOutboxDb {
   private health?: Promise<(request: unknown) => Promise<unknown>>;
 
   override get prisma(): Row {
+    const base = super.prisma;
     return {
-      ...super.prisma,
+      ...base,
+      order: {
+        ...base['order'],
+        // The admin child scope resolves "this tenant's orders" through here.
+        findMany: async ({ where }: { where: Row }) => {
+          const unmodelled = Object.keys(where).filter((k) => k !== 'tenantId');
+          if (unmodelled.length > 0) throw new Error(`unmodelled order filter on ${unmodelled.join(', ')}`);
+          return where['tenantId'] === this.order['tenantId'] ? [{ id: this.order['id'] }] : [];
+        },
+      },
       user: {
         findMany: async ({ where }: { where: Row }) => this.people.filter((p) => personMatches(p, where)).map((p) => ({ id: p['id'] })),
         findUnique: async ({ where }: { where: Row }) => (this.people.some((p) => p['id'] === where['id']) ? { notificationPrefs: null } : null),
@@ -398,12 +448,7 @@ class OperatorPathDb extends FakeOutboxDb {
           }
           return { count };
         },
-        findMany: async ({ where }: { where: Row }) => {
-          const unmodelled = Object.keys(where).filter((k) => k !== 'sentAt');
-          if (unmodelled.length > 0) throw new Error(`unmodelled alertDelivery filter on ${unmodelled.join(', ')}`);
-          const since = ((where['sentAt'] as Row)['gte'] as Date).getTime();
-          return [...this.alerts.values()].filter((a) => (a['sentAt'] as Date).getTime() >= since).map((a) => ({ ...a }));
-        },
+        findMany: async ({ where }: { where: Row }) => [...this.alerts.values()].filter((a) => alertMatches(a, where)).map((a) => ({ ...a })),
       },
     };
   }
@@ -421,17 +466,14 @@ class OperatorPathDb extends FakeOutboxDb {
     return { prisma, now: () => this.now, notifications: new NotificationService(prisma as never, io as never, { push } as never) };
   }
 
-  /** `GET /alerts/health` as `adminRoutes` registers it. The admin child scope
-   *  that narrows tracking rows to one tenant's orders is not modelled (an
-   *  identity `$extends`, as in the verification containment suite): this is
-   *  the handler's own count over every tracking row — what any unscoped
-   *  reader of the table sees. (Under that scope an ADMIN_OPS row, whose
-   *  subject is the page kind rather than an order, is not counted at all.) */
+  /** `GET /alerts/health` as `adminRoutes` registers it, reading through the
+   *  routes' own tenant child scope: `$extends` applies the query hooks the
+   *  routes declare, so `alertDelivery` is narrowed exactly as in production. */
   private alertsHealth(): Promise<(request: unknown) => Promise<unknown>> {
     this.health ??= (async () => {
       const handlers = new Map<string, (request: unknown) => Promise<unknown>>();
       const prisma: Row = { ...this.prisma };
-      prisma['$extends'] = () => prisma;
+      prisma['$extends'] = (extension: { query?: Record<string, Row> }) => extendWithQueryHooks(prisma, extension);
       const app: Row = { prisma, io: {}, log: SILENT, prefix: '', addHook: () => undefined };
       for (const verb of ['get', 'post', 'put', 'patch', 'delete']) {
         app[verb] = (path: string, ...args: unknown[]) => { handlers.set(`${verb} ${path}`, args.at(-1) as never); };
@@ -442,32 +484,46 @@ class OperatorPathDb extends FakeOutboxDb {
     return this.health;
   }
 
-  /** What every operator holds, and what the health endpoint reports sent. */
+  /** What `/alerts/health` reports sent for `kind`, as each tenant's admin sees it. */
+  async scopedHealth(kind: string): Promise<Record<(typeof TENANTS)[number], number>> {
+    const handler = await this.alertsHealth();
+    const sent = {} as Record<(typeof TENANTS)[number], number>;
+    for (const tenant of TENANTS) {
+      const health = (await runWithTenant(tenant, () => handler({ query: {} }))) as { data: { kinds: Row[] } };
+      sent[tenant] = health.data.kinds.find((k) => k['kind'] === kind)?.['sent'] ?? 0;
+    }
+    return sent;
+  }
+
+  /** What every operator holds, and what the scoped health read reports for ops pages. */
   async operatorRecord(): Promise<Row> {
     const operators = new Set(this.people.filter((p) => p['roles'].some((r: string) => r === 'ADMIN' || r === 'SUPER_ADMIN')).map((p) => p['id']));
-    const health = (await (await this.alertsHealth())({ query: {} })) as { data: { kinds: Row[] } };
     return {
       inbox: this.notices.map((n) => n['userId']).filter((id) => operators.has(id)).sort(),
       fanout: this.fanouts.filter((f) => operators.has(f.slice(f.indexOf(':') + 1))).sort(),
       tracking: [...this.alerts.values()].filter((a) => a['kind'] === 'ADMIN_OPS').map((a) => a['recipientId']).sort(),
-      healthSent: health.data.kinds.find((k) => k['kind'] === 'ADMIN_OPS')?.['sent'] ?? 0,
+      scopedHealthSent: await this.scopedHealth('ADMIN_OPS'),
     };
   }
 }
 
 describe('a retried operator page is one delivery with one tracking row [R3 · F-R2-ASTRA-01]', () => {
+  /** [R4 · F-PR1262-SOL-04] The tenant-scoped health read counts no ops page
+   *  (its subject is the page kind, not one of the tenant's orders) — before a
+   *  retry and after it. The positive control at the end shows it does count. */
+  const UNCOUNTED = { 'tenant-a': 0, 'swift-default': 0, 'tenant-b': 0 };
   const ONCE = {
     inbox: ['ops-a', 'ops-root'],
     fanout: ['push:ops-a', 'push:ops-root', 'socket:ops-a', 'socket:ops-root'],
     tracking: ['ops-a', 'ops-root'],
-    healthSent: 2,
+    scopedHealthSent: UNCOUNTED,
   };
 
   it.each([
     { who: 'the customer', down: ['customer-1'], sent: 'business,admin' },
     { who: 'the store', down: ['owner-user'], sent: 'customer,admin' },
     { who: 'the customer and the store', down: ['customer-1', 'owner-user'], sent: 'admin' },
-  ])('$who unreachable through two retries: each operator keeps one notice, one fan-out and one tracking row, the health count agrees, and the obligation completes once they can be reached', async ({ down, sent }) => {
+  ])('$who unreachable through two retries: each operator keeps one notice, one fan-out and one tracking row, the scoped health read is unmoved, and the obligation completes once they can be reached', async ({ down, sent }) => {
     const db = new OperatorPathDb([obligation()]);
     db.inboxDown = new Set(down);
     const row = db.rows[0]!;
@@ -500,7 +556,7 @@ describe('a retried operator page is one delivery with one tracking row [R3 · F
       inbox: ['ops-a', 'ops-new', 'ops-root'],
       fanout: ['push:ops-a', 'push:ops-new', 'push:ops-root', 'socket:ops-a', 'socket:ops-new', 'socket:ops-root'],
       tracking: ['ops-a', 'ops-new', 'ops-root'],
-      healthSent: 3,
+      scopedHealthSent: UNCOUNTED,
     });
   });
 
@@ -548,7 +604,7 @@ describe('a retried operator page is one delivery with one tracking row [R3 · F
       inbox: ['ops-a', 'ops-a', 'ops-root', 'ops-root'],
       fanout: ['push:ops-a', 'push:ops-a', 'push:ops-root', 'push:ops-root', 'socket:ops-a', 'socket:ops-a', 'socket:ops-root', 'socket:ops-root'],
       tracking: ['ops-a', 'ops-a', 'ops-root', 'ops-root'],
-      healthSent: 4,
+      scopedHealthSent: UNCOUNTED,
     });
   });
 
@@ -562,7 +618,24 @@ describe('a retried operator page is one delivery with one tracking row [R3 · F
       inbox: ['ops-a', 'ops-a', 'ops-root', 'ops-root'],
       fanout: ['push:ops-a', 'push:ops-a', 'push:ops-root', 'push:ops-root', 'socket:ops-a', 'socket:ops-a', 'socket:ops-root', 'socket:ops-root'],
       tracking: ['ops-a', 'ops-a', 'ops-root', 'ops-root'],
-      healthSent: 4,
+      scopedHealthSent: UNCOUNTED,
     });
+  });
+
+  it('[R4 · F-PR1262-SOL-04] the health read is the tenant-scoped production one: it counts a tenant’s own order alert, never another tenant’s, and no ops page', async () => {
+    const db = new OperatorPathDb([obligation()]);
+    db.now = at(1_000);
+    await sweep(db);
+    // A store alert about tenant A's own order, sent to tenant A's own store
+    // owner: exactly what the scope exists to count — for tenant A only.
+    db.alerts.set('vendor-alert-1', {
+      id: 'vendor-alert-1', kind: 'VENDOR_ORDER', subjectId: 'order-1', recipientId: 'owner-user',
+      sentAt: new Date(), seenAt: null, acknowledgedAt: null,
+    });
+    expect(await db.scopedHealth('VENDOR_ORDER')).toEqual({ 'tenant-a': 1, 'swift-default': 0, 'tenant-b': 0 });
+    // The ops page's rows are real — one per operator — and the scoped read
+    // counts none of them: their subject is the page kind, not an order.
+    expect((await db.operatorRecord())['tracking']).toEqual(['ops-a', 'ops-root']);
+    expect(await db.scopedHealth('ADMIN_OPS')).toEqual(UNCOUNTED);
   });
 });

@@ -21,26 +21,50 @@ describe('the order screen wires the customer\'s payment claim', () => {
   });
 
   it('declares the claim mutation with the other hooks — before any early return', () => {
-    const hook = SCREEN.indexOf('useClaimMmgPayment(orderId)');
+    const hook = SCREEN.indexOf('useClaimMmgPayment()');
     const earlyReturn = SCREEN.indexOf('if (order.isError || !o)');
     expect(hook).toBeGreaterThan(-1);
     expect(earlyReturn).toBeGreaterThan(-1);
     expect(hook).toBeLessThan(earlyReturn);
   });
 
-  it('"I didn\'t pay" goes through a confirmation; only the confirmed choice is sent', () => {
-    expect(SCREEN).toMatch(/setPendingMmgClaim\(action\)/);
-    expect(SCREEN).toMatch(/visible=\{pendingMmgClaim !== null\}/);
-    const confirmBlock = SCREEN.slice(SCREEN.indexOf('visible={pendingMmgClaim !== null}'));
-    expect(confirmBlock).toMatch(/claimPayment\.mutate\(\{ paid: pendingMmgClaim\.paid \}/);
+  // [R4 · F-PR1262-SOL-01] React Navigation reuses this screen for another
+  // order. A confirmation carries the order it was opened on; the popup and
+  // the send both go through the binding (customer.mmgClaim.test.ts runs it
+  // through the real hook and request seam), in the very render the route
+  // changes — not after a reset effect.
+  it('"I didn\'t pay" goes through a confirmation bound to the order it was opened on', () => {
+    expect(SCREEN).toMatch(/setPendingMmgClaim\(\{ orderId, action \}\)/);
+    expect(SCREEN).toMatch(/const confirmingMmgClaim = boundMmgClaim\(pendingMmgClaim, orderId\);/);
+    expect(SCREEN).toMatch(/visible=\{confirmingMmgClaim !== null\}/);
+    const confirmBlock = SCREEN.slice(SCREEN.indexOf('visible={confirmingMmgClaim !== null}'));
+    expect(confirmBlock).toMatch(/sendBoundMmgClaim\(pendingMmgClaim, orderId, \(claim\) =>/);
   });
 
-  it('the hook refetches the order whether the claim landed or not', () => {
-    const start = HOOKS.indexOf('export function useClaimMmgPayment(orderId: string)');
+  it('every claim the screen sends names its order: none rides on the render\'s order alone', () => {
+    const sends = SCREEN.match(/claimPayment\.mutate\(\{[^}]*\}/g) ?? [];
+    expect(sends.length).toBeGreaterThan(0);
+    for (const send of sends) expect(send).toMatch(/\borderId\b/);
+    expect(SCREEN).toMatch(/claimPayment\.mutate\(\{ orderId, paid: action\.paid \}/);
+    expect(SCREEN).toMatch(/claimPayment\.mutate\(claim,/);
+    expect(SCREEN).not.toMatch(/claimPayment\.mutate\(\{ paid:/);
+  });
+
+  it('a reused screen drops a pending confirmation with the rest of its order-local state', () => {
+    // The [orderId] effect that clears the cancel preview is the order reset.
+    const effects = SCREEN.split('}, [orderId]);').map((chunk) => chunk.slice(chunk.lastIndexOf('useEffect(() => {')));
+    const reset = effects.filter((body) => body.includes('setCancelPreviewOrderId(null);'));
+    expect(reset).toHaveLength(1);
+    expect(reset[0]).toMatch(/setPendingMmgClaim\(null\);/);
+  });
+
+  it('the hook takes the order from the claim itself and refetches that order whether it landed or not', () => {
+    const start = HOOKS.indexOf('export function useClaimMmgPayment()');
     expect(start).toBeGreaterThan(-1);
     const hook = HOOKS.slice(start, HOOKS.indexOf('\n}', start));
+    expect(hook).toMatch(/mutationFn: \(\{ orderId, paid, reference \}/);
     expect(hook).toMatch(/customerApi\.claimOrderPayment\(orderId,/);
-    expect(hook).toMatch(/onSettled:/);
+    expect(hook).toMatch(/onSettled: \(_data, _error, \{ orderId \}\) =>/);
     expect(hook).toMatch(/queryKey: customerKeys\.order\(orderId\)/);
   });
 });
