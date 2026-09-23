@@ -10,7 +10,9 @@ import { landingIntent } from '../lib/roleLanding';
 import { normalizePersistedAuth, recordHydration, type HydrationReason } from '../lib/authHydration';
 import { track } from '../lib/analytics';
 import { useBookingStore } from './bookingStore';
+import { useBusinessSetupDraft } from './businessSetupDraft';
 import { useStoreSwitcher } from './storeSwitcher';
+import { useVendorPreview } from './vendorPreview';
 import {
   sameAuthSession,
   samePrincipalBoundary,
@@ -107,6 +109,15 @@ function nextLoggedOutState(state: Pick<AuthState, 'sessionGeneration'>) {
   };
 }
 
+/** Business-entry UI state is principal-scoped too. A sample-dashboard type
+ * swaps every vendor hook to canned data (real orders hidden, every action a
+ * no-op), and a half-typed List-your-business form holds a business phone and
+ * address; neither may reach the next session. */
+function clearBusinessEntryState(): void {
+  useVendorPreview.getState().exitPreview();
+  useBusinessSetupDraft.getState().clear();
+}
+
 async function revokeCapturedSession(session: AuthSessionSnapshot): Promise<void> {
   let pushToken: string | null = null;
   try {
@@ -143,6 +154,7 @@ function finishLocalLogout(session: AuthSessionSnapshot | null): void {
   // Vendor tenant selection is process-global, not part of the query cache.
   // A shared-device login must never inherit another account's store header.
   useStoreSwitcher.getState().setSelectedStore(null);
+  clearBusinessEntryState();
   if (!session) return;
   // Lazy imports can resolve after another account has already signed in and
   // claimed these process-global native resources. Pass the captured owner so
@@ -199,7 +211,10 @@ export const useAuthStore = create<AuthState>()(
         // teardown receives the captured old owner and cannot disturb the new
         // account installed immediately below.
         if (previousSession) finishLocalLogout(previousSession);
-        else useStoreSwitcher.getState().setSelectedStore(null);
+        else {
+          useStoreSwitcher.getState().setSelectedStore(null);
+          clearBusinessEntryState();
+        }
         set((state) => ({
           user,
           accessToken,
