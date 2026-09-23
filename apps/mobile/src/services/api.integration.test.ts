@@ -180,6 +180,20 @@ describe('API origin integration', () => {
   });
 });
 
+describe('Home request lifetime', () => {
+  it('passes the query abort signal to Axios for obsolete location and account reads', async () => {
+    const controller = new AbortController();
+    let observedSignal: typeof api.defaults.signal;
+    setAdapter(async (config) => {
+      observedSignal = config.signal;
+      return response(config, 200, { success: true, data: {} });
+    });
+
+    await customerApi.getHome(6, -58, controller.signal);
+    expect(observedSignal).toBe(controller.signal);
+  });
+});
+
 describe('Axios auth interceptor integration', () => {
   it('captures A at the exact API invocation before an immediate synchronous B login', async () => {
     const seen: string[] = [];
