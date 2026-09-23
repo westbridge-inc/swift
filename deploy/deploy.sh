@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# Swift one-command self-host / staging deploy.
+# Local Compose convenience commands. The reviewed staging sequence is
+# pilot-up.sh with an exact commit SHA.
 #
 #   ./deploy/deploy.sh up        # build + migrate + start the whole stack
 #   ./deploy/deploy.sh update    # rebuild the app image + migrate + restart
@@ -39,33 +40,46 @@ if [[ ${#missing[@]} -gt 0 && "${1:-up}" != "down" && "${1:-up}" != "nuke" && "$
   exit 1
 fi
 
-API_PORT="$(grep -E '^API_PORT=' .env | head -1 | cut -d= -f2- || true)"; API_PORT="${API_PORT:-3000}"
+ready() {
+  docker compose exec -T api node -e \
+    "fetch('http://127.0.0.1:3000/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+}
+wait_ready() {
+  for _ in $(seq 1 60); do
+    if ready >/dev/null 2>&1; then echo "✓ API /ready passed"; return 0; fi
+    sleep 2
+  done
+  echo "✗ API did not become ready" >&2
+  return 1
+}
 
 case "${1:-up}" in
   up)
+    docker network inspect swift-pilot-private >/dev/null 2>&1 || docker network create swift-pilot-private >/dev/null
     echo "▸ Building the API image and starting the stack (migrations run first)…"
     docker compose up -d --build
-    echo "▸ Waiting for the API to report healthy…"
-    for i in $(seq 1 60); do
-      if curl -fsS "http://localhost:${API_PORT}/health" >/dev/null 2>&1; then
-        echo "✓ Swift is up — http://localhost:${API_PORT}/health"
-        curl -fsS "http://localhost:${API_PORT}/health" && echo
-        exit 0
-      fi
-      sleep 2
-    done
-    echo "✗ API did not become healthy in time — check: ./deploy/deploy.sh logs" >&2
-    exit 1
+    wait_ready
     ;;
   update)
+    docker network inspect swift-pilot-private >/dev/null 2>&1 || docker network create swift-pilot-private >/dev/null
     echo "▸ Rebuilding the app image, migrating, restarting API + worker…"
     docker compose build api
-    docker compose up -d --no-deps migrate
+    docker compose stop api worker
+    docker compose up -d --force-recreate migrate
+    MIGRATE_ID="$(docker compose ps -a -q migrate)"
+    [[ -n "$MIGRATE_ID" ]] || { echo "migration container missing" >&2; exit 1; }
+    for _ in $(seq 1 120); do
+      STATE="$(docker inspect -f '{{.State.Status}}' "$MIGRATE_ID")"
+      [[ "$STATE" = exited ]] && break
+      [[ "$STATE" = running ]] || { echo "migration state: $STATE" >&2; exit 1; }
+      sleep 2
+    done
+    [[ "$(docker inspect -f '{{.State.ExitCode}}' "$MIGRATE_ID")" = 0 ]] || { echo "migration failed" >&2; exit 1; }
     docker compose up -d --no-deps api worker
-    echo "✓ Updated."
+    wait_ready
     ;;
   logs)    docker compose logs -f api worker ;;
-  health)  curl -fsS "http://localhost:${API_PORT}/health" && echo ;;
+  health)  ready ;;
   down)    docker compose down ;;
   nuke)
     read -r -p "This DELETES all Swift data volumes. Type 'yes' to confirm: " ok
