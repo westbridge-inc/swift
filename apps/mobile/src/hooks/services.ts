@@ -7,6 +7,7 @@ import {
   requireAuthSessionSnapshot,
   useAuthStore,
 } from '../stores/authStore';
+import { serviceProviderProfileRefetchInterval } from './verificationPolling';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -36,12 +37,11 @@ export function useServiceProviderProfile<T = any>() {
     enabled: !!userId,
     retry: 2,
     retryDelay: (attempt) => Math.min(500 * (2 ** attempt), 2_000),
-    // Approval updates ServiceProvider.isVerified server-side. Poll only while
-    // an existing profile is waiting so public-listability state catches up.
-    refetchInterval: (query) => {
-      const provider = query.state.data as { isVerified?: boolean } | null | undefined;
-      return provider && !provider.isVerified ? 15_000 : false;
-    },
+    // Approval updates ServiceProvider.isVerified server-side. A policy-held
+    // profile cannot progress through polling; an edit invalidates this query.
+    refetchInterval: (query) => serviceProviderProfileRefetchInterval(
+      query.state.data as { isVerified?: boolean; categoryUnavailable?: boolean } | null | undefined,
+    ),
   });
 }
 
