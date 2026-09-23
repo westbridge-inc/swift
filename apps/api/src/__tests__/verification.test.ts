@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { join } from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -15,7 +16,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { VerificationService, docTypeExpires, resolveApprovalExpiry } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
-import { loginWithOtp } from './helpers/otp';
+import { registrationProofFor } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
@@ -80,9 +81,10 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, 
 }
 
 async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR') {
-  await loginWithOtp(app, phone);
+  const registrationProof = await registrationProofFor(app, phone);
   const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
     phone,
+    registrationProof,
     firstName: 'Step4',
     lastName: role,
     role,
@@ -91,10 +93,7 @@ async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR') {
   // These fixtures model accounts past the signup selfie (its gate has its
   // own coverage in selfie.test.ts) — go-online and the ID face-match must
   // not trip on a missing profile photo here.
-  await app.prisma.user.update({
-    where: { phone },
-    data: { selfieCapturedAt: new Date(), avatar: 'storage://seed/profile-selfie.jpg' },
-  });
+  await signupSelfieFixture(app.prisma, res.json().data.user.id);
   return res.json().data;
 }
 
@@ -207,7 +206,7 @@ describe('Checklists drive from config', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'boat_licence',
-      fileUrl: 'storage://t/boat.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'boat'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -263,7 +262,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
       const res = await inject('POST', '/api/v1/verification/documents', {
         role: 'MOVER',
         docType,
-        fileUrl: `storage://t/${docType}.jpg`,
+        fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, docType),
         consent: true,
         privacyNoticeVersion: 'v1',
       }, moverToken);
@@ -307,7 +306,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: 'storage://t/national_id_v2.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'national_id_v2'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -345,7 +344,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: 'storage://t/dupe.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'dupe'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -359,7 +358,7 @@ describe('Provider auto-decisions (swappable interface)', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'owner_national_id',
-      fileUrl: 'storage://t/auto-approve/owner_id.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-owner-id'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
@@ -380,7 +379,7 @@ describe('Provider auto-decisions (swappable interface)', () => {
     const clearance = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'police_clearance',
-      fileUrl: 'storage://t/auto-approve/clearance.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-clearance'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
@@ -405,8 +404,8 @@ describe('L2 identity — permanent customer verification', () => {
   it('auto-approval promotes to L2 immediately', async () => {
     const customer = await signup(L2_AUTO_PHONE, 'CUSTOMER');
     const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: 'storage://t/auto-approve/id.jpg',
-      selfieUrl: 'storage://t/selfie.jpg',
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'auto-approve-id'),
+      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
@@ -418,8 +417,8 @@ describe('L2 identity — permanent customer verification', () => {
 
     // Already verified — no second submission
     const again = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: 'storage://t/id2.jpg',
-      selfieUrl: 'storage://t/selfie2.jpg',
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id2'),
+      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie2'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
@@ -429,8 +428,8 @@ describe('L2 identity — permanent customer verification', () => {
   it('manual path: pending review, then admin approval promotes to L2', async () => {
     const customer = await signup(L2_MANUAL_PHONE, 'CUSTOMER');
     const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: 'storage://t/id.jpg',
-      selfieUrl: 'storage://t/selfie.jpg',
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id'),
+      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
@@ -520,7 +519,7 @@ describe('Document storage & DPA compliance', () => {
         userId: moverUserId,
         role: 'MOVER',
         docType: 'national_id',
-        fileUrl: '/uploads/verification/signed-me.jpg',
+        fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'signed-me'),
         status: 'PENDING',
         consentAt: new Date(),
         privacyNoticeVersion: 'v1',
@@ -533,7 +532,7 @@ describe('Document storage & DPA compliance', () => {
     expect(expiresInSeconds).toBeGreaterThan(0);
     // Signed + time-limited — never a raw public link
     expect(url).toContain('expires=');
-    expect(url).toContain('signed-me.jpg');
+    expect(url).toContain(`/verification/render/${doc.id}`);
 
     const access = await app.prisma.auditLog.findFirst({
       where: { action: 'VIEW_VERIFICATION_DOC', entityId: doc.id },
@@ -547,7 +546,7 @@ describe('Document storage & DPA compliance', () => {
         userId: moverUserId,
         role: 'MOVER',
         docType: 'national_id',
-        fileUrl: '/uploads/verification/purge-me.jpg',
+        fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'purge-me'),
         status: 'APPROVED',
         consentAt: new Date(),
         privacyNoticeVersion: 'v1',
@@ -594,7 +593,7 @@ describe('Taxi checklist merge + auto-KYC audit', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'hire_car_permit',
-      fileUrl: 'storage://t/auto-approve/hire_permit.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'auto-approve-hire-permit'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -714,7 +713,7 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: 'storage://t/auto-approve/face-id.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, faceUserId, 'auto-approve-face-id'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, faceToken);
@@ -725,7 +724,7 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     const plain = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'vehicle_registration',
-      fileUrl: 'storage://t/face-reg.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, faceUserId, 'face-reg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, faceToken);
@@ -733,10 +732,7 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
   });
 
   it('routes ID docs through verifyIdentity with the selfie; other docs through verifyDocument', async () => {
-    await app.prisma.user.update({
-      where: { id: faceUserId },
-      data: { selfieCapturedAt: new Date(), avatar: 'storage://seed/face-selfie.jpg' },
-    });
+    const selfieUrl = await signupSelfieFixture(app.prisma, faceUserId);
 
     const calls: Array<{ path: string; input: Record<string, unknown> }> = [];
     const recorder = {
@@ -756,16 +752,17 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
       recorder,
     );
 
-    await svc.submitDocument(faceUserId, 'MOVER', 'national_id', 'storage://t/face-id2.jpg', 'v1');
-    await svc.submitDocument(faceUserId, 'MOVER', 'drivers_licence', 'storage://t/face-dl.jpg', 'v1');
+    const idDocumentUrl = await ownedVerificationFixture(app.prisma, faceUserId, 'face-id2');
+    await svc.submitDocument(faceUserId, 'MOVER', 'national_id', idDocumentUrl, 'v1');
+    await svc.submitDocument(faceUserId, 'MOVER', 'drivers_licence', await ownedVerificationFixture(app.prisma, faceUserId, 'face-dl'), 'v1');
 
     expect(calls).toHaveLength(2);
     expect(calls[0]).toEqual({
       path: 'identity',
       input: {
         userId: faceUserId,
-        idDocumentUrl: 'storage://t/face-id2.jpg',
-        selfieUrl: 'storage://seed/face-selfie.jpg', // the signup selfie IS the match target
+        idDocumentUrl,
+        selfieUrl, // the signup selfie IS the match target
       },
     });
     expect(calls[1]?.path).toBe('document');
@@ -825,7 +822,7 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'owner_national_id',
-      fileUrl: 'storage://t/auto-approve/owner_id_renewed.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-owner-id-renewed'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
@@ -887,7 +884,7 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     const renewal = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'police_clearance',
-      fileUrl: 'storage://t/auto-approve/clearance_renewed.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-clearance-renewed'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
@@ -909,7 +906,7 @@ describe('Early renewal window — resubmission opens 30 days before expiry', ()
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'drivers_licence',
-      fileUrl: 'storage://t/licence_renewal.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'licence-renewal'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -925,7 +922,7 @@ describe('Early renewal window — resubmission opens 30 days before expiry', ()
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'vehicle_registration',
-      fileUrl: 'storage://t/too-early.jpg',
+      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'too-early'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);

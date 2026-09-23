@@ -1,4 +1,4 @@
-import type { OnAudit } from '../../lib/audit-writer';
+import type { AuditFacts, OnAudit } from '../../lib/audit-writer';
 import type { Prisma, PrismaClient, ReimbursementClaim } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { assertClaimAmountAttested, isDuplicateReferenceError, normaliseClaimPaymentRef } from './claim-payout';
@@ -775,7 +775,8 @@ export class CashRulesService {
     data: Record<string, unknown>,
     onAudit?: OnAudit,
     /** [P31-1] Money moved by the same transaction as the CAS (the reserve draw); its facts join the audit row. */
-    within?: (tx: Prisma.TransactionClient) => Promise<Record<string, unknown>>,
+    // [C-01b] AuditFacts, so a reserved name in a spread is a build error, not a 500.
+    within?: (tx: Prisma.TransactionClient) => Promise<AuditFacts>,
   ) {
     // [ADM-002] The compare-and-set and the caller's audit row commit together;
     // a refused row leaves the claim exactly where it was.
@@ -811,7 +812,8 @@ export class CashRulesService {
         data: { lossProtectionSuspendedAt: new Date(), lossProtectionSuspendedReason: reason },
         select: { id: true, lossProtectionSuspendedAt: true, lossProtectionSuspendedReason: true },
       });
-      await onAudit?.(tx, { lossProtectionSuspendedAt: row.lossProtectionSuspendedAt?.toISOString() ?? null, reason });
+      // [C-01b] `reason` is canonical — the route passes it as an override.
+      await onAudit?.(tx, { lossProtectionSuspendedAt: row.lossProtectionSuspendedAt?.toISOString() ?? null, suspendedReason: row.lossProtectionSuspendedReason ?? null });
       return row;
     });
     await this.notifications.send({

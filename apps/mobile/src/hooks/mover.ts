@@ -34,6 +34,7 @@ import {
   unwrapOptionalMoverProfile,
 } from '../lib/moverProfile';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
+import { confirmRiderCashSettlement } from './cashSettlement';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -436,11 +437,13 @@ export function useDeclineOffer(kind: MoverKind) {
   return pv ? PV.previewMutation() : m;
 }
 export type FareOutcome = 'paid' | 'refused' | 'no_show';
-export type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'handover';
+export type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'handover' | 'handback';
 export type DriverActionInput =
-  | { id: string; action: Exclude<DriverAction, 'handover'>; pin?: string }
+  | { id: string; action: Exclude<DriverAction, 'handover' | 'handback'>; pin?: string }
   /** [M-29] The fare outcome is explicit — never defaulted — because it moves money. */
-  | { id: string; action: 'handover'; outcome: FareOutcome };
+  | { id: string; action: 'handover'; outcome: FareOutcome }
+  /** A driver handback always carries the human reason the server requires. */
+  | { id: string; action: 'handback'; reason: string };
 
 /** The evidence fix for a handover / fare outcome. The server REQUIRES the
  *  mover's GPS (it is what a guarantee claim stands on). Last-known is
@@ -462,6 +465,7 @@ export function useDriverAction() {
   const m = useMutation({
     mutationFn: async (input: DriverActionInput) => {
       const { id } = input;
+      if (input.action === 'handback') return unwrap(driverApi.handback(id, input.reason));
       if (input.action === 'handover') {
         // [M-29] The fare outcome at the destination IS the ride's completion:
         // 'paid' captures and completes in one commit; 'refused' / 'no_show'
@@ -478,7 +482,16 @@ export function useDriverAction() {
       if (input.action === 'verify-pin') return unwrap(driverApi.verifyPin(id, input.pin ?? ''));
       return unwrap(driverApi.start(id));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
+    onSuccess: (_data, input) => {
+      // Handback owns a native modal dismissal ceremony. Do not make its local
+      // onSuccess wait for the active-ride refetch (which returns null and can
+      // remove that modal before it stages its post-dismiss navigation).
+      if (input.action === 'handback') {
+        void qc.invalidateQueries({ queryKey: ['mover'] });
+        return;
+      }
+      return qc.invalidateQueries({ queryKey: ['mover'] });
+    },
   });
   return pv ? PV.previewMutation() : m;
 }
@@ -533,7 +546,7 @@ export function useConfirmCashSettlement() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: (id: string) => unwrap(riderApi.confirmCashSettlement(id)),
+    mutationFn: confirmRiderCashSettlement,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover', 'cash-settlements'] }),
   });
   return pv ? PV.previewMutation() : m;

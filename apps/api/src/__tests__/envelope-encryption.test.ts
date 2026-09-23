@@ -198,8 +198,8 @@ describe('encrypted upload → render → shred', () => {
     });
     const minted = mintRenderPath(docId, 60);
     const res = await app.inject({ method: 'GET', url: minted.path });
-    expect(res.statusCode).toBe(410);
-    expect(res.json().error.code).toBe('DOCUMENT_SHREDDED');
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('VERIFICATION_OBJECT_UNAVAILABLE');
   });
 });
 

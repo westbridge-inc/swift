@@ -34,7 +34,10 @@ export function OtpVerificationScreen() {
     onSuccess: (res) => {
       const data = res.data?.data;
       if (data?.isNewUser) {
-        navigation.navigate('Register', { phone });
+        navigation.navigate('Register', {
+          phone,
+          registrationProof: typeof data.registrationProof === 'string' ? data.registrationProof : '',
+        });
         return;
       }
       if (data?.user && data?.tokens) {

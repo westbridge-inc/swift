@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -76,7 +77,7 @@ describe('onboarding review loop', () => {
     );
 
     const doc = await verification.submitDocument(
-      applicant.id, 'MOVER', 'police_clearance', 'storage://test/pc.jpg', 'v1',
+      applicant.id, 'MOVER', 'police_clearance', await ownedVerificationFixture(app.prisma, applicant.id), 'v1',
     );
     expect(doc.status).toBe('PENDING');
 

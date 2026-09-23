@@ -3,7 +3,8 @@ import type { PrismaClient } from '@prisma/client';
 import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL, VISIBLE_VENDOR_SELECT, isVendorVisible } from '../vendor/vendor-visibility';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { toItemSearchDoc } from './item-hit';
-import { ITEM_INDEX, VENDOR_INDEX, buildScopedFilter, docId, renderClause, type FilterClause } from './search-scope';
+import { ITEM_INDEX, VENDOR_INDEX, buildScopedFilter, docId, parseDocId, renderClause, type FilterClause } from './search-scope';
+import { getTenantId } from '../../plugins/tenant-context';
 import { searchIndexDocsGauge, searchScopeCounter } from '../../plugins/observability';
 
 /** [R048-003] The slice of the Meilisearch client this service uses — so a
@@ -188,15 +189,42 @@ export class SearchService {
 
   /** [R048-003] Remove every document the fresh set does not contain. Pages
    *  through the index by id only; a page that fails leaves the index as it
-   *  was (the next full sync reconciles again). Returns how many were removed. */
+   *  was (the next full sync reconciles again). Returns how many were removed.
+   *
+   *  [AUD-L8b-004 / INV-4] The blast radius must equal the QUERY'S scope.
+   *  `fresh` is built from tenant-scoped Prisma reads: inside a bound request
+   *  the extension narrows them to the caller's tenant, and the ids are
+   *  `<tenant>__<entity>` by construction, so another tenant's document can
+   *  never be a member of a bound sync's fresh set. Reconciling the whole
+   *  shared index against it therefore deleted every OTHER operator's
+   *  storefronts and items — one ordinary tenant ADMIN calling
+   *  `POST /search/sync`, answered 200, with the database untouched so it read
+   *  as "Meilisearch lost the index". INV-4 names shared search indexes
+   *  explicitly.
+   *
+   *  Unbound work (the boot sync, system reindexes) genuinely IS platform-wide
+   *  and still reconciles everything — that is the only case with the authority
+   *  to remove a document it did not read. */
   private async reconcile(indexName: string, fresh: Set<string>): Promise<number> {
     const index = this.client.index(indexName);
+    const scope = getTenantId();
     const stale: string[] = [];
     for (let offset = 0; ; offset += RECONCILE_PAGE) {
       const page = await index.getDocuments({ fields: ['id'], limit: RECONCILE_PAGE, offset });
       for (const doc of page.results) {
         const id = String(doc['id']);
-        if (!fresh.has(id)) stale.push(id);
+        if (fresh.has(id)) continue;
+        if (scope !== null) {
+          // A document this sync had no authority to read is not its to delete.
+          // An unparseable id predates the prefixed scheme; a bound sync leaves
+          // it to the unbound one rather than guessing whose it is.
+          const parsed = parseDocId(id);
+          if (!parsed || parsed.tenantId !== scope) {
+            searchScopeCounter.labels('reconcile_out_of_scope_kept').inc();
+            continue;
+          }
+        }
+        stale.push(id);
       }
       if (page.results.length < RECONCILE_PAGE) break;
     }

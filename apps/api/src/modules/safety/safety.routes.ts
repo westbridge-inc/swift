@@ -484,8 +484,18 @@ export async function safetyRoutes(app: FastifyInstance) {
 
   /** The ops case queue. `open` = everything not CLOSED, severity-first;
    *  `breached` = SLA clocks already blown (indexed reads, §8.2). */
-  /** [S-08] Merge is an explicit analyst action — never automatic. */
+  /** [S-08] Merge is an explicit analyst action — never automatic.
+   *  [AUD-MAIN-004] ...and never anyone's. This was the ONE case action with no
+   *  ops check: its six siblings below go through `opsCaseAction` and `decide`
+   *  checks inline, while this took a bare `auth` handler and handed
+   *  `request.user.userId` to the service as the acting analyst — an identity
+   *  the service trusts and stamps into closedBy/decidedBy. Merging closes the
+   *  duplicate as DISMISSED and runs liftInterim, which clears
+   *  `safetySuspendedAt` on the subject's driver AND rider rows, so the subject
+   *  of a case could lift their own interim suspension — and the
+   *  interim-suspension notification hands them the caseId they need. */
   app.post('/incidents/:id/merge', auth, async (request) => {
+    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can work a case.');
     const { id } = request.params as { id: string };
     const { intoCaseId } = z.object({ intoCaseId: z.string().min(1) }).parse(request.body ?? {});
     return { success: true, data: await incidents.mergeDuplicate(id, intoCaseId, request.user.userId) };

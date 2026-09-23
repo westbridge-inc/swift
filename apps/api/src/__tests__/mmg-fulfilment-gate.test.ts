@@ -584,9 +584,11 @@ describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmi
     expect(log.note).toContain('UNATTESTED');
   });
 
-  it('concurrent capture vs cancel: whatever interleaving wins, CANCELLED+CAPTURED never exists', async () => {
-    // Both paths take the same orders row lock; this drives the real race and
-    // asserts the invariant the serialization guarantees for EITHER winner.
+  it('concurrent CLAIM vs cancel (stress): whatever interleaving wins, CANCELLED + (CLAIMED|CAPTURED) never exists', async () => {
+    // [F-106-05] SUPPLEMENTAL STRESS, not the correctness proof. Uncontrolled
+    // Promise.all rounds cannot prove both lock orders occurred; the two
+    // FORCED-ORDER tests below are the proof, and this samples the real race
+    // on top of them.
     for (let round = 0; round < 3; round += 1) {
       const order = await makeMmgOrder('ACCEPTED', { withRider: false }); // payment PENDING
       const [confirm, cancel] = await Promise.all([
@@ -594,19 +596,32 @@ describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmi
         inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'raced' }),
       ]);
       const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-      const cancelledAndCaptured = fresh.status === 'CANCELLED' && fresh.paymentStatus === 'CAPTURED';
-      expect(cancelledAndCaptured).toBe(false);
-      if (fresh.paymentStatus === 'CAPTURED') {
-        // capture won → the cancel must have refused
-        expect(confirm.statusCode).toBe(200);
-        expect(cancel.statusCode).toBe(409);
-        expect(fresh.status).toBe('ACCEPTED');
+      // [DOC-1 §31.5 · F-103-01b] MONEY LANDED IS TWO STATES, NOT ONE.
+      //
+      // `confirm-payment` records the store's word as CLAIMED, not CAPTURED
+      // (vendor.routes.ts:1801). This test still asked only about CAPTURED, so:
+      //
+      //   * the invariant could not see the state that actually occurs — a
+      //     CANCELLED + CLAIMED order would have passed it silently; and
+      //   * whenever the capture WON the race the assertions took the
+      //     cancel-won branch and the test failed. Measured at ~40% of runs on
+      //     origin/main; it is not a flake, it is a stale predicate that only
+      //     looks like one because the race decides which branch it takes.
+      const moneyLanded = fresh.paymentStatus === 'CAPTURED' || fresh.paymentStatus === 'CLAIMED';
+      const shot = JSON.stringify({ round, confirm: confirm.statusCode, cancel: cancel.statusCode, status: fresh.status, paymentStatus: fresh.paymentStatus });
+      expect(fresh.status === 'CANCELLED' && moneyLanded, shot).toBe(false);
+      if (moneyLanded) {
+        // the store's claim won → the cancel must have refused
+        expect(confirm.statusCode, shot).toBe(200);
+        expect(cancel.statusCode, shot).toBe(409);
+        expect(fresh.status, shot).toBe('ACCEPTED');
+        expect(fresh.paymentStatus, shot).toBe('CLAIMED');
       } else {
-        // cancel won → the capture must have refused
-        expect(cancel.statusCode).toBe(200);
-        expect(confirm.statusCode).toBe(409);
-        expect(fresh.status).toBe('CANCELLED');
-        expect(fresh.paymentStatus).toBe('PENDING');
+        // cancel won → the claim must have refused
+        expect(cancel.statusCode, shot).toBe(200);
+        expect(confirm.statusCode, shot).toBe(409);
+        expect(fresh.status, shot).toBe('CANCELLED');
+        expect(fresh.paymentStatus, shot).toBe('PENDING');
       }
     }
   });
@@ -667,5 +682,170 @@ describe('[MOB-023] the handover authority at the door', () => {
     const fresh = (await inject('GET', '/api/v1/rider/orders/active', rider.token)).json().data.handover.version as string;
     const done = await inject('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: fresh });
     expect(done.statusCode).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [DOC-INV-48 · F-103-01] THE DOOR OPENED ON A DISPUTED PAYMENT.
+//
+// Codex ran the real `handoverAuthorityFor` against a MOBILE_MONEY + CLAIMED +
+// disputed order at the merged SHA and captured what the server answered:
+//
+//   HANDOVER {"mismatchPresent":true,"authority":{ … "permitted":"DELIVER_NO_CASH","blockReason":null }}
+//
+// The server told the person at the customer's door to hand the goods over on
+// a payment the customer says never happened. The canonical status write
+// refuses afterwards; that is worth nothing, because nothing can un-hand food
+// already given to someone.
+//
+// These are the route-level proofs Codex required: both active payloads, the
+// final route, the stale-version behaviour, and zero money side effects.
+// ---------------------------------------------------------------------------
+describe('[F-103-01] a disputed MMG claim closes the door at every rider surface', () => {
+  const dispute = (orderId: string) =>
+    app.prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'CLAIMED', mmgClaimMismatchAt: new Date() } });
+
+  it('GET /orders/active says BLOCKED / MMG_CLAIM_MISMATCH — not DELIVER_NO_CASH', async () => {
+    const order = await makeMmgOrder('ARRIVED', { fee: 300, tip: 0 });
+    await app.prisma.rider.update({ where: { id: riderId }, data: { currentOrderId: order.id } });
+    await dispute(order.id);
+
+    const res = await inject('GET', '/api/v1/rider/orders/active', rider.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data?.handover).toMatchObject({
+      rail: 'MOBILE_MONEY', paymentState: 'CLAIMED', permitted: 'BLOCKED', blockReason: 'MMG_CLAIM_MISMATCH',
+    });
+  });
+
+  it('GET /orders/active-legs says the same on every leg', async () => {
+    const order = await makeMmgOrder('ARRIVED', { fee: 300, tip: 0 });
+    await app.prisma.rider.update({ where: { id: riderId }, data: { currentOrderId: order.id } });
+    await dispute(order.id);
+
+    const res = await inject('GET', '/api/v1/rider/orders/active-legs', rider.token);
+    expect(res.statusCode).toBe(200);
+    const legs = (res.json().data?.legs ?? []) as Array<{ id: string; handover?: { permitted?: string; blockReason?: string } }>;
+    const leg = legs.find((l) => l.id === order.id);
+    expect(leg, 'the disputed leg is on the board').toBeTruthy();
+    expect(leg!.handover).toMatchObject({ permitted: 'BLOCKED', blockReason: 'MMG_CLAIM_MISMATCH' });
+  });
+
+  it('PUT /delivered refuses with MMG_CLAIM_MISMATCH, leaves custody untouched, and creates NO earnings or settlement', async () => {
+    const order = await makeMmgOrder('ARRIVED', { fee: 300, tip: 200 });
+    await dispute(order.id);
+
+    const res = await inject('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, {});
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error?.code ?? res.json().code).toBe('MMG_CLAIM_MISMATCH');
+
+    const still = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true, deliveredAt: true } });
+    expect(still.status, 'custody did not move').toBe('ARRIVED');
+    expect(still.deliveredAt).toBeNull();
+    expect(await app.prisma.earning.findMany({ where: { orderId: order.id } }), 'no earnings').toHaveLength(0);
+    expect(await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId: order.id } }), 'no settlement debt').toBeNull();
+  });
+
+  it('a version echoed BEFORE the dispute is refused as stale — the generation is in the digest, not implied by a clock', async () => {
+    const order = await makeMmgOrder('ARRIVED', { fee: 300, tip: 0, paymentStatus: 'CLAIMED' });
+    await app.prisma.rider.update({ where: { id: riderId }, data: { currentOrderId: order.id } });
+
+    const open = await inject('GET', '/api/v1/rider/orders/active', rider.token);
+    expect(open.json().data.handover.permitted, 'undisputed CLAIMED still opens').toBe('DELIVER_NO_CASH');
+    const echoed = open.json().data.handover.version as string;
+
+    // The dispute commits, and `updatedAt` is forced back to what the screen
+    // saw — so this can only pass if the DISPUTE itself is in the version.
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { updatedAt: true } });
+    await app.prisma.order.update({ where: { id: order.id }, data: { mmgClaimMismatchAt: new Date() } });
+    await app.prisma.$executeRaw`UPDATE "orders" SET "updatedAt" = ${before.updatedAt} WHERE "id" = ${order.id}`;
+
+    const refused = await inject('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: echoed });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error?.code ?? refused.json().code).toBe('HANDOVER_STALE');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [F-106-05] BOTH ORDERS, FORCED — not sampled.
+//
+// The race test above repeats `Promise.all` and asserts the invariant for
+// whichever side won. Codex's objection is exact: five green runs may all have
+// taken one scheduler order, so that is sampled stress and not proof that both
+// serializations are safe.
+//
+// WHAT THESE TWO ACTUALLY PROVE, stated precisely because the previous wording
+// overstated it. They force each COMMIT order — the first request is awaited to
+// completion before the second is issued — and assert the whole outcome: HTTP
+// result, final state, audit row, and the absence of the forbidden combination.
+// They do NOT prove anything about LOCK ordering, because sequential requests
+// never contend: removing the `SELECT ... FOR UPDATE` from confirm-payment's
+// transaction leaves both of them green, carried by the CAS predicates. The
+// interleaving property is still covered only by the sampled stress above.
+// Closing that needs real contention — a barrier or an injected delay inside
+// one transaction — and is not done here.
+//
+// The forbidden combination is CANCELLED + money-landed, where money-landed is
+// CLAIMED *or* CAPTURED: `confirm-payment` writes CLAIMED (vendor.routes.ts),
+// and asking only about CAPTURED is what let this test read as a flake for so
+// long (F-103-01b).
+// ---------------------------------------------------------------------------
+describe('[F-106-05] claim vs cancel, each COMMIT order forced (sequential, not contended)', () => {
+  const forbidden = (o: { status: string; paymentStatus: string }) =>
+    o.status === 'CANCELLED' && (o.paymentStatus === 'CLAIMED' || o.paymentStatus === 'CAPTURED');
+
+  it('CLAIM commits first: the cancel is refused and the money state stands', async () => {
+    const order = await makeMmgOrder('ACCEPTED', { withRider: false });
+    const claim = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
+    expect(claim.statusCode, claim.body).toBe(200);
+    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'forced-claim-first' });
+
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(cancel.statusCode, 'a claimed order cannot then be cancelled by the customer').toBe(409);
+    expect(fresh.status).toBe('ACCEPTED');
+    expect(fresh.paymentStatus).toBe('CLAIMED');
+    expect(forbidden(fresh)).toBe(false);
+    expect(await app.prisma.auditLog.count({ where: { entityId: order.id, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED' } }), 'the claim is on the record exactly once').toBe(1);
+  });
+
+  it('CANCEL commits first: the claim is refused and no money state is minted', async () => {
+    const order = await makeMmgOrder('ACCEPTED', { withRider: false });
+    const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'forced-cancel-first' });
+    expect(cancel.statusCode, cancel.body).toBe(200);
+    const claim = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
+
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(claim.statusCode, 'a cancelled order cannot then be claimed as paid').toBe(409);
+    expect(fresh.status).toBe('CANCELLED');
+    expect(fresh.paymentStatus, 'PENDING — nothing was minted onto a dead order').toBe('PENDING');
+    expect(forbidden(fresh)).toBe(false);
+    expect(await app.prisma.auditLog.count({ where: { entityId: order.id, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED' } }), 'and the refused claim left no claim record').toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [F-106-01 · Codex re-review item 3] The route-level CAPTURED + mismatch case.
+// The existing route proofs use CLAIMED; the server now blocks a dispute ahead
+// of CAPTURED too, and that has to be shown where it matters — on the payload
+// the rider's screen reads, and at the route that completes the delivery.
+// ---------------------------------------------------------------------------
+describe('[F-106-01] a dispute outranks CAPTURED at the route, not only in the unit', () => {
+  it('CAPTURED + disputed: the active payload is BLOCKED and /delivered creates no money', async () => {
+    const order = await makeMmgOrder('ARRIVED', { fee: 300, tip: 200, paymentStatus: 'CAPTURED' });
+    await app.prisma.rider.update({ where: { id: riderId }, data: { currentOrderId: order.id } });
+    await app.prisma.order.update({ where: { id: order.id }, data: { mmgClaimMismatchAt: new Date() } });
+
+    const payload = await inject('GET', '/api/v1/rider/orders/active', rider.token);
+    expect(payload.statusCode).toBe(200);
+    expect(payload.json().data?.handover).toMatchObject({ paymentState: 'CAPTURED', permitted: 'BLOCKED', blockReason: 'MMG_CLAIM_MISMATCH' });
+
+    const res = await inject('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, {});
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error?.code ?? res.json().code).toBe('MMG_CLAIM_MISMATCH');
+
+    const still = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true, deliveredAt: true } });
+    expect(still.status).toBe('ARRIVED');
+    expect(still.deliveredAt).toBeNull();
+    expect(await app.prisma.earning.findMany({ where: { orderId: order.id } })).toHaveLength(0);
+    expect(await app.prisma.deliveryCashSettlement.findUnique({ where: { orderId: order.id } })).toBeNull();
   });
 });

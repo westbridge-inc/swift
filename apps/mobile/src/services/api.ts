@@ -244,6 +244,7 @@ export const authApi = {
   pricing: (country?: string) => api.get('/auth/pricing', { params: country ? { country } : undefined }),
   register: (data: {
     phone: string;
+    registrationProof: string;
     firstName: string;
     lastName: string;
     email?: string;
@@ -343,7 +344,7 @@ export const customerApi = {
   updateAddress: (id: string, data: Partial<AddressInput>) => api.put(`/customer/addresses/${id}`, data),
   deleteAddress: (id: string) => api.delete(`/customer/addresses/${id}`),
   setDefaultAddress: (id: string) => api.put(`/customer/addresses/${id}/default`),
-  getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),
+  getHome: (lat?: number, lng?: number, signal?: AbortSignal) => api.get('/customer/home', { params: { lat, lng }, signal }),
   getVendors: (params?: Record<string, string>) => api.get('/customer/vendors', { params }),
   // [B15] Flag a public review for the moderation queue (R7). One report per
   // (rating, reporter) — the server answers calm idempotence, never an error.
@@ -819,7 +820,8 @@ export const riderApi = {
   demand: (p: Point) => api.get(`/rider/demand?lat=${p.lat}&lng=${p.lng}`),
   // MMG cash ledger — delivery fees stores owe me (customer paid the store)
   cashSettlements: () => api.get('/rider/cash-settlements'),
-  confirmCashSettlement: (id: string) => api.post(`/rider/cash-settlements/${id}/confirm`, {}),
+  confirmCashSettlement: (id: string, amount: number, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/cash-settlements/${id}/confirm`, { amount }, capturedAuthConfig(session)),
   history: (params?: { page?: number; limit?: number }) => api.get('/rider/orders', { params }),
   stats: () => api.get('/rider/stats'),
   subscription: () => api.get('/rider/subscription'),
@@ -846,6 +848,9 @@ export const driverApi = {
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
   accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
+  /** Give an accepted, pre-custody ride back to dispatch. The server keeps the
+   * passenger's ride alive, frees this driver, and matches another driver. */
+  handback: (id: string, reason: string) => api.post(`/driver/rides/${id}/cancel`, { reason }),
   // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
   acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
@@ -923,7 +928,16 @@ export const vendorApi = {
   lowStock: () => api.get('/vendor/items/low-stock'),
   // MMG cash ledger — delivery fees this store owes riders
   cashSettlements: () => api.get('/vendor/cash-settlements'),
-  confirmCashSettlement: (id: string) => api.post(`/vendor/cash-settlements/${id}/confirm`, {}),
+  confirmCashSettlement: (
+    id: string,
+    amount: number,
+    session?: AuthSessionSnapshot,
+    storeId?: string | null,
+  ) => api.post(
+    `/vendor/cash-settlements/${id}/confirm`,
+    { amount },
+    capturedVendorAuthConfig(session, storeId),
+  ),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),

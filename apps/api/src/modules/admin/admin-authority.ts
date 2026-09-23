@@ -76,11 +76,35 @@ export const ADMIN_ACTION_CLASSES: Record<AdminActionClass, AdminActionMeaning> 
  * record what that row looked like before and after — as digests and a
  * field-level diff of the fields that matter, never the payload.
  */
+/**
+ * [C-01] The model columns a snapshot may select on. A CLOSED set: adding one
+ * is a deliberate edit here, never a string inferred from a route.
+ */
+export const SNAPSHOT_UNIQUE_FIELDS = ['id', 'key', 'code'] as const;
+export type SnapshotUniqueField = (typeof SNAPSHOT_UNIQUE_FIELDS)[number];
+
 export interface AdminRouteEntity {
   /** The Prisma model, as it is named on the client (`subscription`, `order`). */
   readonly model: string;
-  /** Which route param identifies it. Defaults to `id`. */
-  readonly param?: string;
+  /**
+   * [C-01] Which ROUTE PARAMETER carries the value — `:code`, `:key`, `:userId`.
+   * Defaults to `id`. This is a fact about the URL.
+   */
+  readonly routeParam?: string;
+  /**
+   * [C-01] Which MODEL COLUMN that value selects on. Defaults to `id`. This is a
+   * fact about the schema, and it is NOT the same fact as `routeParam`:
+   *
+   *     /doc-types/:code/...        routeParam 'code'    uniqueField 'code'
+   *     /config/:key               routeParam 'key'     uniqueField 'key'
+   *     /rlp/movers/:userId/...    routeParam 'userId'  uniqueField 'id'   <- differ
+   *
+   * One field served both meanings and the third row is why: `snapshot()` read
+   * `param` and asked for `where: { id }` on DocType, whose only key is `code`.
+   * Prisma refused, the catch swallowed it, and every external-processing
+   * decision recorded a null digest pair and an empty diff.
+   */
+  readonly uniqueField?: SnapshotUniqueField;
   /** The fields whose change is worth naming. The digest covers the whole row
    *  regardless, so this is what a reader sees first, not the limit of what is
    *  detected. */
@@ -116,8 +140,8 @@ const E = {
   order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
-  docType: { model: 'docType', param: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
-  platformConfig: { model: 'platformConfig', param: 'key', fields: ['value'] },
+  docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
+  platformConfig: { model: 'platformConfig', routeParam: 'key', uniqueField: 'key', fields: ['value'] },
   promo: { model: 'promoCode', fields: ['isActive', 'discountValue', 'validFrom', 'validUntil'] },
   zone: { model: 'zone', fields: ['isActive', 'name', 'priority'] },
   advertiser: { model: 'advertiser', fields: ['status'] },
@@ -131,7 +155,8 @@ const E = {
   returnRequest: { model: 'returnRequest', fields: ['status', 'refundAmount', 'reviewedAt', 'refundRef', 'refundPaidAmount', 'refundPaidAt'] },
   claim: { model: 'reimbursementClaim', fields: ['status', 'amount', 'paidAt', 'paymentRef', 'paidAmount', 'reviewedAt'] },
   // [DOC-1 §31.4 · P31-1] Loss protection suspension is a stated, reversible fact on the account.
-  lossProtection: { model: 'user', param: 'userId', fields: ['lossProtectionSuspendedAt', 'lossProtectionSuspendedReason'] },
+  // [C-01] `:userId` in the URL, `user.id` in the schema — the two names differ here.
+  lossProtection: { model: 'user', routeParam: 'userId', fields: ['lossProtectionSuspendedAt', 'lossProtectionSuspendedReason'] },
   contentReport: { model: 'contentReport', fields: ['status', 'disposition'] },
   rating: { model: 'rating', fields: ['isPublic', 'state', 'stateReason', 'flagged'] },
   ratingReport: { model: 'ratingReport', fields: ['status'] },

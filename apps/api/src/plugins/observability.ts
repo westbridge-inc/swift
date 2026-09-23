@@ -198,8 +198,32 @@ export const adminReasonCounter = new client.Counter({
  *  threw: inline it also rolled the action back, backstop it lost the row. */
 export const adminAuditCounter = new client.Counter({
   name: 'swift_admin_audit_total',
-  help: 'Admin audit rows by writer (inline|backstop|failed|refused|rolled-back) and action class',
+  help: 'Admin audit rows by writer (inline|backstop|failed|refused|rolled-back|extra_collision:<key>) and action class',
   labelNames: ['writer', 'cls'] as const,
+  registers: [registry],
+});
+
+/**
+ * [C-01] The admin audit's SUBJECT READ, by outcome: `found` (a digest pair
+ * exists), `missing` (the row genuinely is not there — a create has no before,
+ * a delete has no after), `failed` (the read threw), `selector` (the declared
+ * column is outside the allowed set).
+ *
+ * `failed` existed as a bare `catch { return ABSENT }` and was the reason a
+ * wrong selector survived: a refused read and an absent row were the same
+ * observation. They are now separate numbers.
+ *
+ * EVERY exit is counted, not only the interesting ones — `no_id` (the route
+ * carried no subject) and `no_delegate` (the declared model does not exist on
+ * the client, which is what a rename or a typo produces, and the same shape as
+ * C-01). A metric that reports four of six outcomes cannot support the claim
+ * "zero failures means the digests are present"; it only ever meant "zero of
+ * the failures I remembered to count".
+ */
+export const adminAuditSnapshotCounter = new client.Counter({
+  name: 'swift_admin_audit_snapshot_total',
+  help: 'Admin audit subject reads by outcome (found|missing|failed|selector|no_id|no_delegate) and model',
+  labelNames: ['outcome', 'model'] as const,
   registers: [registry],
 });
 

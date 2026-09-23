@@ -4,6 +4,8 @@ import { nanoid } from 'nanoid';
 import { SearchService, type SearchClientLike, type SearchIndexLike } from '../modules/search/search.service';
 import { FilterValueRejected, ITEM_INDEX, VENDOR_INDEX, docId } from '../modules/search/search-scope';
 import { searchIndexDocsGauge, searchScopeCounter } from '../plugins/observability';
+import { runWithTenant } from '../plugins/tenant-context';
+import { scopedPrisma } from '../plugins/prisma';
 
 // ---------------------------------------------------------------------------
 // [R048-003] The index half, proven WITHOUT a Meilisearch process: a recording
@@ -183,5 +185,53 @@ describe('[R048-003] every query carries the tenant clause, built by the server'
     expect(filter.join(' AND ')).not.toMatch(new RegExp(`[^\\\\]"\\s*OR\\s*tenantId = "${TENANT_B}"`));
     await expect(service.searchItems(TENANT_A, 'x', { dietary: 'vegan\nOR 1=1' })).rejects.toMatchObject({ code: 'FILTER_VALUE_REJECTED' });
     await expect(service.searchItems(TENANT_A, 'x', { maxPrice: Number.NaN })).rejects.toMatchObject({ code: 'FILTER_VALUE_REJECTED' });
+  });
+});
+
+describe('[AUD-L8b-004 / AUD-L4-017 · INV-4] a tenant-bound sync reconciles only its OWN tenant', () => {
+  // POST /search/sync runs inside an authenticated, tenant-BOUND request, so the
+  // Prisma reads that build `fresh` are narrowed to the caller's tenant by the
+  // scoping extension. reconcile() then paged the WHOLE shared index and deleted
+  // every id `fresh` did not contain — so one tenant's ADMIN erased every other
+  // operator's storefronts and items from search, and the route answered 200.
+  //
+  // This must be driven on the SCOPED client. The suite above builds the service
+  // on a raw PrismaClient, which carries no tenant extension, so a bound sync
+  // there reads every tenant and the defect is invisible — which is why it passed
+  // through every prior run.
+  //
+  // The unbound full sync (boot, system work) genuinely is platform-wide and must
+  // keep reconciling everything; the sibling test above covers that and still passes.
+  let scopedService: SearchService;
+  beforeAll(async () => {
+    // The extended client's type differs from PrismaClient (the $extends return
+    // type drops $on/$metrics); the app casts once at its composition root for the
+    // same reason. The RUNTIME surface is what matters here — it is the scoping
+    // extension that makes this test able to see the defect at all.
+    scopedService = new SearchService(scopedPrisma as unknown as PrismaClient, undefined, undefined, client);
+    await scopedService.initialize();
+  });
+
+  it('tenant A syncing does NOT delete tenant B\u2019s documents', async () => {
+    const vendors = client.index(VENDOR_INDEX);
+    await service.syncAllVendors();               // unbound: both tenants present
+    expect(vendors.docs.has(docId(TENANT_B, b.vendor.id))).toBe(true);
+
+    await runWithTenant(TENANT_A, () => scopedService.syncAllVendors());
+
+    expect(vendors.docs.has(docId(TENANT_A, a.vendor.id))).toBe(true);
+    expect(vendors.docs.has(docId(TENANT_B, b.vendor.id))).toBe(true); // the victim
+  });
+
+  it('a tenant-bound sync still removes ITS OWN stale document', async () => {
+    const vendors = client.index(VENDOR_INDEX);
+    await service.syncAllVendors();
+    const ownStale = `${TENANT_A}__gone-bound-${RUN}`;
+    vendors.docs.set(ownStale, { id: ownStale, entityId: `gone-bound-${RUN}`, tenantId: TENANT_A, name: 'Gone' });
+
+    await runWithTenant(TENANT_A, () => scopedService.syncAllVendors());
+
+    expect(vendors.docs.has(ownStale)).toBe(false);                    // still reconciles in scope
+    expect(vendors.docs.has(docId(TENANT_B, b.vendor.id))).toBe(true); // and only in scope
   });
 });

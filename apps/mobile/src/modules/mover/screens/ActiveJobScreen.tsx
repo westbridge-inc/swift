@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
-import React, { useState } from 'react';
-import { Linking, Pressable, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Linking, Platform, Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
@@ -26,8 +26,9 @@ import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
 import { openExternal } from '../../../lib/openExternal';
 import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
-import { doorFor, recordDoorBlocked, recordDoorMismatch } from '../../../lib/handoverAuthority';
+import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
 import { telUrl } from '../../../lib/emergencyPolicy';
+import { canDriverHandbackRide } from '../../../lib/driverRide';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
 const RIDE_PIN_LENGTH = 6;
@@ -123,6 +124,17 @@ export function ActiveJobScreen({ navigation }: any) {
   // [MOB-018] The signed-in market decides the emergency number the popup names and dials.
   const sosCountry = useAuthStore((st) => st.countryCode);
   const [sosConfirm, setSosConfirm] = useState(false);
+  // The popup owns a ride snapshot until its native dismissal completes. The
+  // handback refetch legitimately makes the live active ride null, but that must
+  // never unmount the closing modal or discard its post-dismiss navigation.
+  const [driverHandbackFlow, setDriverHandbackFlow] = useState<{
+    rideId: string;
+    job: any;
+    phase: 'confirm' | 'submitting' | 'dismissing';
+  } | null>(null);
+  // A successful request stages navigation; native onDismiss consumes it on
+  // iOS, with the cancellable frame fallback below on other platforms.
+  const driverHandbackNavigateAfterDismissRef = useRef(false);
   // G14: pre-pickup handback — a two-step with preset reasons, never one tap.
   const [handbackConfirm, setHandbackConfirm] = useState(false);
   // [M-29] The unpaid sheet — the failed fare outcome (driver) or failed
@@ -141,7 +153,43 @@ export function ActiveJobScreen({ navigation }: any) {
   // `job`. A single leg is `active.data`, exactly as before.
   const legs: any[] = stackedJobs.legs;
   const stacked = legs.length > 1;
-  const job: any = stacked ? (legs.find((l) => l.id === selectedLegId) ?? legs[0]) : active.data;
+  const liveJob: any = stacked ? (legs.find((l) => l.id === selectedLegId) ?? legs[0]) : active.data;
+  const isDriver = kind === 'DRIVER';
+  const canDriverHandback = isDriver && canDriverHandbackRide(liveJob);
+  const retainDriverHandbackHost = driverHandbackFlow?.phase === 'submitting' || driverHandbackFlow?.phase === 'dismissing';
+  const job: any = liveJob ?? (retainDriverHandbackHost ? driverHandbackFlow?.job : null) ?? null;
+
+  const finishDriverHandbackDismissal = useCallback(() => {
+    if (!driverHandbackNavigateAfterDismissRef.current) return;
+    driverHandbackNavigateAfterDismissRef.current = false;
+    setDriverHandbackFlow(null);
+    navigation?.goBack?.();
+  }, [navigation]);
+
+  // React Native's Modal.onDismiss is iOS-only. Elsewhere, retain the popup for
+  // the state-removal render and navigate after two presented frames. Cleanup
+  // prevents a scheduled exit from outliving this screen.
+  useEffect(() => {
+    if (Platform.OS === 'ios' || driverHandbackFlow?.phase !== 'dismissing') return;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(finishDriverHandbackDismissal);
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame) cancelAnimationFrame(secondFrame);
+    };
+  }, [driverHandbackFlow?.phase, finishDriverHandbackDismissal]);
+
+  // A snapshot can hold presentation together while a submitted request settles,
+  // but it never grants authority to submit. If the live ride disappears or
+  // crosses custody while the reason sheet is open, close it and say why.
+  useEffect(() => {
+    if (driverHandbackFlow?.phase !== 'confirm') return;
+    if (canDriverHandback && liveJob?.id === driverHandbackFlow.rideId) return;
+    setDriverHandbackFlow(null);
+    toast.show('Ride updated', 'This ride can no longer be handed back.');
+  }, [canDriverHandback, driverHandbackFlow?.phase, driverHandbackFlow?.rideId, liveJob?.id]);
 
   if (!job && !ratePopup) {
     return (
@@ -169,7 +217,6 @@ export function ActiveJobScreen({ navigation }: any) {
         : undefined;
 
   const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending;
-  const isDriver = kind === 'DRIVER';
   // Courier deliveries close with a proof-of-delivery photo (D8-02): capture →
   // upload → the handoff transition (which pays the rider). Everything else uses
   // the plain "Mark delivered" action.
@@ -226,8 +273,10 @@ export function ActiveJobScreen({ navigation }: any) {
   const doorBlocked = door.kind === 'blocked';
   const onHandoverRefused = (err: unknown) => {
     const code = (err as { response?: { data?: { error?: { code?: string } } } })?.response?.data?.error?.code;
-    if (code === 'HANDOVER_STALE' || code === 'PAYMENT_NOT_CAPTURED' || code === 'MMG_PAYMENT_PENDING') {
-      // The server's door differs from the one on screen: count it, and re-read the job.
+    // [F-106-03] The dispute and unknown-authority codes belong here too: they
+    // are exactly the refusals where the screen and the server disagreed, and
+    // leaving them out meant the one case worth counting was the one not counted.
+    if (code && DOOR_REFUSAL_CODES.has(code)) {
       recordDoorMismatch(code);
       active.refetch?.();
     }
@@ -595,6 +644,20 @@ export function ActiveJobScreen({ navigation }: any) {
                       onPress={() => setUnpaidSheet(true)}
                     />
                   ) : null}
+                  {/* Driver handback is a controlled pre-custody release, not a
+                      passenger cancellation: the same ride returns to dispatch. */}
+                  {canDriverHandback ? (
+                    <PillButton
+                      label="Can't complete this ride"
+                      variant="soft"
+                      style={{ marginTop: space.sm }}
+                      disabled={busy}
+                      onPress={() => {
+                        if (!liveJob?.id || !canDriverHandback) return;
+                        setDriverHandbackFlow({ rideId: liveJob.id, job: liveJob, phase: 'confirm' });
+                      }}
+                    />
+                  ) : null}
                 </>
               ) : (
                 <T variant="label" center style={{ color: dk.muted, paddingVertical: space.md }}>
@@ -706,16 +769,23 @@ export function ActiveJobScreen({ navigation }: any) {
               </>
             ) : doorBlocked ? (
               <>
-                {/* [MOB-023] The rail says "paid" but the payment state does not
-                    (pending, unknown, failed, reversed): no hand-over, nothing
-                    collected, nothing completed — refresh, or the store confirms. */}
+                {/* [MOB-023 · F-106-03] No hand-over, nothing collected, nothing
+                    completed. The REASON decides both the sentence and the way
+                    out: a dispute cannot be refreshed away, and telling the
+                    rider to ask the store again would strand them holding the
+                    order while following advice that cannot work. */}
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.error, 0.12), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md }}>
                   <Feather name="alert-triangle" size={15} color={color.error} style={{ marginTop: 1 }} />
                   <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
-                    {`Payment not confirmed (${door.reason.replace(/_/g, ' ').toLowerCase()}) — do not hand over the order yet. Ask the store to confirm the payment, then refresh.`}
+                    {doorGuidanceFor(door.reason).headline}
                   </T>
                 </View>
-                {bigButton('Refresh payment status', () => { recordDoorBlocked(door.reason); active.refetch?.(); }, { loading: active.isFetching === true, disabled: busy })}
+                {doorGuidanceFor(door.reason).action !== 'support'
+                  ? bigButton('Refresh payment status', () => { recordDoorBlocked(door.reason); active.refetch?.(); }, { loading: active.isFetching === true, disabled: busy })
+                  : null}
+                {doorGuidanceFor(door.reason).action !== 'refresh'
+                  ? bigButton('Contact support', () => { recordDoorBlocked(door.reason); navigation.navigate('GetHelp' as never); }, { disabled: busy })
+                  : null}
               </>
             ) : isMmgPaid ? (
               <>
@@ -887,6 +957,65 @@ export function ActiveJobScreen({ navigation }: any) {
           onPress={() => collectFromSender('refused')}
         />
         <PillButton label="Go back" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setSenderRefusedSheet(false)} />
+      </PopupCard>
+
+      {/* A driver can release an accepted taxi only before the passenger handoff.
+          The server re-checks custody under lock, frees the driver, and sends the
+          same passenger ride back to dispatch. Keep the sheet open on failure. */}
+      <PopupCard
+        visible={!!driverHandbackFlow && driverHandbackFlow.phase !== 'dismissing' && (
+          driverHandbackFlow.phase === 'submitting'
+          || (canDriverHandback && driverHandbackFlow.rideId === liveJob?.id)
+        )}
+        onClose={() => {
+          if (driverAct.isPending || driverHandbackFlow?.phase === 'submitting') return;
+          driverHandbackNavigateAfterDismissRef.current = false;
+          setDriverHandbackFlow(null);
+        }}
+        onDismissed={finishDriverHandbackDismissal}
+      >
+        <PopupTitle variant="title" center>Hand this ride back?</PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          The passenger keeps this ride and Swift will look for another driver. This may affect your driver standing. Pick what happened:
+        </T>
+        {(['Vehicle problem', 'Road or access blocked', 'Passenger did not arrive'] as const).map((why) => (
+          <PillButton
+            key={why}
+            label={why}
+            variant="outline"
+            style={{ alignSelf: 'stretch', marginTop: space.md }}
+            disabled={driverAct.isPending || driverHandbackFlow?.phase !== 'confirm' || !canDriverHandback}
+            onPress={() => {
+              if (preview || !liveJob?.id || driverHandbackFlow?.phase !== 'confirm' || driverHandbackFlow.rideId !== liveJob.id || !canDriverHandback) return;
+              const rideId = liveJob.id;
+              setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'submitting' } : flow);
+              driverAct.mutate(
+                { id: rideId, action: 'handback', reason: why },
+                {
+                  onSuccess: () => {
+                    driverHandbackNavigateAfterDismissRef.current = true;
+                    setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'dismissing' } : flow);
+                    toast.show('Ride handed back', 'The passenger is being matched with another driver.');
+                  },
+                  onError: (e: any) => {
+                    setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'confirm' } : flow);
+                    toast.error(e?.response?.data?.error?.message ?? "Couldn't hand the ride back — keep the passenger informed and try again.");
+                  },
+                },
+              );
+            }}
+          />
+        ))}
+        <PillButton
+          label="Keep the ride"
+          variant="soft"
+          style={{ alignSelf: 'stretch', marginTop: space.lg }}
+          disabled={driverAct.isPending || driverHandbackFlow?.phase === 'submitting'}
+          onPress={() => {
+            driverHandbackNavigateAfterDismissRef.current = false;
+            setDriverHandbackFlow(null);
+          }}
+        />
       </PopupCard>
 
       {/* G14 handback — reason required, honesty first: the customer is told

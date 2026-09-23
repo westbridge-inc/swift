@@ -12,6 +12,11 @@
  *
  *   THE VERDICT is authoritative. It is one call to the real guard against
  *   your unmodified env. If it says PASS, the server will not refuse to start
+ *   ON THE CONFIGURATION THIS SCRIPT CHECKS — it does NOT run the
+ *   database-dependent tenant-wall gate (`assertTenantWall`), which reads the
+ *   live connection's posture at boot and can refuse on
+ *   TENANT_WALL_EXPAND_ATTESTED / TENANT_RLS_BIND / TENANT_UNSCOPED_ACCESS.
+ *   A PASS here is not a promise about that gate. [REPORT-111 P0.3]
  *   on configuration. If it says FATAL, that is the exact message the server
  *   would print.
  *
@@ -233,7 +238,8 @@ const verdict = guardMessage(production);
 console.log('VERDICT (the real guard, your file, nothing stubbed)');
 console.log('─'.repeat(72));
 if (verdict === null) {
-  console.log('  PASS — this configuration will not be refused at boot.');
+  console.log('  PASS — this configuration will not be refused at boot by the checks above.');
+  console.log('         (The tenant-wall gate reads the live database at boot and is NOT checked here.)');
   console.log('');
   console.log('  Note what this does NOT say: it does not say the credentials are');
   console.log('  valid, only that they are present and shaped correctly. It also');

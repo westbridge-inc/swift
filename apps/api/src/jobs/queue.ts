@@ -3,7 +3,7 @@ import type Redis from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type { FastifyBaseLogger } from 'fastify';
-import { captureError, osrmOutcomeCounter } from '../plugins/observability';
+import { captureError, opsPageCounter, osrmOutcomeCounter } from '../plugins/observability';
 import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
 import { runWithTenant } from '../plugins/tenant-context';
@@ -231,7 +231,36 @@ export async function opsPageOnce(
   }
   if (claimed !== 'OK') return false;
   try {
-    await page();
+    const reached = await page();
+    // [AUD-MAIN-008] A page that reached NOBODY is not a delivered page.
+    //
+    // The catch below already released the claim when `page()` THREW. It did
+    // not when `page()` RESOLVED having notified no one — and that is the
+    // shape that actually occurs: `notifyAdmins` returns the number of
+    // recipients it reached and never throws on zero, so the key stayed
+    // claimed for the whole window and the condition went dark with nobody
+    // told. Thirty of this helper's forty call sites resolve to that count
+    // directly, so the number was always here and simply discarded.
+    //
+    // Observed: `backup-freshness` fires daily, correctly, forever. A stock
+    // deploy seeds no SUPER_ADMIN, so `notifyAdmins` returns 0 — and the alarm
+    // for total, unrecoverable data loss marked itself delivered and slept 20
+    // hours, every day.
+    //
+    // This is not a new rule. `modules/ops/ops-page.ts` already refuses to
+    // claim a zero-recipient page (`zero_recipient_pending`) and leaves the
+    // OpsAlert row open for escalation; it covers one condition. This gives
+    // the same guarantee to the other 39.
+    //
+    // A callback that reports NOTHING (resolves undefined/void) is unchanged:
+    // silence is not zero, and treating it as undelivered would re-page every
+    // window for conditions that are in fact being delivered.
+    if (typeof reached === 'number' && reached <= 0) {
+      // Same outcome name pageOps already uses, so both pagers report on one metric.
+      opsPageCounter.labels('zero_recipient_pending').inc();
+      await ctx.redis.del(redisKey).catch(() => {});
+      return false;
+    }
     return true;
   } catch {
     // The page failed — release the claim so the NEXT detection re-pages rather
@@ -846,7 +875,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
 
       if (job.name === 'expiry-sweep') {
         const { VerificationService } = await import('../modules/verification/verification.service');
-        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
         const { getKycProvider } = await import('../providers/kyc/kyc-provider');
 
         const verification = new VerificationService(
@@ -854,6 +883,31 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           new NotificationService(ctx.prisma, ctx.io),
           getKycProvider(),
         );
+        // [F-026-02] Avatar/object obligations are an independent erasure
+        // census. Run this stage first and contain its failure so neither a
+        // quarantined document nor an orphan-store outage can starve the other
+        // retention work forever.
+        let storageOrphansPurged = 0;
+        try {
+          const { retryStorageOrphans } = await import('../lib/storage-orphans');
+          const { getStorageProvider } = await import('../providers/storage/storage-provider');
+          storageOrphansPurged = await retryStorageOrphans(
+            ctx.prisma,
+            getStorageProvider(),
+            ctx.log,
+            100,
+          );
+        } catch (err) {
+          ctx.log.error({ err }, 'storage-orphan erasure sweep failed');
+          await opsPageOnce(ctx, 'storage-orphan-reaper-failure', 6 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              tenantId: null,
+              title: 'Storage erasure retry failed',
+              body: 'The storage-erasure census could not be drained. Open obligations remain pending and will be retried; treat repeated failures as an incident.',
+              data: { kind: 'ops_reaper_failed', error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) },
+            }),
+          );
+        }
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
@@ -861,7 +915,6 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         try {
           purged = await verification.purgeExpiredDocuments();
         } catch (err) {
-          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'reaper-failure', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
               tenantId: null,
@@ -884,7 +937,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const audit = new ComplianceAuditService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), verification);
         const run = await audit.runAudit('SCHEDULED');
         ctx.log.info(
-          `Verification sweep: ${expired} expired, ${reminded} reminders sent, ${purged} purged; compliance audit: ${run.moversChecked} online movers checked, ${run.violations} violations`,
+          `Verification sweep: ${expired} expired, ${reminded} reminders sent, ${purged} documents and ${storageOrphansPurged} storage orphans purged; compliance audit: ${run.moversChecked} online movers checked, ${run.violations} violations`,
         );
       }
 

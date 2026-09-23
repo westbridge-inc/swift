@@ -17,6 +17,7 @@ import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { VerificationService } from '../verification/verification.service';
+import { CountryConfigService } from '../country/country-config.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { encryptBuffer, generateDek, getKeyProvider } from '../../providers/storage/envelope';
@@ -1004,6 +1005,24 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (registered) throw new AppError(409, 'ALREADY_REGISTERED', 'A business registration is on file for this store, so it is a registered seller — no declaration is needed.');
     if (existing) throw new AppError(409, 'DECLARATION_EXISTS', `A self-declaration is already ${existing.status === 'APPROVED' ? 'on file' : 'under review'} for this store.`);
 
+    // Preflight the same country/tier checklist used by intake. SERVICE has
+    // no declaration checklist by default; this route cannot invent one.
+    const checklist = await new CountryConfigService(app.prisma).getDocumentChecklist(user.countryCode, vendor.vendorType, 'UNREGISTERED');
+    if (!checklist.includes(DECLARATION_DOC_TYPE)) {
+      throw new AppError(400, 'DECLARATION_UNSUPPORTED', 'A self-declaration is not supported for this store type in your country.');
+    }
+    // Acquire and wrap the key BEFORE publishing words, changing tier, or
+    // recording consent. No generated declaration may fall back to plaintext.
+    const dek = generateDek();
+    let wrappedDek: Buffer;
+    try {
+      const keys = getKeyProvider();
+      if (!keys) throw new Error('Envelope encryption unavailable');
+      wrappedDek = await keys.wrapDek(dek);
+    } catch {
+      throw new AppError(503, 'VERIFICATION_UPLOAD_UNAVAILABLE', 'Verification uploads are temporarily unavailable. Try again later.');
+    }
+
     await publishLegalDocumentOnce(app.prisma, { documentType: DECLARATION_CONSENT_TYPE, version: DECLARATION_VERSION, renderedText: UNREGISTERED_TRADER_DECLARATION_V1 });
     const signedAt = new Date();
     const platform = String(request.headers['x-client-platform'] ?? '').toLowerCase();
@@ -1023,20 +1042,12 @@ export async function vendorRoutes(app: FastifyInstance) {
       legalName: `${user.firstName} ${user.lastName}`.trim(), signedAt, storeName: vendor.name,
     });
     const storage = getStorageProvider();
-    const keys = getKeyProvider();
-    let fileUrl: string;
-    if (keys) {
-      const dek = generateDek();
-      const { ciphertext, iv, authTag } = encryptBuffer(pdf, dek);
-      const up = await storage.upload({ buffer: ciphertext, filename: `declaration-${DECLARATION_VERSION}.pdf.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
-      fileUrl = up.url;
-      await app.prisma.encryptedObject.create({ data: {
-        fileKey: fileUrl, iv: new Uint8Array(iv), authTag: new Uint8Array(authTag), wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
-        mimeType: 'application/pdf', sizeBytes: pdf.length, sha256: createHash('sha256').update(pdf).digest('hex'), createdBy: userId,
-      } });
-    } else {
-      fileUrl = (await storage.upload({ buffer: pdf, filename: `declaration-${DECLARATION_VERSION}.pdf`, mimeType: 'application/pdf', folder: `verification/${userId}` })).url;
-    }
+    const { ciphertext, iv, authTag } = encryptBuffer(pdf, dek);
+    const { url: fileUrl } = await storage.upload({ buffer: ciphertext, filename: `declaration-${DECLARATION_VERSION}.pdf.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
+    await app.prisma.encryptedObject.create({ data: {
+      fileKey: fileUrl, iv: new Uint8Array(iv), authTag: new Uint8Array(authTag), wrappedDek: new Uint8Array(wrappedDek),
+      mimeType: 'application/pdf', sizeBytes: pdf.length, sha256: createHash('sha256').update(pdf).digest('hex'), createdBy: userId,
+    } });
     const doc = await verification.submitDocument(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE', DECLARATION_DOC_TYPE, fileUrl, body.privacyNoticeVersion);
     reply.code(201);
     return { success: true, data: { tier: 'UNREGISTERED', declaration: { id: doc.id, status: doc.status, docType: doc.docType }, status: await verification.getStatus(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE') } };

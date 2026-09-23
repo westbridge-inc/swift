@@ -8,6 +8,7 @@
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import type { AuditFacts } from '../../lib/audit-writer';
 
 export interface ExternalProcessingDecisionInput {
   code: string;
@@ -19,7 +20,10 @@ export interface ExternalProcessingDecisionInput {
 
 export const DECISION_REF_REQUIRED = 'DECISION_REF_REQUIRED';
 
-export type DecisionAudit = (tx: Prisma.TransactionClient, facts: Record<string, string | number | boolean | null>) => Promise<unknown>;
+// [C-01b] `AuditFacts`, not a hand-written twin of it. This type once spelled
+// the shape out itself, so it never inherited the refusal of the canonical
+// names — and `reason` went straight through the compiler into a 500.
+export type DecisionAudit = (tx: Prisma.TransactionClient, facts: AuditFacts) => Promise<unknown>;
 
 export async function recordExternalProcessingDecision(db: PrismaClient, input: ExternalProcessingDecisionInput, audit: DecisionAudit, now = new Date()) {
   const row = await db.docType.findUnique({ where: { code: input.code }, select: { code: true, bucket: true, externalProcessingAllowed: true, externalProcessingDecisionRef: true } });
@@ -36,7 +40,10 @@ export async function recordExternalProcessingDecision(db: PrismaClient, input: 
       data: { externalProcessingAllowed: input.allowed, externalProcessingDecisionRef: input.allowed ? ref : null, externalProcessingDecidedAt: now },
       select: { code: true, bucket: true, externalProcessingAllowed: true, externalProcessingDecisionRef: true, externalProcessingDecidedAt: true },
     });
-    await audit(tx, { docType: input.code, bucket: row.bucket, allowedBefore: before.externalProcessingAllowed, allowedAfter: after.externalProcessingAllowed, decisionRef: after.externalProcessingDecisionRef, reason: input.reason });
+    // [C-01b] NOT `reason` — it is a canonical column of the audit row, passed
+    // by the route as an override. Repeating it here made every call to this
+    // route a 500.
+    await audit(tx, { docType: input.code, bucket: row.bucket, allowedBefore: before.externalProcessingAllowed, allowedAfter: after.externalProcessingAllowed, decisionRef: after.externalProcessingDecisionRef });
     return { before, after };
   });
 }
