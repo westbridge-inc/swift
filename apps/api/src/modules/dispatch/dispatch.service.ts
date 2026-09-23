@@ -26,6 +26,7 @@ import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/obs
 import { getTenantId } from '../../plugins/tenant-context';
 import { clampDriverFare } from '../../utils/markup';
 import { assertMmgFulfilmentAllowed } from '../order/order.service';
+import { mmgDispatchBlocked } from '../order/mmg-claim.service';
 import { FloatService, riderFloatForOrder } from './float.service';
 import {
   hasTaxiPassengerCustody,
@@ -1275,6 +1276,8 @@ export class DispatchService {
           fulfillment: true, fulfillmentMode: true, fulfillmentModeVersion: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
           customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
           subtotalBase: true, paymentMethod: true, paymentStatus: true, tenantId: true, readyAt: true, foodAgeHeldAt: true, foodAgeWaivedAt: true,
+          // [S1-6] The disagreement latch the locked assignment writes also read.
+          mmgClaimMismatchAt: true,
           // [WS-6.0] The cash-math triple. A mover deciding on a CASH job is
           // deciding how much of their OWN float to commit, and the card used
           // to show only what they earn. Every number is a stored column, not
@@ -1314,6 +1317,17 @@ export class DispatchService {
           return { exhausted: true };
         }
       }
+
+      // [ORDER-SPINE S1-6 · cross-lane gate invariant 8] Direct-MMG work nobody
+      // has said is paid, or whose two payment claims disagree, is not offered:
+      // both assignment writes refuse it under the row lock, so a card would
+      // only be a ghost a rider is penalised for ignoring. [R4 · F-PR1262-SOL-02]
+      // It sits AFTER the food-age cutoff and before every offer step: an order
+      // too old to deliver is still settled by the dispatch event (the cutoff's
+      // CAS cancels unpaid money and holds claimed or captured money, a
+      // disputed order included, for a person) instead of waiting unoffered for
+      // the next sweep.
+      if (pool === 'RIDER' && mmgDispatchBlocked(order)) return {};
 
       // One live offer at a time
       const existing = await this.redis.get(offerKey(orderId));

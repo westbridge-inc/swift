@@ -1133,6 +1133,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
         const result = await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { limit: 200 });
         if (result.processed + result.failed > 0) ctx.log.info(result, '[M-11] checkout outbox sweep');
+        // [ORDER-SPINE S1-6] Direct-MMG claim notices the request could not
+        // finish. Never handed to a queue (a published row is consumed on
+        // acceptance): delivered here, deduplicated per (order, generation,
+        // role), and kept owed — backed off — until every recipient holds it.
+        const { drainMmgClaimNotices } = await import('../modules/order/mmg-claim.service');
+        const { NotificationService: ClaimNoticeNS } = await import('../modules/notification/notification.service');
+        const notices = await drainMmgClaimNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
+        if (notices.owed + notices.failed > 0) ctx.log.warn(notices, '[S1-6] direct-MMG claim notices still owed — retrying with backoff');
+        else if (notices.delivered > 0) ctx.log.info(notices, '[S1-6] direct-MMG claim notices delivered');
         return;
       }
       if (job.name === 'mover-revocation-outbox') {

@@ -77,6 +77,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await system(async () => {
+    // [S1-6] claim transitions now leave durable notice obligations; order_outbox carries no FK.
+    const mine = await app.prisma.order.findMany({ where: { customerId }, select: { id: true } });
+    if (mine.length) await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: mine.map((o) => o.id) } } });
     // order_status_logs is append-only — deleting the orders cascades it
     await app.prisma.order.deleteMany({ where: { customerId } });
     const owners = await app.prisma.vendorOwner.findMany({ where: { userId: { in: users } }, select: { id: true } });
@@ -129,7 +132,8 @@ describe('[DOC-1 P31-2] claim, not fact', () => {
     const mine = await claim(order.id, { paid: true, reference: `REF${RUN}B` });
     expect(mine.statusCode).toBe(200);
     expect(mine.json().data).toMatchObject({ storeClaimed: false });
-    expect((await orderOf(order.id)).customerPaymentRef).toBe(`REF${RUN}B`);
+    // [S1-6] The customer's reference is normalised exactly like the store's, so the two can be compared.
+    expect((await orderOf(order.id)).customerPaymentRef).toBe(`REF${RUN}B`.toUpperCase());
     expect(await system(() => app.prisma.auditLog.count({ where: { action: 'CUSTOMER_CLAIMED_PAID', entityId: order.id } }))).toBe(1);
     expect((await confirm(order.id, `REF${RUN}B`)).statusCode).toBe(200);
     const dispute = await claim(order.id, { paid: false });
@@ -139,7 +143,8 @@ describe('[DOC-1 P31-2] claim, not fact', () => {
     expect(held.mmgClaimMismatchAt).not.toBeNull();
     expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: held.paymentStatus, orderType: 'FOOD', mmgClaimMismatchAt: held.mmgClaimMismatchAt }, 'ACCEPTED')).toThrow(/disputes the store/);
     expect(await system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'mmg_claim_mismatch' }, body: { contains: order.id } } }))).toBeGreaterThanOrEqual(1);
-    const resolved = await app.inject({ method: 'POST', url: `/api/v1/admin/orders/${order.id}/payment-claim/resolve`, payload: { resolution: 'CUSTOMER_PAID', note: 'Wallet statement shows the transfer' }, headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': `Resolved ${RUN}: statement checked` } });
+    // [S1-6] A decision names the dispute generation the operator reviewed; a stale one is refused.
+    const resolved = await app.inject({ method: 'POST', url: `/api/v1/admin/orders/${order.id}/payment-claim/resolve`, payload: { resolution: 'CUSTOMER_PAID', note: 'Wallet statement shows the transfer', expectedClaimRevision: held.mmgClaimRevision }, headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': `Resolved ${RUN}: statement checked` } });
     expect(resolved.statusCode).toBe(200);
     const cleared = await orderOf(order.id);
     expect(cleared.mmgClaimMismatchAt).toBeNull();
