@@ -1,3 +1,5 @@
+import type { OrderVertical as SharedOrderVertical, OrderVerticalFacts } from '@swift/types';
+
 /**
  * What an order's status is called, in words, for the person waiting on it.
  *
@@ -22,12 +24,17 @@ export type OrderKind = 'FOOD_DELIVERY' | 'GROCERY_DELIVERY' | 'COURIER' | 'TAXI
 /**
  * What the SERVER declares an order's vertical to be. The persisted enum has
  * no SERVICE member — a barbershop booking is stored on the FOOD_DELIVERY
- * spine — so the API derives SERVICE from the business type and the
- * appointment fulfillment (`orderVertical`, apps/api) and sends it beside
- * `orderType` as `vertical`. Everything else is the persisted type. This file
+ * spine — so the API declares SERVICE for an APPOINTMENT (`orderVertical`,
+ * apps/api) and sends it beside `orderType` as `vertical`. Everything else,
+ * including a service business's goods, is the persisted type. This file
  * renders that declaration; it never re-derives it from a vendor or a line.
  */
 export type OrderVertical = OrderKind | 'SERVICE';
+
+/** The alias above must BE the contract `@swift/types` shares with the API:
+ *  a member added or misspelt on either side fails to compile here. */
+type SameType<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+export const ORDER_VERTICAL_IS_THE_SHARED_CONTRACT: SameType<OrderVertical, SharedOrderVertical> = true;
 
 /** Terminal states — an order here is finished and is not "active". */
 const TERMINAL: Record<string, string> = {
@@ -82,32 +89,63 @@ const FROM_A_STORE: Record<string, string> = {
   ARRIVED: 'Your rider has arrived',
 };
 
+/** The words per declared vertical. Typed by the contract, so a vertical the
+ *  API can declare without words here fails to compile. */
+const WORDS: Record<OrderVertical, Record<string, string>> = {
+  FOOD_DELIVERY: FROM_A_STORE,
+  GROCERY_DELIVERY: FROM_A_STORE,
+  COURIER,
+  TAXI,
+  SERVICE,
+};
+
+/** A vertical this file has no words for: every live status is "In progress". */
+const NO_WORDS: Record<string, string> = {};
+
+/** True when a wire value is a vertical this app has words for. */
+export function isOrderVertical(value: unknown): value is OrderVertical {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(WORDS, value);
+}
+
 export function orderStatusLabel(status: string | null | undefined, kind?: string | null): string {
   const s = String(status ?? '').toUpperCase();
   if (!s) return 'In progress';
 
   if (TERMINAL[s]) return TERMINAL[s]!;
 
-  const table = kind === 'TAXI' ? TAXI : kind === 'COURIER' ? COURIER : kind === 'SERVICE' ? SERVICE : FROM_A_STORE;
+  // No kind at all is the legacy caller — a store order from before the
+  // vertical existed. A kind this file does not know is NOT a store: it gets
+  // the honest fallback rather than a kitchen's words.
+  const table = kind == null ? FROM_A_STORE : isOrderVertical(kind) ? WORDS[kind] : NO_WORDS;
   // A taxi that somehow reports a rider status (or vice versa) should not be
   // described with the other vertical's words — fall through to the honest
   // fallback instead of borrowing a label that would be actively misleading.
   return table[s] ?? 'In progress';
 }
 
+/** What a screen presents: a declared vertical, or an explicit UNKNOWN for a
+ *  wire value this app has no words for (never silently a store). */
+export type PresentedVertical = OrderVertical | 'UNKNOWN';
+
 /**
  * The vertical a screen should speak: the server's declaration when it sent
  * one, else the persisted type — so an older API that sends no `vertical`
- * still gets its own words, and a newer one gets SERVICE for a booking.
+ * still gets its own words, and a newer one gets SERVICE for a booking. A
+ * declaration this app does not recognise is UNKNOWN: the server's word wins
+ * over the persisted type, and an unknown word is never rendered as a store.
  */
-export function presentedVertical(order: { vertical?: string | null; orderType?: string | null }): string | null {
-  return order.vertical ?? order.orderType ?? null;
+export function presentedVertical(order: OrderVerticalFacts): PresentedVertical | null {
+  const declared: string | null = order.vertical ?? order.orderType ?? null;
+  if (declared == null) return null;
+  return isOrderVertical(declared) ? declared : 'UNKNOWN';
 }
 
 /** Who has not been told yet while an order is held: a booking has not been
- *  sent to a "store". */
-export function orderRecipientNoun(vertical: string | null | undefined): 'the provider' | 'the store' {
-  return vertical === 'SERVICE' ? 'the provider' : 'the store';
+ *  sent to a "store", and an unknown vertical has a recipient, not a store. */
+export function orderRecipientNoun(vertical: string | null | undefined): 'the provider' | 'the store' | 'the recipient' {
+  if (vertical === 'SERVICE') return 'the provider';
+  if (vertical === 'UNKNOWN') return 'the recipient';
+  return 'the store';
 }
 
 /**

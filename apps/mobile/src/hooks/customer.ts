@@ -7,6 +7,8 @@ import { getAuthSessionSnapshot } from '../stores/authStore';
 import { isAxiosError } from 'axios';
 import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
+import type { OrderProjection } from '@swift/types';
+import type { PromiseView } from '../lib/promise';
 
 /**
  * Thin React Query wrappers over `customerApi`. Every consumer screen reads data
@@ -90,7 +92,31 @@ export function useSetDefaultAddress() {
   return useAddressMutation((id: string) => unwrap(customerApi.setDefaultAddress(id)));
 }
 
-export function useHome<T = any>(lat?: number, lng?: number) {
+/** Home's live-order card row: the shared projection (`vertical`, `fulfillment`
+ *  — the words) plus the hold, the promise and the vendor the card draws. */
+export type LiveOrderProjection = OrderProjection & {
+  holdExpiresAt: string | null;
+  placedAt: string;
+  scheduledFor?: string | null;
+  promise: PromiseView | null;
+  vendor: { id: string; name: string; logoUrl?: string | null; vendorType?: string | null } | null;
+};
+
+/** The Home feed as the app reads it. Only the live-order card is typed to the
+ *  shared contract here; the rails keep their untyped rows (a recorded
+ *  follow-up, not this lane's). */
+export interface HomeFeed {
+  activeOrder: LiveOrderProjection | null;
+  popularItems: any[];
+  featured: any[];
+  nearby: any[];
+  orderAgain: any[];
+  categories: any[];
+  openVendors: any[];
+  closedVendors: any[];
+}
+
+export function useHome<T = HomeFeed>(lat?: number, lng?: number) {
   return useQuery<T>({ queryKey: customerKeys.home(lat, lng), queryFn: () => unwrap<T>(customerApi.getHome(lat, lng)) });
 }
 
@@ -349,7 +375,7 @@ export function useOrdersInfinite() {
     queryFn: async ({ pageParam }) => {
       const res = await customerApi.getOrders(pageParam as number, { live: false });
       const body = res?.data ?? {};
-      return { items: (body.data ?? []) as any[], meta: body.meta ?? { page: 1, totalPages: 1 } };
+      return { items: (body.data ?? []) as OrderProjection[], meta: body.meta ?? { page: 1, totalPages: 1 } };
     },
     getNextPageParam: (last: { meta: { page: number; totalPages: number } }) =>
       last.meta.page < last.meta.totalPages ? last.meta.page + 1 : undefined,
@@ -381,14 +407,14 @@ export function useLiveOrders() {
       const res = await customerApi.getOrders(1, { live: true, limit: LIVE_ORDERS_LIMIT });
       const body = res?.data ?? {};
       return {
-        items: (body.data ?? []) as any[],
+        items: (body.data ?? []) as OrderProjection[],
         total: typeof body.meta?.total === 'number' ? (body.meta.total as number) : null,
       };
     },
   });
 }
 
-export function useOrder<T = any>(id: string, refetchInterval?: number) {
+export function useOrder<T = OrderProjection>(id: string, refetchInterval?: number) {
   return useQuery<T>({
     queryKey: customerKeys.order(id),
     queryFn: () => unwrap<T>(customerApi.getOrder(id)),

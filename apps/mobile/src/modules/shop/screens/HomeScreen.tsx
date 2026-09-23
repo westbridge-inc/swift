@@ -8,7 +8,7 @@ import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../../../services/api';
 import { color, radius, space } from '@swift/ui';
-import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
+import { useDiscoveryCategories, useHome, useToggleFavorite, type HomeFeed, type LiveOrderProjection } from '../../../hooks/customer';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../kit/pressable-scale';
@@ -182,7 +182,7 @@ function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[numb
  * the tracking screen uses, which returns null unless BOTH ends of the window
  * arrived from the server. No local five-minute assumption, one authority.
  */
-function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
+function LiveOrderCard({ order, navigation }: { order: LiveOrderProjection; navigation: any }) {
   // Tick ONLY while a hold is actually running. `holdRingWindow` is pure, so
   // re-evaluating it against a fresh `now` is the whole animation; when the
   // window closes the interval clears itself and the card goes quiet.
@@ -311,7 +311,7 @@ export function HomeScreen() {
   const { resolve: requestLocation } = useDeviceLocation({ refreshOnMount: false });
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
-  const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
+  const home = useHome<HomeFeed>(locationFix?.latitude, locationFix?.longitude);
   const toggleFav = useToggleFavorite();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —

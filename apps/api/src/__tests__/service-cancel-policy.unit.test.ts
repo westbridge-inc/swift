@@ -51,11 +51,16 @@ describe('an appointment slot is the moment the work happens', () => {
 
   it('RED reproduction — the promised window ends FREE_CANCEL_WINDOW_MIN before the slot, not five minutes after placing', () => {
     const expires = freeCancellationExpiresAt(booking(), NOW);
-    expect(expires?.getTime()).toBe(new Date('2026-09-24T10:00:00.000Z').getTime() - FREE_CANCEL_WINDOW_MIN * MINUTE);
+    // The slot's face is 10:00Z, which is 10:00 LOCAL (America/Guyana, UTC-4,
+    // the SCH-F convention): it happens at 14:00Z, so the window ends at
+    // 13:55Z — not at 09:55Z, four hours early [R2 F01].
+    expect(expires?.getTime()).toBe(new Date('2026-09-24T14:00:00.000Z').getTime() - FREE_CANCEL_WINDOW_MIN * MINUTE);
   });
 
   it('the slot inside the window is no longer free (the provider is about to start)', () => {
-    const soon = booking({ appointmentSlot: new Date(NOW.getTime() + 3 * MINUTE) });
+    // NOW (14:00Z) is 10:00 local; a slot three minutes away carries 10:03 on
+    // its UTC face, i.e. it happens at 14:03Z [R2 F01].
+    const soon = booking({ appointmentSlot: new Date('2026-09-23T10:03:00.000Z') });
     expect(isFreeCancellation(soon, NOW)).toBe(false);
     expect(freeCancellationExpiresAt(soon, NOW)).toBeNull();
   });

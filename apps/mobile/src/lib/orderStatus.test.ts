@@ -90,7 +90,9 @@ describe('every order status has words', () => {
     // its inputs change, the words here are no longer backed by anything.
     const api = readFileSync(join(process.cwd(), '../../apps/api/src/modules/order/order-vertical.ts'), 'utf8');
     expect(api).toMatch(/export function orderVertical\(/);
-    expect(api).toMatch(/vendorType === 'SERVICE'/);
+    // [R2 F02] The business type is NOT the discriminator: a service business's
+    // goods sold by delivery are a delivery. Only the appointment is a booking.
+    expect(api).not.toMatch(/vendorType === 'SERVICE'/);
     expect(api).toMatch(/fulfillment === 'APPOINTMENT'/);
   });
 

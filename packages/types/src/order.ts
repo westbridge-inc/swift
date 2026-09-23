@@ -158,3 +158,52 @@ export interface OrderStatusLog {
   changedBy?: string | null;
   createdAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// THE DECLARED VERTICAL — the one contract the API declares and the app reads.
+//
+// The persisted `OrderType` has no SERVICE member: a booking with a service
+// business rides the FOOD_DELIVERY spine, distinguished by its APPOINTMENT
+// fulfillment. The API DECLARES the vertical of every customer order
+// projection (`orderVertical`, apps/api) and sends it as `vertical` beside the
+// untouched `orderType`. Both sides spell it from here: the API's return type
+// is this alias and the app's vocabulary is asserted equal to it at compile
+// time, so a member added or misspelt on one side fails the other.
+// ---------------------------------------------------------------------------
+
+/** `OrderType` as it travels: the enum's string values. */
+export type OrderTypeValue = `${OrderType}`;
+
+/** The vertical the API declares for a customer order projection. */
+export type OrderVertical = OrderTypeValue | 'SERVICE';
+
+/** Fulfillment as it travels (schema `FulfillmentType`). */
+export type OrderFulfillment = 'DELIVERY' | 'PICKUP' | 'APPOINTMENT';
+
+/** The two facts a screen presents the vertical from: the declaration when the
+ *  server sent one, else the persisted type (an API that predates it). */
+export interface OrderVerticalFacts {
+  vertical?: OrderVertical | null;
+  orderType?: OrderTypeValue | null;
+}
+
+/** The serialized order projection every customer surface can rely on — Home's
+ *  live card, the activity list and the tracking screen all read these; each
+ *  endpoint adds its own fields on top. `vertical` is REQUIRED: this is the
+ *  contract of an API that declares it. A status this client does not know is
+ *  rendered by the label authority's honest fallback, so it stays `string`. */
+export interface OrderProjection {
+  id: string;
+  orderNumber: string;
+  status: string;
+  orderType: OrderTypeValue;
+  vertical: OrderVertical;
+  fulfillment?: OrderFulfillment | null;
+}
+
+/** The same projection from an API that predates the declaration: no
+ *  `vertical`. Kept separate so the required discriminator above is never
+ *  made optional by accident. */
+export interface LegacyOrderProjection extends Omit<OrderProjection, 'vertical'> {
+  vertical?: undefined;
+}

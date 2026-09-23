@@ -1,4 +1,5 @@
 import type { BookingConfig } from './booking.service';
+import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // THE availability computation (scheduling spec law: "no double-source") —
@@ -31,6 +32,16 @@ export function fmtSlotTime(d: Date): string {
     weekday: 'short', day: 'numeric', month: 'short',
     hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC',
   });
+}
+
+/** The REAL instant a slot happens. A slot carries the local wall-clock on its
+ *  UTC face (above), so `slot.getTime()` is NOT when it happens — in Guyana it
+ *  is four hours early. Anything that compares a slot with a real clock (the
+ *  cancellation cutoff) resolves it here, through the zone utils/guyana-day.ts
+ *  reads for the platform's one market, never with an offset of its own; a
+ *  per-market zone would plug in here. */
+export function slotInstant(slot: Date): Date {
+  return instantOfGuyanaWallClock(slot);
 }
 
 /** Candidate stride: a buffer widens the grid so every booking leaves its

@@ -67,3 +67,15 @@ export function endOfGuyanaDay(dateOnly: string): Date {
   const [y, m, d] = dateOnly.trim().split('-').map(Number) as [number, number, number];
   return guyanaWallClockToInstant(y, m, d, 23, 59, 59, 999);
 }
+
+/** The real instant of a Guyanese wall-clock time that a Date carries on its
+ *  UTC FACE — the booking-slot convention (`Date.UTC(y, m, d, localHour,
+ *  localMinute)`, booking/availability.ts): "Thu 10:00" is stored as 10:00Z
+ *  and HAPPENS at 14:00Z. Read as an instant, the face is four hours early —
+ *  the class of error the date-only helpers above exist for, on a slot. */
+export function instantOfGuyanaWallClock(utcFace: Date): Date {
+  return guyanaWallClockToInstant(
+    utcFace.getUTCFullYear(), utcFace.getUTCMonth() + 1, utcFace.getUTCDate(),
+    utcFace.getUTCHours(), utcFace.getUTCMinutes(), utcFace.getUTCSeconds(), utcFace.getUTCMilliseconds(),
+  );
+}

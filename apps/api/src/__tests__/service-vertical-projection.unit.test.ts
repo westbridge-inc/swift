@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
+import { slotInstant } from '../modules/booking/availability';
 import {
   MINUTE,
   foodDelivery,
@@ -128,7 +129,9 @@ describe('GET /orders/:id — the order screen’s contract', () => {
       canCancel: true,
       freeCancellationWindow: true,
       cancellationFee: 0,
-      freeCancellationExpiresAt: new Date(slot.getTime() - FREE_CANCEL_WINDOW_MIN * MINUTE).toISOString(),
+      // The slot's UTC face is local wall-clock (SCH-F); the window ends five
+      // minutes before the instant it actually happens [R2 F01].
+      freeCancellationExpiresAt: new Date(slotInstant(slot).getTime() - FREE_CANCEL_WINDOW_MIN * MINUTE).toISOString(),
     });
   });
 

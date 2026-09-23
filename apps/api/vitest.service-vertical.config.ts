@@ -21,6 +21,7 @@ export default defineConfig({
       'src/__tests__/service-vertical-projection.unit.test.ts',
       'src/__tests__/service-appointment-provider.unit.test.ts',
       'src/__tests__/service-vertical-contract.test.ts',
+      'src/__tests__/service-vertical-r2.unit.test.ts',
     ],
     testTimeout: 10_000,
     fileParallelism: false,

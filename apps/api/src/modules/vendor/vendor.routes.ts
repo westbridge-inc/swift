@@ -1557,6 +1557,13 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!);
+    // A booking has no kitchen: it is confirmed, then completed with
+    // complete-appointment. Marking it "preparing" sent the customer kitchen
+    // pushes for a haircut and stranded it (complete-appointment requires
+    // ACCEPTED). The canonical transition refuses this too, for every caller.
+    if (order.fulfillment === 'APPOINTMENT') {
+      throw new AppError(400, 'NOT_A_KITCHEN_ORDER', 'A booking is not prepared — confirm it, then mark it complete.');
+    }
     if (order.status === 'ACCEPTED') {
       const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
       return { success: true, data: updated };
@@ -1573,6 +1580,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!);
+    // A booking is never "ready for pickup" — see /preparing above; a booking
+    // that already sits in PREPARING is not reopened into the kitchen path.
+    if (order.fulfillment === 'APPOINTMENT') {
+      throw new AppError(400, 'NOT_A_KITCHEN_ORDER', 'A booking is not marked ready — confirm it, then mark it complete.');
+    }
     // Grocery/goods picking gate (§5.3): the bag never closes with an open
     // question in it — every line picked, or its substitution resolved.
     // Restaurants don't shelf-pick, so only quantity-tracked store types gate.

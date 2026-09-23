@@ -22,8 +22,9 @@ describe('orderVertical — SERVICE is declared from the business type and the a
     expect(orderVertical({ orderType: 'FOOD_DELIVERY', fulfillment: 'APPOINTMENT', vendor: { vendorType: 'SERVICE' } })).toBe('SERVICE');
   });
 
-  it('the business type alone decides: a line a service business fulfils by delivery is still not food', () => {
-    expect(orderVertical({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', vendor: { vendorType: 'SERVICE' } })).toBe('SERVICE');
+  it('the business type alone does NOT decide: a service business’s goods sold by delivery or pickup keep their delivery words [R2 F02]', () => {
+    expect(orderVertical({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', vendor: { vendorType: 'SERVICE' } })).toBe('FOOD_DELIVERY');
+    expect(orderVertical({ orderType: 'FOOD_DELIVERY', fulfillment: 'PICKUP', vendor: { vendorType: 'SERVICE' } })).toBe('FOOD_DELIVERY');
   });
 
   it('the appointment alone decides when the vendor relation was not loaded', () => {

@@ -981,9 +981,11 @@ export async function customerRoutes(app: FastifyInstance) {
               orderType: true,
               // `orderType` alone cannot say what KIND of vendor order this is:
               // a SERVICE business's appointment is persisted on the FOOD_DELIVERY
-              // spine. The fulfillment and the business type are the two facts
-              // `orderVertical` declares the card's words from — sent here, at
-              // the select, where their absence never failed anything.
+              // spine. The fulfillment is the fact `orderVertical` declares the
+              // card's words from — sent here, at the select, where its absence
+              // never failed anything. The business type rides beside it for the
+              // card; it is not the discriminator (a service business's goods
+              // are deliveries).
               fulfillment: true,
               vendor: { select: { id: true, name: true, logoUrl: true, vendorType: true } },
               // The hold — the window in which the store has not been told yet.

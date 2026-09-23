@@ -11,6 +11,7 @@ import { vendorPhoto } from '../../../lib/images';
 // The single authority for what a status is CALLED — type-aware, so a ride is
 // never described with a store's words. This screen owns tone, never wording.
 import { orderStatusLabel, presentedVertical } from '../../../lib/orderStatus';
+import type { OrderVerticalFacts } from '@swift/types';
 import {
   Photo,
   EmptyState, ErrorState, LoadingBlock, Money,
@@ -80,7 +81,7 @@ const STATUS_TONE: Record<string, PillTone> = {
 
 /** The pill: never the raw enum. An unknown status keeps a neutral tone and
  *  gets the authority's honest "In progress" rather than its own name. */
-function statusPill(o: { status: string; orderType?: string | null; vertical?: string | null }): { label: string; tone: PillTone } {
+function statusPill(o: OrderVerticalFacts & { status: string }): { label: string; tone: PillTone } {
   return {
     // The server's declared vertical (SERVICE for a booking), else the
     // persisted type — one helper, shared with Home's live card.
