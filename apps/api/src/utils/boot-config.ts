@@ -1,4 +1,6 @@
 import { runtimeMode } from './runtime-mode';
+import { firstInvalidTwilioConfig } from './twilio-identity';
+import { assertDisabledCardRailConfig } from './card-rail';
 
 /**
  * Fail-closed boot configuration guard. Called before the server accepts
@@ -46,11 +48,14 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   }
 
   // Subscription charges are real platform revenue. The sandbox succeeds for
-  // synthetic tokens, so production must name and configure a live processor.
+  // synthetic tokens, so production must configure a live processor or
+  // explicitly disable cards. The disabled adapter refuses all instructions;
+  // enrollment/rail-selection boundaries never offer CARD.
   const paymentProvider = env['PAYMENT_PROVIDER'];
-  if (paymentProvider !== 'stripe' && paymentProvider !== 'powertranz') {
-    throw new Error('FATAL: PAYMENT_PROVIDER must be stripe or powertranz in production; sandbox/unset can record fake captured revenue. Refusing to start.');
+  if (paymentProvider !== 'stripe' && paymentProvider !== 'powertranz' && paymentProvider !== 'disabled') {
+    throw new Error('FATAL: PAYMENT_PROVIDER must be stripe, powertranz or disabled in production; sandbox/unset can record fake captured revenue. Refusing to start.');
   }
+  assertDisabledCardRailConfig(env);
   if (paymentProvider === 'stripe' && !env['STRIPE_SECRET_KEY']?.startsWith('sk_live_')) {
     throw new Error('FATAL: PAYMENT_PROVIDER=stripe requires a live STRIPE_SECRET_KEY in production. Refusing to start.');
   }
@@ -85,6 +90,13 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   const notifier = env['NOTIFICATION_PROVIDER'] ?? 'dev';
   if (notifier === 'dev') {
     throw new Error('FATAL: NOTIFICATION_PROVIDER is dev (console) in production — OTP SMS would never be delivered, so no one can sign up or log in. Set NOTIFICATION_PROVIDER=twilio with the TWILIO_* credentials. Refusing to start.');
+  }
+  if (notifier !== 'twilio') {
+    throw new Error('FATAL: NOTIFICATION_PROVIDER must be twilio in production. Refusing to start.');
+  }
+  const invalidTwilioField = firstInvalidTwilioConfig(env);
+  if (invalidTwilioField) {
+    throw new Error(`FATAL: ${invalidTwilioField} is missing or malformed when NOTIFICATION_PROVIDER=twilio. Refusing to start.`);
   }
 
   // [NOC-A F1/F2] The SAME trap, one door over, and it was unguarded: push

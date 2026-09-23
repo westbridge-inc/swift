@@ -14,6 +14,7 @@ import { log } from '../../utils/logger';
 import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor, weeklyFeeAmount } from './subscription-fee';
+import { cardRailKilled } from '../../utils/card-rail';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -606,11 +607,15 @@ export class BillingService {
         continue;
       }
       if (found.status === 'not_found') {
-        if (now.getTime() < ttlAt.getTime() && sub.paymentToken && process.env['CARD_RAIL_KILL'] !== '1') {
+        if (now.getTime() < ttlAt.getTime() && sub.paymentToken && !cardRailKilled()) {
           // Never received: the SAME instruction under the SAME key — the
           // processor's idempotency makes a late arrival of the first one and
           // this one the same capture.
           const result = await this.payments.chargeToken({ token: sub.paymentToken, amount, currencyCode: sub.currencyCode, idempotencyKey: row.clientKey, description: `Swift weekly subscription (${sub.type})` });
+          if (result.code === 'CARD_RAIL_DISABLED') {
+            out.stillUnknown += 1;
+            continue;
+          }
           if (result.status === 'succeeded') {
             const trio = await this.pinnedTrioFor(sub.id, periodKey);
             await this.applySuccessfulCharge(sub as SubWithRelations, amount, result.providerRef, now, periodKey, row.id, trio);
@@ -761,7 +766,7 @@ export class BillingService {
     if (sub.billingMethod === 'CARD' && sub.paymentToken) {
       // [M-01] The kill switch stops NEW instructions only; the reconciler
       // that settles what the processor already did never stops.
-      if (process.env['CARD_RAIL_KILL'] === '1') return { ok: false, deferred: true };
+      if (cardRailKilled()) return { ok: false, deferred: true };
 
       // [M-01 / M-02] THE INTENT BEFORE THE EFFECT, on the card rail. Before,
       // the processor was asked with nothing durable on our side: a process
@@ -803,6 +808,7 @@ export class BillingService {
         description: `Swift weekly subscription (${sub.type})`,
       });
       await this.observer.afterProviderReturned?.(result);
+      if (result.code === 'CARD_RAIL_DISABLED') return { ok: false, deferred: true };
       if (result.status === 'succeeded') return { ok: true, ref: result.providerRef, settlePaymentId: intentId };
       if (result.status === 'unknown') {
         return { ok: false, unknown: true, clientKey: key, intentId, ...(result.reason ? { failureRaw: result.reason } : {}) };
@@ -1299,9 +1305,12 @@ export class BillingService {
   /**
    * §13 rail selection — one place flips how a subscription pays. CASH is the
    * prepaid path; MOBILE_MONEY needs the payer's MMG account. CARD enrollment
-   * stays with the tokenization flow, not here.
+   * is unavailable through this boundary, including unchecked runtime callers.
    */
   async setBillingRail(subscriptionId: string, method: 'CASH' | 'MOBILE_MONEY', mmgPayerMsisdn?: string) {
+    if (method !== 'CASH' && method !== 'MOBILE_MONEY') {
+      throw new AppError(400, 'BILLING_RAIL_UNAVAILABLE', 'Choose cash or mobile money.');
+    }
     if (method === 'MOBILE_MONEY' && !mmgPayerMsisdn?.trim()) {
       throw new AppError(400, 'MSISDN_REQUIRED', 'Your MMG account number is required to pay the weekly fee via MMG.');
     }

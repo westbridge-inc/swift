@@ -125,3 +125,26 @@ describe('[W-32] the payment that opens is the payment that was shown', () => {
     expect(screen.queryByRole('button', { name: /Pay .* by MMG/ })).toBeNull();
   });
 });
+
+describe('taxi safety continues in the mobile app', () => {
+  it.each(['REQUESTED', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS', 'COMPLETED', 'CANCELLED'])(
+    '%s shows the mobile safety notice without pretending web can start the ride', async (status) => {
+      vi.spyOn(customer, 'getOrder').mockResolvedValue({
+        ...ORDER, orderType: 'TAXI', status, paymentMethod: 'CASH', paymentAction: null,
+      } as never);
+      vi.spyOn(customer, 'getRide').mockResolvedValue({ id: ORDER.id } as never);
+      vi.spyOn(customer, 'activeRide').mockResolvedValue(null);
+      render(<OrderDetailPage />);
+      expect(await screen.findByText(/Open the Swift app for your safety PIN and SOS/)).toBeTruthy();
+      expect(screen.getByText(/You cannot start or manage ride safety on the web/)).toBeTruthy();
+      expect(screen.getByRole('link', { name: 'Open Swift app' }).getAttribute('href')).toBe('swift://');
+      expect(screen.queryByRole('button', { name: /start ride|SOS|share trip|not my driver/i })).toBeNull();
+    },
+  );
+
+  it('does not show the taxi notice for a delivery', async () => {
+    render(<OrderDetailPage />);
+    await payButton();
+    expect(screen.queryByText(/Open the Swift app for your safety PIN and SOS/)).toBeNull();
+  });
+});

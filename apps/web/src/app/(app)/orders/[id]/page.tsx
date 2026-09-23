@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { OpenSwiftApp } from '@/components/open-swift-app';
 import { useParams } from 'next/navigation';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
@@ -468,6 +469,14 @@ export default function OrderDetailPage() {
           {order.status.replaceAll('_', ' ').toLowerCase()}
         </span>
       </section>
+
+      {isTaxi ? (
+        <section className={styles.moneyNotice} aria-labelledby="taxi-app-title">
+          <h2 id="taxi-app-title" className={styles.cardTitle}>Open the Swift app for your safety PIN and SOS</h2>
+          <p>You cannot start or manage ride safety on the web. Use the app for trip sharing and driver checks too.</p>
+          <OpenSwiftApp />
+        </section>
+      ) : null}
 
       {trackingError ? (
         <div className={styles.trackingNotice} role="alert">

@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { Prisma, type PrismaClient, type QualificationType } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { formatGuyanaTime } from '../../utils/guyana-day';
@@ -9,126 +9,21 @@ import { formatGuyanaTime } from '../../utils/guyana-day';
  * canonical checklist can run before the transaction commits. */
 type ProviderVerificationDb = PrismaClient | Prisma.TransactionClient;
 
-// ---------------------------------------------------------------------------
-// Services vertical (spec §4.6). Trust is risk-tiered: verify hard where someone
-// could be physically harmed. Every provider needs ID + police clearance; a
-// trade qualification is an optional "Certified" badge. Providers without one
-// can still join, shown transparently as "self-skilled".
-// ---------------------------------------------------------------------------
-
-export const SERVICE_TRADE_CATALOG = {
-  electrician: {
-    label: 'Electrician', riskTier: 'HIGH',
-    aliases: ['electrician', 'electrical', 'electrical contractor', 'electrical installation contractor'],
-  },
-  plumber: {
-    label: 'Plumber', riskTier: 'HIGH',
-    aliases: ['plumber', 'plumbing', 'major plumbing'],
-  },
-  gas_fitter: {
-    label: 'Gas fitter', riskTier: 'HIGH',
-    aliases: ['gas fitter', 'gas fitting', 'gas technician'],
-  },
-  carpenter: {
-    label: 'Carpenter / joiner', riskTier: 'LOW',
-    aliases: ['carpenter', 'carpentry', 'joiner', 'carpenter joiner'],
-  },
-  cleaner: { label: 'Cleaner', riskTier: 'LOW', aliases: ['cleaner', 'cleaning', 'house cleaner'] },
-  ac_refrigeration: {
-    label: 'AC & refrigeration technician', riskTier: 'LOW',
-    aliases: ['ac repair', 'a c repair', 'ac refrigeration', 'ac and refrigeration technician', 'air conditioning repair', 'refrigeration technician', 'hvac'],
-  },
-  mechanic: { label: 'Mechanic', riskTier: 'LOW', aliases: ['mechanic', 'auto mechanic', 'vehicle mechanic'] },
-  painter: { label: 'Painter', riskTier: 'LOW', aliases: ['painter', 'painting', 'house painter'] },
-  mason: { label: 'Mason', riskTier: 'LOW', aliases: ['mason', 'masonry', 'bricklayer'] },
-  welder: {
-    label: 'Welder / fabricator', riskTier: 'LOW',
-    aliases: ['welder', 'welding', 'fabricator', 'welder fabricator'],
-  },
-  gardener: { label: 'Gardener', riskTier: 'LOW', aliases: ['gardener', 'gardening', 'landscaper', 'landscaping'] },
-  appliance_electronics_repair: {
-    label: 'Appliance & electronics repair', riskTier: 'LOW',
-    aliases: ['appliance repair', 'electronics repair', 'appliance and electronics repair'],
-  },
-  solar_generator_inverter_installer: {
-    label: 'Solar / generator / inverter installer', riskTier: 'LOW',
-    aliases: ['solar installer', 'generator installer', 'inverter installer', 'solar generator inverter installer'],
-  },
-  tiler: { label: 'Tiler', riskTier: 'LOW', aliases: ['tiler', 'tiling', 'tile installer'] },
-  pest_control: { label: 'Pest control', riskTier: 'LOW', aliases: ['pest control', 'exterminator'] },
-  heavy_equipment_operator: {
-    label: 'Heavy-equipment operator', riskTier: 'LOW',
-    aliases: ['heavy equipment operator', 'heavy machinery operator'],
-  },
-  chef: { label: 'Chef', riskTier: 'LOW', aliases: ['chef', 'personal chef'] },
-  caterer: { label: 'Caterer', riskTier: 'LOW', aliases: ['caterer', 'catering'] },
-  party_organizer: { label: 'Party organizer', riskTier: 'LOW', aliases: ['party organizer', 'event planner', 'party planner'] },
-  barber: { label: 'Barber', riskTier: 'LOW', aliases: ['barber', 'barbering'] },
-  hairdresser: { label: 'Hairdresser', riskTier: 'LOW', aliases: ['hairdresser', 'hair stylist', 'hairstylist'] },
-  tutor: { label: 'Tutor', riskTier: 'LOW', aliases: ['tutor', 'tutoring'] },
-  mover: { label: 'Mover', riskTier: 'LOW', aliases: ['mover', 'moving service', 'furniture mover'] },
-} as const;
-
-export type ServiceTradeId = keyof typeof SERVICE_TRADE_CATALOG;
-
-function normalizeTradeAlias(input: string): string {
-  return input
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/&/g, ' and ')
-    .replace(/[’']/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-    .replace(/\s+/g, ' ');
-}
-
-const SERVICE_TRADE_ALIASES = new Map<string, ServiceTradeId>();
-for (const [tradeId, entry] of Object.entries(SERVICE_TRADE_CATALOG) as Array<[
-  ServiceTradeId,
-  (typeof SERVICE_TRADE_CATALOG)[ServiceTradeId],
-]>) {
-  SERVICE_TRADE_ALIASES.set(normalizeTradeAlias(tradeId), tradeId);
-  for (const alias of entry.aliases) SERVICE_TRADE_ALIASES.set(normalizeTradeAlias(alias), tradeId);
-}
-
-/** Translate user-facing labels/legacy aliases to the one persisted trade ID. */
-export function canonicalServiceTrade(input: string): ServiceTradeId | null {
-  return SERVICE_TRADE_ALIASES.get(normalizeTradeAlias(input)) ?? null;
-}
-
-export function requireCanonicalServiceTrade(input: string): ServiceTradeId {
-  const trade = canonicalServiceTrade(input);
-  if (!trade) {
-    throw new AppError(400, 'UNKNOWN_SERVICE_TRADE', 'Choose a service from Swift’s supported trade catalog.');
-  }
-  return trade;
-}
-
-export function serviceTradeLabel(trade: string): string {
-  const canonical = canonicalServiceTrade(trade);
-  return canonical ? SERVICE_TRADE_CATALOG[canonical].label : trade;
-}
-
-export function tradeRiskTier(trade: string): 'HIGH' | 'LOW' {
-  const canonical = canonicalServiceTrade(trade);
-  // Unknown trades are rejected at every request boundary. Fail high if an
-  // internal caller nevertheless asks for guidance rather than understating risk.
-  return canonical ? SERVICE_TRADE_CATALOG[canonical].riskTier : 'HIGH';
-}
-
-export function riskGuidance(trade: string): string {
-  return tradeRiskTier(trade) === 'HIGH'
-    ? 'Higher-risk work — we strongly recommend choosing a licensed (Certified) provider. Certified providers are shown first.'
-    : 'Every provider is ID-verified and police-cleared — choose by ratings and reviews.';
-}
-
-/** A credential can only badge the exact trade selected when it was submitted.
- * GEI is specifically an electrician credential; generic qualifications still
- * require a trusted reviewer and remain bound to their submitted trade. */
-export function qualificationTypeMatchesTrade(type: QualificationType, trade: ServiceTradeId): boolean {
-  return type !== 'GEI_LICENCE' || trade === 'electrician';
-}
-
+import {
+  canonicalServiceTrade,
+  isServiceCategoryOperational,
+  type ServiceTradeId,
+} from './service-catalog';
+export {
+  SERVICE_TRADE_CATALOG,
+  canonicalServiceTrade,
+  requireCanonicalServiceTrade,
+  serviceTradeLabel,
+  tradeRiskTier,
+  riskGuidance,
+  qualificationTypeMatchesTrade,
+  type ServiceTradeId,
+} from './service-catalog';
 /**
  * Booking reminders (master plan §4.3): both sides get ONE nudge in the 24h
  * before a confirmed slot. Covers service jobs (provider-confirmed) and
@@ -230,7 +125,7 @@ export async function providerChecklist(prisma: ProviderVerificationDb, userId: 
   const base = lists['SERVICE_PROVIDER'] ?? [];
   const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true } });
   const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
-  if (!trade) return [];
+  if (!trade || !isServiceCategoryOperational(trade)) return [];
   const extra = lists[tradeChecklistKey(trade)] ?? [];
   return [...new Set([...base, ...extra])];
 }
