@@ -50,12 +50,25 @@ import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { safeVendorRole, TabHeader, VendorBillingNotice } from '../shared';
+import { useAuthStore } from '../../../stores/authStore';
+import { useVendorPreview } from '../../../stores/vendorPreview';
 
 export function VendorAccountScreen() {
   const navigation = useNavigation<any>();
   const { owner, store } = useVendorProfile();
   const myRole = safeVendorRole(owner?.myRole);
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // [SPS-F-0024] A signed-out guest in the sample dashboard ("Preview a
+  // business dashboard" on the welcome screen) has no account for Switch app to
+  // move. The switch is the server's and needs a session, so a guest's pick
+  // went nowhere. That guest gets the Orders banner's own Exit instead: the
+  // sample is cleared, then the welcome screen offers Swift, Driver and
+  // Business. A signed-in account keeps Switch app unchanged.
+  const samplePreview = useVendorPreview((s) => s.previewType) != null;
+  const exitPreview = useVendorPreview((s) => s.exitPreview);
+  const signedIn = useAuthStore((s) => s.isAuthenticated);
+  const setIntent = useAuthStore((s) => s.setIntent);
+  const guestSample = samplePreview && !signedIn;
   const isOwner = myRole === 'OWNER';
   const isManager = myRole === 'OWNER' || myRole === 'MANAGER';
   const sub = useVendorSubscription(isOwner);
@@ -148,7 +161,19 @@ export function VendorAccountScreen() {
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
           <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — orders, billing, account" onPress={() => navigation.navigate('GetHelp')} />
-          <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Driver" onPress={() => setSwitcherOpen(true)} />
+          {guestSample ? (
+            <SettingsRow
+              icon="arrow-left"
+              label="Exit preview"
+              sub="Back to the welcome screen"
+              onPress={() => {
+                exitPreview();
+                setIntent(null);
+              }}
+            />
+          ) : (
+            <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Driver" onPress={() => setSwitcherOpen(true)} />
+          )}
         </Card>
 
         {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} /> : null}

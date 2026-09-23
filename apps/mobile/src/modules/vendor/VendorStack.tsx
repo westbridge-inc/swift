@@ -12,6 +12,7 @@ import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { VendorCategoryReviewScreen } from './screens/VendorCategoryReviewScreen';
 import { VendorTierScreen } from './screens/VendorTierScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
+import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { disconnectSocket } from '../../services/socket';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { useVendorProfile, useVendorOrdersLive } from '../../hooks/vendorops';
@@ -20,7 +21,7 @@ import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { useVendorPreview } from '../../stores/vendorPreview';
 import { VendorBulkImportScreen } from './screens/VendorBulkImportScreen';
 import { NewOrderTakeover } from './NewOrderTakeover';
-import { catalogueMeta, safeVendorRole } from './shared';
+import { catalogueMeta, safeVendorRole, TabHeader } from './shared';
 import { billingBlocked } from '../../lib/vendorProfile';
 import { BusinessSetup, VendorOnboarding } from './screens/BusinessSetup';
 import { VendorSwiftNumberScreen } from './screens/VendorSwiftNumberScreen';
@@ -52,6 +53,7 @@ function VendorRoot() {
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   const [repairingSelection, setRepairingSelection] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const { preview, previewType, enterPreview, exitPreview } = useVendorPreview();
   // Preview is a per-store choice: switching stores lands on that store's
   // real state (checklist for pending, board for live) — never a stale peek.
@@ -99,10 +101,14 @@ function VendorRoot() {
   // used to arrive as null and land here as the setup wizard — offered to a
   // working restaurant while its orders were live. Absence is a verified 404
   // (or a well-formed owner with no stores); everything else says so, and
-  // offers the one thing that helps: try again.
+  // offers the one thing that helps: try again. It must not be a one-way door:
+  // `intent` persists, so a cold start reopens this same screen — the header's
+  // Switch app and Log out are the ways back to Swift and the welcome.
   if (profileState === 'error') {
     return (
       <Screen>
+        <TabHeader title="Your business" onSwitch={() => setSwitcherOpen(true)} />
+        <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
         <ErrorState
           message={
             failure === 'unauthorized' ? 'Your session ended. Sign in again to open your store.'
@@ -127,7 +133,7 @@ function VendorRoot() {
       {billingSuspended ? (
         <VendorBillingSuspended store={store} stores={stores} myRole={myRole} />
       ) : store.status !== 'ACTIVE' && !preview ? (
-        <VendorOnboarding store={store} onPreview={enterPreview} />
+        <VendorOnboarding store={store} onPreview={() => enterPreview()} />
       ) : (
         <VendorTabs />
       )}
