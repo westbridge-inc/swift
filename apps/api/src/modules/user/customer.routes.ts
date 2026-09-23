@@ -13,7 +13,7 @@ import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/di
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
-import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache } from './home-cache';
+import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
@@ -909,52 +909,118 @@ export async function customerRoutes(app: FastifyInstance) {
     const userId = request.user?.userId;
     const { lat, lng } = latLngQuerySchema.parse(request.query);
 
-    // Try Redis cache
     const cacheKey = homeCacheKey(userId, lat, lng);
-    const cached = await app.redis.get(cacheKey).catch(() => null);
-    if (cached) {
-      return { success: true, data: JSON.parse(cached) };
-    }
 
-    if (userId) await resolveCustomer(app, userId);
+    // Only discovery is cacheable. Start both loaders together: neither a slow
+    // Redis read nor a cold discovery fill can substitute for order authority.
+    const loadDiscovery = async () => {
+      const cached = parseHomeDiscovery(await app.redis.get(cacheKey).catch(() => null));
+      if (cached) return cached;
 
-    // Parallel fetches
-    const [
-      allVendors,
-      favoriteIds,
-      activeOrder,
-      recentOrders,
-      popularItemRows,
-    ] = await Promise.all([
-      // All active, document-verified vendors with at least one orderable item
-      // (unverified stores AND empty stores stay out of discovery — a vendor
-      // with nothing available dead-ends when tapped; favorites and direct
-      // links still resolve their storefront)
-      app.prisma.vendor.findMany({
-        // [F-028-07] `tenant: { isActive: true }` is load-bearing: a guest has
-        // no tenant context, which the Prisma extension defines as an UNSCOPED
-        // query — so without the relational predicate a deactivated operator's
-        // whole catalog kept serving here after the platform shut them off.
-        where: { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } },
-        include: {
-          // imageUrl was NOT selected, so Home had nothing to draw a category
-          // chip with and every chip fell back to the same stock photograph —
-          // "Popular", "Produce" and "Rice & Grains" were one identical image.
-          // The column has been on Category the whole time.
-          categories: { select: { id: true, name: true, imageUrl: true }, take: 5 },
-        },
-        orderBy: { averageRating: 'desc' },
-        take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
-      }),
+      if (userId) await resolveCustomer(app, userId);
+      const [allVendors, favoriteIds, popularItemRows] = await Promise.all([
+        // All active, document-verified vendors with at least one orderable item
+        // (unverified stores AND empty stores stay out of discovery — a vendor
+        // with nothing available dead-ends when tapped; favorites and direct
+        // links still resolve their storefront)
+        app.prisma.vendor.findMany({
+          // [F-028-07] `tenant: { isActive: true }` is load-bearing: a guest has
+          // no tenant context, which the Prisma extension defines as an UNSCOPED
+          // query — so without the relational predicate a deactivated operator's
+          // whole catalog kept serving here after the platform shut them off.
+          where: { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } },
+          include: {
+            // imageUrl was NOT selected, so Home had nothing to draw a category
+            // chip with and every chip fell back to the same stock photograph —
+            // "Popular", "Produce" and "Rice & Grains" were one identical image.
+            // The column has been on Category the whole time.
+            categories: { select: { id: true, name: true, imageUrl: true }, take: 5 },
+          },
+          orderBy: { averageRating: 'desc' },
+          take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
+        }),
+        // Customer's favorite vendor IDs (guests have none)
+        userId
+          ? app.prisma.vendor.findMany({
+              where: { favoritedBy: { some: { userId } } },
+              select: { id: true },
+            }).then((vs) => new Set(vs.map((v) => v.id)))
+          : Promise.resolve(new Set<string>()),
+        // Popular dishes — top items by lifetime orders (Home "Popular right now" rail)
+        app.prisma.item.findMany({
+          // The FULL vendor-visibility predicate from the vendors query above —
+          // isVerified and tenant.isActive included. Without them a platform-
+          // deactivated or unverified operator's STORE was hidden while their
+          // DISH sat above the fold ([F-028-07] applies here identically: a
+          // guest request is unscoped, so the relational predicate is the only
+          // thing standing between a shut-off operator and the Home rail).
+          where: { isAvailable: true, vendor: visibleVendorRelForCaller() },
+          orderBy: { totalOrdered: 'desc' },
+          take: 10,
+          select: {
+            id: true,
+            name: true,
+            imageUrl: true,
+            basePrice: true,
+            vendorId: true,
+            vendor: { select: { id: true, name: true, vendorType: true, latitude: true, longitude: true, estimatedPrepTime: true } },
+          },
+        }),
+      ]);
 
-      // Customer's favorite vendor IDs (guests have none)
-      userId
-        ? app.prisma.vendor.findMany({
-            where: { favoritedBy: { some: { userId } } },
-            select: { id: true },
-          }).then((vs) => new Set(vs.map((v) => v.id)))
-        : Promise.resolve(new Set<string>()),
+      // Enrich vendors. R8/RAT-I: the home feed feeds EVERY Home rail
+      // (featured/nearby/order-again/open/closed), so the star surface rides
+      // here too — the sim certification caught these rails showing "New"
+      // while browse showed the real display (the fields were missing HERE).
+      const homeSurfaces = await ratingSurfaces(app.prisma, 'VENDOR', allVendors.map((v) => v.id));
+      // [FUL-003b completion] Resolve the buyer's delivery schedule ONCE for this
+      // request, exactly as the cart preview and checkout already do, so the fee
+      // on a vendor card is the fee the checkout will charge. A guest has no
+      // country of their own; 'GY' is the launch market and the same fallback
+      // courier.routes.ts uses.
+      const homeDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
+        (userId ? (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
+      );
+      const enriched = allVendors.map((v) => ({
+        ...enrichVendor(v, lat, lng, homeDeliveryRates),
+        isFavorite: favoriteIds.has(v.id),
+        ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
+      }));
 
+      // Sort by distance if location provided, otherwise by rating
+      if (lat != null && lng != null) {
+        enriched.sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
+      }
+
+      // Categories (distinct)
+      const categorySet = new Map<string, { id: string; name: string; imageUrl: string | null }>();
+      for (const v of allVendors) {
+        for (const c of (v.categories ?? [])) {
+          if (!categorySet.has(c.id)) categorySet.set(c.id, c);
+        }
+      }
+
+      const popularItems = popularItemRows.map((it) => ({
+        id: it.id,
+        name: it.name,
+        imageUrl: it.imageUrl,
+        price: Number(it.basePrice),
+        vendorId: it.vendorId,
+        vendorName: it.vendor?.name ?? '',
+        vendorType: it.vendor?.vendorType ?? null,
+        // "Vendor · N min" on the card — the vendor card's own number (prep +
+        // travel from the buyer's position), null without a position. Computed
+        // here, never on the client.
+        etaMin: it.vendor ? enrichVendor(it.vendor, lat, lng, homeDeliveryRates).etaMin : null,
+      }));
+
+      // Keep the full bounded candidate pool, not just the first visible cards:
+      // fresh order history can name a vendor outside the 30-open/10-closed rails.
+      const discovery = { vendors: enriched, popularItems, categories: Array.from(categorySet.values()) };
+      await app.redis.setex(cacheKey, HOME_CACHE_TTL, JSON.stringify(discovery)).catch(() => {});
+      return discovery;
+    };
+    const loadOrders = () => Promise.all([
       // Active order (guests have none)
       userId
         ? app.prisma.order.findFirst({
@@ -985,11 +1051,8 @@ export async function customerRoutes(app: FastifyInstance) {
               // the server rather than being synthesized from an assumed length.
               //
               // It goes over the wire as an ABSOLUTE instant, never a
-              // remaining-seconds count: this response is cached for
-              // HOME_CACHE_TTL (60s) against a five-minute window, so a
-              // server-baked countdown would arrive up to 20% wrong on the one
-              // number the cancellation policy is built around. An absolute
-              // timestamp is still exactly true when it comes out of the cache.
+              // remaining-seconds count: the client renders the window from
+              // server instants, even between Home refreshes.
               holdExpiresAt: true,
               // [ALG-07] A scheduled order is held until its release: the card
               // says the slot and the release, not a thirty-hour countdown.
@@ -1011,52 +1074,12 @@ export async function customerRoutes(app: FastifyInstance) {
             distinct: ['vendorId'],
           })
         : Promise.resolve([] as { vendorId: string }[]),
-
-      // Popular dishes — top items by lifetime orders (Home "Popular right now" rail)
-      app.prisma.item.findMany({
-        // The FULL vendor-visibility predicate from the vendors query above —
-        // isVerified and tenant.isActive included. Without them a platform-
-        // deactivated or unverified operator's STORE was hidden while their
-        // DISH sat above the fold ([F-028-07] applies here identically: a
-        // guest request is unscoped, so the relational predicate is the only
-        // thing standing between a shut-off operator and the Home rail).
-        where: { isAvailable: true, vendor: visibleVendorRelForCaller() },
-        orderBy: { totalOrdered: 'desc' },
-        take: 10,
-        select: {
-          id: true,
-          name: true,
-          imageUrl: true,
-          basePrice: true,
-          vendorId: true,
-          vendor: { select: { id: true, name: true, vendorType: true, latitude: true, longitude: true, estimatedPrepTime: true } },
-        },
-      }),
     ]);
 
-    // Enrich vendors. R8/RAT-I: the home feed feeds EVERY Home rail
-    // (featured/nearby/order-again/open/closed), so the star surface rides
-    // here too — the sim certification caught these rails showing "New"
-    // while browse showed the real display (the fields were missing HERE).
-    const homeSurfaces = await ratingSurfaces(app.prisma, 'VENDOR', allVendors.map((v) => v.id));
-    // [FUL-003b completion] Resolve the buyer's delivery schedule ONCE for this
-    // request, exactly as the cart preview and checkout already do, so the fee
-    // on a vendor card is the fee the checkout will charge. A guest has no
-    // country of their own; 'GY' is the launch market and the same fallback
-    // courier.routes.ts uses.
-    const homeDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
-      (userId ? (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
-    );
-    const enriched = allVendors.map((v) => ({
-      ...enrichVendor(v, lat, lng, homeDeliveryRates),
-      isFavorite: favoriteIds.has(v.id),
-      ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
-    }));
-
-    // Sort by distance if location provided, otherwise by rating
-    if (lat != null && lng != null) {
-      enriched.sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
-    }
+    // A failed order read rejects the request. Never return cached order state
+    // or turn a read failure into an empty active/recent-order projection.
+    const [discovery, [activeOrder, recentOrders]] = await Promise.all([loadDiscovery(), loadOrders()]);
+    const enriched = discovery.vendors;
 
     // Sections. "Orderable" must match the checkout gate exactly
     // (order.service.ts: isCurrentlyOpen && acceptingOrders && status ACTIVE —
@@ -1081,41 +1104,16 @@ export async function customerRoutes(app: FastifyInstance) {
     const recentVendorIds = new Set(recentOrders.map((o) => o.vendorId).filter(Boolean));
     const orderAgain = enriched.filter((v) => recentVendorIds.has(v.id)).slice(0, 6);
 
-    // Categories (distinct)
-    const categorySet = new Map<string, { id: string; name: string; imageUrl: string | null }>();
-    for (const v of allVendors) {
-      for (const c of (v.categories ?? [])) {
-        if (!categorySet.has(c.id)) categorySet.set(c.id, c);
-      }
-    }
-
-    const popularItems = popularItemRows.map((it) => ({
-      id: it.id,
-      name: it.name,
-      imageUrl: it.imageUrl,
-      price: Number(it.basePrice),
-      vendorId: it.vendorId,
-      vendorName: it.vendor?.name ?? '',
-      vendorType: it.vendor?.vendorType ?? null,
-      // "Vendor · N min" on the card — the vendor card's own number (prep +
-      // travel from the buyer's position), null without a position. Computed
-      // here, never on the client.
-      etaMin: it.vendor ? enrichVendor(it.vendor, lat, lng, homeDeliveryRates).etaMin : null,
-    }));
-
     const feed = {
       activeOrder: activeOrder ? { ...activeOrder, promise: promiseView(activeOrder) } : activeOrder,
-      popularItems,
+      popularItems: discovery.popularItems,
       featured,
       nearby,
       orderAgain,
-      categories: Array.from(categorySet.values()),
+      categories: discovery.categories,
       openVendors: openVendors.slice(0, 30),
       closedVendors: closedVendors.slice(0, 10),
     };
-
-    // Cache
-    await app.redis.setex(cacheKey, HOME_CACHE_TTL, JSON.stringify(feed)).catch(() => {});
 
     return { success: true, data: feed };
   });

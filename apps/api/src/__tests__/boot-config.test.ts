@@ -1,4 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
@@ -12,6 +16,10 @@ const good: Record<string, string | undefined> = {
   STORAGE_SIGNING_SECRET: 'a-managed-signing-secret-of-at-least-32-chars',
   STORAGE_PROVIDER: 's3',
   NOTIFICATION_PROVIDER: 'twilio',
+  TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
+  TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`,
+  TWILIO_API_KEY_SECRET: 'test-key-secret',
+  TWILIO_FROM: '+15550000000',
   PUSH_PROVIDER: 'expo',
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
   KYC_PROVIDER: 'didit',
@@ -27,7 +35,79 @@ const good: Record<string, string | undefined> = {
   MMG_MSECRET: 'mmg-msecret',
 };
 
+const cardOff = {
+  ...good,
+  PAYMENT_PROVIDER: 'disabled',
+  CARD_RAIL_KILL: '1',
+  STRIPE_SECRET_KEY: undefined,
+  PAYMENT_GATEWAY_KEY: undefined,
+  PAYMENT_GATEWAY_SECRET: undefined,
+  POWERTRANZ_API_URL: undefined,
+};
+
+const paddedTwilioIdentities = ([
+  ['TWILIO_ACCOUNT_SID', good['TWILIO_ACCOUNT_SID']],
+  ['TWILIO_API_KEY_SID', good['TWILIO_API_KEY_SID']],
+  ['TWILIO_FROM', good['TWILIO_FROM']],
+] as const).flatMap(([name, valid]) => [' ', '\t', '\r', '\n'].flatMap((whitespace) => [
+  { name, value: `${whitespace}${valid}`, position: 'leading', whitespace: JSON.stringify(whitespace) },
+  { name, value: `${valid}${whitespace}`, position: 'trailing', whitespace: JSON.stringify(whitespace) },
+]));
+
+function runPreflight(candidate: Record<string, string | undefined>) {
+  const directory = mkdtempSync(join(tmpdir(), 'swift-twilio-preflight-'));
+  try {
+    const candidatePath = join(directory, 'candidate.env');
+    writeFileSync(candidatePath, Object.entries(candidate)
+      .filter((entry): entry is [string, string] => entry[1] !== undefined)
+      .map(([name, value]) => `${name}=${value}`).join('\n'));
+    const tsx = join(process.cwd(), 'node_modules/.bin/tsx');
+    const script = join(process.cwd(), '../../deploy/preflight.ts');
+    return spawnSync(tsx, [script, candidatePath], {
+      encoding: 'utf8',
+      env: { PATH: process.env['PATH'] ?? '' },
+    });
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+}
+
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
+  it('boots with the card rail explicitly disabled and no card credentials', () => {
+    expect(() => assertSafeBootConfig(cardOff)).not.toThrow();
+  });
+
+  it.each([undefined, '', '0', 'true', '01'])('refuses disabled cards with an ineffective kill switch (%s)', (kill) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, CARD_RAIL_KILL: kill })).toThrow(/CARD_RAIL_KILL/);
+  });
+
+  it.each([undefined, '', 'disable', 'DISABLED', 'disabled ', 'sandbox'])('does not infer card OFF from provider %s', (provider) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PAYMENT_PROVIDER: provider })).toThrow(/PAYMENT_PROVIDER/);
+  });
+
+  it.each(['stripe', 'powertranz'])('still requires credentials for %s even with the kill switch on', (provider) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PAYMENT_PROVIDER: provider })).toThrow(/STRIPE_SECRET_KEY|PAYMENT_GATEWAY_KEY/);
+  });
+
+  it.each(['MMG_DRIVER', 'MMG_API_URL', 'MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'])(
+    'still requires %s with cards OFF', (name) => {
+      expect(() => assertSafeBootConfig({ ...cardOff, [name]: undefined })).toThrow(/MMG/);
+    },
+  );
+
+  it('still rejects sandbox and UAT MMG with cards OFF', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
+    expect(() => assertSafeBootConfig({ ...cardOff, MMG_API_URL: 'https://mwallet.mmgtest.net' })).toThrow(/non-UAT/);
+  });
+
+  it('preflight accepts explicit card OFF and rejects a reachable card charge rail', () => {
+    const off = runPreflight(cardOff);
+    expect(off.status, off.stdout + off.stderr).toBe(0);
+    const reachable = runPreflight({ ...cardOff, CARD_RAIL_KILL: '0' });
+    expect(reachable.status, reachable.stdout + reachable.stderr).toBe(1);
+    expect(reachable.stdout).toContain('CARD_RAIL_KILL');
+  });
+
   it('boots when every required secret is present', () => {
     expect(() => assertSafeBootConfig(good)).not.toThrow();
   });
@@ -94,6 +174,57 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
 
   it('SWIFT-012: accepts a real notification provider (twilio)', () => {
     expect(() => assertSafeBootConfig({ ...good, NOTIFICATION_PROVIDER: 'twilio' })).not.toThrow();
+  });
+
+  it('refuses incomplete Twilio API-key configuration at production boot', () => {
+    for (const name of ['TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_API_KEY_SECRET', 'TWILIO_FROM'] as const) {
+      expect(() => assertSafeBootConfig({ ...good, [name]: undefined }), name).toThrow(name);
+      expect(() => assertSafeBootConfig({ ...good, [name]: '   ' }), name).toThrow(name);
+    }
+    expect(() => assertSafeBootConfig({ ...good, TWILIO_API_KEY_SECRET: undefined, TWILIO_AUTH_TOKEN: 'legacy-token' }))
+      .toThrow(/TWILIO_API_KEY_SECRET/);
+  });
+
+  it('refuses nonempty malformed Twilio identifiers at production boot', () => {
+    for (const [name, value] of [
+      ['TWILIO_ACCOUNT_SID', 'not-an-account-sid'],
+      ['TWILIO_ACCOUNT_SID', `AC${'g'.repeat(32)}`],
+      ['TWILIO_API_KEY_SID', 'not-an-api-key-sid'],
+      ['TWILIO_API_KEY_SID', `SK${'g'.repeat(32)}`],
+      ['TWILIO_FROM', 'not-a-phone-number'],
+    ] as const) {
+      expect(() => assertSafeBootConfig({ ...good, [name]: value }), name).toThrow(name);
+    }
+  });
+
+  it.each(paddedTwilioIdentities)('refuses literal $position $whitespace in $name at boot and preflight guard', ({ name, value }) => {
+    expect(() => assertSafeBootConfig({ ...good, [name]: value })).toThrow(name);
+  });
+
+  it('accepts exact Twilio values in the value-free preflight CLI', () => {
+    const result = runPreflight(good);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('PASS — this configuration will not be refused at boot');
+  });
+
+  it.each(paddedTwilioIdentities.filter(({ whitespace }) => whitespace === '" "' || whitespace === '"\\t"'))(
+    'preflight CLI refuses unquoted $position $whitespace in $name', ({ name, value }) => {
+      const result = runPreflight({ ...good, [name]: value });
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stdout).toContain(`FATAL: ${name} is missing or malformed`);
+    },
+  );
+
+  it.each(paddedTwilioIdentities.filter(({ whitespace }) => whitespace === '"\\r"' || whitespace === '"\\n"'))(
+    'preflight CLI refuses quoted $position $whitespace in $name', ({ name, value }) => {
+      const result = runPreflight({ ...good, [name]: `"${value}"` });
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stdout).toContain(`FATAL: ${name} is missing or malformed`);
+    },
+  );
+
+  it('refuses an unknown notification adapter at production boot', () => {
+    expect(() => assertSafeBootConfig({ ...good, NOTIFICATION_PROVIDER: 'unknown' })).toThrow(/NOTIFICATION_PROVIDER/);
   });
 
   it('[NOC-A F1] refuses to boot production on the in-memory push provider', () => {

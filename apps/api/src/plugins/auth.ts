@@ -19,6 +19,8 @@ declare module 'fastify' {
   interface FastifyRequest {
     /** Database session that authenticated this request. Stable across access-token rotation. */
     authSessionId: string | null;
+    /** Transport of the verified credential, never a client-declared app identity. */
+    authCredentialSource: 'bearer' | 'cookie' | null;
   }
 }
 
@@ -69,12 +71,13 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   });
 
   app.decorateRequest('authSessionId', null);
+  app.decorateRequest('authCredentialSource', null);
   const authService = new AuthService(app);
 
   app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
     let reviewTenant = false;
     try {
-      adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
+      const credentialSource = adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
       await request.jwtVerify();
 
       // SEC-8: a JWT alone is not enough — the session must still exist.
@@ -125,6 +128,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       // principal from the locked database model on every protected request.
       request.user.role = session.user.activeRole;
       request.authSessionId = session.id;
+      request.authCredentialSource = credentialSource;
       // Multi-tenancy stage 2: bind this request to the caller's tenant so
       // every tenant-owned query downstream is scoped to it.
       enterTenant(session.user.tenantId);
@@ -133,6 +137,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       reviewTenant = session.user.tenant.kind === 'REVIEW';
     } catch (err) {
       request.authSessionId = null;
+      request.authCredentialSource = null;
       // [F-250] "I could not REACH the session store" is not "your token is
       // invalid". The bare catch here reported every infrastructure failure —
       // a saturated connection pool, an unreachable database — as UNAUTHORIZED,
@@ -169,7 +174,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   app.decorate('authenticateOptional', async (request: FastifyRequest) => {
     let reviewTenant = false;
     try {
-      adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
+      const credentialSource = adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
       await request.jwtVerify();
       const token = bearerOrCookieToken(request);
       const session = await app.prisma.session.findUnique({
@@ -199,6 +204,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         session.user.status === 'DEACTIVATED'
       ) {
         request.authSessionId = null;
+        request.authCredentialSource = null;
         (request as { user?: unknown }).user = undefined;
       } else if (
         requiresPrivilegedSessionAssurance(session.user.activeRole, session.user.roles)
@@ -206,10 +212,12 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       ) {
         await authService.logout(session.id, session.user.id);
         request.authSessionId = null;
+        request.authCredentialSource = null;
         (request as { user?: unknown }).user = undefined;
       } else {
         request.user.role = session.user.activeRole;
         request.authSessionId = session.id;
+        request.authCredentialSource = credentialSource;
         enterTenant(session.user.tenantId);
         request.tenantId = session.user.tenantId;
         reviewTenant = session.user.tenant.kind === 'REVIEW';
@@ -224,6 +232,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         request.log.error({ err, url: request.url }, '[F-250] optional auth could not reach the session store — serving this request as a GUEST');
       }
       request.authSessionId = null;
+      request.authCredentialSource = null;
       (request as { user?: unknown }).user = undefined;
     }
     // [STA-1 DL-9] A reviewer whose session died is told so even on a public
