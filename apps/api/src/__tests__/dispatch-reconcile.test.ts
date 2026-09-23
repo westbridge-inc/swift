@@ -95,7 +95,14 @@ describe('reconcileStuckDispatch', () => {
     expect(res.recovered).toContain(order.id);
     expect(enqueued).toContain(order.id);
     // a cooldown marker is set so it won't be re-driven immediately
-    expect(await app.redis.get(`dispatch:reconciled:${order.id}`)).toBe('1');
+    const token = await app.redis.get(`dispatch:reconciled:${order.id}`);
+    expect(token).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(await app.redis.ttl(`dispatch:reconciled:${order.id}`)).toBeGreaterThan(0);
+    expect(await app.redis.ttl(`dispatch:reconciled:${order.id}`)).toBeLessThanOrEqual(600);
+    const again = collector();
+    await reconcileStuckDispatch(app.prisma, app.redis, again.enqueue, NOW_STUCK);
+    expect(again.enqueued).not.toContain(order.id);
+    expect(await app.redis.get(`dispatch:reconciled:${order.id}`)).toBe(token);
   });
 
   it('re-enqueues a stranded TAXI (PENDING, no driver)', async () => {

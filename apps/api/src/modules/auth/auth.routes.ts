@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
+import { partnerPriceList } from '../country/partner-pricing';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
@@ -21,6 +22,7 @@ import {
   withoutTokens,
 } from './browser-session';
 import { browserSessionCounter } from '../../plugins/observability';
+import { isPublicLaunchCountry, PUBLIC_LAUNCH_COUNTRY_CODES } from './launch-market';
 
 const sendOtpSchema = z.object({
   phone: zPhone,
@@ -401,16 +403,17 @@ export async function authRoutes(app: FastifyInstance) {
   // ── Country picker (public — used before signup) ───────────────────────
 
   app.get('/countries', async (_request, reply) => {
-    // Public picker: list ALL Caribbean markets, live ones first. Live (isActive) →
-    // full signup; others show "coming soon"/waitlist. Only picker-safe fields are
-    // exposed (no tiers/checklists/cash-rules — OWASP API3). Dial codes are static
-    // reference data kept here rather than as a DB column (no migration).
+    // V1 is Guyana-only. Future CountryConfig rows remain available to admin
+    // policy tooling, but an inactive/future market must never become a signup
+    // option merely because its row exists. Only picker-safe fields are exposed
+    // (no tiers/checklists/cash-rules — OWASP API3).
     const DIAL_CODES: Record<string, string> = {
       GY: '+592', TT: '+1868', JM: '+1876', BB: '+1246', BS: '+1242', SR: '+597',
       BZ: '+501', GD: '+1473', LC: '+1758', AG: '+1268', VC: '+1784', KN: '+1869', DM: '+1767',
     };
     const countries = await app.prisma.countryConfig.findMany({
-      orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+      where: { code: { in: [...PUBLIC_LAUNCH_COUNTRY_CODES] }, isActive: true },
+      orderBy: { name: 'asc' },
       select: { code: true, name: true, currencyCode: true, currencySymbol: true, isActive: true },
     });
     return reply.send({
@@ -422,15 +425,22 @@ export async function authRoutes(app: FastifyInstance) {
   /** Public price list — SaaS sells with the price on the door: partners see
    *  "14 days free, then X/week" BEFORE committing. Customers never pay, so
    *  nothing here concerns them. Weekly tiers only; checklists/cash-rules
-   *  stay internal (OWASP API3). */
+   *  stay internal (OWASP API3). Every rate is resolved by `partnerRateFor`,
+   *  the function signup and the weekly re-tier bill through; a market that
+   *  cannot be priced is an error, never a zero or a partial list. The
+   *  franchise is a discount on each location's own rate, not a separate
+   *  price, so it is quoted as the rule rather than a number. */
   app.get('/pricing', async (request, reply) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
+    const countryCode = country.toUpperCase();
+    if (!isPublicLaunchCountry(countryCode)) {
+      throw new AppError(404, 'COUNTRY_NOT_FOUND', 'Swift is currently available in Guyana only');
+    }
     const config = await app.prisma.countryConfig.findUnique({
-      where: { code: country.toUpperCase() },
+      where: { code: countryCode },
       select: { code: true, currencyCode: true, currencySymbol: true, subscriptionTiers: true, isActive: true },
     });
-    if (!config) throw new AppError(404, 'COUNTRY_NOT_FOUND', 'No such market');
-    const tiers = (config.subscriptionTiers ?? {}) as Record<string, number>;
+    if (!config || !config.isActive) throw new AppError(404, 'COUNTRY_NOT_FOUND', 'Swift is currently available in Guyana only');
     return reply.send({
       success: true,
       data: {
@@ -439,27 +449,7 @@ export async function authRoutes(app: FastifyInstance) {
         currencySymbol: config.currencySymbol,
         isActive: config.isActive,
         trialDays: TRIAL_DAYS,
-        weekly: {
-          // `mover` = STANDARD band (bike, motorbike, car, wagon car);
-          // `moverHeavy` = HEAVY band (buses, canters, box trucks). A market
-          // that has not set a heavy rate reports null, and every surface
-          // renders one mover price — never a free or a guessed one.
-          mover: tiers['mover'] ?? null,
-          moverHeavy: tiers['moverHeavy'] ?? null,
-          serviceVendor: tiers['serviceVendor'] ?? null,
-          smallVendor: tiers['smallVendor'] ?? null,
-          largeVendor: tiers['largeVendor'] ?? null,
-          departmentVendor: tiers['departmentVendor'] ?? null,
-        },
-        // The franchise is a discount on each location's own rate, not a
-        // separate price, so it is quoted as the rule rather than a number.
-        franchise:
-          tiers['franchiseMinLocations'] != null && tiers['franchiseDiscountPct'] != null
-            ? {
-                minLocations: tiers['franchiseMinLocations'],
-                discountPct: tiers['franchiseDiscountPct'],
-              }
-            : null,
+        ...partnerPriceList(config.subscriptionTiers),
       },
     });
   });

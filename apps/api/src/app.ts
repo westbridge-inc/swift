@@ -23,8 +23,8 @@ import { adsRoutes } from './modules/ads/ads.routes';
 import { placesRoutes } from './modules/places/places.routes';
 import courierRoutes from './modules/courier/courier.routes';
 import { servicesRoutes } from './modules/services/services.routes';
+import { serviceCatalogRoutes } from './modules/services/service-catalog.routes';
 import { partnerRoutes } from './modules/partner/partner.routes';
-import { aiRoutes } from './modules/ai/ai.routes';
 import { setAppLogger } from './utils/logger';
 import { evaluateSchedulerHealth, schedulerStallMs, workerCheckStatus } from './utils/scheduler-health';
 import { prismaPlugin, beginRequestTenantContext } from './plugins/prisma';
@@ -313,8 +313,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(placesRoutes, { prefix: '/api/v1/places' });
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
+  await app.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
-  await app.register(aiRoutes, { prefix: '/api/v1/ai' });
   // Unauthenticated read-only storefront pages (web SEO) — see module header.
   await app.register(publicRoutes, { prefix: '/api/v1/public' });
   // Printed-QR short links: /s/{code} at the ROOT path (the production web

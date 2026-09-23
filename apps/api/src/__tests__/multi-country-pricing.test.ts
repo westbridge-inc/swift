@@ -10,11 +10,11 @@ import { countryFromPhone } from '../utils/phone-country';
 import { TRIAL_DAYS } from '../modules/subscription/subscription.service';
 
 // ---------------------------------------------------------------------------
-// Whole-Caribbean availability (founder directive 2026-07-12): anyone signs up
-// from any island and lands in THEIR market — the dial prefix decides the
-// country (pricing, currency, checklists), never a client-picked field. The
-// public /auth/pricing endpoint is the SaaS price-on-the-door partners see
-// before committing.
+// Guyana-only V1 public launch. Future-market currency and phone metadata stay
+// intact for a reviewed expansion, but public signup and price-on-the-door
+// routes must not expose those markets before they are launched. OTP remains
+// market-neutral because the same endpoint authenticates existing accounts
+// and powers password recovery without revealing whether an account exists.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -79,21 +79,32 @@ describe('public pricing (price on the door)', () => {
     const d = res.json().data;
     expect(d.countryCode).toBe('GY');
     expect(d.trialDays).toBe(TRIAL_DAYS);
-    // Two mover bands: standard (bike/motorbike/car/wagon) and heavy
-    // (bus/canter/box truck). The public endpoint quotes both.
-    expect(d.weekly.mover).toBe(10000);
-    expect(d.weekly.moverHeavy).toBe(12000);
-    expect(d.weekly.smallVendor).toBe(20000);
-    expect(d.weekly.largeVendor).toBe(30000);
+    // Every vehicle is quoted at the rate of the role it provisions: delivery
+    // riders 8,000, taxi drivers 9,000 (car or bus), heavy delivery 9,000.
+    const rateFor = (v: string) => d.movers.find((q: { vehicleType: string }) => q.vehicleType === v)?.rate;
+    expect([rateFor('MOTORCYCLE'), rateFor('CAR'), rateFor('BUS_15'), rateFor('CANTER_LONG')]).toEqual([8000, 9000, 9000, 9000]);
+    expect(d.vendors).toEqual({
+      service: 8000,
+      catalogue: [
+        { minItems: 0, tier: 'small', rate: 15000 },
+        { minItems: 1000, tier: 'large', rate: 20000 },
+        { minItems: 10000, tier: 'department', rate: 60000 },
+      ],
+    });
+    // Older clients read the legacy numbers, which never under-quote a bill:
+    // the old card's "Large catalogues (1000+ items)" line stands for every
+    // store from 1,000 items up, so it carries the 10,000+ bill [PR1270-S2-05].
+    expect(d.weekly.mover).toBe(9000);
+    expect(d.weekly.moverHeavy).toBe(9000);
+    expect(d.weekly.smallVendor).toBe(15000);
+    expect(d.weekly.largeVendor).toBe(60000);
+    expect(d.weekly.departmentVendor).toBe(60000);
   });
 
-  it('serves another island in its own currency', async () => {
+  it('does not publish a future island price book', async () => {
     const res = await inject('GET', '/api/v1/auth/pricing?country=tt');
-    expect(res.statusCode).toBe(200);
-    const d = res.json().data;
-    expect(d.countryCode).toBe('TT');
-    expect(d.currencyCode).toBe('TTD');
-    expect(d.weekly.mover).toBeGreaterThan(0);
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe('COUNTRY_NOT_FOUND');
   });
 
   it('404s an unknown market', async () => {
@@ -102,25 +113,22 @@ describe('public pricing (price on the door)', () => {
   });
 });
 
-describe('signup lands in the phone country', () => {
-  it('a Trinidad number registers as TT even if the client claims GY', async () => {
+describe('public auth stays inside the launch market', () => {
+  it('rejects a new Trinidad account after phone ownership is proven', async () => {
     const phone = `+1868555${String(Math.floor(Math.random() * 9000) + 1000)}`;
     const registrationProof = await registrationProofFor(app, phone);
-
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone,
       registrationProof,
       firstName: 'Port',
       lastName: 'OfSpain',
-      countryCode: 'GY', // spoof attempt — the dial prefix must win
+      countryCode: 'GY',
     });
-    expect(res.statusCode).toBe(201);
-    const user = res.json().data.user;
-    createdUserIds.push(user.id);
-    expect(user.countryCode).toBe('TT');
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('COUNTRY_NOT_ACTIVE');
   });
 
-  it('a Guyana number stays GY', async () => {
+  it('a Guyana number stays GY even if the client claims a future market', async () => {
     const phone = `+592655${String(Math.floor(Math.random() * 9000) + 1000)}`;
     const registrationProof = await registrationProofFor(app, phone);
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
@@ -128,6 +136,7 @@ describe('signup lands in the phone country', () => {
       registrationProof,
       firstName: 'George',
       lastName: 'Town',
+      countryCode: 'TT',
     });
     expect(res.statusCode).toBe(201);
     const user = res.json().data.user;

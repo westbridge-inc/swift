@@ -26,28 +26,55 @@ import { isProduction } from '../../utils/runtime-mode';
  */
 
 /** Bump when any value below changes; recorded with every apply. */
-export const PLATFORM_CONFIG_VERSION = '2026-09-02.1';
+export const PLATFORM_CONFIG_VERSION = '2026-09-23.3';
+
+/**
+ * The declaration a tier map carries to say it is the COMPLETE partner card:
+ * every rate, both catalogue boundaries and the franchise rule are present
+ * and valid, and no fallback applies. The resolver
+ * (country/country-config.service) refuses a declared card that is missing
+ * any key, rather than quietly pricing it as a smaller card; a market that
+ * declares nothing keeps the documented legacy fallbacks.
+ */
+export const COMPLETE_CARD = 'complete';
 
 // Weekly SaaS tiers (GYD) — single source for the GY CountryConfig AND any
 // seeded subscription rows, so a tier change never leaves accounts on a stale
 // rate. Exported so the dev seed's demo drivers bill at the same rate.
-// `mover` is the STANDARD fee band (bicycle, motorbike, car, wagon car);
-// `moverHeavy` is the HEAVY band (buses, canters, box trucks). Which band a
-// vehicle falls in is config/vehicle-classes.ts — this file only prices them.
+// The owner rate card (2026-09-22): flat weekly fees, independent of sales,
+// moved automatically by the weekly re-tier. A delivery/courier Rider pays by
+// vehicle band — `mover` for the STANDARD band (bicycle, motorbike), and
+// `moverHeavy` for heavy delivery (canters, box trucks) — while every taxi
+// Driver pays `taxiDriver`, car or bus. Which band a vehicle falls in and
+// which role it provisions is config/vehicle-classes.ts — this file only
+// prices them. Every rate is a whole number of dollars.
 export const guyanaTiers = {
+  card: COMPLETE_CARD,
+  mover: 8000,
+  moverHeavy: 9000,
+  taxiDriver: 9000,
+  // Services carry no catalogue — a solo tradesman is not a restaurant.
+  serviceVendor: 8000,
+  smallVendor: 15000,
+  largeVendor: 20000,
+  departmentVendor: 60000,
+  largeCatalogueThreshold: 1000,
+  departmentCatalogueThreshold: 10000,
+  // From the 5th store, every location takes 50% off its OWN rate.
+  franchiseMinLocations: 5,
+  franchiseDiscountPct: 50,
+};
+
+// The Guyana rate card every USD-pegged market was launched from. The pegs
+// stay on it: re-pricing Guyana re-prices Guyana alone, and moving another
+// market's fees is that market's own decision, never a side effect.
+const peggedMarketAnchor = {
   mover: 10000,
   moverHeavy: 12000,
-  // Services carry no catalogue — a solo tradesman is not a restaurant.
   serviceVendor: 12000,
   smallVendor: 20000,
   largeVendor: 30000,
   departmentVendor: 50000,
-  largeCatalogueThreshold: 1000,
-  departmentCatalogueThreshold: 10000,
-  // From the 5th store, every location takes 50% off its OWN rate. At the
-  // standard shop rate that is exactly 50,000/week for five locations.
-  franchiseMinLocations: 5,
-  franchiseDiscountPct: 50,
 };
 
 /**
@@ -148,15 +175,16 @@ export function desiredPlatformConfig(): DesiredConfig {
     ...guyanaRegion,
   };
 
-  // Every other Caribbean market is USD-pegged off the Guyana numbers until a
-  // local business/legal pass refines it — and says so in its notes.
+  // Future Caribbean market policy is retained so expansion can be planned,
+  // reviewed and activated without a data-model rewrite. V1 is Guyana-only:
+  // these rows remain explicitly inactive until their own launch gate passes.
   const USD = {
-    mover: guyanaTiers.mover / gydPerUsd,
-    moverHeavy: guyanaTiers.moverHeavy / gydPerUsd,
-    serviceVendor: guyanaTiers.serviceVendor / gydPerUsd,
-    smallVendor: guyanaTiers.smallVendor / gydPerUsd,
-    largeVendor: guyanaTiers.largeVendor / gydPerUsd,
-    departmentVendor: guyanaTiers.departmentVendor / gydPerUsd,
+    mover: peggedMarketAnchor.mover / gydPerUsd,
+    moverHeavy: peggedMarketAnchor.moverHeavy / gydPerUsd,
+    serviceVendor: peggedMarketAnchor.serviceVendor / gydPerUsd,
+    smallVendor: peggedMarketAnchor.smallVendor / gydPerUsd,
+    largeVendor: peggedMarketAnchor.largeVendor / gydPerUsd,
+    departmentVendor: peggedMarketAnchor.departmentVendor / gydPerUsd,
   };
   const USD_TAXI = { base: 1000 / gydPerUsd, perKm: 300 / gydPerUsd, perMin: 25 / gydPerUsd, minimum: 1500 / gydPerUsd };
   const USD_FLOAT = { l1: 8000 / gydPerUsd, l2: 20000 / gydPerUsd, l3: 40000 / gydPerUsd };
@@ -215,7 +243,7 @@ export function desiredPlatformConfig(): DesiredConfig {
       regulatoryNotes:
         'Tiers and taxi rates are USD-pegged defaults; document checklist mirrors Guyana. Refine with local business/legal input before launch.',
       locale: c.locale,
-      isActive: true,
+      isActive: false,
     };
     return { code: c.code, create: { ...policy }, policy };
   });

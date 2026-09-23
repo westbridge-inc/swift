@@ -152,11 +152,11 @@ async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR', coun
 }
 
 describe('Country picker', () => {
-  it('lists Guyana as an active country before signup (public)', async () => {
+  it('publishes only Guyana before signup', async () => {
     const res = await inject('GET', '/api/v1/auth/countries');
     expect(res.statusCode).toBe(200);
     const codes = res.json().data.map((c: { code: string }) => c.code);
-    expect(codes).toContain('GY');
+    expect(codes).toEqual(['GY']);
   });
 });
 
@@ -172,7 +172,7 @@ describe('Signup — OTP mandatory, role + country aware', () => {
     expect(res.json().error.code).toBe('REGISTRATION_PROOF_REQUIRED');
   });
 
-  it('rejects signup for a market Swift is not in (whole Caribbean IS live)', async () => {
+  it('rejects signup for a market outside the Guyana launch', async () => {
     const registrationProof = await registrationProofFor(app, WAITLIST_PHONE);
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone: WAITLIST_PHONE, // UK prefix — derives no Caribbean market

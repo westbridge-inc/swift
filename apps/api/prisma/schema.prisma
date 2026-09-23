@@ -805,9 +805,15 @@ model DispatchSearch {
   assignedTo      String?
   exhaustedAt     DateTime?
   resolution      String? // RETRIED | SWITCHED_PICKUP | CANCELLED | WATCHING | MANUAL
+  /// Delivery-custody generation read from Order when this search began.
+  /// Null is the pre-generation legacy shape and for non-delivery searches.
+  /// Vendor cleanup is bounded to generations at or before the decision that
+  /// requested it, so a delayed callback cannot cancel a newer rider search.
+  deliveryAuthorityVersion Int?
 
   @@index([status, startedAt])
   @@index([subjectId])
+  @@index([subjectId, deliveryAuthorityVersion, status])
   @@map("dispatch_searches")
 }
 
@@ -1990,6 +1996,10 @@ model Order {
   /// FUL-004: who actually delivers this order (set when the vendor chooses at
   /// Ready). NULL on orders predating the choice — treated as PLATFORM_RIDER.
   fulfillmentMode FulfillmentMode?
+  /// Monotonic custody generation. Every committed change or first resolution
+  /// of fulfillmentMode increments it. Dispatch offers and search journals pin
+  /// this value so delayed cleanup from generation N cannot erase N+1.
+  fulfillmentModeVersion Int @default(0)
   appointmentSlot DateTime?
   /// Takeaway: 4-digit code the customer shows to collect a PICKUP order; the
   /// vendor verifies it to close the order (no rider involved). Null otherwise.
@@ -3895,57 +3905,6 @@ model CartItem {
   @@map("cart_items")
 }
 
-// ==========================================
-// OPS AGENT (spec Part B) — flag-gated OFF
-// The model only CLASSIFIES; every action executes through existing
-// deterministic services, and money-adjacent actions wait for a human.
-// ==========================================
-
-enum AgentActionStatus {
-  PENDING
-  APPROVED
-  REJECTED
-  EXECUTED
-  FAILED
-}
-
-model AgentActionRequest {
-  id        String            @id @default(cuid())
-  /// Tool name from the fixed allowlist (request_cancel, requeue_dispatch, …)
-  action    String
-  /// Tool input, JSON — replayed verbatim on approval
-  input     Json
-  /// The model's rationale — shown to the approving human
-  reasoning String?
-  orderId   String?
-  status    AgentActionStatus @default(PENDING)
-  /// Idempotency: one open request per (action, orderId) problem
-  actionKey String            @unique
-  createdAt DateTime          @default(now())
-  decidedAt DateTime?
-  decidedBy String?
-
-  @@index([status, createdAt])
-  @@map("agent_action_requests")
-}
-
-model AgentAuditEvent {
-  id        String   @id @default(cuid())
-  at        DateTime @default(now())
-  /// ops | approval
-  job       String
-  subjectId String?
-  action    String
-  input     Json
-  /// suggested | executed | pending_approval | auto_executed | rejected | error
-  outcome   String
-  reasoning String?
-
-  @@index([at])
-  @@index([subjectId])
-  @@map("agent_audit_events")
-}
-
 // ─── Safety: SOS engine (safety-system spec M1, foundation for M2) ───────────
 // Reconciled to Swift reality: a "trip" is an Order (rides are orderType=TAXI);
 // tenant is a scalar with code-level tenantScope (Swift has no RLS); actorRole
@@ -5687,8 +5646,8 @@ model SensitiveReadLog {
 /// Every `finance/*`, `billing/*`, `subscriptions/*` and `ads/*` money route
 /// decided on ONE actor's request: a settlement processed, a fee waived, a
 /// top-up granted or an invoice marked paid on one person's say-so, with no
-/// independent check and no reversal path. The only approval model in the
-/// schema, AgentActionRequest, gates the autonomous agent, not a human.
+/// independent check and no reversal path. There was no human-approval model
+/// in the schema at all.
 ///
 /// This is the general record the C4/C5 classes now require: what was asked,
 /// by whom, with what reason, over exactly which request — and who, other than
@@ -6033,7 +5992,7 @@ model DiscoveryCategorySuggestion {
   itemId     String
   categoryId String
   confidence Decimal   @db.Decimal(3, 2)
-  stage      String // "MATCHER" | "AI"
+  stage      String // "MATCHER" — the only stage that writes; the model stage is retired
   status     String    @default("PENDING") // PENDING | ACCEPTED | DISMISSED | SUPERSEDED
   createdAt  DateTime  @default(now())
   resolvedAt DateTime?

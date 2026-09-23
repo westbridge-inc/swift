@@ -492,7 +492,7 @@ describe('Waivers, reminders, tier recalculation', () => {
 
   it('moves a vendor to the large tier from catalogue size — never from sales', async () => {
     const fixture = await makeVendorWithSub({
-      rate: 20000,
+      rate: 15000,
       prepaid: 500000,
       due: new Date(Date.now() + 3 * DAY),
     });
@@ -500,7 +500,7 @@ describe('Waivers, reminders, tier recalculation', () => {
     const category = await app.prisma.category.create({
       data: { vendorId: fixture.vendorId, name: 'Bulk', sortOrder: 0 },
     });
-    // Large tier is 1000+ active listings (30k/week).
+    // Large tier is 1000+ active listings (20k/week; below it, 15k).
     await app.prisma.item.createMany({
       data: Array.from({ length: 1000 }, (_, i) => ({
         vendorId: fixture.vendorId,
@@ -513,7 +513,7 @@ describe('Waivers, reminders, tier recalculation', () => {
 
     await billing.recalculateVendorTiers();
     let sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
-    expect(Number(sub.weeklyRate)).toBe(30000);
+    expect(Number(sub.weeklyRate)).toBe(20000);
 
     const tierEvent = await app.prisma.billingEvent.findFirst({
       where: { subscriptionId: fixture.subId, type: 'TIER_CHANGE' },
@@ -524,7 +524,7 @@ describe('Waivers, reminders, tier recalculation', () => {
     await app.prisma.item.updateMany({ where: { vendorId: fixture.vendorId }, data: { isAvailable: false } });
     await billing.recalculateVendorTiers();
     sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
-    expect(Number(sub.weeklyRate)).toBe(20000);
+    expect(Number(sub.weeklyRate)).toBe(15000);
   });
 });
 
@@ -558,7 +558,7 @@ describe('Subscription trial lifecycle', () => {
     expect(sub.status).toBe('TRIAL');
     expect(sub.isTrialActive).toBe(true);
     expect(sub.type).toBe('RESTAURANT');
-    expect(Number(sub.weeklyRate)).toBe(20000); // smallVendor tier (seeded GY)
+    expect(Number(sub.weeklyRate)).toBe(15000); // smallVendor tier (seeded GY)
     expect(sub.billingMethod).toBe('CASH');
     const days = (sub.trialEndDate!.getTime() - Date.now()) / DAY;
     expect(days).toBeGreaterThan(13);

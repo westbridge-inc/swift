@@ -5,7 +5,14 @@ import { vendorApi, vendorDiscoveryApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { useVendorPreview } from '../stores/vendorPreview';
-import { vendorPreviewDataset, previewQuery, previewMutation, type VendorPreviewDataset } from '../lib/vendorPreviewData';
+import {
+  vendorPreviewDataset,
+  vendorPreviewSubscription,
+  previewQuery,
+  previewMutation,
+  VENDOR_PREVIEW_MARKET,
+  type VendorPreviewDataset,
+} from '../lib/vendorPreviewData';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 import {
   getAuthSessionSnapshot,
@@ -14,6 +21,7 @@ import {
 } from '../stores/authStore';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
 import { confirmVendorCashSettlement } from './cashSettlement';
+import { usePartnerPricing } from './partnerPricing';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -351,7 +359,20 @@ export function useVendorSubscription(enabled = true) {
   // Billing is owner-only (staff & roles §4.1) — staff sessions skip the call.
   const pv = usePreviewDataset();
   const q = useQuery({ queryKey: ['vendor', 'subscription'], queryFn: () => unwrap(vendorApi.subscription()), enabled: enabled && !pv });
-  return pv ? previewQuery(pv.subscription) : q;
+  // Preview bills the sample store the live quote for its business type — the
+  // public price list, read only in preview — never a number frozen in the app.
+  const pricing = usePartnerPricing(VENDOR_PREVIEW_MARKET, !!pv);
+  const sample = useMemo(() => (pv ? vendorPreviewSubscription(pv, pricing.data) : null), [pv, pricing.data]);
+  if (!pv) return q;
+  // [H7] While the price list is still loading or has failed, the preview
+  // query says so and the screen shows its own loading or error state — never
+  // a sample store with no fee, which read as "nothing due, you are covered".
+  return {
+    ...previewQuery(sample),
+    isLoading: sample == null && pricing.isPending === true,
+    isError: sample == null && pricing.isError === true,
+    refetch: pricing.refetch,
+  };
 }
 
 /** "Find a mover again" after dispatch exhausted — clears the cascade's
@@ -361,6 +382,18 @@ export function useRetryDispatch() {
   return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.retryDispatch(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+  });
+}
+
+/** The server owns custody. This only records the eligible store's requested
+ * delivery owner and immediately re-reads both its detail and every order list
+ * after a success or a race refusal. */
+export function useSetOrderFulfillmentMode() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: ({ id, mode }: { id: string; mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY' }) =>
+      unwrap(vendorApi.setFulfillmentMode(id, mode)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
   });
 }
 
@@ -392,7 +425,7 @@ export function useOrderAction() {
       reason,
     }: {
       id: string;
-      action: 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+      action: 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
       code?: string;
       /** reject only — the server records it and tells the customer why. */
       reason?: string;
@@ -401,6 +434,7 @@ export function useOrderAction() {
       if (action === 'confirm-payment') return unwrap(vendorApi.confirmPayment(id, code ?? ''));
       if (action === 'preparing') return unwrap(vendorApi.preparing(id));
       if (action === 'ready') return unwrap(vendorApi.ready(id));
+      if (action === 'delivered') return unwrap(vendorApi.delivered(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));
       if (action === 'complete-appointment') return unwrap(vendorApi.completeAppointment(id));
       return unwrap(vendorApi.reject(id, reason));

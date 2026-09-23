@@ -1,6 +1,6 @@
-import { Prisma, type PrismaClient, type SubscriptionType, type VendorType } from '@prisma/client';
+import { Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
-import { CountryConfigService, moverRateFor, vendorRateFor } from '../country/country-config.service';
+import { CountryConfigService, partnerRateFor, type PartnerRate } from '../country/country-config.service';
 import { TrialEntitlementService } from '../integrity/trial-entitlement.service';
 import { log } from '../../utils/logger';
 
@@ -22,6 +22,17 @@ const VENDOR_SUB_TYPE: Record<VendorType, SubscriptionType> = {
   SERVICE: 'SERVICE_PROVIDER',
 };
 
+type Db = PrismaClient | Prisma.TransactionClient;
+
+/** The partner an activation path is about to make live. */
+export type ActivationEntity = { riderId: string } | { driverId: string } | { vendorId: string };
+
+/** What activating a partner would price: the subscription they already
+ *  hold (nothing to price), or the type, market and rate a new trial is born on. */
+type ActivationPricing =
+  | { existing: Subscription }
+  | { existing: null; type: SubscriptionType; priced: PartnerRate; countryCode: string };
+
 export class SubscriptionService {
   private countryConfig: CountryConfigService;
   private trialLaw: TrialEntitlementService;
@@ -31,8 +42,13 @@ export class SubscriptionService {
     this.trialLaw = new TrialEntitlementService(prisma);
   }
 
-  async startTrialForRider(riderId: string) {
-    const rider = await this.prisma.rider.findUnique({
+  // The three resolvers below read the partner and price them through THE
+  // resolver — and are refused by it — exactly as the trial write is. They
+  // write nothing, so the activation preflight and the trial itself cannot
+  // disagree about a rate. `db` may be a caller's transaction.
+
+  private async riderActivation(riderId: string, db: Db): Promise<ActivationPricing> {
+    const rider = await db.rider.findUnique({
       where: { id: riderId },
       select: {
         riderType: true,
@@ -42,18 +58,18 @@ export class SubscriptionService {
       },
     });
     if (!rider) throw new NotFoundError('Rider', riderId);
-    if (rider.subscription) return rider.subscription; // idempotent
+    if (rider.subscription) return { existing: rider.subscription };
 
-    const tiers = await this.countryConfig.getSubscriptionTiers(rider.user.countryCode);
+    const tiers = await this.countryConfig.getSubscriptionTiers(rider.user.countryCode, db);
     const type: SubscriptionType = rider.riderType === 'COURIER' ? 'COURIER_RIDER' : 'DELIVERY_RIDER';
-    // The weekly fee follows the VEHICLE, not the service: a canter doing
-    // deliveries bills the heavy band exactly like a canter doing courier work.
-    const rate = moverRateFor(tiers, rider.vehicleType);
-    return this.create({ riderId }, type, rate, rider.user.countryCode);
+    // A rider's fee follows the VEHICLE, not the service: a canter doing
+    // deliveries bills heavy delivery exactly like a canter doing courier work.
+    const priced = partnerRateFor(tiers, { kind: 'RIDER', vehicleType: rider.vehicleType });
+    return { existing: null, type, priced, countryCode: rider.user.countryCode };
   }
 
-  async startTrialForDriver(driverId: string) {
-    const driver = await this.prisma.driver.findUnique({
+  private async driverActivation(driverId: string, db: Db): Promise<ActivationPricing> {
+    const driver = await db.driver.findUnique({
       where: { id: driverId },
       select: {
         vehicleType: true,
@@ -62,17 +78,17 @@ export class SubscriptionService {
       },
     });
     if (!driver) throw new NotFoundError('Driver', driverId);
-    if (driver.subscription) return driver.subscription;
+    if (driver.subscription) return { existing: driver.subscription };
 
-    const tiers = await this.countryConfig.getSubscriptionTiers(driver.user.countryCode);
-    // A minibus driver is a TAXI_DRIVER on the heavy band — the subscription
-    // type says what they do, the vehicle says what they pay.
-    const rate = moverRateFor(tiers, driver.vehicleType);
-    return this.create({ driverId }, 'TAXI_DRIVER', rate, driver.user.countryCode);
+    const tiers = await this.countryConfig.getSubscriptionTiers(driver.user.countryCode, db);
+    // A minibus driver is a taxi driver: where the market prices taxis apart
+    // the role decides the fee, car or bus; otherwise the vehicle band does.
+    const priced = partnerRateFor(tiers, { kind: 'DRIVER', vehicleType: driver.vehicleType });
+    return { existing: null, type: 'TAXI_DRIVER', priced, countryCode: driver.user.countryCode };
   }
 
-  async startTrialForVendor(vendorId: string) {
-    const vendor = await this.prisma.vendor.findUnique({
+  private async vendorActivation(vendorId: string, db: Db): Promise<ActivationPricing> {
+    const vendor = await db.vendor.findUnique({
       where: { id: vendorId },
       select: {
         vendorType: true,
@@ -86,20 +102,60 @@ export class SubscriptionService {
       },
     });
     if (!vendor) throw new NotFoundError('Vendor', vendorId);
-    if (vendor.subscription) return vendor.subscription;
+    if (vendor.subscription) return { existing: vendor.subscription };
 
     const countryCode = vendor.owner.user.countryCode;
-    const tiers = await this.countryConfig.getSubscriptionTiers(countryCode);
+    const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
     // A brand-new store has no catalogue yet, so it is born on the small tier
     // and the weekly re-tier moves it up once its listings are counted. The
     // franchise basis IS known at signup, though: the owner's fifth store
     // should not spend its first week at the single-store price.
-    const { rate } = vendorRateFor(tiers, {
+    const priced = partnerRateFor(tiers, {
+      kind: 'VENDOR',
       isService: vendor.vendorType === 'SERVICE',
       activeListings: 0,
       ownedStores: vendor.owner._count.vendors,
     });
-    return this.create({ vendorId }, VENDOR_SUB_TYPE[vendor.vendorType], rate, countryCode);
+    return { existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, countryCode };
+  }
+
+  private activation(entity: ActivationEntity, db: Db): Promise<ActivationPricing> {
+    if ('riderId' in entity) return this.riderActivation(entity.riderId, db);
+    if ('driverId' in entity) return this.driverActivation(entity.driverId, db);
+    return this.vendorActivation(entity.vendorId, db);
+  }
+
+  /**
+   * [PR1270-S2-03] The weekly rate an activation WOULD write — resolved and
+   * refused exactly as `startTrialFor*` resolves it, but writing nothing.
+   * Every activation path calls this BEFORE its first activation write, so a
+   * market that cannot price a partner refuses the whole activation with
+   * PRICING_CONFIG_INVALID instead of leaving an active, searchable partner
+   * with no subscription. Null when the partner already holds a subscription:
+   * nothing to price, nothing to block. `db` may be the caller's transaction
+   * so the check rides its locks.
+   */
+  async priceForActivation(entity: ActivationEntity, db: Db = this.prisma): Promise<PartnerRate | null> {
+    const activation = await this.activation(entity, db);
+    return activation.existing ? null : activation.priced;
+  }
+
+  async startTrialForRider(riderId: string) {
+    const activation = await this.riderActivation(riderId, this.prisma);
+    if (activation.existing) return activation.existing; // idempotent
+    return this.create({ riderId }, activation.type, activation.priced.rate, activation.countryCode);
+  }
+
+  async startTrialForDriver(driverId: string) {
+    const activation = await this.driverActivation(driverId, this.prisma);
+    if (activation.existing) return activation.existing;
+    return this.create({ driverId }, activation.type, activation.priced.rate, activation.countryCode);
+  }
+
+  async startTrialForVendor(vendorId: string) {
+    const activation = await this.vendorActivation(vendorId, this.prisma);
+    if (activation.existing) return activation.existing;
+    return this.create({ vendorId }, activation.type, activation.priced.rate, activation.countryCode);
   }
 
   /** The human behind the entity + their trial-law role (§3: the trial

@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -10,7 +10,16 @@ import { openPayLink } from '../../../lib/payLink';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useBecomePartner, useVerificationStatus } from '../../../hooks/verification';
+import { usePartnerPricing } from '../../../hooks/partnerPricing';
+import { vendorQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
 import { useLocationStore } from '../../../stores/locationStore';
+import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
+import {
+  businessSetupDraftFor,
+  editBusinessSetupDraft,
+  useBusinessSetupDraft,
+  type BusinessSetupDraft,
+} from '../../../stores/businessSetupDraft';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { TYPES, TabHeader } from '../shared';
@@ -77,11 +86,18 @@ export function BusinessSetup() {
   const become = useBecomePartner();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const { latitude, longitude, status: locationStatus } = useLocationStore();
-  const [name, setName] = useState('');
-  const [type, setType] = useState<'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE'>('RESTAURANT');
-  const [phone, setPhone] = useState('');
-  const [addr, setAddr] = useState('');
-  const [city, setCity] = useState('Georgetown');
+  // The form outlives this screen (stores/businessSetupDraft): a failed
+  // background profile read or a trip to Swift and back remounts it, and each
+  // remount used to start blank. It belongs to exactly this signed-in account.
+  const userId = useAuthStore((s) => (s.isAuthenticated ? s.user?.id ?? null : null));
+  const generation = useAuthStore((s) => s.sessionGeneration);
+  const owner = userId ? { userId, generation } : null;
+  // [DCR-1] `agree` is the Business Agreement consent — recorded in the ledger
+  // with the exact version at store creation, the same way signup records the Terms.
+  const { name, type, phone, addr, city, agree } = useBusinessSetupDraft((s) => businessSetupDraftFor(s, owner));
+  const edit = (patch: Partial<BusinessSetupDraft> | ((draft: BusinessSetupDraft) => Partial<BusinessSetupDraft>)) => {
+    editBusinessSetupDraft(getAuthSessionSnapshot(), owner, patch);
+  };
   // [F-027-02] A store's coordinates are where customers are sent and where
   // dispatch measures from. This used to submit `latitude ?? 6.8013` — pinning
   // the shop at the Georgetown city centre whenever the device location was
@@ -95,12 +111,23 @@ export function BusinessSetup() {
   // register a business at wherever the phone last was.
   const pinFix = grantedLocationFix(latitude, longitude, locationStatus);
   const hasPin = pinFix !== null;
-  // [DCR-1] The Business Agreement consent — recorded in the ledger with the
-  // exact version at store creation, the same way signup records the Terms.
-  const [agree, setAgree] = useState(false);
   const valid = hasPin && name.trim().length >= 2 && phone.trim().length >= 5 && addr.trim().length >= 3 && city.trim().length >= 2;
+  // [PR1270-S2-04] The price on the door is a condition of the door: the store
+  // is created only against a weekly fee that was fetched successfully, is the
+  // one the card above shows for THIS business type, and is current. The list
+  // is read fresh here, never from an hour-old cache. Loading, a failed fetch,
+  // no quote for the type, or a stale quote disables the button and says so.
+  const countryCode = useAuthStore((s) => (s.user as { countryCode?: string } | null)?.countryCode);
+  const pricing = usePartnerPricing(countryCode, true, { fresh: true });
+  const gate = quoteGate(pricing, (p) => vendorQuote(p, type));
+  const stale = !gate.ok && gate.why === 'stale';
+  const { refetch: refetchPricing } = pricing;
+  useEffect(() => {
+    if (stale) void refetchPricing();
+  }, [stale, refetchPricing]);
 
   const submit = () => {
+    if (!gate.ok) return; // guarded by the button, restated so no call site can bypass it
     if (!hasPin) return; // guarded by `valid`, restated so the call site cannot fabricate
     become.mutate({
       role: 'VENDOR',
@@ -132,23 +159,24 @@ export function BusinessSetup() {
           <BizValuePill icon="calendar-check" label="Flat weekly fee" />
         </View>
 
-        {/* The price on the door — what the flat weekly fee actually is. */}
-        <PricingCard kind="vendor" />
+        {/* The price on the door — what the flat weekly fee actually is for the
+            business type picked below. */}
+        <PricingCard kind="vendor" vendorType={type} />
 
         <T variant="heading" style={{ marginBottom: space.md }}>
           Business type
         </T>
         <View style={{ flexDirection: 'row', gap: space.md }}>
           {TYPES.map((t) => (
-            <BizTypeTile key={t.key} t={t} active={t.key === type} onPress={() => setType(t.key)} />
+            <BizTypeTile key={t.key} t={t} active={t.key === type} onPress={() => edit({ type: t.key })} />
           ))}
         </View>
 
         <Card style={{ marginTop: space.xl, gap: space.md }}>
-          <LabeledInput value={name} onChangeText={setName} placeholder="Business name" />
-          <LabeledInput value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
-          <LabeledInput value={addr} onChangeText={setAddr} placeholder="Street address" />
-          <LabeledInput value={city} onChangeText={setCity} placeholder="City" />
+          <LabeledInput value={name} onChangeText={(value) => edit({ name: value })} placeholder="Business name" />
+          <LabeledInput value={phone} onChangeText={(value) => edit({ phone: value })} placeholder="Business phone" keyboardType="phone-pad" />
+          <LabeledInput value={addr} onChangeText={(value) => edit({ addr: value })} placeholder="Street address" />
+          <LabeledInput value={city} onChangeText={(value) => edit({ city: value })} placeholder="City" />
           {/* [two-reds law] `error` is reserved for genuine failure — the palette
               says so, and brand is already red, so a second red must mean
               something. Nothing has failed here: the app is asking for a
@@ -166,7 +194,7 @@ export function BusinessSetup() {
           accessibilityRole="checkbox"
           accessibilityState={{ checked: agree }}
           accessibilityLabel="I agree to the Business Agreement"
-          onPress={() => setAgree((v) => !v)}
+          onPress={() => edit((draft) => ({ agree: !draft.agree }))}
           style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}
         >
           <MaterialCommunityIcons
@@ -187,11 +215,14 @@ export function BusinessSetup() {
           </T>
         ) : null}
         {/* [#947's grammar] Disabled names the first missing thing, in the
-            order the form asks for them — the pin first, because without it
-            nothing else matters. */}
+            order the form asks for them — the fee first, because without a
+            fee on the door there is nothing to agree to; then the pin, because
+            without it nothing else matters. */}
         <PillButton
           label={
-            !hasPin
+            !gate.ok
+              ? QUOTE_GATE_COPY[gate.why]
+              : !hasPin
               ? 'Turn location on first'
               : name.trim().length < 2
                 ? 'Name your business'
@@ -206,7 +237,7 @@ export function BusinessSetup() {
                         : 'Create store'
           }
           loading={become.isPending}
-          disabled={!valid || !agree}
+          disabled={!gate.ok || !valid || !agree}
           style={{ marginTop: space.lg }}
           onPress={submit}
         />
@@ -223,13 +254,16 @@ export function BusinessSetup() {
 }
 
 export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: () => void }) {
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   // Poll while onboarding so an approval reflects within seconds.
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType, undefined, { poll: true });
   return (
     <Screen>
-      <TabHeader title={store.name} />
+      {/* Waiting for approval is not a reason to be kept out of Swift. */}
+      <TabHeader title={store.name} onSwitch={() => setSwitcherOpen(true)} />
+      <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
-        <PricingCard kind="vendor" />
+        <PricingCard kind="vendor" vendorType={store.vendorType} />
         <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}
