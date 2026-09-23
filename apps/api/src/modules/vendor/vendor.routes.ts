@@ -46,7 +46,11 @@ import { DiscoveryService } from '../discovery/discovery.service';
 import { QrAnalyticsService } from '../qr/qr-analytics.service';
 import { cachedRender, renderQrPng, renderQrSvg, renderTemplatePdf } from '../qr/qr-assets.service';
 import { publicWebBase } from '../qr/qr-codes';
-import { processReviewText } from '../rating/review-scrub';
+import {
+  respondToVendorReview,
+  summarizeRatingDistribution,
+  vendorReviewWhereForViewer,
+} from '../rating/vendor-review-visibility';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
@@ -3296,15 +3300,30 @@ export async function vendorRoutes(app: FastifyInstance) {
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
 
-    const where: Record<string, unknown> = {
-      vendorId,
-      type: 'CUSTOMER_TO_VENDOR',
-    };
+    const tenantId = request.tenantId;
+    if (!tenantId) {
+      throw new AppError(500, 'TENANT_CONTEXT_REQUIRED', 'This review request has no authenticated tenant context.');
+    }
     const { minScore, maxScore } = reviewsQuerySchema.parse(request.query);
-    if (minScore) where['score'] = { ...(where['score'] as object || {}), gte: minScore };
-    if (maxScore) where['score'] = { ...(where['score'] as object || {}), lte: maxScore };
+    const publishedWhere = await vendorReviewWhereForViewer(
+      app.prisma,
+      tenantId,
+      request.user.userId,
+      vendorId,
+    );
+    const where = {
+      ...publishedWhere,
+      ...(minScore || maxScore
+        ? {
+          score: {
+            ...(minScore ? { gte: minScore } : {}),
+            ...(maxScore ? { lte: maxScore } : {}),
+          },
+        }
+        : {}),
+    };
 
-    const [reviews, total, aggregate] = await Promise.all([
+    const [reviews, scoreBuckets] = await Promise.all([
       app.prisma.rating.findMany({
         where,
         include: {
@@ -3314,34 +3333,22 @@ export async function vendorRoutes(app: FastifyInstance) {
         skip: pagination.skip,
         take: pagination.limit,
       }),
-      app.prisma.rating.count({ where }),
-      app.prisma.rating.aggregate({
-        where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
-        _avg: { score: true },
+      app.prisma.rating.groupBy({
+        by: ['score'],
+        where,
         _count: true,
+        orderBy: { score: 'asc' },
       }),
     ]);
-
-    // Score distribution
-    const distribution = await app.prisma.rating.groupBy({
-      by: ['score'],
-      where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
-      _count: true,
-      orderBy: { score: 'asc' },
-    });
-
-    const scoreDistribution: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-    for (const d of distribution) {
-      scoreDistribution[d.score] = d._count;
-    }
+    const summary = summarizeRatingDistribution(scoreBuckets);
 
     return {
       success: true,
-      ...paginatedResponse(reviews, total, pagination),
+      ...paginatedResponse(reviews, summary.totalReviews, pagination),
       summary: {
-        averageRating: aggregate._avg.score ?? 0,
-        totalReviews: aggregate._count,
-        distribution: scoreDistribution,
+        averageRating: summary.averageRating,
+        totalReviews: summary.totalReviews,
+        distribution: summary.distribution,
       },
     };
   });
@@ -3351,35 +3358,21 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.post<{ Params: IdParam }>('/reviews/:id/respond', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { response } = respondReviewSchema.parse(request.body);
-
-    const rating = await app.prisma.rating.findUnique({ where: { id: request.params.id } });
-    if (!rating || rating.vendorId !== vendorId || rating.type !== 'CUSTOMER_TO_VENDOR') {
-      throw new NotFoundError('Review', request.params.id);
+    const tenantId = request.tenantId;
+    if (!tenantId) {
+      throw new AppError(500, 'TENANT_CONTEXT_REQUIRED', 'This review request has no authenticated tenant context.');
     }
-
-    // Movement R (R7): the reply rides the same scrub pipeline — PII masked;
-    // profanity is refused outright (this is the store's public face).
-    const processed = processReviewText(response);
-    if (processed.hold) {
-      throw new AppError(400, 'KEEP_IT_PROFESSIONAL', 'That language can’t go on your storefront — rephrase and post again');
-    }
-
-    const isEdit = rating.response !== null;
-    const updated = await app.prisma.rating.update({
-      where: { id: request.params.id },
-      data: { response: processed.text, respondedAt: new Date(), respondedBy: request.user.userId },
+    // Movement R (R7): scrub, live block/publication check, response CAS and
+    // durable notification fact are one serializable operation. Only delivery
+    // of the already-persisted notification happens after commit.
+    const updated = await respondToVendorReview(app.prisma, notifications, {
+      tenantId,
+      responderId: request.user.userId,
+      vendorId,
+      reviewId: request.params.id,
+      response,
+      respondedAt: new Date(),
     });
-
-    if (!isEdit) {
-      const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { name: true } });
-      await notifications.send({
-        userId: rating.raterId,
-        type: 'RATING_RECEIVED',
-        title: `${vendor.name} replied to your review`,
-        body: response.length > 120 ? `${response.slice(0, 117)}…` : response,
-        data: { kind: 'review_response', ratingId: rating.id, vendorId },
-      });
-    }
 
     return { success: true, data: updated };
   });
