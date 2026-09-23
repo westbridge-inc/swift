@@ -28,14 +28,16 @@ import {
 // ---------------------------------------------------------------------------
 // R2 — THE FOUR API FINDINGS OF THE AUTHOR-SEPARATED REVIEW, RED FIRST.
 //
-//   F01  A booking's slot carries the LOCAL wall-clock on its UTC face (the
-//        SCH-F convention in booking/availability.ts: the vendor types "10:00",
-//        the picker shows 10:00, the row holds 10:00Z). The cancellation policy
-//        read that face as a real instant, so in Guyana (UTC-4, no DST) the
-//        free window closed at 05:55 for a 10:00 haircut and the locked cancel
-//        recorded the GYD 500 marker four hours early. The slot is resolved
-//        through the market zone before the cutoff is computed, in ONE place,
-//        so the customer preview and the locked cancel agree.
+//   F01  A booking's slot is the moment the work happens. Under the original
+//        convention the row held the LOCAL wall-clock on its UTC face (the
+//        vendor types "10:00", the row held 10:00Z) and the cancellation
+//        policy read that face as a real instant, so in Guyana (UTC-4, no
+//        DST) the free window closed at 05:55 for a 10:00 haircut and the
+//        locked cancel recorded the GYD 500 marker four hours early. Today the
+//        producer (booking/availability.ts) resolves the vendor's wall-clock
+//        through the market zone ONCE and emits the TRUE instant — 10:00 local
+//        is 14:00Z on the wire and in the row — and the policy reads that
+//        instant directly, so the customer preview and the locked cancel agree.
 //   F02  Every order at a SERVICE business was declared SERVICE, so shampoo
 //        bought from a barbershop by delivery read "Booking confirmed" and lost
 //        its delivery stages. Only an APPOINTMENT is a booking.
@@ -130,8 +132,8 @@ describe('F01 — a booking is cancelled by its LOCAL slot, resolved through the
 
   const pendingBooking = () => serviceBooking('bk-r2', { placedAt: PLACED_AT, updatedAt: PLACED_AT, holdExpiresAt: null, appointmentSlot: slot });
 
-  it('the producer stores the local wall-clock on the UTC face, the picker shows it, and it happens at 14:00Z', () => {
-    expect(slot.toISOString()).toBe('2026-09-24T10:00:00.000Z');
+  it('the producer stores the true 14:00Z instant and the picker shows 10:00 local', () => {
+    expect(slot.toISOString()).toBe('2026-09-24T14:00:00.000Z');
     expect(fmtSlotTime(slot)).toBe('Thu 24 Sept, 10:00');
     expect(guyanaClock(new Date('2026-09-24T14:00:00.000Z'))).toBe('10:00');
     expect(guyanaClock(FOUR_HOURS_EARLY)).toBe('05:55');
@@ -292,7 +294,7 @@ describe('F03 — a booking never enters a kitchen state', () => {
 
 describe('F04 — the cancel result names a booking and its provider; the fee and the MMG truth stay the server’s', () => {
   const PLACED_AT = new Date('2026-09-23T14:00:00.000Z');
-  const slot = new Date('2026-09-24T10:00:00.000Z');
+  const slot = new Date('2026-09-24T14:00:00.000Z');
   const booking = (extra: Row = {}) => serviceBooking('bk-r2', { placedAt: PLACED_AT, updatedAt: PLACED_AT, holdExpiresAt: null, appointmentSlot: slot, ...extra });
 
   it('RED — a free cash cancel says "Booking cancelled — no charge" and records no marker', async () => {

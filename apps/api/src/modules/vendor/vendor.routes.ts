@@ -16,6 +16,7 @@ import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } f
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
+import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
 import { VerificationService } from '../verification/verification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -2869,10 +2870,17 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.get('/bookings', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const { from, to } = z
-      .object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() })
+      .object({ from: z.string().optional(), to: z.string().optional() })
       .parse(request.query);
-    const start = from ?? new Date(new Date().setHours(0, 0, 0, 0));
-    const end = to ?? new Date(start.getTime() + 14 * 24 * 60 * 60 * 1000);
+    const start = from
+      ? isDateOnly(from) ? startOfGuyanaDay(from) : z.coerce.date().parse(from)
+      : startOfGuyanaDay(guyanaDayKey(new Date()));
+    const baseKey = guyanaDayKey(start);
+    const [year, month, day] = baseKey.split('-').map(Number);
+    const endKey = new Date(Date.UTC(year!, month! - 1, day! + 14)).toISOString().slice(0, 10);
+    const end = to
+      ? isDateOnly(to) ? startOfGuyanaDay(to) : z.coerce.date().parse(to)
+      : startOfGuyanaDay(endKey);
     const bookings = await app.prisma.booking.findMany({
       where: { item: { vendorId }, slotStart: { gte: start, lt: end }, status: { not: 'CANCELLED' } },
       select: {
@@ -2915,7 +2923,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { from, to } = z
       .object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() })
       .parse(request.query ?? {});
-    const start = from ?? new Date(new Date().setUTCHours(0, 0, 0, 0));
+    const start = from ?? new Date(`${guyanaDayKey(new Date())}T00:00:00.000Z`);
     const end = to ?? new Date(start.getTime() + 30 * 24 * 60 * 60 * 1000);
     const exceptions = await app.prisma.bookingException.findMany({
       where: { vendorId, date: { gte: start, lte: end } },

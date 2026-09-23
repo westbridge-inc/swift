@@ -21,6 +21,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { getTenantId } from '../../plugins/prisma';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { deactivateRoom } from '../chat/chat-authority';
+import { formatGuyanaTime } from '../../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // Module S: Services (spec §4.6) — hire verified professionals. A ServiceJob is
@@ -87,7 +88,7 @@ export async function servicesRoutes(app: FastifyInstance) {
    *  provider reads the same "Tue, 9:00 AM, 26 Aug" when a booking is made as
    *  when it is cancelled. */
   function slotLabel(when: Date): string {
-    return when.toLocaleString('en-GY', { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' });
+    return formatGuyanaTime(when, { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short', hour12: true }, 'en-US');
   }
 
   async function jobForUser(jobId: string, userId: string) {

@@ -38,4 +38,16 @@ describe('new-order takeover', () => {
     expect(headline.textContent).not.toContain('$0');
     expect(headline.textContent ?? '').not.toMatch(/NaN/);
   });
+
+  it('shows a booking at the market time without kitchen prep controls', async () => {
+    const raw = {
+      ...wireVendorOrder(), fulfillment: 'APPOINTMENT', appointmentSlot: '2026-09-24T13:00:00.000Z',
+    };
+    const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(raw)]} />);
+    expect(await screen.findByText('NEW BOOKING')).toBeTruthy();
+    expect(screen.getByText(/9:00 AM/)).toBeTruthy();
+    expect(screen.queryByText('20 min prep')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeTruthy();
+  });
 });

@@ -1,5 +1,5 @@
 import type { BookingConfig } from './booking.service';
-import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
+import { formatGuyanaTime, guyanaWallClockParts, instantOfGuyanaWallClock } from '../../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // THE availability computation (scheduling spec law: "no double-source") —
@@ -7,9 +7,8 @@ import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 // lead time. Pure: the picker endpoint, reservation validation, the vendor
 // calendar and reschedule all consume THIS, never their own arithmetic.
 //
-// Time convention (SCH-F): slot instants carry LOCAL wall-clock time on their
-// UTC face end-to-end — the vendor types "09:00", the window matches 09:00 on
-// the UTC face, the picker formats in UTC. One convention, zero offsets.
+// Vendor windows are Guyana wall-clock fields. A candidate is converted once
+// into a true instant; every wire and database slot uses that instant.
 // ---------------------------------------------------------------------------
 
 export interface ExceptionWindow {
@@ -25,23 +24,12 @@ export function toMinutes(hhmm: string): number {
   return (h ?? 0) * 60 + (m ?? 0);
 }
 
-/** Human form of a slot instant on the UTC face — "Wed 5 Aug, 09:00". Used in
- *  the reschedule notifications; matches what the picker shows. */
+/** Human form of a true slot instant, used in reschedule notifications. */
 export function fmtSlotTime(d: Date): string {
-  return d.toLocaleString('en-GB', {
+  return formatGuyanaTime(d, {
     weekday: 'short', day: 'numeric', month: 'short',
-    hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC',
+    hour: '2-digit', minute: '2-digit', hour12: false,
   });
-}
-
-/** The REAL instant a slot happens. A slot carries the local wall-clock on its
- *  UTC face (above), so `slot.getTime()` is NOT when it happens — in Guyana it
- *  is four hours early. Anything that compares a slot with a real clock (the
- *  cancellation cutoff) resolves it here, through the zone utils/guyana-day.ts
- *  reads for the platform's one market, never with an offset of its own; a
- *  per-market zone would plug in here. */
-export function slotInstant(slot: Date): Date {
-  return instantOfGuyanaWallClock(slot);
 }
 
 /** Candidate stride: a buffer widens the grid so every booking leaves its
@@ -63,7 +51,7 @@ export function slotBlocked(slotMin: number, durationMinutes: number, itemId: st
 }
 
 /**
- * All offerable slot starts for one listing on one date (UTC-face day parts).
+ * All offerable true slot instants for one Guyana calendar date.
  * `takenStarts` are the non-cancelled booking instants for that item/date.
  */
 export function computeDaySlots(opts: {
@@ -89,7 +77,7 @@ export function computeDaySlots(opts: {
     const start = toMinutes(w.start);
     const end = toMinutes(w.end);
     for (let t = start; t + config.durationMinutes <= end; t += stride) {
-      const slot = new Date(Date.UTC(opts.year, opts.month - 1, opts.day, Math.floor(t / 60), t % 60));
+      const slot = instantOfGuyanaWallClock(new Date(Date.UTC(opts.year, opts.month - 1, opts.day, Math.floor(t / 60), t % 60)));
       if (slot <= earliest) continue;
       if (slotBlocked(t, config.durationMinutes, opts.itemId, opts.exceptions)) continue;
       if (taken.has(slot.toISOString())) continue;
@@ -104,8 +92,9 @@ export function computeDaySlots(opts: {
  *  caller with slotBlocked (they need a DB read). */
 export function slotFitsConfig(slotStart: Date, config: BookingConfig, now: Date): 'OK' | 'OUTSIDE' | 'TOO_SOON' {
   const stride = strideMinutes(config);
-  const day = slotStart.getUTCDay();
-  const minutesIntoDay = slotStart.getUTCHours() * 60 + slotStart.getUTCMinutes();
+  const local = guyanaWallClockParts(slotStart);
+  const day = local.dayOfWeek;
+  const minutesIntoDay = local.hour * 60 + local.minute;
   const window = config.slots.find((s) => {
     if (s.dayOfWeek !== day) return false;
     const start = toMinutes(s.start);

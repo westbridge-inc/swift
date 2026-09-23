@@ -19,6 +19,7 @@ import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../
 import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
+import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed';
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
@@ -987,6 +988,7 @@ export async function customerRoutes(app: FastifyInstance) {
               // card; it is not the discriminator (a service business's goods
               // are deliveries).
               fulfillment: true,
+              appointmentSlot: true,
               vendor: { select: { id: true, name: true, logoUrl: true, vendorType: true } },
               // The hold — the window in which the store has not been told yet.
               // `holdExpiresAt` and `placedAt` are its two ends, and the client's
@@ -1565,8 +1567,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // THE availability computation (scheduling law: no double-source):
     // windows MINUS the vendor's exceptions MINUS non-cancelled bookings,
     // honoring buffers + lead time — the same math reservation validates.
-    const dayStart = new Date(Date.UTC(y!, m! - 1, d!));
-    const dayEnd = new Date(Date.UTC(y!, m! - 1, d!, 23, 59, 59, 999));
+    const dayStart = startOfGuyanaDay(date);
+    const dayEnd = endOfGuyanaDay(date);
     const [exceptions, takenRows] = item.isAvailable
       ? await Promise.all([
           bookingService.exceptionsFor(item.vendorId, dayStart),
@@ -2122,6 +2124,7 @@ export async function customerRoutes(app: FastifyInstance) {
       totalAmount: Number(o.totalAmount),
       paymentMethod: o.paymentMethod,
       fulfillment: o.fulfillment,
+      appointmentSlot: o.appointmentSlot,
       // Takeaway handover gate — the customer PRESENTS this at the counter,
       // so it must survive past the checkout confirmation screen.
       pickupCode: o.pickupCode,
@@ -2290,6 +2293,7 @@ export async function customerRoutes(app: FastifyInstance) {
         paymentStatus: order.paymentStatus,
         paymentAction,
         fulfillment: order.fulfillment,
+        appointmentSlot: order.appointmentSlot,
         // Takeaway handover gate — the customer PRESENTS this code at the
         // counter. It was only in the checkout response before, so it
         // vanished the moment they left the confirmation screen.

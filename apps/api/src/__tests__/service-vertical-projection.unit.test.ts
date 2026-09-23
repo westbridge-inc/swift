@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
-import { slotInstant } from '../modules/booking/availability';
 import {
   MINUTE,
   foodDelivery,
@@ -58,7 +57,8 @@ type Detail = { success: boolean; data: Row };
 
 describe('GET /home — the live-order card is told the vertical', () => {
   it('RED reproduction — a barbershop booking on the legacy spine is projected as SERVICE, with its fulfillment and business type', async () => {
-    const h = await customerHost([serviceBooking('bk-1')]);
+    const booking = serviceBooking('bk-1', { appointmentSlot: new Date('2026-09-24T13:00:00.000Z') });
+    const h = await customerHost([booking]);
     const res = (await h.call('get /home', asCustomer())) as Feed;
     expect(res.success).toBe(true);
     expect(res.data.activeOrder).toMatchObject({
@@ -66,6 +66,7 @@ describe('GET /home — the live-order card is told the vertical', () => {
       orderNumber: 'ORD-BK-1',
       orderType: 'FOOD_DELIVERY',
       fulfillment: 'APPOINTMENT',
+      appointmentSlot: booking['appointmentSlot'],
       vertical: 'SERVICE',
       vendor: { id: 'vendor-svc', name: 'Kim’s Barbershop', vendorType: 'SERVICE' },
     });
@@ -78,6 +79,7 @@ describe('GET /home — the live-order card is told the vertical', () => {
     expect(active, 'Home must read the active order with findFirst').toBeTruthy();
     const select = active!.args['select'] as Record<string, unknown>;
     expect(select['fulfillment']).toBe(true);
+    expect(select['appointmentSlot']).toBe(true);
     expect((select['vendor'] as { select: Record<string, unknown> }).select['vendorType']).toBe(true);
   });
 
@@ -106,11 +108,12 @@ describe('GET /home — the live-order card is told the vertical', () => {
 
 describe('GET /orders — the activity list carries the vertical per row', () => {
   it('RED reproduction — a booking row is SERVICE and a food row is FOOD_DELIVERY; the persisted type is untouched on both', async () => {
-    const h = await customerHost([serviceBooking('bk-1'), foodDelivery('food-1')]);
+    const booking = serviceBooking('bk-1', { appointmentSlot: new Date('2026-09-24T13:00:00.000Z') });
+    const h = await customerHost([booking, foodDelivery('food-1')]);
     const res = (await h.call('get /orders', asCustomer())) as List;
     expect(res.success).toBe(true);
     const byId = Object.fromEntries(res.data.map((o) => [o['id'] as string, o]));
-    expect(byId['bk-1']).toMatchObject({ orderType: 'FOOD_DELIVERY', fulfillment: 'APPOINTMENT', vertical: 'SERVICE', vendor: { vendorType: 'SERVICE' } });
+    expect(byId['bk-1']).toMatchObject({ orderType: 'FOOD_DELIVERY', fulfillment: 'APPOINTMENT', vertical: 'SERVICE', appointmentSlot: booking['appointmentSlot'], vendor: { vendorType: 'SERVICE' } });
     expect(byId['food-1']).toMatchObject({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', vertical: 'FOOD_DELIVERY', vendor: { vendorType: 'RESTAURANT' } });
   });
 });
@@ -125,13 +128,14 @@ describe('GET /orders/:id — the order screen’s contract', () => {
       id: 'bk-1',
       orderType: 'FOOD_DELIVERY',
       fulfillment: 'APPOINTMENT',
+      appointmentSlot: slot,
       vertical: 'SERVICE',
       canCancel: true,
       freeCancellationWindow: true,
       cancellationFee: 0,
-      // The slot's UTC face is local wall-clock (SCH-F); the window ends five
-      // minutes before the instant it actually happens [R2 F01].
-      freeCancellationExpiresAt: new Date(slotInstant(slot).getTime() - FREE_CANCEL_WINDOW_MIN * MINUTE).toISOString(),
+      // The slot is already the true instant; the window ends five minutes
+      // before it happens.
+      freeCancellationExpiresAt: new Date(slot.getTime() - FREE_CANCEL_WINDOW_MIN * MINUTE).toISOString(),
     });
   });
 

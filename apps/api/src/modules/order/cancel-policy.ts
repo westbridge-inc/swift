@@ -1,5 +1,3 @@
-import { slotInstant } from '../booking/availability';
-
 // ---------------------------------------------------------------------------
 // The cancellation policy — ONE implementation [SWIFT-UG-CRAFT-01].
 //
@@ -39,12 +37,10 @@ export type CancellationSnapshot = {
   appointmentSlot?: Date | null;
 };
 
-/** The REAL moment the work is scheduled to happen, or null for "now". A
- *  booking's slot is resolved through the market zone (see the predicate's
- *  note); a scheduled delivery's `scheduledFor` is an instant already. ONE
- *  helper, so the predicate and the window it promises cannot drift. */
+/** The real moment the work is scheduled to happen, or null for "now".
+ * Both appointmentSlot and scheduledFor are true instants. */
 function scheduledMoment(appointmentSlot: Date | null | undefined, scheduledFor: Date | null): Date | null {
-  if (appointmentSlot != null) return slotInstant(appointmentSlot);
+  if (appointmentSlot != null) return appointmentSlot;
   return scheduledFor ?? null;
 }
 
@@ -97,13 +93,8 @@ function scheduledMoment(appointmentSlot: Date | null | undefined, scheduledFor:
  * scheduled moment; the rule above applies to it unchanged, and an accepted
  * booking is committed exactly as before.
  *
- * The slot's CLOCK is not the server's. A slot carries the local wall-clock on
- * its UTC face (booking/availability.ts, SCH-F): "Thu 10:00" is stored as
- * 10:00Z and happens at 14:00Z in Guyana. Read as an instant, the cutoff ran
- * four hours early — a 10:00 haircut recorded the marker at 05:55. So the slot
- * is resolved through the market zone in `scheduledMoment`, the one place both
- * the customer preview and the locked cancel read it; `scheduledFor` is an
- * instant already and is left alone.
+ * Both slot columns are instants, so the same cutoff arithmetic applies to
+ * appointments and scheduled deliveries without any zone conversion here.
  */
 export function isFreeCancellation(order: CancellationSnapshot, now: Date = new Date()): boolean {
   const unassigned = order.riderId == null && order.driverId == null;
@@ -115,8 +106,7 @@ export function isFreeCancellation(order: CancellationSnapshot, now: Date = new 
   const minutesSincePlaced = (now.getTime() - order.placedAt.getTime()) / 60000;
   if (minutesSincePlaced <= FREE_CANCEL_WINDOW_MIN) return true;
   // Still nothing committed, and the slot has not come around yet. A booking's
-  // slot is its scheduled moment (the column bookings carry), resolved to the
-  // real instant it happens.
+  // slot is its scheduled moment (the column bookings carry).
   const slotAt = scheduledMoment(order.appointmentSlot, order.scheduledFor);
   if (slotAt == null) return false;
   const minutesUntilSlot = (slotAt.getTime() - now.getTime()) / 60000;

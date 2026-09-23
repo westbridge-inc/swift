@@ -26,6 +26,7 @@ import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
 // photo. `itemImage` used to hand "Mauby" a picture of a cheeseburger.
 import { categoryPhoto, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { orderRecipientNoun, orderStatusLabel, orderSubtitle, presentedVertical } from '../../../lib/orderStatus';
 import { promiseLine } from '../../../lib/promise';
 // ONE hold authority, shared with the tracking screen — never a second
@@ -243,6 +244,11 @@ function LiveOrderCard({ order, navigation }: { order: LiveOrderProjection; navi
                   `${recipient.charAt(0).toUpperCase()}${recipient.slice(1)} hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
                 : orderSubtitle(order.vendor?.name, order.orderNumber)}
             </T>
+            {order.fulfillment === 'APPOINTMENT' && order.appointmentSlot ? (
+              <T variant="caption" style={{ marginTop: 4 }}>
+                Appointment: {formatAppointmentSlot(order.appointmentSlot)}
+              </T>
+            ) : null}
             {promise && !hold ? (
               <T variant="caption" style={{ marginTop: 4 }}>
                 {promise.label}

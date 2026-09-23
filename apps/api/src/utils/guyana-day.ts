@@ -68,14 +68,41 @@ export function endOfGuyanaDay(dateOnly: string): Date {
   return guyanaWallClockToInstant(y, m, d, 23, 59, 59, 999);
 }
 
-/** The real instant of a Guyanese wall-clock time that a Date carries on its
- *  UTC FACE — the booking-slot convention (`Date.UTC(y, m, d, localHour,
- *  localMinute)`, booking/availability.ts): "Thu 10:00" is stored as 10:00Z
- *  and HAPPENS at 14:00Z. Read as an instant, the face is four hours early —
- *  the class of error the date-only helpers above exist for, on a slot. */
+/** Convert a temporary UTC-encoded wall-clock candidate into the true instant.
+ * Only the availability producer uses the face; wire and database slots never
+ * carry it. A local 10:00 appointment is emitted and stored as 14:00Z. */
 export function instantOfGuyanaWallClock(utcFace: Date): Date {
   return guyanaWallClockToInstant(
     utcFace.getUTCFullYear(), utcFace.getUTCMonth() + 1, utcFace.getUTCDate(),
     utcFace.getUTCHours(), utcFace.getUTCMinutes(), utcFace.getUTCSeconds(), utcFace.getUTCMilliseconds(),
   );
+}
+
+/** Calendar parts in the market zone for an actual instant. These are wall
+ * clock fields for schedule rules, never a second persisted Date convention. */
+export function guyanaWallClockParts(at: Date): {
+  year: number; month: number; day: number; dayOfWeek: number; hour: number; minute: number;
+} {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: GUYANA_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(at);
+  const get = (kind: string) => Number(parts.find((p) => p.type === kind)?.value ?? '0');
+  const year = get('year');
+  const month = get('month');
+  const day = get('day');
+  return {
+    year, month, day, dayOfWeek: new Date(Date.UTC(year, month - 1, day)).getUTCDay(),
+    hour: get('hour') % 24, minute: get('minute'),
+  };
+}
+
+export function guyanaDayKey(at: Date): string {
+  const { year, month, day } = guyanaWallClockParts(at);
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/** One server formatter for appointment and service-job copy. */
+export function formatGuyanaTime(at: Date, options: Intl.DateTimeFormatOptions, locale = 'en-GB'): string {
+  return new Intl.DateTimeFormat(locale, { ...options, timeZone: GUYANA_TZ }).format(at);
 }

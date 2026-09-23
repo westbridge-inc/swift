@@ -55,6 +55,14 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const payButton = () => screen.findByRole('button', { name: /Pay Shanta Kitchen by MMG/ });
 
 describe('[W-32] the payment that opens is the payment that was shown', () => {
+  it('shows a service appointment at the market time on the order page', async () => {
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({
+      ...ORDER, fulfillment: 'APPOINTMENT', appointmentSlot: '2026-09-24T13:00:00.000Z',
+    } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText(/Thu, Sep 24, 9:00 AM/)).toBeTruthy();
+  });
+
   it('says who is paid and how much BEFORE anything opens', async () => {
     render(<OrderDetailPage />);
     expect(await screen.findByText(/sends .* directly to Shanta Kitchen/)).toBeTruthy();

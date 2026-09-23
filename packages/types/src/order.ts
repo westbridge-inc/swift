@@ -199,6 +199,11 @@ export interface OrderProjection {
   orderType: OrderTypeValue;
   vertical: OrderVertical;
   fulfillment?: OrderFulfillment | null;
+  /** A booking's slot as a TRUE UTC instant (ISO 8601): 09:00 in Guyana
+   *  travels as 13:00Z. Present on APPOINTMENT rows; every human-facing
+   *  rendering formats it in the market zone (GUYANA_TZ), never in UTC and
+   *  never in the device zone. */
+  appointmentSlot?: string | null;
 }
 
 /** The same projection from an API that predates the declaration: no

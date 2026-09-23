@@ -8,6 +8,7 @@ import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
   acceptOrder, completePickup, confirmPayment, getItems, getOrder, getOrders,
   markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
@@ -219,7 +220,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const act = useMutation({
     mutationFn: async (kind: string) => {
       setError(null);
-      if (kind === 'accept') return acceptOrder(id, prepTime);
+      if (kind === 'accept') return acceptOrder(id, order.data?.fulfillment === 'APPOINTMENT' ? undefined : prepTime);
       if (kind === 'reject') return rejectOrder(id);
       if (kind === 'preparing') return markPreparing(id);
       if (kind === 'ready') return markReady(id);
@@ -276,6 +277,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
           <p className="mt-0.5 text-sm text-[var(--swift-muted)]">
             {customer} · {timeAgo(o.placedAt)} · {o.fulfillment ?? o.orderType}
           </p>
+          {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? <p className="mt-1 text-sm font-semibold">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p> : null}
         </div>
         <div className="flex items-center gap-2">
           {statusChip(s)}
@@ -313,7 +315,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
       <div className="mt-5 flex flex-wrap items-center gap-2">
         {actions.map((a) => (
           <span key={a.kind} className="flex items-center gap-2">
-            {a.kind === 'accept' && (
+            {a.kind === 'accept' && o.fulfillment !== 'APPOINTMENT' && (
               <select
                 value={prepTime}
                 onChange={(e) => setPrepTime(Number(e.target.value))}
@@ -469,6 +471,7 @@ export default function OrdersPage() {
                 {[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ')} · {o.items.length}{' '}
                 {o.items.length === 1 ? 'item' : 'items'} · {money(o.totalAmount)} · {timeAgo(o.placedAt)}
               </p>
+              {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? <p className="mt-1 text-sm font-semibold">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p> : null}
               {o.vendor?.name && <p className="mt-0.5 text-xs text-[var(--swift-muted)]">{o.vendor.name}</p>}
             </button>
           ))}

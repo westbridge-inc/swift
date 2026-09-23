@@ -90,6 +90,7 @@ export interface VendorOrder {
   paymentMethod?: string | null;
   paymentStatus?: string | null;
   placedAt: string;
+  appointmentSlot?: string | null;
   acceptedAt?: string | null;
   preparingAt?: string | null;
   readyAt?: string | null;

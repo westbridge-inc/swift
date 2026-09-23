@@ -18,6 +18,7 @@ import { useOrder, useDecideSubstitution } from '../../../hooks/customer';
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { promiseLine, promiseNote } from '../../../lib/promise';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
@@ -954,6 +955,12 @@ export function DeliveryScreen() {
             }}
             hidden={ringHidden || !isFocused}
           />
+          {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? (
+            <View style={{ marginTop: space.md }}>
+              <T variant="label" tone="muted">Appointment</T>
+              <T variant="body" weight="semibold">{formatAppointmentSlot(o.appointmentSlot)}</T>
+            </View>
+          ) : null}
           {holdTimingUnavailable ? (
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="refresh-cw" size={18} color={color.info} />

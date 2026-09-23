@@ -8,6 +8,7 @@ import { color, radius, space } from '@swift/ui';
 import { useLiveOrders, useOrdersInfinite, useReorder } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { vendorPhoto } from '../../../lib/images';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 // The single authority for what a status is CALLED — type-aware, so a ride is
 // never described with a store's words. This screen owns tone, never wording.
 import { orderStatusLabel, presentedVertical } from '../../../lib/orderStatus';
@@ -316,6 +317,9 @@ export function OrdersHistoryScreen() {
                 {sub}
               </T>
             ) : null}
+            {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? (
+              <T variant="body" tone="muted">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</T>
+            ) : null}
           </View>
           {amountText(o, isRide)}
         </View>
@@ -378,6 +382,9 @@ export function OrdersHistoryScreen() {
                 <T variant="body" tone="muted" numberOfLines={1}>
                   {sub}
                 </T>
+              ) : null}
+              {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? (
+                <T variant="body" tone="muted">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</T>
               ) : null}
             </View>
             {amountText(o, isRide)}
