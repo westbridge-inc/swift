@@ -1,8 +1,9 @@
-import type { Prisma } from '@prisma/client';
+import type { Prisma, SubscriptionStatus } from '@prisma/client';
+import { inoperableSubscriptionWhere, subscriptionOperability } from '../subscription/operate-gate';
 import { getTenantId } from '../../plugins/tenant-context';
 // ---------------------------------------------------------------------------
 // THE customer-facing vendor-visibility predicate — ONE implementation
-// [B2/#790]. A store is visible to customers only when all three hold:
+// [B2/#790]. A store is visible to customers only when all of these hold:
 //
 //   status ACTIVE        — not suspended/rejected,
 //   isVerified           — a human approved its papers,
@@ -11,6 +12,9 @@ import { getTenantId } from '../../plugins/tenant-context';
 //                          (no tenant context in the Prisma extension), so this
 //                          relational predicate is the only wall between a
 //                          shut-off operator and public surfaces.
+//
+//   subscription operates — including grace expiry; missing legacy rows
+//                           follow the vendor operate gate (grandfathered).
 //
 // History, which is why this file exists: the Home popular rail shipped with
 // status alone (a deactivated operator's DISH sat above the fold while their
@@ -29,6 +33,8 @@ export const VISIBLE_VENDOR = {
   status: 'ACTIVE',
   isVerified: true,
   tenant: { isActive: true },
+  // Evaluate the deadline when the predicate is used, never at module boot.
+  get subscription() { return { isNot: inoperableSubscriptionWhere() }; },
 } as const;
 
 /** Spread into an ITEM query's `vendor:` relation filter. */
@@ -78,7 +84,7 @@ export function visibleVendorForCaller(): Prisma.VendorWhereInput {
  * could still drift.
  *
  * Pass a row selected with at least `status`, `isVerified`, and
- * `tenant: { select: { isActive: true } }`. A missing tenant relation is
+ * `tenant` and `subscription` via VISIBLE_VENDOR_SELECT. A missing tenant relation is
  * treated as NOT visible — failing closed, because the tenant clause is the
  * only wall between a shut-off operator and an unscoped guest request.
  */
@@ -86,11 +92,14 @@ export function isVendorVisible(vendor: {
   status: string;
   isVerified: boolean;
   tenant?: { isActive: boolean } | null;
+  subscription?: { status: SubscriptionStatus; gracePeriodEnd: Date | null } | null;
 }): boolean {
   return (
     vendor.status === VISIBLE_VENDOR.status &&
     vendor.isVerified === VISIBLE_VENDOR.isVerified &&
-    vendor.tenant?.isActive === VISIBLE_VENDOR.tenant.isActive
+    vendor.tenant?.isActive === VISIBLE_VENDOR.tenant.isActive &&
+    vendor.subscription !== undefined &&
+    subscriptionOperability(vendor.subscription, { missingRow: 'GRANDFATHER' }).operable
   );
 }
 
@@ -101,6 +110,7 @@ export const VISIBLE_VENDOR_SELECT = {
   status: true,
   isVerified: true,
   tenant: { select: { isActive: true } },
+  subscription: { select: { status: true, gracePeriodEnd: true } },
 } as const;
 
 /** [R048-003] The visibility predicate INSIDE one tenant — for relation
@@ -109,5 +119,5 @@ export const VISIBLE_VENDOR_SELECT = {
  *  tenant's query. */
 export function visibleVendorInTenant(tenantId: string) {
   if (!tenantId) throw new Error('[R048-003] visibleVendorInTenant needs a tenant');
-  return { ...VISIBLE_VENDOR, tenantId } as const;
+  return { ...VISIBLE_VENDOR_REL, tenantId } as const;
 }

@@ -5,6 +5,7 @@ import { authPlugin } from '../../plugins/auth';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { rateLimitKey } from '../../utils/rate-limit-key';
+import { marketRoutes } from '../../modules/market/market.routes';
 import { searchRoutes } from '../../modules/search/search.routes';
 
 // Only the external search client and unused auth mutations are replaced.
@@ -30,12 +31,16 @@ export { engine };
 type Row = Record<string, any>;
 // Small, strict query double: evaluate the route's predicates, never pre-filter
 // the fixtures into the expected answer. Unsupported operators fail the test.
-function matches(row: Row, where: Row = {}): boolean {
+export function matches(row: Row, where: Row = {}): boolean {
   return Object.entries(where).every(([key, value]) => {
     if (key === 'OR') return value.some((w: Row) => matches(row, w));
     if (key === 'AND') return (Array.isArray(value) ? value : [value]).every((w: Row) => matches(row, w));
     const actual = row[key];
     if (value === null || typeof value !== 'object') return actual === value;
+    if ('isNot' in value) return actual == null || !matches(actual, value.isNot);
+    if ('notIn' in value) return !value.notIn.includes(actual);
+    if ('lt' in value) return actual != null && actual < value.lt;
+    if ('gte' in value) return actual != null && actual >= value.gte;
     if ('some' in value) return actual.some((r: Row) => matches(r, value.some));
     if ('in' in value) return value.in.includes(actual);
     if ('contains' in value) return typeof actual === 'string' && actual.toLowerCase().includes(value.contains.toLowerCase());
@@ -70,7 +75,7 @@ export async function guestSearchApp(max = 200) {
     ['suspended', 'public', 'SUSPENDED', true], ['unverified', 'public', 'ACTIVE', false],
     ['unpublished', 'public', 'PENDING_APPROVAL', true],
   ].map(([id, tenantId, status, verified]) => ({
-    id, tenantId, status, isVerified: verified, tenant: tenants.find((t) => t['id'] === tenantId),
+    id, tenantId, status, subscription: null, isVerified: verified, tenant: tenants.find((t) => t['id'] === tenantId),
     name: `Pepper ${id}`, slug: id, vendorType: 'RESTAURANT', isCurrentlyOpen: true,
     latitude: 6.8, longitude: -58.15, city: 'Georgetown', addressLine1: 'Public shop address',
     cuisineTypes: ['Creole'], tags: [], description: 'Pepper dishes', estimatedPrepTime: 15,
@@ -87,6 +92,8 @@ export async function guestSearchApp(max = 200) {
   items.push({ ...items[0], id: 'hidden-item', name: 'Pepper hidden', isAvailable: false });
   items.push({ ...items[0], id: 'gated-item', name: 'Pepper gated' });
   for (const vendor of vendors) vendor['items'] = items.filter((i) => i['vendorId'] === vendor['id']);
+  const categories: Row[] = [{ id: 'licensed', tenantId: 'public', status: 'ACTIVE', slug: 'licensed', kind: 'PRODUCT' }];
+  const tags: Row[] = [{ tenantId: 'public', itemId: 'gated-item', categoryId: 'licensed' }];
   const sessions = new Map<string, Row>();
   function delegate(rows: Row[]) {
     const findMany = vi.fn(async (args: Row = {}) => {
@@ -94,16 +101,16 @@ export async function guestSearchApp(max = 200) {
       const filtered = rows.filter((r) => (!tenantId || !r['tenantId'] || r['tenantId'] === tenantId) && matches(r, args['where']));
       return filtered.slice(0, args['take'] ?? filtered.length).map((r) => select(r, args['select']));
     });
-    return { findMany, findUnique: vi.fn(async (args: Row) => (await findMany(args))[0] ?? null) };
+    return { findMany, findUnique: vi.fn(async (args: Row) => (await findMany(args))[0] ?? null), count: vi.fn(async (args: Row) => (await findMany(args)).length) };
   }
   const db = {
     tenant: delegate(tenants), vendor: delegate(vendors), item: delegate(items),
     actorRatingStat: { findMany: vi.fn(async () => []) },
     session: { findUnique: vi.fn(async ({ where }: Row) => sessions.get(where.token) ?? null) },
-    discoveryCategory: { findMany: vi.fn(async () => [{ id: 'licensed', slug: 'licensed', kind: 'PRODUCT' }]) },
+    discoveryCategory: delegate(categories),
     categoryDocumentGate: { findMany: vi.fn(async () => [{ code: 'licence', categorySlug: 'licensed', categoryKind: null, enforcement: 'BLOCK_LISTING', requiredDocType: { legacyCode: 'LICENCE', displayName: 'Licence' } }]) },
     verificationDocument: { findFirst: vi.fn(async (): Promise<{ id: string } | null> => null) },
-    itemDiscoveryCategory: { findMany: vi.fn(async () => [{ itemId: 'gated-item', categoryId: 'licensed' }]) },
+    itemDiscoveryCategory: delegate(tags),
   };
   const app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -112,6 +119,7 @@ export async function guestSearchApp(max = 200) {
   await app.register(rateLimit, { max, timeWindow: '1 minute', keyGenerator: rateLimitKey });
   await app.register(authPlugin);
   await app.register(searchRoutes, { prefix: '/api/v1' });
+  await app.register(marketRoutes, { prefix: '/api/v1/market' });
   await app.ready();
   function token(tenantId = 'other', role = 'CUSTOMER') {
     const value = app.jwt.sign({ userId: 'test-user', role, jti: `${tenantId}-${role}` });
@@ -120,5 +128,5 @@ export async function guestSearchApp(max = 200) {
     } });
     return value;
   }
-  return { app, db, tenants, vendors, items, token, sessions };
+  return { app, db, tenants, vendors, items, categories, tags, token, sessions };
 }

@@ -5,7 +5,7 @@ import { AppError, ForbiddenError } from '../../utils/errors';
 import { sortByDistance } from '../../utils/distance';
 import { bindPublicMarketTenant, requireRequestTenant } from './search-scope';
 import { visibleVendorInTenant } from '../vendor/vendor-visibility';
-import { bearerOrCookieToken } from '../auth/browser-session';
+import { ACCESS_COOKIE, REFRESH_COOKIE, parseCookies } from '../auth/browser-session';
 import { listableItemsForVendors } from '../verification/category-gate';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
@@ -45,6 +45,7 @@ const nearbyQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90),
   lng: z.coerce.number().min(-180).max(180),
   radius: z.coerce.number().positive().max(50).default(5),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
   type: z.enum(['RESTAURANT', 'SUPERMARKET']).optional(),
 });
 
@@ -71,7 +72,9 @@ export async function searchRoutes(app: FastifyInstance) {
   const browseSearch = async (request: FastifyRequest, reply: FastifyReply) => {
     // Keep credential-bearing requests on the existing strict session path,
     // including cookie sessions and invalid/expired credential refusals.
-    if (request.headers.authorization !== undefined || bearerOrCookieToken(request)) {
+    const cookies = parseCookies(request.headers.cookie);
+    if (request.headers.authorization !== undefined ||
+      Object.hasOwn(cookies, ACCESS_COOKIE) || Object.hasOwn(cookies, REFRESH_COOKIE)) {
       await app.authenticate(request, reply);
     } else {
       await bindPublicTenant(request);
@@ -91,7 +94,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
     // Public discovery reads live browse eligibility. An index hit alone is
     // not authority to publish a listing whose visibility may have changed.
-    // Authenticated engine behavior is deliberately unchanged.
+    // Authenticated search retains index ranking, with live visibility checked below.
     if (searchService && !request.publicTenantId) {
       try {
         const [vendorResults, itemResults] = await Promise.all([
@@ -123,14 +126,30 @@ export async function searchRoutes(app: FastifyInstance) {
           itemHitFromSearchDoc,
         );
 
+        // Index ranking is not authority to publish a vendor after its
+        // subscription stops operating. Reuse the same bounded live gate.
+        const [liveVendors, liveItems] = await Promise.all([
+          app.prisma.vendor.findMany({
+            where: { ...visibleVendorInTenant(tenantId), id: { in: vendors.map((v) => v.id) }, isCurrentlyOpen: true },
+            select: { id: true }, take: parsedLimit,
+          }),
+          app.prisma.item.findMany({
+            where: { id: { in: items.map((i) => i.id) }, isAvailable: true, vendor: visibleVendorInTenant(tenantId) },
+            select: { id: true, vendorId: true }, take: parsedLimit,
+          }),
+        ]);
+        const vendorIds = new Set(liveVendors.map((v) => v.id));
+        const itemIds = new Set(liveItems.map((i) => i.id));
+        const visibleVendors = vendors.filter((v) => vendorIds.has(v.id));
+        const visibleItems = items.filter((i) => itemIds.has(i.id));
         return {
           success: true,
           data: {
-            vendors,
-            items,
+            vendors: visibleVendors,
+            items: visibleItems,
             meta: {
-              vendorCount: vendorResults.estimatedTotalHits,
-              itemCount: itemResults.estimatedTotalHits,
+              vendorCount: visibleVendors.length,
+              itemCount: visibleItems.length,
               processingTimeMs: vendorResults.processingTimeMs + itemResults.processingTimeMs,
             },
           },
@@ -153,7 +172,7 @@ export async function searchRoutes(app: FastifyInstance) {
         // whenever Meilisearch was down.
         where: {
           ...visibleVendorInTenant(tenantId),
-          ...(request.publicTenantId && { items: { some: { isAvailable: true } } }),
+          ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }),
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
@@ -161,6 +180,7 @@ export async function searchRoutes(app: FastifyInstance) {
             { tags: { hasSome: [q] } },
           ],
           ...(type && { vendorType: type }),
+          ...(cuisine && { cuisineTypes: { has: cuisine } }),
         },
         select: {
           id: true,
@@ -185,7 +205,7 @@ export async function searchRoutes(app: FastifyInstance) {
         where: {
           isAvailable: true,
           // the relation filter is not reached by the tenant-scoping extension: the tenant is named here
-          vendor: visibleVendorInTenant(tenantId),
+          vendor: { ...visibleVendorInTenant(tenantId), ...(request.publicTenantId && { isCurrentlyOpen: true }) },
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
@@ -256,14 +276,14 @@ export async function searchRoutes(app: FastifyInstance) {
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
-        where: { ...visibleVendorInTenant(tenantId), ...(request.publicTenantId && { items: { some: { isAvailable: true } } }), name: { contains: q, mode: 'insensitive' } },
+        where: { ...visibleVendorInTenant(tenantId), ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }), name: { contains: q, mode: 'insensitive' } },
         select: { name: true, vendorType: true },
         take: 5,
       }),
       app.prisma.item.findMany({
         // [B2] This query had NO vendor predicate at all — a banned store's
         // dish names kept autocompleting for every customer who typed.
-        where: { isAvailable: true, vendor: visibleVendorInTenant(tenantId), name: { contains: q, mode: 'insensitive' } },
+        where: { isAvailable: true, vendor: { ...visibleVendorInTenant(tenantId), ...(request.publicTenantId && { isCurrentlyOpen: true }) }, name: { contains: q, mode: 'insensitive' } },
         select: { id: true, vendorId: true, name: true },
         take: 5,
       }),
@@ -313,7 +333,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
   // Nearby vendors (location-based)
   app.get('/search/nearby', { preHandler: [browseSearch] }, async (request) => {
-    const { lat: userLat, lng: userLng, radius: radiusKm, type } = nearbyQuerySchema.parse(request.query);
+    const { lat: userLat, lng: userLng, radius: radiusKm, type, limit } = nearbyQuerySchema.parse(request.query);
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
 
     const vendors = await app.prisma.vendor.findMany({
@@ -340,6 +360,10 @@ export async function searchRoutes(app: FastifyInstance) {
         city: true,
         addressLine1: true,
       },
+      // Same candidate cap/default as public customer browse. Distance work
+      // and serialization are bounded even for anonymous callers.
+      take: limit,
+      orderBy: [{ averageRating: 'desc' }, { id: 'asc' }],
     });
 
     const nearby = sortByDistance(vendors, userLat, userLng)

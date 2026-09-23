@@ -68,7 +68,11 @@ describe('guest catalogue search through real HTTP routes', () => {
     expect(db.tenant.findUnique).not.toHaveBeenCalled();
   });
   it('preserves the authenticated engine path and exact filter arguments', async () => {
-    engine.ready = true; const { app, token } = await setup();
+    engine.ready = true; const { app, token, vendors, items } = await setup();
+    // A ranked index hit also needs its live catalogue row.
+    vendors.find((v) => v['id'] === 'other')!['id'] = 'indexed-vendor';
+    const item = items.find((i) => i['id'] === 'item-other')!;
+    item['id'] = 'indexed-item'; item['vendorId'] = 'indexed-vendor';
     const res = await app.inject({ url: '/api/v1/search?q=Pepper&type=RESTAURANT&cuisine=Creole&limit=3', headers: { authorization: `Bearer ${token()}` } });
     expect(res.statusCode).toBe(200); expect(res.json().data.items[0].id).toBe('indexed-item');
     expect(engine.vendors).toHaveBeenCalledWith('other', 'Pepper', { type: 'RESTAURANT', cuisine: 'Creole', openOnly: true, limit: 3 });

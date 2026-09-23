@@ -1,4 +1,4 @@
-import type { SubscriptionStatus } from '@prisma/client';
+import type { Prisma, SubscriptionStatus } from '@prisma/client';
 
 // THE canOperate predicate (lifecycle/billing spec §14, G-BILL-03) — the ONE
 // place that answers "may this subscription state operate right now?". Before
@@ -39,4 +39,15 @@ export function subscriptionOperability(
     return { operable: false, why: 'GRACE_LAPSED', status: sub.status };
   }
   return { operable: true };
+}
+
+/** DB form of the same refusal rule. A nullable relation may use `isNot` with
+ * this filter to preserve the vendor gate's legacy missing-row policy. */
+export function inoperableSubscriptionWhere(now = new Date()): Prisma.SubscriptionWhereInput {
+  return {
+    OR: [
+      { status: { notIn: [...OPERABLE_STATUSES] } },
+      { status: 'PAST_DUE', gracePeriodEnd: { lt: now } },
+    ],
+  };
 }
