@@ -45,6 +45,15 @@ chmod 0600 "$HOME_DIR/.ssh/authorized_keys"
 chown "$DEPLOY_USER:$DEPLOY_USER" "$HOME_DIR/.ssh/authorized_keys"
 grep -Fxq -- "$KEY" "$HOME_DIR/.ssh/authorized_keys" ||
   printf '%s\n' "$KEY" >> "$HOME_DIR/.ssh/authorized_keys"
+# Root SSH login is removed below, so the deploy user needs an audited root
+# path first; otherwise a run that stops later leaves the host unmanageable.
+SUDOERS_FILE=/etc/sudoers.d/90-swift-deploy
+SUDOERS_TMP="$(mktemp)"
+printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$DEPLOY_USER" > "$SUDOERS_TMP"
+visudo -cf "$SUDOERS_TMP" >/dev/null || { rm -f "$SUDOERS_TMP"; die "sudoers entry failed validation"; }
+install -m 0440 -o root -g root "$SUDOERS_TMP" "$SUDOERS_FILE"
+rm -f "$SUDOERS_TMP"
+sudo -l -U "$DEPLOY_USER" >/dev/null 2>&1 || die "deploy user has no working sudo path"
 
 # Keep an existing drop-in available for rollback if sshd rejects the change.
 SSHD_DROPIN=/etc/ssh/sshd_config.d/99-swift-pilot.conf
@@ -86,7 +95,7 @@ UFW_STORED="$(ufw show added)" || die "UFW stored rules could not be read"
 [[ "$UFW_STORED" == 'Added user rules'* ]] || die "UFW stored rules format is unknown"
 while IFS= read -r rule; do
   case "$rule" in
-    'Added user rules'*|'') continue ;;
+    'Added user rules'*|''|'(None)') continue ;;
     'ufw allow 22/tcp'|'ufw allow 80/tcp'|'ufw allow 443/tcp'|\
     'ufw limit 22/tcp'|'ufw limit 80/tcp'|'ufw limit 443/tcp'|\
     'ufw allow 22/tcp (v6)'|'ufw allow 80/tcp (v6)'|'ufw allow 443/tcp (v6)'|\
