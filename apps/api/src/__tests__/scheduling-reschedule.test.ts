@@ -147,6 +147,10 @@ describe('reschedule — both directions, notified', () => {
     });
     expect(note?.title).toBe('Appointment moved');
     expect(note?.body).toContain('moved from');
+    // [E28] the vendor-owner recipient is tagged as the business surface, so
+    // a tap opens their Schedule agenda — the customer-side copy is tagged
+    // separately and must never aim at that vendor-only screen.
+    expect(note?.data).toMatchObject({ kind: 'booking_rescheduled', bookingId: moved.id, audience: 'business' });
   });
 
   it('vendor moves it too — same law, customer notified; foreign vendor probes 404', async () => {
@@ -174,6 +178,9 @@ describe('reschedule — both directions, notified', () => {
       orderBy: { createdAt: 'desc' },
     });
     expect(note?.title).toBe('Your appointment moved');
+    // [E28] the customer recipient is tagged as the customer surface; the
+    // router opens the app normally for it instead of a dead Schedule tap.
+    expect(note?.data).toMatchObject({ kind: 'booking_rescheduled', audience: 'customer' });
   });
 
   it('same-slot reschedule is a calm no-op; dead bookings refuse to move', async () => {

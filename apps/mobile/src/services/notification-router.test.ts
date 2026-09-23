@@ -151,9 +151,15 @@ describe('booking + service-job pushes land on the job [S0]', () => {
 
   it('a moved APPOINTMENT opens the store’s Schedule agenda, not the jobs list', () => {
     // booking_rescheduled is the one booking_ kind that is not a service job:
-    // it carries bookingId (a slot on a vendor calendar). Its other recipient
-    // is the customer, who has no appointments screen anywhere in the app.
-    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1' })).toEqual({ screen: 'Schedule' });
+    // it carries bookingId (a slot on a vendor calendar). The STORE's copy is
+    // tagged audience:'business' and opens their Schedule agenda.
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1', audience: 'business' })).toEqual({ screen: 'Schedule' });
+    // The customer's copy is tagged audience:'customer'. The customer stack
+    // never mounts Schedule, so a tap aimed there was silently dropped [E28].
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1', audience: 'customer' })).toBeNull();
+    // Untagged legacy rows are nobody-placeable: opening the app normally is
+    // the safe answer, never a dead navigate into a vendor-only screen.
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1' })).toBeNull();
   });
 });
 
@@ -269,7 +275,7 @@ const CENSUS: Case[] = [
   { k: 'booking_completed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both — job done, rate it' },
   { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
   { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both, 24h out — GAP when refId is an APPOINTMENT: no customer appointments screen exists' },
-  { k: 'booking_rescheduled', d: { bookingId: 'b1' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda; the customer half has no screen [GAP]' },
+  { k: 'booking_rescheduled', d: { bookingId: 'b1', audience: 'business' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda [E28: the business copy is tagged audience, the customer copy opens normally]' },
 
   // ── Money the recipient must act on — no deep screen wired yet [GAPS].
   { k: 'billing_mmg_pending', d: { subscriptionId: 's1' }, to: null, why: 'GAP: vendor/mover weekly fee — a billing screen exists but is unrouted' },
