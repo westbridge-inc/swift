@@ -144,8 +144,8 @@ describe('[DOC-1 P5-1] the transition table is ONE table', () => {
     // the same helper functions and trigger, the re-seeded table, and the DELETE that drops the
     // three automatic-decision rows the EXPAND migration seeded.
     const humanOnly = readFileSync(HUMAN_ONLY_MIGRATION, 'utf8');
-    for (const statement of docStateMachineDdl()) expect(humanOnly).toContain(statement);
-    const humanOnlySql = humanOnly.split('\n').filter((l) => !l.startsWith('--')).join('\n');
+    const humanOnlySql = humanOnly.split('\n').filter((l) => !l.startsWith('--')).join('\n'); // the SQL that runs, never comment lines
+    for (const statement of docStateMachineDdl()) expect(humanOnlySql).toContain(statement);
     for (const [from, to] of REMOVED_PAIRS) {
       expect(expand).toContain(`('${from}', '${to}', `);
       expect(humanOnlySql).not.toContain(`('${from}', '${to}'`);

@@ -32,6 +32,9 @@ const API_ROOT = join(API_SRC, '..');
 const REPO = join(API_ROOT, '..', '..');
 const MOBILE_SRC = join(REPO, 'apps', 'mobile', 'src');
 const SELF = 'src/__tests__/no-ai-kyc-gate.unit.test.ts';
+/** The legal-text ratchets (owned by the legal step) name the removed identifiers as the historical
+ *  evidence they grade; they cannot reintroduce code, so the removed-name scan skips them. */
+const LEGAL_RATCHETS = new Set(['src/__tests__/legal-human-review-claim.test.ts', 'src/__tests__/legal-version-binding.test.ts']);
 
 const walk = (dir: string, out: string[] = []): string[] => {
   for (const entry of readdirSync(dir)) {
@@ -130,6 +133,9 @@ describe('[NO-AI] identity verification is human review only — the permanent g
       expect(create).not.toMatch(/reviewedBy|reviewedAt|expiresAt|reviewNote/);
     }
     expect(submitPaths).not.toMatch(/reviewedBy|reviewedAt/);
+    // the identity flow takes a document and nothing else: no selfie parameter, no selfie field in the route schema
+    expect(submitPaths).not.toMatch(/selfie/i);
+    expect(api('modules/verification/verification.routes.ts')).not.toMatch(/selfieUrl:\s*z\./);
     // no lowercase adapter status is read anywhere in the service, and no verdict is mapped
     expect(service).not.toMatch(/['"](approved|rejected)['"]/);
     expect(service).not.toMatch(/result\.status|received\.status/);
@@ -147,8 +153,9 @@ describe('[NO-AI] identity verification is human review only — the permanent g
   it('the latest doc-state migration mirrors the generator verbatim and carries none of the removed pairs', () => {
     const migrations = join(API_ROOT, 'prisma', 'migrations');
     const humanOnly = read(join(migrations, '20260923170000_no_automatic_kyc_transitions', 'migration.sql'));
-    for (const statement of docStateMachineDdl()) expect(humanOnly).toContain(statement);
+    // Graded on the SQL that runs, never on comment lines: a statement commented out is a statement gone.
     const sql = humanOnly.split('\n').filter((l) => !l.startsWith('--')).join('\n');
+    for (const statement of docStateMachineDdl()) expect(sql).toContain(statement);
     for (const pair of ["('CAPTURED', 'REJECTED'", "('VALIDATED', 'AUTO_APPROVED'", "('VALIDATED', 'REJECTED'"]) expect(sql).not.toContain(pair);
     // no later migration re-seeds the table behind the generator's back
     const later = readdirSync(migrations).filter((d) => d > '20260923170000_no_automatic_kyc_transitions' && existsSync(join(migrations, d, 'migration.sql')));
@@ -204,7 +211,7 @@ describe('[NO-AI] identity verification is human review only — the permanent g
     const hits: string[] = [];
     for (const file of files) {
       const path = rel(file);
-      if (path === SELF) continue;
+      if (path === SELF || LEGAL_RATCHETS.has(path)) continue;
       const lines = read(file).split('\n');
       for (const { what, re } of FORBIDDEN) {
         const line = lines.findIndex((l) => re.test(l) && !NEGATIVE_ASSERTION.test(l));

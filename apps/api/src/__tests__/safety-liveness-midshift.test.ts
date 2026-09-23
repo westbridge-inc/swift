@@ -111,13 +111,18 @@ afterAll(async () => {
 });
 
 describe('[NO-AI] §7.2 random mid-shift checks are gone', () => {
-  it('no sweep exists: a stale prompt deadline on a row is inert — nobody is prompted, nobody is forced offline, and no job drives it', async () => {
-    const { driver, userId } = await makeDriver({ livenessPromptDeadlineAt: new Date(Date.now() - 60_000) });
+  it('no sweep exists: a stale prompt deadline on a driver or rider row is inert — nobody is prompted, nobody is forced offline, and no job drives it', async () => {
+    const stale = { livenessPromptDeadlineAt: new Date(Date.now() - 60_000) };
+    const d = await makeDriver(stale);
+    const r = await makeRider({ ...stale, lastLivenessPassAt: new Date() });
     const svc = new LivenessService(app.prisma, app.io) as unknown as Record<string, unknown>;
     expect(svc['midshiftSweep']).toBeUndefined();
     expect(svc['check']).toBeUndefined();
-    expect((await driverRow(driver.id)).isOnline).toBe(true);
-    expect(await app.prisma.notification.count({ where: { userId, type: 'SAFETY' } })).toBe(0);
+    expect((await driverRow(d.driver.id)).isOnline).toBe(true);
+    const rider = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.rider.id } });
+    expect({ isOnline: rider.isOnline, isAvailable: rider.isAvailable, lastLivenessPassAt: rider.lastLivenessPassAt }).toMatchObject({ isOnline: true, isAvailable: true });
+    expect(rider.lastLivenessPassAt).not.toBeNull();
+    expect(await app.prisma.notification.count({ where: { userId: { in: [d.userId, r.userId] }, type: 'SAFETY' } })).toBe(0);
     expect(Object.keys(JOB_RECOVERY).filter((k) => /liveness/i.test(k))).toEqual([]);
   });
 });
