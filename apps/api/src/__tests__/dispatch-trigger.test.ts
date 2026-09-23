@@ -34,7 +34,7 @@ async function mkUser(roles: UserRole[], activeRole: UserRole) {
   return { id: u.id, token };
 }
 
-async function mkOrder(status: 'PENDING' | 'PREPARING') {
+async function mkOrder(status: 'PENDING' | 'ACCEPTED' | 'PREPARING' | 'READY_FOR_PICKUP') {
   const o = await app.prisma.order.create({
     data: {
       orderNumber: `TRG-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
@@ -164,10 +164,32 @@ describe('FUL-004d: vendor fulfillment-mode override + the get-a-rider fallback'
   });
 
   it('"get a rider instead" (→ PLATFORM_RIDER) dispatches a rider — the kitchen-rescue fallback', async () => {
-    const id = await mkOrder('PENDING'); // no rider assigned yet
+    const id = await mkOrder('ACCEPTED'); // ON_ACCEPT permits searching after acceptance
     const res = await putMode(id, 'PLATFORM_RIDER');
     expect(res.statusCode).toBe(200);
     expect((await readMode(id)).fulfillmentMode).toBe('PLATFORM_RIDER');
+    expect(added.filter((j) => j.name === 'dispatch-order' && j.data.orderId === id)).toHaveLength(1);
+  });
+
+  it.each(['PENDING', 'ACCEPTED', 'PREPARING'] as const)('ON_READY: switching %s to PLATFORM_RIDER waits for readiness', async (status) => {
+    process.env['DISPATCH_TRIGGER'] = 'ON_READY';
+    const id = await mkOrder(status);
+    const res = await putMode(id, 'PLATFORM_RIDER');
+    expect(res.statusCode).toBe(200);
+    expect((await readMode(id)).fulfillmentMode).toBe('PLATFORM_RIDER');
+    expect(added.filter((j) => j.name === 'dispatch-order' && j.data.orderId === id)).toHaveLength(0);
+  });
+
+  it('ON_ACCEPT: choosing PLATFORM_RIDER while PENDING waits for acceptance', async () => {
+    const id = await mkOrder('PENDING');
+    expect((await putMode(id, 'PLATFORM_RIDER')).statusCode).toBe(200);
+    expect(added.filter((j) => j.name === 'dispatch-order' && j.data.orderId === id)).toHaveLength(0);
+  });
+
+  it('ON_READY: switching a ready order to PLATFORM_RIDER dispatches', async () => {
+    process.env['DISPATCH_TRIGGER'] = 'ON_READY';
+    const id = await mkOrder('READY_FOR_PICKUP');
+    expect((await putMode(id, 'PLATFORM_RIDER')).statusCode).toBe(200);
     expect(added.filter((j) => j.name === 'dispatch-order' && j.data.orderId === id)).toHaveLength(1);
   });
 

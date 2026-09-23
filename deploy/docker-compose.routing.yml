@@ -1,81 +1,40 @@
-# Swift — the self-hosted routing and geocoding stack.
-#
-# This lived outside the repository, in a directory on one laptop, with a note
-# at the top saying it was kept out of the public repo deliberately. Two things
-# make that wrong rather than cautious:
-#
-#   • it holds NO secrets — every value here is a public image tag, a public
-#     Geofabrik URL or a port number; and
-#   • deploy/docker-compose.yml already publishes the whole topology anyway.
-#
-# What it cost was reproducibility: if that laptop died, the routing engine
-# every ETA in the platform depends on could not be rebuilt from anything.
-#
-# SECURITY, stated plainly because it is real: none of these services has
-# authentication. Firewall every published port to the API host only. They are
-# published on the host at all so a developer can curl them; in production they
-# should be reachable from the API and nothing else.
-#
-# DISK, because it filled a machine to zero bytes on 4 Sep 2026. Two of these
-# four services are small and two are not, so they are no longer one command.
-# The default brings up the pair the platform actually routes on:
-#
-#   docker compose -f deploy/docker-compose.routing.yml up -d
-#
-# osrm + vroom, both proven on the Guyana extract — OSRM routed 1,917 m in
-# 200 s inside Georgetown, VROOM batched two shipments into 362 s.
-#
-# The geocoders are opt-in, because each one costs more than a laptop has:
-#
-#   docker compose -f deploy/docker-compose.routing.yml --profile geocoding up -d
-#
-# Photon downloads a 6.72 GB index and then EXTRACTS it, which needs roughly
-# the same again while both copies exist; Nominatim imports the extract into
-# its own PostgreSQL. Budget ~20 GB free for Photon before starting it, and
-# treat both as VPS services. `restart: unless-stopped` means Docker brings
-# a started one back on every daemon boot, so a half-finished index resumes
-# filling the disk after a reboot — `docker rm -f` it, do not just stop it.
-#
-# Data is built by ./setup-routing.sh first — see that file.
+# Private routing/geocoding stack for the single-host staging pilot.
+# The network is created by pilot-up.sh. No service publishes a host port.
+# These services have no built-in authentication. Never publish their ports:
+# UFW alone does not shield Docker-published ports from public access.
+# Build the Guyana OSRM data with setup-routing.sh before starting this file.
+# Geocoding is opt-in and needs substantial disk; VROOM is opt-in (planner).
 
 services:
   # ── Routing and ETA ────────────────────────────────────────────────────
-  # MAPS_PROVIDER=osrm  OSRM_URL=http://<host>:5001
-  #
-  # NOTE THE PORT. The container listens on 5000; the host publishes 5001.
-  # The previous copy of this file documented OSRM_URL as :5000, which is the
-  # CONTAINER port — correct only from inside this compose network, and wrong
-  # for the API, which reaches it across the host. A routing URL that silently
-  # refuses connections degrades every ETA to the haversine fallback, and the
-  # only visible symptom is that distances get slightly worse.
+  # MAPS_PROVIDER=osrm  OSRM_URL=http://osrm:5000
   osrm:
     image: osrm/osrm-backend:v5.25.0
     container_name: swift-osrm
     command: osrm-routed --algorithm mld --max-table-size 10000 /data/guyana-latest.osrm
     volumes:
       - ./routing-data/osrm:/data
-    ports:
-      - "5001:5000"
+    networks: [private]
     restart: unless-stopped
 
   # ── Batch planning ─────────────────────────────────────────────────────
-  # BATCH_PLANNER=vroom  VROOM_URL=http://<host>:3010   (container port 3000)
+  # BATCH_PLANNER=vroom  VROOM_URL=http://vroom:3000
   # Sits on OSRM for travel times; stateless, so it needs no data build.
   vroom:
     image: vroomvrp/vroom-docker:v1.13.0
     container_name: swift-vroom
+    profiles: ["planner"]
     environment:
       - VROOM_ROUTER=osrm
     volumes:
       - ./routing-conf/vroom:/conf
-    ports:
-      - "3010:3000"
+    networks: [private]
     depends_on:
       - osrm
     restart: unless-stopped
 
   # ── Address search and geocoding ───────────────────────────────────────
-  # PLACES_PROVIDER=osm  PHOTON_URL=http://<host>:2322
+  # PLACES_PROVIDER=osm  PHOTON_URL=http://photon:2322
   #
   # REGION picks the prebuilt index, and every number here was measured by
   # starting the container rather than read off a page:
@@ -102,11 +61,10 @@ services:
       - REGION=south-america
     volumes:
       - ./routing-data/photon:/photon/photon_data
-    ports:
-      - "2322:2322"
+    networks: [private]
     restart: unless-stopped
 
-  # NOMINATIM_URL=http://<host>:8080 — reverse geocoding (coordinates → address).
+  # NOMINATIM_URL=http://nominatim:8080 — reverse geocoding.
   # The heavy one: it imports the extract into its own PostgreSQL. One-time,
   # disk- and RAM-hungry, and the only member of this stack that is.
   nominatim:
@@ -118,7 +76,11 @@ services:
       - IMPORT_WIKIPEDIA=false
     volumes:
       - ./routing-data/nominatim:/var/lib/postgresql/14/main
-    ports:
-      - "8080:8080"
+    networks: [private]
     shm_size: 1g
     restart: unless-stopped
+
+networks:
+  private:
+    name: swift-pilot-private
+    external: true

@@ -5,10 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+User=swift-deploy
+Group=swift-deploy
+SupplementaryGroups=docker
 
 # Adjust WorkingDirectory to wherever the repo lives on the server.
 WorkingDirectory=/opt/swift
 EnvironmentFile=/opt/swift/deploy/.env
+Environment=BACKUP_REQUIRED=1
 ExecStart=/opt/swift/deploy/backup.sh /var/backups/swift
 
 # The script exits non-zero when a dump cannot be verified or the offsite
@@ -17,7 +21,8 @@ ExecStart=/opt/swift/deploy/backup.sh /var/backups/swift
 # It does NOT retry: a second attempt at a full backup on a failing disk is
 # rarely the right move, and the freshness alarm in the API will page anyway.
 
-# The dump contains every customer record. Keep it readable only by root.
+# The dump contains every customer record. The backup directory is 0700 and
+# owned by swift-deploy; no other unprivileged account can read it.
 UMask=0077
 PrivateTmp=true
 NoNewPrivileges=true

@@ -996,13 +996,15 @@ export async function driverRoutes(app: FastifyInstance) {
       data: { orderId: id, status: 'PENDING' },
     });
 
+    let reDispatched = false;
     if (app.dispatchQueue) {
       await app.dispatchQueue.add('dispatch-order', { orderId: id }, { priority: 5, removeOnComplete: 100, removeOnFail: 50 });
+      reDispatched = true;
     } else {
-      await dispatch.dispatchOrder(id);
+      reDispatched = !!(await dispatch.dispatchOrder(id)).offered;
     }
 
-    return { success: true, data: { orderId: id, status: 'PENDING', reDispatched: true } };
+    return { success: true, data: { orderId: id, status: 'PENDING', reDispatched } };
   });
 
   // 2. En route to pickup

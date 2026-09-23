@@ -177,7 +177,7 @@ console.log('─'.repeat(72));
     console.log('    backup.sh will exit non-zero rather than pretend it succeeded.');
   } else {
     console.log(`  ✓ offsite target configured (${bucket})`);
-    console.log('    backup.sh verifies the upload byte-for-byte before calling a run good.');
+    console.log('    backup.sh checks the remote object length; a restore drill proves contents.');
   }
   console.log('');
   // [D-4] A database dump does not save the documents. Two controls, graded:

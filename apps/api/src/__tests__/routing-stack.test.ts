@@ -3,29 +3,32 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 // ---------------------------------------------------------------------------
-// The routing stack, and the port that silently degrades every ETA.
+// The routing stack, and the private service URLs that every ETA depends on.
 //
-// OSRM, VROOM, Photon and Nominatim lived outside the repository — in a
-// directory on one laptop, with a note saying they were kept out of the public
-// repo deliberately. There are no secrets in them, and deploy/docker-compose.yml
-// already publishes the whole topology, so what that bought was not privacy: it
-// was a routing engine every ETA depends on that could not be rebuilt from
-// anything if the laptop died.
+// OSRM, VROOM, Photon and Nominatim once lived outside the repository in a
+// directory on one laptop. The checked-in Compose and rebuild script now make
+// the stack recoverable while generated map data stays out of Git.
 //
-// The copy that came in also carried a live trap. Each container publishes on a
-// DIFFERENT host port than it listens on (5000→5001, 3000→3010), and the file's
-// own comments told you to use the container port. Point the API at :5000 from
-// the host and nothing errors — `maps-provider` falls back to haversine, and
-// the only symptom is that every distance is quietly a little wrong.
+// The staging API and routing containers now share swift-pilot-private. Their
+// URLs use service names and container ports; publishing host ports would expose
+// unauthenticated routing services and is outside the deployment contract.
 // ---------------------------------------------------------------------------
 
 const ROOT = join(process.cwd(), '../..');
 const read = (rel: string) => (existsSync(join(ROOT, rel)) ? readFileSync(join(ROOT, rel), 'utf8') : '');
 
 const COMPOSE = read('deploy/docker-compose.routing.yml');
+const MAIN_COMPOSE = read('deploy/docker-compose.yml');
 const SETUP = read('deploy/setup-routing.sh');
 const VROOM_CONF = read('deploy/routing-conf/vroom/config.yml');
 const GITIGNORE = read('.gitignore');
+const serviceBlock = (source: string, name: string) => {
+  const lines = source.split('\n');
+  const start = lines.findIndex((line) => line === `  ${name}:`);
+  if (start < 0) return '';
+  const next = lines.slice(start + 1).findIndex((line) => /^ {2}[\w-]+:|^networks:/.test(line));
+  return lines.slice(start + 1, next < 0 ? undefined : start + 1 + next).join('\n');
+};
 
 describe('[routing] the stack is in the repository', () => {
   it('every piece is here, not on one machine', () => {
@@ -51,40 +54,33 @@ describe('[routing] the stack is in the repository', () => {
 });
 
 describe('[routing] the documented URL is the one that works', () => {
-  /** host:container for a published port. */
-  const ports = [...COMPOSE.matchAll(/"(\d+):(\d+)"/g)].map((m) => ({ host: m[1]!, container: m[2]! }));
-
-  it('publishes OSRM and VROOM on host ports that differ from the container', () => {
-    expect(ports).toEqual(
-      expect.arrayContaining([
-        { host: '5001', container: '5000' },
-        { host: '3010', container: '3000' },
-      ]),
-    );
+  it('keeps every routing service off host ports on the API network', () => {
+    expect(COMPOSE).not.toMatch(/^\s+ports:/m);
+    expect(COMPOSE).toMatch(/^ {4}name: swift-pilot-private$/m);
+    expect(MAIN_COMPOSE).toMatch(/^ {4}name: swift-pilot-private$/m);
+    expect(serviceBlock(MAIN_COMPOSE, 'api')).toContain('networks: [private]');
+    for (const name of ['osrm', 'vroom', 'photon', 'nominatim']) {
+      expect(serviceBlock(COMPOSE, name), `${name} is not on the private network`).toContain('networks: [private]');
+    }
   });
 
-  it('documents the HOST port for every service the API reaches', () => {
-    // The trap this file exists for. `OSRM_URL=http://<host>:5000` is the
-    // CONTAINER port — correct only from inside the compose network, wrong for
-    // the API. Nothing errors: maps-provider falls back to haversine and every
-    // distance is quietly a little worse.
+  it('documents each private service URL with its container port', () => {
     for (const [name, url] of [
-      ['OSRM', 'OSRM_URL=http://<host>:5001'],
-      ['VROOM', 'VROOM_URL=http://<host>:3010'],
-      ['Photon', 'PHOTON_URL=http://<host>:2322'],
-      ['Nominatim', 'NOMINATIM_URL=http://<host>:8080'],
+      ['OSRM', 'OSRM_URL=http://osrm:5000'],
+      ['VROOM', 'VROOM_URL=http://vroom:3000'],
+      ['Photon', 'PHOTON_URL=http://photon:2322'],
+      ['Nominatim', 'NOMINATIM_URL=http://nominatim:8080'],
     ] as const) {
       expect(COMPOSE + SETUP, `${name}'s documented URL is missing or wrong`).toContain(url);
     }
   });
 
-  it('never documents the container port as the API\'s URL', () => {
-    expect(COMPOSE + SETUP).not.toMatch(/OSRM_URL=http:\/\/<host>:5000/);
-    expect(COMPOSE + SETUP).not.toMatch(/VROOM_URL=http:\/\/<host>:3000/);
+  it('does not document host URLs for private routing services', () => {
+    expect(COMPOSE + SETUP).not.toMatch(/(?:OSRM|VROOM|PHOTON|NOMINATIM)_URL=http:\/\/<host>:/);
   });
 
   it('vroom reaches OSRM by CONTAINER name and port — it is inside the network', () => {
-    // The one place the container port is right, and for the opposite reason.
+    // VROOM uses the same private service-name convention as the API.
     expect(VROOM_CONF).toMatch(/host:\s*'osrm'/);
     expect(VROOM_CONF).toMatch(/port:\s*'5000'/);
   });
@@ -131,10 +127,8 @@ describe('[routing] the data is rebuildable and never committed', () => {
     expect(config, 'COUNTRY_CODE is not read by this image').not.toMatch(/COUNTRY_CODE/);
   });
 
-  it('says out loud that none of these services has authentication', () => {
-    // Bringing this into a public repo without stating that is worse than
-    // leaving it out.
-    expect(COMPOSE).toMatch(/authentication|no auth/i);
-    expect(COMPOSE).toMatch(/[Ff]irewall/);
+  it('warns that these unauthenticated services must stay unpublished', () => {
+    expect(COMPOSE).toMatch(/no built-in authentication/i);
+    expect(COMPOSE).toMatch(/UFW.*published.*ports/i);
   });
 });
