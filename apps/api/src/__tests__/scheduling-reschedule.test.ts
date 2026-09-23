@@ -174,6 +174,7 @@ describe('reschedule — both directions, notified', () => {
       payload: { newSlotStart: tomorrowAt(15).toISOString() },
     });
     expect(res.statusCode).toBe(200);
+    const moved = res.json().data;
 
     const note = await app.prisma.notification.findFirst({
       where: { userId: customer.userId },
@@ -182,7 +183,17 @@ describe('reschedule — both directions, notified', () => {
     expect(note?.title).toBe('Your appointment moved');
     // [E28] the customer recipient is tagged as the customer surface; the
     // router opens the app normally for it instead of a dead Schedule tap.
-    expect(note?.data).toMatchObject({ kind: 'booking_rescheduled', audience: 'customer' });
+    expect(note?.data).toMatchObject({ kind: 'booking_rescheduled', bookingId: moved.id, audience: 'customer' });
+
+    // [E28] The inbox row routes on exactly what GET /customer/notifications
+    // serves, so the endpoint must hand back the payload, audience included.
+    const inbox = await app.inject({
+      method: 'GET', url: '/api/v1/customer/notifications',
+      headers: { authorization: `Bearer ${customer.token}` },
+    });
+    expect(inbox.statusCode).toBe(200);
+    const listed = (inbox.json().data as Array<{ id: string; data: unknown }>).find((n) => n.id === note?.id);
+    expect(listed?.data).toEqual({ kind: 'booking_rescheduled', bookingId: moved.id, audience: 'customer' });
   });
 
   it('same-slot reschedule is a calm no-op; dead bookings refuse to move', async () => {
