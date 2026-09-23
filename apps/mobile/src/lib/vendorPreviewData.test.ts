@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { vendorPreviewDataset, previewQuery, previewMutation } from './vendorPreviewData';
+import * as PVD from './vendorPreviewData';
 import { useVendorPreview } from '../stores/vendorPreview';
 
 // Vendor PREVIEW (R4 + invariant 5): a prospective owner walks the REAL dashboard
@@ -146,5 +147,42 @@ describe('the sample never goes stale', () => {
     const src = readFileSync(new URL('./vendorPreviewData.ts', import.meta.url), 'utf8');
     const stripped = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
     expect(stripped).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
+  });
+});
+
+describe('vendor preview — the sample weekly fee is the live quote for that business type', () => {
+  const pricing = {
+    countryCode: 'GY', currencyCode: 'GYD', currencySymbol: '$', isActive: true, trialDays: 14,
+    movers: [],
+    vendors: {
+      service: 8000,
+      catalogue: [
+        { minItems: 0, tier: 'small', rate: 15000 },
+        { minItems: 1000, tier: 'large', rate: 20000 },
+        { minItems: 10000, tier: 'department', rate: 60000 },
+      ],
+    },
+    franchise: null,
+    weekly: { mover: 9000, moverHeavy: 9000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 20000, departmentVendor: 60000 },
+  };
+
+  it('no dataset carries a weekly fee of its own', () => {
+    for (const type of TYPES) {
+      const { subscription } = vendorPreviewDataset(type);
+      expect('weeklyRate' in subscription, type).toBe(false);
+      expect('customRate' in subscription, type).toBe(false);
+    }
+  });
+
+  it('a service is billed the service quote; a small sample catalogue the first catalogue band', () => {
+    expect(PVD.vendorPreviewSubscription(vendorPreviewDataset('SERVICE'), pricing as never)).toMatchObject({ status: 'ACTIVE', weeklyRate: 8000 });
+    for (const type of ['RESTAURANT', 'SUPERMARKET', 'STORE'] as const) {
+      expect(PVD.vendorPreviewSubscription(vendorPreviewDataset(type), pricing as never)?.weeklyRate, type).toBe(15000);
+    }
+  });
+
+  it('no quote, no sample subscription — the fee is absent, never zero', () => {
+    expect(PVD.vendorPreviewSubscription(vendorPreviewDataset('STORE'), undefined)).toBeNull();
+    expect(PVD.vendorPreviewSubscription(vendorPreviewDataset('SERVICE'), { ...pricing, vendors: undefined } as never)).toBeNull();
   });
 });

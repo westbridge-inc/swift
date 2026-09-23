@@ -183,6 +183,24 @@ const fx = vi.hoisted(() => {
       /** The `enabled` flag of every vendor-profile read, in order. */
       profileReads: [] as boolean[],
       refetch: vi.fn(),
+      /** The public Guyana price list: the form commits only to a fetched, current quote [PR1270-S2-04]. */
+      pricing: {
+        countryCode: 'GY',
+        currencyCode: 'GYD',
+        currencySymbol: '$',
+        isActive: true,
+        trialDays: 14,
+        movers: [],
+        vendors: {
+          service: 8000,
+          catalogue: [
+            { minItems: 0, tier: 'small', rate: 15000 },
+            { minItems: 1000, tier: 'large', rate: 20000 },
+            { minItems: 10000, tier: 'department', rate: 60000 },
+          ],
+        },
+        franchise: { minLocations: 5, discountPct: 50 },
+      },
     },
     queryClient: {
       clear: vi.fn(),
@@ -224,6 +242,9 @@ vi.mock('@tanstack/react-query', () => ({
         const { data, error } = fx.server.profile;
         return { data, error, isLoading: false, isFetched: true, refetch: fx.server.refetch };
       }
+    }
+    if (options.queryKey[0] === 'pricing' && enabled) {
+      return { data: fx.server.pricing, error: null, isLoading: false, isPending: false, isFetched: true, isError: false, isRefetching: false, dataUpdatedAt: Date.now(), refetch: vi.fn() };
     }
     return { data: undefined, error: null, isLoading: false, isFetched: false, isError: false, isRefetching: false, refetch: vi.fn() };
   },
