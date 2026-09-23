@@ -109,7 +109,8 @@ umask 077
   echo "OTP_HASH_SECRET=$(gen_secret)"
   echo "STORAGE_SIGNING_SECRET=$(gen_secret)"
   echo "CONSENT_IP_PEPPER=$(gen_secret)"
-  echo "POSTGRES_PASSWORD=$(gen_secret)"
+  # DATABASE_URL embeds this password without percent-encoding; hex is URL-safe.
+  echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)"
   echo "MEILISEARCH_KEY=$(gen_secret)"
   echo
   echo "# ---------------------------------------------------------------------"

@@ -1,0 +1,8 @@
+# API_HOST is a single staging DNS name set in deploy/.env. A hostname site
+# address enables Caddy's automatic certificate issuance and renewal.
+{$API_HOST} {
+    encode zstd gzip
+    @metrics path /metrics
+    respond @metrics 403
+    reverse_proxy api:3000
+}
