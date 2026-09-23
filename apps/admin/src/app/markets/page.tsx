@@ -3,11 +3,24 @@
 import { useQuery } from '@tanstack/react-query';
 import { fetchCountries } from '@/lib/api';
 
-/** Weekly tier prices live in subscriptionTiers JSON: { mover, smallVendor, largeVendor, ... }. */
+/** Weekly tier prices live in subscriptionTiers JSON — every partner kind the
+ *  resolver prices: mover, moverHeavy, taxiDriver, serviceVendor, smallVendor,
+ *  largeVendor, departmentVendor. A market that has not set one shows a dash. */
 function tier(c: any, key: string) {
   const v = c?.subscriptionTiers?.[key];
   return v != null ? `${c.currencySymbol}${Number(v).toLocaleString()}` : '—';
 }
+
+const TIER_COLUMNS: Array<[key: string, label: string]> = [
+  ['mover', 'Rider / wk'],
+  ['moverHeavy', 'Heavy delivery / wk'],
+  ['taxiDriver', 'Taxi driver / wk'],
+  ['serviceVendor', 'Service / wk'],
+  ['smallVendor', 'Small vendor / wk'],
+  ['largeVendor', 'Large vendor / wk'],
+  ['departmentVendor', 'Department / wk'],
+];
+const COLUMN_COUNT = 5 + TIER_COLUMNS.length;
 
 export default function MarketsPage() {
   const { data, isLoading } = useQuery({ queryKey: ['countries'], queryFn: fetchCountries });
@@ -30,16 +43,16 @@ export default function MarketsPage() {
               <th className="text-right p-4 text-[var(--muted)] font-medium">per USD</th>
               <th className="text-right p-4 text-[var(--muted)] font-medium">ID gate (USD)</th>
               <th className="text-right p-4 text-[var(--muted)] font-medium">Float L1 / L2 / L3</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Mover / wk</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Small vendor / wk</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Large vendor / wk</th>
+              {TIER_COLUMNS.map(([key, label]) => (
+                <th key={key} className="text-right p-4 text-[var(--muted)] font-medium">{label}</th>
+              ))}
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={8} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+              <tr><td colSpan={COLUMN_COUNT} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={8} className="p-8 text-center text-[var(--muted)]">No markets configured.</td></tr>
+              <tr><td colSpan={COLUMN_COUNT} className="p-8 text-center text-[var(--muted)]">No markets configured.</td></tr>
             ) : (
               rows.map((c: any) => (
                 <tr key={c.id} className="border-b border-[var(--border)] hover:bg-white/5">
@@ -52,9 +65,9 @@ export default function MarketsPage() {
                   <td className="p-4 text-right text-[var(--muted)]">
                     {Number(c.floatL1).toLocaleString()} / {Number(c.floatL2).toLocaleString()} / {Number(c.floatL3).toLocaleString()}
                   </td>
-                  <td className="p-4 text-right">{tier(c, 'mover')}</td>
-                  <td className="p-4 text-right">{tier(c, 'smallVendor')}</td>
-                  <td className="p-4 text-right">{tier(c, 'largeVendor')}</td>
+                  {TIER_COLUMNS.map(([key]) => (
+                    <td key={key} className="p-4 text-right">{tier(c, key)}</td>
+                  ))}
                 </tr>
               ))
             )}

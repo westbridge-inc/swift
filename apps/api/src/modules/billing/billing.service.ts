@@ -3,8 +3,7 @@ import type { PrismaClient, Subscription, Prisma, SubscriptionStatus } from '@pr
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
 import { getChannels } from '../../providers/notifications/channels';
-import { CountryConfigService, moverRateFor, vendorRateFor } from '../country/country-config.service';
-import { feeBandFor } from '../../config/vehicle-classes';
+import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
@@ -2104,12 +2103,12 @@ export class BillingService {
   }
 
   /**
-   * Weekly tier check for movers: the band comes from the vehicle they have
-   * registered TODAY, not the one they signed up on.
+   * Weekly tier check for movers: the rate comes from the role they hold and
+   * the vehicle they have registered TODAY, not the one they signed up on.
    *
-   * Without this a driver who signs up on a car and later buys a minibus keeps
-   * paying the standard rate forever — `weeklyRate` is a snapshot taken at
-   * signup. Same shape as `recalculateVendorTiers` below, and it shares that
+   * Without this a rider who signs up on a motorbike and later buys a canter
+   * keeps paying the standard rate forever — `weeklyRate` is a snapshot taken
+   * at signup. Same shape as `recalculateVendorTiers` below, and it shares that
    * method's TIER_CHANGE event so one audit trail covers both.
    */
   async recalculateMoverTiers(): Promise<number> {
@@ -2126,33 +2125,86 @@ export class BillingService {
 
     let changed = 0;
     for (const sub of moverSubs) {
-      const mover = sub.rider ?? sub.driver;
-      if (!mover) continue;
-      const tiers = await this.countryConfig.getSubscriptionTiers(mover.user.countryCode);
-      const targetRate = moverRateFor(tiers, mover.vehicleType);
+      try {
+        const mover = sub.rider ?? sub.driver;
+        if (!mover) continue;
+        // A negotiated rate is a human decision — a vehicle swap must not silently
+        // overwrite it. Waived fees are likewise left alone.
+        if (sub.customRate != null || sub.feeWaived) continue;
 
-      // A negotiated rate is a human decision — a vehicle swap must not silently
-      // overwrite it. Waived fees are likewise left alone.
-      if (sub.customRate != null || sub.feeWaived) continue;
-      if (Number(sub.weeklyRate) === targetRate) continue;
+        const role = sub.rider ? 'RIDER' : 'DRIVER';
+        const tiers = await this.countryConfig.getSubscriptionTiers(mover.user.countryCode);
+        const target = this.retierTarget(sub.id, tiers, { kind: role, vehicleType: mover.vehicleType });
+        if (!target || Number(sub.weeklyRate) === target.rate) continue;
 
-      await this.prisma.subscription.update({
-        where: { id: sub.id },
-        data: { weeklyRate: targetRate },
+        const note = `${role === 'DRIVER' ? 'taxi driver' : 'rider'} on ${mover.vehicleType} -> ${target.tier} tier`;
+        if (await this.applyTierChange(sub, target, note)) changed += 1;
+      } catch (error) {
+        this.holdTierChange(sub.id, error);
+      }
+    }
+    return changed;
+  }
+
+  /** The rate the re-tier moves a subscription to — or null when its market's
+   *  config cannot price it, which HOLDS the current rate (loudly) instead of
+   *  writing a zero or stopping the run for every healthy subscription. */
+  private retierTarget(subscriptionId: string, tiers: SubscriptionTiers, subject: PartnerSubject): PartnerRate | null {
+    try {
+      return partnerRateFor(tiers, subject);
+    } catch (error) {
+      if (!(error instanceof PricingConfigError)) throw error;
+      log().error({ subscriptionId, key: error.details?.['key'] }, 'tier recalculation held: weekly-fee config cannot price this subscription');
+      return null;
+    }
+  }
+
+  /** [PR1270-S2-06] One subscription's failure is logged and held; the run
+   *  goes on to the next, so a single bad row never stops the market's re-tier. */
+  private holdTierChange(subscriptionId: string, error: unknown): void {
+    log().error({ err: error, subscriptionId }, 'tier recalculation held: this subscription could not be moved; the run continued');
+  }
+
+  /**
+   * [PR1270-S2-06] ONE transition is ONE transaction: the new rate and its
+   * TIER_CHANGE event commit together or not at all, so a crash between them
+   * can no longer leave a changed bill with no audit row. The rate write is a
+   * compare-and-set on the rate this run read: two runs racing over the same
+   * subscription (the weekly job and an operator's manual run) move it once
+   * and write one event — the loser matches nothing and writes nothing.
+   *
+   * Key policy: `tier:<subscription>:<n>:<from>-><to>` — the n-th tier
+   * change of this subscription, counted under the row lock the CAS above
+   * takes, so it is unique per transition by construction: a same-day return
+   * to an earlier rate is transition n+2, never a replay of n, and no clock is
+   * involved. The job's idempotency is carried by the rate itself: a re-run
+   * finds the rate already at target and skips before it gets here.
+   */
+  private async applyTierChange(
+    sub: { id: string; weeklyRate: Prisma.Decimal; currencyCode: string },
+    target: PartnerRate,
+    note: string,
+  ): Promise<boolean> {
+    const from = Number(sub.weeklyRate);
+    return this.prisma.$transaction(async (tx) => {
+      const won = await tx.subscription.updateMany({
+        where: { id: sub.id, weeklyRate: sub.weeklyRate },
+        data: { weeklyRate: target.rate },
       });
-      await this.prisma.billingEvent.create({
+      if (won.count === 0) return false;
+      const seq = (await tx.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } })) + 1;
+      await tx.billingEvent.create({
         data: {
           subscriptionId: sub.id,
           type: 'TIER_CHANGE',
-          amount: targetRate,
+          amount: target.rate,
           currencyCode: sub.currencyCode,
-          idempotencyKey: `tier:${sub.id}:${new Date().toISOString().slice(0, 10)}:${targetRate}`,
-          note: `vehicle ${mover.vehicleType} -> ${feeBandFor(mover.vehicleType)} band`,
+          idempotencyKey: `tier:${sub.id}:${seq}:${from}->${target.rate}`,
+          note,
         },
       });
-      changed += 1;
-    }
-    return changed;
+      return true;
+    });
   }
 
   /**
@@ -2180,39 +2232,29 @@ export class BillingService {
 
     let changed = 0;
     for (const sub of vendorSubs) {
-      if (!sub.vendor) continue;
-      const tiers = await this.countryConfig.getSubscriptionTiers(sub.vendor.owner.user.countryCode);
+      try {
+        if (!sub.vendor) continue;
+        // A negotiated rate or a waived fee is a human decision — a catalogue
+        // growing past a threshold must never silently overwrite one.
+        if (sub.customRate != null || sub.feeWaived) continue;
 
-      const activeListings = await this.prisma.item.count({
-        where: { vendorId: sub.vendor.id, isAvailable: true },
-      });
-      // The threshold count itself qualifies: "1000+ items" is >= 1000.
-      const { rate: targetRate, reason, franchised } = vendorRateFor(tiers, {
-        isService: sub.vendor.vendorType === 'SERVICE',
-        activeListings,
-        ownedStores: sub.vendor.owner._count.vendors,
-      });
-
-      // A negotiated rate or a waived fee is a human decision — a catalogue
-      // growing past a threshold must never silently overwrite one.
-      if (sub.customRate != null || sub.feeWaived) continue;
-
-      if (Number(sub.weeklyRate) !== targetRate) {
-        await this.prisma.subscription.update({
-          where: { id: sub.id },
-          data: { weeklyRate: targetRate },
+        const tiers = await this.countryConfig.getSubscriptionTiers(sub.vendor.owner.user.countryCode);
+        const activeListings = await this.prisma.item.count({
+          where: { vendorId: sub.vendor.id, isAvailable: true },
         });
-        await this.prisma.billingEvent.create({
-          data: {
-            subscriptionId: sub.id,
-            type: 'TIER_CHANGE',
-            amount: targetRate,
-            currencyCode: sub.currencyCode,
-            idempotencyKey: `tier:${sub.id}:${new Date().toISOString().slice(0, 10)}:${targetRate}`,
-            note: `${activeListings} active listings, ${sub.vendor.owner._count.vendors} owned store(s) -> ${reason} tier${franchised ? ' (franchise discount)' : ''}`,
-          },
+        // The threshold count itself qualifies: "1000+ items" is >= 1000.
+        const target = this.retierTarget(sub.id, tiers, {
+          kind: 'VENDOR',
+          isService: sub.vendor.vendorType === 'SERVICE',
+          activeListings,
+          ownedStores: sub.vendor.owner._count.vendors,
         });
-        changed += 1;
+        if (!target || Number(sub.weeklyRate) === target.rate) continue;
+
+        const note = `${activeListings} active listings, ${sub.vendor.owner._count.vendors} owned store(s) -> ${target.tier} tier${target.franchised ? ' (franchise discount)' : ''}`;
+        if (await this.applyTierChange(sub, target, note)) changed += 1;
+      } catch (error) {
+        this.holdTierChange(sub.id, error);
       }
     }
     return changed;

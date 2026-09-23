@@ -7,6 +7,7 @@ import {
   PREVIEW_VERIFICATION,
   PREVIEW_ACTIVE_JOB,
 } from './moverPreviewData';
+import * as PV from './moverPreviewData';
 import { useMoverPreview } from '../stores/moverPreview';
 
 // Earner PREVIEW (R3 + invariant 3): the whole guarantee is that preview is
@@ -62,5 +63,35 @@ describe('moverPreview store', () => {
     expect(useMoverPreview.getState().kind).toBe('RIDER');
     useMoverPreview.getState().exitPreview();
     expect(useMoverPreview.getState().preview).toBe(false);
+  });
+});
+
+describe('earner preview — the sample weekly fee is the live quote, never a frozen number', () => {
+  const quote = (vehicleType: string, role: string, band: string, tier: string, rate: number) => ({ vehicleType, label: vehicleType, role, band, tier, rate });
+  const pricing = {
+    countryCode: 'GY', currencyCode: 'GYD', currencySymbol: '$', isActive: true, trialDays: 14,
+    movers: [quote('MOTORCYCLE', 'RIDER', 'STANDARD', 'courier', 8000), quote('CAR', 'DRIVER', 'STANDARD', 'taxi', 9000)],
+    vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 15000 }] },
+    franchise: null,
+    weekly: { mover: 9000, moverHeavy: 9000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 20000, departmentVendor: 60000 },
+  };
+
+  it('the static sample subscription carries no weekly fee of its own', () => {
+    expect('weeklyRate' in PV.PREVIEW_SUBSCRIPTION).toBe(false);
+    expect('customRate' in PV.PREVIEW_SUBSCRIPTION).toBe(false);
+  });
+
+  it('the sample taxi driver is billed the taxi quote for the sample car', () => {
+    const sub = PV.previewSubscription(pricing as never);
+    expect(sub).toMatchObject({ type: 'TAXI_DRIVER', status: 'ACTIVE', weeklyRate: 9000 });
+    // The quote follows the list, so a re-price reaches the preview untouched.
+    const repriced = { ...pricing, movers: [quote('CAR', 'DRIVER', 'STANDARD', 'taxi', 9500)] };
+    expect(PV.previewSubscription(repriced as never)?.weeklyRate).toBe(9500);
+  });
+
+  it('no quote, no sample subscription — the fee is absent, never zero', () => {
+    expect(PV.previewSubscription(undefined)).toBeNull();
+    expect(PV.previewSubscription({ ...pricing, movers: undefined } as never)).toBeNull();
+    expect(PV.previewSubscription({ ...pricing, movers: [quote('CAR', 'DRIVER', 'STANDARD', 'taxi', 0)] } as never)).toBeNull();
   });
 });
