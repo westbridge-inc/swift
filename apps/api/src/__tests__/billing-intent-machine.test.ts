@@ -171,14 +171,20 @@ describe('LAW M-5 — UNKNOWN is a first-class state', () => {
     const held = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
     expect(held.status).toBe('UNKNOWN');
 
-    // Past TTL: closes EXPIRED with the normalized code, duns normally
+    // CHANGED DELIBERATELY [LAW M-5]. Past TTL the row used to close EXPIRED
+    // and dun. The justification was that MMG had no record by our reference —
+    // but MMG's merchant-initiated body carries NO reference field, and its
+    // history returns neither `external_id` nor `debitParty` (verified against
+    // the UAT sandbox), so the lookup could never have matched. Silence is not
+    // evidence of non-payment, and dunning on it suspends the payer who
+    // approved late, having paid. It stays UNKNOWN and ages into the admin
+    // queue — what PaymentStatus.UNKNOWN's schema comment always promised.
     await billing.pollPendingMmgCharges(new Date(Date.now() + 25 * HOUR));
     const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
-    expect(intent.status).toBe('EXPIRED');
-    expect(intent.failureCode).toBe('REQUEST_EXPIRED');
+    expect(intent.status).toBe('UNKNOWN');
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(after.status).toBe('PAST_DUE');
-    expect(after.failedAttempts).toBe(1);
+    expect(after.failedAttempts, 'the ladder to SUSPENDED must not advance on silence').toBe(0);
+    expect(after.status).not.toBe('SUSPENDED');
   });
 });
 

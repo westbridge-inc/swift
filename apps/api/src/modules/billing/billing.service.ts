@@ -11,7 +11,7 @@ import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
 import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
-import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
+import { mmgUnverifiableCounter, billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor, weeklyFeeAmount } from './subscription-fee';
 
@@ -1152,21 +1152,41 @@ export class BillingService {
           continue;
         }
         if (now >= ttlAt) {
-          // 6.6(c): the create itself had timed out AND the provider has no
-          // record by our reference after the TTL — safe to close and dun.
-          // [M-04] Terminal status and dunning outcome land in ONE transaction,
-          // behind the same per-row boundary the lookup branch has: one row's
-          // failure must never abort the sweep for every other payer.
-          try {
-            const outcome = await this.terminalizeFailedPayment(
-              sub as SubWithRelations, payment, { status: 'EXPIRED', failureCode: 'REQUEST_EXPIRED', from: ['UNKNOWN'] },
-              'MMG request lost in transit — never confirmed at MMG', now, periodKey,
-            );
-            if (!outcome) continue;
-            out.failed += 1;
-          } catch (err) {
-            log().error({ err, paymentId: payment.id, subscriptionId: sub.id }, 'MMG poll expiry failed for one payment — continuing');
-          }
+          // [LAW M-5] AGES INTO THE ADMIN QUEUE — IT IS NOT FAILED.
+          //
+          // This used to terminalize the row as EXPIRED/REQUEST_EXPIRED, which
+          // duns the payer and advances failedAttempts toward SUSPENDED. Its
+          // stated justification was "the provider has no record by our
+          // reference after the TTL — safe to close and dun". That premise is
+          // FALSE, and measurably so:
+          //
+          //   * MMG's merchant-initiated payment body carries NO merchant
+          //     reference field (verified against their own collection: it is
+          //     amount, currency, subType, type, debitParty, creditParty).
+          //   * `external_id` comes back null/empty on the UAT sandbox, and
+          //     `debitParty.accountid` is null too — so neither our reference
+          //     NOR the payer can be matched.
+          //
+          // A lookup that cannot match is not evidence of non-payment; it is no
+          // evidence at all. Closing on it punished the one person who did the
+          // right thing: the payer whose prompt was still live and who approved
+          // it late. Their money leaves, we never link it, and three strikes
+          // later they are SUSPENDED HAVING PAID.
+          //
+          // So the row stays UNKNOWN, exactly as `PaymentStatus.UNKNOWN`'s own
+          // schema comment promises — "never auto-failed, never auto-succeeded;
+          // ages into the admin queue". failedAttempts does not move, the
+          // subscription is not dunned, and the existing aged-UNKNOWN ops page
+          // (jobs/queue.ts) finally has something to fire on, because the row is
+          // still UNKNOWN when it reaches that threshold.
+          //
+          // The cost is explicit and accepted: a genuine non-payer whose
+          // initiate TIMED OUT is not dunned through this path until a human
+          // looks. That is the right side to err on — every other failure mode
+          // (declined, expired-at-initiate, insufficient funds) still duns
+          // normally, because those are answers from MMG rather than silence.
+          out.stillPending += 1;
+          mmgUnverifiableCounter.inc();
         } else {
           out.stillPending += 1;
         }
