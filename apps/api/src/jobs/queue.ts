@@ -6,6 +6,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { captureError, opsPageCounter, osrmOutcomeCounter } from '../plugins/observability';
 import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
+import { GUYANA_TZ } from '../modules/prep/prep-time';
 import { runWithTenant } from '../plugins/tenant-context';
 import {
   requireActiveDiscoveryTenant,
@@ -1482,14 +1483,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // The backfill movement (#17 CAT-I): admin-triggered, once per tenant.
         // Idempotent — a re-run writes nothing new and never re-notifies.
         const { runCategoryBackfill } = await import('../modules/discovery/backfill');
-        const { AiService } = await import('../modules/ai/ai.service');
         const { NotificationService } = await import('../modules/notification/notification.service');
         const notifications = new NotificationService(ctx.prisma, ctx.io);
         const tenantId = await requireActiveDiscoveryTenant(ctx.prisma, job.data);
         const report = await runWithTenant(tenantId, () =>
-          runCategoryBackfill(ctx.prisma, new AiService(), {
+          runCategoryBackfill(ctx.prisma, {
             tenantId,
-            notify: (userId) => notifications.send({
+            notify: (userId: string) => notifications.send({
               userId,
               type: 'SYSTEM_ANNOUNCEMENT',
               title: 'Your menu just got easier to find',
@@ -1499,20 +1499,6 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           }),
         );
         ctx.log.info({ tenantId, ...report }, 'discovery: backfill movement complete');
-        return;
-      }
-
-      if (job.name === 'discovery-ai-classify') {
-        // Stage-B (category spec Part 4): budgeted AI pass over items Stage A
-        // couldn't place. Budget exhausted or model down = silent wait.
-        const { runAiClassifierBatch } = await import('../modules/discovery/ai-classifier');
-        const { AiService } = await import('../modules/ai/ai.service');
-        const results = await runForActiveDiscoveryTenants(ctx.prisma, (tenantId) =>
-          runAiClassifierBatch(ctx.prisma, new AiService(), { tenantId }),
-        );
-        for (const { tenantId, result } of results) {
-          if (result.scanned > 0) ctx.log.info({ tenantId, ...result }, 'discovery: AI classifier batch');
-        }
         return;
       }
 
@@ -1869,22 +1855,6 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               data: { kind: 'earnings_missing', count: healed.length },
             }),
           ).catch(() => {});
-        }
-        return;
-      }
-
-      if (job.name === 'agent-ops-scan') {
-        // Ops agent (spec Part B): deterministic detection → model classifies
-        // a PII-free snapshot → gated execution. Runs whenever a key is present
-        // (AGENT_ENABLED=0 disables); sensitive actions wait for a human in assist mode.
-        const { AgentService, agentEnabled } = await import('../modules/agent/agent.service');
-        if (!agentEnabled()) return;
-        const agent = new AgentService(ctx.prisma, ctx.io, async (orderId) => {
-          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-        });
-        const result = await agent.runOpsScan();
-        if (result.scanned > 0) {
-          ctx.log.info(result, 'Agent ops scan complete');
         }
         return;
       }
@@ -2321,14 +2291,6 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 7,
   });
 
-  // Stage-B AI classifier: hourly nibble at the un-placed backlog under the
-  // daily budget (waits silently when spent — spec: nobody sees degradation).
-  await queues.dispatchQueue.add('discovery-ai-classify', {}, {
-    repeat: { pattern: '20 * * * *' },
-    removeOnComplete: 24,
-    removeOnFail: 24,
-  });
-
   // Movement R: nightly full stats recompute (RAT-H reconciliation leg).
   await queues.dispatchQueue.add('rating-stats-recompute', {}, {
     repeat: { pattern: '30 4 * * *' },
@@ -2359,8 +2321,9 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 30,
   });
 
-  // Vendor↔rider collusion affinity scan (SWIFT-164): weekly, Monday 06:00 —
-  // after tier-recalc (05:00), before the human's week starts.
+  // Vendor↔rider collusion affinity scan (SWIFT-164): weekly, Monday 06:00
+  // UTC (02:00 in Guyana) — before the human's week starts. It does not
+  // depend on tier-recalc, which runs at 05:00 Guyana time (09:00 UTC).
   await queues.verificationQueue.add('collusion-affinity-scan', {}, {
     repeat: { pattern: '0 6 * * 1' },
     removeOnComplete: 10,
@@ -2375,9 +2338,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 30,
   });
 
-  // Vendor tier recalculation from catalogue size: weekly, Monday 05:00
+  // Partner tier recalculation (vendors by catalogue size, movers by vehicle):
+  // weekly, Monday 05:00 IN GUYANA. The zone is pinned to the platform's
+  // timezone authority: a bare cron rule reads the worker's clock, and on a
+  // UTC host that is 01:00 Georgetown — a different week boundary for a
+  // weekly fee. Changing the rule's options registers a new repeatable in
+  // Redis; an old zone-less registration must be removed at rollout.
   await queues.subscriptionQueue.add('tier-recalc', {}, {
-    repeat: { pattern: '0 5 * * 1' },
+    repeat: { pattern: '0 5 * * 1', tz: GUYANA_TZ },
     removeOnComplete: 10,
     removeOnFail: 10,
   });
@@ -2428,16 +2396,6 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // minutes — dead phones must not keep swallowing dispatch offers.
   await queues.dispatchQueue.add('stale-movers', {}, {
     repeat: { pattern: '*/5 * * * *' },
-    removeOnComplete: 20,
-    removeOnFail: 20,
-  });
-
-  // Ops agent problem scan (spec Part B): every 60s; runs whenever
-  // ANTHROPIC_API_KEY is set (AGENT_ENABLED=0 disables). Detection is
-  // deterministic SQL — the model only classifies; money actions wait in the
-  // approval queue.
-  await queues.dispatchQueue.add('agent-ops-scan', {}, {
-    repeat: { every: Number(process.env['AGENT_SCAN_INTERVAL_SECONDS'] ?? 60) * 1000 },
     removeOnComplete: 20,
     removeOnFail: 20,
   });

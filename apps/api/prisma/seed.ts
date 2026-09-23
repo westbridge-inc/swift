@@ -629,12 +629,13 @@ async function main() {
             lastLocationUpdate: new Date(),
             // go-online requires a live subscription for drivers (no missing-row
             // grandfathering, unlike riders) — without this the Comfort/XL demo
-            // fleet can never come online (found in the platform audit).
+            // fleet can never come online (found in the platform audit). A taxi
+            // driver's fee is the taxi rate, not the rider rate.
             subscription: {
               create: {
                 type: 'TAXI_DRIVER',
                 status: 'TRIAL',
-                weeklyRate: guyanaTiers.mover,
+                weeklyRate: guyanaTiers.taxiDriver,
                 currentPeriodStart: new Date(),
                 currentPeriodEnd: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
                 nextBillingDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
