@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RideClass } from '@prisma/client';
 import { z } from 'zod';
 import { FareService } from './fare.service';
@@ -63,6 +63,13 @@ async function authenticatedTenantId(app: FastifyInstance, userId: string): Prom
 
 export async function ridesRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
+  const creationAuth = { preHandler: [app.authenticate, async (request: FastifyRequest) => {
+    // Cookie provenance is set only after JWT and live-session verification.
+    // A bearer is not proof of a mobile app; do not trust a client-name header.
+    if (request.authCredentialSource === 'cookie') {
+      throw new AppError(403, 'TAXI_MOBILE_APP_REQUIRED', 'Book taxi rides in the Swift mobile app for your safety PIN and SOS.');
+    }
+  }] };
   const fareService = new FareService(app.prisma);
   const orderService = new OrderService(app.prisma, app.io);
   const dispatch = makeDispatchService(app);
@@ -133,7 +140,7 @@ export async function ridesRoutes(app: FastifyInstance) {
   /** POST /request — create the ride at the quoted fare and start dispatch.
    *  The core lives in rides.service createRideRequest (one source of truth
    *  with the 5.5B queue's auto-request); this handler is HTTP only. */
-  app.post('/request', auth, async (request, reply) => {
+  app.post('/request', creationAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
     const { order, estimate, ridePin } = await createRideRequest(app, fareService, dispatch, request.user.userId, body);
 
@@ -170,7 +177,7 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  from the request path (no availability pre-check: the queue exists FOR
    *  the no-supply case). Replaces any prior WAITING entry (newest trip wins,
    *  same semantic as the supply watch). */
-  app.post('/queue/join', auth, async (request, reply) => {
+  app.post('/queue/join', creationAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
     const user = await assertRideGates(app, request.user.userId);
     assertL2(user);

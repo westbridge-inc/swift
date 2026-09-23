@@ -17,7 +17,7 @@ const VERTICALS = [
   { icon: UtensilsCrossed, label: 'Food', blurb: 'Restaurants, delivered hot', key: 'food' as const },
   { icon: ShoppingBasket, label: 'Groceries', blurb: 'Supermarkets, shelf-picked', key: 'groceries' as const },
   { icon: Store, label: 'Shops', blurb: 'Local stores at your door', key: 'shops' as const },
-  { icon: Car, label: 'Rides', blurb: 'PIN-verified taxis', key: 'rides' as const },
+  { icon: Car, label: 'Rides', blurb: 'PIN-verified taxis in the mobile app', key: 'rides' as const },
   { icon: Package, label: 'Parcels', blurb: 'Anything, across town', key: 'courier' as const },
   { icon: Wrench, label: 'Trades', blurb: 'Quoted, booked, paid on completion', key: 'services' as const },
 ];
@@ -112,7 +112,7 @@ export default function HomePage() {
               confidence; a dead badge reads as carelessness — and is a review flag. */}
           {!showAppStoreBadges && (
             <p className="mt-6 text-sm text-[var(--swift-muted)]">
-              No app needed — Swift runs in your phone&apos;s browser today, tracking included.
+              Order from stores in your phone&apos;s browser, tracking included. Taxi rides require the Swift mobile app.
             </p>
           )}
         </div>

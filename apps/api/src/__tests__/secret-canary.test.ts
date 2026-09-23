@@ -114,7 +114,7 @@ describe('the census is generated from the tree, never maintained by hand', () =
     expect(r.code).toBe(0);
     const names = r.output.trim().split('\n');
     expect(names.length).toBeGreaterThanOrEqual(20);
-    for (const must of ['JWT_SECRET', 'MASTER_KEK', 'POSTGRES_PASSWORD', 'MMG_MSECRET', 'TWILIO_AUTH_TOKEN']) expect(names).toContain(must);
+    for (const must of ['JWT_SECRET', 'MASTER_KEK', 'POSTGRES_PASSWORD', 'MMG_MSECRET', 'TWILIO_API_KEY_SECRET']) expect(names).toContain(must);
     expect(names).not.toContain('ANDROID_GOOGLE_MAPS_API_KEY'); // client-embedded by design, with its reason in the script
     expect(names.filter((n) => /^(EXPO_PUBLIC|NEXT_PUBLIC|VITE)_/.test(n))).toEqual([]);
   });
