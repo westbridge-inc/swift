@@ -32,6 +32,7 @@ import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 import { handoverBlockCounter } from '../../plugins/observability';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
+import { mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { log } from '../../utils/logger';
@@ -987,7 +988,11 @@ export async function riderRoutes(app: FastifyInstance) {
         // open work, and advertising it sends riders to collect food that is
         // already out for delivery. In AND because notHeldFilter already spread
         // an OR key above.
-        AND: [notSelfDeliveredFilter(), riderDispatchReadinessFilter()],
+        // [ORDER-SPINE S1-6] Nor is direct-MMG work nobody has said is paid, or
+        // whose payment claims disagree: the claim below would refuse it. All
+        // three predicates hold at once (cross-lane gate): not self-delivered,
+        // ready for a rider, and MMG-eligible.
+        AND: [notSelfDeliveredFilter(), riderDispatchReadinessFilter(), mmgDispatchEligibleWhere()],
       },
       include: {
         vendor: {
