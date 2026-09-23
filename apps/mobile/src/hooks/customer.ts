@@ -323,8 +323,15 @@ export function useUnblockUser() {
 export function useItemSlots<T = any>(itemId: string, date: string) {
   return useQuery<T>({
     queryKey: ['customer', 'slots', itemId, date],
-    queryFn: () => unwrap<T>(customerApi.getItemSlots(itemId, date)),
+    queryFn: ({ signal }) => unwrap<T>(customerApi.getItemSlots(itemId, date, {
+      signal,
+      // Appointment selection blocks checkout. One bounded read is preferable
+      // to silently extending this loader through three transport attempts;
+      // the screen exposes an explicit, user-controlled retry.
+      timeout: 8_000,
+    })),
     enabled: !!itemId && !!date,
+    retry: false,
     // Live exclusivity: a slot someone else just booked disappears for
     // everyone WHILE they're looking at the picker, not only on reopen —
     // the DB unique is still the final judge (409 SLOT_TAKEN on the race).
