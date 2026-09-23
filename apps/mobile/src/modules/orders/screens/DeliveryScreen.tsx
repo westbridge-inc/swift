@@ -18,6 +18,7 @@ import { useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../ho
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { promiseLine, promiseNote } from '../../../lib/promise';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
@@ -786,6 +787,13 @@ export function DeliveryScreen() {
     : o.fulfillment === 'APPOINTMENT' ? 'provider' : 'seller or rider';
   const mmgPayee = mmgPaymentAction?.recipientName
     ?? (o.orderType === 'COURIER' ? 'the named payee' : o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store');
+  // The last two food sentences a booking could reach on this screen were both
+  // cancellation copy on the MMG rail — the one rail where the money may have
+  // already moved. They name the party who holds it from the fulfillment, the
+  // discriminator every other booking word on this screen keys on, and call a
+  // booking a booking. Food, pickup and courier keep their exact words.
+  const refundParty = o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
+  const cancelledNoun = o.fulfillment === 'APPOINTMENT' ? 'booking' : 'order';
   let etaCopy = pendingSummary;
   if (cancelled) etaCopy = 'Cancelled';
   else if (failed) etaCopy = 'Couldn’t complete this order';
@@ -966,6 +974,12 @@ export function DeliveryScreen() {
             }}
             hidden={ringHidden || !isFocused}
           />
+          {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? (
+            <View style={{ marginTop: space.md }}>
+              <T variant="label" tone="muted">Appointment</T>
+              <T variant="body" weight="semibold">{formatAppointmentSlot(o.appointmentSlot)}</T>
+            </View>
+          ) : null}
           {holdTimingUnavailable ? (
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="refresh-cw" size={18} color={color.info} />
@@ -1175,8 +1189,8 @@ export function DeliveryScreen() {
                     ? 'This order could not continue. Report a problem for help with what happens next.'
                     : cancelMessage
                       ?? (mmgCancellationAmbiguous
-                        ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
-                        : 'This order was cancelled.')}
+                        ? `This ${cancelledNoun} was cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`
+                        : `This ${cancelledNoun} was cancelled.`)}
                 </T>
                 {/* [REPORT-012 F-012-03] The fee the server ACTUALLY charged —
                     rendered from the committed result, never a preview. */}
@@ -1431,7 +1445,7 @@ export function DeliveryScreen() {
               ? 'This cancels the pickup and puts the assigned rider back in the dispatch pool. It can’t be undone.'
               : 'This stops the rider search and cancels the pickup request. It can’t be undone.'
             : mmgCancellationAmbiguous
-              ? 'Cancelling stops fulfilment. If you already sent the MMG payment, the store refunds you directly.'
+              ? `Cancelling stops fulfilment. If you already sent the MMG payment, ${refundParty} refunds you directly.`
               : 'Cancelling stops fulfilment. The server preview is shown below; the final outcome is confirmed when cancellation completes.'}
         </T>
         {cancelPreviewFresh && o.orderType === 'COURIER' ? (

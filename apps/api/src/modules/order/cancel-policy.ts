@@ -31,7 +31,18 @@ export type CancellationSnapshot = {
   driverId: string | null;
   /** Set at checkout when the customer picks a future slot. Null = "now". */
   scheduledFor: Date | null;
+  /** A booking's slot, chosen at checkout and reserved by the provider at
+   *  acceptance. Optional because a delivery row never carries one; both the
+   *  charge path and the preview hold full order rows, so it flows unchanged. */
+  appointmentSlot?: Date | null;
 };
+
+/** The real moment the work is scheduled to happen, or null for "now".
+ * Both appointmentSlot and scheduledFor are true instants. */
+function scheduledMoment(appointmentSlot: Date | null | undefined, scheduledFor: Date | null): Date | null {
+  if (appointmentSlot != null) return appointmentSlot;
+  return scheduledFor ?? null;
+}
 
 /**
  * THE one free-cancellation predicate — the charge path and the customer
@@ -73,6 +84,17 @@ export type CancellationSnapshot = {
  * The shape of a longer-horizon cancellation CURVE (does a week's notice
  * differ from an hour's?) is a founder decision and is not invented here.
  * This only stops charging for a commitment that provably has not happened.
+ *
+ * A BOOKING is the same fact read from its own column. A service business's
+ * appointment carries `appointmentSlot`, not `scheduledFor`, and the provider
+ * reserves that slot at acceptance — so a PENDING haircut booked this morning
+ * for Thursday was handed the kitchen's five-minute clock and previewed the
+ * late-cancellation marker before any provider had seen it. The slot IS the
+ * scheduled moment; the rule above applies to it unchanged, and an accepted
+ * booking is committed exactly as before.
+ *
+ * Both slot columns are instants, so the same cutoff arithmetic applies to
+ * appointments and scheduled deliveries without any zone conversion here.
  */
 export function isFreeCancellation(order: CancellationSnapshot, now: Date = new Date()): boolean {
   const unassigned = order.riderId == null && order.driverId == null;
@@ -83,9 +105,11 @@ export function isFreeCancellation(order: CancellationSnapshot, now: Date = new 
   if (!uncommittedStatus) return false;
   const minutesSincePlaced = (now.getTime() - order.placedAt.getTime()) / 60000;
   if (minutesSincePlaced <= FREE_CANCEL_WINDOW_MIN) return true;
-  // Still nothing committed, and the slot has not come around yet.
-  if (order.scheduledFor == null) return false;
-  const minutesUntilSlot = (order.scheduledFor.getTime() - now.getTime()) / 60000;
+  // Still nothing committed, and the slot has not come around yet. A booking's
+  // slot is its scheduled moment (the column bookings carry).
+  const slotAt = scheduledMoment(order.appointmentSlot, order.scheduledFor);
+  if (slotAt == null) return false;
+  const minutesUntilSlot = (slotAt.getTime() - now.getTime()) / 60000;
   return minutesUntilSlot > FREE_CANCEL_WINDOW_MIN;
 }
 
@@ -108,8 +132,10 @@ export function freeCancellationExpiresAt(order: CancellationSnapshot, now: Date
   // Held and unassigned: the hold IS the window.
   if (order.holdExpiresAt != null && order.holdExpiresAt > now) return order.holdExpiresAt;
   const candidates = [new Date(order.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * 60_000)];
-  if (order.scheduledFor != null) {
-    candidates.push(new Date(order.scheduledFor.getTime() - FREE_CANCEL_WINDOW_MIN * 60_000));
+  // The same moment the predicate read: a booking's slot, else the schedule.
+  const slotAt = scheduledMoment(order.appointmentSlot, order.scheduledFor);
+  if (slotAt != null) {
+    candidates.push(new Date(slotAt.getTime() - FREE_CANCEL_WINDOW_MIN * 60_000));
   }
   // The two branches of the predicate are OR'd, so the window ends at the
   // LATER of them — anything else expires the countdown early.

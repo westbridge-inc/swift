@@ -471,6 +471,20 @@ export class NotificationService {
     });
   }
 
+  /** A SERVICE business confirmed a booking: the customer's slot is reserved.
+   *  No kitchen words — a booking is not prepared. Same data shape as
+   *  orderAccepted, so the app's notification router lands on the same order
+   *  screen it always did. */
+  async bookingConfirmed(customerId: string, orderNumber: string, vendorName: string, orderId: string): Promise<void> {
+    await this.send({
+      userId: customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Booking confirmed',
+      body: `${vendorName} confirmed your booking ${orderNumber}.`,
+      data: { orderId, orderNumber, status: 'ACCEPTED' },
+    });
+  }
+
   async orderPreparing(customerId: string, orderNumber: string, vendorName: string, orderId: string): Promise<void> {
     await this.send({
       userId: customerId,
