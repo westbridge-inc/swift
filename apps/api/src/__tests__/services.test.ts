@@ -175,8 +175,22 @@ describe('Services — provider verification + qualification badge', () => {
 
     const mine = await inject('GET', '/api/v1/services/providers/me', undefined, owner.token);
     expect(mine.json().data.id).toBe(first.json().data.id);
+    expect(mine.json().data.categoryUnavailable).toBe(false);
     const notMine = await inject('GET', '/api/v1/services/providers/me', undefined, other.token);
     expect(notMine.statusCode).toBe(404);
+  });
+
+  it('marks a stored held-category profile unavailable after refreshing its live verification', async () => {
+    const owner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    await runWithoutTenant(() => app.prisma.serviceProvider.create({
+      data: { userId: owner.userId, trade: 'tutor', portfolioPhotos: [], isVerified: true },
+    }));
+
+    const mine = await inject('GET', '/api/v1/services/providers/me', undefined, owner.token);
+    expect(mine.statusCode).toBe(200);
+    expect(mine.json().data).toMatchObject({
+      trade: 'tutor', isVerified: false, categoryUnavailable: true,
+    });
   });
 
   it('fails closed on the first electrician save until the trade-specific legal gate is met', async () => {
@@ -410,14 +424,14 @@ describe('Services — risk-tiered browse', () => {
 
   it('bounds anonymous pages at 50 and uses a stable opaque tenant/trade-bound cursor', async () => {
     const providers = await Promise.all([
-      makeVerifiedProvider('tutor'),
-      makeVerifiedProvider('tutoring'),
-      makeVerifiedProvider('Tutor'),
+      makeVerifiedProvider('cleaner'),
+      makeVerifiedProvider('cleaning'),
+      makeVerifiedProvider('house cleaner'),
     ]);
-    const oversized = await inject('GET', '/api/v1/services/providers?trade=tutor&limit=51');
+    const oversized = await inject('GET', '/api/v1/services/providers?trade=cleaner&limit=51');
     expect(oversized.statusCode).toBe(400);
 
-    const first = await inject('GET', '/api/v1/services/providers?trade=tutor&limit=2');
+    const first = await inject('GET', '/api/v1/services/providers?trade=cleaner&limit=2');
     expect(first.statusCode).toBe(200);
     const firstData = first.json().data;
     expect(firstData.providers).toHaveLength(2);
@@ -425,13 +439,13 @@ describe('Services — risk-tiered browse', () => {
     expect(firstData.page.nextCursor).toEqual(expect.any(String));
     expect(firstData.page.nextCursor).not.toContain(providers[0]!.providerId);
 
-    const replay = await inject('GET', '/api/v1/services/providers?trade=tutoring&limit=2');
+    const replay = await inject('GET', '/api/v1/services/providers?trade=cleaning&limit=2');
     expect(replay.json().data.page.nextCursor).toBe(firstData.page.nextCursor);
     expect(replay.json().data.providers.map((row: { id: string }) => row.id))
       .toEqual(firstData.providers.map((row: { id: string }) => row.id));
 
     const cursor = encodeURIComponent(firstData.page.nextCursor);
-    const second = await inject('GET', `/api/v1/services/providers?trade=tutor&limit=2&cursor=${cursor}`);
+    const second = await inject('GET', `/api/v1/services/providers?trade=cleaner&limit=2&cursor=${cursor}`);
     expect(second.statusCode).toBe(200);
     expect(second.json().data.providers).toHaveLength(1);
     const allIds = [
@@ -444,10 +458,17 @@ describe('Services — risk-tiered browse', () => {
     // decodes to the same HMAC bytes unless the route rejects non-canonical
     // encodings before its timing-safe comparison.
     const tampered = `${firstData.page.nextCursor}=`;
-    expect((await inject('GET', `/api/v1/services/providers?trade=tutor&limit=2&cursor=${encodeURIComponent(tampered)}`)).statusCode)
+    expect((await inject('GET', `/api/v1/services/providers?trade=cleaner&limit=2&cursor=${encodeURIComponent(tampered)}`)).statusCode)
       .toBe(400);
     expect((await inject('GET', `/api/v1/services/providers?trade=mason&limit=2&cursor=${cursor}`)).statusCode)
       .toBe(400);
+
+    // A held trade and its alias cannot enter the browse/cursor population.
+    for (const trade of ['tutor', 'tutoring']) {
+      const held = await inject('GET', `/api/v1/services/providers?trade=${trade}`);
+      expect(held.statusCode).toBe(409);
+      expect(held.json().error.code).toBe('SERVICE_CATEGORY_UNAVAILABLE');
+    }
   });
 
   it('marks high-risk trades and recommends a licensed provider', async () => {

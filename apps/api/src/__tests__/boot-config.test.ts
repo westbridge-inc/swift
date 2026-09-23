@@ -34,6 +34,16 @@ const good: Record<string, string | undefined> = {
   MMG_MSECRET: 'mmg-msecret',
 };
 
+const cardOff = {
+  ...good,
+  PAYMENT_PROVIDER: 'disabled',
+  CARD_RAIL_KILL: '1',
+  STRIPE_SECRET_KEY: undefined,
+  PAYMENT_GATEWAY_KEY: undefined,
+  PAYMENT_GATEWAY_SECRET: undefined,
+  POWERTRANZ_API_URL: undefined,
+};
+
 const paddedTwilioIdentities = ([
   ['TWILIO_ACCOUNT_SID', good['TWILIO_ACCOUNT_SID']],
   ['TWILIO_API_KEY_SID', good['TWILIO_API_KEY_SID']],
@@ -62,6 +72,41 @@ function runPreflight(candidate: Record<string, string | undefined>) {
 }
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
+  it('boots with the card rail explicitly disabled and no card credentials', () => {
+    expect(() => assertSafeBootConfig(cardOff)).not.toThrow();
+  });
+
+  it.each([undefined, '', '0', 'true', '01'])('refuses disabled cards with an ineffective kill switch (%s)', (kill) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, CARD_RAIL_KILL: kill })).toThrow(/CARD_RAIL_KILL/);
+  });
+
+  it.each([undefined, '', 'disable', 'DISABLED', 'disabled ', 'sandbox'])('does not infer card OFF from provider %s', (provider) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PAYMENT_PROVIDER: provider })).toThrow(/PAYMENT_PROVIDER/);
+  });
+
+  it.each(['stripe', 'powertranz'])('still requires credentials for %s even with the kill switch on', (provider) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PAYMENT_PROVIDER: provider })).toThrow(/STRIPE_SECRET_KEY|PAYMENT_GATEWAY_KEY/);
+  });
+
+  it.each(['MMG_DRIVER', 'MMG_API_URL', 'MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'])(
+    'still requires %s with cards OFF', (name) => {
+      expect(() => assertSafeBootConfig({ ...cardOff, [name]: undefined })).toThrow(/MMG/);
+    },
+  );
+
+  it('still rejects sandbox and UAT MMG with cards OFF', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
+    expect(() => assertSafeBootConfig({ ...cardOff, MMG_API_URL: 'https://mwallet.mmgtest.net' })).toThrow(/non-UAT/);
+  });
+
+  it('preflight accepts explicit card OFF and rejects a reachable card charge rail', () => {
+    const off = runPreflight(cardOff);
+    expect(off.status, off.stdout + off.stderr).toBe(0);
+    const reachable = runPreflight({ ...cardOff, CARD_RAIL_KILL: '0' });
+    expect(reachable.status, reachable.stdout + reachable.stderr).toBe(1);
+    expect(reachable.stdout).toContain('CARD_RAIL_KILL');
+  });
+
   it('boots when every required secret is present', () => {
     expect(() => assertSafeBootConfig(good)).not.toThrow();
   });

@@ -19,6 +19,7 @@ import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
 import { clusterMemberIds } from '../integrity/identity.service';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService } from '../country/country-config.service';
+import { log } from '../../utils/logger';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
@@ -520,7 +521,13 @@ export class VerificationService {
       take: cap,
     });
     for (const owner of owners) {
-      await this.projectVendorActivation(this.prisma, owner.userId);
+      try {
+        await this.projectVendorActivation(this.prisma, owner.userId);
+      } catch (error) {
+        // [PR1270-S2-03] One owner the market cannot price (or any other
+        // failure) is logged and skipped; the belt keeps healing everyone else.
+        log().error({ err: error, userId: owner.userId }, 'vendor activation reconcile held for this owner; the sweep continued');
+      }
     }
     return owners.length;
   }
@@ -847,6 +854,12 @@ export class VerificationService {
       // transaction: checklist completion → isVerified + PENDING_APPROVAL→
       // ACTIVE promotion can no longer be stranded by a post-commit callback
       // crash, and a rejection de-verifies atomically with its decision.
+      // [PR1270-S2-03] An approval prices every partner it could activate
+      // BEFORE it projects anything: a market that cannot price one of them
+      // rolls this whole decision back, and the reviewer meets the config
+      // error with the document still pending — never an activated partner
+      // with no subscription.
+      if (approve) await this.assertActivationPriceable(candidate.userId, tx);
       await projectProviderVerificationLocked(tx, updated.userId);
       await this.projectVendorActivation(tx, updated.userId);
       return { kind: 'UPDATED' as const, document: updated };
@@ -1083,7 +1096,8 @@ export class VerificationService {
       documents,
       missing,
       vehicleType,
-      roleVerified: missing.length === 0,
+      roleVerified: checklist.length > 0 && missing.length === 0,
+      categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && checklist.length === 0,
       trial,
     };
   }
@@ -1197,13 +1211,31 @@ export class VerificationService {
     return bound;
   }
 
+  /**
+   * [PR1270-S2-03] Price BEFORE activating. Every partner this person's
+   * approval could activate — their rider or driver record, every store they
+   * own — is priced through the subscription service exactly as the trial
+   * will be, and a market that cannot price one of them refuses here, with the
+   * config error, before any activation write. A partner who already holds a
+   * subscription needs no price and never blocks. Reads only; `db` may be the
+   * decision transaction so the check rides its locks.
+   */
+  private async assertActivationPriceable(userId: string, db: Prisma.TransactionClient | PrismaClient): Promise<void> {
+    const driver = await db.driver.findUnique({ where: { userId }, select: { id: true } });
+    if (driver) await this.subscriptions.priceForActivation({ driverId: driver.id }, db);
+    const rider = await db.rider.findUnique({ where: { userId }, select: { id: true } });
+    if (rider) await this.subscriptions.priceForActivation({ riderId: rider.id }, db);
+    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true } } } });
+    for (const vendor of owner?.vendors ?? []) await this.subscriptions.priceForActivation({ vendorId: vendor.id }, db);
+  }
+
   private async projectVendorActivation(
     db: Prisma.TransactionClient | PrismaClient,
     userId: string,
   ): Promise<void> {
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
-      include: { vendors: { select: { id: true, vendorType: true, isVerified: true } } },
+      include: { vendors: { select: { id: true, vendorType: true, isVerified: true, status: true } } },
     });
     if (!owner) return;
     // [DOC-1 §3.6 · P3-2] A VALID registration record promotes every UNREGISTERED store the
@@ -1227,6 +1259,15 @@ export class VerificationService {
       const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
       const verified = checklistOk && (!disclosureGate || (await compileStorefrontDisclosure(db, vendor.id)).complete);
       if (verified) {
+        // [PR1270-S2-03] This projection is the one authority that makes a
+        // store live, on every path (review, auto-approval, the reconcile
+        // belt). On the activation edge it prices the store first: a market
+        // that cannot price it refuses the activation — and rolls back the
+        // transaction it rides in — instead of leaving an ACTIVE store with no
+        // subscription. An already-live store is not re-priced here.
+        if (!vendor.isVerified || vendor.status === 'PENDING_APPROVAL') {
+          await this.subscriptions.priceForActivation({ vendorId: vendor.id }, db);
+        }
         const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db);
         await db.vendor.update({
           where: { id: vendor.id },

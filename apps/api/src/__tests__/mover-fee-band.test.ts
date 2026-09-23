@@ -9,12 +9,13 @@ import { SubscriptionService } from '../modules/subscription/subscription.servic
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { VEHICLE_CLASSES, feeBandFor } from '../config/vehicle-classes';
-import { moverRateFor, vendorRateFor, type SubscriptionTiers } from '../modules/country/country-config.service';
+import { partnerRateFor, type SubscriptionTiers } from '../modules/country/country-config.service';
 
 // ---------------------------------------------------------------------------
-// The mover weekly fee has TWO bands, and which one a mover pays follows the
-// VEHICLE they have registered — not the service they perform, and not the
-// rate they happened to sign up on.
+// The mover weekly fee follows the ROLE first, then the VEHICLE — never the
+// service performed, and never the rate a mover happened to sign up on. A taxi
+// Driver pays the market's taxi rate whatever the vehicle (where the market
+// sets one); a delivery/courier Rider pays the band of the vehicle registered:
 //
 //   STANDARD  bicycle, motorbike, car, wagon car
 //   HEAVY     bus (9/15), canter (short/long), box truck (short/long)
@@ -45,19 +46,34 @@ describe('mover fee band — classification', () => {
 });
 
 describe('mover fee band — the rate resolver', () => {
+  // A market that prices by band alone: no taxi rate, so the band decides for
+  // Riders and Drivers alike.
   const tiers: SubscriptionTiers = { mover: 10000, moverHeavy: 12000, smallVendor: 20000, largeVendor: 30000 };
+  const rateOf = (t: SubscriptionTiers, kind: 'RIDER' | 'DRIVER', vehicleType: VehicleType) =>
+    partnerRateFor(t, { kind, vehicleType }).rate;
 
   it('resolves each vehicle to its band rate', () => {
-    for (const v of STANDARD_VEHICLES) expect(moverRateFor(tiers, v)).toBe(10000);
-    for (const v of HEAVY_VEHICLES) expect(moverRateFor(tiers, v)).toBe(12000);
+    for (const kind of ['RIDER', 'DRIVER'] as const) {
+      for (const v of STANDARD_VEHICLES) expect(rateOf(tiers, kind, v)).toBe(10000);
+      for (const v of HEAVY_VEHICLES) expect(rateOf(tiers, kind, v)).toBe(12000);
+    }
   });
 
   it('a market with no heavy rate falls back to the standard rate — never 0, never undefined', () => {
     const noHeavy: SubscriptionTiers = { mover: 10000, smallVendor: 20000, largeVendor: 30000 };
     for (const v of HEAVY_VEHICLES) {
-      expect(moverRateFor(noHeavy, v)).toBe(10000);
-      expect(Number.isFinite(moverRateFor(noHeavy, v))).toBe(true);
+      expect(rateOf(noHeavy, 'RIDER', v)).toBe(10000);
+      expect(Number.isFinite(rateOf(noHeavy, 'DRIVER', v))).toBe(true);
     }
+  });
+
+  it('a market with a taxi rate prices every Driver by role, car or bus; Riders stay on their band', () => {
+    const taxi: SubscriptionTiers = { ...tiers, taxiDriver: 11000 };
+    for (const v of [...STANDARD_VEHICLES, ...HEAVY_VEHICLES]) {
+      expect(partnerRateFor(taxi, { kind: 'DRIVER', vehicleType: v })).toEqual({ rate: 11000, tier: 'taxi', franchised: false });
+    }
+    for (const v of STANDARD_VEHICLES) expect(rateOf(taxi, 'RIDER', v)).toBe(10000);
+    for (const v of HEAVY_VEHICLES) expect(rateOf(taxi, 'RIDER', v)).toBe(12000);
   });
 });
 
@@ -68,26 +84,26 @@ describe('vendor rate — services, catalogue tiers and the franchise discount',
     largeCatalogueThreshold: 1000, departmentCatalogueThreshold: 10000,
     franchiseMinLocations: 5, franchiseDiscountPct: 50,
   };
-  const shop = (activeListings: number, ownedStores = 1) =>
-    vendorRateFor(tiers, { isService: false, activeListings, ownedStores });
+  const vendor = (isService: boolean, activeListings: number, ownedStores: number) =>
+    partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings, ownedStores });
+  const shop = (activeListings: number, ownedStores = 1) => vendor(false, activeListings, ownedStores);
 
   it('a service carries no catalogue and pays the service rate', () => {
-    expect(vendorRateFor(tiers, { isService: true, activeListings: 0, ownedStores: 1 }))
-      .toEqual({ rate: 12000, reason: 'service', franchised: false });
+    expect(vendor(true, 0, 1)).toEqual({ rate: 12000, tier: 'service', franchised: false });
   });
 
   it('catalogue tiers step at their thresholds, and the threshold itself qualifies', () => {
     expect(shop(0).rate).toBe(20000);
     expect(shop(999).rate).toBe(20000);
-    expect(shop(1000)).toEqual({ rate: 30000, reason: 'large', franchised: false });
+    expect(shop(1000)).toEqual({ rate: 30000, tier: 'large', franchised: false });
     expect(shop(9999).rate).toBe(30000);
-    expect(shop(10000)).toEqual({ rate: 50000, reason: 'department', franchised: false });
+    expect(shop(10000)).toEqual({ rate: 50000, tier: 'department', franchised: false });
   });
 
-  it('five shops pay 50,000 in total — the founder rate card, exactly', () => {
+  it('from the fifth store every location pays half its own rate', () => {
     expect(shop(50, 4).rate).toBe(20000); // four stores: no discount yet
     const five = shop(50, 5);
-    expect(five).toEqual({ rate: 10000, reason: 'small', franchised: true });
+    expect(five).toEqual({ rate: 10000, tier: 'small', franchised: true });
     expect(five.rate * 5).toBe(50000);
     expect(shop(50, 10).rate * 10).toBe(100000); // scales linearly, no cliff
   });
@@ -95,12 +111,11 @@ describe('vendor rate — services, catalogue tiers and the franchise discount',
   it('the discount applies to each location OWN tier — it never erases catalogue scale', () => {
     // The loophole this closes: a flat 50,000 bundle would let five department
     // stores pay less than one does alone.
-    expect(shop(20000, 5)).toEqual({ rate: 25000, reason: 'department', franchised: true });
+    expect(shop(20000, 5)).toEqual({ rate: 25000, tier: 'department', franchised: true });
     expect(shop(20000, 5).rate * 5).toBe(125000); // discounted, still not 50,000
     expect(shop(20000, 5).rate).toBeGreaterThan(shop(50, 5).rate);
-    expect(shop(5000, 5)).toEqual({ rate: 15000, reason: 'large', franchised: true });
-    expect(vendorRateFor(tiers, { isService: true, activeListings: 0, ownedStores: 5 }))
-      .toEqual({ rate: 6000, reason: 'service', franchised: true });
+    expect(shop(5000, 5)).toEqual({ rate: 15000, tier: 'large', franchised: true });
+    expect(vendor(true, 0, 5)).toEqual({ rate: 6000, tier: 'service', franchised: true });
   });
 
   it('a single department store never pays less than a chain member of the same size', () => {
@@ -110,8 +125,8 @@ describe('vendor rate — services, catalogue tiers and the franchise discount',
 
   it('a market that has priced none of the new tiers behaves exactly as before', () => {
     const legacy: SubscriptionTiers = { mover: 10000, smallVendor: 20000, largeVendor: 30000 };
-    expect(vendorRateFor(legacy, { isService: true, activeListings: 0, ownedStores: 1 }).rate).toBe(20000);
-    const many = vendorRateFor(legacy, { isService: false, activeListings: 50000, ownedStores: 9 });
+    expect(partnerRateFor(legacy, { kind: 'VENDOR', isService: true, activeListings: 0, ownedStores: 1 }).rate).toBe(20000);
+    const many = partnerRateFor(legacy, { kind: 'VENDOR', isService: false, activeListings: 50000, ownedStores: 9 });
     expect(many.rate).toBe(30000);
     expect(many.franchised).toBe(false); // no franchise config = no discount
   });
@@ -141,14 +156,14 @@ describe('mover fee band — what a mover is actually charged', () => {
     await app.close();
   });
 
-  it('the SEEDED Guyana rate card matches the founder rate card exactly', async () => {
+  it('the SEEDED Guyana rate card matches the owner rate card exactly', async () => {
     // Read from the CountryConfig row the public pricing endpoint serves, so a
     // stale database fails loudly instead of testing a number nobody ships.
     const gy = await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } });
     const seeded = gy.subscriptionTiers as unknown as SubscriptionTiers;
     expect(seeded, 'GY rate card — re-run the seed if this fails').toMatchObject({
-      mover: 10000, moverHeavy: 12000, serviceVendor: 12000,
-      smallVendor: 20000, largeVendor: 30000, departmentVendor: 50000,
+      mover: 8000, moverHeavy: 9000, taxiDriver: 9000, serviceVendor: 8000,
+      smallVendor: 15000, largeVendor: 20000, departmentVendor: 60000,
       largeCatalogueThreshold: 1000, departmentCatalogueThreshold: 10000,
       franchiseMinLocations: 5, franchiseDiscountPct: 50,
     });
@@ -185,76 +200,87 @@ describe('mover fee band — what a mover is actually charged', () => {
     });
   }
 
-  it('a motorbike delivery rider signs up on 10,000', async () => {
-    const userId = await makeMoverUser();
-    const rider = await app.prisma.rider.create({
-      data: { userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' },
-    });
+  async function makeRider(userId: string, vehicleType: VehicleType, riderType: 'DELIVERY' | 'COURIER' = 'DELIVERY') {
+    return app.prisma.rider.create({ data: { userId, riderType, vehicleType } });
+  }
+
+  it('a motorbike delivery rider signs up on 8,000', async () => {
+    const rider = await makeRider(await makeMoverUser(), 'MOTORCYCLE');
     const sub = await subscriptions.startTrialForRider(rider.id);
-    expect(Number(sub.weeklyRate)).toBe(10000);
+    expect(Number(sub.weeklyRate)).toBe(8000);
   });
 
-  it('a canter courier signs up on 12,000 — the same service, the bigger vehicle', async () => {
-    const userId = await makeMoverUser();
-    const rider = await app.prisma.rider.create({
-      data: { userId, riderType: 'COURIER', vehicleType: 'CANTER_LONG' },
-    });
+  it('a canter courier signs up on 9,000 — heavy delivery: the same service, the bigger vehicle', async () => {
+    const rider = await makeRider(await makeMoverUser(), 'CANTER_LONG', 'COURIER');
     const sub = await subscriptions.startTrialForRider(rider.id);
-    expect(Number(sub.weeklyRate)).toBe(12000);
+    expect(Number(sub.weeklyRate)).toBe(9000);
   });
 
-  it('a car taxi driver signs up on 10,000, a 15-seater bus driver on 12,000', async () => {
+  it('every taxi driver signs up on 9,000 — a car or a 15-seater bus', async () => {
     const car = await makeDriver(await makeMoverUser(), 'CAR');
-    expect(Number((await subscriptions.startTrialForDriver(car.id)).weeklyRate)).toBe(10000);
+    expect(Number((await subscriptions.startTrialForDriver(car.id)).weeklyRate)).toBe(9000);
 
     const bus = await makeDriver(await makeMoverUser(), 'BUS_15');
-    expect(Number((await subscriptions.startTrialForDriver(bus.id)).weeklyRate)).toBe(12000);
+    expect(Number((await subscriptions.startTrialForDriver(bus.id)).weeklyRate)).toBe(9000);
   });
 
-  it('buying a bigger vehicle moves the mover onto the heavy rate, with an audit event', async () => {
+  it('a rider who buys a canter moves onto the heavy-delivery rate, with an audit event', async () => {
     // The revenue leak this closes: weeklyRate is a snapshot taken at signup,
-    // so without the weekly re-tier a driver who upgrades pays 10,000 forever.
-    const driver = await makeDriver(await makeMoverUser(), 'CAR');
-    const sub = await subscriptions.startTrialForDriver(driver.id);
-    expect(Number(sub.weeklyRate)).toBe(10000);
+    // so without the weekly re-tier a rider who upgrades pays 8,000 forever.
+    const rider = await makeRider(await makeMoverUser(), 'MOTORCYCLE');
+    const sub = await subscriptions.startTrialForRider(rider.id);
+    expect(Number(sub.weeklyRate)).toBe(8000);
 
-    await app.prisma.driver.update({ where: { id: driver.id }, data: { vehicleType: 'BUS_15' } });
+    await app.prisma.rider.update({ where: { id: rider.id }, data: { vehicleType: 'CANTER_LONG' } });
     expect(await billing.recalculateMoverTiers()).toBeGreaterThanOrEqual(1);
 
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(Number(after.weeklyRate)).toBe(12000);
+    expect(Number(after.weeklyRate)).toBe(9000);
 
     const event = await app.prisma.billingEvent.findFirst({
       where: { subscriptionId: sub.id, type: 'TIER_CHANGE' },
     });
     expect(event).not.toBeNull();
-    expect(Number(event?.amount)).toBe(12000);
+    expect(Number(event?.amount)).toBe(9000);
 
-    // ...and it moves back down when they sell the bus. The band is not a ratchet.
-    await app.prisma.driver.update({ where: { id: driver.id }, data: { vehicleType: 'CAR' } });
+    // ...and it moves back down when they sell the canter. The band is not a ratchet.
+    await app.prisma.rider.update({ where: { id: rider.id }, data: { vehicleType: 'MOTORCYCLE' } });
     await billing.recalculateMoverTiers();
     const back = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(Number(back.weeklyRate)).toBe(10000);
+    expect(Number(back.weeklyRate)).toBe(8000);
+  });
+
+  it('a taxi driver who buys a bus stays on the taxi rate — the role decides, not the vehicle', async () => {
+    const driver = await makeDriver(await makeMoverUser(), 'CAR');
+    const sub = await subscriptions.startTrialForDriver(driver.id);
+    expect(Number(sub.weeklyRate)).toBe(9000);
+
+    await app.prisma.driver.update({ where: { id: driver.id }, data: { vehicleType: 'BUS_15' } });
+    await billing.recalculateMoverTiers();
+
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(Number(after.weeklyRate)).toBe(9000);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } })).toBe(0);
   });
 
   it('a negotiated rate and a waived fee both survive the re-tier', async () => {
     // A human decided these. A vehicle swap must never silently undo one.
-    const negDriver = await makeDriver(await makeMoverUser(), 'CAR');
-    const negSub = await subscriptions.startTrialForDriver(negDriver.id);
+    const negRider = await makeRider(await makeMoverUser(), 'MOTORCYCLE');
+    const negSub = await subscriptions.startTrialForRider(negRider.id);
     await app.prisma.subscription.update({
       where: { id: negSub.id },
       data: { customRate: 7500, weeklyRate: 7500 },
     });
 
-    const waivedDriver = await makeDriver(await makeMoverUser(), 'CAR');
-    const waivedSub = await subscriptions.startTrialForDriver(waivedDriver.id);
+    const waivedRider = await makeRider(await makeMoverUser(), 'MOTORCYCLE');
+    const waivedSub = await subscriptions.startTrialForRider(waivedRider.id);
     await app.prisma.subscription.update({
       where: { id: waivedSub.id },
       data: { feeWaived: true, feeWaivedBy: 'founder', feeWaivedReason: 'launch partner' },
     });
 
-    await app.prisma.driver.updateMany({
-      where: { id: { in: [negDriver.id, waivedDriver.id] } },
+    await app.prisma.rider.updateMany({
+      where: { id: { in: [negRider.id, waivedRider.id] } },
       data: { vehicleType: 'BOX_TRUCK_LONG' },
     });
     await billing.recalculateMoverTiers();
@@ -265,6 +291,6 @@ describe('mover fee band — what a mover is actually charged', () => {
     const waived = await app.prisma.subscription.findUniqueOrThrow({ where: { id: waivedSub.id } });
     expect(waived.feeWaived).toBe(true);
     // Untouched: the waiver, not the band, decides what is collected.
-    expect(Number(waived.weeklyRate)).toBe(10000);
+    expect(Number(waived.weeklyRate)).toBe(8000);
   });
 });

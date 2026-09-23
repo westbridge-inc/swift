@@ -2,6 +2,8 @@ import { toProviderMinor } from '../../utils/currency-amount';
 import { nanoid } from 'nanoid';
 import { randomUUID } from 'node:crypto';
 import { isProduction } from '../../utils/runtime-mode';
+import { assertDisabledCardRailConfig } from '../../utils/card-rail';
+import { AppError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
 // PaymentProvider — hard rule 4: swappable interface. Nothing outside this
@@ -18,6 +20,8 @@ export interface ChargeResult {
   /** Provider-side charge reference */
   providerRef: string;
   reason?: string;
+  /** A local refusal, not a processor decline. Billing must not dun on it. */
+  code?: 'CARD_RAIL_DISABLED';
 }
 
 /** [M-01] The provider's truth about an instruction we sent, by our key. */
@@ -25,6 +29,7 @@ export interface ChargeLookup {
   status: 'succeeded' | 'failed' | 'not_found' | 'unknown';
   providerRef?: string;
   reason?: string;
+  code?: 'CARD_RAIL_DISABLED';
 }
 
 export interface PaymentProvider {
@@ -52,6 +57,26 @@ export interface PaymentProvider {
    *  the provider's own id when known) BEFORE any retry. 'not_found' means the
    *  processor never received it; 'unknown' means the processor cannot say. */
   lookupCharge(input: { idempotencyKey: string; providerRef?: string }): Promise<ChargeLookup>;
+}
+
+/** No gateway, token storage, synthetic capture or network access. Lookup
+ * cannot determine an earlier charge's outcome and must leave it unresolved. */
+class DisabledPaymentProvider implements PaymentProvider {
+  async tokenizeCard(_input: Parameters<PaymentProvider['tokenizeCard']>[0]): Promise<{ token: string }> {
+    throw new AppError(503, 'CARD_RAIL_DISABLED', 'Card payments are disabled.');
+  }
+
+  async chargeToken(_input: Parameters<PaymentProvider['chargeToken']>[0]): Promise<ChargeResult> {
+    return { status: 'failed', providerRef: '', code: 'CARD_RAIL_DISABLED', reason: 'Card payments are disabled.' };
+  }
+
+  async refund(_input: Parameters<PaymentProvider['refund']>[0]): Promise<ChargeResult> {
+    return { status: 'failed', providerRef: '', code: 'CARD_RAIL_DISABLED', reason: 'Card payments are disabled.' };
+  }
+
+  async lookupCharge(_input: Parameters<PaymentProvider['lookupCharge']>[0]): Promise<ChargeLookup> {
+    return { status: 'unknown', code: 'CARD_RAIL_DISABLED', reason: 'Card payments are disabled.' };
+  }
 }
 
 /**
@@ -467,6 +492,9 @@ export function getPaymentProvider(): PaymentProvider {
     throw new Error('PAYMENT_PROVIDER=sandbox is forbidden in production');
   }
   switch (provider) {
+    case 'disabled':
+      assertDisabledCardRailConfig(process.env);
+      return new DisabledPaymentProvider();
     case 'sandbox':
       return new SandboxPaymentProvider();
     case 'stripe': {

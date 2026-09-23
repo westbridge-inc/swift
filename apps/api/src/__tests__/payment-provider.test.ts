@@ -78,6 +78,39 @@ describe('getPaymentProvider', () => {
   });
 });
 
+describe('explicitly disabled card provider', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it('refuses enrollment, charge and refund with a typed code without contacting a provider', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('PAYMENT_PROVIDER', 'disabled');
+    vi.stubEnv('CARD_RAIL_KILL', '1');
+    const fetch = vi.fn(() => { throw new Error('Unexpected provider contact'); });
+    vi.stubGlobal('fetch', fetch);
+    const provider = getPaymentProvider();
+    await expect(provider.tokenizeCard({ userId: 'synthetic', cardNumber: 'synthetic', expMonth: 1, expYear: 2030, cvc: 'synthetic' }))
+      .rejects.toMatchObject({ statusCode: 503, code: 'CARD_RAIL_DISABLED' });
+    await expect(provider.chargeToken(CHARGE)).resolves.toMatchObject({ status: 'failed', providerRef: '', code: 'CARD_RAIL_DISABLED' });
+    await expect(provider.refund({ providerRef: 'synthetic', amount: 1, currencyCode: 'GYD', idempotencyKey: 'disabled-refund' }))
+      .resolves.toMatchObject({ status: 'failed', providerRef: '', code: 'CARD_RAIL_DISABLED' });
+    // Disabled is no evidence about an earlier charge: never fabricate a decline
+    // or a not-found that could let billing reissue or expire an uncertain intent.
+    await expect(provider.lookupCharge({ idempotencyKey: 'earlier-charge' }))
+      .resolves.toMatchObject({ status: 'unknown', code: 'CARD_RAIL_DISABLED' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, '', '0', 'true'])('factory refuses disabled cards without the kill switch (%s)', (kill) => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('PAYMENT_PROVIDER', 'disabled');
+    vi.stubEnv('CARD_RAIL_KILL', kill);
+    expect(() => getPaymentProvider()).toThrow(/CARD_RAIL_KILL/);
+  });
+});
+
 describe('SandboxPaymentProvider', () => {
   it('declines tokens containing "fail", succeeds otherwise', async () => {
     const p: PaymentProvider = new SandboxPaymentProvider();

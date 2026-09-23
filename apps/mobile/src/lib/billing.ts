@@ -138,17 +138,19 @@ export function daysUntil(iso: string | null | undefined, now: Date = new Date()
   return Math.round((startOfThen - startOfToday) / 86_400_000);
 }
 
-/** Which of the four bands this account is in. `tone` names a semantic token,
- *  never a raw colour — viridian for covered, amber for owed, ink for paused. */
-export type PayBandTone = 'covered' | 'owed' | 'paused';
+/** Which band this account is in. `tone` names a semantic token, never a raw
+ *  colour — viridian for covered, amber for owed, ink for paused, muted ink
+ *  for a fee we could not load. */
+export type PayBandTone = 'covered' | 'owed' | 'paused' | 'unknown';
 
 export interface PayScreenState {
-  band: 'active' | 'due' | 'grace' | 'paused';
+  band: 'active' | 'due' | 'grace' | 'paused' | 'unavailable';
   tone: PayBandTone;
   /** Small caps above the amount — "NOTHING DUE NOW" / "DUE FRIDAY" / "DUE NOW". */
   eyebrow: string;
-  /** The hero. The most readable thing we can put on a cheap screen in sunlight. */
-  amountGyd: number;
+  /** The hero. The most readable thing we can put on a cheap screen in
+   *  sunlight. Null when the fee is UNKNOWN: rendered as a dash, never as $0 [H7]. */
+  amountGyd: number | null;
   /** What the money buys — "Covers 1 week · through 22 Aug". '' when unknown. */
   covers: string;
   title: string;
@@ -158,6 +160,16 @@ export interface PayScreenState {
 }
 
 export function payScreenState(sub: any, now: Date = new Date()): PayScreenState {
+  // [H7] No subscription is not a paid-up one. The sample store in preview has
+  // none while the price list is unavailable, and a pending store has none
+  // yet: say the fee is unavailable rather than reward them with a zero.
+  if (sub == null) {
+    return {
+      band: 'unavailable', tone: 'unknown', eyebrow: 'WEEKLY FEE', amountGyd: null, covers: '',
+      title: 'Fee not available right now',
+      body: 'We could not load your weekly fee. Pull down to refresh, or check back once your store is approved.',
+    };
+  }
   const phase = billingPhase(sub);
   const fee = weeklyFeeGyd(sub);
   const due = Number(sub?.amountDueGyd ?? 0);
