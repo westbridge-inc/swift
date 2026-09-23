@@ -23,6 +23,7 @@ function dbDouble(opts: { records?: unknown[]; everHeld: number }) {
   return {
     user: { findUnique: async () => ({ countryCode: 'GY' }) },
     subjectLink: { findMany: async () => [] },
+    verificationDocument: { count: async () => 0 },
     documentRecord: {
       findMany: async () => opts.records ?? [],
       count: async () => opts.everHeld,
@@ -86,6 +87,7 @@ describe('[AUD-L8b-001 / INV-15] an expired document takes a verified mover off 
       {
         user: { findUnique: async () => ({ countryCode: 'GY' }) },
         subjectLink: { findMany: async () => [] },
+        verificationDocument: { count: async () => 0 },
         documentRecord: {
           // nothing CURRENT for the checklist, and nothing ever filed for the
           // two types that are missing

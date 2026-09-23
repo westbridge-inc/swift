@@ -1382,16 +1382,18 @@ export class VerificationService {
   }
 
   /**
-   * Live-operation gate (provisional access ≠ live). A mover may set up a
-   * profile while documents are pending, but cannot operate live until the
-   * required documents are approved — and a taxi driver also needs current,
-   * hire-class motor insurance (spec §3.4, load-bearing rules #5 + #6).
+   * Base document authority shared by delivery-rider GO and driver live status.
+   * Always evaluate current evidence before considering the legacy flag. Only
+   * missing types with no record or submission history can be grandfathered; expired,
+   * revoked or purged evidence cannot. Vehicle and flag come from the caller's
+   * own profile (the locked snapshot for the authoritative GO recheck).
+   * Passenger hire-insurance rules belong to getLiveOperationStatus below.
    */
-  async getLiveOperationStatus(
+  async getMoverDocumentStatus(
     userId: string,
     opts: { vehicleType: VehicleType; legacyVerified?: boolean },
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
-  ): Promise<{ allowed: boolean; reason: 'ok' | 'docs' | 'insurance' }> {
+  ): Promise<{ allowed: boolean; reason: 'ok' | 'docs' }> {
     // [EV-ACT-16/17 TOCTOU] Accepts a transaction client so GO can evaluate
     // documents INSIDE its User/profile-locked transaction — an expiry or
     // rejection committing between a pre-transaction check and the online
@@ -1418,27 +1420,36 @@ export class VerificationService {
     // was never entitled to: it may rescue an account with NO checklist evidence at
     // all (a genuine pre-checklist account, where nothing can have expired), and it
     // may never override evidence that exists and is no longer current.
-    const required = await this.countryConfig.getMoverChecklist(user.countryCode, opts.vehicleType);
+    const required = await this.countryConfig.getMoverChecklist(user.countryCode, opts.vehicleType, db);
     let baseOk: boolean;
     if (required.length === 0) {
-      baseOk = true;
+      // A missing country checklist is a configuration error, not approval.
+      baseOk = false;
     } else {
       const approvedDocs = await this.approvedEvidence(db, userId, required, now);
       const approved = new Set(approvedDocs.map((d) => d.docType));
       const missing = required.filter((docType) => !approved.has(docType));
       baseOk = missing.length === 0;
       if (!baseOk && (opts.legacyVerified ?? false)) {
-        // The question is asked of the MISSING types only, and that distinction
-        // is the whole rule. A type that is missing because a record EXISTS and
-        // is no longer current is an expiry — exactly what the flag must not be
-        // allowed to paper over. A type that is missing because no record was
-        // ever filed is an absence, which is the pre-checklist state the clause
-        // was written for, and which other gates (hire insurance below, the
-        // vendor checklist, admin review) still judge on their own terms.
+        // Only MISSING types matter. Any record or submission proves the type
+        // was filed, even if it never reached approval or was later purged.
+        // Grandfathering is reserved for types with no filing history at all.
         baseOk = !(await anyChecklistEvidenceFor(db, userId, missing));
       }
     }
     if (!baseOk) return { allowed: false, reason: 'docs' };
+    return { allowed: true, reason: 'ok' };
+  }
+
+  /** Driver live-operation gate: shared mover documents, then passenger insurance. */
+  async getLiveOperationStatus(
+    userId: string,
+    opts: { vehicleType: VehicleType; legacyVerified?: boolean },
+    db: Prisma.TransactionClient | PrismaClient = this.prisma,
+  ): Promise<{ allowed: boolean; reason: 'ok' | 'docs' | 'insurance' }> {
+    const documents = await this.getMoverDocumentStatus(userId, opts, db);
+    if (!documents.allowed) return documents;
+    const now = new Date();
 
     // Any PASSENGER vehicle (car, wagon, bus): a current, manually-confirmed
     // HIRE-class policy is mandatory before carrying passengers, and the reviewer
@@ -1806,10 +1817,9 @@ export class VerificationService {
   /** Public: the compliance audit reuses the exact same force-offline the
    *  expiry sweep applies — one behavior, one notification copy. */
   async forceMoverOfflineIfNotLive(userId: string, reason?: string): Promise<boolean> {
-    // [EV-ACT-18] BOTH profiles' legacy grandfather flags count — the same
-    // authority GO honours. The old shape read only the driver's flag, so a
-    // legacy-verified RIDER could be forced offline for checklist evidence
-    // their GO gate never required.
+    // A unified account may own BOTH profiles. Each supply uses its own GO
+    // authority: neither its sibling's vehicle nor its legacy flag can approve
+    // it, and failing taxi hire insurance cannot darken valid delivery supply.
     const [driver, rider] = await Promise.all([
       this.prisma.driver.findUnique({
         where: { userId },
@@ -1820,18 +1830,22 @@ export class VerificationService {
         select: { vehicleType: true, documentsVerified: true },
       }),
     ]);
-    const vehicleType = driver?.vehicleType ?? rider?.vehicleType ?? (await this.getMoverVehicleType(userId));
-    if (!vehicleType) return false;
-
-    const live = await this.getLiveOperationStatus(userId, {
-      vehicleType,
-      legacyVerified: driver?.documentsVerified || rider?.documentsVerified,
-    });
-    if (live.allowed) return false;
+    const [driverLive, riderLive] = await Promise.all([
+      driver ? this.getLiveOperationStatus(userId, {
+        vehicleType: driver.vehicleType, legacyVerified: driver.documentsVerified,
+      }) : null,
+      rider ? this.getMoverDocumentStatus(userId, {
+        vehicleType: rider.vehicleType, legacyVerified: rider.documentsVerified,
+      }) : null,
+    ]);
 
     const [driverOff, riderOff] = await Promise.all([
-      this.prisma.driver.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } }),
-      this.prisma.rider.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } }),
+      driverLive && !driverLive.allowed
+        ? this.prisma.driver.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } })
+        : { count: 0 },
+      riderLive && !riderLive.allowed
+        ? this.prisma.rider.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } })
+        : { count: 0 },
     ]);
     if (driverOff.count + riderOff.count === 0) return false;
 
