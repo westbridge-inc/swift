@@ -26,12 +26,49 @@
 -- schedule. That is a data-lifecycle decision with its own evidence, not a
 -- side effect of removing a feature.
 --
--- ROLLBACK:
---   ALTER TABLE "retired"."retired_agent_action_requests" SET SCHEMA "public";
---   ALTER TABLE "retired"."retired_agent_audit_events"    SET SCHEMA "public";
---   (then rename back and recreate the enum)
---   DROP RULE IF EXISTS no_insert ON "agent_action_requests"; ... (etc.)
--- Restoring the Prisma models is a code change, not a database one.
+-- BACKUP CHECKPOINT: immediately before `prisma migrate deploy` applies this,
+-- take the "pre-20260907200000 agent evidence export" in addition to the
+-- standard full pre-deploy backup:
+--   pg_dump -Fc --data-only -t public.agent_action_requests -t public.agent_audit_events
+--
+-- ROLLBACK: the exact inverse below, verified on PostgreSQL 16, restores the
+-- prior schema exactly, keeps every row, and deletes this migration's
+-- _prisma_migrations row. It restores the database only: restoring the Prisma
+-- models is a code change, and rows lost while retired (the rules do not block
+-- TRUNCATE) come back only from the export above.
+--   BEGIN;
+--   SET LOCAL lock_timeout = '10s';
+--   -- COPY and superuser writes bypass the rules; refuse rather than fail half-way on a non-enum status.
+--   DO $$ BEGIN
+--     IF EXISTS (SELECT 1 FROM "retired"."retired_agent_action_requests"
+--                WHERE "status" NOT IN ('PENDING', 'APPROVED', 'REJECTED', 'EXECUTED', 'FAILED')) THEN
+--       RAISE EXCEPTION 'refusing rollback: a retired status value is not an AgentActionStatus label';
+--     END IF;
+--   END $$;
+--   CREATE TYPE "public"."AgentActionStatus" AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'EXECUTED', 'FAILED');
+--   DROP RULE "retired_no_insert" ON "retired"."retired_agent_action_requests";
+--   DROP RULE "retired_no_update" ON "retired"."retired_agent_action_requests";
+--   DROP RULE "retired_no_delete" ON "retired"."retired_agent_action_requests";
+--   DROP RULE "retired_no_insert" ON "retired"."retired_agent_audit_events";
+--   DROP RULE "retired_no_update" ON "retired"."retired_agent_audit_events";
+--   DROP RULE "retired_no_delete" ON "retired"."retired_agent_audit_events";
+--   ALTER TABLE "retired"."retired_agent_action_requests"
+--     ALTER COLUMN "status" TYPE "public"."AgentActionStatus" USING "status"::"public"."AgentActionStatus";
+--   ALTER TABLE "retired"."retired_agent_action_requests"
+--     ALTER COLUMN "status" SET DEFAULT 'PENDING'::"public"."AgentActionStatus";
+--   COMMENT ON TABLE "retired"."retired_agent_action_requests" IS NULL;
+--   COMMENT ON TABLE "retired"."retired_agent_audit_events" IS NULL;
+--   ALTER TABLE "retired"."retired_agent_action_requests" RENAME TO "agent_action_requests";
+--   ALTER TABLE "retired"."retired_agent_audit_events" RENAME TO "agent_audit_events";
+--   ALTER TABLE "retired"."agent_action_requests" SET SCHEMA "public";
+--   ALTER TABLE "retired"."agent_audit_events" SET SCHEMA "public";
+--   DROP SCHEMA "retired";  -- RESTRICT (default): refuses if anything else was ever placed in it
+--   DO $$ DECLARE n integer; BEGIN
+--     DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260907200000_retire_ai_agent_tables';
+--     GET DIAGNOSTICS n = ROW_COUNT;
+--     IF n <> 1 THEN RAISE EXCEPTION 'expected exactly one _prisma_migrations row, deleted %', n; END IF;
+--   END $$;
+--   COMMIT;
 
 -- A dedicated schema, not a renamed table in `public`. Two reasons, and the
 -- second is the one that matters: it puts the evidence outside the
