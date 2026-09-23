@@ -17,7 +17,9 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.
-  const mode = runtimeMode(env);
+  // Parsed FIRST, before the every-environment refusals below, so a bad
+  // NODE_ENV is the error an operator sees before anything else.
+  runtimeMode(env);
 
   // [NO-AI · owner rule 2026-09-07] Identity and document verification is HUMAN
   // review only, in EVERY environment. The model-backed providers and the
@@ -37,7 +39,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     }
   }
 
-  if (mode !== 'production') return;
+  if (runtimeMode(env) !== 'production') return;
 
   if (env['DEV_OTP_BYPASS'] === '1') {
     throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
