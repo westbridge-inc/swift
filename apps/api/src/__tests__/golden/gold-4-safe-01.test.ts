@@ -28,7 +28,8 @@ import { devChannelLog, getChannels, resetDevChannelLog } from '../../providers/
 
 const DAY = 24 * 60 * 60 * 1000;
 let app: FastifyInstance;
-const TENANT_B = `gold4-safe01-${nanoid(6)}`;
+const TENANT_SLUG_PREFIX = 'gold4-safe01-';
+const TENANT_B = `${TENANT_SLUG_PREFIX}${nanoid(6)}`;
 const createdUserIds: string[] = [];
 const createdJobIds: string[] = [];
 const alertIds: string[] = [];
@@ -184,7 +185,12 @@ async function purgeFixtures() {
     createdUserIds.length = 0;
     createdJobIds.length = 0;
     alertIds.length = 0;
-    await app.prisma.tenant.deleteMany({ where: { id: TENANT_B } });
+    // The tenant id is randomized per run, so a crashed run (afterAll skipped)
+    // leaves its tenant row behind: sweep every earlier run's tenant by slug
+    // prefix. A tenant something outside this file still references is left in
+    // place rather than failing the run.
+    const tenants = await app.prisma.tenant.findMany({ where: { slug: { startsWith: TENANT_SLUG_PREFIX } }, select: { id: true } });
+    for (const t of tenants) await app.prisma.tenant.delete({ where: { id: t.id } }).catch(() => undefined);
   });
 }
 
@@ -219,8 +225,15 @@ beforeAll(async () => {
   await app.register(safetyRoutes, { prefix: '/api/v1/safety' });
   await app.ready();
   // Every SMS in this file must land in the dev adapter's log, never a real
-  // provider: the provider-failure test wraps that one adapter.
-  expect(getChannels().sms).toBe(getChannels().sms);
+  // provider: the provider-failure test wraps that one adapter. Proved by
+  // behaviour, not identity: the configured provider is the dev one (checked
+  // first, so nothing is ever sent elsewhere), and a probe sent through the
+  // configured channel appears in the dev log.
+  expect(process.env['NOTIFICATION_PROVIDER'] ?? 'dev').toBe('dev');
+  resetDevChannelLog();
+  await getChannels().sms.sendSms(`${PHONE_PREFIX}999`, 'gold4 channel probe');
+  expect(devChannelLog.filter((e) => e.channel === 'sms' && e.to === `${PHONE_PREFIX}999`)).toHaveLength(1);
+  resetDevChannelLog();
 
   await purgeFixtures();
   await runWithoutTenant(() => app.prisma.tenant.create({
