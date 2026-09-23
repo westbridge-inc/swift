@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { authApi, verificationApi, partnerApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
+import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
 import { PREVIEW_VERIFICATION, previewQuery } from '../lib/moverPreviewData';
 import {
   AuthSessionBoundaryError,
@@ -99,6 +100,10 @@ export function useBecomePartner() {
         }
       }
       requireAuthSessionForPrincipal(owner);
+      // The store exists: its List-your-business draft is done. Cleared here,
+      // not by the screen — a per-call observer callback never runs once the
+      // screen has unmounted — and only for the account that submitted it.
+      if (data.role === 'VENDOR') useBusinessSetupDraft.getState().clearIfOwner(owner);
       void qc.invalidateQueries({ queryKey: ['verification'] });
       void qc.invalidateQueries({ queryKey: ['vendor'] });
       void qc.invalidateQueries({ queryKey: ['mover'] });
