@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
-import { OrderService, assertMmgFulfilmentAllowed, notHeldFilter, holdWindowMs } from '../order/order.service';
+import type { FulfillmentMode, Prisma } from '@prisma/client';
+import { OrderService, assertMmgFulfilmentAllowed, notHeldFilter, holdWindowMs, isTerminalOrderStatus } from '../order/order.service';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
@@ -595,6 +596,29 @@ export async function vendorRoutes(app: FastifyInstance) {
   const discovery = new DiscoveryService(app.prisma);
   const qrAnalytics = new QrAnalyticsService(app.prisma);
 
+  /** The order/mode transition has already committed when this runs. Queue or
+   * Redis trouble must not turn that durable success into a contradictory HTTP
+   * failure. The periodic dispatch reconciler reads the same committed row and
+   * is the durable recovery path when this immediate attempt cannot be armed. */
+  async function startPlatformDeliveryAfterCommit(
+    order: { id: string; isExpress: boolean },
+    fulfillmentModeVersion: number,
+    reason: 'accept' | 'ready' | 'mode_switch',
+  ): Promise<boolean> {
+    try {
+      const current = await dispatch.prepareForPlatformDelivery(order.id, fulfillmentModeVersion);
+      if (!current) return false;
+      await enqueueDeliveryDispatch(app, order);
+      return true;
+    } catch (err) {
+      app.log.error(
+        { err, orderId: order.id, fulfillmentModeVersion, reason },
+        'platform delivery committed but immediate dispatch arm failed; reconciler will retry',
+      );
+      return false;
+    }
+  }
+
   // A vendor may only DRIVE an order FORWARD (accept / prepare / ready / complete)
   // while eligible to operate — the SAME predicate as the toggle-orders front
   // door. The doc-expiry sweep sets isVerified=false but leaves status ACTIVE, so
@@ -627,6 +651,32 @@ export async function vendorRoutes(app: FastifyInstance) {
       }
       throw new AppError(403, 'SUBSCRIPTION_INACTIVE', 'Your subscription must be active to work orders — renew from Account.');
     }
+  }
+
+  /** Resolve only a genuinely unresolved delivery owner from the Order row
+   * held by the canonical transition lock. An explicit mode that committed
+   * after the route's initial read always wins. The vendor preference is a
+   * snapshot default for this order: later profile changes do not silently
+   * rewrite accepted work, and PLATFORM_RIDER remains available as recovery. */
+  async function bindUnresolvedDeliveryMode(
+    tx: Prisma.TransactionClient,
+    source: {
+      id: string;
+      vendorId: string | null;
+      riderId: string | null;
+      fulfillment: string;
+      fulfillmentMode: FulfillmentMode | null;
+    },
+  ): Promise<void> {
+    if (source.fulfillment !== 'DELIVERY' || source.riderId || source.fulfillmentMode != null) return;
+    const vendor = source.vendorId
+      ? await tx.vendor.findUnique({ where: { id: source.vendorId }, select: { selfDeliveryEnabled: true } })
+      : null;
+    const mode = resolveDeliveryMode(null, vendor?.selfDeliveryEnabled ?? false);
+    await tx.order.update({
+      where: { id: source.id },
+      data: { fulfillmentMode: mode, fulfillmentModeVersion: { increment: 1 } },
+    });
   }
 
   // =========================================================================
@@ -1470,7 +1520,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       ? order.items[0]?.itemId ?? null
       : null;
     const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor', {
-      withinTransaction: async (tx) => {
+      withinTransaction: async (tx, lockedOrder) => {
         if (appointmentItemId && order.appointmentSlot) {
           await bookingService.reserveSlot(appointmentItemId, order.customerId, order.appointmentSlot, order.id, tx);
         }
@@ -1480,6 +1530,7 @@ export async function vendorRoutes(app: FastifyInstance) {
             data: { estimatedPrepTime: body.estimatedPrepTime },
           });
         }
+        await bindUnresolvedDeliveryMode(tx, lockedOrder);
       },
     });
     if (appointmentItemId) await bookingService.nudgeForItem(appointmentItemId).catch(() => {});
@@ -1489,13 +1540,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // APPOINTMENT orders never dispatch). FUL-005: this is the ON_ACCEPT trigger
     // (the default) — the rider travels to the store during prep. ON_READY
     // defers dispatch to the Mark-ready transition below instead.
-    if (order.fulfillment === 'DELIVERY' && dispatchTrigger() === 'ON_ACCEPT') {
-      // FUL-004b: resolve who delivers (vendor default / prior override), record
-      // it, and dispatch a platform rider ONLY for PLATFORM_RIDER — VENDOR_DELIVERY
-      // means the vendor's own courier delivers, so no rider is pinged.
-      const mode = resolveDeliveryMode(order.fulfillmentMode, order.vendor?.selfDeliveryEnabled ?? false);
-      await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: mode } });
-      if (mode === 'PLATFORM_RIDER') await enqueueDeliveryDispatch(app, order);
+    if (updated.fulfillmentMode === 'VENDOR_DELIVERY') {
+      await dispatch.retireForVendorDelivery(order.id, updated.fulfillmentModeVersion);
+    } else if (updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_ACCEPT') {
+      await startPlatformDeliveryAfterCommit(order, updated.fulfillmentModeVersion, 'accept');
     }
 
     return { success: true, data: updated };
@@ -1601,15 +1649,16 @@ export async function vendorRoutes(app: FastifyInstance) {
       }
     }
     if (order.status === 'PREPARING') {
-      const updated = await orderService.updateStatus(order.id, 'READY_FOR_PICKUP', request.user.userId, 'Order ready for pickup');
+      const updated = await orderService.updateStatus(order.id, 'READY_FOR_PICKUP', request.user.userId, 'Order ready for pickup', {
+        withinTransaction: bindUnresolvedDeliveryMode,
+      });
       // FUL-005: ON_READY — dispatch NOW, when the food is ready, not at accept.
       // No-op under the ON_ACCEPT default (the rider was already dispatched); and
       // never dispatches if a rider is already assigned.
-      if (order.fulfillment === 'DELIVERY' && !order.riderId && dispatchTrigger() === 'ON_READY') {
-        // FUL-004b: same resolution as at accept — VENDOR_DELIVERY skips the rider.
-        const mode = resolveDeliveryMode(order.fulfillmentMode, order.vendor?.selfDeliveryEnabled ?? false);
-        await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: mode } });
-        if (mode === 'PLATFORM_RIDER') await enqueueDeliveryDispatch(app, order);
+      if (updated.fulfillmentMode === 'VENDOR_DELIVERY') {
+        await dispatch.retireForVendorDelivery(order.id, updated.fulfillmentModeVersion);
+      } else if (updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_READY') {
+        await startPlatformDeliveryAfterCommit(order, updated.fulfillmentModeVersion, 'ready');
       }
       return { success: true, data: updated };
     }
@@ -1627,21 +1676,63 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  the fallback that stops a self-delivery order dying in the kitchen. */
   app.put<{ Params: IdParam }>('/orders/:id/fulfillment-mode', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await assertVendorCanOperate(order.vendorId!);
     const { mode } = fulfillmentModeSchema.parse(request.body);
     if (order.fulfillment !== 'DELIVERY') {
       throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders have a fulfillment mode');
     }
-    if (['DELIVERED', 'CANCELLED', 'FAILED', 'COMPLETED'].includes(order.status)) {
+    if (isTerminalOrderStatus(order.status)) {
       throw new AppError(409, 'ORDER_CLOSED', 'This order is already closed');
     }
-    if (mode === 'VENDOR_DELIVERY' && !order.vendor?.selfDeliveryEnabled) {
-      throw new AppError(400, 'SELF_DELIVERY_DISABLED', 'Turn on self-delivery in settings first');
-    }
-    await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: mode } });
+    // The rider claim path locks this same row. Whichever decision wins the
+    // lock wins custody; the loser receives a conflict rather than producing
+    // both a vendor courier and a Swift rider for one order.
+    const committed = await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      const live = await tx.order.findUniqueOrThrow({
+        where: { id: order.id },
+        select: {
+          id: true,
+          vendorId: true,
+          status: true,
+          fulfillment: true,
+          fulfillmentMode: true,
+          fulfillmentModeVersion: true,
+          riderId: true,
+        },
+      });
+      if (live.fulfillment !== 'DELIVERY') {
+        throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders have a fulfillment mode');
+      }
+      if (isTerminalOrderStatus(live.status)) {
+        throw new AppError(409, 'ORDER_CLOSED', 'This order is already closed');
+      }
+      if (mode === 'VENDOR_DELIVERY') {
+        const vendor = live.vendorId
+          ? await tx.vendor.findUnique({ where: { id: live.vendorId }, select: { selfDeliveryEnabled: true } })
+          : null;
+        if (!vendor?.selfDeliveryEnabled) {
+          throw new AppError(400, 'SELF_DELIVERY_DISABLED', 'Turn on self-delivery in settings first');
+        }
+      }
+      if (mode === 'VENDOR_DELIVERY' && live.riderId) {
+        throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'A Swift rider already has this order');
+      }
+      if (mode === 'PLATFORM_RIDER' && live.fulfillmentMode === 'VENDOR_DELIVERY' && live.riderId) {
+        throw new AppError(409, 'CUSTODY_CONFLICT', 'This order has conflicting delivery custody and needs operator review');
+      }
+      if (live.fulfillmentMode === mode) return live;
+      return tx.order.update({
+        where: { id: order.id },
+        data: { fulfillmentMode: mode, fulfillmentModeVersion: { increment: 1 } },
+      });
+    });
     // Fallback: "get a rider instead" dispatches a platform rider now if none is
     // on it yet. VENDOR_DELIVERY needs no rider — the vendor's own courier delivers.
-    if (mode === 'PLATFORM_RIDER' && !order.riderId) {
-      await enqueueDeliveryDispatch(app, order);
+    if (mode === 'VENDOR_DELIVERY') {
+      await dispatch.retireForVendorDelivery(order.id, committed.fulfillmentModeVersion);
+    } else if (!committed.riderId) {
+      await startPlatformDeliveryAfterCommit(order, committed.fulfillmentModeVersion, 'mode_switch');
     }
     return { success: true, data: { orderId: order.id, fulfillmentMode: mode } };
   });
@@ -1902,17 +1993,21 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  decline memory). No-op while an offer is already live. */
   app.post<{ Params: IdParam }>('/orders/:id/retry-dispatch', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    await assertVendorCanOperate(order.vendorId!);
     if (order.fulfillment !== 'DELIVERY') {
       throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders are dispatched to movers');
     }
     if (order.riderId) {
       throw new AppError(409, 'ALREADY_ASSIGNED', 'A mover already has this order');
     }
+    if (resolveDeliveryMode(order.fulfillmentMode, order.vendor?.selfDeliveryEnabled ?? false) === 'VENDOR_DELIVERY') {
+      throw new AppError(409, 'VENDOR_DELIVERY_SELECTED', 'Choose “Get a Swift rider” before retrying dispatch');
+    }
     if (!['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot search for a mover while the order is ${order.status}`);
     }
     const result = await dispatch.retryDispatch(order.id);
-    return { success: true, data: { orderId: order.id, searching: !result.exhausted, exhausted: !!result.exhausted } };
+    return { success: true, data: { orderId: order.id, searching: !!result.offered, exhausted: !!result.exhausted } };
   });
 
   /** PUT /orders/:id/complete-pickup — Takeaway: customer collected the order.
@@ -1997,7 +2092,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
     // updateStatus is the CAS: a concurrent cancel (or a double-tap) matches
     // nothing and throws, so exactly one transition and one status-log row.
-    const updated = await orderService.updateStatus(order.id, 'DELIVERED', request.user.userId, 'Delivered by the store');
+    const updated = await orderService.updateStatus(order.id, 'DELIVERED', request.user.userId, 'Delivered by the store', {
+      allowedFrom: ['READY_FOR_PICKUP'],
+      expectedFulfillment: 'DELIVERY',
+      expectedFulfillmentMode: 'VENDOR_DELIVERY',
+      expectedRiderId: null,
+      expectedDriverId: null,
+    });
     return { success: true, data: updated };
   });
 
