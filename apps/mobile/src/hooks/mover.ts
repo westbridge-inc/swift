@@ -35,7 +35,7 @@ import {
 } from '../lib/moverProfile';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import { confirmRiderCashSettlement } from './cashSettlement';
-import { usePartnerPricing } from './verification';
+import { usePartnerPricing } from './partnerPricing';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;

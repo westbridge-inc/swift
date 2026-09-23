@@ -21,7 +21,7 @@ import {
 } from '../stores/authStore';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
 import { confirmVendorCashSettlement } from './cashSettlement';
-import { usePartnerPricing } from './verification';
+import { usePartnerPricing } from './partnerPricing';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;

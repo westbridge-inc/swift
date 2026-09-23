@@ -1,10 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { authApi, verificationApi, partnerApi, type VehicleKind } from '../services/api';
+import { verificationApi, partnerApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
 import { PREVIEW_VERIFICATION, previewQuery } from '../lib/moverPreviewData';
-import type { PartnerPricing } from '../lib/partnerPricing';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -38,16 +37,8 @@ export function useVerificationStatus<T = any>(role: string, vehicleType?: strin
   return previewMover ? previewQuery(PREVIEW_VERIFICATION) : q;
 }
 
-/** Public weekly price list for the partner pitch ("N days free, then X/week").
- *  Read a partner's own quote from it with `moverQuote` / `vendorQuote`. */
-export function usePartnerPricing(countryCode?: string, enabled = true) {
-  return useQuery({
-    queryKey: ['pricing', countryCode ?? 'GY'],
-    queryFn: () => unwrap<PartnerPricing>(authApi.pricing(countryCode)),
-    staleTime: 60 * 60 * 1000,
-    enabled,
-  });
-}
+/** Public weekly price list for the partner pitch ("N days free, then X/week"). */
+export { usePartnerPricing } from './partnerPricing';
 
 export function useBecomePartner() {
   const qc = useQueryClient();
