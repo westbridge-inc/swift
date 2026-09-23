@@ -92,26 +92,6 @@ export function ServicesScreen({ navigation }: any) {
           Verified tradespeople. Discuss the quote in chat, then pay cash on completion.
         </T>
 
-        <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.xl }}>
-          <IconChip icon="briefcase" />
-          <View style={{ flex: 1 }}>
-            <T variant="label" weight="semibold">Offer your own services</T>
-            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-              Set up your profile, verification, and provider jobs.
-            </T>
-          </View>
-          <PillButton
-            label="Open"
-            variant="soft"
-            size="md"
-            onPress={() => enterServiceProvider({
-              isAuthenticated,
-              promptLogin,
-              navigate: (screen) => navigation?.navigate?.(screen),
-            })}
-          />
-        </Card>
-
         <T variant="heading" style={{ marginBottom: space.sm }}>
           Choose a trade
         </T>
@@ -245,6 +225,26 @@ export function ServicesScreen({ navigation }: any) {
             })}
           </View>
         )}
+
+        <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space['3xl'] }}>
+          <IconChip icon="briefcase" />
+          <View style={{ flex: 1 }}>
+            <T variant="label" weight="semibold" accessibilityRole="header">Offer your own services</T>
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              Set up your profile, verification, and provider jobs.
+            </T>
+          </View>
+          <PillButton
+            label="Set up profile"
+            variant="soft"
+            size="md"
+            onPress={() => enterServiceProvider({
+              isAuthenticated,
+              promptLogin,
+              navigate: (screen) => navigation?.navigate?.(screen),
+            })}
+          />
+        </Card>
       </ScrollView>
 
       {/* Job composer — slides in when a provider is chosen */}
@@ -281,7 +281,7 @@ export function ServicesScreen({ navigation }: any) {
               placeholder="Describe the job (at least 10 characters)…"
               placeholderTextColor={color.text.muted}
               multiline
-              style={{ fontFamily: font.body, fontSize: fontSize.base, color: color.text.primary, minHeight: space['5xl'] }}
+              style={{ fontFamily: font.body, fontSize: fontSize.input, color: color.text.primary, minHeight: space['5xl'] }}
             />
           </View>
           {errMsg ? (
