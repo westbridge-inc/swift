@@ -4,6 +4,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      // Profile guard is a .spec.ts so the default API *.test.ts glob excludes it.
+      'src/__tests__/home-service-free.spec.ts',
       'src/__tests__/home-order-projection.unit.test.ts',
       'src/__tests__/order-status-single-source.test.ts',
       'src/__tests__/terminal-status-single-source.test.ts',

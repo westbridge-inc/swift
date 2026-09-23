@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { OrderStatus, PrismaClient, type Prisma } from '@prisma/client';
+import { OrderStatus, type Prisma } from '@prisma/client';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { homeCacheKey, invalidateHomeCache } from '../modules/user/home-cache';
 import { beginRequestTenantContext, enterTenant, getTenantId, runWithTenant } from '../plugins/tenant-context';
@@ -168,9 +168,6 @@ const count = (h: Awaited<ReturnType<typeof harness>>, kind: string) => h.reads.
 const ids = (cards: Array<{ id: string }>) => cards.map((v) => v.id);
 
 describe('Home authoritative order projection through real Fastify registration/inject', () => {
-  it('the service-free profile refuses a real Prisma client before any connection', () => {
-    expect(() => new PrismaClient()).toThrow('Home service-free profile forbids PrismaClient');
-  });
   it.each(LIVE)('warm discovery observes live status %s, including recovery', async (status) => {
     const h = await harness(); h.state.orders = [order(A, 'RIDER_ASSIGNED')];
     expect((await h.home()).activeOrder.status).toBe('RIDER_ASSIGNED');
