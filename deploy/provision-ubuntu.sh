@@ -58,6 +58,9 @@ PermitRootLogin no
 AuthenticationMethods publickey
 SSH
 chmod 0644 "$SSHD_DROPIN"
+# Ubuntu 24.04 starts sshd through ssh.socket, so the privilege separation
+# directory may not exist yet; `sshd -t` refuses to validate without it.
+install -d -m 0755 -o root -g root /run/sshd
 if ! /usr/sbin/sshd -t ||
    ! /usr/sbin/sshd -T -C "user=$DEPLOY_USER,host=localhost,addr=127.0.0.1" |
      grep -qx 'passwordauthentication no' ||
