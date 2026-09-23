@@ -22,6 +22,35 @@ const VENDOR_SUB_TYPE: Record<VendorType, SubscriptionType> = {
   SERVICE: 'SERVICE_PROVIDER',
 };
 
+/**
+ * [Codex C-05] EXACTLY ONE PARTNER OWNS A SUBSCRIPTION.
+ *
+ * `Subscription` has three nullable owner columns, each `@unique`. Unique stops
+ * a partner holding two subscriptions; NOTHING stopped a subscription holding
+ * zero owners or three. Codex's C-05 named this precisely: the funds gate "does
+ * not prove a charged subscription belongs to exactly one partner".
+ *
+ * Measured before changing anything: all three entry points
+ * (`startTrialForRider/Driver/Vendor`) already pass exactly one, so no runtime
+ * path produces an orphan today. But the parameter type was
+ * `{ riderId?; driverId?; vendorId? }` — every field optional — so `{}` and
+ * `{ riderId, vendorId }` were both well-typed, and a fourth entry point could
+ * add one without any gate noticing. A charge attributable to nobody, or to two
+ * people, is a money defect however it arrives.
+ *
+ * Made unrepresentable rather than asserted at runtime.
+ *
+ * NOT DONE, and it is the harder half: the DATABASE has no such constraint, and
+ * a CHECK cannot be added yet — the dev database holds 247 ownerless rows and
+ * the test database 216, all fixture residue. That needs a preflight census and
+ * a data repair under expand -> migrate -> contract, and it is one of the eight
+ * structural controls Codex requires before C-05 can close. C-05 STAYS OPEN.
+ */
+export type SubscriptionOwner =
+  | { riderId: string; driverId?: never; vendorId?: never }
+  | { riderId?: never; driverId: string; vendorId?: never }
+  | { riderId?: never; driverId?: never; vendorId: string };
+
 export class SubscriptionService {
   private countryConfig: CountryConfigService;
   private trialLaw: TrialEntitlementService;
@@ -121,7 +150,7 @@ export class SubscriptionService {
   }
 
   private async create(
-    entity: { riderId?: string; driverId?: string; vendorId?: string },
+    entity: SubscriptionOwner,
     type: SubscriptionType,
     weeklyRate: number,
     currencyCode: string,
@@ -141,7 +170,7 @@ export class SubscriptionService {
   }
 
   private async createRow(
-    entity: { riderId?: string; driverId?: string; vendorId?: string },
+    entity: SubscriptionOwner,
     type: SubscriptionType,
     weeklyRate: number,
     currencyCode: string,
