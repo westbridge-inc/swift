@@ -25,11 +25,12 @@ describe('normalizePhone (pure)', () => {
 
 let app: FastifyInstance;
 const digits = String(Math.floor(1000 + Math.random() * 8999));
-// A number range no other suite uses: a random draw inside a range other
-// suites use with fixed numbers (for example +5926001000) can collide on the
-// shared test database and fail this file's setup.
-const CLEAN = `+592691${digits}`;         // as stored
-const SPACED = `+592 691 ${digits}`;      // as a human might type it
+// Phone prefix +592013… is used by no other suite (checked: no fixed number
+// and no random generator in apps/api can produce it). A draw inside a range
+// other suites share can collide on the shared test database and fail this
+// file's setup, as +592600… did.
+const CLEAN = `+592013${digits}`;         // as stored
+const SPACED = `+592 013 ${digits}`;      // as a human might type it
 let userId = '';
 
 const post = (url: string, payload: unknown) =>
