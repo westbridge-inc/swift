@@ -25,8 +25,11 @@ describe('normalizePhone (pure)', () => {
 
 let app: FastifyInstance;
 const digits = String(Math.floor(1000 + Math.random() * 8999));
-const CLEAN = `+592600${digits}`;         // as stored
-const SPACED = `+592 600 ${digits}`;      // as a human might type it
+// A number range no other suite uses: a random draw inside a range other
+// suites use with fixed numbers (for example +5926001000) can collide on the
+// shared test database and fail this file's setup.
+const CLEAN = `+592691${digits}`;         // as stored
+const SPACED = `+592 691 ${digits}`;      // as a human might type it
 let userId = '';
 
 const post = (url: string, payload: unknown) =>
