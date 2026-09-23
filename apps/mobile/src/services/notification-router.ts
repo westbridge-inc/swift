@@ -99,8 +99,8 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
 
   // BOOKINGS + SERVICE JOBS [S0: a push landing on a dead screen]. Every other
   // booking_* kind is a service JOB event carrying jobId/refId and no orderId
-  // (to_confirm · confirmed · slot_declined · reminder · completed ·
-  // cancelled), so the family resolves above the order fallback: a job push
+  // (quoted · to_confirm · confirmed · slot_declined · started · reminder
+  // · completed · cancelled), so the family resolves above the order fallback: a job push
   // must never win a tracking screen. ServiceJobs ("My Jobs") is the ONE
   // screen that renders that job for BOTH sides — GET /services/jobs returns
   // rows where the caller is the customer OR the provider, and the provider's

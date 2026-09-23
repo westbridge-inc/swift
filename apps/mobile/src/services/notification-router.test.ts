@@ -118,9 +118,11 @@ describe('booking + service-job pushes land on the job [S0]', () => {
       // The request itself — the rung that had no notification at all, so the
       // provider never learned there was anything to quote on.
       'booking_requested',
+      'booking_quoted',
       'booking_to_confirm',
       'booking_confirmed',
       'booking_slot_declined',
+      'booking_started',
       'booking_completed',
       'booking_cancelled',
     ]) {
@@ -260,9 +262,11 @@ const CENSUS: Case[] = [
 
   // ── Bookings + service jobs [the S0 this pass closed].
   { k: 'booking_requested', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — a customer asked them to quote; the first rung of the ladder, and the one that used to send nothing at all' },
+  { k: 'booking_quoted', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — a durable quote is ready to review' },
   { k: 'booking_to_confirm', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — accept or move the customer’s slot' },
   { k: 'booking_confirmed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider took the slot' },
   { k: 'booking_slot_declined', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — pick another time' },
+  { k: 'booking_started', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider asserted commencement at the agreed time' },
   { k: 'booking_completed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both — job done, rate it' },
   { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
   { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both, 24h out — GAP when refId is an APPOINTMENT: no customer appointments screen exists' },

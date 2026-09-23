@@ -98,17 +98,22 @@ export function useRequestJob() {
 export function useScheduleJob() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, scheduledFor }: { id: string; scheduledFor: string }) =>
-      unwrap(servicesApi.scheduleJob(id, scheduledFor)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+    mutationFn: ({ id, scheduledFor, expectedUpdatedAt, expectedQuoteAmount }: {
+      id: string;
+      scheduledFor: string;
+      expectedUpdatedAt: string;
+      expectedQuoteAmount: number;
+    }) => unwrap(servicesApi.scheduleJob(id, { scheduledFor, expectedUpdatedAt, expectedQuoteAmount })),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
   });
 }
 
 export function useCancelJob() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => unwrap(servicesApi.cancelJob(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+    mutationFn: ({ id, expectedUpdatedAt }: { id: string; expectedUpdatedAt: string }) =>
+      unwrap(servicesApi.cancelJob(id, expectedUpdatedAt)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
   });
 }
 
@@ -125,31 +130,53 @@ export function useRateJob() {
 export function useQuoteJob() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, amount }: { id: string; amount: number }) => unwrap(servicesApi.quoteJob(id, amount)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+    mutationFn: ({ id, amount, expectedUpdatedAt }: { id: string; amount: number; expectedUpdatedAt: string }) =>
+      unwrap(servicesApi.quoteJob(id, amount, expectedUpdatedAt)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
   });
 }
 
 export function useConfirmJob() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => unwrap(servicesApi.confirmJob(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+    mutationFn: ({ id, expectedUpdatedAt, expectedScheduledFor }: {
+      id: string;
+      expectedUpdatedAt: string;
+      expectedScheduledFor: string;
+    }) => unwrap(servicesApi.confirmJob(id, expectedUpdatedAt, expectedScheduledFor)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+  });
+}
+
+export function useStartJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, expectedUpdatedAt, expectedScheduledFor }: {
+      id: string;
+      expectedUpdatedAt: string;
+      expectedScheduledFor: string;
+    }) => unwrap(servicesApi.startJob(id, expectedUpdatedAt, expectedScheduledFor)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
   });
 }
 
 export function useCompleteJob() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => unwrap(servicesApi.completeJob(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+    mutationFn: ({ id, expectedUpdatedAt }: { id: string; expectedUpdatedAt: string }) =>
+      unwrap(servicesApi.completeJob(id, expectedUpdatedAt)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
   });
 }
 
 export function useDeclineSlot() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => unwrap(servicesApi.declineSlot(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
+    mutationFn: ({ id, expectedUpdatedAt, expectedScheduledFor }: {
+      id: string;
+      expectedUpdatedAt: string;
+      expectedScheduledFor: string;
+    }) => unwrap(servicesApi.declineSlot(id, expectedUpdatedAt, expectedScheduledFor)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['services', 'jobs'] }),
   });
 }

@@ -698,17 +698,25 @@ export const servicesApi = {
   jobs: () => api.get('/services/jobs'),
   job: (id: string) => api.get(`/services/jobs/${id}`),
   // Customer accepts the provider's quote by scheduling the job.
-  scheduleJob: (id: string, scheduledFor: string) => api.post(`/services/jobs/${id}/schedule`, { scheduledFor }),
-  cancelJob: (id: string) => api.post(`/services/jobs/${id}/cancel`, {}),
+  scheduleJob: (id: string, input: { scheduledFor: string; expectedUpdatedAt: string; expectedQuoteAmount: number }) =>
+    api.post(`/services/jobs/${id}/schedule`, input),
+  cancelJob: (id: string, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/cancel`, { expectedUpdatedAt }),
   rateJob: (id: string, score: number, comment?: string) => api.post(`/services/jobs/${id}/rate`, { score, comment }),
   // Provider side: send the quote, then accept/decline the customer's slot (§4.3),
   // then close the job out when the work is done (SWIFT-AUD-D8-04: the complete
   // endpoint existed server-side but was never wired, so a ServiceJob stalled
   // forever at SCHEDULED — no completion, no rating, no reputation).
-  quoteJob: (id: string, amount: number) => api.post(`/services/jobs/${id}/quote`, { amount }),
-  confirmJob: (id: string) => api.post(`/services/jobs/${id}/confirm`, {}),
-  declineSlot: (id: string) => api.post(`/services/jobs/${id}/decline-slot`, {}),
-  completeJob: (id: string) => api.post(`/services/jobs/${id}/complete`, {}),
+  quoteJob: (id: string, amount: number, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/quote`, { amount, expectedUpdatedAt }),
+  confirmJob: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/confirm`, { expectedUpdatedAt, expectedScheduledFor }),
+  declineSlot: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/decline-slot`, { expectedUpdatedAt, expectedScheduledFor }),
+  startJob: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/start`, { expectedUpdatedAt, expectedScheduledFor }),
+  completeJob: (id: string, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }),
 };
 
 // Verification (mounted at /api/v1/verification)
