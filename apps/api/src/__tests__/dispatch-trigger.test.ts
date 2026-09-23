@@ -34,7 +34,7 @@ async function mkUser(roles: UserRole[], activeRole: UserRole) {
   return { id: u.id, token };
 }
 
-async function mkOrder(status: 'PENDING' | 'PREPARING') {
+async function mkOrder(status: 'PENDING' | 'ACCEPTED' | 'PREPARING' | 'READY_FOR_PICKUP') {
   const o = await app.prisma.order.create({
     data: {
       orderNumber: `TRG-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
