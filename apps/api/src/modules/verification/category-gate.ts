@@ -95,6 +95,21 @@ export async function blockedCategoryIdsForVendors(prisma: Db, tenantId: string,
   return out;
 }
 
+/** Shared public-listing projection gate for Market and guest search. */
+export async function listableItemsForVendors<T extends { id: string; vendorId: string }>(
+  prisma: Db, tenantId: string, rows: readonly T[],
+): Promise<T[]> {
+  if (rows.length === 0) return [];
+  const gated = await blockedCategoryIdsForVendors(prisma, tenantId, rows.map((r) => r.vendorId));
+  const tags = [...gated.values()].some((set) => set.size > 0)
+    ? await prisma.itemDiscoveryCategory.findMany({
+      where: { itemId: { in: rows.map((r) => r.id) } },
+      select: { itemId: true, categoryId: true },
+    })
+    : [];
+  return rows.filter((r) => !tags.some((t) => t.itemId === r.id && gated.get(r.vendorId)?.has(t.categoryId)));
+}
+
 /** Checkout: a line in a BLOCK_ORDER category whose licence is not valid fails the order — the lapse-after-publish case. */
 export async function assertOrderable(prisma: Db, vendorId: string, items: ReadonlyArray<{ id: string; name: string }>, now = new Date()): Promise<void> {
   if (items.length === 0) return;

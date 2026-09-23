@@ -1,10 +1,12 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { SearchService } from './search.service';
 import { AppError, ForbiddenError } from '../../utils/errors';
 import { sortByDistance } from '../../utils/distance';
-import { requireRequestTenant } from './search-scope';
+import { bindPublicMarketTenant, requireRequestTenant } from './search-scope';
 import { visibleVendorInTenant } from '../vendor/vendor-visibility';
+import { bearerOrCookieToken } from '../auth/browser-session';
+import { listableItemsForVendors } from '../verification/category-gate';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
 
@@ -65,18 +67,32 @@ export async function searchRoutes(app: FastifyInstance) {
     }
   })();
 
+  const bindPublicTenant = bindPublicMarketTenant(app);
+  const browseSearch = async (request: FastifyRequest, reply: FastifyReply) => {
+    // Keep credential-bearing requests on the existing strict session path,
+    // including cookie sessions and invalid/expired credential refusals.
+    if (request.headers.authorization !== undefined || bearerOrCookieToken(request)) {
+      await app.authenticate(request, reply);
+    } else {
+      await bindPublicTenant(request);
+    }
+  };
+
   // Universal search — searches vendors AND items
-  app.get('/search', { preHandler: [app.authenticate] }, async (request) => {
+  app.get('/search', { preHandler: [browseSearch] }, async (request) => {
     const { q, type, cuisine, lat, lng, limit: parsedLimit } = searchQuerySchema.parse(request.query);
     // [R048-003] ONE tenant per request — the caller's, as auth bound it. Carried into the
     // index filter (server-built) and into every DB fallback query below.
-    const tenantId = requireRequestTenant(request);
+    const tenantId = request.publicTenantId ?? requireRequestTenant(request);
 
     if (!q || q.length < 2) {
       return { success: true, data: { vendors: [], items: [] } };
     }
 
-    if (searchService) {
+    // Public discovery reads live browse eligibility. An index hit alone is
+    // not authority to publish a listing whose visibility may have changed.
+    // Authenticated engine behavior is deliberately unchanged.
+    if (searchService && !request.publicTenantId) {
       try {
         const [vendorResults, itemResults] = await Promise.all([
           searchService.searchVendors(tenantId, q, { type, cuisine, openOnly: true, limit: parsedLimit }),
@@ -137,6 +153,7 @@ export async function searchRoutes(app: FastifyInstance) {
         // whenever Meilisearch was down.
         where: {
           ...visibleVendorInTenant(tenantId),
+          ...(request.publicTenantId && { items: { some: { isAvailable: true } } }),
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
@@ -216,27 +233,30 @@ export async function searchRoutes(app: FastifyInstance) {
       sortedVendors = [...sortByDistance(locatable, userLat, userLng), ...unlocatable];
     }
 
-    const shapedItems: ItemHit[] = items.map(toItemHit);
+    const listable = request.publicTenantId
+      ? await listableItemsForVendors(app.prisma, tenantId, items)
+      : items;
+    const shapedItems: ItemHit[] = listable.map(toItemHit);
 
     return {
       success: true,
       data: {
         vendors: sortedVendors,
         items: shapedItems,
-        meta: { vendorCount: vendors.length, itemCount: items.length },
+        meta: { vendorCount: vendors.length, itemCount: shapedItems.length },
       },
     };
   });
 
   // Suggestions / autocomplete
-  app.get('/search/suggestions', { preHandler: [app.authenticate] }, async (request) => {
+  app.get('/search/suggestions', { preHandler: [browseSearch] }, async (request) => {
     const { q } = suggestionsQuerySchema.parse(request.query);
     if (!q || q.length < 2) return { success: true, data: [] };
-    const tenantId = requireRequestTenant(request);
+    const tenantId = request.publicTenantId ?? requireRequestTenant(request);
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
-        where: { ...visibleVendorInTenant(tenantId), name: { contains: q, mode: 'insensitive' } },
+        where: { ...visibleVendorInTenant(tenantId), ...(request.publicTenantId && { items: { some: { isAvailable: true } } }), name: { contains: q, mode: 'insensitive' } },
         select: { name: true, vendorType: true },
         take: 5,
       }),
@@ -244,14 +264,17 @@ export async function searchRoutes(app: FastifyInstance) {
         // [B2] This query had NO vendor predicate at all — a banned store's
         // dish names kept autocompleting for every customer who typed.
         where: { isAvailable: true, vendor: visibleVendorInTenant(tenantId), name: { contains: q, mode: 'insensitive' } },
-        select: { name: true },
+        select: { id: true, vendorId: true, name: true },
         take: 5,
       }),
     ]);
 
+    const listable = request.publicTenantId
+      ? await listableItemsForVendors(app.prisma, tenantId, items)
+      : items;
     const suggestions = [
       ...vendors.map((v) => ({ text: v.name, type: 'vendor' as const })),
-      ...items.map((i) => ({ text: i.name, type: 'item' as const })),
+      ...listable.map((i) => ({ text: i.name, type: 'item' as const })),
     ];
 
     return { success: true, data: suggestions };
@@ -264,8 +287,8 @@ export async function searchRoutes(app: FastifyInstance) {
   // never found the toggle. Trending must be EARNED, so it ranks on
   // totalOrdered alone. isCurrentlyOpen stays: this feeds discovery moments
   // ("worth trying right now"), and a closed store isn't tryable right now.
-  app.get('/search/trending', { preHandler: [app.authenticate] }, async (request) => {
-    const tenantId = requireRequestTenant(request);
+  app.get('/search/trending', { preHandler: [browseSearch] }, async (request) => {
+    const tenantId = request.publicTenantId ?? requireRequestTenant(request);
     const items = await app.prisma.item.findMany({
       where: { isAvailable: true, vendor: { ...visibleVendorInTenant(tenantId), isCurrentlyOpen: true } },
       // The shared select again. Trending is the Market tab's fallback rail, so
@@ -277,18 +300,21 @@ export async function searchRoutes(app: FastifyInstance) {
       take: 20,
     });
 
+    const listable = request.publicTenantId
+      ? await listableItemsForVendors(app.prisma, tenantId, items)
+      : items;
     return {
       success: true,
       // ItemHit plus the one field that makes it *trending* — a superset, never
       // a different shape.
-      data: items.map((i) => ({ ...toItemHit(i), totalOrdered: i.totalOrdered })),
+      data: listable.map((i) => request.publicTenantId ? toItemHit(i) : ({ ...toItemHit(i), totalOrdered: i.totalOrdered })),
     };
   });
 
   // Nearby vendors (location-based)
-  app.get('/search/nearby', { preHandler: [app.authenticate] }, async (request) => {
+  app.get('/search/nearby', { preHandler: [browseSearch] }, async (request) => {
     const { lat: userLat, lng: userLng, radius: radiusKm, type } = nearbyQuerySchema.parse(request.query);
-    const tenantId = requireRequestTenant(request);
+    const tenantId = request.publicTenantId ?? requireRequestTenant(request);
 
     const vendors = await app.prisma.vendor.findMany({
       where: {
