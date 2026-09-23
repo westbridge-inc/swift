@@ -344,7 +344,7 @@ export const customerApi = {
   updateAddress: (id: string, data: Partial<AddressInput>) => api.put(`/customer/addresses/${id}`, data),
   deleteAddress: (id: string) => api.delete(`/customer/addresses/${id}`),
   setDefaultAddress: (id: string) => api.put(`/customer/addresses/${id}/default`),
-  getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),
+  getHome: (lat?: number, lng?: number, signal?: AbortSignal) => api.get('/customer/home', { params: { lat, lng }, signal }),
   getVendors: (params?: Record<string, string>) => api.get('/customer/vendors', { params }),
   // [B15] Flag a public review for the moderation queue (R7). One report per
   // (rating, reporter) — the server answers calm idempotence, never an error.
@@ -358,7 +358,11 @@ export const customerApi = {
   searchTrending: () => api.get('/search/trending'),
   getVendor: (id: string) => api.get(`/customer/vendors/${id}`),
   getVendorReviews: (id: string) => api.get(`/customer/vendors/${id}/reviews`),
-  getItemSlots: (itemId: string, date: string) => api.get(`/customer/items/${itemId}/slots`, { params: { date } }),
+  getItemSlots: (itemId: string, date: string, config?: AxiosRequestConfig) =>
+    api.get(`/customer/items/${itemId}/slots`, {
+      ...config,
+      params: { ...config?.params, date },
+    }),
   getFavorites: () => api.get('/customer/favorites'),
   addFavorite: (vendorId: string) => api.post(`/customer/favorites/${vendorId}`, {}),
   removeFavorite: (vendorId: string) => api.delete(`/customer/favorites/${vendorId}`),
