@@ -199,7 +199,13 @@ export const useAuthStore = create<AuthState>()(
         // teardown receives the captured old owner and cannot disturb the new
         // account installed immediately below.
         if (previousSession) finishLocalLogout(previousSession);
-        else useStoreSwitcher.getState().setSelectedStore(null);
+        else {
+          // Guest Home is public but lacks the new account's order and rails.
+          // Clear before installing the account so a fresh guest cache cannot
+          // be observed as that account's personalized response.
+          queryClient.clear();
+          useStoreSwitcher.getState().setSelectedStore(null);
+        }
         set((state) => ({
           user,
           accessToken,
