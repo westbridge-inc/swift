@@ -358,7 +358,11 @@ export const customerApi = {
   searchTrending: () => api.get('/search/trending'),
   getVendor: (id: string) => api.get(`/customer/vendors/${id}`),
   getVendorReviews: (id: string) => api.get(`/customer/vendors/${id}/reviews`),
-  getItemSlots: (itemId: string, date: string) => api.get(`/customer/items/${itemId}/slots`, { params: { date } }),
+  getItemSlots: (itemId: string, date: string, config?: AxiosRequestConfig) =>
+    api.get(`/customer/items/${itemId}/slots`, {
+      ...config,
+      params: { ...config?.params, date },
+    }),
   getFavorites: () => api.get('/customer/favorites'),
   addFavorite: (vendorId: string) => api.post(`/customer/favorites/${vendorId}`, {}),
   removeFavorite: (vendorId: string) => api.delete(`/customer/favorites/${vendorId}`),
