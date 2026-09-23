@@ -26,7 +26,7 @@ import { isProduction } from '../../utils/runtime-mode';
  */
 
 /** Bump when any value below changes; recorded with every apply. */
-export const PLATFORM_CONFIG_VERSION = '2026-09-02.1';
+export const PLATFORM_CONFIG_VERSION = '2026-09-23.1';
 
 // Weekly SaaS tiers (GYD) — single source for the GY CountryConfig AND any
 // seeded subscription rows, so a tier change never leaves accounts on a stale
@@ -148,8 +148,9 @@ export function desiredPlatformConfig(): DesiredConfig {
     ...guyanaRegion,
   };
 
-  // Every other Caribbean market is USD-pegged off the Guyana numbers until a
-  // local business/legal pass refines it — and says so in its notes.
+  // Future Caribbean market policy is retained so expansion can be planned,
+  // reviewed and activated without a data-model rewrite. V1 is Guyana-only:
+  // these rows remain explicitly inactive until their own launch gate passes.
   const USD = {
     mover: guyanaTiers.mover / gydPerUsd,
     moverHeavy: guyanaTiers.moverHeavy / gydPerUsd,
@@ -215,7 +216,7 @@ export function desiredPlatformConfig(): DesiredConfig {
       regulatoryNotes:
         'Tiers and taxi rates are USD-pegged defaults; document checklist mirrors Guyana. Refine with local business/legal input before launch.',
       locale: c.locale,
-      isActive: true,
+      isActive: false,
     };
     return { code: c.code, create: { ...policy }, policy };
   });

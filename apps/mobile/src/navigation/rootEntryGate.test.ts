@@ -16,14 +16,13 @@ const fresh: RootEntryState = {
   needsSelfie: false,
 };
 
-function postCarouselGateBeforeFix(state: RootEntryState) {
-  const { isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie } = state;
+function guyanaOnlyGate(state: RootEntryState) {
+  const { isAuthenticated, wantsAuth, intent, anyPreview, needsSelfie } = state;
   const earner = intent === 'mover' || intent === 'vendor' || intent === 'advertiser';
   const needsAuth = earner ? !isAuthenticated && !anyPreview : wantsAuth && !isAuthenticated;
 
   if (wantsAuth && !isAuthenticated) return 'auth';
   if (!intent) return 'role-picker';
-  if (earner && !countryCode && !anyPreview) return 'country';
   if (needsAuth) return 'auth';
   if (needsSelfie) return 'selfie';
   return 'main';
@@ -43,9 +42,9 @@ describe('rootEntryGate', () => {
   });
 
   it.each(['mover', 'vendor', 'advertiser'] as const)(
-    'keeps the %s country-before-auth path unchanged',
+    'sends the %s directly to auth because V1 has one launch country',
     (intent) => {
-      expect(rootEntryGate({ ...fresh, intent })).toBe('country');
+      expect(rootEntryGate({ ...fresh, intent })).toBe('auth');
       expect(rootEntryGate({ ...fresh, intent, countryCode: 'GY' })).toBe('auth');
     },
   );
@@ -93,7 +92,7 @@ describe('rootEntryGate', () => {
             for (const anyPreview of booleans) {
               for (const needsSelfie of booleans) {
                 const state = { isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie };
-                expect(rootEntryGate(state)).toBe(postCarouselGateBeforeFix(state));
+                expect(rootEntryGate(state)).toBe(guyanaOnlyGate(state));
               }
             }
           }
@@ -135,7 +134,7 @@ describe('previewBypassForIntent', () => {
     const anyPreview = previewBypassForIntent('vendor', { moverPreview: true, vendorSamplePreview: false });
 
     expect(anyPreview).toBe(false);
-    expect(rootEntryGate({ ...fresh, intent: 'vendor', anyPreview })).toBe('country');
+    expect(rootEntryGate({ ...fresh, intent: 'vendor', anyPreview })).toBe('auth');
     expect(rootEntryGate({ ...fresh, intent: 'vendor', countryCode: 'GY', anyPreview })).toBe('auth');
   });
 

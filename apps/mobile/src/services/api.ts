@@ -344,7 +344,7 @@ export const customerApi = {
   updateAddress: (id: string, data: Partial<AddressInput>) => api.put(`/customer/addresses/${id}`, data),
   deleteAddress: (id: string) => api.delete(`/customer/addresses/${id}`),
   setDefaultAddress: (id: string) => api.put(`/customer/addresses/${id}/default`),
-  getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),
+  getHome: (lat?: number, lng?: number, signal?: AbortSignal) => api.get('/customer/home', { params: { lat, lng }, signal }),
   getVendors: (params?: Record<string, string>) => api.get('/customer/vendors', { params }),
   // [B15] Flag a public review for the moderation queue (R7). One report per
   // (rating, reporter) — the server answers calm idempotence, never an error.
