@@ -2007,7 +2007,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot search for a mover while the order is ${order.status}`);
     }
     const result = await dispatch.retryDispatch(order.id);
-    return { success: true, data: { orderId: order.id, searching: !result.exhausted, exhausted: !!result.exhausted } };
+    return { success: true, data: { orderId: order.id, searching: !!result.offered, exhausted: !!result.exhausted } };
   });
 
   /** PUT /orders/:id/complete-pickup — Takeaway: customer collected the order.

@@ -399,7 +399,7 @@ function inlineDispatch(route: 'courier' | 'driver', app: any, dispatch: any, or
   };
   visit(file);
   expect(branches).toHaveLength(1);
-  const run = vm.runInContext(ts.transpileModule(`(async (app, dispatch, order, id) => { ${branches[0]!.getText(file)} })`, {
+  const run = vm.runInContext(ts.transpileModule(`(async (app, dispatch, order, id) => { let reDispatched = false; ${branches[0]!.getText(file)} })`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText, context);
   return run(app, dispatch, order, order.id);
@@ -1110,5 +1110,76 @@ describe('R4 exact-review regressions — service-free', () => {
     expect(emitted[0][1].offerAttemptId).toBe(scheduled[0][3]);
     expect(h.state.get('dispatch:offer-pending:order-unit:' + scheduled[0][3])).toBeUndefined();
     expect(h.state.get('dispatch:mover-offer:orphan-rider')).toBeUndefined();
+  });
+});
+
+// Route response tails run from the real AST, without importing service wiring.
+function dispatchResponse(route: 'driver' | 'vendor', app: any, dispatch: any) {
+  const file = ts.createSourceFile('route.ts', readFileSync(join(__dirname, `../modules/${route}/${route}.routes.ts`), 'utf8'), ts.ScriptTarget.Latest, true);
+  const path = route === 'driver' ? '/rides/:id/cancel' : '/orders/:id/retry-dispatch';
+  let body!: ts.Block;
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.arguments[0]?.getText(file) === `'${path}'`) {
+      const callback = node.arguments.at(-1) as ts.ArrowFunction;
+      body = callback.body as ts.Block;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  const start = body.statements.findIndex(node => route === 'driver'
+    ? node.getText(file).startsWith('let reDispatched') || (ts.isIfStatement(node) && node.expression.getText(file) === 'app.dispatchQueue')
+    : node.getText(file).startsWith('const result = await dispatch.retryDispatch'));
+  expect(start).toBeGreaterThanOrEqual(0);
+  const run = vm.runInNewContext(ts.transpileModule(`(async (app, dispatch) => {
+    const id = 'order-unit', order = { id };
+    ${body.statements.slice(start).map(node => node.getText(file)).join('\n')}
+  })`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText);
+  return run(app, dispatch);
+}
+
+describe('R11 timeout deadline accounting', () => {
+  it.each([[false, 20_000], [true, 12_000]])('charges preparation time to the original offer deadline (express=%s)', async (isExpress, duration) => {
+    const h = publishingHarness();
+    let now = Date.parse('2026-09-23T00:00:00Z');
+    context['Date'] = class extends Date {
+      constructor(value?: string | number | Date) { super(value === undefined ? now : value instanceof Date ? value.getTime() : value); }
+      static override now() { return now; }
+    };
+    Object.assign(h.order, { isExpress });
+    const install = h.subject.installOfferPair.bind(h.subject);
+    h.subject.installOfferPair = async (...args: any[]) => {
+      const result = await install(...args); now += 321; return result;
+    };
+    const delays: number[] = [];
+    h.subject.scheduleTimeout = async (_order: string, _rider: string, delay: number) => { delays.push(delay); };
+    expect(await h.subject.dispatchOrder(h.order.id)).toEqual({ offered: 'rider' });
+    expect(delays).toEqual([Number(duration) - 321]);
+    expect(h.emitted).toHaveLength(1);
+    context['Date'] = Date;
+  });
+});
+
+describe('R11 truthful dispatch responses', () => {
+  it.each([
+    [{}, false], [{ offered: 'mover' }, true], [{ exhausted: true }, false],
+  ])('driver inline result %j reports reDispatched=%s', async (result, expected) => {
+    const response = await dispatchResponse('driver', {}, { dispatchOrder: async () => result });
+    expect(response.data.reDispatched).toBe(expected);
+  });
+  it('driver queue acknowledgement is required before reporting re-dispatch', async () => {
+    const entered = barrier(), resume = barrier(); let answered = false;
+    const pending = dispatchResponse('driver', { dispatchQueue: { add: async () => { entered.open(); await resume.promise; } } }, {});
+    void pending.then(() => { answered = true; });
+    await entered.promise; expect(answered).toBe(false);
+    resume.open(); expect((await pending).data.reDispatched).toBe(true);
+  });
+  it('driver queue rejection cannot report re-dispatch', async () => {
+    await expect(dispatchResponse('driver', { dispatchQueue: { add: async () => { throw new Error('queue unavailable'); } } }, {})).rejects.toThrow('queue unavailable');
+  });
+  it.each([
+    [{}, false, false], [{ offered: 'mover' }, true, false], [{ exhausted: true }, false, true],
+  ])('vendor retry result %j reports searching=%s exhausted=%s', async (result, searching, exhausted) => {
+    const response = await dispatchResponse('vendor', {}, { retryDispatch: async () => result });
+    expect(response.data).toEqual({ orderId: 'order-unit', searching, exhausted });
   });
 });

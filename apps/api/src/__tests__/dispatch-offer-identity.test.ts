@@ -449,8 +449,14 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
 
     const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
     expect(Number(after.acceptanceRate)).toBe(100); // spared — no render proof
-    // The cascade still advanced honestly.
-    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, r.riderId)).toBe(1);
+    // The sole candidate timed out: exhaustion retires this wave's decline
+    // set, but retains the attempt outcome and terminal search evidence.
+    expect(await app.redis.get(offerKey(order.id))).toBeNull();
+    expect(await app.redis.get(moverOfferKey(r.riderId))).toBeNull();
+    expect(await app.redis.smembers(`dispatch:declined:${order.id}`)).toEqual([]);
+    expect(await app.redis.get(`dispatch:exhausts:${order.id}`)).toBe('1');
+    expect(await app.redis.zscore(`dispatch:offer-expiries:${r.riderId}`, `${order.id}:${job.attemptId}`)).not.toBeNull();
+    expect(await app.prisma.dispatchSearch.count({ where: { subjectId: order.id, status: 'EXHAUSTED' } })).toBe(1);
   });
 
   it('a release racing the publish tail retires the attempt: no ghost card, no stale timeout, no unfair miss [REPORT-014 F-014-10]', async () => {
@@ -618,7 +624,11 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
 
     expect(await app.redis.get(offerKey(order.id))).toBeNull();
     expect(await app.redis.get(moverOfferKey(a.riderId))).toBeNull();
-    const declined = await app.redis.smembers(`dispatch:declined:${order.id}`);
-    expect(declined).toContain(a.riderId);
+    // A legacy timeout also exhausts the sole-candidate wave and clears its
+    // exclusions; durable expiry evidence still records the bare attempt.
+    expect(await app.redis.smembers(`dispatch:declined:${order.id}`)).toEqual([]);
+    expect(await app.redis.get(`dispatch:exhausts:${order.id}`)).toBe('1');
+    expect(await app.redis.zscore(`dispatch:offer-expiries:${a.riderId}`, `${order.id}:`)).not.toBeNull();
+    expect(await app.prisma.dispatchSearch.count({ where: { subjectId: order.id, status: 'EXHAUSTED' } })).toBe(1);
   });
 });
