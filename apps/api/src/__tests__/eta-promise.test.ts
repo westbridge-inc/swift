@@ -18,6 +18,14 @@ import {
   WINDOW_BEFORE_MIN, WINDOW_AFTER_MIN, SLIP_GATE_SECONDS,
 } from '../modules/eta/promise';
 
+const DAY = 24 * 60 * 60 * 1000;
+
+function etaReportFixtureAt(now: Date): Date {
+  const placed = new Date(now.getTime() - 7 * DAY);
+  placed.setUTCHours(16, 10, 0, 0);
+  return placed;
+}
+
 // ---------------------------------------------------------------------------
 // [ALG-12 / FMC §12.2] The promise the customer is given.
 //
@@ -51,6 +59,19 @@ describe('the range the customer sees', () => {
     expect(ALGO_DEFAULTS['eta.defaultPadSeconds']).toBe(300);
   });
 
+  it('keeps the relative report fixture in-window and away from the off-hours bucket across every UTC start hour', () => {
+    const offHours = bucketOf(new Date('2026-08-27T23:00:00Z')).hourBucket;
+    for (let startHour = 0; startHour < 24; startHour++) {
+      const started = new Date(Date.UTC(2026, 8, 22, startHour));
+      const placed = etaReportFixtureAt(started);
+      expect(placed.toISOString().slice(11)).toBe('16:10:00.000Z');
+      expect(placed.getTime()).toBeLessThanOrEqual(started.getTime());
+      expect(placed.getTime()).toBeGreaterThan(started.getTime() - 28 * DAY);
+      expect(bucketOf(placed).hourBucket).toBe(12);
+      expect(bucketOf(placed).hourBucket).not.toBe(offHours);
+    }
+  });
+
   it('checkout writes the promise from the one seam, and every read hands out the view', () => {
     const svc = readFileSync(path.join(__dirname, '..', 'modules', 'order', 'order.service.ts'), 'utf8');
     expect(svc).toContain('await promiseAtCheckout(this.prisma, {');
@@ -66,8 +87,11 @@ describe('the range the customer sees', () => {
 
 describe('the promise, the pad, the revision, the report — against the database', () => {
   const PHONE_PREFIX = '+59200667';
-  const DAY = 24 * 60 * 60 * 1000;
-  const PLACED = new Date('2026-08-24T16:10:00Z'); // Monday noon in Georgetown
+  // Keep the delivered fixtures inside both the explicitly anchored report and
+  // the route's real-time 28-day window, while pinning 16:10Z (Georgetown 12)
+  // away from the fixed 19:00 Georgetown off-hours sample.
+  const REPORT_NOW = new Date();
+  const PLACED = etaReportFixtureAt(REPORT_NOW);
   let app: FastifyInstance;
   let customerId: string;
   let vendorId: string;
@@ -155,7 +179,7 @@ describe('the promise, the pad, the revision, the report — against the databas
     for (const late of lateness) {
       await makeOrder({ status: 'DELIVERED', placedAt: PLACED, deliveredAt: new Date(PLACED.getTime() + (3000 + late) * 1000), promiseBaseSeconds: 3000, promisedAt: new Date(PLACED.getTime() + 3300 * 1000) });
     }
-    const r = await computeEtaPads(app.prisma, new Date('2026-08-30T12:00:00Z'));
+    const r = await computeEtaPads(app.prisma, REPORT_NOW);
     expect(r.orders).toBeGreaterThanOrEqual(10);
     const { hourBucket } = bucketOf(PLACED);
     const hour = await app.prisma.etaPadStat.findUniqueOrThrow({ where: { tenantId_vertical_hourBucket: { tenantId: 'swift-default', vertical: 'FOOD_DELIVERY', hourBucket } } });
@@ -222,14 +246,14 @@ describe('the promise, the pad, the revision, the report — against the databas
 
   it('the weekly report measures what was kept, per vertical, and writes the founder\'s row', async () => {
     // The ten seeded deliveries were promised at base + 300; lateness ≤ 300 s kept the promise: 8 of 10.
-    const report = await etaReport(app.prisma, 28, new Date('2026-08-30T12:00:00Z'));
+    const report = await etaReport(app.prisma, 28, REPORT_NOW);
     expect(report.delivered).toBe(10);
     expect(report.realisedOnTimeRate).toBe(0.8);
     expect(report.byVertical['FOOD_DELIVERY']).toEqual({ delivered: 10, onTimeRate: 0.8 });
     expect(report.target).toBe(0.85);
     expect(report.pads.length).toBeGreaterThanOrEqual(2);
 
-    const weekly = await weeklyEtaCalibration(app.prisma, new Date('2026-08-30T12:00:00Z'));
+    const weekly = await weeklyEtaCalibration(app.prisma, REPORT_NOW);
     expect(weekly.learned.rows).toBeGreaterThanOrEqual(2);
     const row = await app.prisma.algoDecision.findFirst({ where: { algo: 'ALG-12', subjectId: 'platform' }, orderBy: { createdAt: 'desc' } });
     expect(row).toMatchObject({ shadow: true, outcome: 'BELOW_TARGET' });
