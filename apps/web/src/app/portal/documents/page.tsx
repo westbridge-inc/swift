@@ -7,9 +7,12 @@ import {
   getRiderProfile, getVerificationStatus, submitVerificationDocument, uploadVerificationFile,
 } from '@/lib/mover-api';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { LEGAL_URL } from '@/lib/api';
 
 const pretty = (docType: string) => docType.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+// This is a client page. Legal pages live on this same public site, so this
+// must stay a relative route: importing the server-only API fetch module here
+// would pull its runtime upstream resolver into the browser bundle.
+const PRIVACY_NOTICE_HREF = '/legal/privacy' as const;
 
 function statusTone(s: string, expiresAt: string | null) {
   const expiringSoon = expiresAt && new Date(expiresAt).getTime() - Date.now() < 30 * 24 * 3600 * 1000;
@@ -122,7 +125,7 @@ export default function DocumentsPage() {
                     <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[var(--swift-red)]" />
                     <span>
                       I consent to Swift processing this document for verification, per the{' '}
-                      <a href={LEGAL_URL('privacy')} target="_blank" rel="noreferrer" className="font-semibold text-[var(--swift-red)]">privacy notice</a>.
+                      <a href={PRIVACY_NOTICE_HREF} target="_blank" rel="noreferrer" className="font-semibold text-[var(--swift-red)]">privacy notice</a>.
                       It is stored encrypted and never shared.
                     </span>
                   </label>

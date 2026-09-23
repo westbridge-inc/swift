@@ -18,14 +18,20 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api-staging.swift.gy"
+        "EXPO_PUBLIC_API_URL": "https://api-staging.swift.gy",
+        "EXPO_PUBLIC_LINK_ENV": "preview",
+        "SWIFT_LINK_DOMAIN": "swiftgy.com",
+        "EXPO_PUBLIC_LINK_PREVIEW_HOSTS": ""
       }
     },
     "production": {
       "channel": "production",
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api.swift.gy"
+        "EXPO_PUBLIC_API_URL": "https://api.swift.gy",
+        "EXPO_PUBLIC_LINK_ENV": "production",
+        "EXPO_PUBLIC_WEB_URL": "https://swiftgy.com",
+        "SWIFT_LINK_DOMAIN": "swiftgy.com"
       }
     }
   },

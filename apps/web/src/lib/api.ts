@@ -1,10 +1,15 @@
 // Server-side fetchers against the existing Fastify API — the web app is
 // another client on the same backend, never a second source of truth.
-import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+import { resolveServerUpstreamApiOrigin } from '@/lib/browser-api-origin';
 
 // The server-side fetch origin may be overridden (an internal address on the
-// same network); the browser side is the one authority, never a fallback.
-const API_URL = process.env['API_URL'] ?? BROWSER_API_ORIGIN;
+// same network). Browser code uses the same-site rewrite instead; this server
+// module must never recurse through the browser transport in production. The
+// shared resolver uses localhost only for development/test server fetches and
+// requires the exact API upstream in a production runtime.
+export const resolveServerApiOrigin = (env: Pick<NodeJS.ProcessEnv, 'NODE_ENV' | 'API_URL'> = process.env): string =>
+  resolveServerUpstreamApiOrigin(env);
+const API_URL = resolveServerApiOrigin();
 
 export interface CountryPricing {
   countryCode: string;
@@ -41,8 +46,6 @@ export async function fetchPricing(country?: string): Promise<CountryPricing | n
     return null;
   }
 }
-
-export const LEGAL_URL = (doc: 'terms' | 'privacy') => `${API_URL}/legal/${doc}`;
 
 // ── Public storefronts (SEO surface — ACTIVE + verified stores only) ────────
 export interface StorefrontSummary {

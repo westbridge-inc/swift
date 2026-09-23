@@ -1,12 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { SITE_DOMAIN } from '../site.domain';
+import { SITE_DOMAIN, SITE_ORIGIN } from '../site.domain';
 import {
   buildBrowserContentSecurityPolicy,
   DEVELOPMENT_BROWSER_API_ORIGIN,
   RELEASE_BROWSER_API_ORIGIN,
+  RELEASE_UPSTREAM_API_ORIGIN,
   resolveBrowserApiOrigin,
+  resolveServerUpstreamApiOrigin,
+  resolveUpstreamApiOrigin,
 } from './browser-api-origin';
 
 // ---------------------------------------------------------------------------
@@ -41,6 +44,16 @@ describe('public-web browser API origin source contract', () => {
     }
   });
 
+  it('keeps the client document-consent page out of the server upstream module', () => {
+    const clientPage = source('src/app/portal/documents/page.tsx');
+    const serverFetchers = source('src/lib/api.ts');
+    expect(clientPage).toContain("'use client'");
+    expect(clientPage).not.toContain("from '@/lib/api'");
+    expect(clientPage).toContain("PRIVACY_NOTICE_HREF = '/legal/privacy'");
+    expect(clientPage).toContain('href={PRIVACY_NOTICE_HREF}');
+    expect(serverFetchers).not.toContain('LEGAL_URL');
+  });
+
   it('the config derives its mode from the Next phase and its CSP from the authority, never from a scheme wildcard', () => {
     const contents = source('next.config.ts');
     expect(contents).not.toContain("connect-src 'self' https: wss:");
@@ -57,9 +70,50 @@ describe('public-web browser API origin source contract', () => {
     expect(source('next.config.ts')).not.toContain('process.env.NEXT_PUBLIC_API_URL');
   });
 
-  it('the release origin is derived from the one domain file, not a second hardcoded host', () => {
-    expect(RELEASE_BROWSER_API_ORIGIN).toBe(`https://api.${SITE_DOMAIN}`);
-    expect(source('src/lib/browser-api-origin.ts')).not.toMatch(/https:\/\/api\.[a-z]+\.[a-z]+/);
+  it('keeps browser transport same-site while retaining a distinct server-only upstream', () => {
+    expect(SITE_DOMAIN).toBe('swiftgy.com');
+    expect(RELEASE_BROWSER_API_ORIGIN).toBe(SITE_ORIGIN);
+    expect(RELEASE_UPSTREAM_API_ORIGIN).toBe('https://api.swift.gy');
+    expect(RELEASE_UPSTREAM_API_ORIGIN).not.toBe(RELEASE_BROWSER_API_ORIGIN);
+  });
+
+  it('binds the executable CI build inputs to the same-site browser transport and the distinct upstream', () => {
+    const ci = source('../../.github/workflows/ci.yml');
+    expect(ci).toContain('NEXT_PUBLIC_API_URL: https://swiftgy.com');
+    expect(ci).toContain('API_URL: https://api.swift.gy');
+  });
+});
+
+describe('resolveUpstreamApiOrigin', () => {
+  it('production requires the exact server-only upstream and has no fallback', () => {
+    expect(() => resolveUpstreamApiOrigin('production', undefined)).toThrow(/API_URL is required/);
+    expect(resolveUpstreamApiOrigin('production', RELEASE_UPSTREAM_API_ORIGIN)).toBe(RELEASE_UPSTREAM_API_ORIGIN);
+    for (const wrong of [
+      RELEASE_BROWSER_API_ORIGIN,
+      `${RELEASE_UPSTREAM_API_ORIGIN}/`,
+      `${RELEASE_UPSTREAM_API_ORIGIN}/v1`,
+      `${RELEASE_UPSTREAM_API_ORIGIN}?x=1`,
+      'http://api.swift.gy',
+      'https://api.swiftgy.com',
+      'https://attacker.example',
+    ]) {
+      expect(() => resolveUpstreamApiOrigin('production', wrong), wrong).toThrow();
+    }
+  });
+
+  it('development defaults to the local API and rejects a release upstream', () => {
+    expect(resolveUpstreamApiOrigin('development', undefined)).toBe(DEVELOPMENT_BROWSER_API_ORIGIN);
+    expect(() => resolveUpstreamApiOrigin('development', RELEASE_UPSTREAM_API_ORIGIN)).toThrow(/API_URL must be exactly/);
+  });
+});
+
+describe('resolveServerUpstreamApiOrigin', () => {
+  it('defaults server-rendered development fetches to the local API, but production is exact and fail-closed', () => {
+    expect(resolveServerUpstreamApiOrigin({ NODE_ENV: 'development', API_URL: undefined })).toBe(DEVELOPMENT_BROWSER_API_ORIGIN);
+    expect(resolveServerUpstreamApiOrigin({ NODE_ENV: 'test', API_URL: undefined })).toBe(DEVELOPMENT_BROWSER_API_ORIGIN);
+    expect(resolveServerUpstreamApiOrigin({ NODE_ENV: 'production', API_URL: RELEASE_UPSTREAM_API_ORIGIN })).toBe(RELEASE_UPSTREAM_API_ORIGIN);
+    expect(() => resolveServerUpstreamApiOrigin({ NODE_ENV: 'production', API_URL: undefined })).toThrow(/API_URL is required/);
+    expect(() => resolveServerUpstreamApiOrigin({ NODE_ENV: 'production', API_URL: RELEASE_BROWSER_API_ORIGIN })).toThrow(/API_URL must be exactly/);
   });
 });
 
@@ -98,10 +152,11 @@ describe('resolveBrowserApiOrigin', () => {
 });
 
 describe('buildBrowserContentSecurityPolicy', () => {
-  it('production connect-src names the release origin (https and wss) and nothing broader', () => {
+  it('production connect-src is same-origin only; the upstream is server-side', () => {
     const csp = buildBrowserContentSecurityPolicy('production');
     const connect = csp.split('; ').find((d) => d.startsWith('connect-src '))!;
-    expect(connect).toBe(`connect-src 'self' ${RELEASE_BROWSER_API_ORIGIN} ${RELEASE_BROWSER_API_ORIGIN.replace('https://', 'wss://')}`);
+    expect(connect).toBe("connect-src 'self'");
+    expect(connect).not.toContain(RELEASE_UPSTREAM_API_ORIGIN);
     expect(connect.split(' ')).not.toContain('https:'); // no scheme wildcard in connect-src (img-src may still allow https: images)
     expect(connect.split(' ')).not.toContain('wss:');
     expect(csp).toContain("frame-ancestors 'none'");
@@ -111,5 +166,29 @@ describe('buildBrowserContentSecurityPolicy', () => {
     const connect = buildBrowserContentSecurityPolicy('development').split('; ').find((d) => d.startsWith('connect-src '))!;
     expect(connect).toContain(DEVELOPMENT_BROWSER_API_ORIGIN);
     expect(connect).not.toContain(RELEASE_BROWSER_API_ORIGIN);
+  });
+});
+
+describe('Strict-cookie production transport contract', () => {
+  it('routes browser session endpoints through the same public origin and a server-only rewrite', () => {
+    const browserSession = source('../api/src/modules/auth/browser-session.ts');
+    const nextConfig = source('next.config.ts');
+    const sessionPaths = [
+      '/api/v1/auth/register',
+      '/api/v1/auth/verify-otp',
+      '/api/v1/auth/me',
+      '/api/v1/customer/home',
+      '/api/v1/auth/refresh',
+      '/api/v1/auth/logout',
+    ];
+
+    expect(RELEASE_BROWSER_API_ORIGIN).toBe(SITE_ORIGIN);
+    expect(browserSession).toContain("'SameSite=Strict'");
+    for (const path of sessionPaths) {
+      expect(new URL(`${RELEASE_BROWSER_API_ORIGIN}${path}`).origin).toBe(SITE_ORIGIN);
+      expect(new URL(`${RELEASE_BROWSER_API_ORIGIN}${path}`).origin).not.toBe(RELEASE_UPSTREAM_API_ORIGIN);
+    }
+    expect(nextConfig).toContain("source: '/api/v1/:path*', destination: `${upstreamApiOrigin}/api/v1/:path*`");
+    expect(nextConfig).toContain('resolveConfiguredUpstreamApiOrigin');
   });
 });

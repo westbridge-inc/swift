@@ -83,7 +83,24 @@ const splashImage = './assets/icon.png';
 // interception half. The domain must serve
 // /.well-known/apple-app-site-association and /.well-known/assetlinks.json —
 // apps/web serves both, gated on APPLE_TEAM_ID / ANDROID_CERT_SHA256 env.
-const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com';
+// Expo compiles app.config.ts to a CommonJS file before it evaluates it.  It
+// cannot require a TypeScript module under src/ reliably, so this tiny native
+// half remains self-contained.  release-link-origin-config.test.ts binds its
+// literal to src/lib/publicOrigin.ts and the API/web authorities.
+const CANONICAL_LINK_DOMAIN = 'swiftgy.com';
+const linkBuildChannel = process.env['EXPO_PUBLIC_LINK_ENV'] === 'production'
+  ? 'production'
+  : process.env['EXPO_PUBLIC_LINK_ENV'] === 'preview'
+    ? 'preview'
+    : null;
+const configuredLinkDomain = process.env['SWIFT_LINK_DOMAIN'];
+if (configuredLinkDomain !== undefined && configuredLinkDomain !== CANONICAL_LINK_DOMAIN) {
+  throw new Error(`[swift] SWIFT_LINK_DOMAIN must be exactly ${CANONICAL_LINK_DOMAIN}`);
+}
+if ((linkBuildChannel === 'production' || linkBuildChannel === 'preview') && configuredLinkDomain !== CANONICAL_LINK_DOMAIN) {
+  throw new Error(`[swift] ${linkBuildChannel} native links require SWIFT_LINK_DOMAIN=${CANONICAL_LINK_DOMAIN}`);
+}
+const linkDomain = CANONICAL_LINK_DOMAIN;
 
 /**
  * THE ANDROID MAPS KEY GATE.

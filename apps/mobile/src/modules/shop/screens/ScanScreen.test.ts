@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { destinationForUrl } from '../../../lib/deepLinkParse';
+import { destinationForUrl, setLinkPolicyForTests } from '../../../lib/deepLinkParse';
+import { policyFrom } from '../../../lib/linkPolicy';
 
 // ---------------------------------------------------------------------------
 // The in-app scanner [SCAN-1].
@@ -18,6 +19,10 @@ import { destinationForUrl } from '../../../lib/deepLinkParse';
 
 const SRC = readFileSync(new URL('./ScanScreen.tsx', import.meta.url), 'utf8');
 const STRIPPED = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+beforeEach(() => {
+  setLinkPolicyForTests(policyFrom({ webUrl: 'https://swiftgy.com', isDev: false }));
+});
 
 describe('the scanner reuses the link machinery rather than forking it', () => {
   it('parses with the SAME pure parser a universal link uses', () => {
@@ -93,12 +98,12 @@ describe('every failure says what happened, and none of them guess', () => {
 
 describe('the codes it must accept are the codes vendors print', () => {
   it('a printed short link resolves to a short-code destination', () => {
-    const d = destinationForUrl('https://swift.gy/s/BCDFGHJKMN');
+    const d = destinationForUrl('https://swiftgy.com/s/BCDFGHJKMN');
     expect(d).toEqual({ kind: 'short', code: 'BCDFGHJKMN' });
   });
 
   it('a storefront link with an attribution code carries the code through', () => {
-    const d = destinationForUrl('https://swift.gy/store/georgetown-grill?src=qr&c=BCDFGHJKMN');
+    const d = destinationForUrl('https://swiftgy.com/store/georgetown-grill?src=qr&c=BCDFGHJKMN');
     expect(d).toEqual({ kind: 'store', slug: 'georgetown-grill', code: 'BCDFGHJKMN' });
   });
 

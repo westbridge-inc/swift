@@ -1,5 +1,3 @@
-import { SITE_DOMAIN } from '../site.domain';
-
 /**
  * [SWX-DEV-WEB-076 · integrated] ONE authority for the origin the browser
  * calls, and the CSP that permits exactly that origin.
@@ -11,20 +9,27 @@ import { SITE_DOMAIN } from '../site.domain';
  *
  * - development (`next dev`) uses exactly `http://localhost:3000` when nothing
  *   is configured;
- * - a production build REQUIRES `NEXT_PUBLIC_API_URL`, requires it to be an
- *   exact absolute https origin (no path, query, credentials or fragment), and
- *   requires it to be the canonical release origin — `https://api.<site
- *   domain>`, derived from the one file that owns the company's domain rather
- *   than a second hardcoded hostname;
- * - the CSP's connect-src names that one origin, never a scheme wildcard.
+ * - a production browser calls the same public-site origin, `https://swiftgy.com`.
+ *   Browser session cookies are `SameSite=Strict`; directing the browser to
+ *   the separately registered `https://api.swift.gy` upstream would make
+ *   authentication cross-site and the cookie rail unusable. Next proxies the
+ *   `/api/v1/*` transport path to that upstream server-side instead.
+ * - a production build requires both exact origins: `NEXT_PUBLIC_API_URL` is
+ *   the browser-visible, same-site transport origin; server-only `API_URL` is
+ *   the exact upstream. Neither has a release fallback.
+ * - the CSP permits only the browser transport (`'self'`) in production,
+ *   never a scheme wildcard or direct upstream connection.
  *
- * The Codex candidate this integrates pinned the release origin to a literal
- * hostname under a different domain than the site's own domain file names,
- * so the literal is replaced by the derivation. Its sandbox evidence-build machinery
- * is not carried: CI type-checks and builds the real tree on every PR.
+ * The public-site and API domains intentionally differ.  Their relationship is
+ * asserted by release-contract tests rather than inferred by string surgery.
  */
+import { SITE_ORIGIN } from '../site.domain';
+
 export const DEVELOPMENT_BROWSER_API_ORIGIN = 'http://localhost:3000';
-export const RELEASE_BROWSER_API_ORIGIN = `https://api.${SITE_DOMAIN}` as const;
+/** Browser-visible API transport. Production cookies remain same-site here. */
+export const RELEASE_BROWSER_API_ORIGIN = SITE_ORIGIN;
+/** Server-only rewrite target. This is not a browser cookie transport. */
+export const RELEASE_UPSTREAM_API_ORIGIN = 'https://api.swift.gy' as const;
 
 export type BrowserApiMode = 'development' | 'production';
 
@@ -35,22 +40,24 @@ declare global {
   namespace NodeJS {
     interface ProcessEnv {
       NEXT_PUBLIC_API_URL?: string;
+      API_URL?: string;
     }
   }
 }
 /* eslint-enable no-unused-vars */
 
 const CONFIGURED_BROWSER_API_ORIGIN = process.env.NEXT_PUBLIC_API_URL;
+const CONFIGURED_UPSTREAM_API_ORIGIN = process.env.API_URL;
 
-function assertOriginOnly(value: string): void {
+function assertOriginOnly(value: string, envName: 'NEXT_PUBLIC_API_URL' | 'API_URL'): void {
   if (value !== value.trim() || value.length === 0) {
-    throw new Error('NEXT_PUBLIC_API_URL must be an exact absolute origin');
+    throw new Error(`${envName} must be an exact absolute origin`);
   }
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    throw new Error('NEXT_PUBLIC_API_URL must be an exact absolute origin');
+    throw new Error(`${envName} must be an exact absolute origin`);
   }
   if (
     parsed.username
@@ -60,7 +67,7 @@ function assertOriginOnly(value: string): void {
     || parsed.hash
     || parsed.origin !== value
   ) {
-    throw new Error('NEXT_PUBLIC_API_URL must not contain credentials, a path, query, fragment, or normalized port');
+    throw new Error(`${envName} must not contain credentials, a path, query, fragment, or normalized port`);
   }
 }
 
@@ -74,7 +81,7 @@ export function resolveBrowserApiOrigin(
   if (configuredOrigin === undefined) {
     throw new Error(`NEXT_PUBLIC_API_URL is required for a production web build (expected ${RELEASE_BROWSER_API_ORIGIN})`);
   }
-  assertOriginOnly(configuredOrigin);
+  assertOriginOnly(configuredOrigin, 'NEXT_PUBLIC_API_URL');
   const expected = mode === 'production'
     ? RELEASE_BROWSER_API_ORIGIN
     : DEVELOPMENT_BROWSER_API_ORIGIN;
@@ -84,9 +91,42 @@ export function resolveBrowserApiOrigin(
   return expected;
 }
 
+export function resolveUpstreamApiOrigin(
+  mode: BrowserApiMode,
+  configuredOrigin: string | undefined,
+): string {
+  if (mode === 'development' && configuredOrigin === undefined) {
+    return DEVELOPMENT_BROWSER_API_ORIGIN;
+  }
+  if (configuredOrigin === undefined) {
+    throw new Error(`API_URL is required for a production web build (expected ${RELEASE_UPSTREAM_API_ORIGIN})`);
+  }
+  assertOriginOnly(configuredOrigin, 'API_URL');
+  const expected = mode === 'production'
+    ? RELEASE_UPSTREAM_API_ORIGIN
+    : DEVELOPMENT_BROWSER_API_ORIGIN;
+  if (configuredOrigin !== expected) {
+    throw new Error(`API_URL must be exactly ${expected} in ${mode}`);
+  }
+  return expected;
+}
+
+/**
+ * Resolve the origin used by server-rendered web fetchers. This deliberately
+ * shares the upstream validator with Next's rewrite configuration, but picks
+ * its mode from the server runtime rather than a browser-build phase:
+ * development (and tests) may use the local API by default; production cannot
+ * silently call localhost or the public browser transport.
+ */
+export function resolveServerUpstreamApiOrigin(
+  env: Pick<NodeJS.ProcessEnv, 'NODE_ENV' | 'API_URL'> = process.env,
+): string {
+  return resolveUpstreamApiOrigin(env.NODE_ENV === 'production' ? 'production' : 'development', env.API_URL);
+}
+
 export function buildBrowserContentSecurityPolicy(mode: BrowserApiMode): string {
   const connectSources = mode === 'production'
-    ? ["'self'", RELEASE_BROWSER_API_ORIGIN, RELEASE_BROWSER_API_ORIGIN.replace('https://', 'wss://')]
+    ? ["'self'"]
     : ["'self'", DEVELOPMENT_BROWSER_API_ORIGIN, 'ws://localhost:3000', 'ws://localhost:3002'];
   // [W-42] The legal pages inject document HTML. Nothing a script can reach
   // survives the legal grammar (src/legal/legal-html.ts), and the CSP shrinks
@@ -113,6 +153,10 @@ export function buildBrowserContentSecurityPolicy(mode: BrowserApiMode): string 
 
 export function resolveConfiguredBrowserApiOrigin(mode: BrowserApiMode): string {
   return resolveBrowserApiOrigin(mode, CONFIGURED_BROWSER_API_ORIGIN);
+}
+
+export function resolveConfiguredUpstreamApiOrigin(mode: BrowserApiMode): string {
+  return resolveUpstreamApiOrigin(mode, CONFIGURED_UPSTREAM_API_ORIGIN);
 }
 
 // next.config validates the mode and injects the exact value into every client
