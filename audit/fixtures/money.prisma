@@ -1,0 +1,9 @@
+model UnsafeMoneyFixture {
+  id String @id
+
+  // ruleid: swift-float-money-prisma
+  totalAmount Float
+
+  // ruleid: swift-decimal-money-prisma
+  payoutBalance Decimal
+}
