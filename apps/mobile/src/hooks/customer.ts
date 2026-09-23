@@ -781,3 +781,17 @@ export function useDecideSubstitution(orderId: string) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['order', orderId] }),
   });
 }
+
+/** [ORDER-SPINE S1-6] Tell Swift what happened to a direct-MMG payment. The
+ *  order is refetched whatever the outcome — a timeout can mean it landed. */
+export function useClaimMmgPayment() {
+  const qc = useQueryClient();
+  // [R4 · F-PR1262-SOL-01] The order is part of the claim, never the render's
+  // closure: a screen React Navigation reuses for another order cannot send
+  // order A's confirmation to order B.
+  return useMutation({
+    mutationFn: ({ orderId, paid, reference }: { orderId: string; paid: boolean; reference?: string }) =>
+      customerApi.claimOrderPayment(orderId, { paid, ...(reference ? { reference } : {}) }),
+    onSettled: (_data, _error, { orderId }) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
+  });
+}
