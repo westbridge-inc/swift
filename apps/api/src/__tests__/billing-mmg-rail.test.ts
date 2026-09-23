@@ -171,18 +171,18 @@ describe('MMG charge lifecycle', () => {
     expect(payments[0]!.status).toBe('CAPTURED');
   });
 
-  it('a request ignored for >24h expires into the normal dunning path', async () => {
+  it.each(['pending', 'expired'] as const)('an aged request obeys provider %s truth instead of local TTL', async outcome => {
     const due = new Date(Date.now() - 60_000);
     const { subId } = await makeMoverWithMmgSub({ due, msisdn: '6091162' });
 
-    // A stale pending row whose sandbox lookup stays pending forever.
+    // Local age does not settle provider authority in either direction.
     await app.prisma.subscriptionPayment.create({
       data: {
         subscriptionId: subId,
         amount: 12000,
         status: 'PENDING',
         paymentMethod: 'MOBILE_MONEY',
-        externalRef: `mmgtx_pending_${nanoid(8)}`,
+        externalRef: `mmgtx_${outcome}_${nanoid(8)}`,
         periodStart: due,
         periodEnd: new Date(due.getTime() + 7 * DAY),
         createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
@@ -190,17 +190,15 @@ describe('MMG charge lifecycle', () => {
     });
 
     const polled = await billing.pollPendingMmgCharges();
-    expect(polled.failed).toBeGreaterThanOrEqual(1);
+    if (outcome === 'expired') expect(polled.failed).toBeGreaterThanOrEqual(1);
+    else expect(polled.stillPending).toBeGreaterThanOrEqual(1);
 
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-    expect(after.status).toBe('PAST_DUE'); // dunning, not silence
-    expect(after.failedAttempts).toBe(1);
+    expect(after.status).toBe(outcome === 'expired' ? 'PAST_DUE' : 'ACTIVE');
+    expect(after.failedAttempts).toBe(outcome === 'expired' ? 1 : 0);
     const payment = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } });
-    // The intent machine labels a timed-out request EXPIRED (distinct from a
-    // provider decline's FAILED) — same dunning consequences, sharper truth,
-    // and a normalized code the ladder can branch on.
-    expect(payment.status).toBe('EXPIRED');
-    expect(payment.failureCode).toBe('REQUEST_EXPIRED');
+    expect(payment.status).toBe(outcome === 'expired' ? 'EXPIRED' : 'PENDING');
+    expect(payment.failureCode).toBe(outcome === 'expired' ? 'REQUEST_EXPIRED' : null);
   });
 
   it('a fresh still-pending request is left alone', async () => {

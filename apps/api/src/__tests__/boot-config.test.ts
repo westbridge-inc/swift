@@ -25,6 +25,7 @@ const good: Record<string, string | undefined> = {
   MMG_PASSWORD: 'mmg-password',
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
+  MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
 };
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
@@ -84,6 +85,8 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: undefined })).toThrow(/MMG_DRIVER/);
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
     expect(() => assertSafeBootConfig({ ...good, MMG_MSECRET: undefined })).toThrow(/MMG_MSECRET/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: 'yes' })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
     expect(() => assertSafeBootConfig({ ...good, MMG_API_URL: 'https://mwallet.mmgtest.net/olive/publisher/v1' })).toThrow(/non-UAT/);
   });
 

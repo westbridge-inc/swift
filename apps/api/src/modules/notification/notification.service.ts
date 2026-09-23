@@ -147,27 +147,40 @@ export async function acknowledgeAlert(
  *  must not do is fail closed SILENTLY: a lookup that throws is an outage, and
  *  an outage that quietly redirects a tenant's pages away from that tenant's
  *  own responders is exactly the kind of thing nobody notices for months. */
-export async function tenantOfUser(prisma: PrismaClient, userId: string | null | undefined): Promise<string | null> {
-  if (!userId) return null;
+export async function tenantOfUser(prisma: PrismaClient, userId: string | null | undefined, requireResolved = false): Promise<string | null> {
+  if (!userId) {
+    if (requireResolved) throw new Error('admin page subject unavailable');
+    return null;
+  }
   const u = await prisma.user
     .findUnique({ where: { id: userId }, select: { tenantId: true } })
     .catch((err) => {
+      if (requireResolved) throw err;
       log().error({ err, userId }, '[F-027-20] could not resolve a tenant for an admin page — it will reach PLATFORM OPERATORS ONLY, not this subject’s own admins');
       return null;
     });
+  if (!u && requireResolved) throw new Error('admin page subject unavailable');
   return u?.tenantId ?? null;
 }
 
 /** Same idea for billing: a Subscription carries no tenantId of its own — it
  *  inherits one from the actor it belongs to (rider, driver, or vendor owner).
  *  [NOC-A F45] */
-export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId: string | null | undefined): Promise<string | null> {
-  if (!subscriptionId) return null;
+export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId: string | null | undefined, requireResolved = false): Promise<string | null> {
+  if (!subscriptionId) {
+    if (requireResolved) throw new Error('admin page subscription unavailable');
+    return null;
+  }
   const sub = await prisma.subscription.findUnique({
     where: { id: subscriptionId },
     select: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } },
-  }).catch(() => null);
-  return tenantOfUser(prisma, sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null);
+  }).catch(err => {
+    if (requireResolved) throw err;
+    return null;
+  });
+  // Durable callers cannot acknowledge a platform-only fallback after a failed
+  // lookup. Only a successfully resolved user with tenantId=null is platform scoped.
+  return tenantOfUser(prisma, sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null, requireResolved);
 }
 
 export async function notifyAdmins(
@@ -175,7 +188,9 @@ export async function notifyAdmins(
   notifications: NotificationService,
   /** `tenantId` is REQUIRED — pass the subject's tenant, or an explicit
    *  `null` for a genuinely platform-wide notice. See the note below. */
-  input: { title: string; body: string; data?: Record<string, unknown>; tenantId: string | null },
+  input: { title: string; body: string; data?: Record<string, unknown>; tenantId: string | null;
+    /** Durable callers pass the committed event's key; existing callers are unchanged. */
+    dedupeKey?: string; requireAll?: boolean },
 ): Promise<number> {
   // [REPORT-014 F-014-03] Background workers carry no tenant ALS, so a
   // tenant-A event used to page tenant-B admins with A's order evidence.
@@ -244,6 +259,7 @@ export async function notifyAdmins(
       title: input.title,
       body: input.body,
       data: input.data,
+      dedupeKey: input.dedupeKey,
     });
     if (id) reached += 1;
   }
@@ -254,6 +270,9 @@ export async function notifyAdmins(
     await prisma.alertDelivery
       .createMany({ data: admins.map((a) => ({ kind: 'ADMIN_OPS', subjectId, recipientId: a.id })) })
       .catch(() => {});
+  }
+  if (input.requireAll && (admins.length === 0 || reached !== admins.length)) {
+    throw new Error('admin notice incomplete');
   }
   return reached;
 }

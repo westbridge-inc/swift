@@ -485,13 +485,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // past SUSPENSION_MAX_DAYS so dunning — and the daily MMG
           // re-request — never runs forever against a dead account.
           const swept = await billing.sweepSuspended();
+          const billingNotices = await billing.drainPendingNotices();
           // Trial first-payment funnel [san spec 21.4]: day-10 how-to-pay +
           // day-13 exact-amount education, each stage once per trial
           // (BillingEvent unique-key gate) — preloaded wallets make trial→
           // paid conversion seamless.
           const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
           const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, reminders, ...swept, trialEdu: edu }, 'Billing cycle complete');
+          ctx.log.info({ ...result, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
           const troubled = result.failed + result.errors + result.suspended;
@@ -528,6 +529,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // §13 MMG rail: settle in-flight merchant-initiated weekly-fee
           // requests (approved → period advances; declined/expired → dunning).
           const polled = await billing.pollPendingMmgCharges();
+          // The committed mismatch event survives a process crash between its
+          // authority transaction and its admin page. Polling also retries
+          // final churn/nudge notices after the source row leaves SUSPENDED.
+          const billingNotices = await billing.drainPendingNotices();
+          if (billingNotices.attempted > 0) ctx.log.info(billingNotices, 'Billing notices retried from committed events');
           if (polled.settled + polled.failed > 0) {
             ctx.log.info(polled, 'MMG billing poll settled pending charges');
           }
