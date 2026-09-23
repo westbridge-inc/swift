@@ -1,4 +1,5 @@
 import { runtimeMode } from './runtime-mode';
+import { firstInvalidTwilioConfig } from './twilio-identity';
 
 /**
  * Fail-closed boot configuration guard. Called before the server accepts
@@ -85,6 +86,13 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   const notifier = env['NOTIFICATION_PROVIDER'] ?? 'dev';
   if (notifier === 'dev') {
     throw new Error('FATAL: NOTIFICATION_PROVIDER is dev (console) in production — OTP SMS would never be delivered, so no one can sign up or log in. Set NOTIFICATION_PROVIDER=twilio with the TWILIO_* credentials. Refusing to start.');
+  }
+  if (notifier !== 'twilio') {
+    throw new Error('FATAL: NOTIFICATION_PROVIDER must be twilio in production. Refusing to start.');
+  }
+  const invalidTwilioField = firstInvalidTwilioConfig(env);
+  if (invalidTwilioField) {
+    throw new Error(`FATAL: ${invalidTwilioField} is missing or malformed when NOTIFICATION_PROVIDER=twilio. Refusing to start.`);
   }
 
   // [NOC-A F1/F2] The SAME trap, one door over, and it was unguarded: push
