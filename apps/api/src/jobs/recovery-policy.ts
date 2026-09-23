@@ -92,7 +92,6 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'incident-pattern-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'incident-sla-watch': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'incident-weekly-digest': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'liveness-midshift': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'mmg-link-apply': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'mover-revocation-outbox': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'offer-timeout': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -155,7 +154,6 @@ export type JobName =
   | 'incident-pattern-scan'
   | 'incident-sla-watch'
   | 'incident-weekly-digest'
-  | 'liveness-midshift'
   | 'mmg-link-apply'
   | 'mover-revocation-outbox'
   | 'offer-timeout'

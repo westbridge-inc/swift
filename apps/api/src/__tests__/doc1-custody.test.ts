@@ -43,9 +43,7 @@ let ownerId = '', adminId = '', adminToken = '', docId = '';
 const users: string[] = [];
 class SpyKyc implements KycProvider {
   readonly engine: KycEngine = { name: 'spy', version: 'custody-1', external: false };
-  async verifyIdentity(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `spy_${nanoid(6)}`, extracted: { documentNumber: SECRET } }; }
-  async verifyDocument(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `spy_${nanoid(6)}`, extracted: { documentNumber: SECRET } }; }
-  async getStatus(): Promise<'pending_manual'> { return 'pending_manual'; }
+  async verifyDocument(): Promise<KycVerificationResult> { return { referenceToken: `spy_${nanoid(6)}`, extracted: { documentNumber: SECRET } }; }
 }
 
 beforeAll(async () => {

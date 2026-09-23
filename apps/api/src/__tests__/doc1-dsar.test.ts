@@ -52,10 +52,7 @@ const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-dsar-test
 class SpyKyc implements KycProvider {
   readonly engine: KycEngine = { name: 'spy', version: 'test', external: false };
   extracted: Record<string, unknown> | undefined;
-  private result(): KycVerificationResult { return { status: 'pending_manual', referenceToken: `spy_${nanoid(6)}`, extracted: this.extracted as KycVerificationResult['extracted'] }; }
-  async verifyIdentity(): Promise<KycVerificationResult> { return this.result(); }
-  async verifyDocument(): Promise<KycVerificationResult> { return this.result(); }
-  async getStatus(): Promise<'pending_manual'> { return 'pending_manual'; }
+  async verifyDocument(): Promise<KycVerificationResult> { return { referenceToken: `spy_${nanoid(6)}`, extracted: this.extracted as KycVerificationResult['extracted'] }; }
 }
 const kyc = new SpyKyc();
 

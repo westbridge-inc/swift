@@ -6,8 +6,8 @@
  * never approve.
  *  - Extraction service down / hung: the submission is ACCEPTED and queued for a human
  *    (T6), the actor sees "received, under review", the run records the outage.
- *  - Model returns garbage: a circuit breaker per document type — schema-violation rate
- *    above 10% over the last 100 runs disables the model leg for that type (manual
+ *  - An engine returns garbage: a circuit breaker per document type — schema-violation rate
+ *    above 10% over the last 100 runs disables that engine for the type (manual
  *    keying), and alarms once.
  *  - Key service unreachable (production): no new intake, no approvals — never plaintext
  *    "temporarily". Existing verified actors keep operating on the materialised
@@ -33,15 +33,15 @@ export type DegradedResult = KycVerificationResult & { degraded?: string };
 
 /**
  * Call the extraction adapter with a hard bound. A throw or a hang is an OUTAGE, not a
- * verdict: the result is `pending_manual` tagged with the outage, so the submission
- * queues for a human and can never reach an approval.
+ * verdict: the result carries nothing but the outage tag, so the submission queues for a
+ * human like every other one (there is no approval path for it to reach).
  */
 export function extractWithLadder(
   call: () => Promise<KycVerificationResult>,
   opts: { timeoutMs?: number } = {},
 ): Promise<DegradedResult> {
   const timeoutMs = opts.timeoutMs ?? extractionTimeoutMs();
-  const degraded = (why: string): DegradedResult => ({ status: 'pending_manual', referenceToken: '', reason: why.slice(0, 120), degraded: EXTRACTION_UNAVAILABLE });
+  const degraded = (why: string): DegradedResult => ({ referenceToken: '', reason: why.slice(0, 120), degraded: EXTRACTION_UNAVAILABLE });
   // One settled promise, never a rejection: a hung adapter resolves to the outage at the bound,
   // a thrown one resolves to it at once, and a late answer after the bound is discarded.
   return new Promise<DegradedResult>((resolve) => {
@@ -73,5 +73,5 @@ export function assertKeyServiceForAccess(what: 'intake' | 'approval'): void {
 /** Something the ladder can observe: a provider whose next call throws or hangs (tests). */
 export function degradedProvider(base: KycProvider, mode: 'throw' | 'hang'): KycProvider {
   const fail = () => (mode === 'throw' ? Promise.reject(new Error('extraction service down')) : new Promise<never>(() => undefined));
-  return { ...base, engine: base.engine, verifyIdentity: () => fail(), verifyDocument: () => fail(), getStatus: base.getStatus.bind(base) };
+  return { ...base, engine: base.engine, verifyDocument: () => fail() };
 }

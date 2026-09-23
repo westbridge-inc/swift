@@ -57,22 +57,6 @@ export const CONTRACT_GATED_PAYLOADS: ReadonlySet<PayloadClass> = new Set([
 
 export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   {
-    ref: 'DIDIT', party: 'Didit', service: 'Identity verification: ID document image, selfie, liveness, OCR',
-    providerDirs: ['kyc'], hosts: ['verification.didit.me', 'didit.me'],
-    payload: ['PERSONAL_DOC_IMAGE', 'BIOMETRIC', 'IDENTITY_FIELDS'], lawfulBasis: 'LEGAL_OBLIGATION',
-    country: 'vendor-hosted (EU/US)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES',
-    contractEnv: 'PROCESSOR_CONTRACT_DIDIT',
-    note: 'KYC_PROVIDER=didit. Biometric operations additionally need FD-D5 (FEATURE_BIOMETRIC_FACE_MATCH).',
-  },
-  {
-    ref: 'ID_ANALYZER', party: 'ID Analyzer', service: 'Document OCR + biometric match',
-    providerDirs: ['kyc'], hosts: ['api2.idanalyzer.com', 'idanalyzer.com'],
-    payload: ['PERSONAL_DOC_IMAGE', 'BIOMETRIC', 'IDENTITY_FIELDS'], lawfulBasis: 'LEGAL_OBLIGATION',
-    country: 'vendor-hosted (US)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES',
-    contractEnv: 'PROCESSOR_CONTRACT_ID_ANALYZER',
-    note: 'KYC_PROVIDER=id-analyzer. Same gate as Didit.',
-  },
-  {
     ref: 'OBJECT_STORE', party: 'Cloudflare R2 / AWS S3 (S3-compatible endpoint)', service: 'Object storage for uploaded documents',
     providerDirs: ['storage'], hosts: ['r2.cloudflarestorage.com', 'amazonaws.com'],
     payload: ['PERSONAL_DOC_CIPHERTEXT'], lawfulBasis: 'CONTRACT',
@@ -165,6 +149,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
 
 /** Provider directories that are not a processor, with the reason the census accepts. */
 export const NON_PROCESSOR_DIRS: Readonly<Record<string, string>> = {
+  kyc: 'Manual review on Swift infrastructure (ManualReviewKycProvider): no network call, no document leaves. The model-backed identity adapters were removed under the owner rule of 2026-09-07 (no AI).',
   prescreen: 'in-process heuristics (HeuristicAdPreScreenProvider); no network call',
 };
 

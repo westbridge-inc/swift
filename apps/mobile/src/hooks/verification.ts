@@ -135,11 +135,11 @@ export function useUploadFile() {
   });
 }
 
-/** Consumer L2: submit a government ID + selfie (manual KYC review). */
+/** Consumer L2: submit a government ID for human review. */
 export function useSubmitIdentity() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (data: { idDocumentUrl: string; selfieUrl: string }) => {
+    mutationFn: async (data: { idDocumentUrl: string }) => {
       const owner = requireAuthSessionSnapshot();
       const result = await unwrap(verificationApi.submitIdentity(
         { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION },

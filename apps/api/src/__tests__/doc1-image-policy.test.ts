@@ -20,7 +20,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { seedDocRegistry, registryCode, IMAGE_POLICY_OF_BUCKET, reconcileImagePolicy } from '../modules/verification/doc-registry';
 import { applyImagePolicy } from '../modules/verification/image-policy';
 import { documentRecordDdl } from '../modules/verification/document-record';
@@ -82,7 +82,7 @@ beforeAll(async () => {
   await app.ready();
   const tables = ['subject', 'subject_link', 'person_profile', 'business_profile', 'vehicle_profile', 'document_record'];
   await installDdl(app.prisma, [...tables.flatMap((t) => rlsDdlFor(t)), ...tenantLineageDdl().filter((s) => tables.some((t) => s.includes(`${t}_tenant_matches`))), ...docStateMachineDdl(), ...documentRecordDdl()]);
-  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   await system(() => seedDocRegistry(app.prisma));
 });
 

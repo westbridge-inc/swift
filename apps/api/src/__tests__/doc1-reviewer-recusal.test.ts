@@ -40,9 +40,7 @@ let clusterId = '';
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-reviewer-recusal-test');
 
 class ManualKyc implements KycProvider {
-  async verifyIdentity(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `m_${nanoid(6)}` }; }
-  async verifyDocument(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `m_${nanoid(6)}` }; }
-  async getStatus(): Promise<'pending_manual'> { return 'pending_manual'; }
+  async verifyDocument(): Promise<KycVerificationResult> { return { referenceToken: `m_${nanoid(6)}` }; }
 }
 
 async function admin(n: number) {

@@ -22,8 +22,7 @@ const good: Record<string, string | undefined> = {
   TWILIO_FROM: '+15550000000',
   PUSH_PROVIDER: 'expo',
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
-  KYC_PROVIDER: 'didit',
-  DIDIT_API_KEY: 'didit-live-key',
+  KYC_PROVIDER: 'manual',
   PAYMENT_PROVIDER: 'stripe',
   STRIPE_SECRET_KEY: 'sk_live_boot_config_test',
   MMG_DRIVER: 'live',
@@ -95,11 +94,29 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, JWT_SECRET: undefined, OTP_HASH_SECRET: 'dedicated-otp-secret-at-least-32-chars' })).not.toThrow();
   });
 
-  it('refuses sandbox or unconfigured KYC in production', () => {
-    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: undefined })).toThrow(/KYC_PROVIDER/);
-    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'sandbox' })).toThrow(/KYC_PROVIDER/);
-    expect(() => assertSafeBootConfig({ ...good, DIDIT_API_KEY: undefined })).toThrow(/DIDIT_API_KEY/);
-    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'idanalyzer', ID_ANALYZER_API_KEY: undefined })).toThrow(/ID_ANALYZER_API_KEY/);
+  it('[NO-AI] refuses every KYC_PROVIDER but manual — the removed providers, the sandbox, unset — in production and everywhere else', () => {
+    // The removed provider names are built from fragments so no source file carries them.
+    const removed = [['di', 'dit'].join(''), ['id', 'analyzer'].join('')];
+    for (const provider of [undefined, '', 'sandbox', 'MANUAL', ...removed]) {
+      expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: provider }), `production/${provider}`).toThrow(/KYC_PROVIDER must be 'manual'/);
+      for (const mode of ['development', 'test', 'loadtest']) {
+        expect(() => assertSafeBootConfig({ NODE_ENV: mode, KYC_PROVIDER: provider }), `${mode}/${provider}`).toThrow(/KYC_PROVIDER must be 'manual'/);
+      }
+    }
+    // The refusal names the value it saw, never a provider that could be selected instead.
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'sandbox' })).toThrow(/got "sandbox"\. No other identity provider exists/);
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: undefined })).toThrow(/got unset/);
+  });
+
+  it('[NO-AI] refuses the two dead face-match switches in every environment; unset or 0 is fine', () => {
+    for (const removed of ['FEATURE_BIOMETRIC_FACE_MATCH', 'LIVENESS_REQUIRED']) {
+      expect(() => assertSafeBootConfig({ ...good, [removed]: '1' }), removed).toThrow(`${removed}=1 has no implementation`);
+      for (const mode of ['development', 'test', 'loadtest']) {
+        expect(() => assertSafeBootConfig({ NODE_ENV: mode, KYC_PROVIDER: 'manual', [removed]: '1' }), `${mode}/${removed}`).toThrow(/no face matching and no selfie identity checks/);
+        expect(() => assertSafeBootConfig({ NODE_ENV: mode, KYC_PROVIDER: 'manual', [removed]: '0' }), `${mode}/${removed}=0`).not.toThrow();
+        expect(() => assertSafeBootConfig({ NODE_ENV: mode, KYC_PROVIDER: 'manual', [removed]: '' }), `${mode}/${removed}=`).not.toThrow();
+      }
+    }
   });
 
   it('refuses sandbox/test subscription card processors in production', () => {
@@ -221,10 +238,12 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, NODE_ENV: 'prod', MASTER_KEK: undefined })).toThrow(/NODE_ENV/);
   });
 
-  it('does NOT enforce any of this outside production (dev/test/loadtest boot freely)', () => {
-    expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
-    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();
-    expect(() => assertSafeBootConfig({ NODE_ENV: 'test', DEV_OTP_BYPASS: '1' })).not.toThrow();
+  it('does NOT enforce the production secrets outside production (dev/test/loadtest boot freely); only the no-AI rule applies everywhere', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', KYC_PROVIDER: 'manual' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest', KYC_PROVIDER: 'manual' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'test', KYC_PROVIDER: 'manual', DEV_OTP_BYPASS: '1' })).not.toThrow();
+    // …and a non-production boot with no provider named is the one thing that is NOT free.
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).toThrow(/KYC_PROVIDER must be 'manual'/);
   });
 });
 

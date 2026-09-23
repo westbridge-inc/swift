@@ -9,13 +9,14 @@ import { socketPlugin } from '../plugins/socket';
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { LivenessService, assertShiftLiveness } from '../modules/safety/liveness.service';
+import { JOB_RECOVERY } from '../jobs/recovery-policy';
 import { syntheticLocationOwner } from './helpers/online-mover';
 
-// Identity Assurance M5b — §7.2 random mid-shift checks + §7.3 "this isn't
-// my driver". The mid-shift prompt/deadline is DB state enforced by a CAS
-// sweep (restart-proof); the report is the account-sharing kill shot: one tap
-// releases the ride, LOCKS the driver (a lock holds even with the liveness
-// flag off — it is a safety action, not a feature cost), and pages ops.
+// Identity Assurance M5b — [NO-AI] §7.2 random mid-shift checks are GONE (they
+// were a face comparison run by the removed identity provider) and §7.3 "this
+// is not my driver" stays: the report is the account-sharing kill shot — one
+// tap releases the ride, LOCKS the driver (the one identity gate left; a safety
+// action, never a feature cost), and pages ops.
 
 let app: FastifyInstance;
 const userIds: string[] = [];
@@ -87,7 +88,6 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
-  delete process.env['LIVENESS_REQUIRED'];
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin);
@@ -99,8 +99,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  delete process.env['LIVENESS_REQUIRED'];
-  delete process.env['LIVENESS_MIDSHIFT_PER_WEEK'];
   await app.prisma.incidentCase.deleteMany({ where: { subjectUserId: { in: userIds } } });
   await app.prisma.livenessCheck.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
@@ -112,59 +110,15 @@ afterAll(async () => {
   await app.close();
 });
 
-describe('§7.2 random mid-shift checks', () => {
-  it('dormant with the flag off — nobody is prompted, nobody enforced', async () => {
-    delete process.env['LIVENESS_REQUIRED'];
-    const { driver } = await makeDriver({ livenessPromptDeadlineAt: new Date(Date.now() - 60_000) });
-    expect(await svc().midshiftSweep()).toEqual({ prompted: 0, enforced: 0 });
-    expect((await driverRow(driver.id)).isOnline).toBe(true); // even an expired prompt is not enforced while off
-  });
-
-  it('prompts idle online movers (never mid-trip, never locked) and stamps a DB deadline', async () => {
-    process.env['LIVENESS_REQUIRED'] = '1';
-    process.env['LIVENESS_MIDSHIFT_PER_WEEK'] = '10000000'; // p = 1: selection is deterministic
-    try {
-      const idle = await makeDriver();
-      const busy = await makeDriver({ currentRideId: 'ride-busy' });
-      const locked = await makeDriver({ livenessLockedAt: new Date() });
-      await svc().midshiftSweep(new Date(), 300_000);
-
-      expect((await driverRow(idle.driver.id)).livenessPromptDeadlineAt).not.toBeNull();
-      expect((await driverRow(busy.driver.id)).livenessPromptDeadlineAt).toBeNull(); // §7.2: never while a trip is in progress
-      expect((await driverRow(locked.driver.id)).livenessPromptDeadlineAt).toBeNull();
-      const prompt = await app.prisma.notification.findFirst({ where: { userId: idle.userId, type: 'SAFETY', title: 'Safety check-in' } });
-      expect(prompt).not.toBeNull();
-
-      // A passing check ANSWERS the prompt — deadline cleared.
-      await svc().check({ userId: idle.userId, profile: 'DRIVER', selfieUrl: 'https://cdn.test/liveness/auto-approve.jpg' });
-      expect((await driverRow(idle.driver.id)).livenessPromptDeadlineAt).toBeNull();
-    } finally {
-      delete process.env['LIVENESS_REQUIRED'];
-      delete process.env['LIVENESS_MIDSHIFT_PER_WEEK'];
-    }
-  });
-
-  it('a missed deadline forces the mover offline until a fresh PASS (rider side)', async () => {
-    process.env['LIVENESS_REQUIRED'] = '1';
-    process.env['LIVENESS_MIDSHIFT_PER_WEEK'] = '0.0000001'; // selection ~never; this tick only enforces
-    try {
-      const r = await makeRider({
-        lastLivenessPassAt: new Date(), // was fresh — missing the prompt still voids it
-        livenessPromptDeadlineAt: new Date(Date.now() - 60_000),
-      });
-      const res = await svc().midshiftSweep(new Date(), 300_000);
-      expect(res.enforced).toBeGreaterThanOrEqual(1);
-      const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.rider.id } });
-      expect(after.isOnline).toBe(false);
-      expect(after.isAvailable).toBe(false);
-      expect(after.lastLivenessPassAt).toBeNull(); // must PASS again to return
-      expect(after.livenessPromptDeadlineAt).toBeNull();
-      const note = await app.prisma.notification.findFirst({ where: { userId: r.userId, title: 'Identity check missed' } });
-      expect(note).not.toBeNull();
-    } finally {
-      delete process.env['LIVENESS_REQUIRED'];
-      delete process.env['LIVENESS_MIDSHIFT_PER_WEEK'];
-    }
+describe('[NO-AI] §7.2 random mid-shift checks are gone', () => {
+  it('no sweep exists: a stale prompt deadline on a row is inert — nobody is prompted, nobody is forced offline, and no job drives it', async () => {
+    const { driver, userId } = await makeDriver({ livenessPromptDeadlineAt: new Date(Date.now() - 60_000) });
+    const svc = new LivenessService(app.prisma, app.io) as unknown as Record<string, unknown>;
+    expect(svc['midshiftSweep']).toBeUndefined();
+    expect(svc['check']).toBeUndefined();
+    expect((await driverRow(driver.id)).isOnline).toBe(true);
+    expect(await app.prisma.notification.count({ where: { userId, type: 'SAFETY' } })).toBe(0);
+    expect(Object.keys(JOB_RECOVERY).filter((k) => /liveness/i.test(k))).toEqual([]);
   });
 });
 
@@ -193,8 +147,7 @@ describe('§7.3 "this isn\'t my driver"', () => {
     expect(driver.livenessLockedAt).not.toBeNull(); // the kill shot
     expect(driver.isOnline).toBe(false);
     expect(driver.currentRideId).toBeNull();
-    // The lock holds even with the liveness feature OFF.
-    delete process.env['LIVENESS_REQUIRED'];
+    // The lock is the one identity gate left, and it holds.
     expect(() => assertShiftLiveness(driver)).toThrow(/contact support/i);
 
     const log = await app.prisma.orderStatusLog.findFirst({ where: { orderId: ride.id, changedBy: 'system:not-my-driver' } });

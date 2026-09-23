@@ -25,7 +25,7 @@ import { VerificationService } from '../modules/verification/verification.servic
 import { NotificationService } from '../modules/notification/notification.service';
 import { AccountService } from '../modules/user/account.service';
 import { alertOverdueDocLegalHolds, placeDocLegalHold } from '../modules/verification/legal-hold';
-import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
@@ -73,7 +73,7 @@ beforeAll(async () => {
   await adminApp.register(prismaPlugin); await adminApp.register(redisPlugin); await adminApp.register(authPlugin); await adminApp.register(socketPlugin);
   await adminApp.register(adminRoutes, { prefix: '/api/v1/admin' });
   await adminApp.ready();
-  verification = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  verification = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   const admin = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59273${NUM}9`, firstName: 'Hold', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
     admin: { create: { permissions: ['*'] } },

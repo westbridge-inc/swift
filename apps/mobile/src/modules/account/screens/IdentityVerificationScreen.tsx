@@ -44,12 +44,11 @@ export function IdentityVerificationScreen({ navigation }: any) {
   const upload = useUploadFile();
   const submit = useSubmitIdentity();
   const [idUrl, setIdUrl] = useState<string | undefined>(undefined);
-  const [selfieUrl, setSelfieUrl] = useState<string | undefined>(undefined);
-  const [picking, setPicking] = useState<'id' | 'selfie' | null>(null);
+  const [picking, setPicking] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [permErr, setPermErr] = useState<string | null>(null);
 
-  const pick = async (kind: 'id' | 'selfie') => {
+  const pick = async () => {
     try {
       const owner = requireAuthSessionSnapshot();
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -65,21 +64,20 @@ export function IdentityVerificationScreen({ navigation }: any) {
       requireAuthSessionForPrincipal(owner);
       if (res.canceled || !res.assets?.[0]) return;
       const a = res.assets[0];
-      setPicking(kind);
+      setPicking(true);
       const url = await upload.mutateAsync({
         uri: a.uri,
-        name: a.fileName ?? `${kind}.jpg`,
+        name: a.fileName ?? 'identity.jpg',
         type: a.mimeType ?? 'image/jpeg',
         authSession: owner,
       });
       requireAuthSessionForPrincipal(owner);
-      if (kind === 'id') setIdUrl(url);
-      else setSelfieUrl(url);
+      setIdUrl(url);
     } catch (pickError) {
       if (pickError instanceof AuthSessionBoundaryError) return;
       // surfaced below
     } finally {
-      setPicking(null);
+      setPicking(false);
     }
   };
 
@@ -110,10 +108,9 @@ export function IdentityVerificationScreen({ navigation }: any) {
       </View>
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
-          A one-time check, required for larger cash orders and rides. Upload a government ID and a selfie — verify once and the limit is gone.
+          A one-time check, required for larger cash orders and rides. Upload a government ID for a person to review.
         </T>
-        <UploadRow title="Government ID" done={!!idUrl} busy={picking === 'id'} onPress={() => pick('id')} />
-        <UploadRow title="Selfie" done={!!selfieUrl} busy={picking === 'selfie'} onPress={() => pick('selfie')} />
+        <UploadRow title="Government ID" done={!!idUrl} busy={picking} onPress={pick} />
 
         {/* [WR-027] The catch above says "surfaced below" — this is that
             surface. Only the submit error rendered; a failed photo UPLOAD was
@@ -124,12 +121,12 @@ export function IdentityVerificationScreen({ navigation }: any) {
 
         {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
-          label={!idUrl ? 'Upload your ID first' : !selfieUrl ? 'Add your selfie' : 'Submit for verification'}
+          label={!idUrl ? 'Upload your ID first' : 'Submit for review'}
           loading={submit.isPending}
           style={{ marginTop: space.lg }}
-          disabled={!idUrl || !selfieUrl}
+          disabled={!idUrl}
           onPress={() =>
-            submit.mutate({ idDocumentUrl: idUrl as string, selfieUrl: selfieUrl as string }, { onSuccess: () => setSubmitted(true) })
+            submit.mutate({ idDocumentUrl: idUrl as string }, { onSuccess: () => setSubmitted(true) })
           }
         />
         <T variant="micro" tone="muted" center style={{ marginTop: space.md }}>

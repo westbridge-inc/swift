@@ -16,7 +16,27 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.
-  if (runtimeMode(env) !== 'production') return;
+  const mode = runtimeMode(env);
+
+  // [NO-AI · owner rule 2026-09-07] Identity and document verification is HUMAN
+  // review only, in EVERY environment. The model-backed providers and the
+  // self-approving sandbox are deleted, so `manual` is not the safe choice among
+  // several: it is the only implementation that exists. Anything else is a
+  // configuration with nothing behind it, and boot says so rather than falling
+  // through to a default that used to approve people.
+  const kycProvider = env['KYC_PROVIDER'];
+  if (kycProvider !== 'manual') {
+    throw new Error(`FATAL: KYC_PROVIDER must be 'manual' (human review) in every environment; got ${kycProvider === undefined ? 'unset' : JSON.stringify(kycProvider)}. No other identity provider exists. Refusing to start.`);
+  }
+  // The two switches that once enabled a face comparison went with it. A set
+  // switch is an operator believing something runs that does not: refused.
+  for (const removed of ['FEATURE_BIOMETRIC_FACE_MATCH', 'LIVENESS_REQUIRED'] as const) {
+    if (env[removed] === '1') {
+      throw new Error(`FATAL: ${removed}=1 has no implementation — Swift performs no face matching and no selfie identity checks. Unset it. Refusing to start.`);
+    }
+  }
+
+  if (mode !== 'production') return;
 
   if (env['DEV_OTP_BYPASS'] === '1') {
     throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
@@ -28,22 +48,6 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   const otpHashSecret = env['OTP_HASH_SECRET'] ?? env['JWT_SECRET'];
   if (!otpHashSecret || otpHashSecret.length < 32) {
     throw new Error('FATAL: OTP_HASH_SECRET or JWT_SECRET must be at least 32 characters in production — OTP records require a keyed HMAC. Refusing to start.');
-  }
-
-  // Identity must never silently select the deterministic test adapter. Its
-  // marker URLs can approve a user, so a missing production variable is a
-  // security failure, not a reasonable default.
-  const kycProvider = env['KYC_PROVIDER'];
-  // [FD-DOC-3b (b) · 2026-09-07] `manual` = on-shore human review; it approves nothing, so it is
-  // as safe as a real provider here. `sandbox` self-approves and stays forbidden.
-  if (kycProvider !== 'didit' && kycProvider !== 'idanalyzer' && kycProvider !== 'manual') {
-    throw new Error('FATAL: KYC_PROVIDER must be didit, idanalyzer or manual in production; sandbox/unset can self-approve test identities. Refusing to start.');
-  }
-  if (kycProvider === 'didit' && !env['DIDIT_API_KEY']) {
-    throw new Error('FATAL: DIDIT_API_KEY is required when KYC_PROVIDER=didit. Refusing to start.');
-  }
-  if (kycProvider === 'idanalyzer' && !env['ID_ANALYZER_API_KEY']) {
-    throw new Error('FATAL: ID_ANALYZER_API_KEY is required when KYC_PROVIDER=idanalyzer. Refusing to start.');
   }
 
   // Subscription charges are real platform revenue. The sandbox succeeds for

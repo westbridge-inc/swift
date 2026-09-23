@@ -25,7 +25,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider, type KycProvider, type KycVerificationResult } from '../providers/kyc/kyc-provider';
 import { seedDocRegistry } from '../modules/verification/doc-registry';
 import { DOC_STATES, DOC_TRANSITIONS, DOC_STATE_MIGRATION_HEADER, LEGACY_STATUS_OF, docStateMachineDdl, isTransitionAllowed } from '../modules/verification/doc-state';
 import { installDdl } from './helpers/install-ddl';
@@ -37,6 +37,9 @@ const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
 const REASON = `Decision ${RUN}: the document was reviewed against the checklist`;
 const MIGRATION = join(__dirname, '..', '..', 'prisma', 'migrations', '20260906090000_doc_state_machine', 'migration.sql');
+const HUMAN_ONLY_MIGRATION = join(__dirname, '..', '..', 'prisma', 'migrations', '20260923170000_no_automatic_kyc_transitions', 'migration.sql');
+/** [NO-AI] The three automatic-decision rows the EXPAND migration seeded and the human-only migration deletes. */
+const REMOVED_PAIRS = [['CAPTURED', 'REJECTED'], ['VALIDATED', 'AUTO_APPROVED'], ['VALIDATED', 'REJECTED']] as const;
 
 let app: FastifyInstance;
 let adminApp: FastifyInstance;
@@ -87,7 +90,7 @@ beforeAll(async () => {
   await adminApp.register(prismaPlugin); await adminApp.register(redisPlugin); await adminApp.register(authPlugin); await adminApp.register(socketPlugin);
   await adminApp.register(adminRoutes, { prefix: '/api/v1/admin' });
   await adminApp.ready();
-  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   await system(() => seedDocRegistry(app.prisma));
   const a = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59279${NUM}0`, firstName: 'State', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
@@ -113,7 +116,7 @@ afterAll(async () => {
 });
 
 describe('[DOC-1 P5-1] the transition table is ONE table', () => {
-  it('the database rows are exactly DOC_TRANSITIONS, LEGAL_HOLD is never a stored state, and the migration mirrors the generator verbatim', async () => {
+  it('the database rows are exactly DOC_TRANSITIONS, the latest migration mirrors the generator verbatim, and no automatic decision transition remains', async () => {
     const rows = await system(() => app.prisma.docStateTransition.findMany());
     const key = (t: { fromState: string; toState: string; event: string }) => `${t.fromState}>${t.toState}:${t.event}`;
     expect(new Set(rows.map(key))).toEqual(new Set(DOC_TRANSITIONS.map((t) => key({ fromState: t.from, toState: t.to, event: t.event }))));
@@ -122,15 +125,31 @@ describe('[DOC-1 P5-1] the transition table is ONE table', () => {
     expect(DOC_TRANSITIONS.some((t) => t.from === 'LEGAL_HOLD' || t.to === 'LEGAL_HOLD')).toBe(false);
     expect(DOC_TRANSITIONS.some((t) => t.from === 'PURGED')).toBe(false);
     // The spec's named rows are present …
-    for (const [from, to] of [['CAPTURED', 'PREPROCESSED'], ['EXTRACTED', 'VALIDATED'], ['VALIDATED', 'AUTO_APPROVED'], ['REVIEW_QUEUED', 'IN_REVIEW'], ['IN_REVIEW', 'APPROVED'], ['APPROVED', 'COMMITTED'], ['COMMITTED', 'EXPIRED'], ['COMMITTED', 'REVOKED'], ['REJECTED', 'PURGED']] as const) {
+    for (const [from, to] of [['CAPTURED', 'PREPROCESSED'], ['EXTRACTED', 'VALIDATED'], ['VALIDATED', 'REVIEW_QUEUED'], ['REVIEW_QUEUED', 'IN_REVIEW'], ['IN_REVIEW', 'APPROVED'], ['APPROVED', 'COMMITTED'], ['COMMITTED', 'EXPIRED'], ['COMMITTED', 'REVOKED'], ['REJECTED', 'PURGED']] as const) {
       expect(isTransitionAllowed(from, to)).toBe(true);
     }
     // … and §5.2's illegal pairs are absent.
     expect(isTransitionAllowed('EXTRACTED', 'APPROVED')).toBe(false);
     expect(isTransitionAllowed('REVIEW_QUEUED', 'APPROVED')).toBe(false);
-    const sql = readFileSync(MIGRATION, 'utf8');
-    expect(sql.startsWith(DOC_STATE_MIGRATION_HEADER)).toBe(true);
-    for (const statement of docStateMachineDdl()) expect(sql).toContain(statement);
+    for (const [from, to] of REMOVED_PAIRS) {
+      expect(isTransitionAllowed(from, to)).toBe(false);
+      expect(rows.some((r) => r.fromState === from && r.toState === to)).toBe(false);
+    }
+    // Every pair INTO a decision starts at a claimed case.
+    expect(DOC_TRANSITIONS.filter((t) => t.to === 'APPROVED' || t.to === 'REJECTED').every((t) => t.from === 'IN_REVIEW')).toBe(true);
+    // The EXPAND migration carries the schema half verbatim …
+    const expand = readFileSync(MIGRATION, 'utf8');
+    expect(expand.startsWith(DOC_STATE_MIGRATION_HEADER)).toBe(true);
+    // … and the LATEST doc-state migration (human review only) mirrors the generator verbatim:
+    // the same helper functions and trigger, the re-seeded table, and the DELETE that drops the
+    // three automatic-decision rows the EXPAND migration seeded.
+    const humanOnly = readFileSync(HUMAN_ONLY_MIGRATION, 'utf8');
+    for (const statement of docStateMachineDdl()) expect(humanOnly).toContain(statement);
+    const humanOnlySql = humanOnly.split('\n').filter((l) => !l.startsWith('--')).join('\n');
+    for (const [from, to] of REMOVED_PAIRS) {
+      expect(expand).toContain(`('${from}', '${to}', `);
+      expect(humanOnlySql).not.toContain(`('${from}', '${to}'`);
+    }
   });
 
   it('a legacy insert (status only) derives its state; a planted state projects its legacy status', async () => {
@@ -164,7 +183,7 @@ describe('[DOC-1 §5.2] the five illegal transitions are refused by the database
     expect(await read(d.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
   });
 
-  it('test_blocking_fail_never_auto_approves — VALIDATED → AUTO_APPROVED is refused while any blocking validator FAILed; a WARN does not block', async () => {
+  it('test_no_automatic_approval — VALIDATED routes to a person regardless of validator result', async () => {
     const u = await owner(3);
     const failed = await at(u, 'VALIDATED');
     const warned = await at(u, 'VALIDATED');
@@ -172,10 +191,13 @@ describe('[DOC-1 §5.2] the five illegal transitions are refused by the database
       { submissionId: failed.id, tenantId: 'swift-default', validatorCode: 'V_TEST_BLOCKING', status: 'FAIL', isBlocking: true },
       { submissionId: warned.id, tenantId: 'swift-default', validatorCode: 'V_TEST_WARN', status: 'WARN', isBlocking: false },
     ] }));
-    await expect(move(failed.id, 'AUTO_APPROVED')).rejects.toThrow(/DOC_STATE_ILLEGAL: AUTO_APPROVED with a blocking FAIL/);
-    await move(failed.id, 'REVIEW_QUEUED'); // T9: a human
-    await move(warned.id, 'AUTO_APPROVED');
-    expect(await read(warned.id)).toMatchObject({ state: 'AUTO_APPROVED', status: 'APPROVED' });
+    await expect(move(failed.id, 'AUTO_APPROVED')).rejects.toThrow(/DOC_STATE_ILLEGAL: VALIDATED -> AUTO_APPROVED/);
+    await expect(move(warned.id, 'AUTO_APPROVED')).rejects.toThrow(/DOC_STATE_ILLEGAL: VALIDATED -> AUTO_APPROVED/);
+    await expect(move(failed.id, 'REJECTED')).rejects.toThrow(/DOC_STATE_ILLEGAL: VALIDATED -> REJECTED/);
+    await move(failed.id, 'REVIEW_QUEUED');
+    await move(warned.id, 'REVIEW_QUEUED');
+    expect(await read(failed.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
+    expect(await read(warned.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
   });
 
   it('test_purged_is_terminal — nothing leaves PURGED', async () => {
@@ -257,14 +279,21 @@ describe('[DOC-1 §5.1] the real path walks the machine', () => {
     expect(again.json().error.code).toBe('NOT_COMMITTED');
   });
 
-  it('the processor\'s verdict is reached by transitions: an auto-reject lands REJECTED; an approval without confidence never auto-commits', async () => {
+  it('[NO-AI] an adapter cannot decide: a stray verdict, or a full read, still lands in REVIEW_QUEUED with its ledger, an open case and nobody as reviewer', async () => {
     const u = await owner(9);
-    const rejected = await submit(u, `/uploads/verification/${RUN}/auto-reject-${nanoid(4)}.enc`);
-    expect(await read(rejected.id)).toMatchObject({ state: 'REJECTED', status: 'REJECTED' });
-    const approved = await submit(u, `/uploads/verification/${RUN}/auto-approve-${nanoid(4)}.enc`);
-    // While the registry type is INACTIVE the processor's approval stands (P6-4's confidence
-    // gate engages at activation): T8 then T17, with the extraction ledger as the provenance.
-    expect(await read(approved.id)).toMatchObject({ state: 'COMMITTED', status: 'APPROVED' });
-    expect(await system(() => app.prisma.extractionRun.count({ where: { submissionId: approved.id } }))).toBe(1);
+    const answering = (answer: Record<string, unknown>): KycProvider => ({
+      engine: { name: 'stray', version: 'test', external: false },
+      // Written against the old contract: the verdict is cast past the types and must change nothing.
+      verifyDocument: async () => ({ referenceToken: `stray_${nanoid(6)}`, ...answer } as KycVerificationResult),
+    });
+    for (const answer of [{ status: 'rejected', reason: 'forged' }, { status: 'approved', extracted: { documentNumber: `BR-${RUN}` }, confidence: 1 }]) {
+      const svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), answering(answer));
+      const doc = await runWithTenant('swift-default', async () => svc.submitDocument(u, 'RESTAURANT', 'business_registration', await ownedVerificationFixture(app.prisma, u), 'v1'));
+      expect(await read(doc.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
+      expect(await system(() => app.prisma.extractionRun.count({ where: { submissionId: doc.id } }))).toBe(1);
+      expect(await system(() => app.prisma.reviewCase.count({ where: { submissionId: doc.id, closedAt: null } }))).toBe(1);
+      const row = await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id }, select: { reviewedBy: true, reviewedAt: true, expiresAt: true } }));
+      expect(row).toEqual({ reviewedBy: null, reviewedAt: null, expiresAt: null });
+    }
   });
 });

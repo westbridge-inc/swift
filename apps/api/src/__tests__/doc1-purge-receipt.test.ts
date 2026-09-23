@@ -26,7 +26,7 @@ import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { LocalStorageProvider, type StorageProvider } from '../providers/storage/storage-provider';
 import { shredAndProbe, writeDeletionReceipt } from '../modules/verification/purge-receipt';
 
@@ -72,7 +72,7 @@ describe('[DOC-INV-7] proof of purge', () => {
   it('the reaper purges a due document and writes a CONFIRMED_ABSENT receipt in the same transaction — bytes gone, key gone, hash and size recorded', async () => {
     const original = Buffer.from(`original-${RUN}-` + 'x'.repeat(500));
     const { url, sha256, doc } = await storedDocument(original, new Date(Date.now() - 86_400_000));
-    const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+    const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
     const purged = await system(() => service.purgeExpiredDocuments());
     expect(purged).toBeGreaterThanOrEqual(1);
     const row = await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } }));

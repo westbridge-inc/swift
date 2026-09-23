@@ -1,14 +1,14 @@
 /**
- * [DOC-1 §6.9 · P6-4] test_always_review_set — routing after extraction.
+ * [DOC-1 §6.9 · P6-4 · NO-AI] test_always_review_set — routing after extraction.
  *
- * Once the registry speaks for a document type (ACTIVE: legal facts verified), a
- * processor approval stands only when auto_approve_eligible holds: every blocking
- * validator PASS (a SKIP is not a PASS), processor confidence known and at or
- * above the type's threshold, no cross-subject collision, and the type outside
- * the always-review set — every PERSONAL document, the insurance certificate,
- * anything still needing a specimen. Until a type is active the legacy verdict
- * holds (minus the §0.5 gate, held by `test_blocking_fail_never_auto_approves`
- * in doc1-extraction-ledger), so activation is the one switch.
+ * Under the owner rule of 2026-09-07 there is no automatic decision: every
+ * submission — active type or not, fields read or not, at any confidence, with
+ * or without a collision — waits for a person. What §6.9 still contributes is a
+ * registry FACT: which types are always reviewed by rule (every PERSONAL
+ * document, the insurance certificate, anything still needing a specimen). The
+ * activation rehearsal reports it. auto_approve_eligible and its gate are gone,
+ * and the ledger still records what an engine read and how sure it was — for the
+ * reviewer, never as a verdict.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
@@ -23,7 +23,7 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { seedDocRegistry, registryCode } from '../modules/verification/doc-registry';
-import { alwaysReview, autoApproveEligible, type ExtractionPlan } from '../modules/verification/extraction-ledger';
+import { alwaysReview } from '../modules/verification/extraction-ledger';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import type { KycEngine, KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 
@@ -44,15 +44,11 @@ const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-always-re
 
 class SpyKyc implements KycProvider {
   readonly engine: KycEngine = { name: 'spy', version: 'test', external: false };
-  verdict: KycVerificationResult['status'] = 'approved';
   extracted: Record<string, unknown> | undefined;
   confidence: number | undefined;
-  private result(): KycVerificationResult {
-    return { status: this.verdict, referenceToken: `spy_${nanoid(6)}`, extracted: this.extracted as KycVerificationResult['extracted'], confidence: this.confidence };
+  async verifyDocument(): Promise<KycVerificationResult> {
+    return { referenceToken: `spy_${nanoid(6)}`, extracted: this.extracted as KycVerificationResult['extracted'], confidence: this.confidence };
   }
-  async verifyIdentity(): Promise<KycVerificationResult> { return this.result(); }
-  async verifyDocument(): Promise<KycVerificationResult> { return this.result(); }
-  async getStatus(): Promise<'pending_manual'> { return 'pending_manual'; }
 }
 const kyc = new SpyKyc();
 
@@ -69,7 +65,7 @@ const submit = (userId: string, docType: string) =>
   runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', docType, await ownedVerificationFixture(app.prisma, userId), 'v1'));
 const setActive = (code: string, on: boolean) => system(() => app.prisma.docType.update({ where: { code }, data: { isActive: on, legalFactsVerifiedAt: on ? new Date() : null } }));
 const openCases = (docId: string) => system(() => app.prisma.reviewCase.findMany({ where: { submissionId: docId, closedAt: null } }));
-const readOnly = () => { kyc.verdict = 'approved'; kyc.extracted = { documentNumber: `TIN-${RUN}-${nanoid(4)}` }; };
+const readOnly = () => { kyc.extracted = { documentNumber: `TIN-${RUN}-${nanoid(4)}` }; };
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'test';
@@ -109,7 +105,7 @@ afterAll(async () => {
   await app.close();
 });
 
-describe('[DOC-1 P6-4] routing after extraction — auto_approve_eligible (§6.9)', () => {
+describe('[DOC-1 P6-4 · NO-AI] routing after extraction — always a person; the registry facts are still recorded', () => {
   it('the always-review set is exactly §6.9: every PERSONAL document, anything needing a specimen, and the registry fact — the insurance certificate carries it, its neighbours do not', async () => {
     expect(alwaysReview({ bucket: 'PERSONAL', needsSpecimen: false, alwaysReview: false })).toBe(true);
     expect(alwaysReview({ bucket: 'BUSINESS', needsSpecimen: true, alwaysReview: false })).toBe(true);
@@ -121,49 +117,33 @@ describe('[DOC-1 P6-4] routing after extraction — auto_approve_eligible (§6.9
     expect(rows.length).toBeGreaterThan(1);
   });
 
-  it('a SKIP is not a PASS: an active type with nothing validated is never eligible, whatever the confidence', () => {
-    const plan = {
-      run: { confidence: 1 }, fields: [], blockingFail: false,
-      validations: [{ validatorCode: 'V_ALL_REQUIRED_PRESENT', status: 'SKIP', detailCode: 'NO_DECLARED_FIELDS', isBlocking: true }],
-    } as unknown as ExtractionPlan;
-    const type = { isActive: true, bucket: 'BUSINESS' as const, needsSpecimen: false, alwaysReview: false, minConfidenceAutoApprove: 0.97 };
-    expect(autoApproveEligible(plan, type, false)).toEqual({ eligible: false, reason: 'NOT_VALIDATED' });
-    expect(autoApproveEligible(plan, { ...type, isActive: false }, false)).toEqual({ eligible: true, reason: null });
+  it('[NO-AI] auto_approve_eligible is gone: the ledger module exports no routing gate at all', async () => {
+    const ledger = await import('../modules/verification/extraction-ledger');
+    expect(Object.keys(ledger).filter((k) => /auto|eligib|gate/i.test(k))).toEqual([]);
   });
 
-  it('the reasons are told apart: unknown confidence is CONFIDENCE_UNKNOWN, a low one is BELOW_THRESHOLD, a collision is COLLISION, the threshold is inclusive', () => {
-    const validated = {
-      fields: [], blockingFail: false,
-      validations: [{ validatorCode: 'V_ALL_REQUIRED_PRESENT', status: 'PASS', detailCode: null, isBlocking: true }],
-    };
-    const type = { isActive: true, bucket: 'BUSINESS' as const, needsSpecimen: false, alwaysReview: false, minConfidenceAutoApprove: 0.97 };
-    const withConf = (confidence: number | null) => ({ ...validated, run: { confidence } }) as unknown as ExtractionPlan;
-    expect(autoApproveEligible(withConf(null), type, false)).toEqual({ eligible: false, reason: 'CONFIDENCE_UNKNOWN' });
-    expect(autoApproveEligible(withConf(0.969), type, false)).toEqual({ eligible: false, reason: 'CONFIDENCE_BELOW_THRESHOLD' });
-    expect(autoApproveEligible(withConf(0.97), type, false)).toEqual({ eligible: true, reason: null });
-    expect(autoApproveEligible(withConf(1), type, true)).toEqual({ eligible: false, reason: 'COLLISION' });
-    expect(autoApproveEligible({ ...withConf(1), blockingFail: true } as ExtractionPlan, type, false)).toEqual({ eligible: false, reason: 'BLOCKING_FAIL' });
-  });
-
-  it('registry silent (type inactive): the processor approval stands without any confidence — activation is the one switch', async () => {
+  it('registry silent (type inactive): a full read at unknown confidence still waits for a person', async () => {
     const u = await owner(1);
     expect((await system(() => app.prisma.docType.findUniqueOrThrow({ where: { code: CODES.BUSINESS } }))).isActive).toBe(false);
     readOnly(); kyc.confidence = undefined;
     const doc = await submit(u, BUSINESS);
-    expect(doc.status).toBe('APPROVED');
+    expect(doc.status).toBe('PENDING');
+    expect((await openCases(doc.id)).map((c) => c.queue)).toEqual(['STANDARD']);
   });
 
-  it('active BUSINESS type: fields read, confidence at the threshold, no collision → the approval stands and the run records the confidence', async () => {
+  it('active BUSINESS type: fields read, confidence at the old threshold, no collision → a person still decides, and the run records the confidence for them', async () => {
     await setActive(CODES.BUSINESS, true);
     const u = await owner(2);
     readOnly(); kyc.confidence = 0.97;
     const doc = await submit(u, BUSINESS);
-    expect(doc.status).toBe('APPROVED');
+    expect(doc.status).toBe('PENDING');
+    expect(doc.reviewedBy).toBeNull();
+    expect((await openCases(doc.id)).map((c) => c.queue)).toEqual(['STANDARD']);
     const run = await system(() => app.prisma.extractionRun.findFirstOrThrow({ where: { submissionId: doc.id } }));
     expect(Number(run.confidence)).toBe(0.97);
   });
 
-  it('active + confidence unknown → a person reviews it (CONFIDENCE_UNKNOWN)', async () => {
+  it('active + confidence unknown → a person reviews it', async () => {
     const u = await owner(3);
     readOnly(); kyc.confidence = undefined;
     const doc = await submit(u, BUSINESS);
@@ -188,10 +168,10 @@ describe('[DOC-1 P6-4] routing after extraction — auto_approve_eligible (§6.9
     expect((await openCases(doc.id)).map((c) => c.queue)).toEqual(['STANDARD']);
   });
 
-  it('active type with no declared fields: the verdict is SKIP, and SKIP never auto-approves (NOT_VALIDATED)', async () => {
+  it('active type with no declared fields: the verdict is SKIP, recorded for the person who decides', async () => {
     await setActive(CODES.UNDECLARED, true);
     const u = await owner(6);
-    kyc.verdict = 'approved'; kyc.extracted = undefined; kyc.confidence = 1;
+    kyc.extracted = undefined; kyc.confidence = 1;
     const doc = await submit(u, UNDECLARED);
     expect(doc.status).toBe('PENDING');
     const v = await system(() => app.prisma.validationResult.findFirstOrThrow({ where: { submissionId: doc.id, validatorCode: 'V_ALL_REQUIRED_PRESENT' } }));

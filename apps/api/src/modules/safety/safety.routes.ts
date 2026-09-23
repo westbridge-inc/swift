@@ -7,8 +7,6 @@ import { IncidentService, DECISION_CODES } from './incident.service';
 import { EvidenceService } from './evidence.service';
 import { EmergencyContactService } from './emergency-contact.service';
 import { getChannels } from '../../providers/notifications/channels';
-import { getStorageProvider } from '../../providers/storage/storage-provider';
-import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { NotFoundError, ForbiddenError, AppError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
 import { runWithoutTenant } from '../../plugins/tenant-context';
@@ -367,31 +365,15 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: await guardian.driverConfirm(request.user.userId, body) };
   });
 
-  // ── Identity Assurance (§7.1) — the shift liveness check ────────────────
-  // Multipart selfie in, §7.1 outcome out. The image is validated exactly like
-  // the signup selfie (mime + magic bytes) and stored under liveness/ — the
-  // review queue renders it next to the profile photo.
+  // [NO-AI] The §7.1 shift selfie check was a biometric comparison run by the removed
+  // identity provider. Nothing is left to run it, so this route refuses BEFORE reading the
+  // multipart body: a selfie collected for a check that cannot happen is biometric data
+  // gathered for no purpose. Kept as an explicit 410 for older app builds; new builds have
+  // no caller (the mobile screen is gone too).
   const liveness = new LivenessService(app.prisma, app.io);
 
-  app.post('/liveness-check', auth, async (request) => {
-    const { profile } = z.object({ profile: z.enum(['DRIVER', 'RIDER']).default('DRIVER') }).parse(request.query ?? {});
-    const file = await request.file();
-    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a selfie image');
-    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
-      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
-    }
-    const buffer = await file.toBuffer();
-    if (!looksLikeImage(buffer)) {
-      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
-    }
-    const { url } = await getStorageProvider().upload({
-      buffer,
-      filename: file.filename,
-      mimeType: file.mimetype,
-      folder: `liveness/${request.user.userId}`,
-    });
-    const result = await liveness.check({ userId: request.user.userId, profile, selfieUrl: url });
-    return { success: true, data: result };
+  app.post('/liveness-check', auth, async () => {
+    throw new AppError(410, 'LIVENESS_CHECK_REMOVED', 'Selfie identity checks are no longer part of Swift. Nothing was uploaded or recorded.');
   });
 
   /** §7.3 — "This isn't my driver", one tap on the arrival screen. Releases

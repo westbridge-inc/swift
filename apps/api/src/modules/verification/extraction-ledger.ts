@@ -53,7 +53,7 @@ export interface ExtractionPlan {
   };
   fields: PlannedField[];
   validations: PlannedValidation[];
-  /** A blocking validator FAILed: this document may not be auto-approved. */
+  /** A blocking validator FAILed: the reviewer sees it first. (Nothing is approved automatically in any case.) */
   blockingFail: boolean;
 }
 export interface ExtractionPlanInput {
@@ -185,9 +185,11 @@ export function recordExtractionMetrics(plan: ExtractionPlan): void {
 }
 
 // ---------------------------------------------------------------------------
-// [DOC-1 §6.9 · P6-4] Routing after extraction. The registry speaks for a
-// document type once it is ACTIVE (legal facts verified); until then the
-// legacy behaviour holds — the processor verdict, minus the §0.5 gate above.
+// [DOC-1 §6.9 · P6-4 · NO-AI] Routing after extraction. Under the owner rule of
+// 2026-09-07 there is no automatic decision: every submission is decided by a
+// person. What remains of §6.9 is the registry FACT of which types are always
+// reviewed by rule (the activation rehearsal reports it). auto_approve_eligible
+// and the gate that applied it were deleted and must not return.
 // ---------------------------------------------------------------------------
 
 /**
@@ -206,52 +208,4 @@ export interface RoutingType {
 }
 export function alwaysReview(type: Pick<RoutingType, 'bucket' | 'needsSpecimen' | 'alwaysReview'>): boolean {
   return type.bucket === 'PERSONAL' || type.needsSpecimen || type.alwaysReview;
-}
-
-export type IneligibleReason =
-  | 'BLOCKING_FAIL' | 'ALWAYS_REVIEW' | 'COLLISION' | 'NOT_VALIDATED' | 'CONFIDENCE_UNKNOWN' | 'CONFIDENCE_BELOW_THRESHOLD';
-
-/**
- * auto_approve_eligible (§6.9): every blocking validator PASS (a SKIP is not a
- * PASS — nothing was checked), confidence known and at or above the type's
- * threshold, no cross-subject collision, type not in the always-review set.
- * Evaluated only when the registry speaks for the type; the §0.5 gate applies
- * regardless.
- */
-export function autoApproveEligible(
-  plan: ExtractionPlan,
-  type: RoutingType | null,
-  collided: boolean,
-): { eligible: boolean; reason: IneligibleReason | null } {
-  if (plan.blockingFail) return { eligible: false, reason: 'BLOCKING_FAIL' };
-  if (!type?.isActive) return { eligible: true, reason: null }; // the registry is silent: legacy behaviour
-  if (alwaysReview(type)) return { eligible: false, reason: 'ALWAYS_REVIEW' };
-  if (collided) return { eligible: false, reason: 'COLLISION' };
-  if (!plan.validations.some((v) => v.isBlocking) || plan.validations.some((v) => v.isBlocking && v.status !== 'PASS')) {
-    return { eligible: false, reason: 'NOT_VALIDATED' };
-  }
-  if (plan.run.confidence === null) return { eligible: false, reason: 'CONFIDENCE_UNKNOWN' };
-  if (plan.run.confidence < Number(type.minConfidenceAutoApprove)) return { eligible: false, reason: 'CONFIDENCE_BELOW_THRESHOLD' };
-  return { eligible: true, reason: null };
-}
-
-const INELIGIBLE_TEXT: Record<IneligibleReason, string> = {
-  BLOCKING_FAIL: 'Required fields could not be read from the document — human review',
-  ALWAYS_REVIEW: 'This document type is always reviewed by a person (DOC-1 §6.9)',
-  COLLISION: 'Duplicate of a document already on another account — second review required',
-  NOT_VALIDATED: 'Nothing was validated for this document type — human review',
-  CONFIDENCE_UNKNOWN: 'The processor reported no confidence — human review',
-  CONFIDENCE_BELOW_THRESHOLD: 'Processor confidence is below the auto-approval threshold — human review',
-};
-
-/** A processor approval becomes human review whenever §6.9 / §0.5 say it is not eligible. Anything else passes through untouched. */
-export function gateAutoApproval<T extends { status: string; reason?: string; collided?: boolean }>(
-  result: T,
-  plan: ExtractionPlan,
-  type: RoutingType | null,
-): T {
-  if (result.status !== 'approved') return result;
-  const verdict = autoApproveEligible(plan, type, result.collided === true);
-  if (verdict.eligible) return result;
-  return { ...result, status: 'pending_manual', reason: INELIGIBLE_TEXT[verdict.reason!] };
 }

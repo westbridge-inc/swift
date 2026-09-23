@@ -217,7 +217,7 @@ function explainPermissionDenied(
           <T variant="body" weight="semibold">{label(docType)}</T>
           {docType === 'national_id' || docType === 'owner_national_id' ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
-              Face-matched against your profile selfie
+              Reviewed by a person
             </T>
           ) : null}
         </View>

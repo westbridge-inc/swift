@@ -2,17 +2,23 @@
  * [DOC-1 §0.5] test_doc1_hard_limits — one test per hard limit, each red when
  * the limit is violated.
  *
- * Two limits are violated today BY DECISION (CONFLICT-DOC-2, founder-inputs
- * FD-DOC-3/4): PERSONAL images persist until the retention clock, and they go
- * to a third-party KYC processor without a code-level processor register.
- * Those two are pinned with `it.fails`: they pass while the violation stands
- * and go red the day the code changes — at which point they flip to `it`.
- * Nothing here is skipped, and nothing here pretends.
+ * One limit is violated today BY DECISION (CONFLICT-DOC-2, founder-inputs
+ * FD-DOC-3/4): PERSONAL images persist until the retention clock. It is pinned
+ * with `it.fails`: it passes while the violation stands and goes red the day
+ * the code changes — at which point it flips to `it`. Nothing here is skipped,
+ * and nothing here pretends.
+ *
+ * [NO-AI · owner rule 2026-09-07] The second decided violation — PERSONAL images
+ * going to a third-party processor — no longer exists: the model-backed identity
+ * adapters are deleted, no register entry receives a personal image or a
+ * biometric, and the send gate refuses ANY external identity engine as
+ * unregistered. Limits [2], [3] and [4] now grade that absence.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { recordExternalProcessingDecision } from '../modules/verification/external-processing';
-import { assertExternalProcessingPermitted } from '../modules/legal/processor-register';
+import { assertExternalProcessingPermitted, PROCESSOR_REGISTER } from '../modules/legal/processor-register';
+import { degradedProvider } from '../modules/verification/degradation';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { nanoid } from 'nanoid';
@@ -26,8 +32,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
-import { biometricFaceMatchEnabled } from '../lib/biometric-guard';
+import type { KycEngine, KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 import { loggerRedactConfig } from '../utils/logger-config';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
@@ -37,14 +42,18 @@ const REPO_APPS = join(__dirname, '..', '..', '..');
 let app: FastifyInstance;
 let userId = '';
 
-/** A provider that records which leg was called and answers as told. */
+/** A local engine that records which leg was called and answers with whatever it is told to. */
 class SpyKyc implements KycProvider {
   calls: string[] = [];
-  verdict: KycVerificationResult['status'] = 'pending_manual';
-  async verifyIdentity(): Promise<KycVerificationResult> { this.calls.push('verifyIdentity'); return { status: this.verdict, referenceToken: `spy_${nanoid(6)}` }; }
-  async verifyDocument(): Promise<KycVerificationResult> { this.calls.push('verifyDocument'); return { status: this.verdict, referenceToken: `spy_${nanoid(6)}` }; }
-  async getStatus(): Promise<'pending_manual'> { return 'pending_manual'; }
+  /** Extra fields for the answer. A verdict here is an adapter written against the OLD contract: cast past the types, it must change nothing. */
+  extra: Record<string, unknown> = {};
+  readonly engine: KycEngine = { name: 'spy', version: 'test', external: false };
+  async verifyDocument(): Promise<KycVerificationResult> {
+    this.calls.push('verifyDocument');
+    return { referenceToken: `spy_${nanoid(6)}`, ...this.extra } as KycVerificationResult;
+  }
 }
+const codeOf = (fn: () => void) => { try { fn(); return null; } catch (e) { return (e as { code?: string; statusCode?: number }); } };
 
 const walk = (dir: string, out: string[] = []): string[] => {
   for (const name of readdirSync(dir)) {
@@ -74,16 +83,24 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await runWithTenant('swift-default', async () => {
+    const docs = await app.prisma.verificationDocument.findMany({ where: { userId }, select: { id: true } });
+    await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: docs.map((d) => d.id) } } } });
+    await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId } });
     await app.prisma.user.deleteMany({ where: { id: userId } });
   });
-  delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
   await app.close();
 });
 
 const service = (kyc: KycProvider) => new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), kyc);
 const submitOwnerId = (kyc: KycProvider, tag: string) =>
   runWithTenant('swift-default', async () => service(kyc).submitDocument(userId, 'RESTAURANT', 'owner_national_id', await ownedVerificationFixture(app.prisma, userId, tag), 'v1'));
+const cleanupDocs = () => runWithTenant('swift-default', async () => {
+  const docs = await app.prisma.verificationDocument.findMany({ where: { userId }, select: { id: true } });
+  await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
+  await app.prisma.verificationDocument.deleteMany({ where: { userId } });
+});
+const latestDoc = () => runWithTenant('swift-default', () => app.prisma.verificationDocument.findFirstOrThrow({ where: { userId, docType: 'owner_national_id' }, orderBy: { createdAt: 'desc' } }));
 
 describe('[DOC-1 §0.5] hard limits', () => {
   it.fails('[1] PERSONAL bytes are not persisted beyond the IDV-1 transient intake TTL — VIOLATED BY DECISION (CONFLICT-DOC-2): images persist to the retention clock', () => {
@@ -92,80 +109,85 @@ describe('[DOC-1 §0.5] hard limits', () => {
     expect(ttlFields.length).toBeGreaterThan(0);
   });
 
-  it('[2] PERSONAL images reach an external processor only if allowed, registered and covered by a transfer basis — the DGP-1 register exists and the gate is fail-closed (CONFLICT-DOC-2 is now a recorded decision, not a leak)', () => {
+  it('[2] PERSONAL images never reach an external processor: no register entry receives one, and the send gate refuses any external identity engine — forbidden by the type, or unregistered even when the type allows and a contract reference is set', () => {
     expect(existsSync(join(API_SRC, 'modules', 'legal', 'processor-register.ts'))).toBe(true);
-    const external = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' };
-    expect(() => assertExternalProcessingPermitted({ code: 'owner_national_id', externalProcessingAllowed: false }, external, { PROCESSOR_CONTRACT_DIDIT: 'x' })).toThrow(/PROCESSOR_NOT_PERMITTED|externally/);
-    expect(() => assertExternalProcessingPermitted({ code: 'owner_national_id', externalProcessingAllowed: true }, external, {})).toThrow(/PROCESSOR_NO_TRANSFER_BASIS|externally/);
-    expect(() => assertExternalProcessingPermitted({ code: 'owner_national_id', externalProcessingAllowed: true }, external, { PROCESSOR_CONTRACT_DIDIT: 'DPA-ref' })).not.toThrow();
+    expect(PROCESSOR_REGISTER.filter((p) => p.payload.includes('PERSONAL_DOC_IMAGE') || p.payload.includes('BIOMETRIC'))).toEqual([]);
+    const outside = { name: 'outside-identity', version: '1', external: true, processorRef: 'OUTSIDE_IDENTITY' };
+    expect(codeOf(() => assertExternalProcessingPermitted({ code: 'owner_national_id', externalProcessingAllowed: false }, outside, { PROCESSOR_CONTRACT_OUTSIDE_IDENTITY: 'x' }))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_NOT_PERMITTED' });
+    expect(codeOf(() => assertExternalProcessingPermitted({ code: 'owner_national_id', externalProcessingAllowed: true }, outside, { PROCESSOR_CONTRACT_OUTSIDE_IDENTITY: 'DPA-ref' }))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_UNREGISTERED' });
   });
 
-  it('[2b] the gate is live in the submission path: an EXTERNAL engine is refused for a PERSONAL type until the decision is recorded and the processor is contracted — then the document goes, document-only', async () => {
-    class ExternalSpyKyc extends SpyKyc { readonly engine = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' }; }
-    const cleanup = () => runWithTenant('swift-default', () => app.prisma.verificationDocument.deleteMany({ where: { userId } }));
+  it('[2b] the gate is live in the submission path: an EXTERNAL identity engine is refused before it is called — by the type by default, and as unregistered once a decision is recorded — so the document never leaves', async () => {
+    class ExternalSpyKyc extends SpyKyc { override readonly engine: KycEngine = { name: 'outside-identity', version: '1', external: true, processorRef: 'OUTSIDE_IDENTITY' }; }
     const row = { where: { countryCode_legacyCode: { countryCode: 'GY', legacyCode: 'owner_national_id' } } };
-    process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '0';
     try {
       // 1. registry forbids (default) → refused before the adapter is called
       const closed = new ExternalSpyKyc();
       await expect(submitOwnerId(closed, 'ext-closed')).rejects.toMatchObject({ statusCode: 503, code: 'PROCESSOR_NOT_PERMITTED' });
       expect(closed.calls).toEqual([]);
-      // 2. decision recorded, but no contract reference for the processor → still refused
+      // 2. a decision recorded for the type, and even a contract reference in env: there is no
+      //    register entry for an identity processor to be ACTIVE under → still refused, never called
       await runWithoutTenant(() => recordExternalProcessingDecision(app.prisma, { code: 'GY.owner_national_id', allowed: true, decisionRef: 'FD-DOC-3b test', reason: 'test' }, async () => undefined), 'hard-limits-test');
-      delete process.env['PROCESSOR_CONTRACT_DIDIT'];
-      const uncontracted = new ExternalSpyKyc();
-      await expect(submitOwnerId(uncontracted, 'ext-nocontract')).rejects.toMatchObject({ statusCode: 503, code: 'PROCESSOR_NO_TRANSFER_BASIS' });
-      expect(uncontracted.calls).toEqual([]);
-      // 3. decision + contract → the document goes to the external engine, document-only (biometrics off)
-      process.env['PROCESSOR_CONTRACT_DIDIT'] = 'DPA-test';
-      const open = new ExternalSpyKyc();
-      await submitOwnerId(open, 'ext-open');
-      expect(open.calls).toEqual(['verifyDocument']);
+      process.env['PROCESSOR_CONTRACT_OUTSIDE_IDENTITY'] = 'DPA-test';
+      const decided = new ExternalSpyKyc();
+      await expect(submitOwnerId(decided, 'ext-decided')).rejects.toMatchObject({ statusCode: 503, code: 'PROCESSOR_UNREGISTERED' });
+      expect(decided.calls).toEqual([]);
+      expect(await runWithTenant('swift-default', () => app.prisma.verificationDocument.count({ where: { userId } }))).toBe(0);
     } finally {
-      delete process.env['FEATURE_BIOMETRIC_FACE_MATCH']; delete process.env['PROCESSOR_CONTRACT_DIDIT'];
+      delete process.env['PROCESSOR_CONTRACT_OUTSIDE_IDENTITY'];
       await runWithoutTenant(() => app.prisma.docType.update({ ...row, data: { externalProcessingAllowed: false, externalProcessingDecisionRef: null, externalProcessingDecidedAt: null } }), 'hard-limits-test');
-      await cleanup();
+      await cleanupDocs();
     }
   });
 
-  it('[3] no biometric operation without the recorded decision: the kill switch exists, defaults OFF (FD-D5 not approved), and only an explicit 1 sends the selfie', async () => {
-    expect(biometricFaceMatchEnabled({})).toBe(false);
-    expect(biometricFaceMatchEnabled({ FEATURE_BIOMETRIC_FACE_MATCH: '1' })).toBe(true);
-    expect(biometricFaceMatchEnabled({ FEATURE_BIOMETRIC_FACE_MATCH: '0' })).toBe(false);
-    const on = new SpyKyc();
-    process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
-    await submitOwnerId(on, 'on');
-    expect(on.calls).toEqual(['verifyIdentity']);
-    await runWithTenant('swift-default', () => app.prisma.verificationDocument.deleteMany({ where: { userId } }));
-    const off = new SpyKyc();
-    delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
+  it('[3] no biometric operation exists: there is no kill switch to flip, an identity document is handed over document-only with or without a signup selfie, and the shift selfie check is gone', async () => {
+    expect(existsSync(join(API_SRC, 'lib', 'biometric-guard.ts'))).toBe(false);
+    const withSelfie = new SpyKyc();
+    await submitOwnerId(withSelfie, 'doc-only');
+    expect(withSelfie.calls).toEqual(['verifyDocument']);
+    await cleanupDocs();
+    // Without a profile selfie the document is still accepted: there is nothing to compare it against, so nothing is missing.
+    await runWithTenant('swift-default', () => app.prisma.user.update({ where: { id: userId }, data: { avatar: null, selfieCapturedAt: null } }));
     try {
-      await submitOwnerId(off, 'off');
-      expect(off.calls).toEqual(['verifyDocument']);
+      const withoutSelfie = new SpyKyc();
+      const doc = await submitOwnerId(withoutSelfie, 'doc-only-no-selfie');
+      expect(withoutSelfie.calls).toEqual(['verifyDocument']);
+      expect(doc.status).toBe('PENDING');
     } finally {
-      delete process.env['FEATURE_BIOMETRIC_FACE_MATCH'];
-      await runWithTenant('swift-default', () => app.prisma.verificationDocument.deleteMany({ where: { userId } }));
+      await signupSelfieFixture(app.prisma, userId);
+      await cleanupDocs();
     }
-    // The shift-selfie liveness check is a face-match too: it must consult the same switch.
-    expect(readFileSync(join(API_SRC, 'modules', 'safety', 'liveness.service.ts'), 'utf8')).toMatch(/biometricFaceMatchEnabled\(\)/);
+    const liveness = readFileSync(join(API_SRC, 'modules', 'safety', 'liveness.service.ts'), 'utf8');
+    expect(liveness).not.toMatch(/midshift|selfieUrl|KycProvider/);
   });
 
-  it('[4] a document that failed the processor is never auto-approved, whatever the confidence', async () => {
-    const kyc = new SpyKyc();
-    kyc.verdict = 'rejected';
-    await submitOwnerId(kyc, 'rejected');
-    const doc = await runWithTenant('swift-default', () => app.prisma.verificationDocument.findFirst({ where: { userId, docType: 'owner_national_id' }, orderBy: { createdAt: 'desc' } }));
-    expect(doc?.status).toBe('REJECTED');
-    await runWithTenant('swift-default', () => app.prisma.verificationDocument.deleteMany({ where: { userId } }));
+  it('[4] no automatic adverse (or favourable) decision: whatever an adapter answers — a stray verdict, a full read at full confidence, or an outage — the row is PENDING in a queue for a person', async () => {
+    const answers: Array<[string, KycProvider]> = [
+      ['stray-reject', Object.assign(new SpyKyc(), { extra: { status: 'rejected', reason: 'Document failed authenticity checks' } })],
+      ['stray-approve', Object.assign(new SpyKyc(), { extra: { status: 'approved' } })],
+      ['full-read', Object.assign(new SpyKyc(), { extra: { extracted: { documentNumber: `ID-${RUN}` }, confidence: 1 } })],
+      ['outage', degradedProvider(new SpyKyc(), 'throw')],
+    ];
+    for (const [tag, kyc] of answers) {
+      const submitted = await submitOwnerId(kyc, tag);
+      const doc = await latestDoc();
+      expect(doc.id, tag).toBe(submitted.id);
+      expect({ status: doc.status, state: doc.state, reviewedBy: doc.reviewedBy, reviewedAt: doc.reviewedAt, expiresAt: doc.expiresAt }, tag)
+        .toEqual({ status: 'PENDING', state: 'REVIEW_QUEUED', reviewedBy: null, reviewedAt: null, expiresAt: null });
+      expect(await runWithTenant('swift-default', () => app.prisma.reviewCase.count({ where: { submissionId: doc.id, closedAt: null } })), tag).toBe(1);
+      await cleanupDocs();
+    }
   });
 
-  it('[5] no extracted field is written that the contract does not declare — the contract declares exactly documentNumber, and the service reads nothing else', () => {
+  it('[5] nothing is read automatically: the contract declares exactly documentNumber and no verdict, the service reads no field of it, and the ledger maps only the declared key', () => {
     const contract = readFileSync(join(API_SRC, 'providers', 'kyc', 'kyc-provider.ts'), 'utf8');
     expect(contract).toMatch(/extracted\?: \{ documentNumber\?: string \};/);
+    expect(contract).not.toMatch(/\bstatus\??:/);
     const service = readFileSync(join(API_SRC, 'modules', 'verification', 'verification.service.ts'), 'utf8');
     const reads = [...service.matchAll(/extracted\??\.(\w+)/g)].map((m) => m[1]);
-    expect(reads.length).toBeGreaterThan(0);
-    expect(new Set(reads)).toEqual(new Set(['documentNumber']));
+    expect(reads).toEqual([]);
+    const ledger = readFileSync(join(API_SRC, 'modules', 'verification', 'extraction-ledger.ts'), 'utf8');
+    expect(ledger).toMatch(/PROVIDER_KEY_TO_FIELD_CODE[^\n]*= \{ documentNumber: 'doc_number' \}/);
   });
 
   it('[6] raw extracted PII and the signed URLs of PERSONAL images never reach a log line', async () => {
@@ -183,12 +205,12 @@ describe('[DOC-1 §0.5] hard limits', () => {
     expect(out).toContain('submitted');
   });
 
-  it('[7] one document system: the upload entry points are the registered ones, and VerificationDocument rows are written by the verification service alone', () => {
+  it('[7] one document system: the upload entry points are the registered ones (the shift selfie upload is gone), and VerificationDocument rows are written by the verification service alone', () => {
     const files = walk(API_SRC);
     const uploaders = files.filter((f) => /request\.file\(|req\.file\(|\.parts\(\)/.test(readFileSync(f, 'utf8'))).map((f) => relative(API_SRC, f)).sort();
     expect(uploaders).toEqual([
       'modules/ads/ads.routes.ts', 'modules/auth/auth.routes.ts', 'modules/chat/chat.routes.ts', 'modules/courier/courier.routes.ts',
-      'modules/driver/driver.routes.ts', 'modules/rider/rider.routes.ts', 'modules/safety/safety.routes.ts', 'modules/vendor/vendor.routes.ts',
+      'modules/driver/driver.routes.ts', 'modules/rider/rider.routes.ts', 'modules/vendor/vendor.routes.ts',
       'modules/verification/verification.routes.ts',
     ]);
     const writers = files.filter((f) => /verificationDocument\.create(Many)?\(/.test(readFileSync(f, 'utf8'))).map((f) => relative(API_SRC, f)).sort();

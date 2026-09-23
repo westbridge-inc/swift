@@ -1,7 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { IdentityService } from './identity.service';
 import {
-  normalizeDocNumber,
   normalizePlate,
   normalizePhone,
   normalizeEmail,
@@ -67,8 +66,8 @@ export function captureSignup(
 
     // §5 device-velocity rule (rung 2 of the ladder): the Nth signup from one
     // device in 24h enters REVIEW_FIRST — signup itself completed normally
-    // (the abuser learns nothing); ACTIVATION waits for a human because the
-    // verification pipeline refuses to auto-approve held accounts.
+    // (the abuser learns nothing); ACTIVATION waits for the person who reviews
+    // the documents and sees the hold on the identity panel.
     if (deviceHash) {
       const settings = await prisma.integritySettings.findUnique({ where: { id: 'platform' } });
       const maxPerDevice = settings?.maxSignupsPerDevice24h ?? 3;
@@ -89,18 +88,6 @@ export function captureSignup(
       }
     }
   })(); // [R048-007] the caller awaits, bounds, counts and logs a failure — nothing is swallowed here
-}
-
-/** Extracted ID document number (§2.1 ID_DOC_NUMBER — HARD). The raw number
- *  arrives from the KYC result, is hashed here, and is never stored. */
-export function captureDocumentNumber(
-  prisma: PrismaClient,
-  input: { userId: string; role: string; documentNumber: string },
-): void {
-  void service(prisma).capture({
-    accountId: input.userId, actorRole: input.role,
-    type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(input.documentNumber), source: 'AI_ID_ANALYZER',
-  }).catch((err) => log().error({ err, userId: input.userId }, 'doc-number identity capture failed — flow unaffected'));
 }
 
 /** Vehicle plate (§2.1 PLATE — HARD): one plate, one active vehicle-bound

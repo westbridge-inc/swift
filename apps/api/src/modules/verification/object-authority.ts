@@ -170,20 +170,6 @@ export async function resolveUnreferencedAvatarObject(
   }
 }
 
-/** Transitional signup-selfie authority. POST /auth/selfie is the only non-null
- * avatar writer; profile edits cannot choose this pointer. Read that persisted
- * fact ourselves, and require the exact subject namespace and capture marker.
- * This exception is only for the signup face, never a verification document. */
-export async function resolveSignupSelfie(db: Pick<PrismaClient, 'user'>, userId: string): Promise<string> {
-  try {
-    const user = await db.user.findUnique({ where: { id: userId }, select: { avatar: true, selfieCapturedAt: true } });
-    if (!user?.avatar || !user.selfieCapturedAt || !isOwnedAvatarKey(user.avatar, userId)) throw new Error();
-    return user.avatar;
-  } catch {
-    throw new AppError(400, 'SELFIE_REQUIRED', 'Retake your profile selfie before submitting your ID.');
-  }
-}
-
 /** Avatar cleanup must never interpret a document pointer as deletion authority. */
 export function isOwnedAvatarKey(key: string, userId: string): boolean {
   return canonicalOwnedAvatarKey(key, userId) !== null;

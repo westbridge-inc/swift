@@ -14,13 +14,13 @@ import {
   coverageOfHost, coverageOfProviderDir, outboundHostLiterals, processorByRef, processorStatus, needsContract,
   processorRegisterView,
 } from '../modules/legal/processor-register';
-import { DiditKycProvider } from '../providers/kyc/didit-provider';
-import { IdAnalyzerKycProvider } from '../providers/kyc/id-analyzer-provider';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { UNKNOWN_ENGINE } from '../modules/verification/extraction-ledger';
 
 const SRC = join(__dirname, '..');
-const EXTERNAL_DIDIT = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' } as const;
-const LOCAL = { name: 'sandbox', version: '1', external: false } as const;
+const EXTERNAL_IDENTITY = { name: 'unregistered-identity', version: '1', external: true, processorRef: 'UNREGISTERED_IDENTITY' } as const;
+const EXTERNAL_STORE = { name: 'object-store', version: '1', external: true, processorRef: 'OBJECT_STORE' } as const;
+const LOCAL = { name: 'manual-review', version: '1', external: false } as const;
 const allows = { code: 'national_id', externalProcessingAllowed: true };
 const forbids = { code: 'national_id', externalProcessingAllowed: false };
 const codeOf = (fn: () => void) => { try { fn(); return null; } catch (e) { return (e as { code?: string; statusCode?: number }); } };
@@ -43,17 +43,14 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
     expect(undeclared, `outbound hosts with no register entry: ${undeclared.join('; ')}`).toEqual([]);
   });
 
-  it('test_external_kyc_engines_are_registered: every external engine names an entry that carries the PERSONAL image classes', () => {
-    // a local .env may carry the keys as EMPTY strings; the adapters need any non-empty value to construct
-    for (const k of ['DIDIT_API_KEY', 'ID_ANALYZER_API_KEY']) if (!process.env[k]) process.env[k] = 'test';
-    for (const engine of [new DiditKycProvider().engine, new IdAnalyzerKycProvider().engine]) {
-      expect(engine.external).toBe(true);
-      const entry = processorByRef(engine.processorRef);
-      expect(entry, `engine ${engine.name} → ${engine.processorRef}`).not.toBeNull();
-      expect(entry!.payload).toContain('PERSONAL_DOC_IMAGE');
-      expect(needsContract(entry!)).toBe(true);
-      expect(entry!.contractEnv).toMatch(/^PROCESSOR_CONTRACT_/);
-    }
+  it('test_identity_engine_is_local: no registered external identity processor or adapter remains', () => {
+    expect(new ManualReviewKycProvider().engine.external).toBe(false);
+    expect(NON_PROCESSOR_DIRS['kyc']).toMatch(/Manual review/);
+    expect(processorByRef('DIDIT')).toBeNull();
+    expect(processorByRef('ID_ANALYZER')).toBeNull();
+    expect(PROCESSOR_REGISTER.filter((p) => p.payload.includes('PERSONAL_DOC_IMAGE'))).toEqual([]);
+    expect(PROCESSOR_REGISTER.filter((p) => p.payload.includes('BIOMETRIC'))).toEqual([]);
+    expect(PROCESSOR_REGISTER.filter((p) => p.providerDirs.includes('kyc'))).toEqual([]);
     expect(processorByRef(UNKNOWN_ENGINE.processorRef)).toBeNull();
   });
 
@@ -84,24 +81,24 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
 
 describe('[DGP-1 · DOC-1 §2] the send gate is fail-closed', () => {
   it('test_external_send_refused_when_doc_type_forbids: an external engine never sees a type whose registry row forbids external processing', () => {
-    const env = { PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' };
-    expect(codeOf(() => assertExternalProcessingPermitted(forbids, EXTERNAL_DIDIT, env))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_NOT_PERMITTED' });
+    const env = { PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' };
+    expect(codeOf(() => assertExternalProcessingPermitted(forbids, EXTERNAL_STORE, env))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_NOT_PERMITTED' });
     // unknown to the registry = forbidden (fail closed), never "allowed by absence"
-    expect(codeOf(() => assertExternalProcessingPermitted({ code: 'mystery', externalProcessingAllowed: null }, EXTERNAL_DIDIT, env))).toMatchObject({ code: 'PROCESSOR_NOT_PERMITTED' });
+    expect(codeOf(() => assertExternalProcessingPermitted({ code: 'mystery', externalProcessingAllowed: null }, EXTERNAL_STORE, env))).toMatchObject({ code: 'PROCESSOR_NOT_PERMITTED' });
   });
 
   it('test_external_send_refused_without_registered_processor: an engine with no register entry is refused even when the type allows', () => {
-    const env = { PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' };
-    expect(codeOf(() => assertExternalProcessingPermitted(allows, { ...EXTERNAL_DIDIT, processorRef: 'ACME_OCR' }, env))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_UNREGISTERED' });
+    const env = { PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' };
+    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_IDENTITY, env))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_UNREGISTERED' });
     expect(codeOf(() => assertExternalProcessingPermitted(allows, UNKNOWN_ENGINE, env))).toMatchObject({ code: 'PROCESSOR_UNREGISTERED' });
   });
 
   it('test_external_send_refused_without_transfer_basis: a registered processor with no configured contract reference is DORMANT and refused; with one it passes', () => {
-    expect(processorStatus(processorByRef('DIDIT')!, {})).toBe('DORMANT_NO_CONTRACT');
-    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_DIDIT, {}))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_NO_TRANSFER_BASIS' });
-    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_DIDIT, { PROCESSOR_CONTRACT_DIDIT: '   ' }))).toMatchObject({ code: 'PROCESSOR_NO_TRANSFER_BASIS' });
-    expect(processorStatus(processorByRef('DIDIT')!, { PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' })).toBe('ACTIVE');
-    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_DIDIT, { PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' }))).toBeNull();
+    expect(processorStatus(processorByRef('OBJECT_STORE')!, {})).toBe('DORMANT_NO_CONTRACT');
+    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_STORE, {}))).toMatchObject({ statusCode: 503, code: 'PROCESSOR_NO_TRANSFER_BASIS' });
+    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_STORE, { PROCESSOR_CONTRACT_OBJECT_STORE: '   ' }))).toMatchObject({ code: 'PROCESSOR_NO_TRANSFER_BASIS' });
+    expect(processorStatus(processorByRef('OBJECT_STORE')!, { PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' })).toBe('ACTIVE');
+    expect(codeOf(() => assertExternalProcessingPermitted(allows, EXTERNAL_STORE, { PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' }))).toBeNull();
   });
 
   it('test_local_engine_never_gated: an in-process engine passes regardless of the registry row or env', () => {
@@ -110,11 +107,11 @@ describe('[DGP-1 · DOC-1 §2] the send gate is fail-closed', () => {
   });
 
   it('the admin view resolves status from env and never exposes the reference value', () => {
-    const view = processorRegisterView({ PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' });
-    const didit = view.find((p) => p.ref === 'DIDIT')!;
-    expect(didit.status).toBe('ACTIVE'); expect(didit.contractConfigured).toBe(true);
+    const view = processorRegisterView({ PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' });
+    const store = view.find((p) => p.ref === 'OBJECT_STORE')!;
+    expect(store.status).toBe('ACTIVE'); expect(store.contractConfigured).toBe(true);
     expect(JSON.stringify(view)).not.toContain('DPA-2026-001');
-    expect(view.find((p) => p.ref === 'ID_ANALYZER')!.status).toBe('DORMANT_NO_CONTRACT');
+    expect(view.find((p) => p.ref === 'DIDIT')).toBeUndefined();
     expect(view.find((p) => p.ref === 'MMG')!.status).toBe('ACTIVE');
   });
 });

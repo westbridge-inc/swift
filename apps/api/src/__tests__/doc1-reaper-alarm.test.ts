@@ -15,7 +15,7 @@ import { socketPlugin } from '../plugins/socket';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { checkReaperFreshness, recordReaperRun, LAST_REAPER_RUN_KEY, REAPER_CYCLE_HOURS, REAPER_MAX_LAG_CYCLES } from '../modules/ops/reaper-freshness';
 import { JOB_RECOVERY } from '../jobs/recovery-policy';
 import { readFileSync } from 'node:fs';
@@ -60,7 +60,7 @@ describe('[DOC-1 P9-2] reaper failure or lag alarms', () => {
   });
 
   it('a completed sweep writes the heartbeat, and a fresh heartbeat is not stale; two cycles of silence is', async () => {
-    const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+    const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
     const before = new Date();
     await service.purgeExpiredDocuments();
     const row = await system(() => app.prisma.platformConfig.findUniqueOrThrow({ where: { key: LAST_REAPER_RUN_KEY } }));

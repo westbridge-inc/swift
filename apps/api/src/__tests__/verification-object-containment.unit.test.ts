@@ -8,7 +8,7 @@ import { AccountService } from '../modules/user/account.service';
 import { eraseDocumentsFor } from '../modules/verification/dsar';
 import { retryStorageOrphans } from '../lib/storage-orphans';
 import type { NotificationService } from '../modules/notification/notification.service';
-import { isOwnedAvatarKey, resolveSignupSelfie, resolveVerificationObject } from '../modules/verification/object-authority';
+import { isOwnedAvatarKey, resolveVerificationObject } from '../modules/verification/object-authority';
 import { shredAndProbe } from '../modules/verification/purge-receipt';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
@@ -165,6 +165,7 @@ function harness() {
     advertiserMember: { findMany: vi.fn(async () => []), deleteMany: vi.fn() }, vendorStaff: { deleteMany: vi.fn() },
     extractionRun: { updateMany: vi.fn() }, extractedField: { updateMany: vi.fn() },
     integritySettings: { findUnique: vi.fn() },
+    enforcementAction: { findFirst: vi.fn(async () => null) },
     $transaction: vi.fn(async (fn: any) => fn(db)),
     $queryRaw: vi.fn(async (query: unknown, ...values: unknown[]) => rawSecurityCensus(people, orphans, query, values)
       ?? [{ id: String(values[0] ?? A), status: 'ACTIVE', tenantId: 'tenant-a', countryCode: 'GY' }]),
@@ -174,9 +175,7 @@ function harness() {
   }
   const provider = {
     engine: { name: 'test', version: '1', external: false },
-    verifyDocument: vi.fn(async () => ({ status: 'pending_manual' as const, referenceToken: 'test' })),
-    verifyIdentity: vi.fn(async () => ({ status: 'pending_manual' as const, referenceToken: 'test' })),
-    getStatus: vi.fn(async () => 'pending_manual' as const),
+    verifyDocument: vi.fn(async () => ({ referenceToken: 'test' })),
   };
   const service = new VerificationService(db as PrismaClient, {} as NotificationService, provider);
   const internals = service as any;
@@ -187,7 +186,7 @@ function harness() {
   vi.spyOn(internals, 'createDocumentLively').mockImplementation(async (data: any) => {
     db.verificationDocument.create(data); return { id: 'created', ...data };
   });
-  vi.spyOn(internals, 'recordDecision').mockResolvedValue(undefined);
+  vi.spyOn(internals, 'recordSubmission').mockResolvedValue(undefined);
   const capture = vi.spyOn(internals, 'holdOnCrossSubjectCollision');
   const log = { error: vi.fn(), info: vi.fn(), warn: vi.fn() };
   const account = new AccountService({ prisma: db, log, io: {} } as unknown as FastifyInstance);
@@ -228,7 +227,7 @@ async function handlers(h: ReturnType<typeof harness>, routes: typeof verificati
 }
 
 describe('verification object containment at real service boundaries', () => {
-  it.each(['same-tenant', 'cross-tenant'].flatMap((tenancy) => ['checklist', 'id', 'selfie'].map((input) => [tenancy, input])))('%s B upload cannot enter A %s processing', async (tenancy, input) => {
+  it.each(['same-tenant', 'cross-tenant'].flatMap((tenancy) => ['checklist', 'id'].map((input) => [tenancy, input])))('%s B upload cannot enter A %s processing', async (tenancy, input) => {
     const h = harness();
     if (tenancy === 'same-tenant') h.people.get(B)!.tenantId = 'tenant-a';
     // B really uploads through the existing handler before A supplies its key.
@@ -238,12 +237,11 @@ describe('verification object containment at real service boundaries', () => {
     await routes.get('post /upload')!(uploadRequest(B));
     expect(h.db.encryptedObject.create).toHaveBeenCalledOnce();
     const attempt = input === 'checklist' ? h.service.submitDocument(A, 'MOVER', 'vehicle_registration', key(B), '1')
-      : h.service.submitIdentity(A, key(input === 'id' ? B : A), key(input === 'selfie' ? B : A), '1');
+      : h.service.submitIdentity(A, key(B), '1');
     await expect(attempt).rejects.toMatchObject(unavailable);
     expect(h.provider.verifyDocument).not.toHaveBeenCalled();
-    expect(h.provider.verifyIdentity).not.toHaveBeenCalled();
-    expect(h.capture).not.toHaveBeenCalled();
     expect(h.db.verificationDocument.create).not.toHaveBeenCalled();
+    expect(h.capture).not.toHaveBeenCalled();
   });
 
   it.each(['dsar', 'retention', 'image', 'account', 'orphan'])('poisoned legacy pointer cannot reach the %s storage sink', async (sink) => {
@@ -379,17 +377,39 @@ describe('verification object containment at real service boundaries', () => {
     expect(h.db.verificationDocument.create).toHaveBeenCalledOnce();
   });
 
-  it('owned identity and owned selfie uploads reach the identity provider', async () => {
-    const h = harness(); vi.stubEnv('FEATURE_BIOMETRIC_FACE_MATCH', '1');
-    const selfie = key(A, 's'); h.objects.set(selfie, { ...h.objects.get(key(A))!, fileKey: selfie });
-    await expect(h.service.submitIdentity(A, key(A), selfie, '1')).resolves.toMatchObject({ userId: A, fileUrl: key(A) });
-    expect(h.provider.verifyIdentity).toHaveBeenCalledWith({ userId: A, idDocumentUrl: key(A), selfieUrl: selfie });
+  it.each(['approved', 'rejected'] as const)('[NO-AI] a stray %s verdict from an adapter cannot decide a checklist document: PENDING, nobody as reviewer, no expiry', async (status) => {
+    const h = harness();
+    // The contract has no status field; an adapter written against the old one is cast past the types.
+    h.provider.verifyDocument.mockResolvedValueOnce({ status, referenceToken: 'untrusted-result' } as never);
+    vi.spyOn(h.service as any, 'planExtractionFor').mockResolvedValue({ plan: { blockingFail: false, run: { outcome: 'OK', confidence: 1 }, validations: [] }, type: null });
+    const doc = await h.service.submitDocument(A, 'MOVER', 'vehicle_registration', key(A), '1');
+    expect(doc).toMatchObject({ status: 'PENDING' });
+    expect(doc.reviewedBy).toBeUndefined();
+    expect(doc.reviewedAt).toBeUndefined();
+    expect(doc.expiresAt).toBeUndefined();
   });
 
-  it('server-persisted signup selfie keeps the checklist face-match path working', async () => {
-    const h = harness(); vi.stubEnv('FEATURE_BIOMETRIC_FACE_MATCH', '1');
+  it('[NO-AI] a stray rejection cannot decide an L2 identity submission either', async () => {
+    const h = harness();
+    h.provider.verifyDocument.mockResolvedValueOnce({ status: 'rejected', referenceToken: 'untrusted-result' } as never);
+    const doc = await h.service.submitIdentity(A, key(A), '1');
+    expect(doc).toMatchObject({ status: 'PENDING', docType: 'identity_l2' });
+    expect(doc.reviewedBy).toBeUndefined();
+  });
+
+  it('an owned identity document reaches the engine document-only: one call, the ID, nothing else', async () => {
+    const h = harness();
+    await expect(h.service.submitIdentity(A, key(A), '1')).resolves.toMatchObject({ userId: A, fileUrl: key(A) });
+    expect(h.provider.verifyDocument).toHaveBeenCalledOnce();
+    expect(h.provider.verifyDocument).toHaveBeenCalledWith({ userId: A, docType: 'national_id', fileUrl: key(A) });
+  });
+
+  it('a checklist identity document is handed over the same way, and the signup selfie pointer is not even read for it', async () => {
+    const h = harness();
     await h.service.submitDocument(A, 'MOVER', 'national_id', key(A), '1');
-    expect(h.provider.verifyIdentity).toHaveBeenCalledWith({ userId: A, idDocumentUrl: key(A), selfieUrl: avatar(A) });
+    expect(h.provider.verifyDocument).toHaveBeenCalledOnce();
+    expect(h.provider.verifyDocument).toHaveBeenCalledWith({ userId: A, docType: 'national_id', fileUrl: key(A) });
+    expect(h.db.user.findUnique).not.toHaveBeenCalledWith(expect.objectContaining({ select: expect.objectContaining({ avatar: true }) }));
   });
 
   it.each([
@@ -425,11 +445,12 @@ describe('verification object containment at real service boundaries', () => {
     expect(isOwnedAvatarKey(key, A)).toBe(true);
   });
 
-  it.each([avatar(B), key(B), key(A), 'https://example.invalid/photo.jpg', '/uploads/avatars/subject-a/../subject-b/ssssssssssssssss.jpg'])('poisoned persisted signup selfie %s is refused with a retake instruction', async (value) => {
-    const h = harness(); h.people.get(A)!.avatar = value; vi.stubEnv('FEATURE_BIOMETRIC_FACE_MATCH', '1');
-    await expect(h.service.submitDocument(A, 'MOVER', 'national_id', key(A), '1')).rejects.toMatchObject({ code: 'SELFIE_REQUIRED' });
-    expect(h.provider.verifyIdentity).not.toHaveBeenCalled();
-    await expect(resolveSignupSelfie(h.db, A)).rejects.toThrow('Retake your profile selfie');
+  it.each([avatar(B), key(B), key(A), 'https://example.invalid/photo.jpg', '/uploads/avatars/subject-a/../subject-b/ssssssssssssssss.jpg'])('a poisoned persisted signup selfie %s is not an owned avatar key, and document review never consults it', async (value) => {
+    const h = harness(); h.people.get(A)!.avatar = value;
+    expect(isOwnedAvatarKey(value, A)).toBe(false);
+    await expect(h.service.submitDocument(A, 'MOVER', 'national_id', key(A), '1')).resolves.toMatchObject({ status: 'PENDING' });
+    expect(h.provider.verifyDocument).toHaveBeenCalledOnce();
+    expect(h.provider.verifyDocument).toHaveBeenCalledWith({ userId: A, docType: 'national_id', fileUrl: key(A) });
   });
 
   it('poisoned account avatar cannot delete a verification object', async () => {
@@ -1255,7 +1276,7 @@ describe('generated declaration envelope contract', () => {
       await resolveVerificationObject(h.db, { fileKey: data.fileUrl, userId: data.userId });
       const doc = { id: 'declaration-a', ...data }; h.documents.push(doc); return doc;
     });
-    vi.spyOn(prototype, 'recordDecision').mockResolvedValue(undefined);
+    vi.spyOn(prototype, 'recordSubmission').mockResolvedValue(undefined);
     vi.spyOn(prototype, 'getStatus').mockResolvedValue({ required: [DECLARATION_DOC_TYPE] });
     const routes = await handlers(h, vendorRoutes);
     const reply = { code: vi.fn() };

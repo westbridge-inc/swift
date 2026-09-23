@@ -508,25 +508,15 @@ export function MoverHomeScreen({ navigation }: any) {
   const activeJob = active.data;
   const jobs: any[] = available.data ?? [];
   const errMsg = (goOnline.error as any)?.response?.data?.error?.message;
-  // [E12 §7.1] The two liveness refusals are ACTIONABLE, not just readable:
-  // 428 wants a selfie check (there's a screen for that now); 423 means only
-  // support can help. Every other gate keeps the plain banner.
+  // [E12 §7.1 · NO-AI] The one identity refusal left is ACTIONABLE: 423 is an
+  // account LOCK (a passenger disputed the driver, or ops) and only support can
+  // lift it. The selfie identity check and its 428 are gone with the face
+  // comparison Swift no longer performs. Every other gate keeps the plain banner.
   const errCode = (goOnline.error as any)?.response?.data?.error?.code as string | undefined;
   const livenessAction =
-    errCode === 'LIVENESS_CHECK_REQUIRED'
-      ? { label: 'Take the selfie check', go: () => navigation?.navigate?.('LivenessCheck', { profile: kind }) }
-      : errCode === 'LIVENESS_LOCKED'
-        ? { label: 'Contact support', go: () => navigation?.navigate?.('GetHelp', { category: 'ACCOUNT', subject: 'Identity check locked my account' }) }
-        : null;
-  // [E12 §7.2] A pending mid-shift prompt, surfaced IN the app: the push is
-  // the primary nudge, but a mover with notifications off would otherwise be
-  // forced offline in silence. The deadline is the server's column, verbatim.
-  const livenessPromptBy = (() => {
-    const raw = (profile as any)?.livenessPromptDeadlineAt;
-    if (typeof raw !== 'string') return null;
-    const at = new Date(raw);
-    return Number.isFinite(at.getTime()) && at.getTime() > Date.now() ? at : null;
-  })();
+    errCode === 'LIVENESS_LOCKED'
+      ? { label: 'Contact support', go: () => navigation?.navigate?.('GetHelp', { category: 'ACCOUNT', subject: 'Identity check locked my account' }) }
+      : null;
   const d: any = demand.data ?? {};
 
   // Soonest checklist document inside its 30-day renewal window (skipping any
@@ -788,21 +778,6 @@ export function MoverHomeScreen({ navigation }: any) {
                 />
               ) : null}
             </View>
-          ) : null}
-
-          {/* [E12 §7.2] A live mid-shift identity prompt — tap lands on the
-              selfie screen with the same server deadline the push carries. */}
-          {online && livenessPromptBy ? (
-            <Pressable onPress={() => navigation?.navigate?.('LivenessCheck', { profile: kind, respondBy: livenessPromptBy.toISOString() })}>
-              {({ pressed }) => (
-                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.warning, 0.12), borderWidth: 1, borderColor: withAlpha(color.warning, 0.4), padding: space.md, marginTop: space.md, opacity: pressed ? 0.85 : 1 }}>
-                  <Feather name="user-check" size={15} color={dk.warning} style={{ marginTop: 1 }} />
-                  <T variant="label" style={{ flex: 1, color: dk.text }}>
-                    Safety check-in: take a quick selfie by {livenessPromptBy.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} to stay online — tap here.
-                  </T>
-                </View>
-              )}
-            </Pressable>
           ) : null}
 
           {/* Renewal nudge — a document is inside its 30-day window */}

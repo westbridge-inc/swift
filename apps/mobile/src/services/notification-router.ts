@@ -115,17 +115,6 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // row [both reported, neither invented].
   if (kind.startsWith('booking_')) return { screen: 'ServiceJobs' };
 
-  // [E12 §7.2] The identity-check prompts land ON the selfie screen — a timed
-  // prompt that opens the app "wherever it was" is a deadline the person burns
-  // hunting for the right screen. The deadline rides along verbatim (a server
-  // timestamp, never invented); a missed-check tap goes to the same screen
-  // because a fresh PASS is the only way back online. The lock's only door is
-  // support, so that tap opens GetHelp preset with the subject.
-  if (kind === 'liveness_midshift_prompt' || kind === 'liveness_midshift_missed') {
-    const profile = data['profile'] === 'RIDER' ? 'RIDER' : 'DRIVER';
-    const respondBy = typeof data['respondBy'] === 'string' ? (data['respondBy'] as string) : undefined;
-    return { screen: 'LivenessCheck', params: respondBy ? { profile, respondBy } : { profile } };
-  }
   // [MKT G3] "Review your categories — takes about 2 minutes." The backfill
   // sends this to a STORE OWNER (`vendor.owner.userId`), and accepting one of
   // those suggestions is the only thing that writes the tag the Market feed
@@ -142,10 +131,6 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
     return { screen: 'Account' };
   }
 
-  if (kind === 'liveness_locked') {
-    return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } };
-  }
-
   // TWO PUSHES THAT TELL THE RECIPIENT TO CONTACT SUPPORT, AND THEN DIDN'T.
   //
   // Both go to a MOVER and both carry an orderId, so the generic branch at the
@@ -154,8 +139,8 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // screen, which is how a suspended driver read "contact Swift support to
   // respond" and had nowhere to tap.
   //
-  // `GetHelp` is the answer for the same reason `liveness_locked` uses it: it
-  // is mounted in ALL FOUR navigators (customer, mover, vendor, advertiser), so
+  // `GetHelp` is the answer because it is mounted in ALL FOUR navigators
+  // (customer, mover, vendor, advertiser), so
   // it is reachable no matter which stack the recipient is in — and the screen
   // genuinely reads `category`, `subject` and `orderId`, so none of these params
   // is decoration.
