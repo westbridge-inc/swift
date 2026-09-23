@@ -9,8 +9,7 @@ import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { OrderService, holdWindowMs, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
-import { CashRulesService } from '../cash/cash-rules.service';
-import { orderingRestriction } from '../cash/cash-rules.service';
+import { CashRulesService, gpsEvidence, orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -56,6 +55,13 @@ const orderSchema = z.object({
 });
 
 const cancelSchema = z.object({ reason: z.string().max(500).optional() });
+// E16: the pickup custody assertion carries the same issued-then-exact-matched
+// proof shape as the drop-off proof, plus a REQUIRED location fix — a custody
+// claim without GPS evidence is a claim, not proof.
+const pickupProofSchema = z.object({
+  proofPhotoUrl: z.string().min(5).max(2048),
+  gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
+});
 // [M-28] A proof photo never implies money: for a cash job the recipient
 // pays for, the outcome and the rider's location travel with the proof.
 const proofSchema = z.object({
@@ -349,6 +355,88 @@ export default async function courierRoutes(app: FastifyInstance) {
     // Same reason as the store-order and ride cancels: Home's cached feed
     // would otherwise keep this parcel as the live order for up to a minute.
     await invalidateHomeCache(app, request.user.userId).catch(() => {});
+    return { success: true, data: updated };
+  });
+
+  /** POST /order/:id/pickup-proof-photo — the assigned rider uploads the pickup
+   *  custody photo (magic-byte checked, stored in a public folder), then confirms
+   *  pickup via /pickup-proof with the returned url + GPS. Mirrors the drop-off
+   *  pair so the CAS custody transition stays untouched. */
+  app.post<{ Params: { id: string } }>('/order/:id/pickup-proof-photo', auth, async (request) => {
+    const { id } = request.params;
+    const rider = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+    if (!rider) throw new NotFoundError('Rider');
+    const order = await app.prisma.order.findFirst({
+      where: { id, orderType: 'COURIER', riderId: rider.id },
+      select: { id: true, status: true },
+    });
+    if (!order) throw new NotFoundError('CourierOrder', id);
+    if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
+      throw new AppError(400, 'NOT_IN_TRANSIT', 'This courier job is already closed');
+    }
+
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a photo of the pickup');
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG or WebP images are accepted');
+    }
+    const buffer = await file.toBuffer();
+    if (!looksLikeImage(buffer)) {
+      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    }
+
+    const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `courier-proof/${id}/pickup` });
+    // E16 — the pickup mirror of [REPORT-016 F-016-04]: record the SERVER-issued
+    // URL + the rider it was issued to. /pickup-proof exact-matches it, so pickup
+    // custody proof is proof of an actual upload by this rider — not any string
+    // that contains the folder name. Guarded on rider ownership + non-terminal
+    // status, exactly like the delivery-side direct write below it.
+    await app.prisma.order.updateMany({
+      where: { id, orderType: 'COURIER', riderId: rider.id, status: { notIn: TERMINAL_ORDER_STATUSES } },
+      data: { courierPickupProofIssuedUrl: url, courierPickupProofIssuedRiderId: rider.id },
+    });
+    return { success: true, data: { url } };
+  });
+
+  /** POST /order/:id/pickup-proof — the assigned rider confirms pickup with the
+   *  uploaded photo + GPS. This is the ONLY courier entry into PICKED_UP: the
+   *  generic rider leg refuses couriers, so custody proof gates both
+   *  EN_ROUTE_DELIVERY and the direct PICKED_UP → DELIVERED courier path. */
+  app.post('/order/:id/pickup-proof', auth, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = pickupProofSchema.parse(request.body);
+    const rider = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+    if (!rider) throw new NotFoundError('Rider');
+    const order = await app.prisma.order.findFirst({ where: { id, orderType: 'COURIER', riderId: rider.id } });
+    if (!order) throw new NotFoundError('CourierOrder', id);
+    if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
+      throw new AppError(400, 'NOT_IN_TRANSIT', 'This courier job is already closed');
+    }
+    // [REPORT-016 F-016-04 pickup mirror] The proof object must EXACTLY equal
+    // the URL the server issued for this order to THIS rider at
+    // /pickup-proof-photo — not a substring that merely contains the folder
+    // name. A crafted/foreign URL is refused because it was never issued.
+    if (!order.courierPickupProofIssuedUrl
+        || order.courierPickupProofIssuedRiderId !== rider.id
+        || body.proofPhotoUrl !== order.courierPickupProofIssuedUrl) {
+      throw new AppError(400, 'PICKUP_PROOF_NOT_ISSUED',
+        'Attach the pickup photo through the photo step first.');
+    }
+    // Canonical, locked transition: expectedRiderId re-proves ownership on the
+    // locked row, and the proof facts share the transition's commit. updateStatus
+    // (not a raw transition) fires the existing PICKED_UP notification + socket.
+    const updated = await orderService.updateStatus(id, 'PICKED_UP', request.user.userId,
+      `pickup custody proof captured — ${gpsEvidence(body.gps.lat, body.gps.lng)}`, {
+        allowedFrom: ['RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP'],
+        expectedRiderId: rider.id,
+        withinTransaction: async (tx) => {
+          await tx.order.update({ where: { id }, data: {
+            courierPickupProofPhotoUrl: body.proofPhotoUrl,
+            courierPickupProofLat: body.gps.lat,
+            courierPickupProofLng: body.gps.lng,
+          } });
+        },
+      });
     return { success: true, data: updated };
   });
 

@@ -675,6 +675,17 @@ export const courierApi = {
     body: { outcome: 'paid' | 'refused'; gps: { lat: number; lng: number } },
     session?: AuthSessionSnapshot,
   ) => api.post(`/courier/order/${id}/collect`, body, capturedAuthConfig(session)),
+  // E16: pickup custody proof — upload the captured pickup photo, then confirm
+  // pickup with the returned URL + GPS. The server refuses the bare pickup tap.
+  uploadPickupProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/courier/order/${id}/pickup-proof-photo`, form, capturedAuthConfig(session, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })),
+  pickupProof: (
+    id: string,
+    body: { proofPhotoUrl: string; gps: { lat: number; lng: number } },
+    session?: AuthSessionSnapshot,
+  ) => api.post(`/courier/order/${id}/pickup-proof`, body, capturedAuthConfig(session)),
 };
 
 // Services (mounted at /api/v1/services)

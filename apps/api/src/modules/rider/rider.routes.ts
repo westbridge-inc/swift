@@ -1410,6 +1410,16 @@ export async function riderRoutes(app: FastifyInstance) {
         );
       }
 
+      // E16: a courier's PICKED_UP asserts physical custody, which must carry
+      // photo + time + location proof. The generic leg keeps serving the food
+      // path byte-identical; the courier pickup-proof flow (courier.routes) is
+      // the only courier entry into PICKED_UP, and PICKED_UP is the sole
+      // predecessor of in-transit and a direct predecessor of courier DELIVERED.
+      if (slug === 'picked-up' && order.orderType === 'COURIER') {
+        throw new AppError(409, 'PICKUP_PROOF_REQUIRED',
+          'Courier pickup requires a custody photo — complete the pickup-proof flow first.');
+      }
+
       // EVIDENCE, NOT A GATE [L3 advisory · L4 shadow-first].
       //
       // `arrived` and `arrived-pickup` are the two rungs where the rider makes

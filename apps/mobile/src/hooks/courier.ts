@@ -105,3 +105,37 @@ export function useCourierCollect() {
   });
   return pv ? previewMutation() : m;
 }
+
+/** E16: pickup custody proof. PICKED_UP is a physical-custody claim, so the
+ *  bare tap is refused server-side and the pickup must carry a photo + the
+ *  rider's location. One mutation, two server calls: upload the captured
+ *  photo, then confirm pickup with the returned URL on the evidence fix —
+ *  GPS is ALWAYS present here, the server will not accept the proof without it. */
+export function useCourierPickupProof() {
+  const pv = useMoverPreview((s) => s.preview);
+  const qc = useQueryClient();
+  const m = useMutation({
+    mutationFn: async ({ orderId, uri, authSession }: {
+      orderId: string;
+      uri: string;
+      authSession?: AuthSessionSnapshot;
+    }) => {
+      const owner = authSession ?? requireAuthSessionSnapshot();
+      const initial = requireAuthSessionForPrincipal(owner);
+      const form = new FormData();
+      form.append('file', { uri, name: 'pickup-proof.jpg', type: 'image/jpeg' } as unknown as Blob);
+      const up = await courierApi.uploadPickupProof(orderId, form, initial);
+      let current = requireAuthSessionForPrincipal(owner);
+      const url = (up as any)?.data?.data?.url as string;
+      if (!url) throw new Error('upload failed');
+      const fix = await evidenceFix(owner);
+      current = fix.current;
+      const result = await unwrap(courierApi.pickupProof(orderId, { proofPhotoUrl: url, gps: fix.gps }, current));
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['courier', 'orders'] });
+      void qc.invalidateQueries({ queryKey: ['mover'] });
+      return result;
+    },
+  });
+  return pv ? previewMutation() : m;
+}
