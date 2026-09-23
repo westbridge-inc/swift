@@ -27,7 +27,7 @@ import { assertFounderAccess } from './founder-access';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import { APPROVAL_HEADER, approvalRefusalMessage, decideApproval, requiresApproval, resolveApproval } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
-import { adminAuditRow, auditWithin, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
+import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -4777,7 +4777,23 @@ export async function adminRoutes(app: FastifyInstance) {
       audit: (auditTx, facts) => auditWithin(auditTx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
     }));
     const facts = outcome.facts;
-    if (!outcome.replayed) {
+    if (outcome.replayed) {
+      // [R5] A replay changed nothing and wrote no row. The decision it repeats
+      // was audited inline when it was made (its row carries that decision's
+      // claim revision): point the backstop at that row, so it verifies it
+      // instead of writing a second one after the response.
+      const decidedRevision = facts.mmgClaimResolvedRevision;
+      const decisionRow = decidedRevision == null ? null : await app.prisma.auditLog.findFirst({
+        where: {
+          entityId: id,
+          action: `ADMIN ${request.method} ${request.routeOptions?.url ?? request.url}`,
+          changes: { path: ['claimRevision'], equals: decidedRevision },
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true },
+      });
+      markReplayAudited(request as unknown as AuditRequestLike, decisionRow?.id);
+    } else {
       app.io.to(`order:${id}`).emit('order:status_changed', {
         orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
         mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,

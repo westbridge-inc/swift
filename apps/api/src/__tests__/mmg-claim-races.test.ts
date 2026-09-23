@@ -37,6 +37,7 @@ import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { adminAuditCounter } from '../plugins/observability';
 
 grantSuiteCapability('unscoped-mutation');
 
@@ -115,6 +116,43 @@ const row = (id: string) => system(() => app.prisma.order.findUniqueOrThrow({ wh
 const audits = (id: string, action: string) => system(() => app.prisma.auditLog.count({ where: { entityId: id, action } }));
 const outboxRows = (id: string) => system(() => app.prisma.orderOutbox.findMany({ where: { orderId: id, kind: 'mmg-claim-notice' }, orderBy: { createdAt: 'asc' } }));
 const code = (res: { json: () => any }) => res.json().error?.code ?? res.json().code;
+
+/** [R5] The admin audit hook runs AFTER the response is sent, so an audit row it
+ *  writes can land before or after a test counts rows. It decides every
+ *  successful admin mutation exactly once — `inline` (the action's own row,
+ *  verified), `backstop` (it writes one), `rolled-back` (it writes one) — and
+ *  counts that decision, so waiting on the count is waiting on the hook. */
+type AuditWriters = { inline: number; backstop: number; 'rolled-back': number };
+async function auditWriters(): Promise<AuditWriters> {
+  const out: AuditWriters = { inline: 0, backstop: 0, 'rolled-back': 0 };
+  for (const v of (await adminAuditCounter.get()).values) {
+    const writer = String(v.labels['writer']) as keyof AuditWriters;
+    if (writer in out) out[writer] += v.value;
+  }
+  return out;
+}
+const decided = (w: AuditWriters) => w.inline + w.backstop + w['rolled-back'];
+/** Bounded: until the hook's decisions stop moving (nothing from an earlier test in flight). */
+async function auditHookQuiet(): Promise<AuditWriters> {
+  let last = await auditWriters();
+  for (let stable = 0, i = 0; stable < 3 && i < 100; i += 1) {
+    await new Promise((r) => setTimeout(r, 25));
+    const now = await auditWriters();
+    stable = decided(now) === decided(last) ? stable + 1 : 0;
+    last = now;
+  }
+  return last;
+}
+/** Bounded: until the hook has decided `requests` more requests than `before`; returns what it decided. */
+async function auditHookSettled(before: AuditWriters, requests: number): Promise<AuditWriters> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const now = await auditWriters();
+    const delta: AuditWriters = { inline: now.inline - before.inline, backstop: now.backstop - before.backstop, 'rolled-back': now['rolled-back'] - before['rolled-back'] };
+    if (decided(delta) >= requests || Date.now() > deadline) return delta;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
 
 /** Poll the server's own view of its backends until one is WAITING on a lock
  *  inside a FOR UPDATE — the observable proof that the second command reached
@@ -456,11 +494,16 @@ describe('admin resolution: locked, revision-bound, atomic, idempotent', () => {
   it('one decision, retried: one resolution, one audit row, one durable event', async () => {
     const { order, revision } = await openDispute();
     const body = { resolution: 'CUSTOMER_DID_NOT_PAY', note: 'No transfer on the statement', expectedClaimRevision: revision };
+    const hookBefore = await auditHookQuiet();
     const first = await resolve(order.id, body);
     expect(first.statusCode, first.body).toBe(200);
     const again = await resolve(order.id, body);
     expect(again.statusCode, again.body).toBe(200);
     expect(again.json().data).toMatchObject({ replayed: true });
+    // [R5] Deterministic, not a race with the post-response hook: once it has
+    // decided BOTH requests, the decision was recorded inline and its replay
+    // points at that same row — the backstop wrote nothing for either.
+    expect(await auditHookSettled(hookBefore, 2), 'how the audit hook recorded the decision and its replay').toEqual({ inline: 2, backstop: 0, 'rolled-back': 0 });
     const after = await row(order.id);
     expect(after).toMatchObject({ paymentStatus: 'PENDING', mmgClaimResolution: 'CUSTOMER_DID_NOT_PAY', mmgClaimRevision: revision + 1, mmgClaimResolvedRevision: revision + 1 });
     expect(after.mmgClaimMismatchAt).toBeNull();

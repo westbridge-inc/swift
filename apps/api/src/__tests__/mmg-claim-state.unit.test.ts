@@ -942,6 +942,11 @@ describe('route contracts — no unlocked writer survives', () => {
     expect(h).toMatch(/auditWithin\(/);
     expect(h).not.toMatch(/await audit\(/);
     expect(h).not.toMatch(/app\.prisma\.order\.update\(/);
+    // [R5] A replay writes no row of its own: it is marked with the decision's
+    // inline row (found by that decision's claim revision), so the backstop
+    // hook verifies instead of writing a second one.
+    expect(h).toMatch(/changes: \{ path: \['claimRevision'\], equals: decidedRevision \}/);
+    expect(h).toMatch(/markReplayAudited\(request as unknown as AuditRequestLike, decisionRow\?\.id\)/);
   });
 
   it('vendor confirm-payment: the decision is taken on the LOCKED row and bound to its revision', () => {
