@@ -61,23 +61,22 @@ chmod 0644 "$SSHD_DROPIN"
 # Ubuntu 24.04 starts sshd through ssh.socket, so the privilege separation
 # directory may not exist yet; `sshd -t` refuses to validate without it.
 install -d -m 0755 -o root -g root /run/sshd
-if ! /usr/sbin/sshd -t ||
-   ! /usr/sbin/sshd -T -C "user=$DEPLOY_USER,host=localhost,addr=127.0.0.1" |
-     grep -qx 'passwordauthentication no' ||
-   ! /usr/sbin/sshd -T -C "user=$DEPLOY_USER,host=localhost,addr=127.0.0.1" |
-     grep -qx 'kbdinteractiveauthentication no' ||
-   ! /usr/sbin/sshd -T -C "user=$DEPLOY_USER,host=localhost,addr=127.0.0.1" |
-     grep -qx 'pubkeyauthentication yes' ||
-   ! /usr/sbin/sshd -T -C "user=$DEPLOY_USER,host=localhost,addr=127.0.0.1" |
-     grep -qx 'permitrootlogin no' ||
-   ! /usr/sbin/sshd -T -C "user=$DEPLOY_USER,host=localhost,addr=127.0.0.1" |
-     grep -qx 'authenticationmethods publickey' ||
-   ! /usr/sbin/sshd -T -C 'user=root,host=localhost,addr=127.0.0.1' |
-     grep -qx 'permitrootlogin no'; then
+restore_sshd_and_die() {
   if [ -s "$SSHD_PREVIOUS" ]; then cp "$SSHD_PREVIOUS" "$SSHD_DROPIN"; else rm -f "$SSHD_DROPIN"; fi
   rm -f "$SSHD_PREVIOUS"
   die "sshd rejected the key-only configuration; previous file restored"
-fi
+}
+# Read each effective configuration once, then match it. Piping `sshd -T`
+# into `grep -q` under `set -o pipefail` fails whenever grep stops reading
+# early and sshd dies of SIGPIPE, which rejected a correct configuration.
+/usr/sbin/sshd -t || restore_sshd_and_die
+DEPLOY_EFFECTIVE="$(/usr/sbin/sshd -T -C "user=$DEPLOY_USER,host=localhost,addr=127.0.0.1")" || restore_sshd_and_die
+ROOT_EFFECTIVE="$(/usr/sbin/sshd -T -C 'user=root,host=localhost,addr=127.0.0.1')" || restore_sshd_and_die
+for expected in 'passwordauthentication no' 'kbdinteractiveauthentication no' \
+                'pubkeyauthentication yes' 'permitrootlogin no' 'authenticationmethods publickey'; do
+  grep -qxF -- "$expected" <<< "$DEPLOY_EFFECTIVE" || restore_sshd_and_die
+done
+grep -qxF -- 'permitrootlogin no' <<< "$ROOT_EFFECTIVE" || restore_sshd_and_die
 rm -f "$SSHD_PREVIOUS"
 systemctl reload ssh
 
