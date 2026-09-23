@@ -6,6 +6,7 @@ import { color, font, fontSize, radius, space } from '@swift/ui';
 import { T, TonePill, PillButton } from '../../kit';
 import { useAuthStore } from '../../stores/authStore';
 import { money } from '../../lib/money';
+import { canVendorConfirmDelivered } from './screens/delivery-owner';
 
 export const GUTTER = space['2xl'];
 
@@ -17,7 +18,7 @@ export function prettyVendorType(t?: string) {
 
 // ─── Order helpers ───────────────────────────────────────────────────────────
 
-export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
 
 /** Statuses where a rider owns the status lane; kitchen progress then rides
  *  the preparingAt/readyAt timestamps (see the vendor prep routes). */
@@ -42,6 +43,15 @@ export function orderActions(order: any): { label: string; action: VendorOrderAc
   }
   // Takeaway: the vendor closes the order when the customer collects it (no rider).
   if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) return [{ label: 'Mark picked up', action: 'complete-pickup' }];
+  // Store-owned delivery has its own terminal ceremony. Platform-rider orders
+  // remain exclusively completable from the assigned rider's app.
+  if (canVendorConfirmDelivered({
+    fulfillment: order?.fulfillment,
+    fulfillmentMode: order?.fulfillmentMode,
+    status: order?.status,
+    riderId: order?.riderId,
+    riderPresent: Boolean(order?.rider),
+  })) return [{ label: 'Confirm delivered', action: 'delivered' }];
   return [];
 }
 

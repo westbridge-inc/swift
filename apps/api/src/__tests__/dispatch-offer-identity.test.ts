@@ -297,6 +297,142 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
     expect(mine).toHaveLength(1);
   });
 
+  it('an old empty-ring worker cannot exhaust or delete a newer delivery generation', async () => {
+    await parkAllRiders();
+    const order = await makeOrder();
+    const internal = dispatch as any;
+    const originalAcquire = internal.acquireExhaustLock.bind(dispatch);
+    let entered!: () => void;
+    let resume!: () => void;
+    const atExhaustion = new Promise<void>((resolve) => { entered = resolve; });
+    const released = new Promise<void>((resolve) => { resume = resolve; });
+    const lockSpy = vi.spyOn(internal, 'acquireExhaustLock').mockImplementationOnce(async (...args: any[]) => {
+      entered();
+      await released;
+      return originalAcquire(...args);
+    });
+
+    try {
+      const oldWorker = dispatch.dispatchOrder(order.id);
+      await atExhaustion;
+
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentMode: 'VENDOR_DELIVERY', fulfillmentModeVersion: { increment: 1 } },
+      });
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: { increment: 1 } },
+      });
+      expect(await dispatch.prepareForPlatformDelivery(order.id, 2)).toBe(true);
+
+      const currentRider = await makeRider();
+      const currentAttempt = 'new-generation-card~fv2';
+      const currentSearch = await app.prisma.dispatchSearch.create({
+        data: {
+          subjectId: order.id,
+          subjectType: 'ORDER',
+          status: 'SEARCHING',
+          vertical: 'DELIVERY',
+          radiusKm: 5,
+          deliveryAuthorityVersion: 2,
+        },
+      });
+      await app.redis.set(offerKey(order.id), `${currentRider.riderId}:${currentAttempt}`, 'EX', 40);
+      await app.redis.set(moverOfferKey(currentRider.riderId), `${order.id}:${currentAttempt}`, 'EX', 40);
+      await app.redis.sadd(`dispatch:declined:${order.id}:fv2`, 'already-declined');
+      await app.redis.set(`dispatch:round:${order.id}:fv2`, '2', 'EX', 3600);
+      await app.redis.set(`dispatch:exhausts:${order.id}:fv2`, '2', 'EX', 3600);
+
+      resume();
+      expect(await oldWorker).toEqual({ offered: currentRider.riderId });
+      expect(await app.redis.get(offerKey(order.id))).toBe(`${currentRider.riderId}:${currentAttempt}`);
+      expect(await app.redis.get(moverOfferKey(currentRider.riderId))).toBe(`${order.id}:${currentAttempt}`);
+      expect(await app.redis.smembers(`dispatch:declined:${order.id}:fv2`)).toEqual(['already-declined']);
+      expect(await app.redis.get(`dispatch:round:${order.id}:fv2`)).toBe('2');
+      expect(await app.redis.get(`dispatch:exhausts:${order.id}:fv2`)).toBe('2');
+      expect((await app.prisma.dispatchSearch.findUniqueOrThrow({ where: { id: currentSearch.id } })).status).toBe('SEARCHING');
+      const notices = await app.prisma.notification.findMany({ where: { userId: customerId } });
+      expect(notices.some((notice) => {
+        const data = notice.data as { orderId?: string; kind?: string } | null;
+        return data?.orderId === order.id
+          && (data.kind === 'dispatch_exhausted' || data.kind === 'dispatch_retrying');
+      })).toBe(false);
+
+      const claimed = await dispatch.acceptOffer(order.id, currentRider.userId, undefined, currentAttempt);
+      expect(claimed.riderId).toBe(currentRider.riderId);
+      expect(claimed.fulfillmentModeVersion).toBe(2);
+    } finally {
+      resume();
+      lockSpy.mockRestore();
+      await app.redis.del(
+        offerKey(order.id),
+        `dispatch:round:${order.id}:fv2`,
+        `dispatch:declined:${order.id}:fv2`,
+        `dispatch:exhausts:${order.id}:fv2`,
+        `dispatch:generation-init:${order.id}:fv2`,
+        `dispatch:exhaust-lock:${order.id}`,
+      );
+    }
+  });
+
+  it.each(['EXHAUSTED', 'ASSIGNED', 'CANCELLED'] as const)(
+    'a stale generation-zero journal worker cannot rewrite or reopen a generation-two %s row',
+    async (status) => {
+      const order = await makeOrder();
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentModeVersion: 2 },
+      });
+      const later = await app.prisma.dispatchSearch.create({
+        data: {
+          subjectId: order.id,
+          subjectType: 'ORDER',
+          status,
+          vertical: 'DELIVERY',
+          radiusKm: 5,
+          deliveryAuthorityVersion: 2,
+          ...(status === 'EXHAUSTED' ? { exhaustedAt: new Date() } : {}),
+        },
+      });
+
+      await (dispatch as any).journalOpenSearch(
+        { id: order.id, orderType: order.orderType, fulfillmentModeVersion: 0 },
+        0,
+        5,
+      );
+
+      const after = await app.prisma.dispatchSearch.findUniqueOrThrow({ where: { id: later.id } });
+      expect(after.status).toBe(status);
+      expect(after.resolution).toBeNull();
+      expect(await app.prisma.dispatchSearch.count({
+        where: {
+          subjectId: order.id,
+          status: 'SEARCHING',
+          OR: [{ deliveryAuthorityVersion: 0 }, { deliveryAuthorityVersion: null }],
+        },
+      })).toBe(0);
+    },
+  );
+
+  it('serializes concurrent journal openers into one generation-zero search row', async () => {
+    const order = await makeOrder();
+    const snapshot = { id: order.id, orderType: order.orderType, fulfillmentModeVersion: 0 };
+
+    await Promise.all([
+      (dispatch as any).journalOpenSearch(snapshot, 0, 5),
+      (dispatch as any).journalOpenSearch(snapshot, 1, 8),
+    ]);
+
+    expect(await app.prisma.dispatchSearch.count({
+      where: {
+        subjectId: order.id,
+        status: 'SEARCHING',
+        OR: [{ deliveryAuthorityVersion: 0 }, { deliveryAuthorityVersion: null }],
+      },
+    })).toBe(1);
+  });
+
   it('a timeout with NO evidence row spares the acceptance rate — absence is not proof of delivery [REPORT-014 F-014-10]', async () => {
     await parkAllRiders();
     const r = await makeRider();
@@ -401,13 +537,50 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
 
     // B grabs O1 off the open board (bypassing A's offer): retirement must
     // retire A's pair — and must NOT touch B's reverse pointer for O2.
-    await dispatch.retireAfterAssignment(o1.id, b.riderId);
+    await app.prisma.order.update({
+      where: { id: o1.id },
+      data: { riderId: b.riderId, status: 'RIDER_ASSIGNED' },
+    });
+    await dispatch.retireAfterAssignment(o1.id, b.riderId, 0, 0);
 
     expect(await app.redis.get(offerKey(o1.id))).toBeNull();          // O1 offer gone
     expect(await app.redis.get(moverOfferKey(a.riderId))).toBeNull(); // A's pointer gone (was dangling before)
     expect((await app.redis.get(moverOfferKey(b.riderId)))!.split(':')[0]).toBe(o2.id); // B's O2 pointer INTACT
     expect((await app.redis.get(offerKey(o2.id)))!.split(':')[0]).toBe(b.riderId);      // O2 offer INTACT
   });
+
+  it.each([0, 2])(
+    'a delayed assignment cleanup cannot delete a post-handback offer in generation %i',
+    async (generation) => {
+      await parkAllRiders();
+      const prior = await makeRider();
+      const next = await makeRider({ lat: PICKUP.lat + 0.01 });
+      const order = await makeOrder();
+
+      // The first assignment committed, then was handed back before its
+      // post-commit Redis cleanup resumed.
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { riderId: prior.riderId, status: 'RIDER_ASSIGNED', fulfillmentModeVersion: generation },
+      });
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { riderId: null, status: 'READY_FOR_PICKUP' },
+      });
+
+      const attempt = generation === 0 ? 'same-generation-reoffer' : `new-generation-reoffer~fv${generation}`;
+      await app.redis.set(offerKey(order.id), `${next.riderId}:${attempt}`, 'EX', 40);
+      await app.redis.set(moverOfferKey(next.riderId), `${order.id}:${attempt}`, 'EX', 40);
+
+      try {
+        await dispatch.retireAfterAssignment(order.id, prior.riderId, generation, 0);
+        expect(await app.redis.get(offerKey(order.id))).toBe(`${next.riderId}:${attempt}`);
+        expect(await app.redis.get(moverOfferKey(next.riderId))).toBe(`${order.id}:${attempt}`);
+      } finally {
+        await app.redis.del(offerKey(order.id), moverOfferKey(next.riderId));
+      }
+    },
+  );
 
   it('a redispatch scheduling failure releases the exhaust lock so the queue retry can finish the job [REPORT-021 F-021-03]', async () => {
     await parkAllRiders();

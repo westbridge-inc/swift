@@ -364,6 +364,18 @@ export function useRetryDispatch() {
   });
 }
 
+/** The server owns custody. This only records the eligible store's requested
+ * delivery owner and immediately re-reads both its detail and every order list
+ * after a success or a race refusal. */
+export function useSetOrderFulfillmentMode() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: ({ id, mode }: { id: string; mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY' }) =>
+      unwrap(vendorApi.setFulfillmentMode(id, mode)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+  });
+}
+
 export function useToggleOpen() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOpen()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
@@ -392,7 +404,7 @@ export function useOrderAction() {
       reason,
     }: {
       id: string;
-      action: 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+      action: 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
       code?: string;
       /** reject only — the server records it and tells the customer why. */
       reason?: string;
@@ -401,6 +413,7 @@ export function useOrderAction() {
       if (action === 'confirm-payment') return unwrap(vendorApi.confirmPayment(id, code ?? ''));
       if (action === 'preparing') return unwrap(vendorApi.preparing(id));
       if (action === 'ready') return unwrap(vendorApi.ready(id));
+      if (action === 'delivered') return unwrap(vendorApi.delivered(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));
       if (action === 'complete-appointment') return unwrap(vendorApi.completeAppointment(id));
       return unwrap(vendorApi.reject(id, reason));

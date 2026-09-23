@@ -6,6 +6,12 @@ import { recordDecision } from '../algo/decisions';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { log } from '../../utils/logger';
+import {
+  deliveryGenerationSuffix,
+  dispatchDeclinedKey,
+  dispatchExhaustKey,
+  dispatchRoundKey,
+} from './dispatch-generation-keys';
 
 /**
  * [ALG-06] Rescue — the missing half of a real watchdog.
@@ -88,9 +94,14 @@ export function isCapturedMmg(order: { paymentMethod: string; paymentStatus: str
 export type RetireOutcome = 'RETIRED' | 'HELD_PAID' | 'UNTOUCHED';
 
 // Key formats mirror dispatch.service's private keys — pinned by test.
-export const incentiveKey = (orderId: string) => `dispatch:rescue-incentive:${orderId}`;
-const dispatchKeys = (orderId: string) => [
-  `dispatch:offer:${orderId}`, `dispatch:declined:${orderId}`, `dispatch:exhausts:${orderId}`, `dispatch:round:${orderId}`,
+export const incentiveKey = (orderId: string, deliveryAuthorityVersion?: number | null) =>
+  `dispatch:rescue-incentive:${orderId}${deliveryGenerationSuffix(deliveryAuthorityVersion)}`;
+const dispatchKeys = (orderId: string, deliveryAuthorityVersion?: number | null) => [
+  `dispatch:offer:${orderId}`,
+  dispatchDeclinedKey(orderId, deliveryAuthorityVersion),
+  dispatchExhaustKey(orderId, deliveryAuthorityVersion),
+  dispatchRoundKey(orderId, deliveryAuthorityVersion),
+  incentiveKey(orderId, deliveryAuthorityVersion),
 ];
 
 export interface RescueDeps {
@@ -131,6 +142,7 @@ export interface RetireableOrder {
   /** [TA-S0-001] Required, not optional: a caller that forgets to SELECT it
    *  fails to compile instead of silently cancelling paid money. */
   paymentStatus: string;
+  fulfillmentModeVersion?: number;
   readyAt: Date | null;
   vendor: { name: string; owner: { userId: string } } | null;
 }
@@ -174,7 +186,7 @@ export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder
       note: `Food-age cutoff: ready ${ageMinutes} min ago, limit ${limitMinutes} min, no rider found — routed to a human. Nobody is marked.`,
     },
   }).catch(() => {});
-  await deps.redis.del(...dispatchKeys(order.id)).catch(() => {});
+  await deps.redis.del(...dispatchKeys(order.id, order.fulfillmentModeVersion)).catch(() => {});
   await recordDecision(deps.prisma, {
     algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId, outcome: 'FOOD_TOO_OLD',
     sentence: `Ready ${ageMinutes} min ago against a ${limitMinutes}-min limit with no rider found: too old to deliver, cancelled by the system and handed to a person — nobody is marked.`,
@@ -317,7 +329,7 @@ async function recordHoldAudit(tx: Prisma.TransactionClient | PrismaClient, orde
  * flagged for review — never "someone is looking at it".
  */
 async function deliverHoldEffects(deps: RescueDeps, order: RetireableOrder, ageMinutes: number, limitMinutes: number): Promise<void> {
-  await deps.redis.del(...dispatchKeys(order.id)).catch(() => {});
+  await deps.redis.del(...dispatchKeys(order.id, order.fulfillmentModeVersion)).catch(() => {});
   const { opsPageOnce } = await import('../../jobs/queue');
   await opsPageOnce({ redis: deps.redis }, `food_too_old_paid:${order.id}`, 6 * 3600, () =>
     pageOperators(deps, {
@@ -392,6 +404,7 @@ export async function sweepFoodAge(deps: RescueDeps, now = new Date()): Promise<
   const held: string[] = [];
   const select = {
     id: true, orderNumber: true, customerId: true, tenantId: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true, readyAt: true,
+    fulfillmentModeVersion: true,
     vendor: { select: { name: true, owner: { select: { userId: true } } } },
   } as const;
   // [REPORT-070 F-04/F-06] Oldest first, a bounded page, held rows excluded,

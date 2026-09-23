@@ -39,7 +39,7 @@ const PICKUP = { lat: 6.8, lng: -58.15 };
 
 let app: FastifyInstance;
 let dispatch: DispatchService;
-const scheduled: Array<{ orderId: string; riderId: string; delayMs: number }> = [];
+const scheduled: Array<{ orderId: string; riderId: string; delayMs: number; attemptId?: string }> = [];
 
 const createdUserIds: string[] = [];
 const createdOrderIds: string[] = [];
@@ -208,8 +208,8 @@ beforeAll(async () => {
     app.redis,
     app.io,
     new HaversineMapsProvider(),
-    async (orderId, riderId, delayMs) => {
-      scheduled.push({ orderId, riderId, delayMs });
+    async (orderId, riderId, delayMs, attemptId) => {
+      scheduled.push({ orderId, riderId, delayMs, attemptId });
     },
   );
 
@@ -887,7 +887,10 @@ describe('The offer cascade', () => {
 
     // 3) B times out (goes dark mid-offer) -> nobody left in 5km -> radius
     //    widens -> still nobody -> honest exhaustion to customer AND vendor
-    await dispatch.handleOfferTimeout(order.id, b.riderId);
+    const secondTimeout = scheduled.at(-1)!;
+    expect(secondTimeout).toMatchObject({ orderId: order.id, riderId: b.riderId });
+    expect(secondTimeout.attemptId).toBeTruthy();
+    await dispatch.handleOfferTimeout(order.id, b.riderId, secondTimeout.attemptId);
 
     const customerNote = await app.prisma.notification.findFirst({
       where: { userId: customerId, title: 'No movers available right now' },

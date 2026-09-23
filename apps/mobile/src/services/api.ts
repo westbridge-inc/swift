@@ -940,6 +940,9 @@ export const vendorApi = {
   ),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
+  delivered: (id: string) => api.put(`/vendor/orders/${id}/delivered`),
+  setFulfillmentMode: (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY') =>
+    api.put(`/vendor/orders/${id}/fulfillment-mode`, { mode }),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
   reject: (id: string, reason?: string) => api.put(`/vendor/orders/${id}/reject`, reason ? { reason } : {}),
