@@ -327,9 +327,6 @@ export async function rideAvailability(lat: number, lng: number): Promise<{ leve
 export async function rideEstimate(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number } }) {
   return (await apiFetch('/api/v1/rides/estimate', { method: 'POST', body: JSON.stringify(body) })).data;
 }
-export async function requestRide(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; passengerCount?: number; rideClass?: string }) {
-  return (await apiFetch('/api/v1/rides/request', { method: 'POST', body: JSON.stringify(body) })).data;
-}
 export async function activeRide(): Promise<any> { return (await apiFetch('/api/v1/rides/active')).data; }
 export async function getRide(id: string): Promise<any> { return (await apiFetch(`/api/v1/rides/${encodeURIComponent(id)}`)).data; }
 export async function watchRide(body: { lat: number; lng: number }) {
