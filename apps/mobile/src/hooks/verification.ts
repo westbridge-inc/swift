@@ -3,6 +3,7 @@ import { authApi, verificationApi, partnerApi, type VehicleKind } from '../servi
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
 import { PREVIEW_VERIFICATION, previewQuery } from '../lib/moverPreviewData';
+import type { PartnerPricing } from '../lib/partnerPricing';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -36,18 +37,14 @@ export function useVerificationStatus<T = any>(role: string, vehicleType?: strin
   return previewMover ? previewQuery(PREVIEW_VERIFICATION) : q;
 }
 
-/** Public weekly price list for the partner pitch ("N days free, then X/week"). */
-export function usePartnerPricing(countryCode?: string) {
+/** Public weekly price list for the partner pitch ("N days free, then X/week").
+ *  Read a partner's own quote from it with `moverQuote` / `vendorQuote`. */
+export function usePartnerPricing(countryCode?: string, enabled = true) {
   return useQuery({
     queryKey: ['pricing', countryCode ?? 'GY'],
-    queryFn: () => unwrap<{
-      countryCode: string;
-      currencyCode: string;
-      currencySymbol: string;
-      trialDays: number;
-      weekly: { mover: number | null; moverHeavy: number | null; serviceVendor: number | null; smallVendor: number | null; largeVendor: number | null; departmentVendor: number | null };
-    }>(authApi.pricing(countryCode)),
+    queryFn: () => unwrap<PartnerPricing>(authApi.pricing(countryCode)),
     staleTime: 60 * 60 * 1000,
+    enabled,
   });
 }
 

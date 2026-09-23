@@ -79,12 +79,23 @@ describe('public pricing (price on the door)', () => {
     const d = res.json().data;
     expect(d.countryCode).toBe('GY');
     expect(d.trialDays).toBe(TRIAL_DAYS);
-    // Two mover bands: standard (bike/motorbike/car/wagon) and heavy
-    // (bus/canter/box truck). The public endpoint quotes both.
-    expect(d.weekly.mover).toBe(10000);
-    expect(d.weekly.moverHeavy).toBe(12000);
-    expect(d.weekly.smallVendor).toBe(20000);
-    expect(d.weekly.largeVendor).toBe(30000);
+    // Every vehicle is quoted at the rate of the role it provisions: delivery
+    // riders 8,000, taxi drivers 9,000 (car or bus), heavy delivery 9,000.
+    const rateFor = (v: string) => d.movers.find((q: { vehicleType: string }) => q.vehicleType === v)?.rate;
+    expect([rateFor('MOTORCYCLE'), rateFor('CAR'), rateFor('BUS_15'), rateFor('CANTER_LONG')]).toEqual([8000, 9000, 9000, 9000]);
+    expect(d.vendors).toEqual({
+      service: 8000,
+      catalogue: [
+        { minItems: 0, tier: 'small', rate: 15000 },
+        { minItems: 1000, tier: 'large', rate: 20000 },
+        { minItems: 10000, tier: 'department', rate: 60000 },
+      ],
+    });
+    // Older clients read the legacy numbers, which never under-quote a bill.
+    expect(d.weekly.mover).toBe(9000);
+    expect(d.weekly.moverHeavy).toBe(9000);
+    expect(d.weekly.smallVendor).toBe(15000);
+    expect(d.weekly.largeVendor).toBe(20000);
   });
 
   it('serves another island in its own currency', async () => {

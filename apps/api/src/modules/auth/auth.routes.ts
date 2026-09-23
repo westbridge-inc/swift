@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
+import { partnerPriceList } from '../country/partner-pricing';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
@@ -422,7 +423,11 @@ export async function authRoutes(app: FastifyInstance) {
   /** Public price list — SaaS sells with the price on the door: partners see
    *  "14 days free, then X/week" BEFORE committing. Customers never pay, so
    *  nothing here concerns them. Weekly tiers only; checklists/cash-rules
-   *  stay internal (OWASP API3). */
+   *  stay internal (OWASP API3). Every rate is resolved by `partnerRateFor`,
+   *  the function signup and the weekly re-tier bill through; a market that
+   *  cannot be priced is an error, never a zero or a partial list. The
+   *  franchise is a discount on each location's own rate, not a separate
+   *  price, so it is quoted as the rule rather than a number. */
   app.get('/pricing', async (request, reply) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
     const config = await app.prisma.countryConfig.findUnique({
@@ -430,7 +435,6 @@ export async function authRoutes(app: FastifyInstance) {
       select: { code: true, currencyCode: true, currencySymbol: true, subscriptionTiers: true, isActive: true },
     });
     if (!config) throw new AppError(404, 'COUNTRY_NOT_FOUND', 'No such market');
-    const tiers = (config.subscriptionTiers ?? {}) as Record<string, number>;
     return reply.send({
       success: true,
       data: {
@@ -439,27 +443,7 @@ export async function authRoutes(app: FastifyInstance) {
         currencySymbol: config.currencySymbol,
         isActive: config.isActive,
         trialDays: TRIAL_DAYS,
-        weekly: {
-          // `mover` = STANDARD band (bike, motorbike, car, wagon car);
-          // `moverHeavy` = HEAVY band (buses, canters, box trucks). A market
-          // that has not set a heavy rate reports null, and every surface
-          // renders one mover price — never a free or a guessed one.
-          mover: tiers['mover'] ?? null,
-          moverHeavy: tiers['moverHeavy'] ?? null,
-          serviceVendor: tiers['serviceVendor'] ?? null,
-          smallVendor: tiers['smallVendor'] ?? null,
-          largeVendor: tiers['largeVendor'] ?? null,
-          departmentVendor: tiers['departmentVendor'] ?? null,
-        },
-        // The franchise is a discount on each location's own rate, not a
-        // separate price, so it is quoted as the rule rather than a number.
-        franchise:
-          tiers['franchiseMinLocations'] != null && tiers['franchiseDiscountPct'] != null
-            ? {
-                minLocations: tiers['franchiseMinLocations'],
-                discountPct: tiers['franchiseDiscountPct'],
-              }
-            : null,
+        ...partnerPriceList(config.subscriptionTiers),
       },
     });
   });

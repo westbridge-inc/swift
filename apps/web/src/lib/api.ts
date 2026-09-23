@@ -6,25 +6,42 @@ import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 // same network); the browser side is the one authority, never a fallback.
 const API_URL = process.env['API_URL'] ?? BROWSER_API_ORIGIN;
 
+/** One vehicle a mover can register, priced at the rate of the role it
+ *  provisions — a taxi Driver, or a delivery/courier Rider on a standard or
+ *  heavy vehicle. */
+export interface MoverPriceQuote {
+  vehicleType: string;
+  label: string;
+  role: 'RIDER' | 'DRIVER';
+  band: 'STANDARD' | 'HEAVY';
+  tier: 'courier' | 'courierHeavy' | 'taxi';
+  rate: number;
+}
+
+/** One catalogue step: from `minItems` active items, `rate` per week. */
+export interface CataloguePriceBand {
+  minItems: number;
+  tier: 'small' | 'large' | 'department';
+  rate: number;
+}
+
 export interface CountryPricing {
   countryCode: string;
   currencyCode: string;
   currencySymbol: string;
   isActive: boolean;
   trialDays: number;
-  /** `moverHeavy` is the bus/canter/box-truck band; null in a market that has
-   *  not priced one, where the page shows a single mover card. */
-  weekly: {
-    mover: number;
-    moverHeavy: number | null;
-    serviceVendor: number | null;
-    smallVendor: number;
-    largeVendor: number;
-    departmentVendor: number | null;
-  };
+  /** Every vehicle, resolved by the same function signup and the weekly
+   *  re-tier bill through. Absent from an API that predates the typed list. */
+  movers?: MoverPriceQuote[];
+  /** Services are flat; catalogue businesses step up by active items. */
+  vendors?: { service: number; catalogue: CataloguePriceBand[] };
   /** From `minLocations` stores, every location takes `discountPct` off its
    *  own weekly rate. Null in a market with no franchise pricing. */
   franchise: { minLocations: number; discountPct: number } | null;
+  /** @deprecated Conflated numbers kept for older clients — never render them:
+   *  one figure here can stand for several kinds of partner at once. */
+  weekly?: Record<string, number | null>;
 }
 
 /** Public weekly price list — the same numbers the app's signup shows. */

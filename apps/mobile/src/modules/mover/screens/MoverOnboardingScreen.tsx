@@ -205,9 +205,11 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
           <ValuePill icon="calendar-check" label="Flat weekly fee" />
         </View>
 
-        {/* The price on the door — what "flat weekly fee" actually costs. */}
+        {/* The price on the door — what "flat weekly fee" actually costs for
+            the vehicle picked below: a taxi driver, a delivery rider and a
+            heavy-delivery rider each read their own rate. */}
         <View style={{ marginTop: space.lg }}>
-          <PricingCard kind="mover" />
+          <PricingCard kind="mover" vehicleType={vt} />
         </View>
 
         <View style={{ marginTop: space.xl }}>

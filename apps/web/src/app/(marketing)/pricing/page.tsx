@@ -1,25 +1,75 @@
 import type { Metadata } from 'next';
+import type { ReactNode } from 'react';
 import { Section } from '@/components/site';
-import { fetchPricing } from '@/lib/api';
+import { fetchPricing, type CataloguePriceBand, type CountryPricing, type MoverPriceQuote } from '@/lib/api';
+import { formatAmount, parseAmount } from '@/lib/money';
 import { site } from '@/site.config';
 
 export const metadata: Metadata = { title: 'Pricing' };
 
-// The mover fee has two bands, set by the VEHICLE. `moverHeavy` is optional:
-// a market that has not priced its heavy fleet simply shows one mover card.
-const TIER_META = [
-  { key: 'mover' as const, label: 'Riders & drivers', blurb: 'Bicycle, motorbike, car or wagon car — taxi, delivery and courier work. Every fare, fee and tip is yours.' },
-  { key: 'moverHeavy' as const, label: 'Buses, canters & trucks', blurb: 'The commercial fleet — 9- and 15-seater buses, short- and long-base canters, box trucks.' },
-  { key: 'serviceVendor' as const, label: 'Services', blurb: 'Plumbers, electricians, mechanics, barbers — trades that book work rather than sell a catalogue.' },
-  { key: 'smallVendor' as const, label: 'Businesses', blurb: 'Restaurants, shops and stores with a standard catalogue.' },
-  { key: 'largeVendor' as const, label: 'Large catalogues', blurb: 'Supermarkets and stores with 1,000+ items.' },
-  { key: 'departmentVendor' as const, label: 'Department stores', blurb: 'Full department-store scale — 10,000+ items.' },
+// Every number on this page is the server's quote — resolved by the same
+// function signup and the weekly re-tier bill through — so what a partner reads
+// here is what they are billed. A mover reads the rate of the role their
+// vehicle provisions: a taxi driver and a delivery rider never share a figure.
+const MOVER_CLASSES: ReadonlyArray<{ tier: MoverPriceQuote['tier']; label: string; blurb: string }> = [
+  { tier: 'courier', label: 'Delivery & courier riders', blurb: 'Deliveries and parcels — every delivery fee and tip is yours.' },
+  { tier: 'taxi', label: 'Taxi drivers', blurb: 'One taxi rate, whatever you drive — every fare and tip is yours.' },
+  { tier: 'courierHeavy', label: 'Heavy delivery', blurb: 'Canters and box trucks for large and bulky loads.' },
 ];
+
+const CATALOGUE_CLASSES: Record<CataloguePriceBand['tier'], { label: string; blurb: string }> = {
+  small: { label: 'Businesses', blurb: 'Restaurants, groceries and shops.' },
+  large: { label: 'Large catalogues', blurb: 'Supermarkets and stores with a wide range.' },
+  department: { label: 'Department stores', blurb: 'Full department-store scale.' },
+};
+
+const isRate = (value: unknown) => {
+  const amount = parseAmount(value);
+  return amount !== null && amount > 0;
+};
+
+/** The typed list, whole and billable — or null. A partial list, or one with a
+ *  rate that is not a positive amount, is not quoted at all: the page says so
+ *  rather than show a hole as a price. */
+function typedList(pricing: CountryPricing | null) {
+  const movers = pricing?.movers;
+  const vendors = pricing?.vendors;
+  if (!pricing || !Array.isArray(movers) || movers.length === 0 || !vendors) return null;
+  const catalogue = vendors.catalogue;
+  if (!movers.every((q) => isRate(q.rate)) || !isRate(vendors.service)) return null;
+  if (!Array.isArray(catalogue) || catalogue.length === 0 || catalogue[0]!.minItems !== 0) return null;
+  const rising = catalogue.every((band, i) => isRate(band.rate) && (i === 0 || band.minItems > catalogue[i - 1]!.minItems));
+  return rising ? { pricing, movers, service: vendors.service, catalogue } : null;
+}
+
+/** The active-item range a catalogue step covers, from the server's own boundaries. */
+function itemRange(catalogue: CataloguePriceBand[], i: number): string {
+  const band = catalogue[i]!;
+  const next = catalogue[i + 1];
+  if (!next) return i === 0 ? 'Any number of active items' : `${band.minItems.toLocaleString()}+ active items`;
+  if (i === 0) return `For fewer than ${next.minItems.toLocaleString()} active items`;
+  return `${band.minItems.toLocaleString()}–${(next.minItems - 1).toLocaleString()} active items`;
+}
+
+function PriceCard({ title, price, children, trialDays }: { title: string; price: string; children: ReactNode; trialDays: number }) {
+  return (
+    <div className="rounded-2xl bg-white p-7 shadow-sm">
+      <h3 className="font-bold">{title}</h3>
+      <p className="mt-3 text-3xl font-extrabold">
+        {price}
+        <span className="text-base font-medium text-[var(--swift-muted)]"> / week</span>
+      </p>
+      {children}
+      <p className="mt-4 text-sm font-semibold text-[var(--swift-red)]">{trialDays}-day free trial</p>
+    </div>
+  );
+}
 
 // Live from the same endpoint the app's signup shows — never a hardcoded table.
 export default async function PricingPage({ searchParams }: { searchParams: Promise<{ country?: string }> }) {
   const { country } = await searchParams;
-  const pricing = await fetchPricing(country);
+  const list = typedList(await fetchPricing(country));
+  const amount = (n: number) => formatAmount(n, list?.pricing.currencySymbol ?? '');
 
   return (
     <>
@@ -31,49 +81,60 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
         </p>
       </Section>
       <Section tint>
-        {pricing ? (
+        {list ? (
           <>
             <p className="text-sm font-semibold text-[var(--swift-muted)]">
-              {pricing.countryCode} · prices in {pricing.currencyCode}
+              {list.pricing.countryCode} · prices in {list.pricing.currencyCode}
             </p>
             <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-              {TIER_META.filter((t) => pricing.weekly[t.key] != null).map((t) => (
-                <div key={t.key} className="rounded-2xl bg-white p-7 shadow-sm">
-                  <h3 className="font-bold">{t.label}</h3>
-                  <p className="mt-3 text-3xl font-extrabold">
-                    {pricing.currencySymbol}
-                    {Number(pricing.weekly[t.key]).toLocaleString()}
-                    <span className="text-base font-medium text-[var(--swift-muted)]"> / week</span>
+              {MOVER_CLASSES.map((c) => {
+                const quotes = list.movers.filter((q) => q.tier === c.tier);
+                if (quotes.length === 0) return null;
+                const rates = quotes.map((q) => q.rate);
+                const low = Math.min(...rates);
+                const high = Math.max(...rates);
+                // One figure when the class shares one rate; otherwise the range,
+                // with each vehicle's own rate beside it — never one guessed number.
+                const vehicles = low === high ? quotes.map((q) => q.label).join(', ') : quotes.map((q) => `${q.label} ${amount(q.rate)}`).join(' · ');
+                return (
+                  <PriceCard key={c.tier} title={c.label} price={low === high ? amount(low) : `${amount(low)}–${amount(high)}`} trialDays={list.pricing.trialDays}>
+                    <p className="mt-2 text-sm text-[var(--swift-muted)]">{c.blurb}</p>
+                    <p className="mt-2 text-sm text-[var(--swift-muted)]">{vehicles}</p>
+                  </PriceCard>
+                );
+              })}
+              <PriceCard title="Services" price={amount(list.service)} trialDays={list.pricing.trialDays}>
+                <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                  Plumbers, electricians, mechanics, barbers — trades that book work rather than sell a catalogue.
+                </p>
+              </PriceCard>
+              {list.catalogue.map((band, i) => (
+                <PriceCard key={band.tier} title={CATALOGUE_CLASSES[band.tier]?.label ?? 'Businesses'} price={amount(band.rate)} trialDays={list.pricing.trialDays}>
+                  <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                    {CATALOGUE_CLASSES[band.tier]?.blurb} {itemRange(list.catalogue, i)}.
                   </p>
-                  <p className="mt-2 text-sm text-[var(--swift-muted)]">{t.blurb}</p>
-                  <p className="mt-4 text-sm font-semibold text-[var(--swift-red)]">
-                    {pricing.trialDays}-day free trial
-                  </p>
-                </div>
+                </PriceCard>
               ))}
             </div>
-            {pricing.franchise && (
+            {list.pricing.franchise && (
               <div className="mt-6 rounded-2xl bg-white p-7 shadow-sm">
                 <h3 className="font-bold">Franchises</h3>
                 <p className="mt-3 text-3xl font-extrabold">
-                  {pricing.franchise.discountPct}% off
+                  {list.pricing.franchise.discountPct}% off
                   <span className="text-base font-medium text-[var(--swift-muted)]"> every location</span>
                 </p>
                 <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                  From your {pricing.franchise.minLocations}th store, every location takes{' '}
-                  {pricing.franchise.discountPct}% off its own weekly rate — so five standard shops come to{' '}
-                  {pricing.currencySymbol}
-                  {Math.round(
-                    pricing.weekly.smallVendor * (1 - pricing.franchise.discountPct / 100),
-                  ).toLocaleString()}{' '}
-                  each. It applies to whichever tier a store is on, however large its catalogue.
+                  With {list.pricing.franchise.minLocations} or more stores under one owner, every location takes{' '}
+                  {list.pricing.franchise.discountPct}% off its own weekly rate — a store on the first step pays{' '}
+                  {amount(Math.round(list.catalogue[0]!.rate * (1 - list.pricing.franchise.discountPct / 100)))} a week.
+                  It applies to whichever tier a store is on, however large its catalogue.
                 </p>
               </div>
             )}
             <p className="mt-6 text-sm text-[var(--swift-muted)]">
-              Your weekly fee follows the vehicle you register, so a bus or canter is priced apart from a
-              bike or car. Catalogue-size tiers apply above 1,000 items. Your exact rate is confirmed when
-              your business is approved.
+              A taxi driver pays the taxi rate whatever the vehicle; a delivery rider&apos;s rate follows the
+              vehicle they register. A business moves between catalogue tiers automatically as its active items
+              change — nothing to apply for. A rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (

@@ -5,7 +5,14 @@ import { vendorApi, vendorDiscoveryApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { useVendorPreview } from '../stores/vendorPreview';
-import { vendorPreviewDataset, previewQuery, previewMutation, type VendorPreviewDataset } from '../lib/vendorPreviewData';
+import {
+  vendorPreviewDataset,
+  vendorPreviewSubscription,
+  previewQuery,
+  previewMutation,
+  VENDOR_PREVIEW_MARKET,
+  type VendorPreviewDataset,
+} from '../lib/vendorPreviewData';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 import {
   getAuthSessionSnapshot,
@@ -14,6 +21,7 @@ import {
 } from '../stores/authStore';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
 import { confirmVendorCashSettlement } from './cashSettlement';
+import { usePartnerPricing } from './verification';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -351,7 +359,11 @@ export function useVendorSubscription(enabled = true) {
   // Billing is owner-only (staff & roles §4.1) — staff sessions skip the call.
   const pv = usePreviewDataset();
   const q = useQuery({ queryKey: ['vendor', 'subscription'], queryFn: () => unwrap(vendorApi.subscription()), enabled: enabled && !pv });
-  return pv ? previewQuery(pv.subscription) : q;
+  // Preview bills the sample store the live quote for its business type — the
+  // public price list, read only in preview — never a number frozen in the app.
+  const pricing = usePartnerPricing(VENDOR_PREVIEW_MARKET, !!pv);
+  const sample = useMemo(() => (pv ? vendorPreviewSubscription(pv, pricing.data) : null), [pv, pricing.data]);
+  return pv ? previewQuery(sample) : q;
 }
 
 /** "Find a mover again" after dispatch exhausted — clears the cascade's

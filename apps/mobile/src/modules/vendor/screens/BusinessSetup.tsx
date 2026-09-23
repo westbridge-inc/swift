@@ -132,8 +132,9 @@ export function BusinessSetup() {
           <BizValuePill icon="calendar-check" label="Flat weekly fee" />
         </View>
 
-        {/* The price on the door — what the flat weekly fee actually is. */}
-        <PricingCard kind="vendor" />
+        {/* The price on the door — what the flat weekly fee actually is for the
+            business type picked below. */}
+        <PricingCard kind="vendor" vendorType={type} />
 
         <T variant="heading" style={{ marginBottom: space.md }}>
           Business type
@@ -229,7 +230,7 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
     <Screen>
       <TabHeader title={store.name} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
-        <PricingCard kind="vendor" />
+        <PricingCard kind="vendor" vendorType={store.vendorType} />
         <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}

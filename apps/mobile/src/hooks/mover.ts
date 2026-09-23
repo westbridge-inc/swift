@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { customerApi, riderApi, driverApi } from '../services/api';
@@ -35,6 +35,7 @@ import {
 } from '../lib/moverProfile';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import { confirmRiderCashSettlement } from './cashSettlement';
+import { usePartnerPricing } from './verification';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -591,7 +592,11 @@ export function useMoverSubscription(kind: MoverKind | null) {
     queryFn: () => tryUnwrap<any>(svc(kind as MoverKind).subscription()),
     enabled: !!kind && !pv,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_SUBSCRIPTION) : q;
+  // Preview bills the sample driver the live quote for the sample car — the
+  // public price list, read only in preview — never a number frozen in the app.
+  const pricing = usePartnerPricing(PV.PREVIEW_MARKET, pv);
+  const sample = useMemo(() => (pv ? PV.previewSubscription(pricing.data) : null), [pv, pricing.data]);
+  return pv ? PV.previewQuery(sample) : q;
 }
 
 /** Post-trip DRIVER_TO_CUSTOMER rating (409 when already rated — treat as done). */

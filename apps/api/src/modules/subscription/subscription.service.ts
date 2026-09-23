@@ -1,6 +1,6 @@
 import { Prisma, type PrismaClient, type SubscriptionType, type VendorType } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
-import { CountryConfigService, moverRateFor, vendorRateFor } from '../country/country-config.service';
+import { CountryConfigService, partnerRateFor } from '../country/country-config.service';
 import { TrialEntitlementService } from '../integrity/trial-entitlement.service';
 import { log } from '../../utils/logger';
 
@@ -46,9 +46,9 @@ export class SubscriptionService {
 
     const tiers = await this.countryConfig.getSubscriptionTiers(rider.user.countryCode);
     const type: SubscriptionType = rider.riderType === 'COURIER' ? 'COURIER_RIDER' : 'DELIVERY_RIDER';
-    // The weekly fee follows the VEHICLE, not the service: a canter doing
-    // deliveries bills the heavy band exactly like a canter doing courier work.
-    const rate = moverRateFor(tiers, rider.vehicleType);
+    // A rider's fee follows the VEHICLE, not the service: a canter doing
+    // deliveries bills heavy delivery exactly like a canter doing courier work.
+    const { rate } = partnerRateFor(tiers, { kind: 'RIDER', vehicleType: rider.vehicleType });
     return this.create({ riderId }, type, rate, rider.user.countryCode);
   }
 
@@ -65,9 +65,9 @@ export class SubscriptionService {
     if (driver.subscription) return driver.subscription;
 
     const tiers = await this.countryConfig.getSubscriptionTiers(driver.user.countryCode);
-    // A minibus driver is a TAXI_DRIVER on the heavy band — the subscription
-    // type says what they do, the vehicle says what they pay.
-    const rate = moverRateFor(tiers, driver.vehicleType);
+    // A minibus driver is a taxi driver: where the market prices taxis apart
+    // the role decides the fee, car or bus; otherwise the vehicle band does.
+    const { rate } = partnerRateFor(tiers, { kind: 'DRIVER', vehicleType: driver.vehicleType });
     return this.create({ driverId }, 'TAXI_DRIVER', rate, driver.user.countryCode);
   }
 
@@ -94,7 +94,8 @@ export class SubscriptionService {
     // and the weekly re-tier moves it up once its listings are counted. The
     // franchise basis IS known at signup, though: the owner's fifth store
     // should not spend its first week at the single-store price.
-    const { rate } = vendorRateFor(tiers, {
+    const { rate } = partnerRateFor(tiers, {
+      kind: 'VENDOR',
       isService: vendor.vendorType === 'SERVICE',
       activeListings: 0,
       ownedStores: vendor.owner._count.vendors,
