@@ -87,7 +87,9 @@ for expected in 'passwordauthentication no' 'kbdinteractiveauthentication no' \
 done
 grep -qxF -- 'permitrootlogin no' <<< "$ROOT_EFFECTIVE" || restore_sshd_and_die
 rm -f "$SSHD_PREVIOUS"
-systemctl reload ssh
+# Ubuntu 24.04 socket-activates sshd: when ssh.service is not running, the
+# next connection starts it with the validated configuration above.
+if systemctl is-active --quiet ssh; then systemctl reload ssh; fi
 
 # Do not remove unknown firewall rules automatically. `status` omits saved
 # rules while inactive, so inspect both the stored and active inventories.
