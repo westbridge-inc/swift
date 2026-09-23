@@ -382,3 +382,89 @@ describe('multi-step authenticated mutation ownership', () => {
     expect(mocks.user.id).toBe(accountB.userId);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The List-your-business draft is cleared by the durable result, not by the
+// screen. A per-call TanStack observer callback does not run once the screen
+// has unmounted, so clearing from the component would keep a submitted phone
+// and address whenever the owner switched away mid-request.
+// ---------------------------------------------------------------------------
+describe('business form draft follows the durable store-creation result', () => {
+  const vendorRequest = {
+    role: 'VENDOR' as const,
+    acceptAgreement: true,
+    business: {
+      name: 'Kitty Bakes',
+      vendorType: 'RESTAURANT' as const,
+      phone: '6001234',
+      addressLine1: '12 Regent Street',
+      city: 'Georgetown',
+      latitude: 6.8,
+      longitude: -58.16,
+    },
+  };
+  const typedForm = { name: 'Kitty Bakes', phone: '6001234', addr: '12 Regent Street', agree: true };
+  const drafts = async () => (await import('../stores/businessSetupDraft')).useBusinessSetupDraft;
+
+  it('clears exactly the submitting account’s form once the store exists', async () => {
+    const store = await drafts();
+    store.getState().clear();
+    store.getState().update(accountA, typedForm);
+    const become = deferred<any>();
+    mocks.becomePartner.mockReturnValue(become.promise);
+    const mutation = useBecomePartner() as unknown as CapturedMutation<typeof vendorRequest>;
+
+    const result = mutation.mutationFn(vendorRequest);
+    // Still in flight: nothing is discarded before the server has answered.
+    expect(store.getState().draft).toMatchObject(typedForm);
+    become.resolve({ data: { data: { roles: ['CUSTOMER', 'VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } } });
+    await result;
+
+    expect(store.getState().owner).toBeNull();
+    expect(store.getState().draft).toMatchObject({ name: '', phone: '', addr: '', agree: false });
+  });
+
+  it('keeps the form when the store could not be created', async () => {
+    const store = await drafts();
+    store.getState().clear();
+    store.getState().update(accountA, typedForm);
+    mocks.becomePartner.mockRejectedValue(Object.assign(new Error('Service unavailable'), { response: { status: 503 } }));
+    const mutation = useBecomePartner() as unknown as CapturedMutation<typeof vendorRequest>;
+
+    await expect(mutation.mutationFn(vendorRequest)).rejects.toThrow('Service unavailable');
+
+    expect(store.getState().owner).toEqual({ userId: accountA.userId, generation: accountA.generation });
+    expect(store.getState().draft).toMatchObject(typedForm);
+  });
+
+  it('a late A result can neither clear nor complete B’s form', async () => {
+    const store = await drafts();
+    store.getState().clear();
+    store.getState().update(accountA, typedForm);
+    const become = deferred<any>();
+    mocks.becomePartner.mockReturnValue(become.promise);
+    const mutation = useBecomePartner() as unknown as CapturedMutation<typeof vendorRequest>;
+
+    const result = mutation.mutationFn(vendorRequest);
+    mocks.current = { ...accountB };
+    mocks.user = { id: accountB.userId, firstName: 'Account', lastName: 'B' };
+    store.getState().update(accountB, { name: 'B Barbers', type: 'SERVICE' });
+    become.resolve({ data: { data: { roles: ['CUSTOMER', 'VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } } });
+
+    await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
+    expect(store.getState().owner).toEqual({ userId: accountB.userId, generation: accountB.generation });
+    expect(store.getState().draft).toMatchObject({ name: 'B Barbers', type: 'SERVICE' });
+  });
+
+  it('a driver application leaves the business form alone', async () => {
+    const store = await drafts();
+    store.getState().clear();
+    store.getState().update(accountA, typedForm);
+    mocks.becomePartner.mockResolvedValue({ data: { data: { roles: ['MOVER'], activeRole: 'DRIVER' } } });
+    const mutation = useBecomePartner() as unknown as CapturedMutation<{ role: 'MOVER' }>;
+
+    await mutation.mutationFn({ role: 'MOVER' });
+
+    expect(store.getState().draft).toMatchObject(typedForm);
+  });
+});

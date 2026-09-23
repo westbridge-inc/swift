@@ -7,7 +7,6 @@ import { useMoverPreview } from '../stores/moverPreview';
 import { useVendorPreview } from '../stores/vendorPreview';
 import { useCustomerCountry } from '../hooks/useCustomerCountry';
 import { registerIfGranted } from '../services/push';
-import { CountryPickerScreen } from '../screens/auth/CountryPickerScreen';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
 import { AuthStack } from './AuthStack';
@@ -19,7 +18,7 @@ import { navigationRef, safeNavigate } from './navigationRef';
 import { installNotificationTapRouter, flushPendingNavigation } from '../services/notification-router';
 import { installDeepLinkHandler, flushPendingDeepLink } from '../services/deep-links';
 import { ensureFirstLaunchClaim, flushAttributedDestination } from '../services/attribution';
-import { rootEntryGate, rootNavigatorBoundaryKey } from './rootEntryGate';
+import { previewBypassForIntent, rootEntryGate, rootNavigatorBoundaryKey } from './rootEntryGate';
 import {
   discardAuthContinuation,
   flushAuthContinuation,
@@ -48,8 +47,8 @@ function mainForIntent(intent?: string | null) {
 
 export function RootNavigator() {
   const { isAuthenticated, wantsAuth, intent, countryCode, user, sessionGeneration } = useAuthStore();
-  // Customers skip the country picker — their market is seeded + resolved from
-  // location instead (spec: pick role → straight to browsing).
+  // V1 has one launch market. This keeps the persisted market pinned to Guyana
+  // rather than asking people to choose a country Swift does not serve yet.
   useCustomerCountry();
 
   // Push registration follows the session — but NEVER prompts at boot
@@ -81,7 +80,8 @@ export function RootNavigator() {
   // peek (previewType null), which stays signed-in.
   const moverPreview = useMoverPreview((s) => s.preview);
   const vendorSamplePreview = useVendorPreview((s) => s.previewType) != null;
-  const anyPreview = moverPreview || vendorSamplePreview;
+  // Each preview opens only its own stack (see previewBypassForIntent).
+  const anyPreview = previewBypassForIntent(intent, { moverPreview, vendorSamplePreview });
   // Mandatory signup selfie (master plan §3): every signed-in account must
   // carry a camera-captured profile photo before using the app. Guests browse
   // untouched; the API enforces the same rule on orders/rides/go-online.
@@ -146,11 +146,6 @@ export function RootNavigator() {
           // Fresh install: the trio IS the welcome. Marketing onboarding
           // carousels are explicitly banned by first-open spec 2.1.
           <Stack.Screen name="RolePicker" component={RolePickerScreen} />
-        ) : entryGate === 'country' ? (
-          // Only earners pick a country here (it drives their signup + pricing);
-          // customers are seeded/resolved by useCustomerCountry and go straight
-          // to browsing.
-          <Stack.Screen name="Country" component={CountryPickerScreen} />
         ) : entryGate === 'selfie' ? (
           <Stack.Screen name="Selfie" component={SelfieCaptureScreen} />
         ) : (
