@@ -121,7 +121,7 @@ async function providerHost(rows: Row[]) {
     platformConfig: { findUnique: async () => null },
   });
   const host = await hostRoutes(vendorRoutes, { prisma, redis: recordingRedis(), io: recordingIo() });
-  return { ...host, store };
+  return { ...host, store, prisma };
 }
 
 const asProvider = (extra: Record<string, unknown> = {}) => ({ user: { userId: 'user-provider', role: 'VENDOR_OWNER' }, ...extra });
@@ -145,13 +145,18 @@ describe('GET /vendor/orders — the provider’s board is scoped to the provide
 });
 
 describe('PUT /vendor/orders/:id/accept — acceptance reserves the provider’s slot and dispatches nothing', () => {
-  function acceptSpies(store: ReturnType<typeof orderStore>) {
-    const tx = { marker: 'tx-double' };
+  // The transaction handed to the route's callback is the same graded double
+  // as the host's client, so writes made inside it (the delivery-mode bind
+  // since #1266) are recorded and asserted like any other query.
+  function acceptSpies(store: ReturnType<typeof orderStore>, tx: unknown) {
     const transition = vi.spyOn(OrderService.prototype, 'updateStatus').mockImplementation(async (orderId, status, _by, _note, opts) => {
       const live = store.rows.find((r) => r['id'] === orderId);
       if (!live) throw new Error(`modelled transition: no row ${orderId}`);
+      // Production (OrderService.updateStatus) hands the callback the row it
+      // locked BEFORE the transition, after writing the new status.
+      const lockedSource = { ...live };
       Object.assign(live, { status, acceptedAt: new Date() });
-      await opts?.withinTransaction?.(tx as never);
+      await opts?.withinTransaction?.(tx as never, lockedSource as never);
       return { ...live } as never;
     });
     const reserve = vi.spyOn(BookingService.prototype, 'reserveSlot').mockImplementation(async (itemId, customerId, slotStart, orderId) =>
@@ -165,7 +170,7 @@ describe('PUT /vendor/orders/:id/accept — acceptance reserves the provider’s
       process.env['DISPATCH_TRIGGER'] = trigger;
       const slot = new Date(Date.now() + 26 * 60 * MINUTE);
       const h = await providerHost([serviceBooking('bk-1', { appointmentSlot: slot })]);
-      const spies = acceptSpies(h.store);
+      const spies = acceptSpies(h.store, h.prisma);
       const res = (await h.call('put /orders/:id/accept', asProvider({ params: { id: 'bk-1' }, body: {} }))) as { success: boolean; data: Row };
       expect(res.success).toBe(true);
       expect(res.data).toMatchObject({ id: 'bk-1', status: 'ACCEPTED', fulfillment: 'APPOINTMENT', vendorId: 'vendor-svc' });
@@ -181,11 +186,17 @@ describe('PUT /vendor/orders/:id/accept — acceptance reserves the provider’s
   it('control — a restaurant delivery accepted under ON_ACCEPT resolves its delivery mode and enqueues exactly one dispatch job; no slot is reserved', async () => {
     process.env['DISPATCH_TRIGGER'] = 'ON_ACCEPT';
     const h = await providerHost([foodDelivery('food-1')]);
-    const spies = acceptSpies(h.store);
+    const spies = acceptSpies(h.store, h.prisma);
+    // Since #1266 the platform hand-off is armed through the delivery-authority
+    // generation (Redis) before the job is enqueued; that seam has its own
+    // suites. Here it is the boundary: it must receive the version the accept
+    // just bound, and the route must then enqueue exactly one job.
+    const prepare = vi.spyOn(DispatchService.prototype, 'prepareForPlatformDelivery').mockResolvedValue(true);
     const res = (await h.call('put /orders/:id/accept', asProvider({ params: { id: 'food-1' }, body: {} }))) as { success: boolean; data: Row };
-    expect(res.data).toMatchObject({ id: 'food-1', status: 'ACCEPTED' });
+    expect(res.data).toMatchObject({ id: 'food-1', status: 'ACCEPTED', fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: 1 });
     expect(spies.reserve).not.toHaveBeenCalled();
-    expect(h.store.queries.filter((q) => q.method === 'order.update').map((q) => q.args['data'])).toEqual([{ fulfillmentMode: 'PLATFORM_RIDER' }]);
+    expect(h.store.queries.filter((q) => q.method === 'order.update').map((q) => q.args['data'])).toEqual([{ fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: { increment: 1 } }]);
+    expect(prepare.mock.calls).toEqual([['food-1', 1]]);
     expect(h.enqueued.map((j) => ({ name: j.name, data: j.data }))).toEqual([{ name: 'dispatch-order', data: { orderId: 'food-1' } }]);
   });
 });

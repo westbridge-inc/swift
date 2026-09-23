@@ -158,6 +158,29 @@ export interface OrderStore {
   };
 }
 
+/** Apply a Prisma `data` argument the way the database does: the atomic
+ *  number operations (`{ increment: 1 }` and friends) change the stored number
+ *  instead of replacing it with the operation object. */
+function applyData(row: Row, data: Row): void {
+  for (const [key, value] of Object.entries(data)) {
+    const op = value && typeof value === 'object' && !(value instanceof Date) && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+    const current = row[key];
+    if (op && Object.keys(op).length === 1 && typeof current === 'number') {
+      const [name, amount] = Object.entries(op)[0] as [string, unknown];
+      if (typeof amount === 'number') {
+        if (name === 'increment') { row[key] = current + amount; continue; }
+        if (name === 'decrement') { row[key] = current - amount; continue; }
+        if (name === 'multiply') { row[key] = current * amount; continue; }
+        if (name === 'divide') { row[key] = current / amount; continue; }
+        if (name === 'set') { row[key] = amount; continue; }
+      }
+    }
+    row[key] = value;
+  }
+}
+
 export function orderStore(rows: Row[]): OrderStore {
   const queries: RecordedQuery[] = [];
   const store: OrderStore = {
@@ -192,14 +215,14 @@ export function orderStore(rows: Row[]): OrderStore {
       updateMany: async (args) => {
         queries.push({ method: 'order.updateMany', args });
         const hit = rows.filter((r) => matchesWhere(r, args.where));
-        for (const r of hit) Object.assign(r, args.data);
+        for (const r of hit) applyData(r, args.data);
         return { count: hit.length };
       },
       update: async (args) => {
         queries.push({ method: 'order.update', args });
         const row = rows.find((r) => r['id'] === args.where.id);
         if (!row) throw new Error(`orderStore: update of a row that does not exist (${args.where.id})`);
-        Object.assign(row, args.data);
+        applyData(row, args.data);
         return project(row, args.select);
       },
     },
@@ -335,6 +358,7 @@ export function serviceBooking(id: string, extra: Row = {}): Row {
     orderType: 'FOOD_DELIVERY',
     fulfillment: 'APPOINTMENT',
     fulfillmentMode: null,
+    fulfillmentModeVersion: 0,
     status: 'PENDING',
     customerId: 'user-customer',
     customer: { id: 'user-customer', firstName: 'Ama' },
