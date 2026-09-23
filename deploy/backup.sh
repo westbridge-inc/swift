@@ -24,11 +24,8 @@
 # Format is pg_dump custom (-Fc): compressed, and restorable selectively with
 # pg_restore, which plain SQL is not.
 #
-# OFFSITE IS THE POINT. A dump written next to the database it protects is a
-# copy, not a backup: one dead disk takes both. When BACKUP_BUCKET is set this
-# script uploads each dump off the machine and VERIFIES the upload before it
-# will call the run a success. Without it, it warns loudly and keeps going, so
-# a laptop or a dev box still works.
+# OFFSITE IS THE POINT. The staging timer sets BACKUP_REQUIRED=1 and refuses
+# local-only success. An interactive development run may omit the bucket.
 #
 # It also records a heartbeat in the database on success. That is what lets
 # something else notice when backups have quietly stopped — a silent backup
@@ -39,8 +36,9 @@
 #   ./deploy/backup.sh /path/to/dir       # → that directory
 #   BACKUP_RETAIN_DAYS=14 ./deploy/backup.sh
 #
-# Reads DATABASE_URL from the environment, else from deploy/.env.
-# Offsite (all from deploy/.env, same credentials the app already uses for R2):
+# Reads the bundled Postgres through its private Compose network. No host
+# DATABASE_URL or published database port is needed.
+# Offsite settings come from the environment, then deploy/.env:
 #   BACKUP_BUCKET      bucket for dumps (e.g. swift-backups)
 #   AWS_S3_ENDPOINT    R2/S3 endpoint
 #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
@@ -51,15 +49,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${1:-$HERE/backups}"
 RETAIN_DAYS="${BACKUP_RETAIN_DAYS:-14}"
-
-if [ -z "${DATABASE_URL:-}" ] && [ -f "$HERE/.env" ]; then
-  # Only this one variable, and never echoed.
-  DATABASE_URL="$(grep -E '^DATABASE_URL=' "$HERE/.env" | head -1 | cut -d= -f2- || true)"
-fi
-if [ -z "${DATABASE_URL:-}" ]; then
-  echo "FATAL: DATABASE_URL is not set and deploy/.env does not define it." >&2
-  exit 1
-fi
+COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
 
 # Offsite settings, from the environment first, then deploy/.env. Values are
 # never echoed — only whether each is present.
@@ -67,13 +57,29 @@ env_value() {
   [ -f "$HERE/.env" ] || return 0
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
 }
-for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION BACKUP_HEARTBEAT_URL; do
+aws_s3() {
+  if [ -n "${AWS_S3_ENDPOINT:-}" ]; then aws --endpoint-url "$AWS_S3_ENDPOINT" "$@"
+  else aws "$@"; fi
+}
+for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_BUCKET AWS_S3_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION BACKUP_HEARTBEAT_URL; do
   if [ -z "${!var:-}" ]; then export "$var=$(env_value "$var")"; fi
 done
 BACKUP_PREFIX="${BACKUP_PREFIX:-db}"
 AWS_REGION="${AWS_REGION:-auto}"
 
-command -v pg_dump >/dev/null 2>&1 || { echo "FATAL: pg_dump not found (install the postgresql client)." >&2; exit 1; }
+[[ "$RETAIN_DAYS" =~ ^[0-9]+$ ]] || { echo "FATAL: BACKUP_RETAIN_DAYS must be a non-negative integer." >&2; exit 1; }
+command -v docker >/dev/null 2>&1 || { echo "FATAL: Docker is required for the private Postgres connection." >&2; exit 1; }
+if [ "${BACKUP_REQUIRED:-0}" = "1" ]; then
+  for name in BACKUP_BUCKET AWS_S3_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+    [ -n "${!name:-}" ] || { echo "FATAL: $name is required for offsite backups." >&2; exit 1; }
+  done
+fi
+if [ -n "${AWS_S3_BUCKET:-}" ] && [ "${BACKUP_BUCKET:-}" = "$AWS_S3_BUCKET" ]; then
+  echo "FATAL: BACKUP_BUCKET must differ from AWS_S3_BUCKET." >&2
+  exit 1
+fi
+
+command -v pg_restore >/dev/null 2>&1 || { echo "FATAL: pg_restore not found (install the postgresql client)." >&2; exit 1; }
 
 mkdir -p "$OUT_DIR"
 chmod 700 "$OUT_DIR"
@@ -83,7 +89,9 @@ TARGET="$OUT_DIR/swift-$STAMP.dump"
 echo "dumping → $(basename "$TARGET")"
 # Write to a partial name first: a backup job killed mid-write must never leave
 # a truncated file that looks like a good backup.
-pg_dump "$DATABASE_URL" -Fc -f "$TARGET.partial"
+"${COMPOSE[@]}" exec -T postgres sh -c \
+  'export PGPASSWORD="$POSTGRES_PASSWORD"; exec pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+  > "$TARGET.partial"
 mv "$TARGET.partial" "$TARGET"
 chmod 600 "$TARGET"
 
@@ -107,24 +115,21 @@ if [ -n "${BACKUP_BUCKET:-}" ]; then
     exit 1
   fi
   KEY="$BACKUP_PREFIX/$(basename "$TARGET")"
-  ENDPOINT_ARG=()
-  [ -n "${AWS_S3_ENDPOINT:-}" ] && ENDPOINT_ARG=(--endpoint-url "$AWS_S3_ENDPOINT")
-
   echo "uploading → s3://$BACKUP_BUCKET/$KEY"
-  if ! aws "${ENDPOINT_ARG[@]}" s3 cp "$TARGET" "s3://$BACKUP_BUCKET/$KEY" --only-show-errors; then
+  if ! aws_s3 s3 cp "$TARGET" "s3://$BACKUP_BUCKET/$KEY" --only-show-errors; then
     echo "FATAL: offsite upload failed. The local dump exists but is NOT safe from this machine dying." >&2
     exit 1
   fi
 
   # An upload that "succeeded" but landed truncated is the failure that hurts
   # most, because it looks fine. Compare the byte count at the destination.
-  REMOTE_SIZE=$(aws "${ENDPOINT_ARG[@]}" s3api head-object \
+  REMOTE_SIZE=$(aws_s3 s3api head-object \
     --bucket "$BACKUP_BUCKET" --key "$KEY" --query 'ContentLength' --output text 2>/dev/null || echo "")
   if [ "$REMOTE_SIZE" != "$SIZE" ]; then
     echo "FATAL: uploaded object is $REMOTE_SIZE bytes, local dump is $SIZE. Treating this run as FAILED." >&2
     exit 1
   fi
-  echo "verified offsite: $KEY ($REMOTE_SIZE bytes, byte-for-byte with the local dump)"
+  echo "verified offsite: $KEY ($REMOTE_SIZE bytes; restore drill verifies contents)"
   UPLOADED=1
 else
   echo "WARNING: BACKUP_BUCKET is not set — this dump lives only on the machine it backs up." >&2
@@ -136,8 +141,10 @@ fi
 # backups stop. Recorded ONLY when the dump is genuinely safe: offsite-verified,
 # or explicitly local-only. Best-effort — a failed heartbeat must not fail a
 # backup that actually worked; the staleness check will catch a real outage.
-if command -v psql >/dev/null 2>&1; then
-  psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 <<SQL >/dev/null 2>&1 || echo "note: heartbeat write failed (backup itself is fine)" >&2
+if command -v docker >/dev/null 2>&1; then
+  "${COMPOSE[@]}" exec -T postgres sh -c \
+    'export PGPASSWORD="$POSTGRES_PASSWORD"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q -v ON_ERROR_STOP=1' \
+    <<SQL >/dev/null 2>&1 || echo "note: heartbeat write failed (backup itself is fine)" >&2
 -- id has no database-side default (Prisma mints the cuid), so supply one.
 INSERT INTO platform_config (id, key, value, "updatedAt")
 VALUES (md5(random()::text || clock_timestamp()::text), 'last_backup_at', to_jsonb(now()::text), now())
