@@ -4,7 +4,6 @@ import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
-import { countryFromPhone } from '../../utils/phone-country';
 import { generateOtp, checkOtpRateLimit } from '../../utils/otp';
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
@@ -36,6 +35,7 @@ import {
   storeSignupOtp,
   verifySignupOtp,
 } from './signup-continuation';
+import { publicLaunchCountryFromPhone } from './launch-market';
 
 interface DeviceInfo {
   deviceId: string;
@@ -280,9 +280,12 @@ export class AuthService {
     }
 
     // The PHONE decides the market: pricing, currency, and checklists follow
-    // the dial prefix, never a client-picked field (which is only a fallback
-    // for prefixes we don't know). Inactive countries stay waitlist-only.
-    const countryCode = countryFromPhone(data.phone) ?? data.countryCode ?? 'GY';
+    // the dial prefix, never a client-picked field. V1 is Guyana-only even if
+    // a future CountryConfig row was accidentally left active.
+    const countryCode = publicLaunchCountryFromPhone(data.phone);
+    if (!countryCode) {
+      throw new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Swift is currently available in Guyana only');
+    }
     const activeCountries = await this.countryConfig.getActiveCountries();
     if (!activeCountries.some((c) => c.code === countryCode)) {
       throw new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Swift is not live in this country yet — join the waitlist');
