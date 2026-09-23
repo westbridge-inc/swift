@@ -388,3 +388,57 @@ describe('CONSENT_IP_PEPPER visibility [V8]', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// [R13 on current main] Two production boot rules meet here. #1272 lets a
+// cash-only launch start with the card rail declared OFF; R13 keeps live MMG
+// collection off until sandbox UAT proves the merchant reference round-trips
+// (MMG_REFERENCE_ROUNDTRIP_VERIFIED=1). The merged configuration must keep
+// both: cards OFF is not a way past the MMG gate, and the MMG gate does not
+// stop a cash-only launch. Checked everywhere a booting server consults it:
+// the boot guard, the value-free preflight, and the two provider factories
+// the billing workers construct.
+// ---------------------------------------------------------------------------
+describe('[R13 on current main] cash-only production boot keeps the MMG reference gate', () => {
+  const cashOnly: Record<string, string | undefined> = { ...cardOff, MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' };
+  const unverified = [undefined, '', '0', 'true', 'yes', '1 '];
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('boots with cards OFF once the MMG reference round-trip is verified', () => {
+    expect(() => assertSafeBootConfig(cashOnly)).not.toThrow();
+  });
+
+  it.each(unverified)('refuses cards OFF while the MMG reference round-trip is unverified (%s)', (verified) => {
+    expect(() => assertSafeBootConfig({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: verified }))
+      .toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+  });
+
+  it('the value-free preflight gives the same two verdicts', () => {
+    const pass = runPreflight(cashOnly);
+    expect(pass.status, pass.stdout + pass.stderr).toBe(0);
+    const held = runPreflight({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined });
+    expect(held.status, held.stdout + held.stderr).toBe(1);
+    expect(held.stdout).toContain('MMG_REFERENCE_ROUNDTRIP_VERIFIED');
+  });
+
+  it('the workers get a card rail that refuses locally and live MMG only once verified', async () => {
+    const { getPaymentProvider } = await import('../providers/payment/payment-provider');
+    const { getMmgProvider, LiveMmgProvider } = await import('../providers/mmg/mmg-provider');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('a boot check never contacts a provider'));
+    try {
+      for (const [name, value] of Object.entries(cashOnly)) vi.stubEnv(name, value);
+      const cards = getPaymentProvider();
+      await expect(cards.chargeToken({ token: 'synthetic', amount: 1, currencyCode: 'GYD', idempotencyKey: 'boot-check', description: 'boot check' }))
+        .resolves.toMatchObject({ status: 'failed', code: 'CARD_RAIL_DISABLED' });
+      expect(getMmgProvider()).toBeInstanceOf(LiveMmgProvider);
+      for (const verified of unverified) {
+        vi.stubEnv('MMG_REFERENCE_ROUNDTRIP_VERIFIED', verified);
+        expect(() => getMmgProvider(), String(verified)).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
