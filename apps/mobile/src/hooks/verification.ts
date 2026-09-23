@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { authApi, verificationApi, partnerApi, type VehicleKind } from '../services/api';
+import { verificationApi, partnerApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
@@ -39,19 +39,7 @@ export function useVerificationStatus<T = any>(role: string, vehicleType?: strin
 }
 
 /** Public weekly price list for the partner pitch ("N days free, then X/week"). */
-export function usePartnerPricing(countryCode?: string) {
-  return useQuery({
-    queryKey: ['pricing', countryCode ?? 'GY'],
-    queryFn: () => unwrap<{
-      countryCode: string;
-      currencyCode: string;
-      currencySymbol: string;
-      trialDays: number;
-      weekly: { mover: number | null; moverHeavy: number | null; serviceVendor: number | null; smallVendor: number | null; largeVendor: number | null; departmentVendor: number | null };
-    }>(authApi.pricing(countryCode)),
-    staleTime: 60 * 60 * 1000,
-  });
-}
+export { usePartnerPricing } from './partnerPricing';
 
 export function useBecomePartner() {
   const qc = useQueryClient();

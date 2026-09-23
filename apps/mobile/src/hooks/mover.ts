@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { customerApi, riderApi, driverApi } from '../services/api';
@@ -35,6 +35,7 @@ import {
 } from '../lib/moverProfile';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import { confirmRiderCashSettlement } from './cashSettlement';
+import { usePartnerPricing } from './partnerPricing';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -591,7 +592,20 @@ export function useMoverSubscription(kind: MoverKind | null) {
     queryFn: () => tryUnwrap<any>(svc(kind as MoverKind).subscription()),
     enabled: !!kind && !pv,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_SUBSCRIPTION) : q;
+  // Preview bills the sample driver the live quote for the sample car — the
+  // public price list, read only in preview — never a number frozen in the app.
+  const pricing = usePartnerPricing(PV.PREVIEW_MARKET, pv);
+  const sample = useMemo(() => (pv ? PV.previewSubscription(pricing.data) : null), [pv, pricing.data]);
+  if (!pv) return q;
+  // [H7] While the price list is still loading or has failed, the preview
+  // query says so and the screen shows its own loading or error state — never
+  // a sample subscription with no fee.
+  return {
+    ...PV.previewQuery(sample),
+    isLoading: sample == null && pricing.isPending === true,
+    isError: sample == null && pricing.isError === true,
+    refetch: pricing.refetch,
+  };
 }
 
 /** Post-trip DRIVER_TO_CUSTOMER rating (409 when already rated — treat as done). */

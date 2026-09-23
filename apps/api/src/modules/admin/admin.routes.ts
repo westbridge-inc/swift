@@ -1281,6 +1281,12 @@ export async function adminRoutes(app: FastifyInstance) {
       );
     }
 
+    // [PR1270-S2-03] Price BEFORE the activation write. A market that cannot
+    // price this store refuses the approval here, with the config error, and
+    // the store stays pending — never ACTIVE and searchable with no
+    // subscription, which a failure after the CAS below used to leave behind.
+    await subscriptions.priceForActivation({ vendorId: id });
+
     // CAS [EV-ACT-11]: exactly one approval transitions the store, so a
     // double-tap cannot double-fire the trial/notification side effects.
     const won = await app.prisma.vendor.updateMany({
@@ -1455,6 +1461,11 @@ export async function adminRoutes(app: FastifyInstance) {
       }
     }
 
+    // [PR1270-S2-03] Price BEFORE documentsVerified is written: a rider whose
+    // market cannot price them is refused here, still unverified, rather than
+    // verified with no subscription.
+    if (isVerified) await subscriptions.priceForActivation({ riderId: id });
+
     const updated = await mutationOrNotFound('Rider', id, () => app.prisma.rider.update({
       where: { id, user: { tenantId } },
       data: {
@@ -1584,6 +1595,11 @@ export async function adminRoutes(app: FastifyInstance) {
         );
       }
     }
+
+    // [PR1270-S2-03] Price BEFORE documentsVerified is written: a driver whose
+    // market cannot price them is refused here, still unverified, rather than
+    // verified with no subscription.
+    if (isVerified) await subscriptions.priceForActivation({ driverId: id });
 
     const updated = await mutationOrNotFound('Driver', id, () => app.prisma.driver.update({
       where: { id, user: { tenantId } },
