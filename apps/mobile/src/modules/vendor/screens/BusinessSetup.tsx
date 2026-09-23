@@ -11,6 +11,13 @@ import { DocumentChecklist } from '../../../components/onboarding/DocumentCheckl
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useBecomePartner, useVerificationStatus } from '../../../hooks/verification';
 import { useLocationStore } from '../../../stores/locationStore';
+import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
+import {
+  businessSetupDraftFor,
+  editBusinessSetupDraft,
+  useBusinessSetupDraft,
+  type BusinessSetupDraft,
+} from '../../../stores/businessSetupDraft';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { TYPES, TabHeader } from '../shared';
@@ -77,11 +84,18 @@ export function BusinessSetup() {
   const become = useBecomePartner();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const { latitude, longitude, status: locationStatus } = useLocationStore();
-  const [name, setName] = useState('');
-  const [type, setType] = useState<'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE'>('RESTAURANT');
-  const [phone, setPhone] = useState('');
-  const [addr, setAddr] = useState('');
-  const [city, setCity] = useState('Georgetown');
+  // The form outlives this screen (stores/businessSetupDraft): a failed
+  // background profile read or a trip to Swift and back remounts it, and each
+  // remount used to start blank. It belongs to exactly this signed-in account.
+  const userId = useAuthStore((s) => (s.isAuthenticated ? s.user?.id ?? null : null));
+  const generation = useAuthStore((s) => s.sessionGeneration);
+  const owner = userId ? { userId, generation } : null;
+  // [DCR-1] `agree` is the Business Agreement consent — recorded in the ledger
+  // with the exact version at store creation, the same way signup records the Terms.
+  const { name, type, phone, addr, city, agree } = useBusinessSetupDraft((s) => businessSetupDraftFor(s, owner));
+  const edit = (patch: Partial<BusinessSetupDraft> | ((draft: BusinessSetupDraft) => Partial<BusinessSetupDraft>)) => {
+    editBusinessSetupDraft(getAuthSessionSnapshot(), owner, patch);
+  };
   // [F-027-02] A store's coordinates are where customers are sent and where
   // dispatch measures from. This used to submit `latitude ?? 6.8013` — pinning
   // the shop at the Georgetown city centre whenever the device location was
@@ -95,9 +109,6 @@ export function BusinessSetup() {
   // register a business at wherever the phone last was.
   const pinFix = grantedLocationFix(latitude, longitude, locationStatus);
   const hasPin = pinFix !== null;
-  // [DCR-1] The Business Agreement consent — recorded in the ledger with the
-  // exact version at store creation, the same way signup records the Terms.
-  const [agree, setAgree] = useState(false);
   const valid = hasPin && name.trim().length >= 2 && phone.trim().length >= 5 && addr.trim().length >= 3 && city.trim().length >= 2;
 
   const submit = () => {
@@ -141,15 +152,15 @@ export function BusinessSetup() {
         </T>
         <View style={{ flexDirection: 'row', gap: space.md }}>
           {TYPES.map((t) => (
-            <BizTypeTile key={t.key} t={t} active={t.key === type} onPress={() => setType(t.key)} />
+            <BizTypeTile key={t.key} t={t} active={t.key === type} onPress={() => edit({ type: t.key })} />
           ))}
         </View>
 
         <Card style={{ marginTop: space.xl, gap: space.md }}>
-          <LabeledInput value={name} onChangeText={setName} placeholder="Business name" />
-          <LabeledInput value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
-          <LabeledInput value={addr} onChangeText={setAddr} placeholder="Street address" />
-          <LabeledInput value={city} onChangeText={setCity} placeholder="City" />
+          <LabeledInput value={name} onChangeText={(value) => edit({ name: value })} placeholder="Business name" />
+          <LabeledInput value={phone} onChangeText={(value) => edit({ phone: value })} placeholder="Business phone" keyboardType="phone-pad" />
+          <LabeledInput value={addr} onChangeText={(value) => edit({ addr: value })} placeholder="Street address" />
+          <LabeledInput value={city} onChangeText={(value) => edit({ city: value })} placeholder="City" />
           {/* [two-reds law] `error` is reserved for genuine failure — the palette
               says so, and brand is already red, so a second red must mean
               something. Nothing has failed here: the app is asking for a
@@ -167,7 +178,7 @@ export function BusinessSetup() {
           accessibilityRole="checkbox"
           accessibilityState={{ checked: agree }}
           accessibilityLabel="I agree to the Business Agreement"
-          onPress={() => setAgree((v) => !v)}
+          onPress={() => edit((draft) => ({ agree: !draft.agree }))}
           style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}
         >
           <MaterialCommunityIcons
@@ -224,11 +235,14 @@ export function BusinessSetup() {
 }
 
 export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: () => void }) {
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   // Poll while onboarding so an approval reflects within seconds.
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType, undefined, { poll: true });
   return (
     <Screen>
-      <TabHeader title={store.name} />
+      {/* Waiting for approval is not a reason to be kept out of Swift. */}
+      <TabHeader title={store.name} onSwitch={() => setSwitcherOpen(true)} />
+      <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <PricingCard kind="vendor" vendorType={store.vendorType} />
         <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />

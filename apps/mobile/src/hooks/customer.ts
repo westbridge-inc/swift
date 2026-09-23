@@ -3,7 +3,8 @@ import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClie
 import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
 import { recordCheckoutOutcome, stableBodyHash, type CheckoutPrincipal } from '../lib/checkoutAttempt';
-import { getAuthSessionSnapshot } from '../stores/authStore';
+import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
+import { homePlaceholderData, homeQueryKey, isHomeFeed, retainedHomeData } from '../lib/homeReliability';
 import { isAxiosError } from 'axios';
 import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
@@ -91,7 +92,25 @@ export function useSetDefaultAddress() {
 }
 
 export function useHome<T = any>(lat?: number, lng?: number) {
-  return useQuery<T>({ queryKey: customerKeys.home(lat, lng), queryFn: () => unwrap<T>(customerApi.getHome(lat, lng)) });
+  const scope = useAuthStore((state) => state.adEventScopeId);
+  const [last, setLast] = useState<{ scope: string; data: T } | null>(null);
+  const query = useQuery<T>({
+    queryKey: homeQueryKey(lat, lng, scope),
+    queryFn: async ({ signal }) => {
+      const data = await unwrap<T>(customerApi.getHome(lat, lng, signal));
+      if (!isHomeFeed(data)) throw new Error('Home response is incomplete');
+      return data;
+    },
+    placeholderData: (previous, previousQuery) => homePlaceholderData(previous, previousQuery, scope),
+    // The shared two retries can hold this first-paint body on a spinner for
+    // roughly three 10-second request windows. An explicit retry and the next
+    // focus/foreground refresh are available after one bounded attempt.
+    retry: false,
+  });
+  useEffect(() => {
+    if (query.data !== undefined && !query.isPlaceholderData) setLast({ scope, data: query.data });
+  }, [query.data, query.isPlaceholderData, scope]);
+  return { ...query, data: retainedHomeData(query.data, last, scope) };
 }
 
 export type DiscoveryRail = {
@@ -304,8 +323,15 @@ export function useUnblockUser() {
 export function useItemSlots<T = any>(itemId: string, date: string) {
   return useQuery<T>({
     queryKey: ['customer', 'slots', itemId, date],
-    queryFn: () => unwrap<T>(customerApi.getItemSlots(itemId, date)),
+    queryFn: ({ signal }) => unwrap<T>(customerApi.getItemSlots(itemId, date, {
+      signal,
+      // Appointment selection blocks checkout. One bounded read is preferable
+      // to silently extending this loader through three transport attempts;
+      // the screen exposes an explicit, user-controlled retry.
+      timeout: 8_000,
+    })),
     enabled: !!itemId && !!date,
+    retry: false,
     // Live exclusivity: a slot someone else just booked disappears for
     // everyone WHILE they're looking at the picker, not only on reopen —
     // the DB unique is still the final judge (409 SLOT_TAKEN on the race).

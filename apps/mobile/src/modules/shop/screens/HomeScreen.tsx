@@ -1,14 +1,16 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { Dimensions, FlatList, Linking, Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { AppState, Dimensions, FlatList, Linking, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useQueryClient } from '@tanstack/react-query';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../../../services/api';
 import { color, radius, space } from '@swift/ui';
-import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
+import { customerKeys, useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
+import { createHomeRefreshGate, homeFeedState, homeQueryKey, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../kit/pressable-scale';
@@ -293,7 +295,8 @@ export function HomeScreen() {
   const [avatarBroken, setAvatarBroken] = useState(false);
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
-  const { user, isAuthenticated, promptLogin } = useAuthStore();
+  const { user, isAuthenticated, promptLogin, adEventScopeId: scope } = useAuthStore();
+  const qc = useQueryClient();
   // [REPORT-022 F-022-18] clear the failure latch when the URL changes.
   React.useEffect(() => { setAvatarBroken(false); }, [user?.avatar]);
   const { latitude, longitude, address, status } = useLocationStore();
@@ -303,6 +306,18 @@ export function HomeScreen() {
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
   const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
+  const attentionGate = React.useMemo(
+    () => createHomeRefreshGate(() => { void qc.invalidateQueries({ queryKey: customerKeys.homeAll, refetchType: 'active' }); }, 750),
+    [qc],
+  );
+  const refreshForAttention = React.useCallback(() => {
+    const current = qc.getQueryState(homeQueryKey(locationFix?.latitude, locationFix?.longitude, scope));
+    attentionGate(Date.now(), current?.fetchStatus === 'fetching');
+  }, [attentionGate, qc, locationFix?.latitude, locationFix?.longitude, scope]);
+  useFocusEffect(React.useCallback(
+    () => subscribeToHomeAttention(AppState.currentState, (callback) => AppState.addEventListener('change', callback), refreshForAttention),
+    [refreshForAttention],
+  ));
   const toggleFav = useToggleFavorite();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
@@ -333,6 +348,7 @@ export function HomeScreen() {
   };
 
   const feed = home.data;
+  const feedState = homeFeedState({ ...home, data: feed });
   const featured: any[] = feed?.featured ?? [];
   const popularItems: any[] = feed?.popularItems ?? [];
   const nearby: any[] = locationFix ? (feed?.nearby ?? []) : [];
@@ -505,6 +521,16 @@ export function HomeScreen() {
             order this renders nothing and the food is still the first thing on
             Home. An order in flight is not a launcher tile — it is transient,
             it is timed, and while it exists it outranks browsing. */}
+        {home.isError && feed ? (
+          <Card style={{ marginHorizontal: GUTTER, marginTop: space.lg }}>
+            <T variant="label">Couldn’t update Home. Showing the last loaded feed, including its order status.</T>
+            <PillButton size="sm" label="Try again" onPress={() => { void home.refetch(); }} />
+          </Card>
+        ) : home.isFetching && feed ? (
+          <T variant="caption" tone="muted" style={{ marginHorizontal: GUTTER, marginTop: space.sm }}>
+            Updating Home…
+          </T>
+        ) : null}
         {activeOrder ? <LiveOrderCard order={activeOrder} navigation={navigation} /> : null}
 
         {/* THE services grid — 4x2, drawn icons, ON OPEN PAPER.
@@ -607,10 +633,12 @@ export function HomeScreen() {
           </View>
         ) : null}
 
-        {home.isLoading ? (
+        {feedState === 'offline' ? (
+          <ErrorState message="You're offline. Connect to load Home, then try again." onRetry={() => { void home.refetch(); }} style={{ paddingTop: 48 }} />
+        ) : feedState === 'loading' ? (
           <LoadingBlock style={{ paddingTop: 96 }} />
-        ) : home.isError ? (
-          <ErrorState onRetry={() => home.refetch()} style={{ paddingTop: 48 }} />
+        ) : feedState === 'error' ? (
+          <ErrorState onRetry={() => { void home.refetch(); }} style={{ paddingTop: 48 }} />
         ) : (
           <>
             {/* Order again — the fastest path to the next order */}

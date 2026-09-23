@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
+  previewBypassForIntent,
   rootEntryGate,
   rootNavigatorBoundaryKey,
   type RootEntryState,
@@ -14,14 +16,13 @@ const fresh: RootEntryState = {
   needsSelfie: false,
 };
 
-function postCarouselGateBeforeFix(state: RootEntryState) {
-  const { isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie } = state;
+function guyanaOnlyGate(state: RootEntryState) {
+  const { isAuthenticated, wantsAuth, intent, anyPreview, needsSelfie } = state;
   const earner = intent === 'mover' || intent === 'vendor' || intent === 'advertiser';
   const needsAuth = earner ? !isAuthenticated && !anyPreview : wantsAuth && !isAuthenticated;
 
   if (wantsAuth && !isAuthenticated) return 'auth';
   if (!intent) return 'role-picker';
-  if (earner && !countryCode && !anyPreview) return 'country';
   if (needsAuth) return 'auth';
   if (needsSelfie) return 'selfie';
   return 'main';
@@ -41,9 +42,9 @@ describe('rootEntryGate', () => {
   });
 
   it.each(['mover', 'vendor', 'advertiser'] as const)(
-    'keeps the %s country-before-auth path unchanged',
+    'sends the %s directly to auth because V1 has one launch country',
     (intent) => {
-      expect(rootEntryGate({ ...fresh, intent })).toBe('country');
+      expect(rootEntryGate({ ...fresh, intent })).toBe('auth');
       expect(rootEntryGate({ ...fresh, intent, countryCode: 'GY' })).toBe('auth');
     },
   );
@@ -91,7 +92,7 @@ describe('rootEntryGate', () => {
             for (const anyPreview of booleans) {
               for (const needsSelfie of booleans) {
                 const state = { isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie };
-                expect(rootEntryGate(state)).toBe(postCarouselGateBeforeFix(state));
+                expect(rootEntryGate(state)).toBe(guyanaOnlyGate(state));
               }
             }
           }
@@ -114,5 +115,76 @@ describe('rootNavigatorBoundaryKey', () => {
     expect(rootNavigatorBoundaryKey(7)).toBe(rootNavigatorBoundaryKey(7));
     expect(rootEntryGate(fresh)).toBe('role-picker');
     expect(rootEntryGate({ ...fresh, wantsAuth: true })).toBe('auth');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A read-only preview may skip country and sign-in ONLY for the stack it
+// previews. The root navigator OR-ed both flags into one `anyPreview`, and a
+// flag can outlive its own stack: the driver preview's "Log out" returns a
+// guest to the welcome with that preview still on, and "Swift Business" then
+// opened the vendor stack signed out. Its profile read is a 401
+// that a guest cannot refresh, so the guest was stranded on "Your session
+// ended" with nothing to press but Retry.
+// ---------------------------------------------------------------------------
+describe('previewBypassForIntent', () => {
+  const both = { moverPreview: true, vendorSamplePreview: true };
+
+  it('a leftover driver preview does not open the business stack for a guest', () => {
+    const anyPreview = previewBypassForIntent('vendor', { moverPreview: true, vendorSamplePreview: false });
+
+    expect(anyPreview).toBe(false);
+    expect(rootEntryGate({ ...fresh, intent: 'vendor', anyPreview })).toBe('auth');
+    expect(rootEntryGate({ ...fresh, intent: 'vendor', countryCode: 'GY', anyPreview })).toBe('auth');
+  });
+
+  it('a leftover business sample opens neither the driver nor the advertiser stack', () => {
+    const flags = { moverPreview: false, vendorSamplePreview: true };
+
+    for (const intent of ['mover', 'advertiser'] as const) {
+      const anyPreview = previewBypassForIntent(intent, flags);
+      expect(anyPreview).toBe(false);
+      expect(rootEntryGate({ ...fresh, intent, countryCode: 'GY', anyPreview })).toBe('auth');
+    }
+  });
+
+  it('each preview still opens its own stack without a country or sign-in', () => {
+    expect(rootEntryGate({
+      ...fresh,
+      intent: 'mover',
+      anyPreview: previewBypassForIntent('mover', { moverPreview: true, vendorSamplePreview: false }),
+    })).toBe('main');
+    expect(rootEntryGate({
+      ...fresh,
+      intent: 'vendor',
+      anyPreview: previewBypassForIntent('vendor', { moverPreview: false, vendorSamplePreview: true }),
+    })).toBe('main');
+  });
+
+  it('customers, advertisers and the welcome never take a preview bypass', () => {
+    for (const intent of [null, 'customer', 'advertiser'] as const) {
+      expect(previewBypassForIntent(intent, both)).toBe(false);
+    }
+  });
+
+  it('is what the root navigator hands the entry gate, instead of both previews OR-ed', () => {
+    const src = readFileSync(new URL('./RootNavigator.tsx', import.meta.url), 'utf8');
+
+    expect(src).toContain('const anyPreview = previewBypassForIntent(intent, { moverPreview, vendorSamplePreview });');
+    expect(src).not.toMatch(/moverPreview \|\| vendorSamplePreview/);
+    expect(src).toMatch(/rootEntryGate\(\{ isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie \}\)/);
+  });
+
+  it('is exactly the preview of the intent being opened, across every combination', () => {
+    const intents: RootEntryState['intent'][] = [null, 'customer', 'mover', 'vendor', 'advertiser'];
+    for (const intent of intents) {
+      for (const moverPreview of [false, true]) {
+        for (const vendorSamplePreview of [false, true]) {
+          expect(previewBypassForIntent(intent, { moverPreview, vendorSamplePreview })).toBe(
+            (intent === 'mover' && moverPreview) || (intent === 'vendor' && vendorSamplePreview),
+          );
+        }
+      }
+    }
   });
 });

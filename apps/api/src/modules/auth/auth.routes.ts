@@ -22,6 +22,7 @@ import {
   withoutTokens,
 } from './browser-session';
 import { browserSessionCounter } from '../../plugins/observability';
+import { isPublicLaunchCountry, PUBLIC_LAUNCH_COUNTRY_CODES } from './launch-market';
 
 const sendOtpSchema = z.object({
   phone: zPhone,
@@ -402,16 +403,17 @@ export async function authRoutes(app: FastifyInstance) {
   // ── Country picker (public — used before signup) ───────────────────────
 
   app.get('/countries', async (_request, reply) => {
-    // Public picker: list ALL Caribbean markets, live ones first. Live (isActive) →
-    // full signup; others show "coming soon"/waitlist. Only picker-safe fields are
-    // exposed (no tiers/checklists/cash-rules — OWASP API3). Dial codes are static
-    // reference data kept here rather than as a DB column (no migration).
+    // V1 is Guyana-only. Future CountryConfig rows remain available to admin
+    // policy tooling, but an inactive/future market must never become a signup
+    // option merely because its row exists. Only picker-safe fields are exposed
+    // (no tiers/checklists/cash-rules — OWASP API3).
     const DIAL_CODES: Record<string, string> = {
       GY: '+592', TT: '+1868', JM: '+1876', BB: '+1246', BS: '+1242', SR: '+597',
       BZ: '+501', GD: '+1473', LC: '+1758', AG: '+1268', VC: '+1784', KN: '+1869', DM: '+1767',
     };
     const countries = await app.prisma.countryConfig.findMany({
-      orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+      where: { code: { in: [...PUBLIC_LAUNCH_COUNTRY_CODES] }, isActive: true },
+      orderBy: { name: 'asc' },
       select: { code: true, name: true, currencyCode: true, currencySymbol: true, isActive: true },
     });
     return reply.send({
@@ -430,11 +432,15 @@ export async function authRoutes(app: FastifyInstance) {
    *  price, so it is quoted as the rule rather than a number. */
   app.get('/pricing', async (request, reply) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
+    const countryCode = country.toUpperCase();
+    if (!isPublicLaunchCountry(countryCode)) {
+      throw new AppError(404, 'COUNTRY_NOT_FOUND', 'Swift is currently available in Guyana only');
+    }
     const config = await app.prisma.countryConfig.findUnique({
-      where: { code: country.toUpperCase() },
+      where: { code: countryCode },
       select: { code: true, currencyCode: true, currencySymbol: true, subscriptionTiers: true, isActive: true },
     });
-    if (!config) throw new AppError(404, 'COUNTRY_NOT_FOUND', 'No such market');
+    if (!config || !config.isActive) throw new AppError(404, 'COUNTRY_NOT_FOUND', 'Swift is currently available in Guyana only');
     return reply.send({
       success: true,
       data: {
