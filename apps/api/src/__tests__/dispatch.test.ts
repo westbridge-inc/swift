@@ -1,3 +1,4 @@
+import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -39,7 +40,7 @@ const PICKUP = { lat: 6.8, lng: -58.15 };
 
 let app: FastifyInstance;
 let dispatch: DispatchService;
-const scheduled: Array<{ orderId: string; riderId: string; delayMs: number }> = [];
+const scheduled: Array<{ orderId: string; riderId: string; delayMs: number; attemptId?: string; scheduledAt: number }> = [];
 
 const createdUserIds: string[] = [];
 const createdOrderIds: string[] = [];
@@ -178,6 +179,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  recordDispatchQueue(app);
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.ready();
 
@@ -208,8 +210,8 @@ beforeAll(async () => {
     app.redis,
     app.io,
     new HaversineMapsProvider(),
-    async (orderId, riderId, delayMs) => {
-      scheduled.push({ orderId, riderId, delayMs });
+    async (orderId, riderId, delayMs, attemptId) => {
+      scheduled.push({ orderId, riderId, delayMs, attemptId, scheduledAt: Date.now() });
     },
   );
 
@@ -874,9 +876,15 @@ describe('The offer cascade', () => {
     createdUserIds.push(admin.id);
 
     // 1) Best candidate gets the offer + a timeout is scheduled
+    const startedAt = Date.now();
     const first = await dispatch.dispatchOrder(order.id);
     expect(first.offered).toBe(a.riderId);
-    expect(scheduled.at(-1)).toMatchObject({ orderId: order.id, riderId: a.riderId, delayMs: 20_000 });
+    const timeout = scheduled.at(-1)!;
+    expect(timeout).toMatchObject({ orderId: order.id, riderId: a.riderId });
+    // Preparation consumes the original deadline; arming never resets it.
+    expect(timeout.delayMs).toBeGreaterThan(0);
+    expect(timeout.delayMs).toBeLessThanOrEqual(20_000);
+    expect(timeout.scheduledAt + timeout.delayMs).toBeGreaterThanOrEqual(startedAt + 20_000);
 
     // 2) A declines -> B is offered; A's acceptance EMA dropped
     await dispatch.declineOffer(order.id, a.userId);
@@ -887,7 +895,10 @@ describe('The offer cascade', () => {
 
     // 3) B times out (goes dark mid-offer) -> nobody left in 5km -> radius
     //    widens -> still nobody -> honest exhaustion to customer AND vendor
-    await dispatch.handleOfferTimeout(order.id, b.riderId);
+    const secondTimeout = scheduled.at(-1)!;
+    expect(secondTimeout).toMatchObject({ orderId: order.id, riderId: b.riderId });
+    expect(secondTimeout.attemptId).toBeTruthy();
+    await dispatch.handleOfferTimeout(order.id, b.riderId, secondTimeout.attemptId);
 
     const customerNote = await app.prisma.notification.findFirst({
       where: { userId: customerId, title: 'No movers available right now' },
@@ -1842,13 +1853,55 @@ describe('Atomic acceptance — the concurrency proof', () => {
       dispatch.dispatchOrder(order.id),
       dispatch.dispatchOrder(order.id),
     ]);
-    // Exactly one live offer key, owned by ONE mover; both calls REPORT the
-    // same owner (the loser returns the winner's offer, never a second card).
+    // The loser may observe the still-unpublished reservation and return {};
+    // any reported offer must be the single acknowledged winner's pair.
     const owner = await app.redis.get(`dispatch:offer:${order.id}`);
     expect(owner).toBeTruthy();
     const ownerId = owner!.split(':')[0]; // `<mover>:<attemptId>` [F-014-04]
-    expect(a.offered).toBe(ownerId);
-    expect(b.offered).toBe(ownerId);
+    expect([a, b].filter(result => result.offered === ownerId).length).toBeGreaterThanOrEqual(1);
+    for (const result of [a, b]) expect(result).toEqual(result.offered ? { offered: ownerId } : {});
+    expect((await app.redis.get(`dispatch:mover-offer:${ownerId}`))!.split(':')[0]).toBe(order.id);
+    expect(scheduled.filter(job => job.orderId === order.id)).toHaveLength(1);
+    // Exactly one alert-delivery row: the loser emitted nothing.
+    const pings = await app.prisma.alertDelivery.count({ where: { subjectId: order.id, kind: 'MOVER_OFFER' } });
+    expect(pings).toBe(1);
+    await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${ownerId}`);
+    for (const r of [r1, r2]) {
+      await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null } });
+    }
+  });
+
+  it('a concurrent trigger cannot report an offer before its timeout acknowledgement', async () => {
+    const r1 = await makeRider({ lat: PICKUP.lat + 0.006 });
+    const r2 = await makeRider({ lat: PICKUP.lat + 0.007 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    // Suspend the winner at timeout acknowledgement. A duplicate that sees
+    // the unpublished reservation must report no offer; it cannot expose it.
+    let atSchedule!: () => void, acknowledge!: () => void;
+    const scheduling = new Promise<void>(resolve => { atSchedule = resolve; });
+    const acknowledgement = new Promise<void>(resolve => { acknowledge = resolve; });
+    let scheduledCount = 0;
+    const concurrentDispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {
+      scheduledCount += 1; atSchedule(); await acknowledgement;
+    });
+    const first = concurrentDispatch.dispatchOrder(order.id);
+    await scheduling;
+    let second;
+    try {
+      second = await concurrentDispatch.dispatchOrder(order.id);
+      expect(second).toEqual({});
+      expect(await app.prisma.alertDelivery.count({ where: { subjectId: order.id, kind: 'MOVER_OFFER' } })).toBe(0);
+    } finally {
+      acknowledge();
+    }
+    const winner = await first;
+    const owner = await app.redis.get(`dispatch:offer:${order.id}`);
+    expect(owner).toBeTruthy();
+    const ownerId = owner!.split(':')[0];
+    expect(winner.offered).toBe(ownerId);
+    expect(scheduledCount).toBe(1);
+    // After acknowledgement, an idempotent trigger may report that live offer.
+    expect(await concurrentDispatch.dispatchOrder(order.id)).toEqual({ offered: ownerId });
     // Exactly one alert-delivery row: the loser emitted nothing.
     const pings = await app.prisma.alertDelivery.count({ where: { subjectId: order.id, kind: 'MOVER_OFFER' } });
     expect(pings).toBe(1);

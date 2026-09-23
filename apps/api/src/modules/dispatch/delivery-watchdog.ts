@@ -6,6 +6,7 @@ import { FloatService, riderFloatForOrder } from './float.service';
 import { settleRiderLegs } from './concurrency-policy';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { log } from '../../utils/logger';
+import { dispatchDeclinedKey } from './dispatch-generation-keys';
 import {
   TERMINAL_ORDER_STATUSES,
   RIDER_PRE_CUSTODY_STATUSES,
@@ -139,7 +140,7 @@ export async function recoverStrandedDeliveries(
         select: {
           tenantId: true, // the ops page follows the order's tenant [NOC-A F45]
           id: true, status: true, orderType: true, customerId: true, orderNumber: true,
-          riderId: true, paymentMethod: true, subtotalBase: true,
+          riderId: true, paymentMethod: true, subtotalBase: true, fulfillmentModeVersion: true,
           preparingAt: true, readyAt: true, vendorId: true,
         },
       });
@@ -207,8 +208,9 @@ export async function recoverStrandedDeliveries(
 
     // Exclude the dark rider from the re-cascade (same key the cascade reads;
     // module-private there, mirrored here by contract).
-    await redis.sadd(`dispatch:declined:${orderId}`, r.id).catch(() => {});
-    await redis.expire(`dispatch:declined:${orderId}`, 3600).catch(() => {});
+    const declinedKey = dispatchDeclinedKey(orderId, order.fulfillmentModeVersion);
+    await redis.sadd(declinedKey, r.id).catch(() => {});
+    await redis.expire(declinedKey, 3600).catch(() => {});
     io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: decision.reopenStatus, reason: 'rider_dropped' });
     await notifications.send({
       userId: order.customerId,

@@ -6,6 +6,7 @@ import { noteLiveEta } from '../eta/promise';
 import { z } from 'zod';
 import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
+import { riderDispatchableStatusesFor, riderDispatchReadinessFilter, withheldAwaitingReadiness, dispatchHoldExpired } from '../dispatch/dispatch-trigger';
 import { earningsWindow } from '../order/earnings-window';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
@@ -19,6 +20,7 @@ import { FloatService, riderFloatForOrder, floatAdvice } from '../dispatch/float
 import { explainEarning } from '../../utils/explain-earning';
 import { riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
+import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
@@ -988,8 +990,10 @@ export async function riderRoutes(app: FastifyInstance) {
         // already out for delivery. In AND because notHeldFilter already spread
         // an OR key above.
         // [ORDER-SPINE S1-6] Nor is direct-MMG work nobody has said is paid, or
-        // whose payment claims disagree: the claim below would refuse it.
-        AND: [notSelfDeliveredFilter(), mmgDispatchEligibleWhere()],
+        // whose payment claims disagree: the claim below would refuse it. All
+        // three predicates hold at once (cross-lane gate): not self-delivered,
+        // ready for a rider, and MMG-eligible.
+        AND: [notSelfDeliveredFilter(), riderDispatchReadinessFilter(), mmgDispatchEligibleWhere()],
       },
       include: {
         vendor: {
@@ -1230,7 +1234,9 @@ export async function riderRoutes(app: FastifyInstance) {
     // RIDER_ASSIGNED is only reachable from these states — NOT PENDING (the vendor
     // hasn't accepted yet). Kept in sync with the order transition table; accepting
     // a PENDING order used to strand the rider stuck-busy after the throw below.
-    const acceptableStatuses: OrderStatus[] = ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'];
+    if (withheldAwaitingReadiness(order)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
+    if (!dispatchHoldExpired(order)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
+    const acceptableStatuses: OrderStatus[] = riderDispatchableStatusesFor(order.orderType);
     if (!acceptableStatuses.includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Order cannot be accepted in status ${order.status}`);
     }
@@ -1369,7 +1375,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // for the offer/direct entrances). Without it a live offer's timeout could
     // later penalize a mover for this already-assigned job, and the SEARCHING
     // journal never closes. Fire-and-caught — the assignment already committed.
-    await dispatch.retireAfterAssignment(id, rider.id);
+    await dispatch.retireAfterAssignment(id, rider.id, updatedOrder.fulfillmentModeVersion, updatedOrder.dispatchAssignmentSequence);
     await orderService.publishCommittedRiderAssignment(updatedOrder, request.user.userId);
 
     return {
@@ -1869,7 +1875,7 @@ export async function riderRoutes(app: FastifyInstance) {
         where: { id },
         select: {
           id: true, status: true, orderType: true, customerId: true, orderNumber: true,
-          riderId: true, paymentMethod: true, subtotalBase: true,
+          riderId: true, paymentMethod: true, subtotalBase: true, fulfillmentModeVersion: true,
           preparingAt: true, readyAt: true,
           acceptedAt: true, pickupLat: true, pickupLng: true, deliveryLat: true, deliveryLng: true,
         },
@@ -1908,8 +1914,9 @@ export async function riderRoutes(app: FastifyInstance) {
     // Post-commit garnish — none of it may turn a committed handback into an
     // HTTP failure. Self-exclusion uses the cascade's declined key by contract
     // (module-private there, mirrored here — same as the watchdog).
-    await app.redis.sadd(`dispatch:declined:${id}`, rider.id).catch(() => {});
-    await app.redis.expire(`dispatch:declined:${id}`, 3600).catch(() => {});
+    const handbackDeclinedKey = dispatchDeclinedKey(id, outcome.order.fulfillmentModeVersion);
+    await app.redis.sadd(handbackDeclinedKey, rider.id).catch(() => {});
+    await app.redis.expire(handbackDeclinedKey, 3600).catch(() => {});
     app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: outcome.reopenStatus, reason: 'rider_handback' });
     await new NotificationService(app.prisma, app.io).send({
       userId: outcome.customerId,

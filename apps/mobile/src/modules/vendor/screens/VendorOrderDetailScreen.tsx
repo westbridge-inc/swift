@@ -4,7 +4,7 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
-import { useOrderAction, useRetryDispatch, useVendorOrder, usePickingActions, useVendorMenu } from '../../../hooks/vendorops';
+import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
 import { openExternal } from '../../../lib/openExternal';
 import {
@@ -18,6 +18,7 @@ import {
   orderActions,
   prettyStatus,
 } from '../shared';
+import { deliveryOwnerView } from './delivery-owner';
 
 /** [MOB-050] The customer's collection code, as the server mints it. */
 export const PICKUP_CODE_LENGTH = 6;
@@ -105,7 +106,9 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
   const { data: order, isLoading, isError, refetch } = useVendorOrder(orderId);
   const orderAction = useOrderAction();
   const retryDispatch = useRetryDispatch();
+  const fulfillmentMode = useSetOrderFulfillmentMode();
   const [confirmReject, setConfirmReject] = useState(false);
+  const [confirmDelivered, setConfirmDelivered] = useState(false);
   // [MOB-050] The counter hand-over is a ceremony, not a button: the vendor
   // TYPES what the customer reads out. The screen used to print the code and
   // send nothing, so the server (which requires it) refused every attempt and
@@ -144,7 +147,7 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
 
   const items: any[] = order.items ?? [];
   const s = (order.status || '').toUpperCase();
-  const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(s);
+  const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
   // Shelf-pick UI: quantity-tracked store types, while the bag is still open.
   const PICKABLE_STATES = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
   const pickable = ['SUPERMARKET', 'STORE'].includes(order.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
@@ -171,10 +174,22 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
   const timeline: any[] = [...(order.statusHistory ?? [])].reverse();
   const customerName = [order.customer?.firstName, order.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
   const riderName = [order.rider?.user?.firstName, order.rider?.user?.lastName].filter(Boolean).join(' ');
+  const deliveryOwner = deliveryOwnerView({
+    fulfillment: order.fulfillment,
+    fulfillmentMode: order.fulfillmentMode,
+    status: order.status,
+    riderId: order.riderId,
+    riderPresent: Boolean(order.rider),
+    selfDeliveryEnabled: order.vendor?.selfDeliveryEnabled,
+  });
 
   const runAction = (action: (typeof actions)[number]['action']) => {
     if (action === 'reject') {
       setConfirmReject(true);
+      return;
+    }
+    if (action === 'delivered') {
+      setConfirmDelivered(true);
       return;
     }
     orderAction.mutate(
@@ -405,12 +420,57 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
         />
 
         {/* Rider — only once dispatch has assigned one */}
-        {riderName ? <ContactCard icon="bike" title="Rider" name={riderName} phone={order.rider?.user?.phone} /> : null}
+        {deliveryOwner.riderAssigned ? <ContactCard icon="bike" title="Rider" name={riderName || 'Swift rider'} phone={order.rider?.user?.phone} /> : null}
+
+        {/* This is status, never a local custody decision: the server rejects a
+            stale switch if a rider has claimed while this screen was open. */}
+        {deliveryOwner.active ? (
+          <Card style={{ marginBottom: space.md }}>
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.md }}>
+              <MaterialCommunityIcons name={deliveryOwner.selfDelivery ? 'storefront-outline' : 'bike-fast'} size={20} color={deliveryOwner.selfDelivery ? color.brand[600] : color.text.muted} />
+              <View style={{ flex: 1 }}>
+                <T variant="label" weight="semibold">{deliveryOwner.title}</T>
+                <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                  {deliveryOwner.description}
+                </T>
+              </View>
+            </View>
+            {deliveryOwner.canChooseVendor || deliveryOwner.canChoosePlatform ? (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.md }}>
+                {deliveryOwner.canChooseVendor ? (
+                  <PillButton
+                    label="We’ll deliver"
+                    variant="outline"
+                    size="md"
+                    disabled={fulfillmentMode.isPending}
+                    loading={fulfillmentMode.isPending}
+                    onPress={() => fulfillmentMode.mutate({ id: order.id, mode: 'VENDOR_DELIVERY' })}
+                  />
+                ) : null}
+                {deliveryOwner.canChoosePlatform ? (
+                  <PillButton
+                    label="Get a Swift rider"
+                    variant="outline"
+                    size="md"
+                    disabled={fulfillmentMode.isPending}
+                    loading={fulfillmentMode.isPending}
+                    onPress={() => fulfillmentMode.mutate({ id: order.id, mode: 'PLATFORM_RIDER' })}
+                  />
+                ) : null}
+              </View>
+            ) : null}
+            {fulfillmentMode.isError ? (
+              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+                {(fulfillmentMode.error as Error)?.message ?? 'Couldn’t update delivery ownership — check the latest order status and try again.'}
+              </T>
+            ) : null}
+          </Card>
+        ) : null}
 
         {/* No rider yet on an accepted delivery — let the vendor re-run the
             search ("hold it and retry" from the no-movers notice). Harmless
             mid-cascade: the server no-ops while an offer is live. */}
-        {!riderName && !isPickup && !isAppt && ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(s) ? (
+        {!deliveryOwner.riderAssigned && !deliveryOwner.selfDelivery && !isPickup && !isAppt && ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(s) ? (
           <Card style={{ marginBottom: space.md }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
               <MaterialCommunityIcons name="bike-fast" size={20} color={color.text.muted} />
@@ -523,6 +583,34 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
           />
         ))}
         <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setConfirmReject(false)} />
+      </PopupCard>
+
+      <PopupCard visible={confirmDelivered} onClose={() => setConfirmDelivered(false)}>
+        <IconChip icon="check-circle" size={56} />
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
+          Confirm store delivery?
+        </PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          Only confirm after your courier has handed this order to the customer. This closes the order as delivered.
+        </T>
+        <PillButton
+          label="Yes, delivered"
+          variant="primary"
+          style={{ alignSelf: 'stretch', marginTop: space.lg }}
+          disabled={busy}
+          loading={busy}
+          onPress={() => {
+            setConfirmDelivered(false);
+            orderAction.mutate({ id: order.id, action: 'delivered' });
+          }}
+        />
+        <PillButton
+          label="Not yet"
+          variant="soft"
+          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          disabled={busy}
+          onPress={() => setConfirmDelivered(false)}
+        />
       </PopupCard>
     </Screen>
   );

@@ -315,22 +315,29 @@ describe('express dispatch mechanics', () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     await makeRider({ online: true });
 
-    const timeouts: number[] = [];
+    const timeouts: Array<{ delayMs: number; scheduledAt: number }> = [];
     const dispatch = new DispatchService(
       app.prisma, app.redis, app.io, new HaversineMapsProvider(),
-      async (_orderId, _riderId, delayMs) => { timeouts.push(delayMs); },
+      async (_orderId, _riderId, delayMs) => { timeouts.push({ delayMs, scheduledAt: Date.now() }); },
     );
 
     const express = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', { isExpress: true });
-    await dispatch.dispatchOrder(express.id);
+    const expressStart = Date.now();
+    expect((await dispatch.dispatchOrder(express.id)).offered).toBeTruthy();
     const standard = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED');
     // the single rider holds the express offer; standard finds nobody free —
     // use a second rider so both offers land
     await makeRider({ online: true });
-    await dispatch.dispatchOrder(standard.id);
+    const standardStart = Date.now();
+    expect((await dispatch.dispatchOrder(standard.id)).offered).toBeTruthy();
 
-    expect(timeouts[0]).toBe(EXPRESS_OFFER_TIMEOUT_SECONDS * 1000);
-    expect(timeouts[1]).toBe(OFFER_TIMEOUT_SECONDS * 1000);
+    expect(timeouts).toHaveLength(2);
+    for (const [index, seconds, start] of [[0, EXPRESS_OFFER_TIMEOUT_SECONDS, expressStart], [1, OFFER_TIMEOUT_SECONDS, standardStart]] as const) {
+      const timeout = timeouts[index]!;
+      expect(timeout.delayMs).toBeGreaterThan(0);
+      expect(timeout.delayMs).toBeLessThanOrEqual(seconds * 1000);
+      expect(timeout.scheduledAt + timeout.delayMs).toBeGreaterThanOrEqual(start + seconds * 1000);
+    }
     await app.redis.del(`dispatch:offer:${express.id}`, `dispatch:offer:${standard.id}`);
   });
 

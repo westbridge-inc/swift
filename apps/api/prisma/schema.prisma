@@ -805,9 +805,15 @@ model DispatchSearch {
   assignedTo      String?
   exhaustedAt     DateTime?
   resolution      String? // RETRIED | SWITCHED_PICKUP | CANCELLED | WATCHING | MANUAL
+  /// Delivery-custody generation read from Order when this search began.
+  /// Null is the pre-generation legacy shape and for non-delivery searches.
+  /// Vendor cleanup is bounded to generations at or before the decision that
+  /// requested it, so a delayed callback cannot cancel a newer rider search.
+  deliveryAuthorityVersion Int?
 
   @@index([status, startedAt])
   @@index([subjectId])
+  @@index([subjectId, deliveryAuthorityVersion, status])
   @@map("dispatch_searches")
 }
 
@@ -2007,6 +2013,10 @@ model Order {
   /// FUL-004: who actually delivers this order (set when the vendor chooses at
   /// Ready). NULL on orders predating the choice — treated as PLATFORM_RIDER.
   fulfillmentMode FulfillmentMode?
+  /// Monotonic custody generation. Every committed change or first resolution
+  /// of fulfillmentMode increments it. Dispatch offers and search journals pin
+  /// this value so delayed cleanup from generation N cannot erase N+1.
+  fulfillmentModeVersion Int @default(0)
   appointmentSlot DateTime?
   /// Takeaway: 4-digit code the customer shows to collect a PICKUP order; the
   /// vendor verifies it to close the order (no rider involved). Null otherwise.
