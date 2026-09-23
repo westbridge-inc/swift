@@ -1726,7 +1726,7 @@ model BookingException {
   itemId    String?
   vendorId  String
   date      DateTime @db.Date
-  start     String? // "13:00" local wall-clock (the UTC-face convention)
+  start     String? // "13:00" market wall-clock for the date-only exception
   end       String?
   reason    String?
   createdAt DateTime @default(now())

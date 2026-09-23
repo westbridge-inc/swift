@@ -29,21 +29,14 @@ import {
   type VendorBookingException,
 } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
-
-/** Slot instants carry LOCAL wall-clock time on their UTC face (the booking
- *  convention, same as the customer picker) — format in UTC or a UTC-4 phone
- *  shows a 9:00 appointment as 5:00 (found live, SCH-F). */
-function fmtClock(iso: string) {
-  const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' });
-}
+import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay } from '../../../lib/appointmentTime';
 
 function AppointmentCard({ b }: { b: VendorBooking }) {
   return (
     <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.sm }}>
       <View style={{ alignItems: 'center', minWidth: 60 }}>
-        <T variant="body" weight="bold">{fmtClock(b.slotStart)}</T>
-        <T variant="caption" tone="muted">{fmtClock(b.slotEnd)}</T>
+        <T variant="body" weight="bold">{formatAppointmentClock(b.slotStart)}</T>
+        <T variant="caption" tone="muted">{formatAppointmentClock(b.slotEnd)}</T>
       </View>
       <View style={{ width: 1, alignSelf: 'stretch', backgroundColor: color.border.subtle }} />
       <View style={{ flex: 1 }}>
@@ -57,11 +50,6 @@ function AppointmentCard({ b }: { b: VendorBooking }) {
   );
 }
 
-/** UTC-face day key — matches the booking convention end to end. */
-function dayKeyOf(d: Date): string {
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-}
-
 /** The provider's DAY CALENDAR (scheduling spec 2.2): 7-day strip → the
  *  chosen day's timeline — booked slots as cards, blocked time as quiet
  *  hatched rows with one-tap unblock — plus "Block time" (full day or a
@@ -72,7 +60,7 @@ export function VendorScheduleScreen({ navigation }: any) {
   const exceptionsQ = useVendorBookingExceptions();
   const createBlock = useCreateBookingException();
   const deleteBlock = useDeleteBookingException();
-  const [dayKey, setDayKey] = useState(() => dayKeyOf(new Date()));
+  const [dayKey, setDayKey] = useState(() => appointmentDayKey(new Date()));
   const [blocking, setBlocking] = useState(false);
   const [fullDay, setFullDay] = useState(true);
   const [blockStart, setBlockStart] = useState('13:00');
@@ -82,16 +70,16 @@ export function VendorScheduleScreen({ navigation }: any) {
   const rows: VendorBooking[] = q.data ?? [];
   const exceptions: VendorBookingException[] = exceptionsQ.data ?? [];
 
-  // The strip: today + 6, on the UTC face like every slot instant.
+  // The strip follows the market calendar, including near UTC midnight.
   const strip = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(Date.now() + i * 24 * 60 * 60 * 1000);
+    const key = addAppointmentDays(appointmentDayKey(new Date()), i);
     return {
-      key: dayKeyOf(d),
-      label: i === 0 ? 'Today' : d.toLocaleDateString([], { weekday: 'short', day: 'numeric', timeZone: 'UTC' }),
+      key,
+      label: i === 0 ? 'Today' : formatAppointmentDay(key),
     };
   });
-  const dayBookings = rows.filter((b) => dayKeyOf(new Date(b.slotStart)) === dayKey);
-  const dayBlocks = exceptions.filter((e) => dayKeyOf(new Date(e.date)) === dayKey);
+  const dayBookings = rows.filter((b) => appointmentDayKey(b.slotStart) === dayKey);
+  const dayBlocks = exceptions.filter((e) => e.date.slice(0, 10) === dayKey);
   const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
   const blockValid = fullDay || (HHMM.test(blockStart) && HHMM.test(blockEnd) && blockStart < blockEnd);
 

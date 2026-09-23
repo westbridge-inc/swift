@@ -18,6 +18,7 @@ import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stag
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
+import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
 import { VerificationService } from '../verification/verification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -1606,6 +1607,13 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!);
+    // A booking has no kitchen: it is confirmed, then completed with
+    // complete-appointment. Marking it "preparing" sent the customer kitchen
+    // pushes for a haircut and stranded it (complete-appointment requires
+    // ACCEPTED). The canonical transition refuses this too, for every caller.
+    if (order.fulfillment === 'APPOINTMENT') {
+      throw new AppError(400, 'NOT_A_KITCHEN_ORDER', 'A booking is not prepared — confirm it, then mark it complete.');
+    }
     if (order.status === 'ACCEPTED') {
       const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
       return { success: true, data: updated };
@@ -1622,6 +1630,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!);
+    // A booking is never "ready for pickup" — see /preparing above; a booking
+    // that already sits in PREPARING is not reopened into the kitchen path.
+    if (order.fulfillment === 'APPOINTMENT') {
+      throw new AppError(400, 'NOT_A_KITCHEN_ORDER', 'A booking is not marked ready — confirm it, then mark it complete.');
+    }
     // Grocery/goods picking gate (§5.3): the bag never closes with an open
     // question in it — every line picked, or its substitution resolved.
     // Restaurants don't shelf-pick, so only quantity-tracked store types gate.
@@ -2170,14 +2183,19 @@ export async function vendorRoutes(app: FastifyInstance) {
     // learn their order was declined (it just silently vanished).
     // [REPORT-010 F-03] An unattested-MMG decline carries the refund guidance
     // — the customer may have already paid the store's link.
+    // A booking is declined by its PROVIDER: the words follow the appointment
+    // fulfillment, exactly as the acceptance push does, so a haircut is never
+    // "an order declined by the store". Food, grocery and retail keep theirs.
+    const booking = order.fulfillment === 'APPOINTMENT';
+    const decliner = booking ? 'the provider' : 'the store';
     const mmgGuidance = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING'
-      ? ' If you already sent the MMG payment, the store refunds you directly.'
+      ? ` If you already sent the MMG payment, ${decliner} refunds you directly.`
       : '';
     await notifications.send({
       userId: updated.customer.id,
       type: 'ORDER_UPDATE',
-      title: 'Order declined',
-      body: `Your order ${updated.orderNumber} was declined by the store. ${reason}${mmgGuidance}`.trim(),
+      title: booking ? 'Booking declined' : 'Order declined',
+      body: `Your ${booking ? 'booking' : 'order'} ${updated.orderNumber} was declined by ${decliner}. ${reason}${mmgGuidance}`.trim(),
       data: { orderId: order.id, status: 'CANCELLED' },
     });
 
@@ -2981,10 +2999,17 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.get('/bookings', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const { from, to } = z
-      .object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() })
+      .object({ from: z.string().optional(), to: z.string().optional() })
       .parse(request.query);
-    const start = from ?? new Date(new Date().setHours(0, 0, 0, 0));
-    const end = to ?? new Date(start.getTime() + 14 * 24 * 60 * 60 * 1000);
+    const start = from
+      ? isDateOnly(from) ? startOfGuyanaDay(from) : z.coerce.date().parse(from)
+      : startOfGuyanaDay(guyanaDayKey(new Date()));
+    const baseKey = guyanaDayKey(start);
+    const [year, month, day] = baseKey.split('-').map(Number);
+    const endKey = new Date(Date.UTC(year!, month! - 1, day! + 14)).toISOString().slice(0, 10);
+    const end = to
+      ? isDateOnly(to) ? startOfGuyanaDay(to) : z.coerce.date().parse(to)
+      : startOfGuyanaDay(endKey);
     const bookings = await app.prisma.booking.findMany({
       where: { item: { vendorId }, slotStart: { gte: start, lt: end }, status: { not: 'CANCELLED' } },
       select: {
@@ -3027,7 +3052,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { from, to } = z
       .object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() })
       .parse(request.query ?? {});
-    const start = from ?? new Date(new Date().setUTCHours(0, 0, 0, 0));
+    const start = from ?? new Date(`${guyanaDayKey(new Date())}T00:00:00.000Z`);
     const end = to ?? new Date(start.getTime() + 30 * 24 * 60 * 60 * 1000);
     const exceptions = await app.prisma.bookingException.findMany({
       where: { vendorId, date: { gte: start, lte: end } },

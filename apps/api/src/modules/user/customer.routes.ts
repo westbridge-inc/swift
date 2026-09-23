@@ -12,12 +12,14 @@ import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
+import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
+import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed';
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
@@ -1045,7 +1047,16 @@ export async function customerRoutes(app: FastifyInstance) {
               // store" on Home. That client fix was already correct; it was
               // defeated here, at the select, where nothing failed.
               orderType: true,
-              vendor: { select: { id: true, name: true, logoUrl: true } },
+              // `orderType` alone cannot say what KIND of vendor order this is:
+              // a SERVICE business's appointment is persisted on the FOOD_DELIVERY
+              // spine. The fulfillment is the fact `orderVertical` declares the
+              // card's words from — sent here, at the select, where its absence
+              // never failed anything. The business type rides beside it for the
+              // card; it is not the discriminator (a service business's goods
+              // are deliveries).
+              fulfillment: true,
+              appointmentSlot: true,
+              vendor: { select: { id: true, name: true, logoUrl: true, vendorType: true } },
               // The hold — the window in which the store has not been told yet.
               // `holdExpiresAt` and `placedAt` are its two ends, and the client's
               // `holdRingWindow` refuses to draw anything unless BOTH came from
@@ -1106,7 +1117,9 @@ export async function customerRoutes(app: FastifyInstance) {
     const orderAgain = enriched.filter((v) => recentVendorIds.has(v.id)).slice(0, 6);
 
     const feed = {
-      activeOrder: activeOrder ? { ...activeOrder, promise: promiseView(activeOrder) } : activeOrder,
+      // The declared vertical rides with the card: SERVICE for a service
+      // business's booking, otherwise the persisted type — never a client guess.
+      activeOrder: activeOrder ? { ...activeOrder, vertical: orderVertical(activeOrder), promise: promiseView(activeOrder) } : activeOrder,
       popularItems: discovery.popularItems,
       featured,
       nearby,
@@ -1553,8 +1566,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // THE availability computation (scheduling law: no double-source):
     // windows MINUS the vendor's exceptions MINUS non-cancelled bookings,
     // honoring buffers + lead time — the same math reservation validates.
-    const dayStart = new Date(Date.UTC(y!, m! - 1, d!));
-    const dayEnd = new Date(Date.UTC(y!, m! - 1, d!, 23, 59, 59, 999));
+    const dayStart = startOfGuyanaDay(date);
+    const dayEnd = endOfGuyanaDay(date);
     const [exceptions, takenRows] = item.isAvailable
       ? await Promise.all([
           bookingService.exceptionsFor(item.vendorId, dayStart),
@@ -2091,6 +2104,9 @@ export async function customerRoutes(app: FastifyInstance) {
       id: o.id,
       orderNumber: o.orderNumber,
       orderType: o.orderType,
+      // The declared vertical — SERVICE for a service business's booking; the
+      // persisted type for everything else. The activity list's words read it.
+      vertical: orderVertical(o),
       status: o.status,
       vendor: o.vendor,
       items: o.items.map((i) => ({
@@ -2107,6 +2123,7 @@ export async function customerRoutes(app: FastifyInstance) {
       totalAmount: Number(o.totalAmount),
       paymentMethod: o.paymentMethod,
       fulfillment: o.fulfillment,
+      appointmentSlot: o.appointmentSlot,
       // Takeaway handover gate — the customer PRESENTS this at the counter,
       // so it must survive past the checkout confirmation screen.
       pickupCode: o.pickupCode,
@@ -2250,6 +2267,8 @@ export async function customerRoutes(app: FastifyInstance) {
         id: order.id,
         orderNumber: order.orderNumber,
         orderType: order.orderType,
+        // The declared vertical — SERVICE for a service business's booking.
+        vertical: orderVertical(order),
         status: order.status,
         vendor: order.vendor,
         items: order.items.map((i) => ({
@@ -2279,6 +2298,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // order is held on a disagreement, and whether a claim may be made now.
         mmgClaim: mmgClaimView(order),
         fulfillment: order.fulfillment,
+        appointmentSlot: order.appointmentSlot,
         // Takeaway handover gate — the customer PRESENTS this code at the
         // counter. It was only in the checkout response before, so it
         // vanished the moment they left the confirmation screen.

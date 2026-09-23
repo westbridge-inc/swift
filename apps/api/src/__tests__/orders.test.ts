@@ -12,6 +12,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService, ORDER_TRANSITIONS } from '../modules/order/order.service';
 import { BookingService } from '../modules/booking/booking.service';
+import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { RatingService } from '../modules/rating/rating.service';
 
 // ---------------------------------------------------------------------------
@@ -129,13 +130,16 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, 
 }
 
 /** Next occurrence of a UTC weekday at hh:mm, at least a day out. */
-function nextUtc(dayOfWeek: number, hours: number, minutes: number): Date {
-  const d = new Date(Date.now() + DAY);
-  d.setUTCHours(hours, minutes, 0, 0);
-  while (d.getUTCDay() !== dayOfWeek || d.getTime() <= Date.now()) {
-    d.setUTCDate(d.getUTCDate() + 1);
+/** The next given weekday (from tomorrow) at a Guyana wall-clock time, as the
+ *  TRUE instant the slot happens — what the picker sends and the row stores. */
+function nextGuyana(dayOfWeek: number, hours: number, minutes: number): Date {
+  const [y, m, d] = guyanaDayKey(new Date()).split('-').map(Number);
+  for (let i = 1; i <= 7; i++) {
+    const day = new Date(Date.UTC(y!, m! - 1, d! + i));
+    if (day.getUTCDay() !== dayOfWeek) continue;
+    return instantOfGuyanaWallClock(new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hours, minutes)));
   }
-  return d;
+  throw new Error('unreachable: every weekday occurs within seven days');
 }
 
 let customer: { userId: string; token: string };
@@ -656,7 +660,7 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
 describe('Appointments — booked at acceptance, never double-held', () => {
   let service: Awaited<ReturnType<typeof makeVendor>>;
   let haircutId: string;
-  const slot = nextUtc(4, 11, 0); // next Thursday 11:00 UTC
+  const slot = nextGuyana(4, 11, 0); // next Thursday 11:00 in Guyana (15:00Z)
 
   beforeAll(async () => {
     service = await makeVendor({ type: 'SERVICE' });
@@ -827,7 +831,7 @@ describe('Appointments — booked at acceptance, never double-held', () => {
 
     const res = await inject('POST', '/api/v1/customer/checkout', {
       paymentMethod: 'CASH',
-      appointments: [{ itemId: haircutId, slotStart: nextUtc(4, 14, 0).toISOString() }],
+      appointments: [{ itemId: haircutId, slotStart: nextGuyana(4, 14, 0).toISOString() }],
     }, customer.token);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('MIXED_FULFILLMENT');

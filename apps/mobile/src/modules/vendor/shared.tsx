@@ -6,6 +6,7 @@ import { color, font, fontSize, radius, space } from '@swift/ui';
 import { T, TonePill, PillButton } from '../../kit';
 import { useAuthStore } from '../../stores/authStore';
 import { money } from '../../lib/money';
+import { addAppointmentDays, appointmentDayKey, formatAppointmentSlot } from '../../lib/appointmentTime';
 import { canVendorConfirmDelivered } from './screens/delivery-owner';
 
 export const GUTTER = space['2xl'];
@@ -93,12 +94,9 @@ export function fmtDate(iso?: string) {
   return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
 }
 
-// Appointment slot → "Mon 14 Jul · 2:30 PM" (manual format; Hermes Intl is limited).
 export function formatSlot(iso?: string) {
   if (!iso) return 'Time to be confirmed';
-  const d = new Date(iso);
-  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  return `${days[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]} · ${clock(d)}`;
+  return formatAppointmentSlot(iso);
 }
 
 export function prettyStatus(status?: string) {
@@ -639,23 +637,18 @@ export type RevenueDay = {
   isToday?: boolean;
 };
 
-export const DAY_MILLISECONDS = 24 * 60 * 60 * 1000;
-
-export const GUYANA_OFFSET_MILLISECONDS = 4 * 60 * 60 * 1000;
-
 export function numericFact(value: unknown): number | null {
   const n = Number(value);
   return value !== null && value !== undefined && Number.isFinite(n) ? n : null;
 }
 
-/** Guyana has no daylight-saving transition; shift once and read the UTC face. */
+/** A calendar-only UTC Date for existing weekday arithmetic. */
 export function guyanaDate(offsetDays = 0) {
-  return new Date(Date.now() - GUYANA_OFFSET_MILLISECONDS + offsetDays * DAY_MILLISECONDS);
+  return new Date(`${guyanaDayKey(offsetDays)}T00:00:00.000Z`);
 }
 
 export function guyanaDayKey(offsetDays = 0) {
-  const d = guyanaDate(offsetDays);
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  return addAppointmentDays(appointmentDayKey(new Date()), offsetDays);
 }
 
 export function hasTrailingGuyanaDays(daily: RevenueDay[], take: number) {

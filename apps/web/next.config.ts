@@ -25,6 +25,9 @@ export default function createNextConfig(phase: string): NextConfig {
 
   return {
     poweredByHeader: false,
+    // @swift/types ships TypeScript source; Next must transpile it (the admin
+    // console declares the same). The site reads the market zone from it.
+    transpilePackages: ['@swift/types'],
     // The exact origin is inlined into every client chunk from the authority,
     // so no consumer can fall back to localhost in a release by accident.
     env: {
