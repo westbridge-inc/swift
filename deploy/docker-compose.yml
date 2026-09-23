@@ -138,6 +138,15 @@ services:
       MASTER_KEK_FILE: /run/secrets/MASTER_KEK
       STORAGE_SIGNING_SECRET_FILE: /run/secrets/STORAGE_SIGNING_SECRET
       CONSENT_IP_PEPPER_FILE: /run/secrets/CONSENT_IP_PEPPER
+      ATTRIB_SALT_FILE: /run/secrets/ATTRIB_SALT
+      IDENTITY_SALT_FILE: /run/secrets/IDENTITY_SALT
+      SCAN_IP_SALT_FILE: /run/secrets/SCAN_IP_SALT
+      ADS_EVENT_SECRET_FILE: /run/secrets/ADS_EVENT_SECRET
+      # Read by the HTTP process only: the ops endpoints and the load-test
+      # control plane. Not handed to the worker.
+      METRICS_TOKEN_FILE: /run/secrets/METRICS_TOKEN
+      HEALTH_DETAIL_TOKEN_FILE: /run/secrets/HEALTH_DETAIL_TOKEN
+      TEST_CONTROL_SECRET_FILE: /run/secrets/TEST_CONTROL_SECRET
       # The API process serves HTTP only; the worker service below owns jobs.
       RUN_WORKERS: "0"
     volumes:
@@ -178,6 +187,10 @@ services:
       MASTER_KEK_FILE: /run/secrets/MASTER_KEK
       STORAGE_SIGNING_SECRET_FILE: /run/secrets/STORAGE_SIGNING_SECRET
       CONSENT_IP_PEPPER_FILE: /run/secrets/CONSENT_IP_PEPPER
+      ATTRIB_SALT_FILE: /run/secrets/ATTRIB_SALT
+      IDENTITY_SALT_FILE: /run/secrets/IDENTITY_SALT
+      SCAN_IP_SALT_FILE: /run/secrets/SCAN_IP_SALT
+      ADS_EVENT_SECRET_FILE: /run/secrets/ADS_EVENT_SECRET
       RUN_WORKERS: "1"
     volumes:
       - /run/swift-secrets:/run/secrets:ro

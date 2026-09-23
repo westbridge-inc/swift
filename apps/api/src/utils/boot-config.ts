@@ -1,6 +1,23 @@
 import { runtimeMode } from './runtime-mode';
 import { firstInvalidTwilioConfig } from './twilio-identity';
 import { assertDisabledCardRailConfig } from './card-rail';
+import { testControlEnabled } from '../modules/ops/test-control';
+
+/**
+ * [R2 C2] `/test-control/identity` exists only in loadtest and test builds
+ * (TEST_CONTROL_ENABLED=1) and signs an expiring load lease with
+ * TEST_CONTROL_SECRET. The fallback in modules/ops/test-control.ts is a
+ * literal printed in this PUBLIC repository: fine for an isolated `test`
+ * process, fatal for a loadtest deployment anyone can reach, where every
+ * lease would be forgeable. Refuse to start instead.
+ */
+export function assertTestControlConfig(env: Record<string, string | undefined> = process.env): void {
+  if (!testControlEnabled(env) || runtimeMode(env) === 'test') return;
+  const secret = env['TEST_CONTROL_SECRET'];
+  if (!secret || secret.length < 32) {
+    throw new Error('FATAL: TEST_CONTROL_SECRET must be at least 32 characters when TEST_CONTROL_ENABLED=1 in loadtest — otherwise load leases are signed with a value printed in the public repository and anyone can forge one. Refusing to start.');
+  }
+}
 
 /**
  * Fail-closed boot configuration guard. Called before the server accepts
@@ -14,6 +31,8 @@ import { assertDisabledCardRailConfig } from './card-rail';
  * decrypted ID. Neither failure is visible at runtime, so we assert them here.
  */
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
+  // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
+  assertTestControlConfig(env);
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.

@@ -101,10 +101,13 @@ describe('the census is generated from the tree, never maintained by hand', () =
     expect(nonces.size).toBe(1);
   });
 
-  it('the *_FILE loader allowlist is a census source — a secret the API reads through the store, not process.env[...], is still armed', () => {
+  it('the *_FILE loader allowlist is a census source, and authoritative — a name it holds is armed whatever its spelling', () => {
     // apps/api/src/utils/secret-files.ts reads its names through a loop, so the
     // process.env scan never sees them; POSTGRES_PASSWORD reaches the API only
-    // that way once the deploy template stops declaring it.
+    // that way once the deploy template stops declaring it. The allowlist is a
+    // list of secrets by definition, so the spelling heuristic that guards the
+    // other sources does not apply to it: SMTP_PASS and DATABASE_URL (R2 F4)
+    // are armed too. Names OUTSIDE the block are still heuristic.
     const repo = join(fixtureRoot, 'allowlist-repo');
     mkdirSync(join(repo, 'apps', 'api', 'src', 'utils'), { recursive: true });
     writeFileSync(
@@ -113,15 +116,16 @@ describe('the census is generated from the tree, never maintained by hand', () =
         'export const SECRET_FILE_NAMES = [',
         "  'POSTGRES_PASSWORD', // the database password",
         "  'MMG_MSECRET',",
-        "  'LOG_LEVEL', // not secret-shaped: filtered like every other source",
+        "  'SMTP_PASS', // not secret-shaped by the heuristic: armed because it is allowlisted",
+        "  'DATABASE_URL',",
         '] as const;',
-        "const unrelated = ['OTHER_TOKEN'];",
+        "const unrelated = ['OTHER_TOKEN', 'LOG_LEVEL'];",
         '',
       ].join('\n'),
     );
     const r = run(['--root', repo, '--names']);
     expect(r.code).toBe(0);
-    expect(r.output.trim().split('\n')).toEqual(['MMG_MSECRET', 'POSTGRES_PASSWORD']);
+    expect(r.output.trim().split('\n')).toEqual(['DATABASE_URL', 'MMG_MSECRET', 'POSTGRES_PASSWORD', 'SMTP_PASS']);
   });
 
   it('an empty census refuses to arm — a canary set of zero certifies nothing', () => {
@@ -137,7 +141,7 @@ describe('the census is generated from the tree, never maintained by hand', () =
     expect(r.code).toBe(0);
     const names = r.output.trim().split('\n');
     expect(names.length).toBeGreaterThanOrEqual(20);
-    for (const must of ['JWT_SECRET', 'MASTER_KEK', 'POSTGRES_PASSWORD', 'MMG_MSECRET', 'TWILIO_API_KEY_SECRET']) expect(names).toContain(must);
+    for (const must of ['JWT_SECRET', 'MASTER_KEK', 'POSTGRES_PASSWORD', 'MMG_MSECRET', 'TWILIO_API_KEY_SECRET', 'SMTP_PASS', 'DATABASE_URL', 'TEST_CONTROL_SECRET']) expect(names).toContain(must);
     expect(names).not.toContain('ANDROID_GOOGLE_MAPS_API_KEY'); // client-embedded by design, with its reason in the script
     expect(names.filter((n) => /^(EXPO_PUBLIC|NEXT_PUBLIC|VITE)_/.test(n))).toEqual([]);
   });

@@ -25,7 +25,11 @@ load_secret_env() {
     [ -r "$path" ] || { echo "FATAL: $name is expected in $path, which cannot be read." >&2; return 1; }
     value="$(cat "$path"; printf x)"
     value="${value%x}"
-    value="${value%$'\n'}"
+    # One trailing "\r\n" or "\n", exactly as the app's loader and `set` do.
+    if [[ "$value" == *$'\n' ]]; then
+      value="${value%$'\n'}"
+      value="${value%$'\r'}"
+    fi
     [ -n "$value" ] || { echo "FATAL: $path is empty." >&2; return 1; }
     export "$name=$value"
   done

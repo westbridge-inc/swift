@@ -145,9 +145,14 @@ describe('docker-compose.yml — secrets are files on tmpfs, never container env
   it('api and worker wire every generated secret through a file', () => {
     for (const name of ['api', 'worker']) {
       const env = compose[name]?.environment ?? {};
-      for (const secret of ['JWT_SECRET', 'OTP_HASH_SECRET', 'MASTER_KEK', 'STORAGE_SIGNING_SECRET', 'CONSENT_IP_PEPPER', 'MEILISEARCH_KEY']) {
+      for (const secret of ['JWT_SECRET', 'OTP_HASH_SECRET', 'MASTER_KEK', 'STORAGE_SIGNING_SECRET', 'CONSENT_IP_PEPPER', 'MEILISEARCH_KEY', 'ATTRIB_SALT', 'IDENTITY_SALT', 'SCAN_IP_SALT', 'ADS_EVENT_SECRET']) {
         expect(env[`${secret}_FILE`], `${name}.environment.${secret}_FILE`).toBe(`/run/secrets/${secret}`);
       }
+    }
+    // [R2 C1] Read by the HTTP process only; wired where consumed, nowhere else.
+    for (const secret of ['TEST_CONTROL_SECRET', 'METRICS_TOKEN', 'HEALTH_DETAIL_TOKEN']) {
+      expect(compose['api']?.environment[`${secret}_FILE`], `api.environment.${secret}_FILE`).toBe(`/run/secrets/${secret}`);
+      expect(compose['worker']?.environment[`${secret}_FILE`], `worker must not receive ${secret}`).toBeUndefined();
     }
   });
 
@@ -181,9 +186,15 @@ describe('deploy/.env.deploy.example — the template declares no secret', () =>
   });
 
   it('documents the *_FILE wiring for the optional provider secrets it names', () => {
-    for (const name of ['TWILIO_API_KEY_SECRET', 'SMTP_PASS', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'MMG_API_KEY', 'MMG_PASSWORD']) {
+    for (const name of [
+      'TWILIO_API_KEY_SECRET', 'SMTP_PASS', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'MMG_API_KEY', 'MMG_PASSWORD',
+      'GOOGLE_MAPS_API_KEY_BACKEND', 'SENTRY_DSN', 'AGENT_CASH_WEBHOOK_SECRET',
+      'SWIFT_BOOTSTRAP_PASSWORD', 'SERVICE_PROVIDER_CURSOR_SECRET', 'VELOCITY_KEY_SECRET',
+    ]) {
       expect(template, name).toContain(`${name}_FILE=/run/secrets/${name}`);
     }
+    // [R2 C3] The forbidden provider keys are not even offered as wiring.
+    expect(template).not.toMatch(/DIDIT_API_KEY|ID_ANALYZER_API_KEY/);
   });
 });
 
@@ -239,9 +250,23 @@ describe('scripts — no secret value ever rides in argv', () => {
 
   it('gen-secrets.sh pipes every generated value into the store and writes none of them to .env', () => {
     const gen = read('gen-secrets.sh');
-    for (const name of ['MASTER_KEK', 'JWT_SECRET', 'OTP_HASH_SECRET', 'STORAGE_SIGNING_SECRET', 'CONSENT_IP_PEPPER', 'POSTGRES_PASSWORD', 'MEILISEARCH_KEY']) {
-      expect(gen, name).toMatch(new RegExp(`\\|\\s*store set ${name}\\b`));
+    for (const name of [
+      'MASTER_KEK', 'JWT_SECRET', 'OTP_HASH_SECRET', 'STORAGE_SIGNING_SECRET', 'CONSENT_IP_PEPPER', 'POSTGRES_PASSWORD', 'MEILISEARCH_KEY',
+      'TEST_CONTROL_SECRET', 'METRICS_TOKEN', 'HEALTH_DETAIL_TOKEN', 'ATTRIB_SALT', 'IDENTITY_SALT', 'SCAN_IP_SALT', 'ADS_EVENT_SECRET',
+    ]) {
+      expect(gen, name).toMatch(new RegExp(`\\|\\s*store set ${name}\\b|store_generated ${name}\\b`));
       expect(gen, name).not.toMatch(new RegExp(`echo "${name}=`));
+    }
+  });
+
+  it('the env-file matcher is shared and normalized the way Compose reads a line (leading space, `export`, bare name)', () => {
+    // [R2 F1/F6] One definition, sourced by pilot-up.sh and gen-secrets.sh.
+    const shared = read('secret-names.sh');
+    expect(shared).toContain('^[[:space:]]*(export[[:space:]]+)?');
+    for (const file of ['pilot-up.sh', 'gen-secrets.sh']) {
+      const text = read(file);
+      expect(text, file).toMatch(/\. "\$HERE\/secret-names\.sh"/);
+      expect(text, `${file} must not keep a private matcher`).not.toMatch(/grep -qE "\^\$name="/);
     }
   });
 

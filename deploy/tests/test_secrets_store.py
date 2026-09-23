@@ -188,6 +188,22 @@ class SwiftSecretsSet(StoreHarness):
         _, _, payload = (self.store / "MMG_MSECRET.cred").read_bytes().split(b"\n", 2)
         self.assertEqual(base64.b64decode(payload), b"line1\nline2\n")
 
+    def test_set_normalizes_one_trailing_crlf_exactly_like_the_loader(self):
+        # [R2 F7] A value piped with a Windows line ending must round-trip to
+        # the same bytes the app's loader would keep: one "\r\n" or "\n" goes,
+        # a lone trailing "\r" (no newline) stays, and only ONE ending goes.
+        cases = {
+            "SMTP_PASS": (b"pass\r\n", b"pass"),
+            "MMG_MKEY": (b"pass\r", b"pass\r"),
+            "MMG_PASSWORD": (b"pass\r\n\r\n", b"pass\r\n"),
+            "AWS_SECRET_ACCESS_KEY": (b"pa\r\nss\n", b"pa\r\nss"),
+        }
+        for name, (given, stored) in cases.items():
+            with self.subTest(name=name, given=given):
+                self.set_ok(name, given)
+                _, _, payload = (self.store / f"{name}.cred").read_bytes().split(b"\n", 2)
+                self.assertEqual(base64.b64decode(payload), stored)
+
     def test_overwrite_keeps_the_previous_encrypted_version(self):
         self.set_ok("TWILIO_API_KEY_SECRET", b"first")
         self.set_ok("TWILIO_API_KEY_SECRET", b"second")
@@ -199,6 +215,23 @@ class SwiftSecretsSet(StoreHarness):
         self.assertEqual(base64.b64decode(payload), b"second")
         _, _, prev = (self.store / "TWILIO_API_KEY_SECRET.cred.prev").read_bytes().split(b"\n", 2)
         self.assertEqual(base64.b64decode(prev), b"first")
+
+    def test_overwrite_is_a_single_rename_so_the_live_credential_never_disappears(self):
+        # [R2 F3] With two renames (cred → cred.prev, tmp → cred) a materialize
+        # running in between sees no credential and deletes the live tmpfs file.
+        # The previous version is kept by COPY, and the swap is one rename.
+        sh_shim(self.bin, "mv", 'echo "mv $*" >> "$CALL_LOG"; exec /bin/mv "$@"')
+        self.set_ok("JWT_SECRET", b"first")
+        self.set_ok("JWT_SECRET", b"second")
+        cred = str(self.store / "JWT_SECRET.cred")
+        moves = [l for l in self.calls().splitlines() if l.startswith("mv ")]
+        self.assertEqual(len(moves), 2, moves)  # one per `set`
+        for m in moves:
+            self.assertTrue(m.endswith(" " + cred), m)
+            self.assertNotIn(cred + " ", m)  # the live credential is never a rename SOURCE
+        _, _, prev = (self.store / "JWT_SECRET.cred.prev").read_bytes().split(b"\n", 2)
+        self.assertEqual(base64.b64decode(prev), b"first")
+        self.assertEqual(stat.S_IMODE((self.store / "JWT_SECRET.cred.prev").stat().st_mode), 0o600)
 
     def test_set_refuses_a_value_in_argv(self):
         result = self.run_store("set", "JWT_SECRET", "leaked-value", stdin=b"x")
@@ -305,12 +338,42 @@ class SwiftSecretsMaterialize(StoreHarness):
         self.assertNotIn(b"mismatched", result.stderr + result.stdout)
         self.assertFalse((self.run_dir / "MASTER_KEK").exists())
         self.assertEqual([p.name for p in self.run_dir.glob(".*")], [])
+        self.assertEqual([p.name for p in self.run_dir.parent.iterdir() if p.name.startswith(".")], [], "no staging leftovers")
 
     def test_materialize_with_an_empty_store_leaves_an_empty_directory(self):
         result = self.run_store("materialize")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.run_dir.is_dir())
         self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    def test_materialize_never_writes_through_anything_planted_in_the_run_directory(self):
+        # [R2 F2] The run directory is owned by the container uid, which could
+        # plant a symlink where the plaintext is about to be written. Plaintext
+        # is therefore decrypted in a root-only staging directory and renamed
+        # into place; a planted symlink, a planted directory and a planted tmp
+        # link are all replaced, never followed, and the staging area is gone.
+        self.set_ok("JWT_SECRET", b"jwt-plain")
+        self.set_ok("MASTER_KEK", b"kek-plain")
+        self.set_ok("SMTP_PASS", b"smtp-plain")
+        victim = self.tmp / "victim"
+        victim.write_bytes(b"untouched")
+        self.run_dir.mkdir(parents=True)
+        (self.run_dir / ".JWT_SECRET.tmp").symlink_to(victim)   # the R1 write target
+        (self.run_dir / "MASTER_KEK").symlink_to(victim)        # the final name
+        (self.run_dir / "SMTP_PASS").mkdir()                    # a directory in the way
+        result = self.run_store("materialize")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(victim.read_bytes(), b"untouched")
+        for name, plain in (("JWT_SECRET", b"jwt-plain"), ("MASTER_KEK", b"kek-plain"), ("SMTP_PASS", b"smtp-plain")):
+            path = self.run_dir / name
+            self.assertFalse(path.is_symlink(), name)
+            self.assertTrue(path.is_file(), name)
+            self.assertEqual(path.read_bytes(), plain)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o400)
+        self.assertEqual(sorted(p.name for p in self.run_dir.iterdir()), ["JWT_SECRET", "MASTER_KEK", "SMTP_PASS"])
+        self.assertEqual([p.name for p in self.run_dir.parent.iterdir() if p.name.startswith(".")], [])
+        decrypt_lines = [l for l in self.calls().splitlines() if "decrypt" in l]
+        self.assertEqual(len(decrypt_lines), 3)
 
 
 class SwiftSecretsUsage(StoreHarness):
@@ -330,7 +393,10 @@ class GenSecrets(StoreHarness):
     """gen-secrets.sh generates locally and pipes each value into the store."""
 
     GENERATED = ("MASTER_KEK", "JWT_SECRET", "OTP_HASH_SECRET", "STORAGE_SIGNING_SECRET",
-                 "CONSENT_IP_PEPPER", "POSTGRES_PASSWORD", "MEILISEARCH_KEY")
+                 "CONSENT_IP_PEPPER", "POSTGRES_PASSWORD", "MEILISEARCH_KEY",
+                 # [R2 C1] the other random-value secrets production requires
+                 "TEST_CONTROL_SECRET", "METRICS_TOKEN", "HEALTH_DETAIL_TOKEN",
+                 "ATTRIB_SALT", "IDENTITY_SALT", "SCAN_IP_SALT", "ADS_EVENT_SECRET")
 
     def setUp(self):
         super().setUp()
@@ -343,6 +409,10 @@ class GenSecrets(StoreHarness):
         self.work.mkdir()
         shutil.copy(DEPLOY / "gen-secrets.sh", self.work / "gen-secrets.sh")
         shutil.copy(DEPLOY / ".env.deploy.example", self.work / ".env.deploy.example")
+        shutil.copy(DEPLOY / "secret-names.sh", self.work / "secret-names.sh")
+        (self.tmp / "apps" / "api" / "src" / "utils").mkdir(parents=True)
+        shutil.copy(DEPLOY.parent / "apps" / "api" / "src" / "utils" / "secret-files.ts",
+                    self.tmp / "apps" / "api" / "src" / "utils" / "secret-files.ts")
 
     def run_gen(self, *args):
         return subprocess.run(
@@ -406,6 +476,70 @@ class GenSecrets(StoreHarness):
         self.assertIn("CUSTOM=kept\n", text)
         self.assertEqual(text.count("MASTER_KEK_ESCROW_FINGERPRINT="), 1)
         self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
+
+    def test_update_strips_every_old_plaintext_secret_line(self):
+        # [R2 F6] An env file from before the store may still carry secrets in
+        # any spelling Compose would load: bare, indented, `export`-prefixed,
+        # a bare pass-through name, or a consumer alias. All go; settings stay;
+        # wiring lines and comments stay.
+        env_file = self.work / ".env"
+        env_file.write_text(
+            "PILOT_ENV=staging\n"
+            "JWT_SECRET=old-jwt\n"
+            "export SMTP_PASS=old-smtp\n"
+            "  MMG_MSECRET=old-mmg\n"
+            "\texport   AWS_SECRET_ACCESS_KEY=old-aws\n"
+            "TWILIO_API_KEY_SECRET\n"
+            "PGPASSWORD=old-pg\n"
+            "MEILI_MASTER_KEY=old-meili\n"
+            "TWILIO_API_KEY_SECRET_FILE=/run/secrets/TWILIO_API_KEY_SECRET\n"
+            "# JWT_SECRET=commented-out-example\n"
+            "MYJWT_SECRET_NOTE=not-a-secret-name\n"
+            "API_HOST=api.example.test\n"
+        )
+        env_file.chmod(0o600)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = env_file.read_text()
+        for gone in ("old-jwt", "old-smtp", "old-mmg", "old-aws", "old-pg", "old-meili", "PGPASSWORD", "MEILI_MASTER_KEY"):
+            self.assertNotIn(gone, text)
+        self.assertNotRegex(text, r"(?m)^TWILIO_API_KEY_SECRET$")
+        for kept in ("PILOT_ENV=staging\n", "API_HOST=api.example.test\n",
+                     "TWILIO_API_KEY_SECRET_FILE=/run/secrets/TWILIO_API_KEY_SECRET\n",
+                     "# JWT_SECRET=commented-out-example\n", "MYJWT_SECRET_NOTE=not-a-secret-name\n"):
+            self.assertIn(kept, text)
+        self.assertIn("MASTER_KEK_ESCROW_FINGERPRINT=", text)
+        self.assertIn("removed 7 secret line(s)", result.stdout)
+        for v in ("old-jwt", "old-smtp", "old-mmg", "old-aws", "old-pg", "old-meili"):
+            self.assertNotIn(v, result.stdout + result.stderr)
+
+    def test_missing_mode_fills_only_the_absent_names_and_keeps_master_kek(self):
+        # A host set up before a generated name existed gets the new ones only;
+        # nothing stored is replaced, and no --force is needed.
+        (self.shim_store / "MASTER_KEK").write_bytes(b"existing-kek")
+        (self.shim_store / "JWT_SECRET").write_bytes(b"existing-jwt")
+        (self.work / ".env").write_text("PILOT_ENV=staging\nMASTER_KEK_ESCROW_FINGERPRINT=recorded\n")
+        (self.work / ".env").chmod(0o600)
+        result = self.run_gen("--missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.shim_store / "MASTER_KEK").read_bytes(), b"existing-kek")
+        self.assertEqual((self.shim_store / "JWT_SECRET").read_bytes(), b"existing-jwt")
+        self.assertEqual(sorted(p.name for p in self.shim_store.iterdir()), sorted(self.GENERATED))
+        sets = [l for l in self.calls().splitlines() if l.startswith("swift-secrets set")]
+        self.assertEqual(len(sets), len(self.GENERATED) - 2)
+        self.assertNotIn("swift-secrets set MASTER_KEK", self.calls())
+        # The recorded fingerprint belongs to the kept key and is left alone.
+        self.assertIn("MASTER_KEK_ESCROW_FINGERPRINT=recorded\n", (self.work / ".env").read_text())
+        self.assertIn("kept", result.stdout)
+        self.assertIn("METRICS_TOKEN", result.stdout)
+
+    def test_refuses_an_unreadable_allowlist_rather_than_guessing(self):
+        (self.tmp / "apps" / "api" / "src" / "utils" / "secret-files.ts").unlink()
+        (self.work / ".env").write_text("PILOT_ENV=staging\nJWT_SECRET=old\n")
+        result = self.run_gen()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("allowlist", result.stderr)
+        self.assertIn("JWT_SECRET=old", (self.work / ".env").read_text())  # untouched
 
 
 class OwnerPromptTool(StoreHarness):
@@ -533,6 +667,7 @@ class PilotUpSecretsPreflight(StoreHarness):
         self.work = self.tmp / "deploy"
         self.work.mkdir()
         shutil.copy(DEPLOY / "docker-compose.yml", self.work / "docker-compose.yml")
+        shutil.copy(DEPLOY / "secret-names.sh", self.work / "secret-names.sh")
         (self.tmp / "apps" / "api" / "src" / "utils").mkdir(parents=True)
         shutil.copy(DEPLOY.parent / "apps" / "api" / "src" / "utils" / "secret-files.ts",
                     self.tmp / "apps" / "api" / "src" / "utils" / "secret-files.ts")
@@ -557,7 +692,9 @@ class PilotUpSecretsPreflight(StoreHarness):
             text=True, capture_output=True, timeout=15,
         )
 
-    ALL_WIRED = "POSTGRES_PASSWORD\nMEILISEARCH_KEY\nJWT_SECRET\nOTP_HASH_SECRET\nMASTER_KEK\nSTORAGE_SIGNING_SECRET\nCONSENT_IP_PEPPER\nTWILIO_API_KEY_SECRET\nAWS_ACCESS_KEY_ID\nAWS_SECRET_ACCESS_KEY\n"
+    ALL_WIRED = ("POSTGRES_PASSWORD\nMEILISEARCH_KEY\nJWT_SECRET\nOTP_HASH_SECRET\nMASTER_KEK\nSTORAGE_SIGNING_SECRET\n"
+                 "CONSENT_IP_PEPPER\nTEST_CONTROL_SECRET\nMETRICS_TOKEN\nHEALTH_DETAIL_TOKEN\nATTRIB_SALT\nIDENTITY_SALT\n"
+                 "SCAN_IP_SALT\nADS_EVENT_SECRET\nTWILIO_API_KEY_SECRET\nAWS_ACCESS_KEY_ID\nAWS_SECRET_ACCESS_KEY\n")
 
     def test_passes_when_env_is_clean_and_every_wired_secret_is_stored(self):
         result = self.run_fragment(self.ENV_OK, self.ALL_WIRED)
@@ -565,13 +702,29 @@ class PilotUpSecretsPreflight(StoreHarness):
         self.assertIn("systemctl restart swift-secrets.service", self.calls())
 
     def test_refuses_a_secret_declared_in_the_env_file(self):
-        for line in ("JWT_SECRET=abc", "POSTGRES_PASSWORD=", "AWS_SECRET_ACCESS_KEY=x", "MMG_MSECRET=y"):
+        # [R2 F1] Every spelling Compose's env-file parser loads: bare, empty,
+        # indented, `export`-prefixed, a bare pass-through name, the newly
+        # allowlisted names, and the consumer aliases the images read.
+        cases = ("JWT_SECRET=abc", "POSTGRES_PASSWORD=", "AWS_SECRET_ACCESS_KEY=x", "MMG_MSECRET=y",
+                 "export TWILIO_API_KEY_SECRET=abc", "  SMTP_PASS=abc", "\tMMG_PASSWORD=abc",
+                 "export   METRICS_TOKEN=abc", "  export\tJWT_SECRET =abc", "STRIPE_SECRET_KEY",
+                 "SENTRY_DSN=https://abc@host/1", "SWIFT_BOOTSTRAP_PASSWORD=abc", "GOOGLE_MAPS_API_KEY_BACKEND=abc",
+                 "PGPASSWORD=abc", "MEILI_MASTER_KEY=abc")
+        for line in cases:
             with self.subTest(line=line):
                 result = self.run_fragment(self.ENV_OK + line + "\n", self.ALL_WIRED)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(line.split("=")[0], result.stderr)
+                self.assertNotEqual(result.returncode, 0, line)
+                name = re.sub(r"^\s*(export\s+)?", "", line).split("=")[0].strip()
+                self.assertIn(name, result.stderr)
                 self.assertNotIn("abc", result.stderr)
                 self.assertIn("swift-secrets", result.stderr)
+
+    def test_allows_wiring_lines_comments_and_other_names(self):
+        for line in ("JWT_SECRET_FILE=/run/secrets/JWT_SECRET", "# JWT_SECRET=example", "  # export JWT_SECRET=example",
+                     "MYJWT_SECRET_NOTE=1", "JWT_SECRET_ROTATED_AT=2026-09-23", "TWILIO_API_KEY_SID=SKabc"):
+            with self.subTest(line=line):
+                result = self.run_fragment(self.ENV_OK + line + "\n", self.ALL_WIRED)
+                self.assertEqual(result.returncode, 0, f"{line}: {result.stderr}")
 
     def test_refuses_a_wired_secret_that_is_not_in_the_store(self):
         missing_core = self.ALL_WIRED.replace("MASTER_KEK\n", "")
@@ -592,6 +745,59 @@ class PilotUpSecretsPreflight(StoreHarness):
         result = self.run_fragment(self.ENV_OK, self.ALL_WIRED.replace("AWS_ACCESS_KEY_ID\nAWS_SECRET_ACCESS_KEY\n", ""))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("AWS_SECRET_ACCESS_KEY", result.stderr)
+
+
+class DeployShStoreGate(StoreHarness):
+    """[R2 F5] The local convenience wrapper is honest about needing the Linux store."""
+
+    REQUIRED = "POSTGRES_PASSWORD\nMEILISEARCH_KEY\nJWT_SECRET\nOTP_HASH_SECRET\nMASTER_KEK\nSTORAGE_SIGNING_SECRET\nCONSENT_IP_PEPPER\n"
+
+    def setUp(self):
+        super().setUp()
+        self.listed = self.tmp / "listed"
+        self.listed.write_text("")
+        sh_shim(self.bin, "swift-secrets", '[ "$1" = list ] && cat "$LISTED"; exit 0')
+        sh_shim(self.bin, "uname", 'echo "${FAKE_UNAME:-Linux}"')
+        source = (DEPLOY / "deploy.sh").read_text()
+        begin = source.index("# ── secrets store check (begin)")
+        end = source.index("# ── secrets store check (end)")
+        self.fragment = source[begin:end]
+
+    def run_gate(self, action: str, listed: str, **extra):
+        self.listed.write_text(listed)
+        shell = "set -euo pipefail\nset -- " + action + "\n"
+        return subprocess.run(
+            ["bash", "-c", shell + self.fragment], cwd=DEPLOY, env=self.env(LISTED=str(self.listed), **extra),
+            text=True, capture_output=True, timeout=15,
+        )
+
+    def test_linux_with_the_store_passes(self):
+        result = self.run_gate("up", self.REQUIRED)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_linux_without_a_required_secret_refuses_by_name(self):
+        result = self.run_gate("up", self.REQUIRED.replace("MASTER_KEK\n", ""))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MASTER_KEK", result.stderr)
+        self.assertIn("gen-secrets.sh", result.stderr)
+
+    def test_macos_refuses_with_an_explanation_instead_of_failing_later(self):
+        result = self.run_gate("up", self.REQUIRED, FAKE_UNAME="Darwin")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Linux", result.stderr)
+        self.assertIn("SWIFT_DEV_NO_STORE=1", result.stderr)
+
+    def test_explicit_dev_fallback_skips_the_store_with_a_loud_warning(self):
+        result = self.run_gate("up", "", FAKE_UNAME="Darwin", SWIFT_DEV_NO_STORE="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WARNING", result.stderr)
+        self.assertIn("never", result.stderr)
+
+    def test_stopping_the_stack_needs_no_store_on_any_os(self):
+        for action in ("down", "nuke", "logs"):
+            with self.subTest(action=action):
+                result = self.run_gate(action, "", FAKE_UNAME="Darwin")
+                self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

@@ -47,11 +47,14 @@ export SWIFT_TAG="$SHA"
 # Secrets never live in deploy/.env: the encrypted host store holds them
 # (deploy/swift-secrets) and swift-secrets.service materializes them on tmpfs
 # for the containers. Graded against THIS revision's allowlist and Compose file.
-SECRET_NAMES="$(sed -n '/SECRET_FILE_NAMES = \[/,/\] as const/p' "$ROOT/apps/api/src/utils/secret-files.ts" |
-  grep -oE "'[A-Z][A-Z0-9_]*'" | tr -d "'" || true)"
-[ -n "$SECRET_NAMES" ] || die "could not read the secret allowlist from apps/api/src/utils/secret-files.ts"
-for name in $SECRET_NAMES; do
-  ! grep -qE "^$name=" "$HERE/.env" ||
+. "$HERE/secret-names.sh"
+SECRET_NAMES="$(secret_allowlist "$ROOT")" ||
+  die "could not read the secret allowlist from apps/api/src/utils/secret-files.ts"
+# Every spelling Compose would load counts as a declaration — bare, indented,
+# `export`-prefixed, or a bare NAME passed through from this shell — and so do
+# the aliases the images read (PGPASSWORD, MEILI_MASTER_KEY).
+for name in $SECRET_NAMES $SECRET_CONSUMER_ALIASES; do
+  ! env_file_declares "$HERE/.env" "$name" ||
     die "$name is declared in deploy/.env; secrets belong in the encrypted store (sudo swift-secrets set $name) and are wired as ${name}_FILE"
 done
 STORE_BIN="$(command -v swift-secrets || true)"

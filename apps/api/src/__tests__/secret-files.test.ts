@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import {
   SECRET_FILE_NAMES,
   applySecretFiles,
@@ -46,6 +46,12 @@ describe('the allowlist', () => {
       'MMG_API_KEY', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET',
       'PAYMENT_GATEWAY_KEY', 'PAYMENT_GATEWAY_SECRET',
       'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
+      // [R2 C1] Every other secret the API reads; each could otherwise only
+      // arrive through the plaintext env file the owner ruled out.
+      'TEST_CONTROL_SECRET', 'METRICS_TOKEN', 'HEALTH_DETAIL_TOKEN',
+      'SERVICE_PROVIDER_CURSOR_SECRET', 'VELOCITY_KEY_SECRET', 'ADS_EVENT_SECRET',
+      'AGENT_CASH_WEBHOOK_SECRET', 'SWIFT_BOOTSTRAP_PASSWORD', 'GOOGLE_MAPS_API_KEY_BACKEND',
+      'ATTRIB_SALT', 'IDENTITY_SALT', 'SCAN_IP_SALT', 'SENTRY_DSN',
     ]) {
       expect(SECRET_FILE_NAMES, must).toContain(must);
     }
@@ -54,9 +60,93 @@ describe('the allowlist', () => {
     for (const never of ['NODE_ENV', 'LOG_LEVEL', 'API_HOST', 'TWILIO_ACCOUNT_SID', 'TWILIO_FROM', 'MMG_MERCHANT_ID', 'KYC_PROVIDER']) {
       expect(SECRET_FILE_NAMES).not.toContain(never);
     }
+    // [R2 C3] AI identity providers are forbidden by the no-AI rule; no store
+    // may ever carry their keys.
+    for (const forbidden of ['DIDIT_API_KEY', 'ID_ANALYZER_API_KEY']) {
+      expect(SECRET_FILE_NAMES).not.toContain(forbidden);
+    }
     expect(new Set(SECRET_FILE_NAMES).size).toBe(SECRET_FILE_NAMES.length);
     for (const name of SECRET_FILE_NAMES) expect(name).toMatch(/^[A-Z][A-Z0-9_]*$/);
     for (const name of SECRET_FILE_NAMES) expect(name.endsWith('_FILE')).toBe(false);
+  });
+});
+
+describe('the allowlist census — no secret the API reads can fall back to the env file', () => {
+  // [R2 C1] Every environment name the API source reads whose spelling looks
+  // like a secret is either deliverable through the store (allowlisted), or a
+  // documented non-secret, or a forbidden provider key. A new secret-shaped
+  // read anywhere in apps/api/src fails here until it is classified, so the
+  // gap that R1 shipped with cannot reopen.
+  const SRC = join(__dirname, '..');
+  const SECRET_SHAPE = /(KEY|KEK|SECRET|TOKEN|PASSWORD|PASSWD|PASS|CREDENTIAL|DSN|PRIVATE|AUTH|SALT|PEPPER|SIGNING|HMAC|CERT)/;
+  const PUBLIC_PREFIX = /^(EXPO_PUBLIC|NEXT_PUBLIC|VITE)_/;
+  const READ = /process\.env(?:\.([A-Z][A-Z0-9_]*)|\[['"]([A-Z][A-Z0-9_]*)['"]\])|\benv(?:\.([A-Z][A-Z0-9_]*)|\[['"]([A-Z][A-Z0-9_]*)['"]\])/g;
+
+  /** Secret-shaped by spelling, settings by nature. Each carries its reason. */
+  const NON_SECRET: Record<string, string> = {
+    DEV_OTP_BYPASS: 'a development switch (0/1), refused in production by the boot guard',
+    MASTER_KEK_ESCROW_FINGERPRINT: 'the sha256 of the key bytes, recorded beside the key on purpose so a stale escrow is caught',
+    NOT_MY_DRIVER_AUTHORITY_KILL: 'a kill switch for a dispatch rule',
+    SOCKET_AUTH_RECHECK_MS: 'a timing for the socket re-authentication sweep',
+    SOCKET_AUTH_RECHECK_TIMEOUT_MS: 'a timing for the socket re-authentication sweep',
+    SWEEP_MAX_PASS_SECONDS: 'a timing bound for a sweep pass',
+    TWILIO_API_KEY_SID: 'the key identifier (the HTTP Basic username); the secret half is TWILIO_API_KEY_SECRET',
+  };
+  /** Never deliverable: the owner's no-AI rule forbids these providers (#1276 removes the readers). */
+  const FORBIDDEN: Record<string, string> = {
+    DIDIT_API_KEY: 'AI identity provider, forbidden',
+    ID_ANALYZER_API_KEY: 'AI identity provider, forbidden',
+  };
+
+  function sourceFiles(dir: string, out: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === '__tests__' || entry.name === 'node_modules' || entry.name === 'generated') continue;
+        sourceFiles(path, out);
+      } else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') && !entry.name.endsWith('.d.ts')) {
+        out.push(path);
+      }
+    }
+    return out;
+  }
+
+  const reads = new Map<string, Set<string>>();
+  for (const file of sourceFiles(SRC)) {
+    for (const m of readFileSync(file, 'utf8').matchAll(READ)) {
+      const name = m[1] ?? m[2] ?? m[3] ?? m[4];
+      if (!name) continue;
+      if (!reads.has(name)) reads.set(name, new Set());
+      reads.get(name)?.add(relative(SRC, file));
+    }
+  }
+  const secretShaped = [...reads.keys()].filter((n) => SECRET_SHAPE.test(n) && !PUBLIC_PREFIX.test(n)).sort();
+  const allowlisted = new Set<string>(SECRET_FILE_NAMES);
+
+  it('scanned a real tree', () => {
+    expect(reads.size).toBeGreaterThan(50);
+    expect(secretShaped.length).toBeGreaterThan(20);
+    expect(reads.has('JWT_SECRET')).toBe(true);
+  });
+
+  it('classifies every secret-shaped read', () => {
+    const unclassified = secretShaped.filter((n) => !allowlisted.has(n) && !(n in NON_SECRET) && !(n in FORBIDDEN));
+    expect(
+      unclassified.map((n) => `${n} (${[...(reads.get(n) ?? [])].join(', ')})`),
+      'add the name to SECRET_FILE_NAMES (deliverable through the store) or to NON_SECRET with its reason',
+    ).toEqual([]);
+  });
+
+  it('a forbidden provider key is never allowlisted', () => {
+    for (const name of Object.keys(FORBIDDEN)) expect(allowlisted.has(name), name).toBe(false);
+  });
+
+  it('every non-secret exemption still names a real read and a real reason', () => {
+    for (const [name, reason] of Object.entries(NON_SECRET)) {
+      expect(reads.has(name), `${name} is no longer read anywhere — remove the exemption`).toBe(true);
+      expect(reason.length).toBeGreaterThan(20);
+      expect(allowlisted.has(name), `${name} cannot be both allowlisted and exempt`).toBe(false);
+    }
   });
 });
 

@@ -28,21 +28,39 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-# Refuse to run without the required secrets in the encrypted store — fail
-# closed, don't boot broken. The stack reads them from /run/swift-secrets
-# (deploy/swift-secrets), never from deploy/.env.
-STORE_BIN="$(command -v swift-secrets || true)"
-[[ -n "$STORE_BIN" ]] || STORE_BIN=./swift-secrets
-stored="$("$STORE_BIN" list 2>/dev/null || true)"
-missing=()
-for k in POSTGRES_PASSWORD MEILISEARCH_KEY JWT_SECRET OTP_HASH_SECRET MASTER_KEK STORAGE_SIGNING_SECRET CONSENT_IP_PEPPER; do
-  grep -qx "$k" <<< "$stored" || missing+=("$k")
-done
-if [[ ${#missing[@]} -gt 0 && "${1:-up}" != "down" && "${1:-up}" != "nuke" && "${1:-up}" != "logs" ]]; then
-  echo "error: these REQUIRED secrets are not in the encrypted store: ${missing[*]}" >&2
-  echo "  ./deploy/gen-secrets.sh stores them; sudo systemctl restart swift-secrets.service delivers them to /run/swift-secrets" >&2
-  exit 1
+# ── secrets store check (begin) ───────────────────────────────────────────
+# The stack reads its secrets from /run/swift-secrets, a tmpfs that
+# swift-secrets.service fills from the systemd-creds store: a LINUX host with
+# the store installed (deploy/swift-secrets). There is no macOS path for this
+# stack; stopping it needs no store on any OS.
+ACTION="${1:-up}"
+if [[ "$ACTION" != down && "$ACTION" != nuke && "$ACTION" != logs ]]; then
+  if [[ "${SWIFT_DEV_NO_STORE:-0}" == 1 ]]; then
+    echo "WARNING: SWIFT_DEV_NO_STORE=1 — skipping the secret-store check. You must provide every" >&2
+    echo "         /run/swift-secrets/NAME file yourself. This is for a throwaway local stack only," >&2
+    echo "         never for a host that holds a real credential." >&2
+  elif [[ "$(uname -s)" != Linux ]]; then
+    echo "error: this stack delivers secrets through /run/swift-secrets (systemd-creds + tmpfs), which exists on Linux only." >&2
+    echo "  On macOS run the API with pnpm dev against the local infra containers. To force a throwaway" >&2
+    echo "  stack here anyway, set SWIFT_DEV_NO_STORE=1 and provide the files yourself." >&2
+    exit 1
+  else
+    # Fail closed, don't boot broken: the required secrets must be in the store.
+    STORE_BIN="$(command -v swift-secrets || true)"
+    [[ -n "$STORE_BIN" ]] || STORE_BIN=./swift-secrets
+    stored="$("$STORE_BIN" list 2>/dev/null || true)"
+    missing=()
+    for k in POSTGRES_PASSWORD MEILISEARCH_KEY JWT_SECRET OTP_HASH_SECRET MASTER_KEK STORAGE_SIGNING_SECRET CONSENT_IP_PEPPER; do
+      grep -qx "$k" <<< "$stored" || missing+=("$k")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+      echo "error: these REQUIRED secrets are not in the encrypted store: ${missing[*]}" >&2
+      echo "  ./deploy/gen-secrets.sh stores them; sudo systemctl restart swift-secrets.service delivers them to /run/swift-secrets" >&2
+      exit 1
+    fi
+  fi
 fi
+# ── secrets store check (end) ─────────────────────────────────────────────
 
 ready() {
   docker compose exec -T api node -e \
