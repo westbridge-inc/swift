@@ -27,6 +27,42 @@ version: 2
 # a time and must be mergeable on their own, immediately, without waiting for
 # eighty unrelated packages to go green.
 updates:
+  # ── Container images ──────────────────────────────────────────────────────
+  # Every image in this repository is pinned to a digest, which stops a
+  # publisher moving a tag under a production host. It also stops the base-OS
+  # CVE fix arriving: under a tag, the next `docker compose pull` took it; under
+  # a digest, it never comes. That trade is only acceptable with something
+  # scheduled to re-resolve the digests, and this is that something.
+  #
+  # Dependabot's docker ecosystem handles both shapes we use — `repo:tag@sha256:`
+  # in compose files and `FROM` in Dockerfiles. One directory entry per place a
+  # pinned image lives; `container-image-pinning.test.ts` fails the build if a
+  # directory holding pinned images is missing from this list.
+  - package-ecosystem: "docker"
+    directory: "/deploy"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/infrastructure/docker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/apps/api"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/tools/analytics"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
