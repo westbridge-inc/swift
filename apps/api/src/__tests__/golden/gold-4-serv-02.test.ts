@@ -25,7 +25,7 @@ import { ownedVerificationFixture } from '../helpers/verification-object';
 //     wrong party refused at every state-changing step
 //   · in America/Guyana: a 13:00Z slot must read "9:00 AM" in the booking
 //     notice AND the 24h reminder, whatever zone the server runs in
-//     (it.fails on main — E21, fixed by PR #1273; see the test)
+//     (E21: fixed by PR #1273, which flipped this from it.fails)
 //   · expired credentials deny quote AND confirm; renewal through the real
 //     verification route restores both
 //   · two customers racing one provider slot produce exactly one winner, and
@@ -355,7 +355,7 @@ describe('GOLD-4 · SERV-02 — the professional-services golden journey', () =>
 
     // The whole booking runs HERE, through the mounted routes and the real
     // reminder tick: if any of it breaks, this hook fails the suite loudly, so
-    // the it.fails below can only ever "pass" on the time-of-day assertion.
+    // the time-of-day test below only ever judges the time of day.
     beforeAll(async () => {
       const provider = await makeVerifiedProvider('painter');
       const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
@@ -391,13 +391,12 @@ describe('GOLD-4 · SERV-02 — the professional-services golden journey', () =>
       expect(guyana.storedIso).toBe(guyana.slotIso);
     });
 
-    // E21 (S1, ledger): main formats both texts with toLocaleString('en-GY')
-    // in the PROCESS time zone (services.routes.ts slotLabel,
-    // services.service.ts sendBookingReminders), so the same 13:00Z slot reads
-    // "1:00 pm" on a UTC server and "9:00 am" on a Georgetown host. PR #1273
-    // formats both explicitly in America/Guyana. When #1273 merges this test
-    // starts passing, it.fails reports that, and it must flip to it().
-    it.fails('[E21 · fixed by PR #1273] the booking notice and the 24h reminder read "9:00 AM" for a 13:00Z slot on any host zone', () => {
+    // E21 (S1, ledger): the booking notice and the reminder used to format with
+    // toLocaleString('en-GY') in the PROCESS time zone, so the same 13:00Z slot
+    // read "1:00 pm" on a UTC server and "9:00 am" on a Georgetown host. PR
+    // #1273 formats both explicitly in America/Guyana; this ran as it.fails
+    // until it landed.
+    it('[E21 · fixed by PR #1273] the booking notice and the 24h reminder read "9:00 AM" for a 13:00Z slot on any host zone', () => {
       expect(face(guyana.bookingNotice)).toContain(guyana.reads);
       for (const body of guyana.reminders) expect(face(body)).toContain(guyana.reads);
     });

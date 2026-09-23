@@ -529,6 +529,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@swift/types':
+        specifier: workspace:*
+        version: link:../../packages/types
       '@tanstack/react-query':
         specifier: ^5.66.0
         version: 5.91.2(react@19.2.4)
