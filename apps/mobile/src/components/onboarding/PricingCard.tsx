@@ -22,12 +22,14 @@ export type PricingCardProps =
  *  BEFORE they commit — N days free, then THEIR weekly fee, zero commission.
  *  The fee is the server's quote for this vehicle or this business — the same
  *  number signup writes — from the country the account signed up in. With no
- *  valid quote there is no card: never a zero, never a conflated figure. */
+ *  valid quote there is no card: never a zero, never a conflated figure, and
+ *  never a figure the last fetch failed to confirm — the signup gate refuses
+ *  that too, so the card and the disabled button never disagree. */
 export function PricingCard(props: PricingCardProps) {
   const user = useAuthStore((s) => s.user) as { countryCode?: string } | null;
   const pricing = usePartnerPricing(user?.countryCode);
   const p = pricing.data;
-  if (!p) return null;
+  if (!p || pricing.isError) return null;
   const fee = (n: number) => moneyIn(n, p.currencyCode);
 
   let rate: number;

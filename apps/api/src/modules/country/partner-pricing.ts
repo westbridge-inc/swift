@@ -1,8 +1,7 @@
 import type { VehicleType } from '@prisma/client';
 import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, moverRoleFor, type MoverFeeBand, type MoverRole } from '../../config/vehicle-classes';
 import {
-  DEFAULT_DEPARTMENT_CATALOGUE_THRESHOLD,
-  DEFAULT_LARGE_CATALOGUE_THRESHOLD,
+  catalogueStepsFor,
   franchiseRuleFor,
   partnerRateFor,
   PricingConfigError,
@@ -30,6 +29,16 @@ export interface CatalogueBand {
 }
 
 /**
+ * Where the client that predates `vendors.catalogue` split its two business
+ * figures: its onboarding card read `weekly.smallVendor` as "then X/week" for
+ * every business and `weekly.largeVendor` as "Large catalogues (1000+ items)".
+ * That 1,000 was the client's own copy, not the market's boundary, so the
+ * legacy figures are built around it here rather than around
+ * `largeCatalogueThreshold`.
+ */
+const LEGACY_LARGE_CATALOGUE_FROM = 1000;
+
+/**
  * The partner price list the public endpoint serves — every number in it is
  * the output of `partnerRateFor`, the function signup and the weekly re-tier
  * bill through, so what a partner is quoted is what they are billed.
@@ -45,8 +54,14 @@ export interface PartnerPriceList {
   /**
    * @deprecated Compatibility for apps that predate `movers`/`vendors`. Each
    * legacy number is nonzero, and one an older app shows to several kinds of
-   * partner at once is the highest of their rates — an older screen may
-   * over-state a fee, never under-state one. New clients must not read it.
+   * partner at once is the HIGHEST of their bills — an older screen may
+   * over-state a fee, never under-state one. Concretely, for the card those
+   * apps shipped: `mover` is shown to every mover, so it is the highest mover
+   * rate; `smallVendor` is shown to every business as its price, so it is the
+   * highest rate a store under 1,000 items can be billed; `largeVendor` is
+   * shown as "1000+ items", so it is the highest rate any store from 1,000
+   * items up can be billed — the department bill, where the market has one.
+   * New clients must not read it.
    */
   weekly: {
     mover: number;
@@ -73,12 +88,9 @@ export function partnerPriceList(rawTiers: unknown): PartnerPriceList {
   // One store, no franchise: the franchise rule is quoted as a rule below.
   const vendorAt = (isService: boolean, activeListings: number) =>
     partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings, ownedStores: 1 });
-  const floors = [
-    0,
-    tiers.largeCatalogueThreshold ?? DEFAULT_LARGE_CATALOGUE_THRESHOLD,
-    ...(tiers.departmentVendor != null ? [tiers.departmentCatalogueThreshold ?? DEFAULT_DEPARTMENT_CATALOGUE_THRESHOLD] : []),
-  ];
-  const catalogue = floors.map((minItems): CatalogueBand => {
+  // The steps are the biller's own validated ladder; each is then priced
+  // through the biller, so a quoted step is a billed step.
+  const catalogue = catalogueStepsFor(tiers).map(({ minItems }): CatalogueBand => {
     const { rate, tier } = vendorAt(false, minItems);
     return { minItems, tier: tier as CatalogueBand['tier'], rate };
   });
@@ -91,23 +103,26 @@ export function partnerPriceList(rawTiers: unknown): PartnerPriceList {
   if (franchise) {
     const chainStore = { kind: 'VENDOR', ownedStores: franchise.minLocations } as const;
     partnerRateFor(tiers, { ...chainStore, isService: true, activeListings: 0 });
-    for (const minItems of floors) partnerRateFor(tiers, { ...chainStore, isService: false, activeListings: minItems });
+    for (const { minItems } of catalogue) partnerRateFor(tiers, { ...chainStore, isService: false, activeListings: minItems });
   }
 
-  const bandMax = (band: MoverFeeBand) => Math.max(...movers.filter((q) => q.band === band).map((q) => q.rate));
-  const rateOf = (tier: CatalogueBand['tier']) => catalogue.find((b) => b.tier === tier)?.rate ?? null;
+  // Legacy figures: the highest bill each one can stand for (see `weekly`).
+  const highest = (rates: number[]) => Math.max(...rates);
+  // Steps a store below `below` items can be on, and steps a store from `from` items up can be on.
+  const stepsBelow = (below: number) => catalogue.filter((band) => band.minItems < below);
+  const stepsFrom = (from: number) => catalogue.filter((_band, i) => (catalogue[i + 1]?.minItems ?? Number.POSITIVE_INFINITY) > from);
 
   return {
     movers,
     vendors: { service, catalogue },
     franchise,
     weekly: {
-      mover: bandMax('STANDARD'),
-      moverHeavy: tiers.moverHeavy != null ? bandMax('HEAVY') : null,
+      mover: highest(movers.map((q) => q.rate)),
+      moverHeavy: tiers.moverHeavy != null ? highest(movers.filter((q) => q.band === 'HEAVY').map((q) => q.rate)) : null,
       serviceVendor: tiers.serviceVendor != null ? service : null,
-      smallVendor: catalogue[0]!.rate,
-      largeVendor: rateOf('large')!,
-      departmentVendor: rateOf('department'),
+      smallVendor: highest(stepsBelow(LEGACY_LARGE_CATALOGUE_FROM).map((band) => band.rate)),
+      largeVendor: highest(stepsFrom(LEGACY_LARGE_CATALOGUE_FROM).map((band) => band.rate)),
+      departmentVendor: catalogue.find((band) => band.tier === 'department')?.rate ?? null,
     },
   };
 }

@@ -118,4 +118,12 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(screen.queryByRole('heading', { name: 'Taxi drivers' })).toBeNull();
     expect(document.body.textContent).not.toContain('9,000');
   });
+
+  it('[PR1270-S2-02] a rate that is not a whole number of dollars is not quoted — it would render as $0 or as a different figure', async () => {
+    pricing = { ...GY, vendors: { ...GY.vendors, service: 0.4 } };
+    await renderPage();
+    expect(screen.getByText(/could not load this week/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('$0');
+    expect(screen.queryByRole('heading', { name: 'Services' })).toBeNull();
+  });
 });

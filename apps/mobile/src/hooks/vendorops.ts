@@ -363,7 +363,16 @@ export function useVendorSubscription(enabled = true) {
   // public price list, read only in preview — never a number frozen in the app.
   const pricing = usePartnerPricing(VENDOR_PREVIEW_MARKET, !!pv);
   const sample = useMemo(() => (pv ? vendorPreviewSubscription(pv, pricing.data) : null), [pv, pricing.data]);
-  return pv ? previewQuery(sample) : q;
+  if (!pv) return q;
+  // [H7] While the price list is still loading or has failed, the preview
+  // query says so and the screen shows its own loading or error state — never
+  // a sample store with no fee, which read as "nothing due, you are covered".
+  return {
+    ...previewQuery(sample),
+    isLoading: sample == null && pricing.isPending === true,
+    isError: sample == null && pricing.isError === true,
+    refetch: pricing.refetch,
+  };
 }
 
 /** "Find a mover again" after dispatch exhausted — clears the cascade's

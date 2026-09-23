@@ -26,7 +26,17 @@ import { isProduction } from '../../utils/runtime-mode';
  */
 
 /** Bump when any value below changes; recorded with every apply. */
-export const PLATFORM_CONFIG_VERSION = '2026-09-23.2';
+export const PLATFORM_CONFIG_VERSION = '2026-09-23.3';
+
+/**
+ * The declaration a tier map carries to say it is the COMPLETE partner card:
+ * every rate, both catalogue boundaries and the franchise rule are present
+ * and valid, and no fallback applies. The resolver
+ * (country/country-config.service) refuses a declared card that is missing
+ * any key, rather than quietly pricing it as a smaller card; a market that
+ * declares nothing keeps the documented legacy fallbacks.
+ */
+export const COMPLETE_CARD = 'complete';
 
 // Weekly SaaS tiers (GYD) — single source for the GY CountryConfig AND any
 // seeded subscription rows, so a tier change never leaves accounts on a stale
@@ -37,8 +47,9 @@ export const PLATFORM_CONFIG_VERSION = '2026-09-23.2';
 // `moverHeavy` for heavy delivery (canters, box trucks) — while every taxi
 // Driver pays `taxiDriver`, car or bus. Which band a vehicle falls in and
 // which role it provisions is config/vehicle-classes.ts — this file only
-// prices them.
+// prices them. Every rate is a whole number of dollars.
 export const guyanaTiers = {
+  card: COMPLETE_CARD,
   mover: 8000,
   moverHeavy: 9000,
   taxiDriver: 9000,

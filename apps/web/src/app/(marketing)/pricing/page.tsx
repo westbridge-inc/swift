@@ -23,9 +23,12 @@ const CATALOGUE_CLASSES: Record<CataloguePriceBand['tier'], { label: string; blu
   department: { label: 'Department stores', blurb: 'Full department-store scale.' },
 };
 
+// A billable weekly fee is a whole number of currency units above zero. The
+// formatter rounds to whole units, so a fraction would be shown as a different
+// figure than the one held — or, below half a unit, as $0 [PR1270-S2-02].
 const isRate = (value: unknown) => {
   const amount = parseAmount(value);
-  return amount !== null && amount > 0;
+  return amount !== null && Number.isInteger(amount) && amount > 0;
 };
 
 /** The typed list, whole and billable — or null. A partial list, or one with a

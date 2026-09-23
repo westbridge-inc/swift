@@ -18,17 +18,19 @@ import {
 import { GUTTER } from '../shared';
 import { CopyButton } from '../../../components/billing/BillingSurfaces';
 import { useVendorSubscription } from '../../../hooks/vendorops';
-import { money } from '../../../lib/money';
+import { moneyOrDash } from '../../../lib/money';
 import { payScreenState, type PayBandTone } from '../../../lib/billing';
 
 /** The tone of the state band — one 8px dot and one coloured word, never a
  *  filled tint card [Swift Pay §1a, "Colour budget"]. Viridian for covered,
- *  burnt amber for owed, ink for paused. Nothing on this screen turns red:
- *  being behind on a bill is not an error state, it is a Tuesday. */
+ *  burnt amber for owed, ink for paused, muted ink for a fee we could not
+ *  load. Nothing on this screen turns red: being behind on a bill is not an
+ *  error state, it is a Tuesday. */
 const PAY_BAND_INK: Record<PayBandTone, string> = {
   covered: color.success,
   owed: color.warning,
   paused: color.text.primary,
+  unknown: color.text.muted,
 };
 
 export function VendorSwiftNumberScreen({ navigation }: any) {
@@ -114,8 +116,9 @@ export function VendorSwiftNumberScreen({ navigation }: any) {
             <T variant="micro" tone="muted">
               {state.eyebrow}
             </T>
+            {/* [H7] An unknown fee is a dash. "$0" asserts a fact; "—" admits there isn't one. */}
             <T variant="displayXl" style={{ marginTop: space.sm }}>
-              {money(state.amountGyd)}
+              {moneyOrDash(state.amountGyd)}
             </T>
             {state.covers ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>

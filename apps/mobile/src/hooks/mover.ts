@@ -596,7 +596,16 @@ export function useMoverSubscription(kind: MoverKind | null) {
   // public price list, read only in preview — never a number frozen in the app.
   const pricing = usePartnerPricing(PV.PREVIEW_MARKET, pv);
   const sample = useMemo(() => (pv ? PV.previewSubscription(pricing.data) : null), [pv, pricing.data]);
-  return pv ? PV.previewQuery(sample) : q;
+  if (!pv) return q;
+  // [H7] While the price list is still loading or has failed, the preview
+  // query says so and the screen shows its own loading or error state — never
+  // a sample subscription with no fee.
+  return {
+    ...PV.previewQuery(sample),
+    isLoading: sample == null && pricing.isPending === true,
+    isError: sample == null && pricing.isError === true,
+    refetch: pricing.refetch,
+  };
 }
 
 /** Post-trip DRIVER_TO_CUSTOMER rating (409 when already rated — treat as done). */

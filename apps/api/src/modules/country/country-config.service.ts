@@ -1,40 +1,51 @@
-import type { PrismaClient, CountryConfig, VehicleType } from '@prisma/client';
+import type { PrismaClient, CountryConfig, VehicleType, Prisma } from '@prisma/client';
 import { registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER } from '../verification/doc-registry';
-import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
+import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
 import { AppError, NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
 import { readDeliveryRates } from './pricing-config';
 import { docProfilesFor, feeBandFor, type MoverRole } from '../../config/vehicle-classes';
 
+type Db = PrismaClient | Prisma.TransactionClient;
+
 /** Weekly subscription tiers in local currency. */
 export interface SubscriptionTiers {
+  /**
+   * `'complete'` declares the full partner card: every rate, both catalogue
+   * boundaries and the franchise rule are present and valid, and NO fallback
+   * below applies — a missing key refuses the whole market rather than
+   * quietly pricing it as a different card. Absent in a legacy market, which
+   * keeps the documented fallbacks exactly as before.
+   */
+  card?: typeof COMPLETE_CARD;
   /** STANDARD fee band — a delivery/courier Rider on a bicycle or motorbike
    *  (and, where `taxiDriver` is absent, a Driver on a car or wagon car). */
   mover: number;
   /** HEAVY fee band — heavy delivery on a canter or box truck (and, where
-   *  `taxiDriver` is absent, a Driver on a bus). Absent in a market that has
-   *  not set it, which resolves back to `mover`. */
+   *  `taxiDriver` is absent, a Driver on a bus). A LEGACY market may leave it
+   *  unset, which resolves back to `mover`. */
   moverHeavy?: number;
-  /** Every taxi Driver, whatever the vehicle. Absent in a market that has not
-   *  priced taxis apart, where a Driver pays the band rate like everyone else. */
+  /** Every taxi Driver, whatever the vehicle. A LEGACY market may leave it
+   *  unset, where a Driver pays the band rate like everyone else. */
   taxiDriver?: number;
-  /** Services with no catalogue — a plumber, electrician or barber. Falls back
-   *  to `smallVendor` in a market that has not priced services separately. */
+  /** Services with no catalogue — a plumber, electrician or barber. A LEGACY
+   *  market may leave it unset, falling back to `smallVendor`. */
   serviceVendor?: number;
   /** Standard catalogue, below `largeCatalogueThreshold` items. */
   smallVendor: number;
   /** At or above `largeCatalogueThreshold` items. */
   largeVendor: number;
-  /** Department-store scale — at or above `departmentCatalogueThreshold`. */
+  /** Department-store scale — at or above `departmentCatalogueThreshold`. A
+   *  LEGACY market may leave it unset, which removes that step. */
   departmentVendor?: number;
   largeCatalogueThreshold?: number;
   departmentCatalogueThreshold?: number;
   /** Franchise: from `franchiseMinLocations` stores under one owner, every
-   *  location takes `franchiseDiscountPct` off ITS OWN rate. Both must be set
-   *  for franchise pricing to apply at all. */
+   *  location takes `franchiseDiscountPct` off ITS OWN rate. Both keys or
+   *  neither — one alone is a broken rule, never "no rule". */
   franchiseMinLocations?: number;
   franchiseDiscountPct?: number;
-  [tier: string]: number | undefined;
+  [tier: string]: number | string | undefined;
 }
 
 export const DEFAULT_LARGE_CATALOGUE_THRESHOLD = 1000;
@@ -78,36 +89,64 @@ export interface PartnerRate {
 
 /**
  * A market whose tier config cannot price a partner — a missing, zero,
- * negative or non-numeric rate, a nonsensical catalogue boundary, or a
- * discount that leaves nothing to pay. Signup refuses, the re-tier holds the
- * current rate, and the public list refuses to quote: an unknown price is an
- * error, never a free subscription.
+ * negative, fractional or non-numeric rate, a nonsensical catalogue boundary,
+ * half a franchise rule, or a discount that leaves nothing to pay. Signup
+ * refuses, activation refuses, the re-tier holds the current rate, and the
+ * public list refuses to quote: an unknown price is an error, never a free
+ * subscription.
  */
 export class PricingConfigError extends AppError {
   constructor(key: string) {
-    super(500, 'PRICING_CONFIG_INVALID', `Weekly-fee config "${key}" is missing or is not a positive amount`, { key });
+    super(500, 'PRICING_CONFIG_INVALID', `Weekly-fee config "${key}" is missing or is not a whole positive amount`, { key });
     this.name = 'PricingConfigError';
   }
 }
 
-/** A configured rate: a finite amount above zero, or the config is refused. */
+/**
+ * A configured rate: a whole number of currency units above zero, or the
+ * config is refused. Whole because a weekly fee is a number a partner reads
+ * off an invoice and a client renders through a whole-unit formatter, and
+ * because the columns that hold it are Decimal(10,2) and Decimal(12,2): a
+ * 0.001 would be quoted as one thing, rendered as $0 and persisted as 0.00.
+ */
 function requiredRate(tiers: SubscriptionTiers, key: string): number {
   const value: unknown = tiers[key];
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) throw new PricingConfigError(key);
-  return value;
-}
-
-/** An optional rate: absent means "not priced apart"; present must be valid. */
-function optionalRate(tiers: SubscriptionTiers, key: string): number | undefined {
-  return tiers[key] == null ? undefined : requiredRate(tiers, key);
-}
-
-/** A catalogue boundary is a whole number of items above zero. */
-function catalogueFloor(tiers: SubscriptionTiers, key: string, fallback: number): number {
-  const value: unknown = tiers[key];
-  if (value == null) return fallback;
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) throw new PricingConfigError(key);
   return value;
+}
+
+/** A rate a LEGACY market may leave unset ("not priced apart"); the complete
+ *  card may not. Present must be valid either way. */
+function optionalRate(tiers: SubscriptionTiers, key: string, complete: boolean): number | undefined {
+  if (tiers[key] == null) {
+    if (complete) throw new PricingConfigError(key);
+    return undefined;
+  }
+  return requiredRate(tiers, key);
+}
+
+/** A catalogue boundary is a whole number of items above zero. A LEGACY market
+ *  may leave it to the default; the complete card states it. */
+function catalogueFloor(tiers: SubscriptionTiers, key: string, fallback: number, complete: boolean): number {
+  const value: unknown = tiers[key];
+  if (value == null) {
+    if (complete) throw new PricingConfigError(key);
+    return fallback;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) throw new PricingConfigError(key);
+  return value;
+}
+
+/**
+ * Whether the market declares the complete card (`card: 'complete'`). A
+ * declaration this code does not know is a broken market, not a legacy one:
+ * the only way to be priced with fallbacks is to declare nothing at all.
+ */
+export function isCompleteCard(tiers: SubscriptionTiers): boolean {
+  const card: unknown = tiers.card;
+  if (card == null) return false;
+  if (card !== COMPLETE_CARD) throw new PricingConfigError('card');
+  return true;
 }
 
 /** The franchise rule a market bills: from `minLocations` stores under one
@@ -120,14 +159,18 @@ export interface FranchiseRule {
 /**
  * The market's franchise rule, validated — the same answer for the biller and
  * the public price list, so the list never quotes a rule billing would refuse.
- * Null when the market has none: either key absent, or a zero discount. A
- * location count that is not a whole number of stores, or a discount that is
- * negative, not a number, or leaves nothing to pay, is a broken market.
+ * Null when the market has none: BOTH keys absent, or an explicit zero
+ * discount. One key alone is half a rule — a chain silently losing its
+ * discount — and is refused in every market. A location count that is not a
+ * whole number of stores, or a discount that is negative, not a number, or
+ * leaves nothing to pay, is a broken market.
  */
 export function franchiseRuleFor(tiers: SubscriptionTiers): FranchiseRule | null {
   const minLocations: unknown = tiers.franchiseMinLocations;
   const discountPct: unknown = tiers.franchiseDiscountPct;
-  if (minLocations == null || discountPct == null) return null;
+  if (minLocations == null && discountPct == null) return null;
+  if (minLocations == null) throw new PricingConfigError('franchiseMinLocations');
+  if (discountPct == null) throw new PricingConfigError('franchiseDiscountPct');
   if (typeof minLocations !== 'number' || !Number.isInteger(minLocations) || minLocations < 1) {
     throw new PricingConfigError('franchiseMinLocations');
   }
@@ -135,6 +178,49 @@ export function franchiseRuleFor(tiers: SubscriptionTiers): FranchiseRule | null
     throw new PricingConfigError('franchiseDiscountPct');
   }
   return discountPct > 0 ? { minLocations, discountPct } : null;
+}
+
+/** One catalogue step: from `minItems` active items, `rate` per week. */
+export interface CatalogueStep {
+  minItems: number;
+  tier: Exclude<VendorRateReason, 'service'>;
+  rate: number;
+}
+
+/**
+ * The catalogue ladder a market bills — small from 0 items, large from its
+ * floor, department from its floor where the market prices one — validated
+ * as ONE shape, so the biller and the public list read the same steps. A
+ * department step at or below the large one would leave the large tier
+ * unreachable and the ladder out of order.
+ */
+export function catalogueStepsFor(tiers: SubscriptionTiers): CatalogueStep[] {
+  const complete = isCompleteCard(tiers);
+  const largeFloor = catalogueFloor(tiers, 'largeCatalogueThreshold', DEFAULT_LARGE_CATALOGUE_THRESHOLD, complete);
+  const department = optionalRate(tiers, 'departmentVendor', complete);
+  const deptFloor = catalogueFloor(tiers, 'departmentCatalogueThreshold', DEFAULT_DEPARTMENT_CATALOGUE_THRESHOLD, complete);
+  if (department != null && deptFloor <= largeFloor) throw new PricingConfigError('departmentCatalogueThreshold');
+  const steps: CatalogueStep[] = [
+    { minItems: 0, tier: 'small', rate: requiredRate(tiers, 'smallVendor') },
+    { minItems: largeFloor, tier: 'large', rate: requiredRate(tiers, 'largeVendor') },
+  ];
+  if (department != null) steps.push({ minItems: deptFloor, tier: 'department', rate: department });
+  return steps;
+}
+
+/** Every rate the complete card carries. */
+const CARD_RATE_KEYS = ['mover', 'moverHeavy', 'taxiDriver', 'serviceVendor', 'smallVendor', 'largeVendor', 'departmentVendor'] as const;
+
+/**
+ * A complete card is validated WHOLE before any partner is priced from it:
+ * one missing or broken key refuses every quote, signup, activation and
+ * re-tier in the market, never just the partner it happened to concern. An
+ * incomplete card is not a smaller card; it is no card.
+ */
+function assertCompleteCard(tiers: SubscriptionTiers): void {
+  for (const key of CARD_RATE_KEYS) requiredRate(tiers, key);
+  catalogueStepsFor(tiers);
+  franchiseRuleFor(tiers);
 }
 
 /**
@@ -151,33 +237,22 @@ export function franchiseRuleFor(tiers: SubscriptionTiers): FranchiseRule | null
  * department stores pay less than a single one, which is not a volume
  * discount, it is a loophole.
  *
- * Every threshold, price and percentage is config. A market that has set none
- * of the optional keys behaves exactly as it did before they existed.
+ * Every threshold, price and percentage is config. A LEGACY market that has
+ * set none of the optional keys behaves exactly as it did before they existed.
  */
 function vendorRateFor(tiers: SubscriptionTiers, basis: VendorRateBasis): { rate: number; reason: VendorRateReason; franchised: boolean } {
   let rate: number;
   let reason: VendorRateReason;
 
   if (basis.isService) {
-    rate = optionalRate(tiers, 'serviceVendor') ?? requiredRate(tiers, 'smallVendor');
+    rate = optionalRate(tiers, 'serviceVendor', isCompleteCard(tiers)) ?? requiredRate(tiers, 'smallVendor');
     reason = 'service';
   } else {
-    const largeFloor = catalogueFloor(tiers, 'largeCatalogueThreshold', DEFAULT_LARGE_CATALOGUE_THRESHOLD);
-    const department = optionalRate(tiers, 'departmentVendor');
-    const deptFloor = catalogueFloor(tiers, 'departmentCatalogueThreshold', DEFAULT_DEPARTMENT_CATALOGUE_THRESHOLD);
-    // A department step at or below the large one would leave the large tier
-    // unreachable and the public ladder out of order.
-    if (department != null && deptFloor <= largeFloor) throw new PricingConfigError('departmentCatalogueThreshold');
-    if (department != null && basis.activeListings >= deptFloor) {
-      rate = department;
-      reason = 'department';
-    } else if (basis.activeListings >= largeFloor) {
-      rate = requiredRate(tiers, 'largeVendor');
-      reason = 'large';
-    } else {
-      rate = requiredRate(tiers, 'smallVendor');
-      reason = 'small';
-    }
+    const steps = catalogueStepsFor(tiers);
+    let step = steps[0]!;
+    for (const candidate of steps) if (basis.activeListings >= candidate.minItems) step = candidate;
+    rate = step.rate;
+    reason = step.tier;
   }
 
   const franchise = franchiseRuleFor(tiers);
@@ -196,23 +271,24 @@ function vendorRateFor(tiers: SubscriptionTiers, basis: VendorRateBasis): { rate
 /**
  * The weekly rate a mover pays. The ROLE decides first: a market that sets
  * `taxiDriver` charges every taxi Driver that rate, car or bus. A Rider — and a
- * Driver in a market that has not priced taxis apart — pays the band of the
- * vehicle they registered: `moverHeavy` for the heavy fleet, falling back to
- * `mover`, never to zero and never to a code constant.
+ * Driver in a LEGACY market that has not priced taxis apart — pays the band of
+ * the vehicle they registered: `moverHeavy` for the heavy fleet, falling back
+ * (legacy only) to `mover`, never to zero and never to a code constant.
  */
 function moverRateFor(tiers: SubscriptionTiers, role: MoverRole, vehicleType: VehicleType): { rate: number; tier: MoverTier } {
+  const complete = isCompleteCard(tiers);
   const heavy = feeBandFor(vehicleType) === 'HEAVY';
-  const bandRate = () => (heavy ? optionalRate(tiers, 'moverHeavy') : undefined) ?? requiredRate(tiers, 'mover');
-  if (role === 'DRIVER') return { rate: optionalRate(tiers, 'taxiDriver') ?? bandRate(), tier: 'taxi' };
+  const bandRate = () => (heavy ? optionalRate(tiers, 'moverHeavy', complete) : undefined) ?? requiredRate(tiers, 'mover');
+  if (role === 'DRIVER') return { rate: optionalRate(tiers, 'taxiDriver', complete) ?? bandRate(), tier: 'taxi' };
   return { rate: bandRate(), tier: heavy ? 'courierHeavy' : 'courier' };
 }
 
 /**
  * THE weekly fee a partner pays — ONE definition. Signup (SubscriptionService),
- * the weekly re-tier (BillingService) and the public price list every app
- * renders all come through here, so the rate a partner is quoted is the rate
- * they are born on and the rate they are billed. A second copy of this logic
- * anywhere is how a quote and a bill drift apart.
+ * activation preflight, the weekly re-tier (BillingService) and the public
+ * price list every app renders all come through here, so the rate a partner
+ * is quoted is the rate they are born on and the rate they are billed. A
+ * second copy of this logic anywhere is how a quote and a bill drift apart.
  *
  * Throws PricingConfigError rather than ever returning zero, NaN or a guess.
  * A negotiated custom rate or a waived fee is a human decision recorded on the
@@ -221,6 +297,7 @@ function moverRateFor(tiers: SubscriptionTiers, role: MoverRole, vehicleType: Ve
  */
 export function partnerRateFor(tiers: SubscriptionTiers, subject: PartnerSubject): PartnerRate {
   if (tiers == null || typeof tiers !== 'object' || Array.isArray(tiers)) throw new PricingConfigError('subscriptionTiers');
+  if (isCompleteCard(tiers)) assertCompleteCard(tiers);
   if (subject.kind === 'VENDOR') {
     const { rate, reason, franchised } = vendorRateFor(tiers, subject);
     return { rate, tier: reason, franchised };
@@ -237,8 +314,9 @@ export function partnerRateFor(tiers: SubscriptionTiers, subject: PartnerSubject
 export class CountryConfigService {
   constructor(private prisma: PrismaClient) {}
 
-  async getByCode(code: string): Promise<CountryConfig> {
-    const config = await this.prisma.countryConfig.findUnique({ where: { code } });
+  /** `db` may be a caller's transaction, so a read inside one rides its locks. */
+  async getByCode(code: string, db: Db = this.prisma): Promise<CountryConfig> {
+    const config = await db.countryConfig.findUnique({ where: { code } });
     if (!config) throw new NotFoundError('CountryConfig', code);
     return config;
   }
@@ -252,8 +330,8 @@ export class CountryConfigService {
     });
   }
 
-  async getSubscriptionTiers(code: string): Promise<SubscriptionTiers> {
-    const config = await this.getByCode(code);
+  async getSubscriptionTiers(code: string, db: Db = this.prisma): Promise<SubscriptionTiers> {
+    const config = await this.getByCode(code, db);
     return config.subscriptionTiers as unknown as SubscriptionTiers;
   }
 

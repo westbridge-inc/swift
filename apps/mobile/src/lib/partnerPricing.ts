@@ -59,10 +59,55 @@ export interface VendorQuote {
 
 const MOVER_TIERS: readonly string[] = ['courier', 'courierHeavy', 'taxi'];
 
-/** A billable weekly fee: a finite amount above zero. */
+/** A billable weekly fee: a whole number of currency units above zero. The
+ *  server refuses anything else, and so does this: `moneyIn` rounds to whole
+ *  units, so a fraction would be shown as a different number than the one
+ *  held — or, for a fraction below half a dollar, as $0. */
 function isRate(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
+
+/**
+ * How long a fetched quote may stand for "the price today" on a signup
+ * screen. The preview surfaces may read an hour-old list; a partner about to
+ * agree to a weekly fee may not — the signup hook refetches on mount and every
+ * minute it stays open, and this bounds what it may rely on when timers were
+ * suspended in the background.
+ */
+export const QUOTE_MAX_AGE_MS = 5 * 60 * 1000;
+
+export type QuoteGate<Q> = { ok: true; quote: Q } | { ok: false; why: 'loading' | 'error' | 'missing' | 'stale' };
+
+/**
+ * Whether a partner may commit to a fee right now: only with a quote that was
+ * fetched successfully, is for the vehicle or business type they picked, and
+ * is recent. Loading, a failed fetch (even with an older answer still in
+ * hand — an unconfirmed price is not the price), no quote for the selection,
+ * or a quote older than QUOTE_MAX_AGE_MS each refuse: the submit control is
+ * disabled and says why. The quote is `pick`ed from the same data the price
+ * card renders, so the gate and the card cannot disagree.
+ */
+export function quoteGate<Q>(
+  query: { data?: PartnerPricing | null; isPending?: boolean; isError?: boolean; dataUpdatedAt?: number },
+  pick: (pricing: PartnerPricing | null | undefined) => Q | null,
+  now: number = Date.now(),
+): QuoteGate<Q> {
+  if (query.isError) return { ok: false, why: 'error' };
+  if (query.isPending || query.data == null) return { ok: false, why: 'loading' };
+  const quote = pick(query.data);
+  if (!quote) return { ok: false, why: 'missing' };
+  if (typeof query.dataUpdatedAt !== 'number' || now - query.dataUpdatedAt > QUOTE_MAX_AGE_MS) return { ok: false, why: 'stale' };
+  return { ok: true, quote };
+}
+
+/** What the disabled submit control says for each refusal — the ask, never a
+ *  number ([#947's grammar]: disabled says the ask). */
+export const QUOTE_GATE_COPY: Record<Extract<QuoteGate<unknown>, { ok: false }>['why'], string> = {
+  loading: 'Loading your weekly fee…',
+  error: 'Couldn’t load your weekly fee — check your connection',
+  missing: 'No weekly fee is set for this choice yet',
+  stale: 'Refreshing your weekly fee…',
+};
 
 /** The quote for the vehicle a mover registers, or null when there is none. */
 export function moverQuote(pricing: PartnerPricing | null | undefined, vehicleType: string | null | undefined): MoverQuote | null {

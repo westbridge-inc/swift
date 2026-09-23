@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -10,6 +10,8 @@ import { openPayLink } from '../../../lib/payLink';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useBecomePartner, useVerificationStatus } from '../../../hooks/verification';
+import { usePartnerPricing } from '../../../hooks/partnerPricing';
+import { vendorQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
 import { useLocationStore } from '../../../stores/locationStore';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import {
@@ -110,8 +112,22 @@ export function BusinessSetup() {
   const pinFix = grantedLocationFix(latitude, longitude, locationStatus);
   const hasPin = pinFix !== null;
   const valid = hasPin && name.trim().length >= 2 && phone.trim().length >= 5 && addr.trim().length >= 3 && city.trim().length >= 2;
+  // [PR1270-S2-04] The price on the door is a condition of the door: the store
+  // is created only against a weekly fee that was fetched successfully, is the
+  // one the card above shows for THIS business type, and is current. The list
+  // is read fresh here, never from an hour-old cache. Loading, a failed fetch,
+  // no quote for the type, or a stale quote disables the button and says so.
+  const countryCode = useAuthStore((s) => (s.user as { countryCode?: string } | null)?.countryCode);
+  const pricing = usePartnerPricing(countryCode, true, { fresh: true });
+  const gate = quoteGate(pricing, (p) => vendorQuote(p, type));
+  const stale = !gate.ok && gate.why === 'stale';
+  const { refetch: refetchPricing } = pricing;
+  useEffect(() => {
+    if (stale) void refetchPricing();
+  }, [stale, refetchPricing]);
 
   const submit = () => {
+    if (!gate.ok) return; // guarded by the button, restated so no call site can bypass it
     if (!hasPin) return; // guarded by `valid`, restated so the call site cannot fabricate
     become.mutate({
       role: 'VENDOR',
@@ -199,11 +215,14 @@ export function BusinessSetup() {
           </T>
         ) : null}
         {/* [#947's grammar] Disabled names the first missing thing, in the
-            order the form asks for them — the pin first, because without it
-            nothing else matters. */}
+            order the form asks for them — the fee first, because without a
+            fee on the door there is nothing to agree to; then the pin, because
+            without it nothing else matters. */}
         <PillButton
           label={
-            !hasPin
+            !gate.ok
+              ? QUOTE_GATE_COPY[gate.why]
+              : !hasPin
               ? 'Turn location on first'
               : name.trim().length < 2
                 ? 'Name your business'
@@ -218,7 +237,7 @@ export function BusinessSetup() {
                         : 'Create store'
           }
           loading={become.isPending}
-          disabled={!valid || !agree}
+          disabled={!gate.ok || !valid || !agree}
           style={{ marginTop: space.lg }}
           onPress={submit}
         />

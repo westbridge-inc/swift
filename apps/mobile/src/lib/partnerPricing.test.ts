@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { moverQuote, vendorQuote, type PartnerPricing } from './partnerPricing';
+import { moverQuote, vendorQuote, quoteGate, QUOTE_GATE_COPY, QUOTE_MAX_AGE_MS, type PartnerPricing } from './partnerPricing';
 
 // The app never prices a partner itself. It looks up the quote the server
 // resolved with the SAME function signup and the weekly re-tier bill through,
@@ -76,5 +76,55 @@ describe('vendorQuote — services flat, catalogues by active items', () => {
     expect(vendorQuote({ ...GY, vendors: { service: 0, catalogue: GY.vendors!.catalogue } }, 'SERVICE')).toBeNull();
     expect(vendorQuote({ ...GY, vendors: { service: 8000, catalogue: [] } }, 'STORE')).toBeNull();
     expect(vendorQuote({ ...GY, vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: -1 }] } }, 'STORE')).toBeNull();
+  });
+});
+
+describe('[PR1270-S2-02] a fee is a whole number of dollars', () => {
+  it('a fractional rate is no quote — the formatter would show a different number, or $0', () => {
+    expect(moverQuote({ ...GY, movers: [mover('CAR', 'DRIVER', 'STANDARD', 'taxi', 0.4)] }, 'CAR')).toBeNull();
+    expect(moverQuote({ ...GY, movers: [mover('CAR', 'DRIVER', 'STANDARD', 'taxi', 9000.5)] }, 'CAR')).toBeNull();
+    expect(vendorQuote({ ...GY, vendors: { service: 0.001, catalogue: GY.vendors!.catalogue } }, 'SERVICE')).toBeNull();
+    expect(vendorQuote({ ...GY, vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 15000.25 }] } }, 'STORE')).toBeNull();
+    expect(vendorQuote({ ...GY, vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 15000 }, { minItems: 1000, tier: 'large', rate: 0.5 }] } }, 'STORE')).toBeNull();
+  });
+});
+
+describe('[PR1270-S2-04] quoteGate — a partner commits only to a fetched, current, on-screen quote', () => {
+  const pick = (p: PartnerPricing | null | undefined) => moverQuote(p, 'CAR');
+  const now = 1_700_000_000_000;
+  const fresh = { data: GY, isPending: false, isError: false, dataUpdatedAt: now - 1_000 };
+
+  it('is ready only with data, no error, a quote for the selection and a recent fetch', () => {
+    expect(quoteGate(fresh, pick, now)).toEqual({ ok: true, quote: moverQuote(GY, 'CAR') });
+  });
+
+  it('loading: nothing has arrived yet', () => {
+    expect(quoteGate({ data: undefined, isPending: true, isError: false, dataUpdatedAt: 0 }, pick, now)).toEqual({ ok: false, why: 'loading' });
+    expect(quoteGate({ data: null, isPending: false, isError: false, dataUpdatedAt: 0 }, pick, now)).toEqual({ ok: false, why: 'loading' });
+  });
+
+  it('error: a failed fetch refuses even while an older answer is still in hand', () => {
+    expect(quoteGate({ ...fresh, isError: true }, pick, now)).toEqual({ ok: false, why: 'error' });
+  });
+
+  it('missing: the list holds no quote for what was picked', () => {
+    expect(quoteGate(fresh, (p) => moverQuote(p, 'BICYCLE'), now)).toEqual({ ok: false, why: 'missing' });
+    expect(quoteGate({ ...fresh, data: { ...GY, movers: undefined } }, pick, now)).toEqual({ ok: false, why: 'missing' });
+    expect(quoteGate({ ...fresh, data: { ...GY, vendors: undefined } }, (p) => vendorQuote(p, 'STORE'), now)).toEqual({ ok: false, why: 'missing' });
+  });
+
+  it('stale: a quote fetched too long ago is not the price today', () => {
+    expect(quoteGate({ ...fresh, dataUpdatedAt: now - QUOTE_MAX_AGE_MS }, pick, now).ok).toBe(true);
+    expect(quoteGate({ ...fresh, dataUpdatedAt: now - QUOTE_MAX_AGE_MS - 1 }, pick, now)).toEqual({ ok: false, why: 'stale' });
+    expect(quoteGate({ ...fresh, dataUpdatedAt: undefined }, pick, now)).toEqual({ ok: false, why: 'stale' });
+    // The one-hour cache the review flagged is far outside what a signup may rely on.
+    expect(QUOTE_MAX_AGE_MS).toBeLessThanOrEqual(5 * 60 * 1000);
+  });
+
+  it('every refusal has honest copy for the disabled control, and none of it is a price', () => {
+    for (const why of ['loading', 'error', 'missing', 'stale'] as const) {
+      expect(QUOTE_GATE_COPY[why]).toMatch(/fee/i);
+      expect(QUOTE_GATE_COPY[why]).not.toMatch(/\$|\d/);
+    }
   });
 });

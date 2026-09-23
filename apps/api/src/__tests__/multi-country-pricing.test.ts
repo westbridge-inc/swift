@@ -91,11 +91,14 @@ describe('public pricing (price on the door)', () => {
         { minItems: 10000, tier: 'department', rate: 60000 },
       ],
     });
-    // Older clients read the legacy numbers, which never under-quote a bill.
+    // Older clients read the legacy numbers, which never under-quote a bill:
+    // the old card's "Large catalogues (1000+ items)" line stands for every
+    // store from 1,000 items up, so it carries the 10,000+ bill [PR1270-S2-05].
     expect(d.weekly.mover).toBe(9000);
     expect(d.weekly.moverHeavy).toBe(9000);
     expect(d.weekly.smallVendor).toBe(15000);
-    expect(d.weekly.largeVendor).toBe(20000);
+    expect(d.weekly.largeVendor).toBe(60000);
+    expect(d.weekly.departmentVendor).toBe(60000);
   });
 
   it('does not publish a future island price book', async () => {
