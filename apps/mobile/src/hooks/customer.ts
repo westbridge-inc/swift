@@ -34,7 +34,11 @@ export const customerKeys = {
   vendor: (id: string) => ['customer', 'vendor', id] as const,
   orders: ['customer', 'orders'] as const,
   order: (id: string) => ['customer', 'order', id] as const,
-  cart: (lat?: number, lng?: number) => ['customer', 'cart', lat ?? null, lng ?? null] as const,
+  cart: (
+    lat?: number,
+    lng?: number,
+    opts?: { express?: boolean; fulfillment?: Record<string, 'DELIVERY' | 'PICKUP'> },
+  ) => ['customer', 'cart', lat ?? null, lng ?? null, opts?.express === true, opts?.fulfillment ?? null] as const,
   notifications: ['customer', 'notifications'] as const,
 };
 
@@ -642,8 +646,19 @@ export function useCheckoutRecovery(): { recovering: boolean; placedOrderIds: st
 
 // --- Cart ---------------------------------------------------------------------
 
-export function useCart<T = any>(lat?: number, lng?: number) {
-  return useQuery<T>({ queryKey: customerKeys.cart(lat, lng), queryFn: () => unwrap<T>(customerApi.getCart(lat, lng)) });
+export function useCart<T = any>(
+  lat?: number,
+  lng?: number,
+  opts?: { express?: boolean; fulfillment?: Record<string, 'DELIVERY' | 'PICKUP'> },
+) {
+  return useQuery<T>({
+    queryKey: customerKeys.cart(lat, lng, opts),
+    queryFn: () => unwrap<T>(customerApi.getCart(lat, lng, opts)),
+    // The mode chips (pickup / express) switch the query key; keep the last
+    // quote on screen while the server prices the new selection instead of
+    // blanking the whole screen.
+    placeholderData: keepPreviousData,
+  });
 }
 
 function invalidateCart(qc: ReturnType<typeof useQueryClient>) {

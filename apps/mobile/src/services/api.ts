@@ -427,7 +427,22 @@ export const customerApi = {
     session?: AuthSessionSnapshot,
   ) => api.post(`/customer/orders/${id}/rate`, body, capturedAuthConfig(session)),
   // Cart
-  getCart: (lat?: number, lng?: number) => api.get('/customer/cart', { params: { lat, lng } }),
+  getCart: (
+    lat?: number,
+    lng?: number,
+    opts?: { express?: boolean; fulfillment?: Record<string, 'DELIVERY' | 'PICKUP'> },
+  ) => api.get('/customer/cart', {
+    params: {
+      lat,
+      lng,
+      express: opts?.express,
+      // [E01] Per-vendor mode as "<vendorId>=MODE" pairs — the API's query
+      // parser has no bracket support, so a record cannot go through as-is.
+      fulfillment: opts?.fulfillment
+        ? Object.entries(opts.fulfillment).map(([vendorId, mode]) => `${vendorId}=${mode}`).join(',')
+        : undefined,
+    },
+  }),
   addToCart: (data: {
     vendorId: string;
     itemId: string;
