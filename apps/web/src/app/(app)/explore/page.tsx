@@ -10,7 +10,7 @@ const VERTICALS = [
   { href: '/order/browse?type=RESTAURANT', label: 'Food', desc: 'Restaurants & takeaway', Icon: UtensilsCrossed },
   { href: '/order/browse?type=SUPERMARKET', label: 'Groceries', desc: 'Markets & supermarkets', Icon: ShoppingCart },
   { href: '/order/browse?type=STORE', label: 'Shops', desc: 'Pharmacy, hardware, goods', Icon: Store },
-  { href: '/taxi', label: 'Taxi', desc: 'A ride across town', Icon: Car },
+  { href: '/taxi', label: 'Taxi', desc: 'Book in the Swift mobile app', Icon: Car },
   { href: '/courier', label: 'Send a package', desc: 'Point-to-point courier', Icon: Package },
   { href: '/order/browse?type=SERVICE', label: 'Services', desc: 'Electricians, cleaners & more', Icon: Wrench },
 ];
@@ -28,7 +28,7 @@ export default function ExplorePage() {
     <div className="space-y-10">
       <section className="rounded-3xl bg-[var(--swift-red)] p-8 text-white md:p-12">
         <h1 className="text-3xl font-extrabold md:text-4xl">Explore Swift</h1>
-        <p className="mt-2 max-w-xl text-white/90">One app for your city — food, groceries, shops, rides, courier and services. Everything the Swift app does, now on the web.</p>
+        <p className="mt-2 max-w-xl text-white/90">One app for your city — food, groceries, shops, rides, courier and services. Order from stores on the web. Taxi rides require the Swift mobile app.</p>
         <Link href="/order" className="mt-5 inline-block rounded-full bg-white px-5 py-2.5 font-bold text-[var(--swift-red)]">Start an order</Link>
       </section>
 

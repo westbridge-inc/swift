@@ -1215,7 +1215,8 @@ export class VerificationService {
       documents,
       missing,
       vehicleType,
-      roleVerified: missing.length === 0,
+      roleVerified: checklist.length > 0 && missing.length === 0,
+      categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && checklist.length === 0,
       trial,
     };
   }

@@ -11,7 +11,7 @@ import { getHome, type Vendor } from '@/lib/customer';
 const PRIMARY = [
   { href: '/order/browse?type=RESTAURANT', label: 'Food', sub: 'Restaurants & takeaway', Icon: UtensilsCrossed },
   { href: '/order/browse?type=SUPERMARKET', label: 'Groceries & Shops', sub: 'Markets, pharmacies, goods', Icon: ShoppingCart },
-  { href: '/taxi', label: 'Taxi', sub: 'A ride, cash on arrival', Icon: Car },
+  { href: '/taxi', label: 'Taxi', sub: 'Book in the Swift mobile app', Icon: Car },
   { href: '/explore', label: 'Explore Swift', sub: 'What Swift can do', Icon: Compass, web: true },
 ];
 const SECONDARY = [
@@ -53,7 +53,7 @@ export default function OrderHome() {
     <div className="space-y-8">
       <section>
         <h1 className="text-2xl font-extrabold md:text-3xl">Order on Swift</h1>
-        <p className="mt-1 text-[var(--swift-muted)]">Food, groceries, a ride, and more — pay the business or driver directly, cash or MMG.</p>
+        <p className="mt-1 text-[var(--swift-muted)]">Food, groceries and more — pay the business directly, cash or MMG. Taxi rides require the Swift mobile app.</p>
         <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
           {PRIMARY.map(({ href, label, sub, Icon, web }) => (
             <Link key={label} href={href} className="group rounded-2xl border border-black/5 bg-white p-4 transition-shadow hover:shadow-md">
