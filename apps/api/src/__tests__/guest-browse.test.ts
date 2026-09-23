@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
+import { homeCacheKey } from '../modules/user/home-cache';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 
@@ -44,7 +45,7 @@ describe('guest browsing (no account)', () => {
     // The Home scan is capped (HOME_DISCOVERY_SCAN_CAP) so a growing catalogue
     // can't load unboundedly per request. Whatever the vendor count, the feed
     // stays within its documented section sizes.
-    await app.redis.del('t:_notenant:home:guest:x:x');
+    await app.redis.del(homeCacheKey(undefined, undefined, undefined));
     const d = (await get('/api/v1/customer/home')).json().data;
     expect(d.openVendors.length).toBeLessThanOrEqual(30);
     expect(d.closedVendors.length).toBeLessThanOrEqual(10);
@@ -61,7 +62,7 @@ describe('guest browsing (no account)', () => {
     if (!v) return;
     try {
       await app.prisma.vendor.update({ where: { id: v.id }, data: { acceptingOrders: false } });
-      await app.redis.del('t:_notenant:home:guest:x:x');
+      await app.redis.del(homeCacheKey(undefined, undefined, undefined));
       const res = await get('/api/v1/customer/home');
       expect(res.statusCode).toBe(200);
       const d = res.json().data;
@@ -71,7 +72,7 @@ describe('guest browsing (no account)', () => {
       expect(has(d.nearby)).toBe(false);
     } finally {
       await app.prisma.vendor.update({ where: { id: v.id }, data: { acceptingOrders: true } });
-      await app.redis.del('t:_notenant:home:guest:x:x');
+      await app.redis.del(homeCacheKey(undefined, undefined, undefined));
     }
   });
   it('keeps EMPTY stores (no orderable item) out of browse + home, adds them back once stocked', async () => {
@@ -84,14 +85,14 @@ describe('guest browsing (no account)', () => {
     const v = await app.prisma.vendor.create({ data: { ownerId: owner.id, name: `Empty Store ${nanoid(6)}`, slug: `empty-${nanoid(8).toLowerCase()}`, vendorType: 'STORE', phone: `+${rnd + 1}`, addressLine1: '1 Empty', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true } });
     const inBody = (body: unknown) => JSON.stringify(body).includes(v.id);
     try {
-      await app.redis.del('t:_notenant:home:guest:x:x');
+      await app.redis.del(homeCacheKey(undefined, undefined, undefined));
       // Empty → excluded from both the browse list and Home.
       expect(inBody((await get('/api/v1/customer/vendors')).json())).toBe(false);
       expect(inBody((await get('/api/v1/customer/home')).json())).toBe(false);
       // Stock one available item → now discoverable.
       const cat = await app.prisma.category.create({ data: { vendorId: v.id, name: 'Menu', sortOrder: 0 } });
       await app.prisma.item.create({ data: { vendorId: v.id, categoryId: cat.id, name: 'Thing', basePrice: 1000, isAvailable: true } });
-      await app.redis.del('t:_notenant:home:guest:x:x');
+      await app.redis.del(homeCacheKey(undefined, undefined, undefined));
       expect(inBody((await get('/api/v1/customer/vendors')).json())).toBe(true);
     } finally {
       await app.prisma.item.deleteMany({ where: { vendorId: v.id } });
@@ -99,7 +100,7 @@ describe('guest browsing (no account)', () => {
       await app.prisma.vendor.delete({ where: { id: v.id } });
       await app.prisma.vendorOwner.delete({ where: { id: owner.id } });
       await app.prisma.user.delete({ where: { id: user.id } });
-      await app.redis.del('t:_notenant:home:guest:x:x');
+      await app.redis.del(homeCacheKey(undefined, undefined, undefined));
     }
   });
 
