@@ -414,10 +414,10 @@ class GenSecrets(StoreHarness):
         shutil.copy(DEPLOY.parent / "apps" / "api" / "src" / "utils" / "secret-files.ts",
                     self.tmp / "apps" / "api" / "src" / "utils" / "secret-files.ts")
 
-    def run_gen(self, *args):
+    def run_gen(self, *args, **extra):
         return subprocess.run(
             ["bash", str(self.work / "gen-secrets.sh"), *args],
-            env=self.env(SHIM_STORE=str(self.shim_store)), text=True, capture_output=True, timeout=30,
+            env=self.env(SHIM_STORE=str(self.shim_store), **extra), text=True, capture_output=True, timeout=30,
         )
 
     def test_generated_secrets_go_to_the_store_and_only_settings_go_to_env(self):
@@ -492,16 +492,17 @@ class GenSecrets(StoreHarness):
             "TWILIO_API_KEY_SECRET\n"
             "PGPASSWORD=old-pg\n"
             "MEILI_MASTER_KEY=old-meili\n"
+            " SYSTEM_DATABASE_URL=postgresql://sys:old-sys@db/x\n"
             "TWILIO_API_KEY_SECRET_FILE=/run/secrets/TWILIO_API_KEY_SECRET\n"
             "# JWT_SECRET=commented-out-example\n"
             "MYJWT_SECRET_NOTE=not-a-secret-name\n"
             "API_HOST=api.example.test\n"
         )
         env_file.chmod(0o600)
-        result = self.run_gen()
+        result = self.run_gen(LC_ALL="C", LANG="C")  # the server's default locale, where a locale space class is ASCII-only
         self.assertEqual(result.returncode, 0, result.stderr)
         text = env_file.read_text()
-        for gone in ("old-jwt", "old-smtp", "old-mmg", "old-aws", "old-pg", "old-meili", "PGPASSWORD", "MEILI_MASTER_KEY"):
+        for gone in ("old-jwt", "old-smtp", "old-mmg", "old-aws", "old-pg", "old-meili", "old-sys", "PGPASSWORD", "MEILI_MASTER_KEY", "SYSTEM_DATABASE_URL="):
             self.assertNotIn(gone, text)
         self.assertNotRegex(text, r"(?m)^TWILIO_API_KEY_SECRET$")
         for kept in ("PILOT_ENV=staging\n", "API_HOST=api.example.test\n",
@@ -509,8 +510,8 @@ class GenSecrets(StoreHarness):
                      "# JWT_SECRET=commented-out-example\n", "MYJWT_SECRET_NOTE=not-a-secret-name\n"):
             self.assertIn(kept, text)
         self.assertIn("MASTER_KEK_ESCROW_FINGERPRINT=", text)
-        self.assertIn("removed 7 secret line(s)", result.stdout)
-        for v in ("old-jwt", "old-smtp", "old-mmg", "old-aws", "old-pg", "old-meili"):
+        self.assertIn("removed 8 secret line(s)", result.stdout)
+        for v in ("old-jwt", "old-smtp", "old-mmg", "old-aws", "old-pg", "old-meili", "old-sys"):
             self.assertNotIn(v, result.stdout + result.stderr)
 
     def test_missing_mode_fills_only_the_absent_names_and_keeps_master_kek(self):
@@ -694,7 +695,8 @@ class PilotUpSecretsPreflight(StoreHarness):
 
     ALL_WIRED = ("POSTGRES_PASSWORD\nMEILISEARCH_KEY\nJWT_SECRET\nOTP_HASH_SECRET\nMASTER_KEK\nSTORAGE_SIGNING_SECRET\n"
                  "CONSENT_IP_PEPPER\nTEST_CONTROL_SECRET\nMETRICS_TOKEN\nHEALTH_DETAIL_TOKEN\nATTRIB_SALT\nIDENTITY_SALT\n"
-                 "SCAN_IP_SALT\nADS_EVENT_SECRET\nTWILIO_API_KEY_SECRET\nAWS_ACCESS_KEY_ID\nAWS_SECRET_ACCESS_KEY\n")
+                 "SCAN_IP_SALT\nADS_EVENT_SECRET\nTWILIO_API_KEY_SECRET\nAWS_ACCESS_KEY_ID\nAWS_SECRET_ACCESS_KEY\n"
+                 "SYSTEM_DATABASE_URL\n")
 
     def test_passes_when_env_is_clean_and_every_wired_secret_is_stored(self):
         result = self.run_fragment(self.ENV_OK, self.ALL_WIRED)
@@ -709,22 +711,31 @@ class PilotUpSecretsPreflight(StoreHarness):
                  "export TWILIO_API_KEY_SECRET=abc", "  SMTP_PASS=abc", "\tMMG_PASSWORD=abc",
                  "export   METRICS_TOKEN=abc", "  export\tJWT_SECRET =abc", "STRIPE_SECRET_KEY",
                  "SENTRY_DSN=https://abc@host/1", "SWIFT_BOOTSTRAP_PASSWORD=abc", "GOOGLE_MAPS_API_KEY_BACKEND=abc",
-                 "PGPASSWORD=abc", "MEILI_MASTER_KEY=abc")
-        for line in cases:
-            with self.subTest(line=line):
-                result = self.run_fragment(self.ENV_OK + line + "\n", self.ALL_WIRED)
-                self.assertNotEqual(result.returncode, 0, line)
-                name = re.sub(r"^\s*(export\s+)?", "", line).split("=")[0].strip()
-                self.assertIn(name, result.stderr)
-                self.assertNotIn("abc", result.stderr)
-                self.assertIn("swift-secrets", result.stderr)
+                 "PGPASSWORD=abc", "MEILI_MASTER_KEY=abc", "SYSTEM_DATABASE_URL=postgresql://x:abc@h/d",
+                 # [R3 R2-B] Compose skips U+00A0 (NBSP) and U+0085 (NEL) before a key.
+                 " TWILIO_API_KEY_SECRET=abc", "\u0085JWT_SECRET=abc", "  export SMTP_PASS=abc",
+                 "\u0085export MMG_MSECRET=abc")
+        # The matcher must not depend on the host locale: the server default is
+        # C.UTF-8 / C, where a locale space class does not cover those bytes.
+        for locale in ("C", "en_US.UTF-8", "POSIX"):
+            for line in cases:
+                with self.subTest(line=line, locale=locale):
+                    result = self.run_fragment(self.ENV_OK + line + "\n", self.ALL_WIRED, LC_ALL=locale, LANG=locale)
+                    self.assertNotEqual(result.returncode, 0, f"{line!r} under LC_ALL={locale}")
+                    name = re.sub(r"^[\s \u0085]*(export[\s \u0085]+)?", "", line).split("=")[0].strip()
+                    self.assertIn(name, result.stderr)
+                    self.assertNotIn("abc", result.stderr)
+                    self.assertIn("swift-secrets", result.stderr)
 
     def test_allows_wiring_lines_comments_and_other_names(self):
         for line in ("JWT_SECRET_FILE=/run/secrets/JWT_SECRET", "# JWT_SECRET=example", "  # export JWT_SECRET=example",
-                     "MYJWT_SECRET_NOTE=1", "JWT_SECRET_ROTATED_AT=2026-09-23", "TWILIO_API_KEY_SID=SKabc"):
-            with self.subTest(line=line):
-                result = self.run_fragment(self.ENV_OK + line + "\n", self.ALL_WIRED)
-                self.assertEqual(result.returncode, 0, f"{line}: {result.stderr}")
+                     " # JWT_SECRET=example", "MYJWT_SECRET_NOTE=1", "JWT_SECRET_ROTATED_AT=2026-09-23",
+                     "TWILIO_API_KEY_SID=SKabc", "SYSTEM_DATABASE_URL_FILE=/run/secrets/SYSTEM_DATABASE_URL",
+                     "MMG_API_URL=https://api.example.test/x", "OSRM_URL=http://osrm:5000"):
+            for locale in ("C", "en_US.UTF-8"):
+                with self.subTest(line=line, locale=locale):
+                    result = self.run_fragment(self.ENV_OK + line + "\n", self.ALL_WIRED, LC_ALL=locale, LANG=locale)
+                    self.assertEqual(result.returncode, 0, f"{line!r} under LC_ALL={locale}: {result.stderr}")
 
     def test_refuses_a_wired_secret_that_is_not_in_the_store(self):
         missing_core = self.ALL_WIRED.replace("MASTER_KEK\n", "")

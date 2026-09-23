@@ -71,6 +71,14 @@ export const SECRET_FILE_NAMES = [
   'AGENT_CASH_WEBHOOK_SECRET',
   'GOOGLE_MAPS_API_KEY_BACKEND',
   'SENTRY_DSN',
+  // URLs that carry a credential. The RLS-bypass login URL is the most
+  // privileged database credential there is (dormant until the
+  // least-privilege login exists); a Redis URL may carry a password (the
+  // pilot's does not, and Compose sets that credential-free endpoint
+  // plainly); an outbound alert webhook carries its token in the path.
+  'SYSTEM_DATABASE_URL',
+  'REDIS_URL',
+  'CW_ALERT_WEBHOOK_URL',
 ] as const;
 
 export type SecretFileName = (typeof SECRET_FILE_NAMES)[number];

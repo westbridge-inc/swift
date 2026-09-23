@@ -52,6 +52,10 @@ describe('the allowlist', () => {
       'SERVICE_PROVIDER_CURSOR_SECRET', 'VELOCITY_KEY_SECRET', 'ADS_EVENT_SECRET',
       'AGENT_CASH_WEBHOOK_SECRET', 'SWIFT_BOOTSTRAP_PASSWORD', 'GOOGLE_MAPS_API_KEY_BACKEND',
       'ATTRIB_SALT', 'IDENTITY_SALT', 'SCAN_IP_SALT', 'SENTRY_DSN',
+      // [R3 R2-A] URLs that carry a credential: the RLS-bypass login's URL
+      // (the most privileged database credential), a Redis URL (may carry a
+      // password), and an alert webhook (its token is the path).
+      'SYSTEM_DATABASE_URL', 'REDIS_URL', 'CW_ALERT_WEBHOOK_URL',
     ]) {
       expect(SECRET_FILE_NAMES, must).toContain(must);
     }
@@ -123,10 +127,52 @@ describe('the allowlist census — no secret the API reads can fall back to the 
   const secretShaped = [...reads.keys()].filter((n) => SECRET_SHAPE.test(n) && !PUBLIC_PREFIX.test(n)).sort();
   const allowlisted = new Set<string>(SECRET_FILE_NAMES);
 
+  // [R3 R2-A] A URL is a credential whenever userinfo or a token can ride in
+  // it, and its spelling says nothing about that. So every *_URL / *_DSN /
+  // *_URI / *_ENDPOINT read is classified explicitly: allowlisted (it can
+  // carry a credential and must be file-delivered) or a plain endpoint here.
+  const URL_LIKE = /(_URL|_DSN|_URI|_ENDPOINT)$/;
+  const CREDENTIAL_URLS = ['DATABASE_URL', 'SYSTEM_DATABASE_URL', 'REDIS_URL', 'SENTRY_DSN', 'CW_ALERT_WEBHOOK_URL'];
+  const PLAIN_ENDPOINTS: Record<string, string> = {
+    MEILISEARCH_URL: 'private-network service address; the key travels separately as MEILISEARCH_KEY',
+    OSRM_URL: 'private-network routing service, no authentication',
+    VROOM_URL: 'private-network planner, no authentication',
+    PHOTON_URL: 'private-network geocoder, no authentication',
+    NOMINATIM_URL: 'private-network reverse geocoder, no authentication',
+    MMG_API_URL: 'provider API base; credentials travel as MMG_API_KEY / MMG_PASSWORD / MMG_MKEY / MMG_MSECRET',
+    POWERTRANZ_API_URL: 'provider API base; credentials travel as PAYMENT_GATEWAY_KEY / PAYMENT_GATEWAY_SECRET',
+    STRIPE_API_URL: 'provider API base; the credential is STRIPE_SECRET_KEY',
+    DIDIT_API_URL: 'provider API base of a forbidden provider (#1276 removes the reader); never a credential',
+    ID_ANALYZER_API_URL: 'provider API base of a forbidden provider (#1276 removes the reader); never a credential',
+    EXPO_PUSH_URL: 'public push service address',
+    API_PUBLIC_URL: 'this deployment\'s own public origin',
+    APP_PUBLIC_URL: 'this deployment\'s own public origin',
+    APP_STORE_URL: 'a public store listing',
+    PLAY_STORE_URL: 'a public store listing',
+    AWS_S3_ENDPOINT: 'object-storage endpoint; the keys travel as AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY',
+  };
+  const urlLike = [...reads.keys()].filter((n) => URL_LIKE.test(n) && !PUBLIC_PREFIX.test(n)).sort();
+
   it('scanned a real tree', () => {
     expect(reads.size).toBeGreaterThan(50);
     expect(secretShaped.length).toBeGreaterThan(20);
     expect(reads.has('JWT_SECRET')).toBe(true);
+    expect(urlLike.length).toBeGreaterThan(10);
+    expect(reads.has('SYSTEM_DATABASE_URL')).toBe(true);
+  });
+
+  it('classifies every URL-like read: a credential carrier is allowlisted, anything else is a documented plain endpoint', () => {
+    const unclassified = urlLike.filter((n) => !allowlisted.has(n) && !(n in PLAIN_ENDPOINTS));
+    expect(
+      unclassified.map((n) => `${n} (${[...(reads.get(n) ?? [])].join(', ')})`),
+      'add the name to SECRET_FILE_NAMES (it can carry a credential) or to PLAIN_ENDPOINTS with its reason',
+    ).toEqual([]);
+    for (const name of CREDENTIAL_URLS) expect(allowlisted.has(name), `${name} must be file-deliverable`).toBe(true);
+    for (const [name, reason] of Object.entries(PLAIN_ENDPOINTS)) {
+      expect(reads.has(name), `${name} is no longer read anywhere — remove the entry`).toBe(true);
+      expect(allowlisted.has(name), `${name} cannot be both a plain endpoint and allowlisted`).toBe(false);
+      expect(reason.length).toBeGreaterThan(20);
+    }
   });
 
   it('classifies every secret-shaped read', () => {

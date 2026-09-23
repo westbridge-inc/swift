@@ -89,9 +89,19 @@ describe('docker-compose.yml — secrets are files on tmpfs, never container env
     expect(Object.keys(compose['api']?.environment ?? {}).length).toBeGreaterThan(3);
   });
 
+  // [R3 R2-A] REDIS_URL CAN carry a password, so it is allowlisted; the pilot's
+  // Redis has none and sits on the private network, so Compose may set the
+  // endpoint plainly — only ever as this credential-free literal shape. A
+  // password would have to travel as REDIS_URL_FILE (and the plain value go).
+  const CREDENTIAL_FREE_REDIS = /^redis:\/\/[A-Za-z0-9._-]+:[0-9]+(\/[0-9]+)?$/;
+
   it('no service carries an allowlisted secret, or a consumer alias of one, as an environment key', () => {
     for (const [name, service] of Object.entries(compose)) {
-      for (const key of Object.keys(service.environment)) {
+      for (const [key, value] of Object.entries(service.environment)) {
+        if (key === 'REDIS_URL') {
+          expect(value, `${name}.environment.REDIS_URL must be a credential-free endpoint`).toMatch(CREDENTIAL_FREE_REDIS);
+          continue;
+        }
         expect(SECRET.has(key), `${name}.environment.${key} is a secret value in container config`).toBe(false);
         expect(CONSUMER_ALIASES.includes(key), `${name}.environment.${key} is a secret value in container config`).toBe(false);
       }
@@ -190,6 +200,7 @@ describe('deploy/.env.deploy.example — the template declares no secret', () =>
       'TWILIO_API_KEY_SECRET', 'SMTP_PASS', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'MMG_API_KEY', 'MMG_PASSWORD',
       'GOOGLE_MAPS_API_KEY_BACKEND', 'SENTRY_DSN', 'AGENT_CASH_WEBHOOK_SECRET',
       'SWIFT_BOOTSTRAP_PASSWORD', 'SERVICE_PROVIDER_CURSOR_SECRET', 'VELOCITY_KEY_SECRET',
+      'SYSTEM_DATABASE_URL', 'CW_ALERT_WEBHOOK_URL',
     ]) {
       expect(template, name).toContain(`${name}_FILE=/run/secrets/${name}`);
     }
@@ -261,8 +272,16 @@ describe('scripts — no secret value ever rides in argv', () => {
 
   it('the env-file matcher is shared and normalized the way Compose reads a line (leading space, `export`, bare name)', () => {
     // [R2 F1/F6] One definition, sourced by pilot-up.sh and gen-secrets.sh.
+    // [R3 R2-B] Compose skips U+00A0 and U+0085 before a key; a locale class
+    // may not, so the class is byte-explicit and every grep is pinned to the
+    // C locale — the host's locale never decides what "space" means.
     const shared = read('secret-names.sh');
-    expect(shared).toContain('^[[:space:]]*(export[[:space:]]+)?');
+    const code = shared.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
+    expect(code).toContain('\\302\\240');
+    expect(code).toContain('\\302\\205');
+    expect(code).toMatch(/LC_ALL=C grep -qE/);
+    expect(code).toMatch(/LC_ALL=C grep -vE/);
+    expect(code).not.toMatch(/\[\[:space:\]\]/);
     for (const file of ['pilot-up.sh', 'gen-secrets.sh']) {
       const text = read(file);
       expect(text, file).toMatch(/\. "\$HERE\/secret-names\.sh"/);
