@@ -13,6 +13,7 @@ import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
 import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/observability';
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
+import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
@@ -1784,8 +1785,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     // CAPTURED under their lock and refuse. The CAS keeps lifecycle + payment
     // predicates as defense in depth, and two concurrent confirm taps by store
     // staff still have exactly one winner (no duplicate push).
+    // [ORDER-SPINE S1-6] It is also the lock the customer's claim and an
+    // operator's decision take (order/mmg-claim.service.ts): the three
+    // commands on one order's payment claims serialize here, in either order.
+    const now = new Date();
     const capture = await app.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} AND "tenantId" = ${order.tenantId} FOR UPDATE`;
       // [REPORT-005 F-005-04] The vendor is the pickup-code VERIFIER: every
       // read here must omit handover secrets exactly like resolveOwnedOrder,
       // or this response hands the verifier the code (and the ride PIN).
@@ -1793,12 +1798,18 @@ export async function vendorRoutes(app: FastifyInstance) {
         where: { id: order.id },
         omit: HANDOVER_SECRETS_OMIT,
       });
+      await mmgClaimLockObserver.afterLock?.({ orderId: order.id, actor: 'STORE' });
       if (ORDER_CLOSED_STATUSES.includes(locked.status)) throw orderClosedError();
       // [W-25] the preview above is UX; THIS is the authority — a payment that
       // failed or was reversed between the tap and the lock is refused here
       assertMmgAttestable(locked);
-      if (locked.paymentStatus === 'CAPTURED' || locked.paymentStatus === 'CLAIMED') {
-        return { won: false, order: locked }; // idempotent under the lock
+      // [S1-6] The claim is decided on the LOCKED row: a repeat tap writes
+      // nothing; an attempt an operator rejected cannot be revived; and a
+      // durable customer denial — or a different reference — becomes the
+      // disagreement in the SAME statement that writes CLAIMED.
+      const decision = decideStoreMmgClaim(locked, reference, now);
+      if (decision.kind === 'ALREADY_CLAIMED') {
+        return { won: false, order: locked, notice: null as MmgClaimNotice | null, outboxId: null as string | null }; // idempotent under the lock
       }
       // [DOC-1 §31.5 · DOC-INV-48 · P31-2] The store's word is a CLAIM. It lands as CLAIMED —
       // never CAPTURED, which is reserved for a provider's own evidence — so nothing
@@ -1808,8 +1819,9 @@ export async function vendorRoutes(app: FastifyInstance) {
           id: order.id,
           paymentStatus: { notIn: ['CAPTURED', 'CLAIMED'] },
           status: { notIn: ORDER_CLOSED_STATUSES as OrderStatus[] },
+          mmgClaimRevision: locked.mmgClaimRevision,
         },
-        data: { paymentStatus: 'CLAIMED' },
+        data: { paymentStatus: 'CLAIMED', ...decision.data },
       });
       // [LB-015 / REPORT-004 F-004-08] The capture and its evidence row commit
       // or vanish together, the evidence records the FRESH lifecycle status
@@ -1820,6 +1832,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         where: { id: order.id },
         omit: HANDOVER_SECRETS_OMIT,
       });
+      let notice: MmgClaimNotice | null = null;
+      let outboxId: string | null = null;
       if (cas.count > 0) {
         // [W-25] The capture and the evidence behind it commit together: the
         // provider reference, who attested and when, plus an audit row naming
@@ -1848,21 +1862,29 @@ export async function vendorRoutes(app: FastifyInstance) {
           userId: request.user.userId, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED', entity: 'Order', entityId: order.id,
           changes: { reference, amount: String(fresh.totalAmount), claim: 'payment_claimed_by_vendor' },
         } });
+        // [S1-6] The disagreement's evidence and the durable notice obligation
+        // commit with the claim; the customer is told what the STORE said.
+        ({ notice, outboxId } = await stageStoreMmgClaim(tx, { facts: fresh, decision, actorId: request.user.userId, reference, now }));
+        // Answer with the row as it now stands, attestation evidence included.
+        const claimedRow = await tx.order.findUniqueOrThrow({ where: { id: order.id }, omit: HANDOVER_SECRETS_OMIT });
+        return { won: true, order: claimedRow, notice, outboxId };
       }
-      return { won: cas.count > 0, order: fresh };
+      return { won: false, order: fresh, notice, outboxId };
     });
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
     const updated = capture.order;
-    app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED' });
-    // The socket covers an open order screen; the notification survives it.
-    await notifications.send({
-      userId: order.customerId,
-      type: 'PAYMENT_RECEIVED',
-      title: 'Payment received',
-      body: `Your MMG payment for order #${order.orderNumber} is confirmed.`,
-      data: { orderId: order.id, kind: 'mmg_payment_confirmed' },
+    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+      orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
+      mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
     });
+    // The socket covers an open order screen; the notification survives it. It
+    // is delivered from the obligation committed above, in the STORE's words —
+    // never as a confirmation, and as a dispute notice when the claims disagree.
+    if (capture.notice && capture.outboxId) {
+      await completeMmgClaimNotice({ prisma: app.prisma, notifications }, { outboxId: capture.outboxId, notice: capture.notice })
+        .catch((err: unknown) => request.log.error({ err, orderId: order.id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
     return { success: true, data: updated };
   });
 

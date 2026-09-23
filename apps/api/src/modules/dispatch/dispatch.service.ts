@@ -26,6 +26,7 @@ import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/obs
 import { getTenantId } from '../../plugins/tenant-context';
 import { clampDriverFare } from '../../utils/markup';
 import { assertMmgFulfilmentAllowed } from '../order/order.service';
+import { mmgDispatchBlocked } from '../order/mmg-claim.service';
 import { FloatService, riderFloatForOrder } from './float.service';
 import {
   hasTaxiPassengerCustody,
@@ -860,6 +861,8 @@ export class DispatchService {
           fulfillment: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
           customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
           subtotalBase: true, paymentMethod: true, paymentStatus: true, tenantId: true, readyAt: true, foodAgeHeldAt: true, foodAgeWaivedAt: true,
+          // [S1-6] The disagreement latch the locked assignment writes also read.
+          mmgClaimMismatchAt: true,
           // [WS-6.0] The cash-math triple. A mover deciding on a CASH job is
           // deciding how much of their OWN float to commit, and the card used
           // to show only what they earn. Every number is a stored column, not
@@ -882,6 +885,11 @@ export class DispatchService {
         // [TA-S0-001 hold] Held for a person: too old to deliver and already
         // paid by MMG. Not ours to offer until an operator decides.
         if (order.foodAgeHeldAt) return {};
+        // [ORDER-SPINE S1-6 · cross-lane gate invariant 8] Direct-MMG work nobody
+        // has said is paid, or whose two payment claims disagree, is not offered:
+        // both assignment writes refuse it under the row lock, so a card would
+        // only be a ghost a rider is penalised for ignoring.
+        if (mmgDispatchBlocked(order)) return {};
       } else {
         if (order.driverId) return {};
         if (order.status !== 'PENDING') return {};

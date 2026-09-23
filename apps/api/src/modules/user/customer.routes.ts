@@ -30,7 +30,8 @@ import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
 import { RatingService } from '../rating/rating.service';
-import { NotificationService, tenantOfUser } from '../notification/notification.service';
+import { NotificationService } from '../notification/notification.service';
+import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
 import { AccountService } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
@@ -2201,6 +2202,9 @@ export async function customerRoutes(app: FastifyInstance) {
     const validatedOrderMmgUrl = order.paymentMethod === 'MOBILE_MONEY'
       && order.paymentStatus === 'PENDING'
       && !['CANCELLED', 'REFUNDED', 'FAILED'].includes(order.status)
+      // [S1-6] A store claim an operator rejected cannot be replaced by a new
+      // external payment this order could never reconcile: no pay link.
+      && !isRejectedMmgAttempt(order)
       ? safeMmgPayUrl(order.mmgPayUrlSnapshot)
       : null;
     const paymentAction = validatedOrderMmgUrl && order.mmgRecipientNameSnapshot
@@ -2273,6 +2277,9 @@ export async function customerRoutes(app: FastifyInstance) {
         // the pay/track screen can flip from Awaiting to Paid.
         paymentStatus: order.paymentStatus,
         paymentAction,
+        // [S1-6] What each party said about a direct-MMG payment, whether the
+        // order is held on a disagreement, and whether a claim may be made now.
+        mmgClaim: mmgClaimView(order),
         fulfillment: order.fulfillment,
         // Takeaway handover gate — the customer PRESENTS this code at the
         // counter. It was only in the checkout response before, so it
@@ -2514,36 +2521,49 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
-  // [DOC-1 §31.5 · §31.6 · P31-2] The customer's OWN claim, from their device. "I paid" (with
-  // the MMG reference) is a second, independent claim beside the store's; a dispute after the
-  // store claimed receipt is a mismatch that holds dispatch until a person resolves it.
+  // [DOC-1 §31.5 · §31.6 · P31-2 · ORDER-SPINE S1-6] The customer's OWN claim, from their device:
+  // "I paid" (with the MMG reference) or "I did not pay", recorded through the one locked claim
+  // authority (order/mmg-claim.service.ts). A denial is durable whichever party speaks first; two
+  // claims that disagree hold fulfilment until a person decides. The state, its evidence and the
+  // notice obligation commit together; the notices are delivered from that obligation.
   app.post('/orders/:id/payment-claim', async (request: AuthRequest) => {
     if (!request.user?.userId) throw new AppError(401, 'UNAUTHENTICATED', 'Sign in first');
     const { id } = request.params as { id: string };
-    const body = z.object({ paid: z.boolean(), reference: z.string().trim().min(3).max(64).optional() }).parse(request.body ?? {});
-    const order = await app.prisma.order.findFirst({ where: { id, customerId: request.user.userId }, select: { id: true, paymentMethod: true, paymentStatus: true, customerClaimedPaidAt: true, mmgClaimMismatchAt: true } });
-    if (!order) throw new NotFoundError('Order', id);
-    if (order.paymentMethod !== 'MOBILE_MONEY') throw new AppError(409, 'NOT_A_WALLET_ORDER', 'Only an MMG order carries a payment claim');
-    const now = new Date();
-    if (body.paid) {
-      const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: now, customerPaymentRef: body.reference ?? null } });
-      await app.prisma.auditLog.create({ data: { userId: request.user.userId, action: 'CUSTOMER_CLAIMED_PAID', entity: 'Order', entityId: id, changes: { reference: body.reference ?? null, claim: 'customer_claimed_paid' } } });
-      return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, customerClaimedPaidAt: updated.customerClaimedPaidAt, storeClaimed: updated.paymentStatus === 'CLAIMED' } };
-    }
-    // a dispute: the store says received, the customer says not — a mismatch, before dispatch
-    const mismatch = order.paymentStatus === 'CLAIMED' && !order.mmgClaimMismatchAt;
-    const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: null, customerPaymentRef: null, ...(mismatch ? { mmgClaimMismatchAt: now } : {}) } });
-    await app.prisma.auditLog.create({ data: { userId: request.user.userId, action: mismatch ? 'MMG_CLAIM_MISMATCH' : 'CUSTOMER_CLAIMED_NOT_PAID', entity: 'Order', entityId: id, changes: { claim: 'customer_claimed_not_paid', storeStatus: order.paymentStatus } } });
-    if (mismatch) {
-      const { notifyAdmins } = await import('../notification/notification.service');
-      await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
-        tenantId: await tenantOfUser(app.prisma, request.user.userId),
-        title: 'MMG payment claims disagree',
-        body: `Order ${id}: the store reported the MMG payment received; the customer says they did not pay. Dispatch is held until someone resolves it.`,
-        data: { kind: 'mmg_claim_mismatch', orderId: id },
+    const body = z.object({ paid: z.boolean(), reference: z.string().max(80).nullish() }).parse(request.body ?? {});
+    const customerId = request.user.userId;
+    const outcome = await app.prisma.$transaction((tx) => recordCustomerMmgClaim(tx, {
+      orderId: id,
+      customerId,
+      tenantId: getTenantId(),
+      paid: body.paid,
+      reference: body.reference ?? null,
+    }));
+    const facts = outcome.facts;
+    if (!outcome.replayed) {
+      app.io.to(`order:${id}`).emit('order:status_changed', {
+        orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
+        mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });
     }
-    return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, mismatch: Boolean(updated.mmgClaimMismatchAt) } };
+    if (outcome.notice && outcome.outboxId) {
+      // The obligation is already durable; this only delivers it now rather than on the next sweep.
+      await completeMmgClaimNotice(
+        { prisma: app.prisma, notifications: new NotificationService(app.prisma, app.io) },
+        { outboxId: outcome.outboxId, notice: outcome.notice },
+      ).catch((err: unknown) => request.log.error({ err, orderId: id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
+    return {
+      success: true,
+      data: {
+        orderId: id,
+        paymentStatus: facts.paymentStatus,
+        customerClaimedPaidAt: facts.customerClaimedPaidAt,
+        storeClaimed: facts.paymentStatus === 'CLAIMED',
+        mismatch: facts.mmgClaimMismatchAt != null,
+        replayed: outcome.replayed,
+        mmgClaim: mmgClaimView(facts),
+      },
+    };
   });
 
   app.post('/orders/:id/cancel', async (request: AuthRequest) => {

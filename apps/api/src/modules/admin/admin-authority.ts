@@ -137,7 +137,8 @@ const E = {
   // refund actually moves; the reference and the amount are the only proof
   // that a refund happened, and they belong in the trail as a diff.
   // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
-  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt'] },
+  // [ORDER-SPINE S1-6] …and a decision's outcome and the claim generation it produced.
+  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt', 'mmgClaimResolution', 'mmgClaimRevision'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },

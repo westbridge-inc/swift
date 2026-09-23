@@ -29,6 +29,7 @@ import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capability
 import { APPROVAL_HEADER, approvalRefusalMessage, decideApproval, requiresApproval, resolveApproval } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
+import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -4754,18 +4755,50 @@ export async function adminRoutes(app: FastifyInstance) {
   // [DOC-1 §5.1 T23 · P5-1] revoke(): withdraw a COMMITTED approval with a reason. C3 —
   // the same authority as a decision; the state machine refuses anything not committed.
   const revokeDocSchema = z.object({ reason: z.string().min(3).max(500) });
-  // [DOC-1 §31.5 · P31-2] A human resolves a payment-claim mismatch: the hold clears, the order moves.
+  // [DOC-1 §31.5 · P31-2 · ORDER-SPINE S1-6] A person decides a payment-claim disagreement —
+  // under the order's row lock (with this operator's tenant), against the claim generation they
+  // reviewed, with the canonical audit row (auditWithin) and the notice obligation committed in
+  // the SAME transaction. The same decision retried is a replay; a stale or conflicting one is
+  // refused and changes nothing. It never rewrites what the customer or the store said.
   app.post('/orders/:id/payment-claim/resolve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = z.object({ resolution: z.enum(['CUSTOMER_PAID', 'CUSTOMER_DID_NOT_PAY']), note: z.string().min(3).max(500) }).parse(request.body);
-    const order = await app.prisma.order.findUnique({ where: { id }, select: { id: true, mmgClaimMismatchAt: true, paymentStatus: true } });
-    if (!order) throw new NotFoundError('Order', id);
-    const updated = await app.prisma.order.update({ where: { id }, data: {
-      mmgClaimMismatchAt: null,
-      ...(body.resolution === 'CUSTOMER_DID_NOT_PAY' ? { paymentStatus: 'PENDING', customerClaimedPaidAt: null } : { customerClaimedPaidAt: new Date() }),
-    } });
-    await audit(request.user.userId, 'MMG_CLAIM_MISMATCH_RESOLVED', 'Order', id, { resolution: body.resolution, note: body.note, wasStatus: order.paymentStatus }, request);
-    return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, mismatch: false } };
+    const body = z.object({
+      resolution: z.enum(['CUSTOMER_PAID', 'CUSTOMER_DID_NOT_PAY']),
+      note: z.string().min(3).max(500),
+      expectedClaimRevision: z.number().int().min(0),
+    }).parse(request.body);
+    const tenantId = requireTenantId();
+    const outcome = await app.prisma.$transaction((tx) => resolveMmgClaimDisagreement(tx, {
+      orderId: id,
+      tenantId,
+      resolution: body.resolution,
+      expectedClaimRevision: body.expectedClaimRevision,
+      note: body.note,
+      actorId: request.user.userId,
+      audit: (auditTx, facts) => auditWithin(auditTx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
+    const facts = outcome.facts;
+    if (!outcome.replayed) {
+      app.io.to(`order:${id}`).emit('order:status_changed', {
+        orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
+        mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
+      });
+    }
+    if (outcome.notice && outcome.outboxId) {
+      await completeMmgClaimNotice({ prisma: app.prisma, notifications }, { outboxId: outcome.outboxId, notice: outcome.notice })
+        .catch((err: unknown) => request.log.error({ err, orderId: id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
+    return {
+      success: true,
+      data: {
+        orderId: id,
+        paymentStatus: facts.paymentStatus,
+        mismatch: facts.mmgClaimMismatchAt != null,
+        resolution: facts.mmgClaimResolution,
+        replayed: outcome.replayed,
+        mmgClaim: mmgClaimView(facts),
+      },
+    };
   });
 
   app.put('/verification/:id/revoke', { preHandler: [adminGuard] }, async (request) => {

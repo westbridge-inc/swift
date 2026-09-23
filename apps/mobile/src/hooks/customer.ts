@@ -729,3 +729,14 @@ export function useDecideSubstitution(orderId: string) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['order', orderId] }),
   });
 }
+
+/** [ORDER-SPINE S1-6] Tell Swift what happened to a direct-MMG payment. The
+ *  order is refetched whatever the outcome — a timeout can mean it landed. */
+export function useClaimMmgPayment(orderId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ paid, reference }: { paid: boolean; reference?: string }) =>
+      customerApi.claimOrderPayment(orderId, { paid, ...(reference ? { reference } : {}) }),
+    onSettled: () => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
+  });
+}

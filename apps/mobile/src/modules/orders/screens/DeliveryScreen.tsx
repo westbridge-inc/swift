@@ -14,7 +14,7 @@ import { useIsFocused, useNavigation, useRoute } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useOrder, useDecideSubstitution } from '../../../hooks/customer';
+import { useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../hooks/customer';
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
@@ -27,6 +27,8 @@ import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
+import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { parseMmgClaimView, type MmgClaimAction } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 
 const GUTTER = space['2xl'];
@@ -383,6 +385,15 @@ export function DeliveryScreen() {
     },
   });
   const decideSub = useDecideSubstitution(orderId);
+  // [ORDER-SPINE S1-6] The customer's own claim about a direct-MMG payment —
+  // their only first-party door to "I didn't pay". That statement can pause
+  // the order, so it is confirmed first; the order refetches either way.
+  const claimPayment = useClaimMmgPayment(orderId);
+  const [pendingMmgClaim, setPendingMmgClaim] = useState<MmgClaimAction | null>(null);
+  const mmgClaimFailed = (error: any) => {
+    const serverMessage = error?.response?.data?.error?.message;
+    toast.error('That didn’t go through', typeof serverMessage === 'string' ? serverMessage : 'Check your connection and try again.');
+  };
 
   const o = order.data;
   const orderStatus = String(o?.status ?? '').toUpperCase();
@@ -681,6 +692,7 @@ export function DeliveryScreen() {
   const rider = o.rider;
   const items: any[] = o.items ?? [];
   const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
+  const mmgClaim = parseMmgClaimView(o.mmgClaim);
   const mmgCaptured = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'CAPTURED';
   const ringHidden = terminal || mmgCaptured || !o.canCancel;
   // Hold lifecycle and cancel eligibility are separate server facts. A paid or
@@ -1338,6 +1350,20 @@ export function DeliveryScreen() {
             </View>
           ) : null}
 
+          {mmgClaim && !cancelled && !failed ? (
+            <MmgPaymentClaimCard
+              view={mmgClaim}
+              pending={claimPayment.isPending}
+              onClaim={(action) => {
+                if (action.confirm) {
+                  setPendingMmgClaim(action);
+                  return;
+                }
+                claimPayment.mutate({ paid: action.paid }, { onError: mmgClaimFailed });
+              }}
+            />
+          ) : null}
+
           {/* [SPS-F-0023] The post-delivery tip prompt is GONE, not disabled:
               the API fails closed (TIP_COLLECTION_UNAVAILABLE — no rail
               collects money after the job), and a button that always errors is
@@ -1437,6 +1463,42 @@ export function DeliveryScreen() {
             size="md"
             disabled={cancelChecking || cancelOrder.isPending}
             onPress={() => setConfirmCancel(false)}
+          />
+        </View>
+      </PopupCard>
+
+      {/* [ORDER-SPINE S1-6] "I didn't pay" can pause the order for a person to
+          check, so it is a deliberate second tap — never a single stray one. */}
+      <PopupCard
+        visible={pendingMmgClaim !== null}
+        onClose={() => { if (!claimPayment.isPending) setPendingMmgClaim(null); }}
+      >
+        <IconChip icon="alert-circle" size={56} />
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
+          {pendingMmgClaim?.confirm?.title ?? ''}
+        </PopupTitle>
+        <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
+          {pendingMmgClaim?.confirm?.body ?? ''}
+        </T>
+        <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
+          <PillButton
+            label={pendingMmgClaim?.confirm?.confirmLabel ?? 'Confirm'}
+            size="md"
+            loading={claimPayment.isPending}
+            onPress={() => {
+              if (!pendingMmgClaim) return;
+              claimPayment.mutate({ paid: pendingMmgClaim.paid }, {
+                onSettled: () => setPendingMmgClaim(null),
+                onError: mmgClaimFailed,
+              });
+            }}
+          />
+          <PillButton
+            label="Go back"
+            variant="soft"
+            size="md"
+            disabled={claimPayment.isPending}
+            onPress={() => setPendingMmgClaim(null)}
           />
         </View>
       </PopupCard>
