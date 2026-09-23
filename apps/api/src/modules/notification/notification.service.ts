@@ -1,4 +1,5 @@
-import type { Notification, PrismaClient } from '@prisma/client';
+import { createHash } from 'node:crypto';
+import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
@@ -170,12 +171,25 @@ export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId:
   return tenantOfUser(prisma, sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null);
 }
 
+/** The tracking row of one deduped ops page to one admin — derived from the
+ *  notice and the recipient, so the same page sent again maps onto it. */
+function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
+  return `ops_alert_${createHash('sha256').update(`${dedupeKey}:${recipientId}`).digest('hex').slice(0, 24)}`;
+}
+
 export async function notifyAdmins(
   prisma: PrismaClient,
   notifications: NotificationService,
   /** `tenantId` is REQUIRED — pass the subject's tenant, or an explicit
    *  `null` for a genuinely platform-wide notice. See the note below. */
-  input: { title: string; body: string; data?: Record<string, unknown>; tenantId: string | null },
+  input: {
+    title: string; body: string; data?: Record<string, unknown>; tenantId: string | null;
+    /** [ORDER-SPINE S1-6] Per-recipient idempotency key for a page that a
+     *  retried obligation may send again: the retry collapses into the first
+     *  delivery, and its tracking row, for every admin who already has it.
+     *  Omit it everywhere else. */
+    dedupeKey?: string;
+  },
 ): Promise<number> {
   // [REPORT-014 F-014-03] Background workers carry no tenant ALS, so a
   // tenant-A event used to page tenant-B admins with A's order evidence.
@@ -244,6 +258,7 @@ export async function notifyAdmins(
       title: input.title,
       body: input.body,
       data: input.data,
+      ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
     });
     if (id) reached += 1;
   }
@@ -251,9 +266,17 @@ export async function notifyAdmins(
   // alerts, so /alerts/health can show whether anyone actually SAW them.
   if (admins.length > 0) {
     const subjectId = String((input.data?.['kind'] as string | undefined) ?? 'ops');
-    await prisma.alertDelivery
-      .createMany({ data: admins.map((a) => ({ kind: 'ADMIN_OPS', subjectId, recipientId: a.id })) })
-      .catch(() => {});
+    const rows = admins.map((a) => ({ kind: 'ADMIN_OPS', subjectId, recipientId: a.id }));
+    // [F-R2-ASTRA-01] A deduped page stays ONE notice per admin however often
+    // a retried obligation re-sends it — send() hands back the first delivery
+    // and does not fan out again — so it keeps one tracking row per admin
+    // too: the row id is derived from (notice, admin) and a retry's insert is
+    // skipped. Without a key every call is a new notice, tracked as before.
+    const { dedupeKey } = input;
+    const tracking: Prisma.AlertDeliveryCreateManyArgs = dedupeKey
+      ? { data: rows.map((r) => ({ ...r, id: dedupedOpsAlertId(dedupeKey, r.recipientId) })), skipDuplicates: true }
+      : { data: rows };
+    await prisma.alertDelivery.createMany(tracking).catch(() => {});
   }
   return reached;
 }
@@ -424,6 +447,20 @@ export class NotificationService {
       type: 'ORDER_UPDATE',
       title: 'Order Accepted!',
       body: `${vendorName} has accepted your order ${orderNumber} and is preparing it.`,
+      data: { orderId, orderNumber, status: 'ACCEPTED' },
+    });
+  }
+
+  /** A SERVICE business confirmed a booking: the customer's slot is reserved.
+   *  No kitchen words — a booking is not prepared. Same data shape as
+   *  orderAccepted, so the app's notification router lands on the same order
+   *  screen it always did. */
+  async bookingConfirmed(customerId: string, orderNumber: string, vendorName: string, orderId: string): Promise<void> {
+    await this.send({
+      userId: customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Booking confirmed',
+      body: `${vendorName} confirmed your booking ${orderNumber}.`,
       data: { orderId, orderNumber, status: 'ACCEPTED' },
     });
   }

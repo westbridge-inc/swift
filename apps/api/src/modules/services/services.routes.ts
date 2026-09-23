@@ -22,6 +22,7 @@ import { getTenantId } from '../../plugins/prisma';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { deactivateRoom } from '../chat/chat-authority';
 import { isServiceCategoryOperational } from './service-catalog';
+import { formatGuyanaTime } from '../../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // Module S: Services (spec §4.6) — hire verified professionals. A ServiceJob is
@@ -88,7 +89,7 @@ export async function servicesRoutes(app: FastifyInstance) {
    *  provider reads the same "Tue, 9:00 AM, 26 Aug" when a booking is made as
    *  when it is cancelled. */
   function slotLabel(when: Date): string {
-    return when.toLocaleString('en-GY', { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' });
+    return formatGuyanaTime(when, { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short', hour12: true }, 'en-US');
   }
 
   async function jobForUser(jobId: string, userId: string) {
@@ -424,6 +425,11 @@ export async function servicesRoutes(app: FastifyInstance) {
     const job = await jobForUser(id, request.user.userId);
     if (job.customerId !== request.user.userId) throw new AppError(403, 'CUSTOMER_ONLY', 'Only the customer can schedule');
     if (job.status !== 'QUOTED') throw new AppError(400, 'BAD_STATE', 'Agree a quote before scheduling');
+    // A slot that has already started cannot be kept: the provider would be
+    // asked to confirm the impossible and the reminder sweep (which looks
+    // forward only) would never fire. Same rule and code as appointments
+    // (BookingService.validateSlot).
+    if (scheduledFor.getTime() <= Date.now()) throw new AppError(400, 'SLOT_IN_PAST', 'Pick a time in the future');
     // [S0] A provider has ONE body: two customers cannot hold the same slot.
     // The judge is the partial unique index on ("providerId", "scheduledFor")
     // for live jobs (service_job_slot_exclusivity migration) — a read-then-check

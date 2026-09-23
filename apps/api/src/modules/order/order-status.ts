@@ -225,6 +225,58 @@ export function isMoverHolding(status: OrderStatus): boolean {
 // happy path may do, a recovery edge is something only a release may do.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// A BOOKING'S STATES — the NINTH member of this family.
+//
+// An APPOINTMENT is confirmed, completed or cancelled. It is never prepared,
+// marked ready, handed to a rider or delivered: it has no kitchen and no leg.
+// Nothing said so. The forward machine below is keyed by status alone, so a
+// booking in ACCEPTED could be moved to PREPARING and READY_FOR_PICKUP by the
+// vendor's kitchen routes (or any generic caller), the customer got "Being
+// Prepared" and "Food Ready!" pushes for a haircut, and the booking was then
+// stranded — complete-appointment requires ACCEPTED (review F03).
+//
+// Classified ONCE, in the same shape as custody: a `Record<OrderStatus, …>`
+// that fails to compile until a new state is deliberately classified. The
+// canonical transition seam enforces it on the locked row for every caller;
+// the kitchen routes refuse a booking before they reach it.
+// ---------------------------------------------------------------------------
+
+/** May an APPOINTMENT occupy this status? */
+const BOOKING_LAW: Record<OrderStatus, boolean> = {
+  PENDING: true,
+  ACCEPTED: true,
+  // No kitchen: a booking is never prepared or "ready".
+  PREPARING: false,
+  READY_FOR_PICKUP: false,
+  // No leg: nobody carries a haircut.
+  RIDER_ASSIGNED: false,
+  RIDER_EN_ROUTE_PICKUP: false,
+  RIDER_ARRIVED_PICKUP: false,
+  PICKED_UP: false,
+  EN_ROUTE_DELIVERY: false,
+  ARRIVED: false,
+  DRIVER_ASSIGNED: false,
+  DRIVER_EN_ROUTE: false,
+  DRIVER_ARRIVED: false,
+  RIDE_IN_PROGRESS: false,
+  // Over: completed by the provider, cancelled by either side, refunded after.
+  DELIVERED: false,
+  COMPLETED: true,
+  CANCELLED: true,
+  REFUNDED: true,
+  // A booking has no handover to fail; a no-show is a decline or a cancel.
+  FAILED: false,
+};
+
+/** THE statuses a booking may occupy. Derived, never hand-written. */
+export const APPOINTMENT_STATUSES: OrderStatus[] = ALL_STATUSES.filter((s) => BOOKING_LAW[s]);
+
+/** True when a booking may be moved INTO `status`. */
+export function isAppointmentStatus(status: OrderStatus): boolean {
+  return BOOKING_LAW[status];
+}
+
 /**
  * The locked FORWARD state machine. Key = target state, value = the states it
  * may be entered from on the normal path. Compare-and-set on these makes a

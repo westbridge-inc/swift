@@ -1726,7 +1726,7 @@ model BookingException {
   itemId    String?
   vendorId  String
   date      DateTime @db.Date
-  start     String? // "13:00" local wall-clock (the UTC-face convention)
+  start     String? // "13:00" market wall-clock for the date-only exception
   end       String?
   reason    String?
   createdAt DateTime @default(now())
@@ -1893,6 +1893,23 @@ model Order {
   customerClaimedPaidAt    DateTime?
   customerPaymentRef       String?
   mmgClaimMismatchAt       DateTime?
+  /// [ORDER-SPINE S1-6] The customer's statement under the locked claim authority
+  /// (order/mmg-claim.service.ts). UNRECORDED is "nothing said under this contract",
+  /// NOT proof of silence before it; NOT_PAID is durable, so a later store claim finds
+  /// it. `customerClaimedPaidAt`/`customerPaymentRef` stay as its compatibility
+  /// projections. `mmgClaimMismatchAt` remains THE open-disagreement latch every
+  /// fulfilment gate reads; CHECK constraints make an unheld contradiction unwritable.
+  customerMmgClaim         CustomerMmgClaim    @default(UNRECORDED)
+  customerMmgClaimAt       DateTime?
+  /// One generation counter for the claim facts: every changed customer statement,
+  /// first store claim and operator decision advances it; exact repeats do not. An
+  /// operator decision names the generation it reviewed.
+  mmgClaimRevision         Int                 @default(0)
+  /// The latest operator decision and the generation it produced. It covers the
+  /// claim facts only while `mmgClaimResolvedRevision = mmgClaimRevision`.
+  mmgClaimResolution       MmgClaimResolution?
+  mmgClaimResolvedAt       DateTime?
+  mmgClaimResolvedRevision Int?
 
   estimatedPrepTime     Int?
   estimatedDeliveryTime Int?
@@ -2107,6 +2124,23 @@ enum PaymentStatus {
   EXPIRED
   /// Superseded before resolution (another rail paid the week first).
   CANCELLED
+}
+
+/// [ORDER-SPINE S1-6] What the CUSTOMER said about a direct-MMG payment, under
+/// the locked claim authority. Never a payment state: a customer statement
+/// neither authorises fulfilment nor proves money moved.
+enum CustomerMmgClaim {
+  UNRECORDED
+  PAID
+  NOT_PAID
+}
+
+/// [ORDER-SPINE S1-6] An operator's decision on a disagreement between the
+/// store's claim and the customer's statement. CUSTOMER_PAID upholds the
+/// store's claim; CUSTOMER_DID_NOT_PAY rejects that claim attempt for good.
+enum MmgClaimResolution {
+  CUSTOMER_PAID
+  CUSTOMER_DID_NOT_PAY
 }
 
 /// markedUpPrice/markup* fields are V1 dormant (zero-commission) — kept

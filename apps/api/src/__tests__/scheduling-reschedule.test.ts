@@ -10,6 +10,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
+import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 
 // [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
@@ -82,9 +83,10 @@ async function makeServiceVendor() {
   return { owner, vendor, item };
 }
 
+/** Tomorrow at a Guyana wall-clock hour, as the TRUE instant the slot happens. */
 function tomorrowAt(hour: number): Date {
-  const d = new Date(Date.now() + DAY);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), hour, 0, 0, 0));
+  const [y, m, d] = guyanaDayKey(new Date()).split('-').map(Number);
+  return instantOfGuyanaWallClock(new Date(Date.UTC(y!, m! - 1, d! + 1, hour)));
 }
 
 beforeAll(async () => {
