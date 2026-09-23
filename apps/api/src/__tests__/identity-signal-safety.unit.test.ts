@@ -1,34 +1,41 @@
+/**
+ * [NO-AI · trial integrity §2.1] ID_DOC_NUMBER is a HARD identity signal: it unions
+ * accounts and can revoke a later trial. It used to be captured automatically from a
+ * model's reading of an approved document. That path went with the model: no production
+ * code captures ID_DOC_NUMBER any more, and the policy module that admitted model output
+ * into the graph is deleted rather than left as an invitation.
+ * What remains is the service-level guard that an empty signal never hashes or opens a
+ * transaction.
+ *
+ * Consequence, recorded in the lane report: a reviewer-keyed ID_DOC_NUMBER capture is a
+ * follow-up. Until it lands, duplicate-identity detection rests on PHONE, DEVICE, PLATE
+ * and DOC_CONTENT (the file hash) alone.
+ */
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import type { PrismaClient } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 import { IdentityService } from '../modules/integrity/identity.service';
-import { approvedIdentityDocumentNumber } from '../modules/verification/identity-signal-policy';
 
-describe('identity signal admission policy', () => {
-  it.each([
-    ['national_id', ' 154-829-063 ', '154829063'],
-    ['owner_national_id', 'ab 12-34', 'AB1234'],
-    ['passport', ' pa-009 ', 'PA009'],
-    ['identity_l2', ' l2-123 ', 'L2123'],
-  ])('admits a declared identity identifier for %s', (docType, raw, expected) => {
-    expect(approvedIdentityDocumentNumber(docType, 'APPROVED', raw)).toBe(expected);
-  });
+const API_SRC = join(__dirname, '..');
+const walk = (dir: string, out: string[] = []): string[] => {
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) { if (!['node_modules', 'dist', '__tests__'].includes(entry)) walk(full, out); }
+    else if (/\.ts$/.test(entry)) out.push(full);
+  }
+  return out;
+};
 
-  it.each([
-    'vehicle_registration',
-    'vehicle_insurance',
-    'drivers_licence',
-    'hire_car_permit',
-    'business_registration',
-  ])('does not misclassify a %s number as a person identity', (docType) => {
-    expect(approvedIdentityDocumentNumber(docType, 'APPROVED', 'AB-1234')).toBeNull();
-  });
-
-  it.each(['PENDING', 'REJECTED'])('does not trust %s OCR as HARD identity evidence', (status) => {
-    expect(approvedIdentityDocumentNumber('national_id', status, '154-829-063')).toBeNull();
-  });
-
-  it('drops a punctuation-only identity number before capture', () => {
-    expect(approvedIdentityDocumentNumber('national_id', 'APPROVED', '---')).toBeNull();
+describe('identity signal admission after the no-AI rule', () => {
+  it('the model-output admission policy is gone, and no production code captures ID_DOC_NUMBER', () => {
+    expect(existsSync(join(API_SRC, 'modules', 'verification', 'identity-signal-policy.ts'))).toBe(false);
+    const capturing = walk(API_SRC)
+      .filter((f) => /type:\s*'ID_DOC_NUMBER'/.test(readFileSync(f, 'utf8')))
+      .map((f) => relative(API_SRC, f));
+    expect(capturing).toEqual([]);
+    // The signal keeps its HARD strength, so a future reviewer-keyed capture inherits the law unchanged.
+    expect(readFileSync(join(API_SRC, 'modules', 'integrity', 'identity.service.ts'), 'utf8')).toMatch(/ID_DOC_NUMBER:\s*'HARD'/);
   });
 
   it('refuses an empty normalized signal before hashing or opening a transaction', async () => {
@@ -39,7 +46,7 @@ describe('identity signal admission policy', () => {
       actorRole: 'CUSTOMER',
       type: 'ID_DOC_NUMBER',
       normalizedValue: '   ',
-      source: 'AI_ID_ANALYZER',
+      source: 'HUMAN_REVIEW',
     });
 
     expect(result).toEqual({

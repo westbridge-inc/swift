@@ -24,7 +24,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { seedDocRegistry } from '../modules/verification/doc-registry';
 import { documentRecordDdl, DOCUMENT_RECORD_BACKFILL_SQL } from '../modules/verification/document-record';
 import { docStateMachineDdl } from '../modules/verification/doc-state';
@@ -81,7 +81,7 @@ beforeAll(async () => {
   await adminApp.register(prismaPlugin); await adminApp.register(redisPlugin); await adminApp.register(authPlugin); await adminApp.register(socketPlugin);
   await adminApp.register(adminRoutes, { prefix: '/api/v1/admin' });
   await adminApp.ready();
-  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   await system(() => seedDocRegistry(app.prisma));
   const a = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59279${NUM}0`, firstName: 'Rec', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,

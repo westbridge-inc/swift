@@ -88,6 +88,24 @@ const PUBLISHED: Record<
     driver_agreement: 'aea903e63b7620322010187556e385a501e6e0c82d3e25b1e4809a6cd94bc1a5',
     vendor_agreement: 'af8e9d090a0c2d5323c4b6e1433aacd9cd8e2d0a9cd04a57a536f1331d0dd9a8',
   },
+  // [NO-AI · owner rule 2026-09-07, #1276] Identity documents are decided by a
+  // person; the model-backed identity providers, the selfie face-match and the
+  // in-shift selfie check are gone. The 2026-09-23 words described that removed
+  // processing, so they stopped being true. Privacy: the processors list no
+  // longer names an identity-verification provider, the "AI processing"
+  // paragraph says a trained person reads and decides the document and that
+  // there is no AI model in Swift (graded in legal-ai-claim and
+  // legal-human-review-claim), and the verification-documents bullet no longer
+  // points to a provider. Mover Agreement: no in-shift selfie check is claimed.
+  // Terms: the preamble no longer claims Caribbean markets beyond Guyana, since
+  // public signup is Guyana-only (#1259). The date moves with the words, so all
+  // four documents re-pin; the 2026-09-23 entry above stays exactly as pinned.
+  '2026-09-24': {
+    terms: '50efa809026066e7b107001f57a49afc02e1c7620604617847e455a70bb2a5b6',
+    privacy: '28dc34df68a42aece4779c76159f2ba304fe48cbc12b67f29c35ccddfb143200',
+    driver_agreement: 'ef7089db0be6c27e7b446c95d875f30c2b31bbbd8a3b39a94355f9112f3fb159',
+    vendor_agreement: '3672c61f804747d8977981bcee4c75ff4b9935808c00cd0fcd21800bf67f21e2',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

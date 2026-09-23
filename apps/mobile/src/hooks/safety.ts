@@ -163,15 +163,6 @@ export function useRemoveEmergencyContact() {
   return useContactMutation((id: string) => safetyApi.removeEmergencyContact(id));
 }
 
-export interface LivenessCheckOutcome {
-  checkId: string;
-  outcome: 'PASS' | 'BORDERLINE' | 'FAIL' | 'ERROR_FAIL_OPEN' | 'ERROR_FAIL_CLOSED';
-  allowedOnline: boolean;
-  attemptsLeft?: number;
-}
-
-/** §7.1 — run one shift identity check. The screen renders every outcome
- *  itself (including the 423 lock), so the global error toast stays out. */
 /**
  * [TST-001] The driver's answer to a Trip Guardian check.
  *
@@ -185,21 +176,6 @@ export function useGuardianDriverConfirm() {
       const res = await safetyApi.guardianDriverConfirm({ cycleId, nonce });
       return res.data?.data as { status?: string } | undefined;
     },
-    meta: { silent: true },
-  });
-}
-
-export function useLivenessCheck() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async ({ photoUri, profile }: { photoUri: string; profile: 'DRIVER' | 'RIDER' }) => {
-      const form = new FormData();
-      form.append('file', { uri: photoUri, name: 'liveness.jpg', type: 'image/jpeg' } as never);
-      const res = await safetyApi.livenessCheck(form, profile);
-      return res.data?.data as LivenessCheckOutcome;
-    },
-    // A pass changes what go-online will say — refetch the mover surface.
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
     meta: { silent: true },
   });
 }

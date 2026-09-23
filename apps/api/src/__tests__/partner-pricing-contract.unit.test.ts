@@ -1034,12 +1034,15 @@ describe('activation — a market that cannot price a partner refuses to activat
     const decisionAt = verification.indexOf('private async transitionPendingDocument(');
     expect(decisionAt).toBeGreaterThan(-1);
     before(verification.slice(decisionAt, verification.indexOf("if (outcome.kind === 'NOT_PENDING')", decisionAt)), 'assertActivationPriceable(candidate.userId, tx)', 'projectProviderVerificationLocked(tx, updated.userId)');
-    // An auto-approval the market cannot price is queued for a human instead of being written approved.
-    const intakeAt = verification.indexOf("if (result.status === 'approved') {");
-    expect(intakeAt).toBeGreaterThan(-1);
-    const intake = verification.slice(intakeAt, verification.indexOf('const doc = await this.createDocumentLively(', intakeAt));
-    expect(intake).toContain('assertActivationPriceable(userId, this.prisma)');
-    expect(intake).toContain("status: 'pending_manual'");
+    // [NO-AI] Intake can no longer activate anyone: every submission is written PENDING and a
+    // person decides it, so there is nothing to price at intake and the decision above is the
+    // one place an approval is priced. Guard that intake stays that way — no pricing call, no
+    // approval write — rather than asserting a hold on an automatic approval that no longer exists.
+    const intake = verification.slice(verification.indexOf('async submitDocument('), verification.indexOf('async reconcileVendorActivations('));
+    expect(intake.length).toBeGreaterThan(1000);
+    expect(intake).not.toContain('assertActivationPriceable(');
+    expect(intake).not.toMatch(/reviewedBy|reviewedAt/);
+    expect(intake.match(/status: 'PENDING',/g)).toHaveLength(2);
   });
 });
 

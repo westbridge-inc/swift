@@ -54,9 +54,7 @@ let seq = 0;
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-category-gate-test');
 
 class ManualKyc implements KycProvider {
-  async verifyIdentity(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `m_${nanoid(6)}` }; }
-  async verifyDocument(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `m_${nanoid(6)}` }; }
-  async getStatus(): Promise<'pending_manual'> { return 'pending_manual'; }
+  async verifyDocument(): Promise<KycVerificationResult> { return { referenceToken: `m_${nanoid(6)}` }; }
 }
 
 async function user(roles: string[], activeRole: string) {

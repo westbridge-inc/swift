@@ -2,8 +2,8 @@ import type { PrismaClient } from '@prisma/client';
 import { IdentityService } from './identity.service';
 
 // The enforcement ladder's read side (spec Part 4). Rungs 2–3 bite at
-// ACTIVATION, not at signup: a held account's documents are never
-// auto-approved — a human reviews them with the identity panel open. The
+// ACTIVATION, not at signup: every document is reviewed by a person, who
+// sees the hold on the identity panel before deciding. The
 // user-facing copy lives here so every surface says exactly the same thing
 // (glossary law), and the fraud-tier message never names the signal (never
 // leak the tell).

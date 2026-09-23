@@ -85,8 +85,8 @@ describe('a push never lands on a route its recipient cannot reach [S0]', () => 
 
   it('the two pushes that say "contact support" open support', () => {
     // Both bodies instruct the recipient to contact Swift. GetHelp is mounted
-    // in every navigator, which is precisely why liveness_locked already uses
-    // it — a mover-bound destination has to exist inside MoverStack.
+    // in every navigator — a mover-bound destination has to exist inside
+    // MoverStack.
     expect(destinationFor({ kind: 'incident_interim_suspension', orderId: 'o1', caseNumber: 'INC-1' }))
       .toEqual({ screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } });
     expect(destinationFor({ kind: 'claim_over_gate', orderId: 'o1' }))
@@ -247,7 +247,7 @@ const CENSUS: Case[] = [
   { k: 'ops_alert_escalated', d: { opsAlertId: 'a1', sosAlertId: 'a1', level: 1 }, to: null, why: 'admins — [S-19] an ops page nobody acknowledged by its deadline; the alert list is an ops surface' },
   { k: 'ops_alert_drill', d: { opsAlertId: 'a1' }, to: null, why: 'admins — [S-19] a scheduled or manual drill of the paging path; an ops surface' },
   { k: 'safety_sweep_slo', d: { workType: 'guardian.open', stalled: true, passAgeSeconds: 1200 }, to: null, why: 'admins — [S-05] a safety sweep whose pass stalled past the SLO or whose rows keep failing; an ops surface, not mobile' },
-  { k: 'incident_interim_suspension', d: { ...O, caseNumber: 'INC-1' }, to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } }, why: 'suspended mover — the body says "contact Swift support to respond", and support is the ONLY way back. Same destination as liveness_locked, for the same reason. Was Delivery, which MoverStack never mounts' },
+  { k: 'incident_interim_suspension', d: { ...O, caseNumber: 'INC-1' }, to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } }, why: 'suspended mover — the body says "contact Swift support to respond", and support is the ONLY way back. Was Delivery, which MoverStack never mounts' },
   { k: 'support_ticket', d: { ...O, ticketId: 't1' }, to: DELIVERY('o1'), why: 'admins — ops queue lives on the web console' },
   { k: 'sos_active', d: { ...O, sosAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — SOS war room is not a mobile surface' },
   { k: 'ops_delivery_rider_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
@@ -300,9 +300,6 @@ const CENSUS: Case[] = [
   { k: 'verification_vehicle_lapsed', d: { docId: 'd1', subjectId: 's1', suspended: 3 }, to: null, why: 'GAP: a fleet owner learns their vehicle document lapsed' },
   { k: 'verification_l2', d: { audience: 'customer' }, to: null, why: 'GAP: assurance level raised' },
   { k: 'trust_l3', to: null, why: 'GAP: rider trust tier raised' },
-  { k: 'liveness_midshift_prompt', d: { respondBy: '2026-01-01T00:00:00.000Z', profile: 'DRIVER' }, to: { screen: 'LivenessCheck', params: { profile: 'DRIVER', respondBy: '2026-01-01T00:00:00.000Z' } }, why: 'E12: the timed selfie check, deadline riding along' },
-  { k: 'liveness_midshift_missed', to: { screen: 'LivenessCheck', params: { profile: 'DRIVER' } }, why: 'E12: a fresh PASS is the only way back online' },
-  { k: 'liveness_locked', to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } }, why: 'E12: only support clears a lock' },
   { k: 'incident_interim_lifted', d: { caseNumber: 'INC-1' }, to: null, why: 'GAP: suspension lifted' },
   { k: 'incident_shadow_restricted', d: { caseNumber: 'INC-1' }, to: null, why: 'GAP: account restricted' },
   { k: 'compliance_review_failed', d: { audience: 'earner', caseId: 'c1' }, to: null, why: 'GAP: earner compliance failure' },
@@ -380,8 +377,6 @@ const CENSUS: Case[] = [
   { k: 'incident_sla_breach', d: { caseId: 'c1' }, to: null, why: 'admins' },
   { k: 'incident_weekly_digest', to: null, why: 'admins' },
   { k: 'incident_pattern_cross_reporter', to: null, why: 'admins' },
-  { k: 'liveness_outage', d: { userId: 'u1' }, to: null, why: 'admins' },
-  { k: 'liveness_review', d: { livenessCheckId: 'l1' }, to: null, why: 'admins' },
   { k: 'compliance_violation', d: { runId: 'r1' }, to: null, why: 'admins' },
   { k: 'verification_pending', d: { docId: 'd1' }, to: null, why: 'admins — review queue' },
   { k: 'verification_sla_breach', d: { slaHours: 24 }, to: null, why: 'admins' },

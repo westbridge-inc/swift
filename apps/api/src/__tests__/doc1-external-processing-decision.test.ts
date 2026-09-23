@@ -12,8 +12,10 @@ import { recordExternalProcessingDecision, DECISION_REF_REQUIRED } from '../modu
 import { assertExternalProcessingPermitted } from '../modules/legal/processor-register';
 
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'external-processing-decision-test');
-const DIDIT = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' };
-const CONTRACTED = { PROCESSOR_CONTRACT_DIDIT: 'DPA-2026-001' };
+// [NO-AI] No identity processor is registered any more; the send gate is exercised with the
+// object store, the one contract-gated processor left in the register.
+const OUTSIDE = { name: 'object-store', version: '1', external: true, processorRef: 'OBJECT_STORE' };
+const CONTRACTED = { PROCESSOR_CONTRACT_OBJECT_STORE: 'DPA-2026-001' };
 let app: FastifyInstance;
 const audits: Array<Record<string, unknown>> = [];
 const audit = async (_tx: unknown, facts: Record<string, unknown>) => { audits.push(facts); };
@@ -37,30 +39,30 @@ afterAll(async () => {
 describe('[CONFLICT-DOC-2] the residency rule opens only under a recorded decision', () => {
   it('test_personal_type_needs_decision_ref: the database refuses allowed=true on a PERSONAL type with no reference, and so does the service', async () => {
     await expect(system(() => app.prisma.docType.update({ where: { code: PERSONAL }, data: { externalProcessingAllowed: true } }))).rejects.toThrow(/personal_external_needs_decision/);
-    await expect(recordExternalProcessingDecision(app.prisma, { code: PERSONAL, allowed: true, reason: 'launch KYC via Didit' }, audit)).rejects.toMatchObject({ code: DECISION_REF_REQUIRED });
-    await expect(recordExternalProcessingDecision(app.prisma, { code: PERSONAL, allowed: true, decisionRef: '   ', reason: 'launch KYC via Didit' }, audit)).rejects.toMatchObject({ code: DECISION_REF_REQUIRED });
+    await expect(recordExternalProcessingDecision(app.prisma, { code: PERSONAL, allowed: true, reason: 'allow an outside processor' }, audit)).rejects.toMatchObject({ code: DECISION_REF_REQUIRED });
+    await expect(recordExternalProcessingDecision(app.prisma, { code: PERSONAL, allowed: true, decisionRef: '   ', reason: 'allow an outside processor' }, audit)).rejects.toMatchObject({ code: DECISION_REF_REQUIRED });
     const row = await system(() => app.prisma.docType.findUniqueOrThrow({ where: { code: PERSONAL }, select: { externalProcessingAllowed: true } }));
     expect(row.externalProcessingAllowed).toBe(false);
     expect(audits).toEqual([]);
   });
 
   it('test_recorded_decision_opens_the_gate: with the reference the row flips, the audit line carries the facts, and the send gate passes for a contracted processor', async () => {
-    const r = await system(() => recordExternalProcessingDecision(app.prisma, { code: PERSONAL, allowed: true, decisionRef: 'FD-DOC-3b 2026-09-07', reason: 'Founder: identity documents may go to Didit under its DPA' }, audit));
+    const r = await system(() => recordExternalProcessingDecision(app.prisma, { code: PERSONAL, allowed: true, decisionRef: 'FD-DOC-3b 2026-09-07', reason: 'Founder: identity documents may go to a contracted processor under its DPA' }, audit));
     expect(r.before.externalProcessingAllowed).toBe(false);
     expect(r.after).toMatchObject({ externalProcessingAllowed: true, externalProcessingDecisionRef: 'FD-DOC-3b 2026-09-07' });
     expect(r.after.externalProcessingDecidedAt).toBeInstanceOf(Date);
     expect(audits.at(-1)).toMatchObject({ docType: PERSONAL, bucket: 'PERSONAL', allowedBefore: false, allowedAfter: true, decisionRef: 'FD-DOC-3b 2026-09-07' });
     const row = await system(() => app.prisma.docType.findUniqueOrThrow({ where: { code: PERSONAL }, select: { code: true, externalProcessingAllowed: true } }));
-    expect(() => assertExternalProcessingPermitted(row, DIDIT, CONTRACTED)).not.toThrow();
+    expect(() => assertExternalProcessingPermitted(row, OUTSIDE, CONTRACTED)).not.toThrow();
     // the decision opens the TYPE; the processor still needs its contract
-    expect(() => assertExternalProcessingPermitted(row, DIDIT, {})).toThrow(/externally/);
+    expect(() => assertExternalProcessingPermitted(row, OUTSIDE, {})).toThrow(/externally/);
   });
 
   it('test_revoke_closes_the_gate: allowed=false clears the reference and the send gate refuses again', async () => {
     const r = await system(() => recordExternalProcessingDecision(app.prisma, { code: PERSONAL, allowed: false, reason: 'Founder: back on shore' }, audit));
     expect(r.after).toMatchObject({ externalProcessingAllowed: false, externalProcessingDecisionRef: null });
     const row = await system(() => app.prisma.docType.findUniqueOrThrow({ where: { code: PERSONAL }, select: { code: true, externalProcessingAllowed: true } }));
-    expect(() => assertExternalProcessingPermitted(row, DIDIT, CONTRACTED)).toThrow(/externally/);
+    expect(() => assertExternalProcessingPermitted(row, OUTSIDE, CONTRACTED)).toThrow(/externally/);
   });
 
   it('a non-PERSONAL type may be allowed without a reference (the residency rule is about PERSONAL images)', async () => {

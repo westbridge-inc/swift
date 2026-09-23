@@ -30,7 +30,7 @@ export const HARD_CODED_DOC_TYPES: Record<string, readonly string[]> = {
   'modules/compliance/capture-allowlists.ts': ['selfie'],
   // which identity documents are face-matched; the L2 identity leg's doc type;
   // the insurance five-point review's doc type
-  'modules/verification/verification.service.ts': ['national_id', 'owner_national_id', 'vehicle_insurance'],
+  'modules/verification/verification.service.ts': ['national_id', 'vehicle_insurance'],
 };
 
 const walk = (dir: string, out: string[] = []): string[] => {

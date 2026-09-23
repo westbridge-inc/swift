@@ -22,7 +22,7 @@ grantSuiteCapability('ddl');
 
 // Trial-integrity Part 4/5 — the enforcement ladder. Under test: the device-
 // velocity rule flags the Nth signup (scenario H) and the flag means a HUMAN
-// approves (auto-approve refused); the told-before-they-commit preview speaks
+// approves (nothing is approved automatically); the told-before-they-commit preview speaks
 // the canonical copy; and the appeal loop (scenario K) ends in a
 // FOUNDER_OVERRIDE exception the trial law honors. The overturn-rate metric
 // (Part 10's false-positive alarm) computes from the same rows.
@@ -121,16 +121,18 @@ describe('scenario H — device velocity (Part 5)', () => {
     expect((await hasActiveHold(app.prisma, u1.id)).held).toBe(false);
   });
 
-  it('a held account is NEVER auto-approved — the document goes to a human', async () => {
+  it('a held account is never activated by a document alone: the submission waits for a person, who sees the hold', async () => {
     const u = await makeUser();
     await app.prisma.enforcementAction.create({
       data: { accountId: u.id, level: 'REVIEW_FIRST', reasonCode: 'VELOCITY_DEVICE', signalsFired: [] as never, decidedBy: 'SYSTEM' },
     });
     const verification = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
-    // The sandbox marker would auto-approve a clean account; the hold forces
-    // pending_manual — rung 2's whole meaning.
-    const doc = await verification.submitIdentity(u.id, await ownedVerificationFixture(app.prisma, u.id, 'auto-approve'), await ownedVerificationFixture(app.prisma, u.id, 'auto-approve'), 'v1');
+    // [NO-AI] Every submission waits for a person now; the hold is what that person
+    // sees on the identity panel — rung 2 of the ladder is decided by them.
+    const doc = await verification.submitIdentity(u.id, await ownedVerificationFixture(app.prisma, u.id, 'held-account'), 'v1');
     expect(doc.status).toBe('PENDING');
+    expect(doc.reviewedBy).toBeNull();
+    expect((await hasActiveHold(app.prisma, u.id)).held).toBe(true);
   });
 });
 
@@ -142,7 +144,7 @@ describe('told before they commit (Part 4 copy)', () => {
     const h1 = await makeUser();
     const h2 = await makeUser();
     for (const h of [h1, h2]) {
-      await identity.capture({ accountId: h.id, actorRole: 'VENDOR', type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(doc), source: 'AI_ID_ANALYZER' });
+      await identity.capture({ accountId: h.id, actorRole: 'VENDOR', type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(doc), source: 'HUMAN_REVIEW' });
     }
     await subs.startTrialForVendor((await makeVendorFor(h1.id)).id); // ACTIVE trial on h1
 
@@ -169,7 +171,7 @@ describe('scenario K — the appeal loop (Part 4)', () => {
     const h1 = await makeUser();
     const h2 = await makeUser();
     for (const h of [h1, h2]) {
-      await identity.capture({ accountId: h.id, actorRole: 'VENDOR', type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(doc), source: 'AI_ID_ANALYZER' });
+      await identity.capture({ accountId: h.id, actorRole: 'VENDOR', type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(doc), source: 'HUMAN_REVIEW' });
     }
     await subs.startTrialForVendor((await makeVendorFor(h1.id)).id);
 

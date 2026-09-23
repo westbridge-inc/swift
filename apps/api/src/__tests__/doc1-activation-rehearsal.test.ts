@@ -14,7 +14,7 @@ import { socketPlugin } from '../plugins/socket';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { seedDocRegistry, registryCode } from '../modules/verification/doc-registry';
 import { rehearseActivation, renderRehearsal, GRANDFATHER_DAYS } from '../modules/verification/activation-rehearsal';
 
@@ -53,7 +53,7 @@ beforeAll(async () => {
   app = Fastify({ logger: false });
   await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(socketPlugin);
   await app.ready();
-  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   await system(() => seedDocRegistry(app.prisma));
 });
 
@@ -91,7 +91,7 @@ describe('[DOC-1 P10-4] the activation rehearsal', () => {
     expect(report.registry.gaps.length).toBeGreaterThan(0); // UNPROFILED / NO_FIELDS / phantom validators — production would refuse to boot
     expect(report.registry.gaps.some((g) => g.docTypeCode === registryCode('GY', 'storefront_photo') && g.gap === 'NO_FIELDS')).toBe(true);
     expect(report.routing.alwaysReview).toEqual(expect.arrayContaining(['national_id', 'owner_national_id', 'police_clearance', 'vehicle_insurance']));
-    expect(report.routing.noAutoApprovalUntilConfidence).toContain('business_registration');
+    expect(report.routing.humanReview).toContain('business_registration');
     expect(report.images.find((i) => i.bucket === 'BUSINESS')?.stored).toBeGreaterThan(0);
     // nothing written: no type activated, no document touched
     expect(await system(() => app.prisma.docType.count({ where: { isActive: true } }))).toBe(activeBefore);

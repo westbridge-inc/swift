@@ -10,7 +10,8 @@ afterAll(async () => {
 
 /** Explicit per-subject metadata for tests whose processor is a stub. These
  * fixtures do not claim storage/encryption integration; byte/render suites use
- * the real upload route. Keep sandbox verdict markers in the safe basename. */
+ * the real upload route. The marker is only a readable label in the basename;
+ * no engine reads it (there is no self-approving sandbox any more). */
 export async function ownedVerificationFixture(db: PrismaClient, userId: string, marker = 'manual'): Promise<string> {
   const label = marker.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 160);
   const fileKey = `/uploads/verification/${userId}/${nanoid(16)}-${label}.enc`;

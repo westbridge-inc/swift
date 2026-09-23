@@ -551,9 +551,8 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your subscription is unpaid. Top up or pay to go back online.');
     }
 
-    // Identity assurance (safety spec §7.1): when the tenant enables liveness,
-    // a shift needs a fresh face-match PASS (428 tells the client to run the
-    // selfie check first); repeated failures lock until ops clears.
+    // [NO-AI] The only identity gate left is the LOCK a passenger's "not my driver"
+    // report (or ops) places; the biometric shift check is gone.
     assertShiftLiveness(rider);
     // §8.3 — an interim safety suspension blocks go-online until ops lifts it.
     assertNotSafetySuspended(rider);

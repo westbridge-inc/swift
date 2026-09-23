@@ -11,6 +11,8 @@ import { verificationRoutes } from '../../modules/verification/verification.rout
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { providerChecklist, sendBookingReminders } from '../../modules/services/services.service';
 import { NotificationService } from '../../modules/notification/notification.service';
+import { VerificationService, docTypeExpires } from '../../modules/verification/verification.service';
+import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
 import { ownedVerificationFixture } from '../helpers/verification-object';
 
@@ -82,25 +84,37 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
   });
 }
 
-/** Submit documents through the REAL verification route. The sandbox KYC
- *  provider (pinned by vitest.config.ts, as in CI) auto-approves a file
- *  reference carrying the 'auto-approve' marker. */
+/** Submit documents through the REAL verification route, then a person decides
+ *  each one. [NO-AI · #1276] Nothing is approved on submission: the route
+ *  answers PENDING and a reviewer approves it (keying the printed expiry where
+ *  the type carries one) through the same service method the review console
+ *  calls — the human path services.test.ts walks. */
+let reviewerAdmin: { userId: string; token: string } | undefined;
 async function submitDocs(owner: { userId: string; token: string }, docTypes: string[]) {
+  reviewerAdmin ??= await makeUserWithSession(['ADMIN'], 'ADMIN');
+  const reviewer = new VerificationService(app.prisma, notifications, getKycProvider());
   for (const docType of docTypes) {
     const submitted = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE_PROVIDER',
       docType,
-      fileUrl: await ownedVerificationFixture(app.prisma, owner.userId, `auto-approve-${docType}`),
+      fileUrl: await ownedVerificationFixture(app.prisma, owner.userId, docType),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, owner.token);
     expect(submitted.statusCode).toBe(201);
-    expect(submitted.json().data.status).toBe('APPROVED');
+    expect(submitted.json().data.status).toBe('PENDING');
+    const approver = reviewerAdmin.userId;
+    await runWithoutTenant(() => reviewer.approveDocument(
+      submitted.json().data.id,
+      approver,
+      docTypeExpires(docType) ? new Date(Date.now() + 200 * DAY) : undefined,
+    ), 'gold-4-serv-02-reviewer');
   }
 }
 
-/** A provider approved through the real routes: profile, then the full
- *  country checklist, then the profile read back as verified. */
+/** A provider verified through the real routes: profile, then the full
+ *  country checklist (each document decided by a person), then the profile
+ *  read back as verified. */
 async function makeVerifiedProvider(trade: string) {
   const owner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
   const first = await inject('POST', '/api/v1/services/providers', { trade, bio: 'Golden journey provider' }, owner.token);

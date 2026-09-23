@@ -155,7 +155,7 @@ export function desiredPlatformConfig(): DesiredConfig {
   const guyanaRegion = {
     taxiCredentialName: 'Hire Car Licence',
     insuranceClassName: 'Hire',
-    verificationSources: ['ID Analyzer', 'GESW', 'GEI registry', 'Police Clearance'],
+    verificationSources: ['Human review', 'GESW', 'GEI registry', 'Police Clearance'],
     regulatoryNotes: 'Data Protection Act 2023 in force; the Nevis entity requires a Guyana local representative.',
     locale: 'en-GY',
   };
@@ -239,7 +239,7 @@ export function desiredPlatformConfig(): DesiredConfig {
       },
       taxiClassRates,
       cashRules: guyanaCashRules,
-      verificationSources: ['ID Analyzer'],
+      verificationSources: ['Human review'],
       regulatoryNotes:
         'Tiers and taxi rates are USD-pegged defaults; document checklist mirrors Guyana. Refine with local business/legal input before launch.',
       locale: c.locale,

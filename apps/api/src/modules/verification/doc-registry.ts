@@ -64,10 +64,13 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   self_declaration_unregistered: 'BUSINESS',
 };
 
-/** Auto-approved documents must still LAPSE (the "verified ≠ valid now" rule).
- *  A human reviewer keys the real printed expiry; the automatic path applies a
- *  conservative default so the daily sweep + reminders always have a date.
- *  Days by docType; absent = non-expiring (e.g. business registration).
+/** The longest validity each document type is issued for, in days; absent =
+ *  non-expiring (e.g. business registration). A human reviewer keys the printed
+ *  expiry at approval (resolveApprovalExpiry refuses a missing, past or
+ *  implausible date); this table is that plausibility ceiling, the registry's
+ *  defaultValidityDays seed and the expiry-sweep discriminator. [NO-AI] The name
+ *  is historical: it once stamped a default expiry on automatic approvals, and
+ *  no such approval exists any more.
  *
  *  This is registry policy, so it lives with the registry instead of importing
  *  the verification service back into this module. Keeping the dependency one
@@ -125,8 +128,8 @@ export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
   { code: 'V_MRZ_CHECKSUM', scope: 'FIELD', isBlocking: true, detailCode: 'SUSPECTED_ALTERATION' },
   { code: 'V_DATE_ORDER', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE' },
   { code: 'V_NOT_EXPIRED', scope: 'FIELD', isBlocking: true, detailCode: 'EXPIRED_DOCUMENT', implRef: 'validators#V_NOT_EXPIRED' },
-  // [self-test C · ruling 2026-09-06] §7.2 listed this as non-blocking; a non-blocking FAIL still auto-approves, which is
-  // exactly the confident-wrong-expiry hole the self-test names. BLOCKING here means review by a person, never a rejection.
+  // [self-test C · ruling 2026-09-06] §7.2 listed this as non-blocking; a non-blocking FAIL would not have stopped an
+  // approval, which is exactly the confident-wrong-expiry hole the self-test names. BLOCKING means a person looks, never a rejection.
   { code: 'V_EXPIRY_PLAUSIBLE', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE', implRef: 'validators#V_EXPIRY_PLAUSIBLE' },
   { code: 'V_DOB_ADULT', scope: 'FIELD', isBlocking: true, detailCode: 'REQUIREMENT_NOT_MET' },
   { code: 'V_TIN_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE', docTypeLegacy: 'tin_certificate' },

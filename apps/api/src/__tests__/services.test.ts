@@ -14,6 +14,9 @@ import {
   refreshProviderVerification,
 } from '../modules/services/services.service';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { VerificationService, docTypeExpires } from '../modules/verification/verification.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { ownedVerificationFixture } from './helpers/verification-object';
 
@@ -309,9 +312,11 @@ describe('Services — provider verification + qualification badge', () => {
     expect(me.json().data.qualifications[0]).toMatchObject({ trade: 'plumber', status: 'VERIFIED' });
   });
 
-  it('runs customer → provider profile → canonical checklist → KYC approval → public listability', async () => {
+  it('runs customer → provider profile → canonical checklist → a person approves each document → public listability', async () => {
     const provider = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const admin = await makeUserWithSession(['ADMIN'], 'ADMIN');
+    const reviewer = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
 
     const profile = await inject('POST', '/api/v1/services/providers', {
       trade: 'mason',
@@ -333,12 +338,16 @@ describe('Services — provider verification + qualification badge', () => {
       const submitted = await inject('POST', '/api/v1/verification/documents', {
         role: 'SERVICE_PROVIDER',
         docType,
-        fileUrl: await ownedVerificationFixture(app.prisma, provider.userId, `auto-approve-${docType}`),
+        fileUrl: await ownedVerificationFixture(app.prisma, provider.userId, docType),
         consent: true,
         privacyNoticeVersion: 'v1',
       }, provider.token);
       expect(submitted.statusCode).toBe(201);
-      expect(submitted.json().data.status).toBe('APPROVED');
+      // [NO-AI] Nothing is approved on submission: a person decides each document (keying the printed expiry where the type carries one).
+      expect(submitted.json().data.status).toBe('PENDING');
+      const notYet = await inject('GET', '/api/v1/services/providers/me', undefined, provider.token);
+      expect(notYet.json().data.isVerified).toBe(false);
+      await runWithoutTenant(() => reviewer.approveDocument(submitted.json().data.id, admin.userId, docTypeExpires(docType) ? new Date(Date.now() + 200 * DAY) : undefined), 'services-test-reviewer');
     }
 
     const after = await inject('GET', '/api/v1/services/providers/me', undefined, provider.token);

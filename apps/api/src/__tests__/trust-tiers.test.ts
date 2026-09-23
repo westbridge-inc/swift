@@ -9,6 +9,9 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
+import { VerificationService } from '../modules/verification/verification.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService } from '../modules/order/order.service';
 import { ownedVerificationFixture } from './helpers/verification-object';
@@ -16,8 +19,9 @@ import { ownedVerificationFixture } from './helpers/verification-object';
 // ---------------------------------------------------------------------------
 // Trust-tier completion (master plan §5): L2 before the FIRST taxi ride; L3
 // is EARNED automatically on completed history (the dead maybePromoteToL3 is
-// now wired to order completion); auto-approved KYC documents always carry an
-// expiry so the daily sweep + reminders have a date to act on.
+// now wired to order completion); [NO-AI] an expiring document gets its date
+// from the reviewer who approves it, never from a default, so the daily sweep +
+// reminders always have a real date to act on.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -198,35 +202,47 @@ describe('L3 is earned on completed history', () => {
   });
 });
 
-describe('Auto-approved KYC documents lapse', () => {
-  it('kyc:auto approval stamps a default expiry on expiring doc types', async () => {
+describe('[NO-AI] expiring documents get their date from a person, never from a default', () => {
+  const reviewer = () => new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
+
+  it('a police clearance queues with no expiry; the reviewer must key the printed date — refused without it, stored with it', async () => {
     const u = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'police_clearance',
-      fileUrl: await ownedVerificationFixture(app.prisma, u.userId, 'auto-approve-clearance'),
+      fileUrl: await ownedVerificationFixture(app.prisma, u.userId, 'clearance'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, u.token);
     expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
-    const expiresAt = new Date(res.json().data.expiresAt);
-    const days = (expiresAt.getTime() - Date.now()) / DAY;
-    expect(days).toBeGreaterThan(360);
-    expect(days).toBeLessThan(370);
+    expect(res.json().data.status).toBe('PENDING');
+    expect(res.json().data.expiresAt).toBeNull();
+
+    const admin = await makeUser(['ADMIN'], 'ADMIN');
+    await expect(reviewer().approveDocument(res.json().data.id, admin.userId)).rejects.toMatchObject({ code: 'EXPIRY_REQUIRED' });
+    const keyed = new Date(Date.now() + 200 * DAY);
+    const approved = await reviewer().approveDocument(res.json().data.id, admin.userId, keyed);
+    expect(approved.status).toBe('APPROVED');
+    expect(approved.expiresAt?.getTime()).toBe(keyed.getTime());
+    expect(approved.reviewedBy).toBe(admin.userId);
   });
 
-  it('non-expiring types (business registration) stay open-ended', async () => {
+  it('non-expiring types (business registration) stay open-ended after a human approval', async () => {
     const u = await makeUser(['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'RESTAURANT',
       docType: 'business_registration',
-      fileUrl: await ownedVerificationFixture(app.prisma, u.userId, 'auto-approve-bizreg'),
+      fileUrl: await ownedVerificationFixture(app.prisma, u.userId, 'bizreg'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, u.token);
     expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
+    expect(res.json().data.status).toBe('PENDING');
     expect(res.json().data.expiresAt).toBeNull();
+
+    const admin = await makeUser(['ADMIN'], 'ADMIN');
+    const approved = await reviewer().approveDocument(res.json().data.id, admin.userId);
+    expect(approved.status).toBe('APPROVED');
+    expect(approved.expiresAt).toBeNull();
   });
 });

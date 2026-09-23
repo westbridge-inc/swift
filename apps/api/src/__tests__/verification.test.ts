@@ -15,19 +15,17 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { VerificationService, docTypeExpires, resolveApprovalExpiry } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { getKycProvider } from '../providers/kyc/kyc-provider';
+import { getKycProvider, type KycVerificationResult } from '../providers/kyc/kyc-provider';
 import { registrationProofFor } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
 
-// [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
-process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
-
 // ---------------------------------------------------------------------------
-// verification behind KycProvider: checklists from config, the
-// manual review queue, the L2 identity flow, listing/online gates, and the
-// expiry automation. Hardest paths: resubmission after rejection, expiry
+// verification behind the (manual-only) KycProvider seam: checklists from
+// config, the human review queue, the L2 identity flow, listing/online gates,
+// and the expiry automation. [NO-AI] Nothing is approved or rejected without a
+// person: every submission below lands PENDING and a reviewer decides it. Hardest paths: resubmission after rejection, expiry
 // during pending review, lapse auto-suspending live listings.
 // ---------------------------------------------------------------------------
 
@@ -38,14 +36,15 @@ process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
 const runBase = 592_001_000_000 + Math.floor(Math.random() * 8_000_000); // window disjoint from the 592_8XX suite bases
 const MOVER_PHONE = `+${runBase + 1}`;
 const VENDOR_PHONE = `+${runBase + 2}`;
-const L2_AUTO_PHONE = `+${runBase + 3}`;
+const L2_QUEUE_PHONE = `+${runBase + 3}`;
 const L2_MANUAL_PHONE = `+${runBase + 4}`;
 const ADMIN_PHONE = `+${runBase + 5}`;
 const TAXI_MOVER_PHONE = `+${runBase + 6}`;
 const BICYCLE_MOVER_PHONE = `+${runBase + 7}`;
 const PREVIEW_MOVER_PHONE = `+${runBase + 8}`;
-const FACE_MATCH_PHONE = `+${runBase + 9}`;
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE];
+const IDENTITY_DOC_PHONE = `+${runBase + 9}`;
+const L2_LEGACY_CLIENT_PHONE = `+${runBase + 10}`;
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_QUEUE_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, IDENTITY_DOC_PHONE, L2_LEGACY_CLIENT_PHONE];
 
 // Base (incl. police clearance — required of every courier) + motor docs.
 const MOVER_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
@@ -91,8 +90,8 @@ async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR') {
   });
   expect(res.statusCode).toBe(201);
   // These fixtures model accounts past the signup selfie (its gate has its
-  // own coverage in selfie.test.ts) — go-online and the ID face-match must
-  // not trip on a missing profile photo here.
+  // own coverage in selfie.test.ts) so go-online does not trip on a missing
+  // profile photo here.
   await signupSelfieFixture(app.prisma, res.json().data.user.id);
   return res.json().data;
 }
@@ -353,21 +352,26 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   });
 });
 
-describe('Provider auto-decisions (swappable interface)', () => {
-  it('auto-approves the vendor checklist and unlocks listing', async () => {
+describe('[NO-AI] every checklist document is decided by a person', () => {
+  it('a vendor checklist queues document by document; the human approvals — with the printed expiry keyed — unlock listing', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'owner_national_id',
-      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-owner-id'),
+      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'owner-id'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
     expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
-    expect(res.json().data.kycRef).toMatch(/^sbx_/);
+    expect(res.json().data.status).toBe('PENDING');
+    expect(res.json().data.reviewedBy).toBeNull();
+    expect(res.json().data.kycRef).toMatch(/^manual_/);
+    // The submission is audited as a submission, never as a decision.
+    const audit = await app.prisma.auditLog.findMany({ where: { entityId: res.json().data.id } });
+    expect(audit.map((a) => a.action)).toEqual(['VERIFICATION_SUBMIT']);
+    expect(audit[0]!.changes).toMatchObject({ docType: 'owner_national_id', status: 'PENDING', queue: 'STANDARD' });
 
-    // ID alone is not the SERVICE bar — police clearance is still missing
-    // (service people enter customers' homes), so listing stays gated.
+    // Listing stays gated while the ID waits, and after its approval too: police
+    // clearance is still missing (service people enter customers' homes).
     const early = await inject('POST', '/api/v1/vendor/items', {
       categoryId: serviceCategoryId,
       name: 'Hot Stone Massage',
@@ -375,16 +379,34 @@ describe('Provider auto-decisions (swappable interface)', () => {
     }, vendorToken);
     expect(early.statusCode).toBe(403);
     expect(early.json().error.code).toBe('VERIFICATION_REQUIRED');
+    const approveId = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, {}, adminToken);
+    expect(approveId.statusCode).toBe(200);
+    expect(approveId.json().data.status).toBe('APPROVED');
+    const stillEarly = await inject('POST', '/api/v1/vendor/items', {
+      categoryId: serviceCategoryId,
+      name: 'Hot Stone Massage',
+      basePrice: 8000,
+    }, vendorToken);
+    expect(stillEarly.statusCode).toBe(403);
 
     const clearance = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'police_clearance',
-      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-clearance'),
+      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'clearance'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
     expect(clearance.statusCode).toBe(201);
-    expect(clearance.json().data.status).toBe('APPROVED');
+    expect(clearance.json().data.status).toBe('PENDING');
+    // A police clearance carries a printed expiry: the reviewer keys it, or the approval is refused.
+    const noDate = await inject('PUT', `/api/v1/admin/verification/${clearance.json().data.id}/approve`, {}, adminToken);
+    expect(noDate.statusCode).toBe(400);
+    expect(noDate.json().error.code).toBe('EXPIRY_REQUIRED');
+    const approveClearance = await inject('PUT', `/api/v1/admin/verification/${clearance.json().data.id}/approve`, {
+      expiresAt: new Date(Date.now() + 300 * 24 * 60 * 60 * 1000).toISOString(),
+    }, adminToken);
+    expect(approveClearance.statusCode).toBe(200);
+    expect(approveClearance.json().data.status).toBe('APPROVED');
 
     const listing = await inject('POST', '/api/v1/vendor/items', {
       categoryId: serviceCategoryId,
@@ -400,36 +422,42 @@ describe('Provider auto-decisions (swappable interface)', () => {
   });
 });
 
-describe('L2 identity — permanent customer verification', () => {
-  it('auto-approval promotes to L2 immediately', async () => {
-    const customer = await signup(L2_AUTO_PHONE, 'CUSTOMER');
+describe('L2 identity — permanent customer verification, decided by a person', () => {
+  it('[NO-AI] a submission queues for review with no selfie asked for, and changes nothing by itself', async () => {
+    const customer = await signup(L2_QUEUE_PHONE, 'CUSTOMER');
     const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'auto-approve-id'),
-      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie'),
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
     expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
+    expect(res.json().data).toMatchObject({ status: 'PENDING', docType: 'identity_l2' });
+    expect(res.json().data.reviewedBy).toBeNull();
+    expect(res.json().data.kycRef).toMatch(/^manual_/);
 
-    const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_AUTO_PHONE } });
-    expect(user.trustLevel).toBe('L2');
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_QUEUE_PHONE } });
+    expect(user.trustLevel).toBe('L1');
+    const kase = await app.prisma.reviewCase.findFirst({ where: { submissionId: res.json().data.id, closedAt: null } });
+    expect(kase?.queue).toBe('STANDARD');
+  });
 
-    // Already verified — no second submission
-    const again = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id2'),
-      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie2'),
+  it('a legacy selfieUrl from an older app build is accepted and ignored: never resolved, never stored', async () => {
+    const customer = await signup(L2_LEGACY_CLIENT_PHONE, 'CUSTOMER');
+    const res = await inject('POST', '/api/v1/verification/identity', {
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id'),
+      selfieUrl: '/uploads/verification/nobody/not-even-an-owned-object.enc',
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
-    expect(again.statusCode).toBe(409);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.status).toBe('PENDING');
+    expect(JSON.stringify(res.json().data)).not.toContain('not-even-an-owned-object');
   });
 
-  it('manual path: pending review, then admin approval promotes to L2', async () => {
+  it('a human approval promotes to L2, and a second submission is then refused', async () => {
     const customer = await signup(L2_MANUAL_PHONE, 'CUSTOMER');
     const res = await inject('POST', '/api/v1/verification/identity', {
       idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id'),
-      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, customer.tokens.accessToken);
@@ -437,9 +465,19 @@ describe('L2 identity — permanent customer verification', () => {
 
     const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, {}, adminToken);
     expect(approve.statusCode).toBe(200);
+    expect(approve.json().data.status).toBe('APPROVED');
 
     const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_MANUAL_PHONE } });
     expect(user.trustLevel).toBe('L2');
+
+    // Already verified — no second submission
+    const again = await inject('POST', '/api/v1/verification/identity', {
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id2'),
+      consent: true,
+      privacyNoticeVersion: 'v1',
+    }, customer.tokens.accessToken);
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error.code).toBe('ALREADY_VERIFIED');
   });
 });
 
@@ -587,23 +625,21 @@ describe('Document storage & DPA compliance', () => {
   });
 });
 
-describe('Taxi checklist merge + auto-KYC audit', () => {
-  it('a mover can submit a taxi-only document and the auto-approval is audited', async () => {
+describe('Taxi checklist merge + the submission audit', () => {
+  it('a mover can submit a taxi-only document; it queues, and the audit row records a submission, never a decision', async () => {
     // hire_car_permit lives in MOVER_TAXI_EXTRA — only submittable via the merge
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'hire_car_permit',
-      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'auto-approve-hire-permit'),
+      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'hire-permit'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
     expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
+    expect(res.json().data.status).toBe('PENDING');
 
-    const audit = await app.prisma.auditLog.findFirst({
-      where: { action: 'KYC_AUTO_APPROVE', entityId: res.json().data.id },
-    });
-    expect(audit).not.toBeNull();
+    const audits = await app.prisma.auditLog.findMany({ where: { entityId: res.json().data.id } });
+    expect(audits.map((a) => a.action)).toEqual(['VERIFICATION_SUBMIT']);
   });
 });
 
@@ -693,58 +729,55 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
   });
 });
 
-describe('Operator identity docs are face-matched against the signup selfie', () => {
-  let faceToken: string;
-  let faceUserId: string;
+describe('[NO-AI] operator identity documents are handed over document-only', () => {
+  let idToken: string;
+  let idUserId: string;
 
   beforeAll(async () => {
-    const u = await signup(FACE_MATCH_PHONE, 'MOVER');
-    faceToken = u.tokens.accessToken;
-    faceUserId = u.user.id;
+    const u = await signup(IDENTITY_DOC_PHONE, 'MOVER');
+    idToken = u.tokens.accessToken;
+    idUserId = u.user.id;
   });
 
-  it('refuses an ID submission when no profile selfie exists', async () => {
+  it('an ID submission is accepted without a profile selfie — there is no comparison to feed', async () => {
     // Models a pre-selfie account — strip what the fixture helper added.
     await app.prisma.user.update({
-      where: { id: faceUserId },
+      where: { id: idUserId },
       data: { selfieCapturedAt: null, avatar: null },
     });
 
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'national_id',
-      fileUrl: await ownedVerificationFixture(app.prisma, faceUserId, 'auto-approve-face-id'),
+      fileUrl: await ownedVerificationFixture(app.prisma, idUserId, 'id-no-selfie'),
       consent: true,
       privacyNoticeVersion: 'v1',
-    }, faceToken);
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('SELFIE_REQUIRED');
+    }, idToken);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.status).toBe('PENDING');
 
-    // A NON-identity document is unaffected by the missing selfie.
     const plain = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
       docType: 'vehicle_registration',
-      fileUrl: await ownedVerificationFixture(app.prisma, faceUserId, 'face-reg'),
+      fileUrl: await ownedVerificationFixture(app.prisma, idUserId, 'reg'),
       consent: true,
       privacyNoticeVersion: 'v1',
-    }, faceToken);
+    }, idToken);
     expect(plain.statusCode).toBe(201);
+    expect(plain.json().data.status).toBe('PENDING');
   });
 
-  it('routes ID docs through verifyIdentity with the selfie; other docs through verifyDocument', async () => {
-    const selfieUrl = await signupSelfieFixture(app.prisma, faceUserId);
+  it('every document type goes through verifyDocument alone, and an adapter that answers with a verdict changes nothing', async () => {
+    await signupSelfieFixture(app.prisma, idUserId);
 
-    const calls: Array<{ path: string; input: Record<string, unknown> }> = [];
+    const calls: Array<{ userId: string; docType: string; fileUrl: string }> = [];
     const recorder = {
-      verifyIdentity: async (input: { userId: string; idDocumentUrl: string; selfieUrl: string }) => {
-        calls.push({ path: 'identity', input });
-        return { status: 'approved' as const, referenceToken: 'stub_identity' };
-      },
+      engine: { name: 'recorder', version: 'test', external: false },
       verifyDocument: async (input: { userId: string; docType: string; fileUrl: string }) => {
-        calls.push({ path: 'document', input });
-        return { status: 'approved' as const, referenceToken: 'stub_document' };
+        calls.push(input);
+        // An adapter written against the old contract: the verdict is cast past the types and must change nothing.
+        return { status: 'approved', referenceToken: 'stub_document' } as unknown as KycVerificationResult;
       },
-      getStatus: async () => 'pending_manual' as const,
     };
     const svc = new VerificationService(
       app.prisma,
@@ -752,25 +785,22 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
       recorder,
     );
 
-    const idDocumentUrl = await ownedVerificationFixture(app.prisma, faceUserId, 'face-id2');
-    await svc.submitDocument(faceUserId, 'MOVER', 'national_id', idDocumentUrl, 'v1');
-    await svc.submitDocument(faceUserId, 'MOVER', 'drivers_licence', await ownedVerificationFixture(app.prisma, faceUserId, 'face-dl'), 'v1');
+    const idDocumentUrl = await ownedVerificationFixture(app.prisma, idUserId, 'id2');
+    const id = await svc.submitDocument(idUserId, 'MOVER', 'national_id', idDocumentUrl, 'v1');
+    const dl = await svc.submitDocument(idUserId, 'MOVER', 'drivers_licence', await ownedVerificationFixture(app.prisma, idUserId, 'dl'), 'v1');
 
-    expect(calls).toHaveLength(2);
-    expect(calls[0]).toEqual({
-      path: 'identity',
-      input: {
-        userId: faceUserId,
-        idDocumentUrl,
-        selfieUrl, // the signup selfie IS the match target
-      },
-    });
-    expect(calls[1]?.path).toBe('document');
+    expect(calls).toEqual([
+      { userId: idUserId, docType: 'national_id', fileUrl: idDocumentUrl },
+      expect.objectContaining({ userId: idUserId, docType: 'drivers_licence' }),
+    ]);
+    expect([id.status, dl.status]).toEqual(['PENDING', 'PENDING']);
+    expect([id.reviewedBy, dl.reviewedBy]).toEqual([null, null]);
+    expect([id.kycRef, dl.kycRef]).toEqual(['stub_document', 'stub_document']);
   });
 });
 
-describe('Subscriptions are born on verification (auto-approval path)', () => {
-  // The dead-end this prevents: KYC auto-approves the full checklist, the
+describe('Subscriptions are born on verification', () => {
+  // The dead-end this prevents: the last checklist document is approved, the
   // operator is "verified", but only the ADMIN entity-verify endpoints ever
   // started trials — so go-online failed with SUBSCRIPTION_REQUIRED and there
   // was no self-serve way out.
@@ -819,16 +849,20 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     expect(vendor.acceptingOrders).toBe(false);
   });
 
-  it('re-verification restores commerce automatically', async () => {
+  it('re-verification restores commerce once a person approves the renewal', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'owner_national_id',
-      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-owner-id-renewed'),
+      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'owner-id-renewed'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
     expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
+    expect(res.json().data.status).toBe('PENDING');
+    // Still suspended while the renewal waits for a person…
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: serviceVendorId } })).isVerified).toBe(false);
+    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, {}, adminToken);
+    expect(approve.statusCode).toBe(200);
 
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: serviceVendorId } });
     expect(vendor.isVerified).toBe(true);
@@ -877,7 +911,7 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     expect(off.json().data.acceptingOrders).toBe(false);
 
     // …then a document renewal is approved (police clearance enters its
-    // 30-day window and the renewal auto-approves).
+    // 30-day window; the renewal queues and a person approves it with its date).
     await app.prisma.verificationDocument.updateMany({
       where: { userId: vendorUserId, docType: 'police_clearance', status: 'APPROVED' },
       data: { expiresAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) },
@@ -885,11 +919,16 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
     const renewal = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
       docType: 'police_clearance',
-      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-clearance-renewed'),
+      fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'clearance-renewed'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, vendorToken);
     expect(renewal.statusCode).toBe(201);
+    expect(renewal.json().data.status).toBe('PENDING');
+    const approved = await inject('PUT', `/api/v1/admin/verification/${renewal.json().data.id}/approve`, {
+      expiresAt: new Date(Date.now() + 300 * 24 * 60 * 60 * 1000).toISOString(),
+    }, adminToken);
+    expect(approved.statusCode).toBe(200);
 
     // Still verified — but the pause the owner chose stays.
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: serviceVendorId } });

@@ -18,7 +18,7 @@ import { grantSuiteCapability } from '../lib/test-target-lock';
 import { installDdl } from './helpers/install-ddl';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { renewalScheduleDdl, noticeTimesFor, dueRenewalNotices, RENEWAL_NOTICE_DAYS } from '../modules/verification/renewal-schedule';
 
 grantSuiteCapability('ddl');
@@ -41,7 +41,7 @@ beforeAll(async () => {
   await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(socketPlugin);
   await app.ready();
   await installDdl(app.prisma, renewalScheduleDdl()); // the DDL under test is the TS source of truth
-  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   const admin = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `+59282${NUM}1`, firstName: 'Renew', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true } }));
   const owner = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `+59282${NUM}2`, firstName: 'Renew', lastName: `Owner${RUN}`, activeRole: 'VENDOR_OWNER', roles: ['VENDOR_OWNER'], countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true } }));
   adminId = admin.id; ownerId = owner.id;

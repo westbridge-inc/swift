@@ -18,7 +18,7 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { CountryConfigService } from '../modules/country/country-config.service';
-import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { seedDocRegistry, BUCKET_OF } from '../modules/verification/doc-registry';
 import { resolveSubject } from '../modules/verification/subjects';
 import { installDdl } from './helpers/install-ddl';
@@ -67,7 +67,7 @@ beforeAll(async () => {
   await app.ready();
   const tables = ['subject', 'subject_link', 'person_profile', 'business_profile', 'vehicle_profile'];
   await installDdl(app.prisma, [...tables.flatMap((t) => rlsDdlFor(t)), ...tenantLineageDdl().filter((s) => tables.some((t) => s.includes(`${t}_tenant_matches`)))]);
-  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   countryConfig = new CountryConfigService(app.prisma);
   await system(() => seedDocRegistry(app.prisma));
 });

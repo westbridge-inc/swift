@@ -68,7 +68,7 @@ async function makeVendorFor(userId: string) {
 const captureId = (userId: string, docNo: string) =>
   identity.capture({
     accountId: userId, actorRole: 'VENDOR',
-    type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(docNo), source: 'AI_ID_ANALYZER',
+    type: 'ID_DOC_NUMBER', normalizedValue: normalizeDocNumber(docNo), source: 'HUMAN_REVIEW',
   });
 
 beforeAll(async () => {

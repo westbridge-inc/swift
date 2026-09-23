@@ -15,9 +15,12 @@
  * same checks (a status write is not a bypass). Rulings (delegated, 2026-09-06):
  *  - LEGAL_HOLD is an overlay (`legalHoldId`), never a stored state: T21/T22 are the
  *    hold's own placement/release and the trigger refuses `state = 'LEGAL_HOLD'`.
- *  - X-AUTO-REJECT: the processor's REJECTED verdict still rejects at submission
- *    (VALIDATED → REJECTED). The spec's table has no automated rejection — flagged
- *    CONFLICT-DOC-8 for the founder; kept because the actor resubmits at once.
+ *  - [NO-AI · owner rule 2026-09-07] No automatic decision. The spec's T3 (preprocess_fail:
+ *    CAPTURED → REJECTED) and T8 (route: VALIDATED → AUTO_APPROVED) are DEFERRED, and
+ *    the automatic-rejection extension (CONFLICT-DOC-8) is resolved as "no": every pair INTO APPROVED or REJECTED
+ *    starts at IN_REVIEW, a claimed case. AUTO_APPROVED stays in the enum with its
+ *    OUT-transitions (T10 to a person, T17, purge) for rows that reached it before this rule;
+ *    nothing can reach it again. `no-ai-kyc-gate.unit.test.ts` holds the line.
  *  - X-RELEASE: a reviewer handing a case back is IN_REVIEW → REVIEW_QUEUED (same pair
  *    as T15). X-IMPLICIT-CLAIM: a decision on an unclaimed document passes through
  *    IN_REVIEW in the same transaction — the table never allows REVIEW_QUEUED → APPROVED.
@@ -35,8 +38,8 @@ export const DOC_STATES = [
 ] as const satisfies readonly DocState[];
 
 export type DocEvent =
-  | 'preprocess' | 'preprocess_fail' | 'extract' | 'extraction_ok' | 'extraction_fail'
-  | 'validate' | 'route' | 'auto_reject' | 'qa_sample' | 'claim' | 'decide' | 'resubmit'
+  | 'preprocess' | 'extract' | 'extraction_ok' | 'extraction_fail'
+  | 'validate' | 'route' | 'qa_sample' | 'claim' | 'decide' | 'resubmit'
   | 'commit' | 'purge' | 'expire' | 'revoke' | 'supersede';
 
 export interface DocTransition {
@@ -52,14 +55,11 @@ const PURGEABLE = DOC_STATES.filter((s) => s !== 'PURGED' && s !== 'LEGAL_HOLD')
 
 export const DOC_TRANSITIONS: readonly DocTransition[] = [
   { from: 'CAPTURED', to: 'PREPROCESSED', event: 'preprocess', spec: 'T2' },
-  { from: 'CAPTURED', to: 'REJECTED', event: 'preprocess_fail', spec: 'T3' },
   { from: 'PREPROCESSED', to: 'EXTRACTING', event: 'extract', spec: 'T4' },
   { from: 'EXTRACTING', to: 'EXTRACTED', event: 'extraction_ok', spec: 'T5' },
   { from: 'EXTRACTING', to: 'REVIEW_QUEUED', event: 'extraction_fail', spec: 'T6' },
   { from: 'EXTRACTED', to: 'VALIDATED', event: 'validate', spec: 'T7' },
-  { from: 'VALIDATED', to: 'AUTO_APPROVED', event: 'route', spec: 'T8' },
   { from: 'VALIDATED', to: 'REVIEW_QUEUED', event: 'route', spec: 'T9' },
-  { from: 'VALIDATED', to: 'REJECTED', event: 'auto_reject', spec: 'X-AUTO-REJECT (CONFLICT-DOC-8)' },
   { from: 'AUTO_APPROVED', to: 'REVIEW_QUEUED', event: 'qa_sample', spec: 'T10' },
   { from: 'REVIEW_QUEUED', to: 'IN_REVIEW', event: 'claim', spec: 'T11' },
   { from: 'IN_REVIEW', to: 'APPROVED', event: 'decide', spec: 'T12' },

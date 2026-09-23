@@ -45,7 +45,7 @@ export interface RehearsalReport {
   activating: string[];
   registry: { gaps: RegistryGap[]; setsThatSwitch: SetSwitch[]; moverListsUnaffected: true };
   actors: { total: number; keep: number; grandfathered: number; wouldSuspend: number; alreadyLapsed: number; verdicts: ActorVerdict[] };
-  routing: { alwaysReview: string[]; noAutoApprovalUntilConfidence: string[] };
+  routing: { alwaysReview: string[]; humanReview: string[] };
   images: Array<{ bucket: string; stored: number; purged: number }>;
   zeroSuspended: boolean;
 }
@@ -103,7 +103,7 @@ export async function rehearseActivation(
   const drivers = await prisma.driver.findMany({ where: { documentsVerified: true, user: { countryCode: input.countryCode } }, select: { id: true, userId: true, vehicleType: true } });
   for (const d of drivers) { const today = await countryConfig.getMoverChecklist(input.countryCode, d.vehicleType); await judge('DRIVER', d.id, d.userId, `MOVER:${d.vehicleType}`, today, today); }
 
-  // 4. Routing after activation: what goes to a human, and what can never auto-approve until an adapter reports confidence.
+  // 4. Routing after activation: which types are always reviewed by RULE (PERSONAL / needs specimen / by fact). [NO-AI] Every type is decided by a person regardless.
   const routingAlways = candidates.filter((t) => alwaysReview({ bucket: t.bucket, needsSpecimen: t.needsSpecimen, alwaysReview: t.alwaysReview })).map((t) => t.legacyCode).sort();
 
   // 5. The stored-image census by bucket (§1.3 / CONFLICT-DOC-2 — report only).
@@ -123,7 +123,7 @@ export async function rehearseActivation(
     activating: candidates.map((t) => t.legacyCode).sort(),
     registry: { gaps, setsThatSwitch, moverListsUnaffected: true },
     actors: { total: verdicts.length, keep: count('KEEP'), grandfathered: count('GRANDFATHERED'), wouldSuspend: count('WOULD_SUSPEND'), alreadyLapsed: count('ALREADY_LAPSED'), verdicts },
-    routing: { alwaysReview: routingAlways, noAutoApprovalUntilConfidence: candidates.map((t) => t.legacyCode).sort() },
+    routing: { alwaysReview: routingAlways, humanReview: candidates.map((t) => t.legacyCode).sort() },
     images: [...byBucket.entries()].map(([bucket, c]) => ({ bucket, ...c })).sort((a, b) => a.bucket.localeCompare(b.bucket)),
     zeroSuspended: count('WOULD_SUSPEND') === 0,
   };
@@ -150,7 +150,7 @@ export function renderRehearsal(r: RehearsalReport): string {
     ``,
     `## Routing after activation`,
     `- always a human (PERSONAL / needs specimen / by fact): ${r.routing.alwaysReview.join(', ') || '(none)'}`,
-    `- no auto-approval until an adapter reports extraction confidence: ${r.routing.noAutoApprovalUntilConfidence.join(', ') || '(none)'}`,
+    `- decided by a person, every one of them (no automatic decision exists): ${r.routing.humanReview.join(', ') || '(none)'}`,
     ``,
     `## Stored images by bucket (§1.3, report only)`,
     ...r.images.map((i) => `- ${i.bucket}: ${i.stored} stored, ${i.purged} purged`),

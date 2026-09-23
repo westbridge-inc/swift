@@ -40,10 +40,7 @@ const users: string[] = [];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-review-case-test');
 
 class ManualKyc implements KycProvider {
-  verdict: KycVerificationResult['status'] = 'pending_manual';
-  async verifyIdentity(): Promise<KycVerificationResult> { return { status: this.verdict, referenceToken: `m_${nanoid(6)}` }; }
-  async verifyDocument(): Promise<KycVerificationResult> { return { status: this.verdict, referenceToken: `m_${nanoid(6)}` }; }
-  async getStatus(): Promise<'pending_manual'> { return 'pending_manual'; }
+  async verifyDocument(): Promise<KycVerificationResult> { return { referenceToken: `m_${nanoid(6)}` }; }
 }
 const kyc = new ManualKyc();
 
@@ -108,13 +105,10 @@ describe('[DOC-1 P4-5] review cases and decisions', () => {
     for (const [k, who] of [[keyA, a], [keyB, b]] as const) {
       await app.prisma.encryptedObject.create({ data: { fileKey: k, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(40, 3), mimeType: 'image/jpeg', sizeBytes: 10, sha256: sha, createdBy: who } });
     }
-    kyc.verdict = 'approved';
-    try {
-      await submit(a, 'owner_national_id', keyA);
-      const docB = await submit(b, 'owner_national_id', keyB);
-      expect(docB.status).toBe('PENDING');
-      expect((await openCase(docB.id))!.queue).toBe('SECOND_REVIEW');
-    } finally { kyc.verdict = 'pending_manual'; }
+    await submit(a, 'owner_national_id', keyA);
+    const docB = await submit(b, 'owner_national_id', keyB);
+    expect(docB.status).toBe('PENDING');
+    expect((await openCase(docB.id))!.queue).toBe('SECOND_REVIEW');
   });
 
   it('approve writes an APPROVE decision and closes the case in the same transaction', async () => {

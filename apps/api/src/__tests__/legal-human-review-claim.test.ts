@@ -55,9 +55,14 @@ describe('[F-1218-02] the Privacy Policy is graded against the document state ma
   });
 
   it('the identity check is described in exactly one paragraph, so the words graded are the words served', () => {
-    expect(aiParagraph).toMatch(/Didit|ID Analyzer/);
+    // [NO-AI · #1276] This paragraph was anchored on the provider it named. No provider exists
+    // now, so it is anchored on what it describes; and no other paragraph may describe the check,
+    // or name a removed provider, where this ratchet would not grade the words.
+    expect(aiParagraph).toMatch(/identity documents?/i);
     expect(aiParagraph).toMatch(/face[- ]match/i);
     expect(PRIVACY.split('<p><b>AI processing:</b>')).toHaveLength(2);
+    expect(PRIVACY.replace(aiParagraph, '')).not.toMatch(/face[- ]match/i);
+    expect(PRIVACY).not.toMatch(/Didit|ID Analyzer/);
   });
 
   it('while a machine can reject a document on its own, the policy does not promise a person', () => {

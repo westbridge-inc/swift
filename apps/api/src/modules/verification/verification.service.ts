@@ -11,7 +11,6 @@ import { compileStorefrontDisclosure, disclosureGateEngaged } from './storefront
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
-import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
 import { assertNotRecused } from './recusal';
@@ -19,19 +18,18 @@ import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
 import { clusterMemberIds } from '../integrity/identity.service';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
+import { CountryConfigService } from '../country/country-config.service';
 import { log } from '../../utils/logger';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { assertExternalProcessingPermitted } from '../legal/processor-register';
-import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApproval, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
+import { planExtraction, persistExtraction, recordExtractionMetrics, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
-import { approvedIdentityDocumentNumber } from './identity-signal-policy';
-import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import {
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
@@ -43,12 +41,6 @@ export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | '
 
 /** L2 identity rows use this synthetic docType (not part of any checklist). */
 export const IDENTITY_DOC_TYPE = 'identity_l2';
-
-/** Checklist docTypes that ARE a government identity document. These are not
- *  merely OCR-checked: the portrait is face-matched against the operator's
- *  camera-captured signup selfie (master plan §3 — "face-matched to profile
- *  photo"), through the same KycProvider.verifyIdentity seam the L2 flow uses. */
-const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
 
 // Compatibility export for existing callers; the policy itself is registry data.
 export { AUTO_APPROVE_EXPIRY_DAYS } from './doc-registry';
@@ -205,41 +197,25 @@ function audienceForRole(role: string): 'customer' | 'earner' | 'business' {
 
 /**
  * [DOC-1 P5-1] The submission's path through the machine, one CAS hop per §5.1 row.
- * The verdict is what the (gated) processor said; the ledger's outcome decides the
- * extraction branch:
- *  - nothing extracted + REJECTED → T3 (unreadable capture) straight from CAPTURED;
- *  - nothing extracted + any other verdict → T6, a human keys it (an approval with no
- *    evidence is a model-only decision and never auto-commits);
- *  - extracted → T5/T7, then T8+T17 (auto-approve and commit), X-AUTO-REJECT, or T9.
+ * Every new document reaches the human review queue. Historical extraction
+ * state remains readable, but a processor result cannot make a decision.
  */
 async function walkSubmission(
   tx: Prisma.TransactionClient,
   id: string,
-  verdict: 'APPROVED' | 'REJECTED' | 'PENDING',
   plan: ExtractionPlan | undefined,
 ): Promise<VerificationDocument> {
   const hop = (from: DocState, to: DocState, extra: Prisma.VerificationDocumentUpdateManyMutationInput = {}) =>
     hopDocState(tx, { id }, from, to, extra);
   const extracted = plan !== undefined && plan.run.outcome !== 'FAILED';
-  if (!extracted && verdict === 'REJECTED') {
-    await hop('CAPTURED', 'REJECTED', { status: 'REJECTED' });
+  await hop('CAPTURED', 'PREPROCESSED');
+  await hop('PREPROCESSED', 'EXTRACTING');
+  if (!extracted) {
+    await hop('EXTRACTING', 'REVIEW_QUEUED');
   } else {
-    await hop('CAPTURED', 'PREPROCESSED');
-    await hop('PREPROCESSED', 'EXTRACTING');
-    if (!extracted) {
-      await hop('EXTRACTING', 'REVIEW_QUEUED');
-    } else {
-      await hop('EXTRACTING', 'EXTRACTED');
-      await hop('EXTRACTED', 'VALIDATED');
-      if (verdict === 'APPROVED') {
-        await hop('VALIDATED', 'AUTO_APPROVED');
-        await hop('AUTO_APPROVED', 'COMMITTED', { status: 'APPROVED' });
-      } else if (verdict === 'REJECTED') {
-        await hop('VALIDATED', 'REJECTED', { status: 'REJECTED' });
-      } else {
-        await hop('VALIDATED', 'REVIEW_QUEUED');
-      }
-    }
+    await hop('EXTRACTING', 'EXTRACTED');
+    await hop('EXTRACTED', 'VALIDATED');
+    await hop('VALIDATED', 'REVIEW_QUEUED');
   }
   return tx.verificationDocument.findUniqueOrThrow({ where: { id } });
 }
@@ -281,21 +257,18 @@ export class VerificationService {
       }
       await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId });
       // [DOC-1 P5-1] Every submission walks the machine from CAPTURED (T1): the row
-      // is born PENDING/CAPTURED and the verdict is REACHED by transitions the trigger
-      // judges. The ledger lands first, so T8's guard (no blocking FAIL) and T17's
-      // provenance (the AUTO_APPROVED ledger) are facts before the hops that need them.
-      const { status: verdict, ...born } = data;
+      // is born PENDING/CAPTURED and the human queue is reached by guarded transitions.
       // [DOC-1 §4.3 · P1-2] Every new submission names its subject (person / business /
       // vehicle) and links the account to it — in the same transaction, so a submission
       // without a subject cannot exist (a mover without a plate has no vehicle subject).
       const subject = await resolveSubject(tx, { userId: data.userId, countryCode: alive[0]!.countryCode, docType: data.docType, tenantId: alive[0]!.tenantId });
-      const created = await tx.verificationDocument.create({ data: { ...born, status: 'PENDING', state: 'CAPTURED', subjectId: subject?.subjectId ?? null } });
+      const created = await tx.verificationDocument.create({ data: { ...data, status: 'PENDING', state: 'CAPTURED', subjectId: subject?.subjectId ?? null } });
       // [DOC-1 P4-4] The processor result lands as rows in the same transaction:
       // a submission without its extraction ledger cannot exist.
       if (review.extraction) {
         await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
-      const doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
+      const doc = await walkSubmission(tx, created.id, review.extraction);
       // [DOC-1 P4-5] A document waiting on a human has ONE open case, with the
       // SLA clock started here — in the same transaction, so a pending document
       // without a case cannot exist.
@@ -397,7 +370,7 @@ export class VerificationService {
   ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, countryCode: true, avatar: true, selfieCapturedAt: true, status: true },
+      select: { id: true, countryCode: true, status: true },
     });
     if (!user) throw new NotFoundError('User', userId);
     // [NR-3 gap 3, REPORT-022 F-022-13] Deletion write barrier as a DENY-LIST:
@@ -448,60 +421,24 @@ export class VerificationService {
       throw new AppError(409, 'ALREADY_APPROVED', `Your ${docType} is already verified`);
     }
 
-    // Identity documents get the full ID + face-match check against the
-    // operator's signup selfie; every other document is a plain doc check.
-    let result;
     const startedAt = new Date();
-    // [DOC-1 §0.5 · FD-D5 · CONFLICT-DOC-2] The biometric leg runs only while
-    // the kill switch is on (default); off, an identity document is verified
-    // like any other document — no face leaves the building.
     // [DOC-1 §21.1 · P21] No new intake without the key service (production): fail closed, never plaintext.
     assertKeyServiceForAccess('intake');
     // [DGP-1 · DOC-1 §2] No PERSONAL image leaves for an external engine unless the doc type allows
     // it, the processor is registered and a transfer basis is recorded. Local engines pass through.
     assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, docType), this.kyc.engine);
-    if (IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled()) {
-      const selfieUrl = await resolveSignupSelfie(this.prisma, userId);
-      // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
-      result = await extractWithLadder(() => this.kyc.verifyIdentity({ userId, idDocumentUrl: fileUrl, selfieUrl }));
-    } else {
-      result = await extractWithLadder(() => this.kyc.verifyDocument({ userId, docType, fileUrl }));
-    }
+    // [NO-AI · owner rule 2026-09-07] The engine of record is a person. The adapter seam hands the
+    // document over and gets back a reference (and, at most, what an engine READ, for the ledger);
+    // its contract has no verdict field, so nothing that returns here can approve or reject. The
+    // row is born PENDING and walks to REVIEW_QUEUED through a transition table that has no
+    // automatic decision left (doc-state.ts). [P21] A thrown or hung adapter is an outage: the
+    // same queue, with the run marked FAILED.
+    const received = await extractWithLadder(() => this.kyc.verifyDocument({ userId, docType, fileUrl }));
     const finishedAt = new Date();
-
-    // Enforcement ladder rung 2/3 (trial-integrity Part 4): a HELD account
-    // (velocity REVIEW_FIRST / fraud-tier hold) is never auto-approved — the
-    // document goes to a HUMAN with the identity panel open. Auto-reject
-    // stays: a bad document is a bad document.
-    if (result.status === 'approved') {
-      const { hasActiveHold } = await import('../integrity/enforcement');
-      const hold = await hasActiveHold(this.prisma, userId);
-      if (hold.held) {
-        result = { ...result, status: 'pending_manual' as const };
-      }
-    }
-    // [PR1270-S2-03] An approval this market cannot price would activate a
-    // partner with no subscription. It goes to a HUMAN instead, who meets the
-    // config error at decision time — the document is never written approved.
-    if (result.status === 'approved') {
-      try {
-        await this.assertActivationPriceable(userId, this.prisma);
-      } catch (error) {
-        if (!(error instanceof PricingConfigError)) throw error;
-        log().error({ userId, key: error.details?.['key'] }, 'auto-approval held for review: weekly-fee config cannot price this partner');
-        result = { ...result, status: 'pending_manual' as const };
-      }
-    }
-    result = await this.holdOnCrossSubjectCollision(userId, roleKey, fileUrl, result);
-
-    // [DOC-1 P4-4 · P6-4] The result lands as rows, then §0.5 and §6.9 decide
-    // whether the processor's approval may stand: never past a blocking FAIL;
-    // and once the registry speaks for the type, never for the always-review
-    // set, a collision, an unvalidated document, or unknown / low confidence.
-    const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt }, await this.validatorContextFor(userId, docType));
-    result = gateAutoApproval(result, extraction, registryType);
-
-    const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
+    const result = await this.holdOnCrossSubjectCollision(userId, roleKey, fileUrl, received);
+    const { plan: extraction } = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt }, await this.validatorContextFor(userId, docType));
+    // A cross-subject collision opens the case in the SECOND_REVIEW queue (P4-5); everything else is STANDARD.
+    const queue: ReviewQueue = result.collided ? 'SECOND_REVIEW' : 'STANDARD';
     const doc = await this.createDocumentLively({
         userId,
         role: this.roleKeyToUserRole(roleKey),
@@ -510,69 +447,27 @@ export class VerificationService {
         kycRef: result.referenceToken,
         consentAt: new Date(),
         privacyNoticeVersion,
-        status:
-          result.status === 'approved' ? 'APPROVED'
-          : result.status === 'rejected' ? 'REJECTED'
-          : 'PENDING',
-        ...(result.status === 'approved' && {
-          reviewedBy: 'kyc:auto',
-          reviewedAt: new Date(),
-          // Auto-approvals lapse on a conservative default so the expiry
-          // sweep + 30-day reminders always fire; humans key the real date.
-          ...(autoExpiryDays && { expiresAt: new Date(Date.now() + autoExpiryDays * 24 * 60 * 60 * 1000) }),
-        }),
-        ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
-    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction });
+        status: 'PENDING',
+    }, { queue, extraction });
 
-    // Provider listability is the first post-document projection. Everything
-    // below (audit, integrity, notifications, trials) may fail independently;
-    // none may strand an approved provider hidden or a rejected provider live.
-    if (doc.status !== 'PENDING') {
-      await refreshProviderVerification(this.prisma, userId);
-    }
-
-    await this.recordDecision(userId, doc.id, docType, doc.status, result.reason);
-
-    // Identity-integrity capture (silent): only an APPROVED identity type may
-    // turn the analyzer's parsed number into HARD evidence. Rejected/pending
-    // OCR is not identity proof. AWAITED so the signal exists before
-    // afterApproval reaches the trial decision; the service swallows its own
-    // failures (capture never breaks verification).
-    const identityDocumentNumber = approvedIdentityDocumentNumber(
-      docType,
-      doc.status,
-      result.extracted?.documentNumber,
-    );
-    if (identityDocumentNumber) {
-      const { IdentityService } = await import('../integrity/identity.service');
-      await new IdentityService(this.prisma).capture({
-        accountId: userId, actorRole: roleKey,
-        type: 'ID_DOC_NUMBER', normalizedValue: identityDocumentNumber, source: 'AI_ID_ANALYZER',
-      });
-    }
-
-    if (doc.status === 'APPROVED') await this.afterApproval(userId);
-    if (doc.status === 'REJECTED') await this.notifyRejection(userId, docType, result.reason);
-    // Manual-review path: the queue is invisible until an admin is told about
-    // it — found live: documents (and whole onboardings) sat PENDING for weeks.
-    if (doc.status === 'PENDING') {
-      await notifyAdmins(this.prisma, this.notifications, {
-        // Follows the submitter [NOC-A F45].
-        tenantId: await tenantOfUser(this.prisma, userId),
-        title: 'Verification review needed',
-        body: `A ${docType.replace(/_/g, ' ')} (${roleKey}) is waiting in the review queue.`,
-        data: { kind: 'verification_pending', docId: doc.id },
-      });
-    }
+    await this.recordSubmission(userId, doc.id, docType, queue, result.reason);
+    // The queue is invisible until an admin is told about it — found live: documents (and whole
+    // onboardings) sat PENDING for weeks.
+    await notifyAdmins(this.prisma, this.notifications, {
+      // Follows the submitter [NOC-A F45].
+      tenantId: await tenantOfUser(this.prisma, userId),
+      title: 'Verification review needed',
+      body: `A ${docType.replace(/_/g, ' ')} (${roleKey}) is waiting in the review queue.`,
+      data: { kind: 'verification_pending', docId: doc.id },
+    });
 
     return doc;
   }
 
-  /** L2 customer verification: ID + selfie. Approval is permanent. */
+  /** L2 customer verification: a government ID, decided by a person. Approval is permanent (promoteToL2). */
   async submitIdentity(
     userId: string,
     idDocumentUrl: string,
-    selfieUrl: string,
     privacyNoticeVersion: string,
   ) {
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, trustLevel: true, countryCode: true } });
@@ -581,30 +476,16 @@ export class VerificationService {
       throw new AppError(409, 'ALREADY_VERIFIED', 'Identity is already verified');
     }
     await resolveVerificationObject(this.prisma, { fileKey: idDocumentUrl, userId });
-    await resolveVerificationObject(this.prisma, { fileKey: selfieUrl, userId });
-
-    // [DOC-1 §0.5 · FD-D5] Biometric off → the L2 identity document is verified
-    // document-only; the selfie is not sent anywhere.
-    // [DGP-1 · DOC-1 §2] the identity check sends the national ID (and selfie) — same gate as any document.
+    // [DGP-1 · DOC-1 §2] The same send gate as any document; the manual engine is local, so the
+    // document stays on Swift infrastructure.
     assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, 'national_id'), this.kyc.engine);
     const startedAt = new Date();
-    // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
-    let result: DegradedResult = await extractWithLadder(() => (biometricFaceMatchEnabled()
-      ? this.kyc.verifyIdentity({ userId, idDocumentUrl, selfieUrl })
-      : this.kyc.verifyDocument({ userId, docType: 'national_id', fileUrl: idDocumentUrl })));
+    // [NO-AI] See submitDocument: no verdict can come back through this seam; a person decides.
+    const received = await extractWithLadder(() => this.kyc.verifyDocument({ userId, docType: 'national_id', fileUrl: idDocumentUrl }));
     const finishedAt = new Date();
-    result = await this.holdOnCrossSubjectCollision(userId, 'MOVER', idDocumentUrl, result);
-    // Rung 2/3: held accounts are never auto-approved (see submitDocument).
-    if (result.status === 'approved') {
-      const { hasActiveHold } = await import('../integrity/enforcement');
-      if ((await hasActiveHold(this.prisma, userId)).held) {
-        result = { ...result, status: 'pending_manual' as const };
-      }
-    }
-    // [DOC-1 P4-4 · P6-4] Ledger rows for the identity check; §0.5 / §6.9 decide whether the approval stands.
-    const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, IDENTITY_DOC_TYPE, result, { startedAt, finishedAt });
-    result = gateAutoApproval(result, extraction, registryType);
-
+    const result = await this.holdOnCrossSubjectCollision(userId, 'MOVER', idDocumentUrl, received);
+    const { plan: extraction } = await this.planExtractionFor(user.countryCode, IDENTITY_DOC_TYPE, result, { startedAt, finishedAt });
+    const queue: ReviewQueue = result.collided ? 'SECOND_REVIEW' : 'STANDARD';
     const doc = await this.createDocumentLively({
         userId,
         role: 'CUSTOMER',
@@ -613,45 +494,20 @@ export class VerificationService {
         kycRef: result.referenceToken,
         consentAt: new Date(),
         privacyNoticeVersion,
-        status:
-          result.status === 'approved' ? 'APPROVED'
-          : result.status === 'rejected' ? 'REJECTED'
-          : 'PENDING',
-        ...(result.status !== 'pending_manual' && { reviewedBy: 'kyc:auto', reviewedAt: new Date() }),
-        ...(result.status === 'rejected' && { reviewNote: result.reason }),
-    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction });
+        status: 'PENDING',
+    }, { queue, extraction });
 
-    await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason);
-
-    // Only the approved L2 verdict may turn OCR into HARD identity evidence.
-    const identityDocumentNumber = approvedIdentityDocumentNumber(
-      IDENTITY_DOC_TYPE,
-      doc.status,
-      result.extracted?.documentNumber,
-    );
-    if (identityDocumentNumber) {
-      const { IdentityService } = await import('../integrity/identity.service');
-      await new IdentityService(this.prisma).capture({
-        accountId: userId, actorRole: 'CUSTOMER',
-        type: 'ID_DOC_NUMBER', normalizedValue: identityDocumentNumber, source: 'AI_ID_ANALYZER',
-      });
-    }
-
-    if (doc.status === 'APPROVED') await this.promoteToL2(userId);
-    if (doc.status === 'REJECTED') await this.notifyRejection(userId, 'identity', result.reason);
-    if (doc.status === 'PENDING') {
-      await notifyAdmins(this.prisma, this.notifications, {
-        // Follows the submitter [NOC-A F45].
-        tenantId: await tenantOfUser(this.prisma, userId),
-        title: 'Verification review needed',
-        body: 'An identity check (L2) is waiting in the review queue.',
-        data: { kind: 'verification_pending', docId: doc.id },
-      });
-    }
+    await this.recordSubmission(userId, doc.id, IDENTITY_DOC_TYPE, queue, result.reason);
+    await notifyAdmins(this.prisma, this.notifications, {
+      // Follows the submitter [NOC-A F45].
+      tenantId: await tenantOfUser(this.prisma, userId),
+      title: 'Verification review needed',
+      body: 'An identity check (L2) is waiting in the review queue.',
+      data: { kind: 'verification_pending', docId: doc.id },
+    });
 
     return doc;
   }
-
   /** [STRAND-2 belt] Reconcile vendor activation projections against document
    *  truth. The decision transaction keeps NEW decisions atomic; this heals
    *  history — a pre-slice-1 stranded vendor (checklist complete, still
@@ -1664,14 +1520,14 @@ export class VerificationService {
 
   /**
    * [DOC-1 §7 V_SHA_COLLISION · DOC-INV-11] The SAME bytes already on ANOTHER
-   * account never auto-approve: one person opening several accounts, or a
-   * reused/forged document. The upload route already tells the reviewers
-   * (SWIFT-078); this is the rule at the decision — the provider's verdict is
-   * overruled to a human review, and both accounts are linked in the identity
-   * graph with a HARD signal (the file's hash — never the document). A bad
-   * document is still a bad document: an auto-reject stands.
+   * account: one person opening several accounts, or a reused/forged document.
+   * The upload route already tells the reviewers (SWIFT-078); this is the rule
+   * at the submission — the case opens in the SECOND_REVIEW queue with the
+   * reason on the audit row, and both accounts are linked in the identity graph
+   * with a HARD signal (the file hash — never the document). [NO-AI] Nothing is
+   * approved or rejected here; a person decides both documents.
    */
-  private async holdOnCrossSubjectCollision<T extends { status: string; reason?: string }>(
+  private async holdOnCrossSubjectCollision<T extends { reason?: string }>(
     userId: string,
     roleKey: string,
     fileKey: string,
@@ -1689,9 +1545,7 @@ export class VerificationService {
     await identity.capture({ accountId: userId, actorRole: roleKey, type: 'DOC_CONTENT', normalizedValue: mine.sha256, source: 'ONBOARDING_DOC' });
     await identity.capture({ accountId: other.createdBy, actorRole: otherRole, type: 'DOC_CONTENT', normalizedValue: mine.sha256, source: 'ONBOARDING_DOC' });
     // The case this document opens goes to the SECOND_REVIEW queue (P4-5).
-    const flagged = { ...result, collided: true };
-    if (result.status !== 'approved') return flagged;
-    return { ...flagged, status: 'pending_manual', reason: 'Duplicate of a document already on another account — second review required' };
+    return { ...result, collided: true, reason: 'Duplicate of a document already on another account — second review required' };
   }
 
   /** Purge documents whose retention window elapsed: delete the stored object,
@@ -1803,16 +1657,16 @@ export class VerificationService {
   /**
    * Verification-completion side effects. A weekly subscription is BORN as a
    * 14-day trial the moment a participant is fully verified (idempotent — the
-   * admin entity-verify endpoints feed the same seams), so the KYC
-   * auto-approval path can never strand a verified operator without a
+   * admin entity-verify endpoints feed the same seams), so approving the last
+   * checklist document can never strand a verified operator without a
    * subscription. Vendors additionally get their display flag, and a store
    * suspended by a lapsed document re-opens when verification is restored.
    */
   private async afterApproval(userId: string) {
     // [STRAND-1] One projection owns vendor activation truth (flags + the
     // PENDING_APPROVAL→ACTIVE promotion). Manual review already ran it inside
-    // the decision transaction; the auto-approval path reaches it here. It is
-    // idempotent, so the double run after manual review is harmless.
+    // the decision transaction; this post-commit run is idempotent, so the
+    // double run is harmless.
     await this.projectVendorActivation(this.prisma, userId);
     const owner = await this.prisma.vendorOwner.findUnique({
       where: { userId },
@@ -1973,25 +1827,17 @@ export class VerificationService {
     });
   }
 
-  /** Append an immutable audit entry for an automated KYC decision (§3.6). */
-  private async recordDecision(
-    userId: string,
-    docId: string,
-    docType: string,
-    status: VerificationDocument['status'],
-    reason?: string,
-  ) {
-    const action =
-      status === 'APPROVED' ? 'KYC_AUTO_APPROVE'
-      : status === 'REJECTED' ? 'KYC_AUTO_REJECT'
-      : 'VERIFICATION_SUBMIT';
+  /** Append the immutable submission audit entry (§3.6). Nothing is decided here: decisions
+   *  are audited by the review path (review_decision + the audit chain); this row records
+   *  where the submission was queued and why a person must look. */
+  private async recordSubmission(userId: string, docId: string, docType: string, queue: ReviewQueue, reason?: string) {
     await this.prisma.auditLog.create({
       data: {
         userId,
-        action,
+        action: 'VERIFICATION_SUBMIT',
         entity: 'VerificationDocument',
         entityId: docId,
-        changes: { docType, status, ...(reason && { reason }) },
+        changes: { docType, status: 'PENDING', queue, ...(reason && { reason }) },
       },
     });
   }

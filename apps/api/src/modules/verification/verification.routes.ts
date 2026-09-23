@@ -37,7 +37,8 @@ const submitDocumentSchema = z.object({
 
 const submitIdentitySchema = z.object({
   idDocumentUrl: z.string().min(5).max(2048),
-  selfieUrl: z.string().min(5).max(2048),
+  // [NO-AI] Older app builds also send a selfieUrl. The schema strips it (zod strips unknown
+  // keys) and nothing reads it: there is no face comparison for it to feed.
   ...consentFields,
 });
 
@@ -228,13 +229,12 @@ export async function verificationRoutes(app: FastifyInstance) {
     return reply.send(plaintext);
   });
 
-  /** POST /identity — L2 flow: government ID + selfie. Permanent once approved. */
+  /** POST /identity — L2 flow: a government ID, queued for a person to review. */
   app.post('/identity', auth, async (request, reply) => {
     const body = submitIdentitySchema.parse(request.body);
     const doc = await verification.submitIdentity(
       request.user.userId,
       body.idDocumentUrl,
-      body.selfieUrl,
       body.privacyNoticeVersion,
     );
     reply.code(201);

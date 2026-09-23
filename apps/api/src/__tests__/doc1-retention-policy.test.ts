@@ -17,7 +17,7 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { CountryConfigService } from '../modules/country/country-config.service';
-import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { seedDocRegistry, registryCode } from '../modules/verification/doc-registry';
 import { retentionDaysFor, AML_RETENTION_DAYS } from '../modules/verification/retention-policy';
 
@@ -40,7 +40,7 @@ beforeAll(async () => {
   registerErrorHandler(app);
   await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(socketPlugin);
   await app.ready();
-  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   await system(() => seedDocRegistry(app.prisma));
   await system(() => app.prisma.docType.createMany({ data: [
     {

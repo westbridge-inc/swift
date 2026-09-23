@@ -1,29 +1,31 @@
 import { randomUUID } from 'node:crypto';
-import { nanoid } from 'nanoid';
-import { IdAnalyzerKycProvider } from './id-analyzer-provider';
-import { DiditKycProvider } from './didit-provider';
-import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
-// KycProvider — hard rule 4: every external service sits behind a swappable
-// interface. A Sumsub-class adapter slots in later; nothing outside this
-// module may know which provider exists. We store only the verification
-// RESULT and a reference token — never provider payloads, never to logs,
-// never to any AI service.
+// [NO-AI · owner rule 2026-09-07] Identity and document verification is HUMAN
+// review only. This seam once held two model-backed adapters (document OCR,
+// authenticity scoring and face comparison, run by outside providers) and a
+// sandbox that approved on a marker in the file name. All three are deleted,
+// and so is every field through which an adapter could express a decision: a
+// result carries a reference for the ledger and, at most, what an engine READ.
+// It cannot say approved or rejected, because the contract has no such field.
+//
+// The interface stays because the extraction ledger records which engine
+// handled a submission (DOC-1 P4-4) and because the outage ladder, custody and
+// ledger suites are built against it. The only runtime implementation is the
+// manual one below; `getKycProvider` refuses to construct anything else, and
+// `no-ai-kyc-gate.unit.test.ts` fails the build if another one reappears.
 // ---------------------------------------------------------------------------
-
-export type KycStatus = 'approved' | 'rejected' | 'pending_manual';
 
 export interface KycVerificationResult {
-  status: KycStatus;
-  /** Provider-side case id — the only provider artifact we persist */
+  /** Opaque reference recorded on the submission (kycRef). The manual engine mints one. */
   referenceToken: string;
+  /** Why a person must look (an outage, a duplicate). Informational, never a decision. */
   reason?: string;
-  /** Parsed document fields, surfaced ONLY for the identity-integrity capture
-   *  hook, which HMAC-hashes and discards them immediately (trial-integrity
-   *  spec §2.1 hashing law). Raw values are never persisted anywhere. */
+  /** What an engine READ, for the ledger (encrypted, blind-indexed, never persisted raw).
+   *  The manual engine reads nothing: a reviewer keys the fields. */
   extracted?: { documentNumber?: string };
-  /** Processor-reported confidence for the extracted set, 0..1. Absent = unknown — never eligible for auto-approval (DOC-1 §6.9). */
+  /** An engine's reported confidence in what it read, 0..1, recorded on the run for the
+   *  reviewer. It decides nothing. Absent = unknown. */
   confidence?: number;
 }
 
@@ -42,81 +44,26 @@ export interface KycEngine {
 export interface KycProvider {
   /** Absent = an adapter that never described itself; the ledger records it as an external unknown. */
   readonly engine?: KycEngine;
-  /** L2 identity check: government ID + selfie. */
-  verifyIdentity(input: { userId: string; idDocumentUrl: string; selfieUrl: string }): Promise<KycVerificationResult>;
-  /** Single role/business document check. */
+  /** Hand ONE document to the engine of record. Nothing that comes back is a verdict. */
   verifyDocument(input: { userId: string; docType: string; fileUrl: string }): Promise<KycVerificationResult>;
-  /** Provider-side status by reference token. */
-  getStatus(referenceToken: string): Promise<KycStatus>;
-}
-
-/**
- * Sandbox adapter — V1's hybrid model routes everything to the manual admin
- * review queue. Deterministic markers in the file reference let tests force
- * the automatic paths:
- *   "auto-approve" -> approved, "auto-reject" -> rejected, else pending_manual.
- */
-export class SandboxKycProvider implements KycProvider {
-  readonly engine: KycEngine = { name: 'sandbox', version: '1', external: false };
-
-  private decide(url: string): KycVerificationResult {
-    // Deterministic extraction marker so integrity tests can inject document
-    // numbers end-to-end: any "docno-XXXX" token in the file reference.
-    const docno = /docno-([A-Za-z0-9-]+)/.exec(url)?.[1];
-    const extracted = docno ? { documentNumber: docno } : undefined;
-    if (url.includes('auto-approve')) {
-      return { status: 'approved', referenceToken: `sbx_${nanoid(10)}`, extracted };
-    }
-    if (url.includes('auto-reject')) {
-      return { status: 'rejected', referenceToken: `sbx_${nanoid(10)}`, reason: 'Document unreadable (sandbox)', extracted };
-    }
-    return { status: 'pending_manual', referenceToken: `sbx_${nanoid(10)}`, extracted };
-  }
-
-  async verifyIdentity(input: { userId: string; idDocumentUrl: string; selfieUrl: string }): Promise<KycVerificationResult> {
-    // Both files must pass; the selfie marker wins ties so tests can target it
-    const combined = `${input.idDocumentUrl} ${input.selfieUrl}`;
-    return this.decide(combined);
-  }
-
-  async verifyDocument(input: { userId: string; docType: string; fileUrl: string }): Promise<KycVerificationResult> {
-    return this.decide(input.fileUrl);
-  }
-
-  async getStatus(_referenceToken: string): Promise<KycStatus> {
-    return 'pending_manual';
-  }
 }
 
 /**
  * [FD-DOC-3b · founder decision 2026-09-07 · option (b) ON SHORE] No document image ever leaves
  * Swift's infrastructure: nothing is read automatically, every submission lands PENDING for a
- * human reviewer who keys the fields and decides. This provider approves NOTHING — which is
- * exactly why production accepts it where `sandbox` (self-approving test identities) is refused.
+ * human reviewer who keys the fields and decides. This engine returns a reference and nothing
+ * else.
  */
 export class ManualReviewKycProvider implements KycProvider {
   readonly engine: KycEngine = { name: 'manual-review', version: '1', external: false };
-  async verifyIdentity(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `manual_${randomUUID()}` }; }
-  async verifyDocument(): Promise<KycVerificationResult> { return { status: 'pending_manual', referenceToken: `manual_${randomUUID()}` }; }
-  async getStatus(): Promise<KycStatus> { return 'pending_manual'; }
+  async verifyDocument(): Promise<KycVerificationResult> { return { referenceToken: `manual_${randomUUID()}` }; }
 }
 
-/** Provider selection is config, not code. */
+/** `manual` is not the safe choice among several: it is the only implementation that exists. */
 export function getKycProvider(): KycProvider {
-  const provider = process.env['KYC_PROVIDER'] ?? 'sandbox';
-  if (isProduction() && provider === 'sandbox') {
-    throw new Error('KYC_PROVIDER=sandbox is forbidden in production');
+  const provider = process.env['KYC_PROVIDER'];
+  if (provider !== 'manual') {
+    throw new Error(`KYC_PROVIDER must be 'manual' (human review); got ${provider === undefined ? 'unset' : JSON.stringify(provider)}. No other identity provider exists.`);
   }
-  switch (provider) {
-    case 'sandbox':
-      return new SandboxKycProvider();
-    case 'manual':
-      return new ManualReviewKycProvider();
-    case 'idanalyzer':
-      return new IdAnalyzerKycProvider();
-    case 'didit':
-      return new DiditKycProvider();
-    default:
-      throw new Error(`Unknown KYC_PROVIDER: ${provider}`);
-  }
+  return new ManualReviewKycProvider();
 }

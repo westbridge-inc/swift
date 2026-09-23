@@ -23,6 +23,6 @@ export default defineConfig({
       'src/__tests__/order-status-single-source.test.ts',
     ],
     fileParallelism: false,
-    env: { NODE_ENV: 'test', KYC_PROVIDER: 'sandbox' },
+    env: { NODE_ENV: 'test', KYC_PROVIDER: 'manual' },
   },
 });

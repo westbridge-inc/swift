@@ -41,13 +41,10 @@ const users: string[] = [];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-degradation-test');
 const svc = (kyc: KycProvider) => new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), kyc);
 
-/** A processor that says "approved" with fields — the answer an outage must never turn into an approval. */
-class ApprovingKyc implements KycProvider {
-  readonly engine = { name: 'approving', version: 'test', external: false };
-  async verifyIdentity(): Promise<KycVerificationResult> { return this.result(); }
-  async verifyDocument(): Promise<KycVerificationResult> { return this.result(); }
-  async getStatus(): Promise<'approved'> { return 'approved'; }
-  private result(): KycVerificationResult { return { status: 'approved', referenceToken: `ok_${nanoid(5)}`, extracted: { documentNumber: `DN${RUN}` }, confidence: 0.99 }; }
+/** An engine that reads fields at high confidence — the answer an outage must never turn into anything at all. */
+class ReadingKyc implements KycProvider {
+  readonly engine = { name: 'reading', version: 'test', external: false };
+  async verifyDocument(): Promise<KycVerificationResult> { return { referenceToken: `ok_${nanoid(5)}`, extracted: { documentNumber: `DN${RUN}` }, confidence: 0.99 }; }
 }
 
 async function owner(n: number) {
@@ -91,7 +88,7 @@ afterAll(async () => {
 describe('[DOC-1 P21] the ladder', () => {
   it('a thrown adapter is an outage: the submission is accepted, queued for a human, the run records the outage, and no approval path exists', async () => {
     const u = await owner(1);
-    const doc = await submit(svc(degradedProvider(new ApprovingKyc(), 'throw')), u);
+    const doc = await submit(svc(degradedProvider(new ReadingKyc(), 'throw')), u);
     expect(await docOf(doc.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING', record: null });
     const run = await runOf(doc.id);
     expect(run).toMatchObject({ outcome: 'FAILED', errorClass: EXTRACTION_UNAVAILABLE });
@@ -104,18 +101,19 @@ describe('[DOC-1 P21] the ladder', () => {
     try {
       const u = await owner(2);
       const started = Date.now();
-      const doc = await submit(svc(degradedProvider(new ApprovingKyc(), 'hang')), u);
+      const doc = await submit(svc(degradedProvider(new ReadingKyc(), 'hang')), u);
       expect(Date.now() - started).toBeLessThan(5_000);
       expect(await docOf(doc.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
       expect((await runOf(doc.id)).errorClass).toBe(EXTRACTION_UNAVAILABLE);
       const r = await extractWithLadder(() => new Promise<KycVerificationResult>(() => undefined), { timeoutMs: 50 });
-      expect(r).toMatchObject({ status: 'pending_manual', degraded: EXTRACTION_UNAVAILABLE });
+      expect(r).toMatchObject({ degraded: EXTRACTION_UNAVAILABLE });
+      expect(r).not.toHaveProperty('status');
     } finally {
       if (prev === undefined) delete process.env['EXTRACTION_TIMEOUT_MS']; else process.env['EXTRACTION_TIMEOUT_MS'] = prev;
     }
   });
 
-  it('the breaker: more than 10% schema violations over the last 100 runs disables the model leg for that type — manual keying, no fields taken, admins told once', async () => {
+  it('the breaker: more than 10% schema violations over the last 100 runs disables that engine for the type — manual keying, no fields taken, admins told once', async () => {
     const u = await owner(3);
     const code = registryCode('GY', 'tin_certificate');
     const profileCode = `BREAKER_${RUN}`;
@@ -123,7 +121,7 @@ describe('[DOC-1 P21] the ladder', () => {
     // declare the field the processor returns, so a NON-degraded run would store it — the degraded run must not
     await system(() => app.prisma.docField.deleteMany({ where: { docTypeCode: code, fieldCode: 'doc_number' } }));
     await system(() => app.prisma.docField.create({ data: { docTypeCode: code, fieldCode: 'doc_number', dataType: 'text', isRequired: false, isPii: true, isBlindIndexed: false, displayOrder: 1 } }));
-    const seed = await submit(svc(new ApprovingKyc()), u, 'tin_certificate'); // establishes a run on the profile
+    const seed = await submit(svc(new ReadingKyc()), u, 'tin_certificate'); // establishes a run on the profile
     const healthy = await runOf(seed.id);
     expect(healthy.fields.map((f) => f.fieldCode).filter((c) => c === 'doc_number')).toEqual(['doc_number']) // the suite's own declared field; the registry seeds the type's others (P4-1);
     expect(healthy.fields.find((f) => f.fieldCode === 'doc_number')!.valueCt).not.toBeNull(); // the healthy path stores the value (encrypted)
@@ -133,7 +131,7 @@ describe('[DOC-1 P21] the ladder', () => {
     })) }));
     expect((await system(() => l3BreakerOpen(app.prisma, profileCode))).open).toBe(true);
     const u2 = await owner(4);
-    const doc = await submit(svc(new ApprovingKyc()), u2, 'tin_certificate');
+    const doc = await submit(svc(new ReadingKyc()), u2, 'tin_certificate');
     expect(await docOf(doc.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
     const run = await runOf(doc.id);
     expect(run).toMatchObject({ outcome: 'FAILED', errorClass: L3_DISABLED });
@@ -141,7 +139,7 @@ describe('[DOC-1 P21] the ladder', () => {
     const pages = () => system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'ops_extraction_breaker_open' }, body: { contains: profileCode } } }));
     expect(await pages()).toBeGreaterThanOrEqual(1);
     const before = await pages();
-    await submit(svc(new ApprovingKyc()), u2, 'tin_certificate').catch(() => undefined);
+    await submit(svc(new ReadingKyc()), u2, 'tin_certificate').catch(() => undefined);
     expect(await pages()).toBe(before);
     await system(() => app.prisma.docType.update({ where: { code }, data: { extractionProfile: 'UNPROFILED' } }));
     await system(() => app.prisma.docField.deleteMany({ where: { docTypeCode: code, fieldCode: 'doc_number' } }));

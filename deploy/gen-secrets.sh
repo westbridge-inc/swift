@@ -117,8 +117,8 @@ umask 077
   echo "# Everything below is NOT a secret and is copied from .env.deploy.example"
   echo "# so this file is a complete deploy env. Review it — the defaults are"
   echo "# development-safe, which means several of them are exactly what the"
-  echo "# production boot guards refuse to start on (KYC_PROVIDER=sandbox,"
-  echo "# PAYMENT_PROVIDER=sandbox, MMG_DRIVER=sandbox, NOTIFICATION_PROVIDER=dev)."
+  echo "# production boot guards refuse to start on (PAYMENT_PROVIDER=sandbox,"
+  echo "# MMG_DRIVER=sandbox, NOTIFICATION_PROVIDER=dev)."
   echo "# Run ./deploy/preflight.sh to see exactly which ones would refuse."
   echo "# ---------------------------------------------------------------------"
   echo
