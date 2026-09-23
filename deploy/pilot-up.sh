@@ -24,11 +24,11 @@ API_HOST="$(env_value API_HOST)"
 [ "$API_HOST" != localhost ] || die "API_HOST cannot be localhost"
 [ "$(env_value MAPS_PROVIDER)" = osrm ] || die "pilot requires MAPS_PROVIDER=osrm"
 [ "$(env_value OSRM_URL)" = http://osrm:5000 ] || die "OSRM_URL must use the private routing service"
-for name in POSTGRES_PASSWORD MEILISEARCH_KEY JWT_SECRET BACKUP_BUCKET; do
-  [ -n "$(env_value "$name")" ] || die "$name is missing"
-done
-[[ "$(env_value POSTGRES_PASSWORD)" =~ ^[A-Za-z0-9_-]+$ ]] ||
-  die "POSTGRES_PASSWORD must use URL-safe characters"
+# Secrets are not in this file (the encrypted store holds them; checked below
+# against the exact revision being deployed). The database password is
+# percent-encoded by the app when it assembles DATABASE_URL, so it no longer
+# has to be URL-safe.
+[ -n "$(env_value BACKUP_BUCKET)" ] || die "BACKUP_BUCKET is missing"
 [ -f "$HERE/routing-data/osrm/guyana-latest.osrm" ] ||
   die "OSRM extract is missing; run deploy/setup-routing.sh first"
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
@@ -42,6 +42,40 @@ git merge-base --is-ancestor "$SHA" origin/main ||
 git switch --detach "$SHA"
 [ "$(git rev-parse HEAD)" = "$SHA" ] || die "checkout differs from requested SHA"
 export SWIFT_TAG="$SHA"
+
+# ── secrets store checks (begin) ──────────────────────────────────────────
+# Secrets never live in deploy/.env: the encrypted host store holds them
+# (deploy/swift-secrets) and swift-secrets.service materializes them on tmpfs
+# for the containers. Graded against THIS revision's allowlist and Compose file.
+SECRET_NAMES="$(sed -n '/SECRET_FILE_NAMES = \[/,/\] as const/p' "$ROOT/apps/api/src/utils/secret-files.ts" |
+  grep -oE "'[A-Z][A-Z0-9_]*'" | tr -d "'" || true)"
+[ -n "$SECRET_NAMES" ] || die "could not read the secret allowlist from apps/api/src/utils/secret-files.ts"
+for name in $SECRET_NAMES; do
+  ! grep -qE "^$name=" "$HERE/.env" ||
+    die "$name is declared in deploy/.env; secrets belong in the encrypted store (sudo swift-secrets set $name) and are wired as ${name}_FILE"
+done
+STORE_BIN="$(command -v swift-secrets || true)"
+[ -n "$STORE_BIN" ] || STORE_BIN="$HERE/swift-secrets"
+[ -x "$STORE_BIN" ] || die "swift-secrets is not installed (install -m 0755 -o root -g root deploy/swift-secrets /usr/local/sbin/swift-secrets)"
+STORED="$("$STORE_BIN" list)" || die "swift-secrets list failed"
+# Everything wired as NAME_FILE — hardwired in Compose or switched on in .env —
+# must be in the store, or the app refuses to boot after the old one is stopped.
+WIRED="$({
+  grep -oE '^[[:space:]]+[A-Z][A-Z0-9_]*_FILE: /run/secrets/[A-Z][A-Z0-9_]*' "$HERE/docker-compose.yml" || true
+  grep -oE '^[A-Z][A-Z0-9_]*_FILE=/run/secrets/[A-Z][A-Z0-9_]*' "$HERE/.env" || true
+} | sed -E 's#.*/run/secrets/##' | sort -u)"
+for name in $WIRED; do
+  grep -qx "$name" <<< "$STORED" ||
+    die "$name is wired as ${name}_FILE but is not in the encrypted store; run: sudo swift-secrets set $name"
+done
+for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+  grep -qx "$name" <<< "$STORED" ||
+    echo "WARNING: $name is not in the encrypted store; the nightly backup unit (BACKUP_REQUIRED=1) fails until it is" >&2
+done
+# Fresh files for this deploy, and proof the unit is installed.
+sudo -n systemctl restart swift-secrets.service ||
+  die "swift-secrets.service could not materialize the store; inspect: sudo systemctl status swift-secrets.service"
+# ── secrets store checks (end) ────────────────────────────────────────────
 
 docker network inspect swift-pilot-private >/dev/null 2>&1 ||
   docker network create --driver bridge swift-pilot-private >/dev/null

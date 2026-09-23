@@ -101,6 +101,29 @@ describe('the census is generated from the tree, never maintained by hand', () =
     expect(nonces.size).toBe(1);
   });
 
+  it('the *_FILE loader allowlist is a census source — a secret the API reads through the store, not process.env[...], is still armed', () => {
+    // apps/api/src/utils/secret-files.ts reads its names through a loop, so the
+    // process.env scan never sees them; POSTGRES_PASSWORD reaches the API only
+    // that way once the deploy template stops declaring it.
+    const repo = join(fixtureRoot, 'allowlist-repo');
+    mkdirSync(join(repo, 'apps', 'api', 'src', 'utils'), { recursive: true });
+    writeFileSync(
+      join(repo, 'apps', 'api', 'src', 'utils', 'secret-files.ts'),
+      [
+        'export const SECRET_FILE_NAMES = [',
+        "  'POSTGRES_PASSWORD', // the database password",
+        "  'MMG_MSECRET',",
+        "  'LOG_LEVEL', // not secret-shaped: filtered like every other source",
+        '] as const;',
+        "const unrelated = ['OTHER_TOKEN'];",
+        '',
+      ].join('\n'),
+    );
+    const r = run(['--root', repo, '--names']);
+    expect(r.code).toBe(0);
+    expect(r.output.trim().split('\n')).toEqual(['MMG_MSECRET', 'POSTGRES_PASSWORD']);
+  });
+
   it('an empty census refuses to arm — a canary set of zero certifies nothing', () => {
     const empty = join(fixtureRoot, 'empty-repo');
     mkdirSync(join(empty, 'apps', 'api', 'src'), { recursive: true });

@@ -122,6 +122,15 @@ function secretNames(rootDir) {
       if (m) names.add(m[1]);
     }
   }
+  // The `*_FILE` loader's allowlist (apps/api/src/utils/secret-files.ts) is
+  // every secret the API accepts from the encrypted host store. It reads them
+  // through a loop, so the process.env scan above cannot see them, and the
+  // deploy template no longer declares them.
+  const allowlist = path.join(apiSrc, 'utils', 'secret-files.ts');
+  if (fs.existsSync(allowlist)) {
+    const block = /SECRET_FILE_NAMES\s*=\s*\[([\s\S]*?)\]\s*as const/.exec(fs.readFileSync(allowlist, 'utf8'));
+    for (const m of (block ? block[1] : '').matchAll(/'([A-Z][A-Z0-9_]*)'/g)) names.add(m[1]);
+  }
   return [...names]
     .filter((n) => SECRET_WORD.test(n) && !PUBLIC_PREFIX.test(n) && !Object.hasOwn(EMBEDDED_BY_DESIGN, n))
     .sort();

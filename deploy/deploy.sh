@@ -24,19 +24,23 @@ fi
 if [[ ! -f .env ]]; then
   echo "No deploy/.env yet — creating one from the template."
   cp .env.deploy.example .env
-  echo "→ Edit deploy/.env and set POSTGRES_PASSWORD, MEILISEARCH_KEY, JWT_SECRET, then re-run." >&2
+  echo "→ Edit deploy/.env (settings only), run ./deploy/gen-secrets.sh for the secrets, then re-run." >&2
   exit 1
 fi
 
-# Refuse to run with unfilled required secrets — fail closed, don't boot broken.
+# Refuse to run without the required secrets in the encrypted store — fail
+# closed, don't boot broken. The stack reads them from /run/swift-secrets
+# (deploy/swift-secrets), never from deploy/.env.
+STORE_BIN="$(command -v swift-secrets || true)"
+[[ -n "$STORE_BIN" ]] || STORE_BIN=./swift-secrets
+stored="$("$STORE_BIN" list 2>/dev/null || true)"
 missing=()
-for k in POSTGRES_PASSWORD MEILISEARCH_KEY JWT_SECRET; do
-  v="$(grep -E "^${k}=" .env | head -1 | cut -d= -f2-)"
-  [[ -z "$v" ]] && missing+=("$k")
+for k in POSTGRES_PASSWORD MEILISEARCH_KEY JWT_SECRET OTP_HASH_SECRET MASTER_KEK STORAGE_SIGNING_SECRET CONSENT_IP_PEPPER; do
+  grep -qx "$k" <<< "$stored" || missing+=("$k")
 done
 if [[ ${#missing[@]} -gt 0 && "${1:-up}" != "down" && "${1:-up}" != "nuke" && "${1:-up}" != "logs" ]]; then
-  echo "error: these REQUIRED values are empty in deploy/.env: ${missing[*]}" >&2
-  echo "  JWT_SECRET must be >= 32 bytes: openssl rand -hex 32" >&2
+  echo "error: these REQUIRED secrets are not in the encrypted store: ${missing[*]}" >&2
+  echo "  ./deploy/gen-secrets.sh stores them; sudo systemctl restart swift-secrets.service delivers them to /run/swift-secrets" >&2
   exit 1
 fi
 
