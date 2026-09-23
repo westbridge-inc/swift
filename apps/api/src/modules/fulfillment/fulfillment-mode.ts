@@ -1,13 +1,14 @@
 import type { FulfillmentMode } from '@prisma/client';
 
 /**
- * FUL-004b: resolve WHO delivers a DELIVERY order, evaluated AT the dispatch
- * decision (vendor accept for ON_ACCEPT, mark-ready for ON_READY).
+ * FUL-004b: resolve WHO delivers a DELIVERY order before vendor acceptance
+ * becomes visible. Dispatch may happen at accept or ready, but the authority
+ * is persisted in the acceptance transaction for both trigger modes.
  *
  * The sequencing crux: with the ON_ACCEPT dispatch default, the platform rider
  * would be dispatched before a vendor could pick VENDOR_DELIVERY at Ready. So
- * self-delivery is driven by the vendor's standing preference, resolved right at
- * the dispatch point — a self-delivering vendor never has a platform rider
+ * self-delivery is driven by the vendor's standing preference, resolved at the
+ * acceptance boundary — a self-delivering vendor never has a platform rider
  * dispatched underneath it.
  *
  * Precedence: an EXPLICIT choice already on the order (a vendor one-tap override)

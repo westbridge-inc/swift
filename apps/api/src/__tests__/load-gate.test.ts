@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 import {
   estimateLoad,
   requiredPackageSizeForOrder,
@@ -185,8 +186,24 @@ describe('it is a SHADOW — it cannot change or stop a dispatch', () => {
   it('the candidate query is still driven by courierPackageSize alone', () => {
     // The moment this argument changes, the gate is LIVE. That must be a
     // deliberate, evidence-backed change, not something that rides along here.
-    expect(dispatchSrc).toContain('order.courierPackageSize, order.customerId, order.taxiPassengerCount)');
-    expect(dispatchSrc).not.toMatch(/findCandidates\([^)]*requiredPackageSizeForOrder/s);
+    const ast = ts.createSourceFile('dispatch.ts', dispatchSrc, ts.ScriptTarget.Latest, true);
+    const calls: ts.CallExpression[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+        && node.expression.name.text === 'findCandidates'
+        && node.arguments[0]?.getText(ast) === 'orderId') calls.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(ast);
+    expect(calls).toHaveLength(1);
+    // Grade the named formal parameter, so unrelated trailing arguments,
+    // formatting and comments cannot break this shadow-policy assertion.
+    const klass = ast.statements.find(n => ts.isClassDeclaration(n) && n.name?.text === 'DispatchService') as ts.ClassDeclaration;
+    const method = klass.members.find(n => n.name?.getText(ast) === 'findCandidates') as ts.MethodDeclaration;
+    const position = method.parameters.findIndex(p => p.name.getText(ast) === 'packageSize');
+    expect(position).toBeGreaterThanOrEqual(0);
+    expect(calls[0]!.arguments[position]!.getText(ast)).toBe('order.courierPackageSize');
+    expect(calls[0]!.arguments.every(a => !a.getText(ast).includes('requiredPackageSizeForOrder'))).toBe(true);
   });
 
   it('both shadows are wrapped, so a classification bug cannot end a dispatch', () => {

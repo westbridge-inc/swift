@@ -32,6 +32,27 @@ function boardHandler(orders: unknown[], detail: unknown) {
   };
 }
 
+function deliveryOwnerHandler(detail: Record<string, unknown>) {
+  return (request: ApiRequest) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/orders') {
+      return { body: { success: true, data: [detail], meta: { total: 1 } } };
+    }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/orders/order-live') {
+      return { body: { success: true, data: detail } };
+    }
+    if (request.method === 'PUT' && request.url.pathname === '/api/v1/vendor/orders/order-live/fulfillment-mode') {
+      return { body: { success: true, data: { ...detail, fulfillmentMode: JSON.parse(String(request.init?.body)).mode } } };
+    }
+    if (request.method === 'PUT' && request.url.pathname === '/api/v1/vendor/orders/order-live/delivered') {
+      return { body: { success: true, data: { ...detail, status: 'DELIVERED' } } };
+    }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/items') {
+      return { body: { success: true, data: [] } };
+    }
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  };
+}
+
 /** The board row `<p>` is exactly `#SW-1001`; the takeover's is longer. */
 async function rowFor(orderNumber: string) {
   const heading = await screen.findByText(`#${orderNumber}`);
@@ -148,6 +169,100 @@ describe('vendor order board — money is never invented', () => {
     renderWithQuery(<OrdersPage />);
     await screen.findByText(/Nothing in/);
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
+  });
+});
+
+describe('delivery owner controls', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  async function openDeliveryOwner(over: Record<string, unknown>) {
+    const detail = wireVendorOrderDetail({
+      status: 'READY_FOR_PICKUP',
+      fulfillment: 'DELIVERY',
+      vendor: { vendorType: 'RESTAURANT', selfDeliveryEnabled: true },
+      ...over,
+    });
+    const fetchMock = mockApi(deliveryOwnerHandler(detail));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const bucket = detail.status === 'PENDING' ? /New/ : /Ready \/ handoff/;
+    await user.click(await screen.findByRole('button', { name: bucket }));
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByRole('region', { name: 'Delivery owner' });
+    return { user, fetchMock };
+  }
+
+  it('offers the alternative owner for an eligible riderless delivery and sends the typed choice', async () => {
+    const { user, fetchMock } = await openDeliveryOwner({ fulfillmentMode: 'PLATFORM_RIDER' });
+    expect(screen.getByText('Platform rider delivery selected')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'We’ll deliver' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Get a Swift rider' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'We’ll deliver' }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/fulfillment-mode'));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call![1]?.body))).toEqual({ mode: 'VENDOR_DELIVERY' });
+    });
+  });
+
+  it('names vendor self-delivery and never offers a rider retry for it', async () => {
+    await openDeliveryOwner({ fulfillmentMode: 'VENDOR_DELIVERY' });
+    expect(screen.getByText('Your store delivers this order')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Search for a rider again/i })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Get a Swift rider' })).toBeTruthy();
+  });
+
+  it('requires an explicit handoff confirmation before closing a self-delivery', async () => {
+    const { user, fetchMock } = await openDeliveryOwner({ fulfillmentMode: 'VENDOR_DELIVERY' });
+
+    await user.click(screen.getByRole('button', { name: 'Confirm delivered' }));
+    expect(screen.getByRole('dialog', { name: 'Confirm store delivery' })).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/delivered'))).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'Yes, delivered' }));
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([url, init]) =>
+        String(url).endsWith('/api/v1/vendor/orders/order-live/delivered')
+        && init?.method === 'PUT')).toBe(true);
+    });
+  });
+
+  it('keeps the platform-rider escape when the store-wide self-delivery setting is off', async () => {
+    await openDeliveryOwner({
+      fulfillmentMode: 'VENDOR_DELIVERY',
+      vendor: { vendorType: 'RESTAURANT', selfDeliveryEnabled: false },
+    });
+    expect(screen.getByText('Your store delivers this order')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Get a Swift rider' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'We’ll deliver' })).toBeNull();
+  });
+
+  it('does not claim dispatch is searching when the delivery owner is unresolved', async () => {
+    await openDeliveryOwner({ fulfillmentMode: null, status: 'PENDING' });
+    expect(screen.getByText('Delivery owner not chosen yet')).toBeTruthy();
+    expect(screen.getByText('No delivery owner has been recorded yet.')).toBeTruthy();
+    expect(screen.queryByText(/finding a rider/i)).toBeNull();
+  });
+
+  it('treats riderId as assignment even when the rider profile has no display name', async () => {
+    await openDeliveryOwner({
+      riderId: 'rider-without-name',
+      rider: { user: { firstName: null, lastName: null, phone: null } },
+      fulfillmentMode: 'PLATFORM_RIDER',
+    });
+    expect(screen.getByText('A Swift rider delivers this order')).toBeTruthy();
+    expect(screen.getByText('Swift rider')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'We’ll deliver' })).toBeNull();
+  });
+
+  it('preserves pickup semantics: a pickup has no delivery-owner controls', async () => {
+    const detail = wireVendorOrderDetail({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP' });
+    mockApi(deliveryOwnerHandler(detail));
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await screen.findByRole('button', { name: /Ready \/ handoff/ }));
+    await user.click(await rowFor('SW-1001'));
+    expect(screen.queryByRole('region', { name: 'Delivery owner' })).toBeNull();
+    expect(screen.getByText(/Customer collects with a pickup code/)).toBeTruthy();
   });
 });
 

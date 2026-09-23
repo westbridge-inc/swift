@@ -1,5 +1,13 @@
 import { Prisma } from '@prisma/client';
-import type { PrismaClient, OrderStatus, FulfillmentType, DiscountType, PromoFunder } from '@prisma/client';
+import type {
+  PrismaClient,
+  Order,
+  OrderStatus,
+  FulfillmentType,
+  FulfillmentMode,
+  DiscountType,
+  PromoFunder,
+} from '@prisma/client';
 import type { Server } from 'socket.io';
 import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
@@ -24,6 +32,7 @@ import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT, C
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
+import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
 import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction } from './checkout-outbox';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
@@ -40,6 +49,7 @@ import {
 import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { lockActiveOrderCustomer } from './order-creation-authority';
+import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 
 interface CheckoutInput {
   userId: string;
@@ -323,6 +333,10 @@ const RIDER_ASSIGNMENT_SNAPSHOT_SELECT = {
   // matches what picking/refunds may have changed before the lock was taken.
   paymentMethod: true,
   subtotalBase: true,
+  // Dispatch cleanup must retire only the assignment generation that this
+  // locked snapshot actually claimed. Returning the authority version keeps
+  // the post-commit Redis cleanup from guessing against a later mode switch.
+  fulfillmentModeVersion: true,
   rider: { select: { user: { select: { firstName: true } } } },
 } as const satisfies Prisma.OrderSelect;
 
@@ -385,7 +399,13 @@ export interface CanonicalOrderTransitionInput {
    * commits only while this rider still owns the order. A route-level
    * ownership pre-read cannot survive a watchdog release or reassignment
    * committing before the lock — this can. */
-  expectedRiderId?: string;
+  expectedRiderId?: string | null;
+  /** Optional locked-row custody predicates for role-specific commands. A
+   * route pre-read is authorization UX only; physical ownership is proved
+   * again here, in the same transaction as the state transition. */
+  expectedDriverId?: string | null;
+  expectedFulfillment?: FulfillmentType;
+  expectedFulfillmentMode?: FulfillmentMode;
   /** Legacy cancel routes historically healed null/dangling mover pointers.
    * Strict state-machine completions leave every different pointer untouched. */
   releaseStaleMoverPointer?: boolean;
@@ -393,7 +413,7 @@ export interface CanonicalOrderTransitionInput {
    * Order-lock commit (e.g. the appointment slot reservation at vendor
    * acceptance). Runs AFTER the status write and cleanup on the same locked
    * row; a throw rolls the whole transition back. Must not publish. */
-  withinTransaction?: (tx: Prisma.TransactionClient) => Promise<void>;
+  withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
   /** Admin's explicit action evidence belongs in the same commit as the order
    * state. The generic after-response route audit remains defence in depth. */
   operatorAudit?: {
@@ -459,7 +479,7 @@ export class OrderService {
       requestedFee?: number;
       moverUserId: string;
     },
-  ): Promise<RiderAssignmentSnapshot> {
+  ): Promise<RiderAssignmentSnapshot & { dispatchAssignmentSequence: number }> {
     // [SPS-F-0016] Direct claims (boards / dispatch accept) don't pass the
     // canonical transition seam, so the MMG payment-first gate is re-checked
     // here — inside the same transaction, before the CAS — covering legacy
@@ -473,10 +493,12 @@ export class OrderService {
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const paymentGate = await tx.order.findUnique({
       where: { id: input.orderId },
-      select: { paymentMethod: true, paymentStatus: true, orderType: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
+      select: { paymentMethod: true, paymentStatus: true, orderType: true, status: true, holdExpiresAt: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
     });
     if (paymentGate) {
       assertMmgFulfilmentAllowed(paymentGate, 'RIDER_ASSIGNED');
+      if (withheldAwaitingReadiness(paymentGate)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
+      if (!dispatchHoldExpired(paymentGate)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
       if (paymentGate.fulfillment !== 'DELIVERY') {
         throw new ConflictError('This order no longer needs a rider — the customer switched it to pickup');
       }
@@ -508,13 +530,17 @@ export class OrderService {
         id: input.orderId,
         customerId: { not: input.moverUserId },
         riderId: null,
-        status: { in: ORDER_TRANSITIONS.RIDER_ASSIGNED },
+        status: { in: riderDispatchableStatusesFor(paymentGate?.orderType) },
         // [REPORT-006 F-006-03] Riders are assigned to DELIVERY work only —
         // a converted (PICKUP) or appointment order matches nothing here.
         fulfillment: 'DELIVERY',
         // [TA-S0-001 hold] An order held for a person (too old, already paid
         // by MMG) is not claimable by anyone but an operator's decision.
         foodAgeHeldAt: null,
+        // Delivery authority is part of the claim CAS. A board card or stale
+        // request may outlive the vendor choosing its own courier; that stale
+        // request must never create split custody by attaching a Swift rider.
+        AND: [notSelfDeliveredFilter(), dispatchHoldExpiredFilter()],
       },
       data: {
         riderId: input.riderId,
@@ -556,10 +582,14 @@ export class OrderService {
       },
     });
 
-    return tx.order.findUniqueOrThrow({
+    const assigned = await tx.order.findUniqueOrThrow({
       where: { id: input.orderId },
       select: RIDER_ASSIGNMENT_SNAPSHOT_SELECT,
     });
+    const dispatchAssignmentSequence = await tx.orderStatusLog.count({
+      where: { orderId: input.orderId, status: 'RIDER_ASSIGNED' },
+    });
+    return { ...assigned, dispatchAssignmentSequence };
   }
 
   /** Publish live/customer hints only after the assignment transaction commits.
@@ -1713,6 +1743,15 @@ export class OrderService {
       throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
         'This job is no longer assigned to you — it was released or reassigned.');
     }
+    if (input.expectedDriverId !== undefined && source.driverId !== input.expectedDriverId) {
+      throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
+    }
+    if (input.expectedFulfillment !== undefined && source.fulfillment !== input.expectedFulfillment) {
+      throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'This order no longer uses the expected fulfillment path.');
+    }
+    if (input.expectedFulfillmentMode !== undefined && source.fulfillmentMode !== input.expectedFulfillmentMode) {
+      throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
+    }
     // [SPS-F-0016] Every canonical transition passes this seam (vendor accept/
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
     // MMG payment-first gate lives here, on the freshly locked row.
@@ -1876,7 +1915,7 @@ export class OrderService {
       });
     }
 
-    if (input.withinTransaction) await input.withinTransaction(tx);
+    if (input.withinTransaction) await input.withinTransaction(tx, source);
 
     const order = await tx.order.findUniqueOrThrow({
       where: { id: input.orderId },
@@ -2159,10 +2198,17 @@ export class OrderService {
     status: string,
     changedBy: string,
     note?: string,
-    opts?: { withinTransaction?: (tx: Prisma.TransactionClient) => Promise<void> },
+    opts?: {
+      withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
+      allowedFrom?: readonly OrderStatus[];
+      expectedRiderId?: string | null;
+      expectedDriverId?: string | null;
+      expectedFulfillment?: FulfillmentType;
+      expectedFulfillmentMode?: FulfillmentMode;
+    },
   ) {
     const target = status as OrderStatus;
-    const allowedFrom = ORDER_TRANSITIONS[target];
+    const allowedFrom = opts?.allowedFrom ?? ORDER_TRANSITIONS[target];
     if (!allowedFrom || allowedFrom.length === 0) {
       throw new AppError(409, 'INVALID_TRANSITION', `No order may transition into ${status}`);
     }
@@ -2176,6 +2222,10 @@ export class OrderService {
       changedBy,
       note,
       ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
+      ...(opts?.expectedRiderId !== undefined ? { expectedRiderId: opts.expectedRiderId } : {}),
+      ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),
+      ...(opts?.expectedFulfillment !== undefined ? { expectedFulfillment: opts.expectedFulfillment } : {}),
+      ...(opts?.expectedFulfillmentMode !== undefined ? { expectedFulfillmentMode: opts.expectedFulfillmentMode } : {}),
       invalidStatus: (current) => new AppError(
         409,
         'INVALID_TRANSITION',
