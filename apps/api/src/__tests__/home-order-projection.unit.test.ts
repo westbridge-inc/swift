@@ -203,7 +203,11 @@ describe('Home authoritative order projection through real Fastify registration/
       expect((args as Prisma.OrderFindManyArgs).where?.customerId).toBe(A);
     }
     expect(h.prisma.order.findFirst.mock.calls[0]![0]).toEqual({ where: { customerId: A, status: { notIn: expect.arrayContaining(TERMINAL) } }, select: {
-      id: true, orderNumber: true, status: true, orderType: true, vendor: { select: { id: true, name: true, logoUrl: true } },
+      id: true, orderNumber: true, status: true, orderType: true,
+      // The service-vertical facts (fulfillment + business type) and the
+      // booking's slot ride with the card; everything else is unchanged.
+      fulfillment: true, appointmentSlot: true,
+      vendor: { select: { id: true, name: true, logoUrl: true, vendorType: true } },
       holdExpiresAt: true, scheduledFor: true, estimatedDeliveryTime: true, placedAt: true,
       promisedAt: true, promiseRevisedAt: true, promiseRevisionReason: true, promiseRevisions: true,
     }, orderBy: { placedAt: 'desc' } });

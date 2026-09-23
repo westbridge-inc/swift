@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { formatGuyanaTime } from '../../utils/guyana-day';
 
 /** The verification projection is used both on the root client and inside
  * profile-save transactions. Keep the contract narrow enough that the same
@@ -61,7 +62,7 @@ export async function sendBookingReminders(
     include: { provider: { select: { userId: true, trade: true } } },
   });
   for (const job of jobs) {
-    const when = job.scheduledFor!.toLocaleString('en-GY', { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+    const when = formatGuyanaTime(job.scheduledFor!, { weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true }, 'en-US');
     for (const [userId, body] of [
       [job.customerId, `Your ${job.provider.trade.toLowerCase()} is booked for ${when}. Cash on completion.`],
       [job.provider.userId, `You have a job booked for ${when}. Check the details in your jobs list.`],
@@ -84,7 +85,7 @@ export async function sendBookingReminders(
     include: { item: { select: { name: true, vendor: { select: { name: true, owner: { select: { userId: true } } } } } } },
   });
   for (const b of bookings) {
-    const when = b.slotStart.toLocaleString('en-GY', { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+    const when = formatGuyanaTime(b.slotStart, { weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true }, 'en-US');
     for (const [userId, body] of [
       [b.customerId, `${b.item.name} at ${b.item.vendor.name} is booked for ${when}.`],
       [b.item.vendor.owner.userId, `${b.item.name} appointment coming up ${when}.`],

@@ -14,10 +14,11 @@ import { useIsFocused, useNavigation, useRoute } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useOrder, useDecideSubstitution } from '../../../hooks/customer';
+import { useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../hooks/customer';
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { promiseLine, promiseNote } from '../../../lib/promise';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
@@ -27,6 +28,8 @@ import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
+import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 
 const GUTTER = space['2xl'];
@@ -383,6 +386,21 @@ export function DeliveryScreen() {
     },
   });
   const decideSub = useDecideSubstitution(orderId);
+  // [ORDER-SPINE S1-6] The customer's own claim about a direct-MMG payment —
+  // their only first-party door to "I didn't pay". That statement can pause
+  // the order, so it is confirmed first; the order refetches either way.
+  const claimPayment = useClaimMmgPayment();
+  // [R4 · F-PR1262-SOL-01] The confirmation carries the order it was opened
+  // on. It is shown only while this screen still shows that order, and it is
+  // sent to that order — never to whichever order a reused screen shows now.
+  const [pendingMmgClaim, setPendingMmgClaim] = useState<PendingMmgClaim | null>(null);
+  const confirmingMmgClaim = boundMmgClaim(pendingMmgClaim, orderId);
+  const mmgClaimSending = claimPayment.isPending && claimPayment.variables?.orderId === orderId;
+  const mmgClaimFailed = (error: any, claim: { orderId: string }) => {
+    if (claim.orderId !== activeOrderIdRef.current) return;
+    const serverMessage = error?.response?.data?.error?.message;
+    toast.error('That didn’t go through', typeof serverMessage === 'string' ? serverMessage : 'Check your connection and try again.');
+  };
 
   const o = order.data;
   const orderStatus = String(o?.status ?? '').toUpperCase();
@@ -598,6 +616,7 @@ export function DeliveryScreen() {
     setCancelPreviewOrderId(null);
     setCancelMessage(null);
     setCancelFee(null);
+    setPendingMmgClaim(null);
     lastCourierServerFixAt.current = null;
     prevStatus.current = null;
     prevStatusRef.current = undefined;
@@ -681,6 +700,7 @@ export function DeliveryScreen() {
   const rider = o.rider;
   const items: any[] = o.items ?? [];
   const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
+  const mmgClaim = parseMmgClaimView(o.mmgClaim);
   const mmgCaptured = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'CAPTURED';
   const ringHidden = terminal || mmgCaptured || !o.canCancel;
   // Hold lifecycle and cancel eligibility are separate server facts. A paid or
@@ -767,6 +787,13 @@ export function DeliveryScreen() {
     : o.fulfillment === 'APPOINTMENT' ? 'provider' : 'seller or rider';
   const mmgPayee = mmgPaymentAction?.recipientName
     ?? (o.orderType === 'COURIER' ? 'the named payee' : o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store');
+  // The last two food sentences a booking could reach on this screen were both
+  // cancellation copy on the MMG rail — the one rail where the money may have
+  // already moved. They name the party who holds it from the fulfillment, the
+  // discriminator every other booking word on this screen keys on, and call a
+  // booking a booking. Food, pickup and courier keep their exact words.
+  const refundParty = o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
+  const cancelledNoun = o.fulfillment === 'APPOINTMENT' ? 'booking' : 'order';
   let etaCopy = pendingSummary;
   if (cancelled) etaCopy = 'Cancelled';
   else if (failed) etaCopy = 'Couldn’t complete this order';
@@ -947,6 +974,12 @@ export function DeliveryScreen() {
             }}
             hidden={ringHidden || !isFocused}
           />
+          {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? (
+            <View style={{ marginTop: space.md }}>
+              <T variant="label" tone="muted">Appointment</T>
+              <T variant="body" weight="semibold">{formatAppointmentSlot(o.appointmentSlot)}</T>
+            </View>
+          ) : null}
           {holdTimingUnavailable ? (
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="refresh-cw" size={18} color={color.info} />
@@ -1156,8 +1189,8 @@ export function DeliveryScreen() {
                     ? 'This order could not continue. Report a problem for help with what happens next.'
                     : cancelMessage
                       ?? (mmgCancellationAmbiguous
-                        ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
-                        : 'This order was cancelled.')}
+                        ? `This ${cancelledNoun} was cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`
+                        : `This ${cancelledNoun} was cancelled.`)}
                 </T>
                 {/* [REPORT-012 F-012-03] The fee the server ACTUALLY charged —
                     rendered from the committed result, never a preview. */}
@@ -1338,6 +1371,20 @@ export function DeliveryScreen() {
             </View>
           ) : null}
 
+          {mmgClaim && !cancelled && !failed ? (
+            <MmgPaymentClaimCard
+              view={mmgClaim}
+              pending={mmgClaimSending}
+              onClaim={(action) => {
+                if (action.confirm) {
+                  setPendingMmgClaim({ orderId, action });
+                  return;
+                }
+                claimPayment.mutate({ orderId, paid: action.paid }, { onError: mmgClaimFailed });
+              }}
+            />
+          ) : null}
+
           {/* [SPS-F-0023] The post-delivery tip prompt is GONE, not disabled:
               the API fails closed (TIP_COLLECTION_UNAVAILABLE — no rail
               collects money after the job), and a button that always errors is
@@ -1398,7 +1445,7 @@ export function DeliveryScreen() {
               ? 'This cancels the pickup and puts the assigned rider back in the dispatch pool. It can’t be undone.'
               : 'This stops the rider search and cancels the pickup request. It can’t be undone.'
             : mmgCancellationAmbiguous
-              ? 'Cancelling stops fulfilment. If you already sent the MMG payment, the store refunds you directly.'
+              ? `Cancelling stops fulfilment. If you already sent the MMG payment, ${refundParty} refunds you directly.`
               : 'Cancelling stops fulfilment. The server preview is shown below; the final outcome is confirmed when cancellation completes.'}
         </T>
         {cancelPreviewFresh && o.orderType === 'COURIER' ? (
@@ -1437,6 +1484,42 @@ export function DeliveryScreen() {
             size="md"
             disabled={cancelChecking || cancelOrder.isPending}
             onPress={() => setConfirmCancel(false)}
+          />
+        </View>
+      </PopupCard>
+
+      {/* [ORDER-SPINE S1-6] "I didn't pay" can pause the order for a person to
+          check, so it is a deliberate second tap — never a single stray one. */}
+      <PopupCard
+        visible={confirmingMmgClaim !== null}
+        onClose={() => { if (!mmgClaimSending) setPendingMmgClaim(null); }}
+      >
+        <IconChip icon="alert-circle" size={56} />
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
+          {confirmingMmgClaim?.action.confirm?.title ?? ''}
+        </PopupTitle>
+        <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
+          {confirmingMmgClaim?.action.confirm?.body ?? ''}
+        </T>
+        <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
+          <PillButton
+            label={confirmingMmgClaim?.action.confirm?.confirmLabel ?? 'Confirm'}
+            size="md"
+            loading={mmgClaimSending}
+            onPress={() => {
+              const sent = sendBoundMmgClaim(pendingMmgClaim, orderId, (claim) => claimPayment.mutate(claim, {
+                onSettled: () => setPendingMmgClaim((current) => (current?.orderId === claim.orderId ? null : current)),
+                onError: mmgClaimFailed,
+              }));
+              if (!sent) setPendingMmgClaim(null);
+            }}
+          />
+          <PillButton
+            label="Go back"
+            variant="soft"
+            size="md"
+            disabled={mmgClaimSending}
+            onPress={() => setPendingMmgClaim(null)}
           />
         </View>
       </PopupCard>
