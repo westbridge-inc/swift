@@ -2047,14 +2047,19 @@ export async function vendorRoutes(app: FastifyInstance) {
     // learn their order was declined (it just silently vanished).
     // [REPORT-010 F-03] An unattested-MMG decline carries the refund guidance
     // — the customer may have already paid the store's link.
+    // A booking is declined by its PROVIDER: the words follow the appointment
+    // fulfillment, exactly as the acceptance push does, so a haircut is never
+    // "an order declined by the store". Food, grocery and retail keep theirs.
+    const booking = order.fulfillment === 'APPOINTMENT';
+    const decliner = booking ? 'the provider' : 'the store';
     const mmgGuidance = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING'
-      ? ' If you already sent the MMG payment, the store refunds you directly.'
+      ? ` If you already sent the MMG payment, ${decliner} refunds you directly.`
       : '';
     await notifications.send({
       userId: updated.customer.id,
       type: 'ORDER_UPDATE',
-      title: 'Order declined',
-      body: `Your order ${updated.orderNumber} was declined by the store. ${reason}${mmgGuidance}`.trim(),
+      title: booking ? 'Booking declined' : 'Order declined',
+      body: `Your ${booking ? 'booking' : 'order'} ${updated.orderNumber} was declined by ${decliner}. ${reason}${mmgGuidance}`.trim(),
       data: { orderId: order.id, status: 'CANCELLED' },
     });
 

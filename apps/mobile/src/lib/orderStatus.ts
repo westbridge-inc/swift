@@ -19,6 +19,16 @@
  */
 export type OrderKind = 'FOOD_DELIVERY' | 'GROCERY_DELIVERY' | 'COURIER' | 'TAXI';
 
+/**
+ * What the SERVER declares an order's vertical to be. The persisted enum has
+ * no SERVICE member — a barbershop booking is stored on the FOOD_DELIVERY
+ * spine — so the API derives SERVICE from the business type and the
+ * appointment fulfillment (`orderVertical`, apps/api) and sends it beside
+ * `orderType` as `vertical`. Everything else is the persisted type. This file
+ * renders that declaration; it never re-derives it from a vendor or a line.
+ */
+export type OrderVertical = OrderKind | 'SERVICE';
+
 /** Terminal states — an order here is finished and is not "active". */
 const TERMINAL: Record<string, string> = {
   DELIVERED: 'Delivered',
@@ -50,6 +60,14 @@ const COURIER: Record<string, string> = {
   ARRIVED: 'Rider has arrived',
 };
 
+/** A booking with a service business: a provider confirms it and does the
+ *  work. No store, no kitchen, no rider — a status a booking never reaches
+ *  falls through to the honest fallback rather than borrowing store words. */
+const SERVICE: Record<string, string> = {
+  PENDING: 'Waiting for the provider',
+  ACCEPTED: 'Booking confirmed',
+};
+
 /** Food and groceries: a merchant prepares it, then a rider carries it. */
 const FROM_A_STORE: Record<string, string> = {
   PENDING: 'Waiting for the store',
@@ -70,11 +88,26 @@ export function orderStatusLabel(status: string | null | undefined, kind?: strin
 
   if (TERMINAL[s]) return TERMINAL[s]!;
 
-  const table = kind === 'TAXI' ? TAXI : kind === 'COURIER' ? COURIER : FROM_A_STORE;
+  const table = kind === 'TAXI' ? TAXI : kind === 'COURIER' ? COURIER : kind === 'SERVICE' ? SERVICE : FROM_A_STORE;
   // A taxi that somehow reports a rider status (or vice versa) should not be
   // described with the other vertical's words — fall through to the honest
   // fallback instead of borrowing a label that would be actively misleading.
   return table[s] ?? 'In progress';
+}
+
+/**
+ * The vertical a screen should speak: the server's declaration when it sent
+ * one, else the persisted type — so an older API that sends no `vertical`
+ * still gets its own words, and a newer one gets SERVICE for a booking.
+ */
+export function presentedVertical(order: { vertical?: string | null; orderType?: string | null }): string | null {
+  return order.vertical ?? order.orderType ?? null;
+}
+
+/** Who has not been told yet while an order is held: a booking has not been
+ *  sent to a "store". */
+export function orderRecipientNoun(vertical: string | null | undefined): 'the provider' | 'the store' {
+  return vertical === 'SERVICE' ? 'the provider' : 'the store';
 }
 
 /**

@@ -12,6 +12,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
+import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache } from './home-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
@@ -978,7 +979,13 @@ export async function customerRoutes(app: FastifyInstance) {
               // store" on Home. That client fix was already correct; it was
               // defeated here, at the select, where nothing failed.
               orderType: true,
-              vendor: { select: { id: true, name: true, logoUrl: true } },
+              // `orderType` alone cannot say what KIND of vendor order this is:
+              // a SERVICE business's appointment is persisted on the FOOD_DELIVERY
+              // spine. The fulfillment and the business type are the two facts
+              // `orderVertical` declares the card's words from — sent here, at
+              // the select, where their absence never failed anything.
+              fulfillment: true,
+              vendor: { select: { id: true, name: true, logoUrl: true, vendorType: true } },
               // The hold — the window in which the store has not been told yet.
               // `holdExpiresAt` and `placedAt` are its two ends, and the client's
               // `holdRingWindow` refuses to draw anything unless BOTH came from
@@ -1104,7 +1111,9 @@ export async function customerRoutes(app: FastifyInstance) {
     }));
 
     const feed = {
-      activeOrder: activeOrder ? { ...activeOrder, promise: promiseView(activeOrder) } : activeOrder,
+      // The declared vertical rides with the card: SERVICE for a service
+      // business's booking, otherwise the persisted type — never a client guess.
+      activeOrder: activeOrder ? { ...activeOrder, vertical: orderVertical(activeOrder), promise: promiseView(activeOrder) } : activeOrder,
       popularItems,
       featured,
       nearby,
@@ -2092,6 +2101,9 @@ export async function customerRoutes(app: FastifyInstance) {
       id: o.id,
       orderNumber: o.orderNumber,
       orderType: o.orderType,
+      // The declared vertical — SERVICE for a service business's booking; the
+      // persisted type for everything else. The activity list's words read it.
+      vertical: orderVertical(o),
       status: o.status,
       vendor: o.vendor,
       items: o.items.map((i) => ({
@@ -2248,6 +2260,8 @@ export async function customerRoutes(app: FastifyInstance) {
         id: order.id,
         orderNumber: order.orderNumber,
         orderType: order.orderType,
+        // The declared vertical — SERVICE for a service business's booking.
+        vertical: orderVertical(order),
         status: order.status,
         vendor: order.vendor,
         items: order.items.map((i) => ({

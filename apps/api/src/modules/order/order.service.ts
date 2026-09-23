@@ -2182,7 +2182,15 @@ export class OrderService {
         // [ALG-03] Shadow: what the prep-time learner WOULD predict, written beside
         // the accept for the nightly grade. Fire-and-forget; never in the way.
         void shadowPredictAtAccept(this.prisma, orderId);
-        await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        // A booking is CONFIRMED, not "being prepared": the provider reserved
+        // the customer's slot inside this transition. Kitchen words on a
+        // haircut were the phone's first sign that a SERVICE booking was riding
+        // the food order spine.
+        if (order.fulfillment === 'APPOINTMENT') {
+          await this.notifications.bookingConfirmed(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        } else {
+          await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        }
         break;
       case 'PREPARING':
         await this.notifications.orderPreparing(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
