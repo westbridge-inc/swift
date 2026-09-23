@@ -48,6 +48,46 @@ const PUBLISHED: Record<
     driver_agreement: 'da8d8ef8e1bbc7afc0dbf6c4b37da9255ef6447de0b1fca93572a68aed423753',
     vendor_agreement: '9d6454a303b4246dc928909752c2941c3c4f249fec7548c8c3c92cdd84eb16b3',
   },
+  // [NO-AI] The owner removed every AI runtime from Swift, so the Privacy
+  // Policy's "AI processing" paragraph — which told people their search terms
+  // and menu text went to a model provider — became untrue. A policy that
+  // describes processing which no longer happens is as wrong as one that hides
+  // processing which does. It now says plainly that Swift sends nothing you
+  // write to an AI service — AND names the one place a model does run (the
+  // identity check), because the first draft of this paragraph claimed no model
+  // existed anywhere while the KYC face-match was live. That claim is graded
+  // against the processor register now; see legal-ai-claim.test.ts.
+  //
+  // All four documents re-pin, not only the Privacy Policy: the published
+  // "Last updated" date is part of every served text, so changing it changes
+  // each document's words. The 2026-08-30 entry above is untouched — those are
+  // the words people actually consented to.
+  //
+  // Superseded by 2026-09-23 on the same unmerged branch (F-1218-02), before
+  // it reached main. Its hashes stay exactly as pinned — any environment that
+  // ran the branch holds them in its ledger, and the law above is the law.
+  '2026-09-07': {
+    terms: '585d5b6e5f147e945602fd3dce05a27509952563a9be2b6c2127524be6811c32',
+    privacy: 'edad85c0a55cd9520d8e45ed0e0f504481b4d94030068bf0d25df63445a6d6f9',
+    driver_agreement: '923d398238ff81c5b554673871eab012999b77a27742a2812afa965e5ffc7ead',
+    vendor_agreement: '5023bc04a37935f4de6e873f400c8e8b35443164d46e7a951c0f72bbb93946d1',
+  },
+  // [F-1218-02] The 2026-09-07 "AI processing" paragraph said the identity
+  // check's automated results "produce a flag for a person to review, never a
+  // decision on their own". The document state machine licenses VALIDATED →
+  // REJECTED on `auto_reject` and the verification service records a
+  // provider's decline as REJECTED under `reviewedBy: 'kyc:auto'` — a machine
+  // decision the sentence denied. The sentence now says what the check can do
+  // (accept, reject, or refer to a person) and what follows a rejection (you
+  // are told; you can resubmit or raise it through Help & Support): nothing
+  // the code does not already do. Graded in legal-human-review-claim.test.ts.
+  // The date moves with the words, so all four documents re-pin.
+  '2026-09-23': {
+    terms: '198ffa340ffddf7c13c4cbb304bd174779eca63bfd2dd87fcf435582f5f7a229',
+    privacy: '92c78089c42557c575df043f47c315c3f6ff67dad75760a5e9e2e6b1b7d23091',
+    driver_agreement: 'aea903e63b7620322010187556e385a501e6e0c82d3e25b1e4809a6cd94bc1a5',
+    vendor_agreement: 'af8e9d090a0c2d5323c4b6e1433aacd9cd8e2d0a9cd04a57a536f1331d0dd9a8',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

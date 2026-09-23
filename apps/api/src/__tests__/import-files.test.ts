@@ -4,6 +4,7 @@ import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
 import ExcelJS from 'exceljs';
+import PDFDocument from 'pdfkit';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -78,8 +79,7 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
-  // Menu parsing must fail CLOSED without the key — force it off for the test.
-  delete process.env['ANTHROPIC_API_KEY'];
+  // [NO-AI] There is no key to remove: menu parsing reads the PDF's own text.
 
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -163,7 +163,10 @@ describe('Menu PDF parsing (§3.1) — fails closed', () => {
     expect(res.json().error.code).toBe('BAD_MENU_FILE');
   });
 
-  it('with the AI offline, a readable PDF menu gets a clear 503 and imports NOTHING', async () => {
+  it('[NO-AI] a run-on menu that cannot be read imports NOTHING and says so', async () => {
+    // One prose line with prices buried mid-sentence is not a menu layout. The
+    // parser reads lines, so it refuses rather than guessing which words are a
+    // dish and which are a sentence — and the vendor is told to use CSV.
     // Minimal but WELL-FORMED single-page PDF (correct stream length + xref).
     const content = 'BT /F1 12 Tf 72 720 Td (Pepperpot with rice 1500 GYD. Cookup rice 1200 GYD. Mauby 400.) Tj ET';
     const objects = [
@@ -186,9 +189,73 @@ describe('Menu PDF parsing (§3.1) — fails closed', () => {
     const pdf = Buffer.from(body);
     const before = await app.prisma.item.count({ where: { vendorId } });
     const res = await postFile('/api/v1/vendor/items/import/menu-parse', owner.token, 'menu.pdf', 'application/pdf', pdf);
-    expect(res.statusCode).toBe(503);
-    expect(res.json().error.code).toBe('AI_UNAVAILABLE');
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe('MENU_UNPARSEABLE');
     const after = await app.prisma.item.count({ where: { vendorId } });
     expect(after).toBe(before); // nothing imported on the failure path
+  });
+
+  it('[NO-AI] a real menu LAYOUT is read deterministically, and still only previewed', async () => {
+    // The same PDF machinery, with the line breaks a menu actually has.
+    const lines = ['STARTERS', 'Pholourie .... 500', 'MAINS', 'Pepperpot .... 2500'];
+    const content = `BT /F1 12 Tf 72 720 Td 14 TL ${lines.map((l) => `(${l}) Tj T*`).join(' ')} ET`;
+    const objects = [
+      '<</Type/Catalog/Pages 2 0 R>>',
+      '<</Type/Pages/Kids[3 0 R]/Count 1>>',
+      '<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>',
+      `<</Length ${content.length}>>stream\n${content}\nendstream`,
+      '<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>',
+    ];
+    let body = '%PDF-1.4\n';
+    const offsets: number[] = [];
+    objects.forEach((obj, i) => {
+      offsets.push(Buffer.byteLength(body));
+      body += `${i + 1} 0 obj\n${obj}\nendobj\n`;
+    });
+    const xrefStart = Buffer.byteLength(body);
+    body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    for (const off of offsets) body += `${String(off).padStart(10, '0')} 00000 n \n`;
+    body += `trailer<</Size ${objects.length + 1}/Root 1 0 R>>\nstartxref\n${xrefStart}\n%%EOF`;
+
+    const before = await app.prisma.item.count({ where: { vendorId } });
+    const res = await postFile('/api/v1/vendor/items/import/menu-parse', owner.token, 'menu.pdf', 'application/pdf', Buffer.from(body));
+    expect(res.statusCode, res.body).toBe(200);
+    const data = res.json().data as { rowCount: number; preview: Array<{ name: string; basePrice: number; category: string }> };
+    expect(data.rowCount).toBe(2);
+    expect(data.preview.map((p) => p.name)).toEqual(['Pholourie', 'Pepperpot']);
+    expect(data.preview.map((p) => p.basePrice)).toEqual([500, 2500]);
+    expect(data.preview.map((p) => p.category)).toEqual(['STARTERS', 'MAINS']);
+    // A PARSE is not an import: the vendor still confirms.
+    expect(await app.prisma.item.count({ where: { vendorId } })).toBe(before);
+  });
+
+  it('[F-1218-01] a real menu PDF: every proposed row comes back for inspection, and a numbered name is never cut at its digit', async () => {
+    // pdfkit's text layer collapses the column gap ("Combo 2   500" arrives as
+    // "Combo 2 500"), the shape independent review used to put "Combo" at
+    // 2,500 in row six — past everything the confirm card showed. The route
+    // must return every row it proposes, and must not propose that one.
+    const doc = new PDFDocument();
+    const chunks: Buffer[] = [];
+    const done = new Promise<void>((resolve) => {
+      doc.on('data', (chunk: Buffer) => chunks.push(chunk));
+      doc.on('end', resolve);
+    });
+    const lines = ['Dish A   $500', 'Dish B   $500', 'Dish C   $500', 'Dish D   $500', 'Dish E   $500', 'Combo 2   500', 'Meal for 2   750', 'Combo 3   $1,800'];
+    for (const line of lines) doc.text(line);
+    doc.end();
+    await done;
+
+    const before = await app.prisma.item.count({ where: { vendorId } });
+    const res = await postFile('/api/v1/vendor/items/import/menu-parse', owner.token, 'menu.pdf', 'application/pdf', Buffer.concat(chunks));
+    expect(res.statusCode, res.body).toBe(200);
+    const data = res.json().data as { rowCount: number; preview: Array<{ name: string; basePrice: number }>; normalizedCsv: string };
+    // Every row the confirm CSV would import is on the preview the vendor sees.
+    expect(data.preview).toHaveLength(data.rowCount);
+    expect(data.normalizedCsv.split('\n')).toHaveLength(data.rowCount + 1); // header + one line per row
+    expect(data.preview.map((p) => [p.name, p.basePrice])).toEqual([
+      ['Dish A', 500], ['Dish B', 500], ['Dish C', 500], ['Dish D', 500], ['Dish E', 500], ['Combo 3', 1800],
+    ]);
+    expect(data.normalizedCsv).not.toMatch(/,2500,|,2750,/);
+    expect(await app.prisma.item.count({ where: { vendorId } })).toBe(before);
   });
 });

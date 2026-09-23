@@ -59,7 +59,6 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'ads-stats-rollup': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'ads-weekly-report': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'agent-cash-sla': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'agent-ops-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'algo-decision-retention': { policy: 'SAFE_REPLAY', why: 'Purges decision-log rows past their retention. A second run finds nothing left to purge.' },
   'auto-cancel': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'auto-complete': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -76,7 +75,6 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'compliance-sample': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'convert-trials': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'cw-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'discovery-ai-classify': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'discovery-backfill': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'discovery-derivation': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'dispatch-order': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -122,7 +120,6 @@ export type JobName =
   | 'ads-stats-rollup'
   | 'ads-weekly-report'
   | 'agent-cash-sla'
-  | 'agent-ops-scan'
   | 'algo-decision-retention'
   | 'auto-cancel'
   | 'auto-complete'
@@ -139,7 +136,6 @@ export type JobName =
   | 'compliance-sample'
   | 'convert-trials'
   | 'cw-scan'
-  | 'discovery-ai-classify'
   | 'discovery-backfill'
   | 'discovery-derivation'
   | 'dispatch-order'
