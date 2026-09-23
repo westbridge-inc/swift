@@ -626,6 +626,43 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(updated.averageRating).toBe(5);
   });
 
+  it('refuses a slot that is not in the future; the job stays QUOTED and the customer can pick a real time', async () => {
+    const provider = await makeVerifiedProvider('carpenter');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const created = await inject('POST', '/api/v1/services/jobs', {
+      providerId: provider.providerId,
+      description: 'Fix a sagging cupboard door in the kitchen.',
+    }, customer.token);
+    expect(created.statusCode).toBe(201);
+    const jobId = created.json().data.id;
+    const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000 }, provider.token);
+    expect(quoted.json().data.status).toBe('QUOTED');
+
+    const askedToConfirm = async () => (await runWithoutTenant(() =>
+      app.prisma.notification.findMany({ where: { userId: provider.userId }, select: { data: true } })))
+      .filter((n) => {
+        const data = n.data as Record<string, unknown> | null;
+        return data?.['kind'] === 'booking_to_confirm' && data?.['jobId'] === jobId;
+      }).length;
+
+    // Three days ago, and one minute ago: neither is a time anyone can keep.
+    for (const scheduledFor of [new Date(Date.now() - 3 * DAY), new Date(Date.now() - 60_000)]) {
+      const refused = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: scheduledFor.toISOString() }, customer.token);
+      expect(refused.statusCode).toBe(400);
+      expect(refused.json().error.code).toBe('SLOT_IN_PAST');
+    }
+    const unchanged = await app.prisma.serviceJob.findUniqueOrThrow({ where: { id: jobId } });
+    expect(unchanged.status).toBe('QUOTED');
+    expect(unchanged.scheduledFor).toBeNull();
+    expect(await askedToConfirm(), 'the provider must never be asked to confirm a time that has passed').toBe(0);
+
+    // The refusal is not a dead end: a future time books normally.
+    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString() }, customer.token);
+    expect(scheduled.statusCode).toBe(200);
+    expect(scheduled.json().data.status).toBe('SCHEDULED');
+    expect(await askedToConfirm()).toBe(1);
+  });
+
   it('blocks hiring an unverified provider', async () => {
     const unverifiedUser = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const prof = await inject('POST', '/api/v1/services/providers', { trade: 'electrician' }, unverifiedUser.token);
