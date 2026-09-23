@@ -88,6 +88,14 @@ export function MenuItemScreen() {
   const bookableWeekdays: number[] | undefined = slotsQ.data?.bookableWeekdays;
   const daySlots: string[] = slotsQ.data?.slots ?? [];
 
+  // A slot can disappear during the 20-second freshness poll because another
+  // customer won it. Never leave a now-unavailable selection armed in the
+  // sticky booking button; checkout remains the final server-side judge.
+  React.useEffect(() => {
+    const available = slotsQ.data?.slots as string[] | undefined;
+    if (slot && available && !available.includes(slot)) setSlot(null);
+  }, [slot, slotsQ.data]);
+
   // Re-seed defaults when the item arrives after a cold load.
   const seededFor = React.useRef<string | null>(item ? itemId : null);
   React.useEffect(() => {
@@ -371,10 +379,22 @@ export function MenuItemScreen() {
                   );
                 })}
               </ScrollView>
-              {slotsQ.isLoading ? (
+              {slotsQ.isPending ? (
                 <T variant="label" tone="muted" style={{ marginTop: space.md }}>
                   Checking times…
                 </T>
+              ) : slotsQ.isError && !slotsQ.data ? (
+                <View style={{ marginTop: space.md, alignItems: 'flex-start', gap: space.sm }}>
+                  <T variant="label" tone="error">
+                    Couldn’t load available times. Check your connection and try again.
+                  </T>
+                  <Chip
+                    label="Try again"
+                    selected={false}
+                    onPress={() => void slotsQ.refetch()}
+                    style={{ height: 40, paddingHorizontal: space.lg }}
+                  />
+                </View>
               ) : daySlots.length === 0 ? (
                 <T variant="label" tone="muted" style={{ marginTop: space.md }}>
                   No times left this day — try another.
@@ -392,6 +412,19 @@ export function MenuItemScreen() {
                   ))}
                 </View>
               )}
+              {slotsQ.isError && slotsQ.data ? (
+                <View style={{ marginTop: space.sm, flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                  <T variant="caption" tone="warning" style={{ flex: 1 }}>
+                    These are the last known times. Refresh before choosing if your connection is back.
+                  </T>
+                  <Chip
+                    label="Refresh"
+                    selected={false}
+                    onPress={() => void slotsQ.refetch()}
+                    style={{ height: 36, paddingHorizontal: space.md }}
+                  />
+                </View>
+              ) : null}
               {slotsQ.data?.durationMinutes ? (
                 <T variant="caption" tone="faint" style={{ marginTop: space.sm }}>
                   Each appointment runs about {slotsQ.data.durationMinutes} minutes.
