@@ -50,20 +50,25 @@ if (!existsSync(envPath)) {
  *  bare checkout before anything is installed. */
 function readEnvFile(file: string): Record<string, string> {
   const out: Record<string, string> = {};
+  const literalTwilioFields = new Set(['TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_FROM']);
   for (const raw of readFileSync(file, 'utf8').split('\n')) {
-    const line = raw.trim();
+    const sourceLine = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    const line = sourceLine.trim();
     if (!line || line.startsWith('#')) continue;
     const eq = line.indexOf('=');
     if (eq === -1) continue;
     const key = line.slice(0, eq).trim();
     // Strip an inline comment only when the value is unquoted — a secret may
     // legitimately contain '#'.
-    let value = line.slice(eq + 1).trim();
+    // Identity syntax is literal: do not hide padding before the boot guard.
+    let value = literalTwilioFields.has(key)
+      ? sourceLine.slice(sourceLine.indexOf('=') + 1)
+      : line.slice(eq + 1).trim();
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     } else {
       const hash = value.indexOf(' #');
-      if (hash !== -1) value = value.slice(0, hash).trim();
+      if (hash !== -1) value = literalTwilioFields.has(key) ? value.slice(0, hash) : value.slice(0, hash).trim();
     }
     out[key] = value;
   }
@@ -90,6 +95,10 @@ const STUBS: Record<string, string> = {
   MMG_MSECRET: 'STUB', MMG_PASSWORD: 'STUB',
   MMG_API_URL: 'https://stub.invalid/mmg',
   NOTIFICATION_PROVIDER: 'twilio',
+  TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
+  TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`,
+  TWILIO_API_KEY_SECRET: 'STUB-NOT-A-REAL-SECRET',
+  TWILIO_FROM: '+15550000000',
   PUSH_PROVIDER: 'expo',
   MASTER_KEK: Buffer.alloc(32, 7).toString('base64'),
   STORAGE_SIGNING_SECRET: 'x'.repeat(48),
@@ -242,7 +251,7 @@ if (verdict === null) {
   console.log('         (The tenant-wall gate reads the live database at boot and is NOT checked here.)');
   console.log('');
   console.log('  Note what this does NOT say: it does not say the credentials are');
-  console.log('  valid, only that they are present and shaped correctly. It also');
+  console.log('  valid, only that required values pass local format checks. It also');
   console.log('  does not cover assertProductionData(), which refuses to start on a');
   console.log('  database with zero CountryConfig rows — seed the platform spine');
   console.log('  with prisma/seed-production.ts.');

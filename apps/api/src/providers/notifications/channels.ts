@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { isProduction } from '../../utils/runtime-mode';
+import { firstInvalidTwilioConfig, isTwilioMessageSid } from '../../utils/twilio-identity';
 import { SmtpEmailProvider } from './smtp-email';
 
 export interface SmsProvider {
@@ -123,39 +124,46 @@ const devChannels: NotificationChannels = {
  */
 class TwilioSmsProvider implements SmsProvider {
   private sid = process.env['TWILIO_ACCOUNT_SID'] ?? '';
-  private token = process.env['TWILIO_AUTH_TOKEN'] ?? '';
+  private keySid = process.env['TWILIO_API_KEY_SID'] ?? '';
+  private keySecret = process.env['TWILIO_API_KEY_SECRET']?.trim() ?? '';
   private from = process.env['TWILIO_FROM'] ?? '';
 
   constructor() {
-    if (!this.sid || !this.token || !this.from) {
-      throw new Error('TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM are required for the twilio provider');
-    }
+    const invalidField = firstInvalidTwilioConfig(process.env);
+    if (invalidField) throw new Error(`${invalidField} is missing or malformed for the twilio provider`);
   }
 
   async sendSms(to: string, body: string): Promise<{ ref: string }> {
-    const auth = Buffer.from(`${this.sid}:${this.token}`).toString('base64');
+    const auth = Buffer.from(`${this.keySid}:${this.keySecret}`).toString('base64');
     // Bound the call: a hung Twilio must not hang the login request behind it.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), SMS_TIMEOUT_MS);
-    let res: Response;
     try {
-      res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
-        method: 'POST',
-        headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ To: to, From: this.from, Body: body }).toString(),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      throw new Error(`Twilio SMS request failed: ${(err as Error).message}`);
+      let res: Response;
+      try {
+        res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
+          method: 'POST',
+          headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ To: to, From: this.from, Body: body }).toString(),
+          signal: controller.signal,
+        });
+      } catch {
+        throw new Error(controller.signal.aborted ? 'Twilio SMS timed out' : 'Twilio SMS request failed');
+      }
+      // Provider bodies can echo request metadata. Keep all response and fetch
+      // exception text outside application errors and their downstream logs.
+      if (!res.ok) throw new Error(`Twilio SMS failed (${res.status})`);
+      let data: { sid?: unknown };
+      try {
+        data = (await res.json()) as { sid?: unknown };
+      } catch {
+        throw new Error('Twilio SMS response invalid');
+      }
+      if (!data || !isTwilioMessageSid(data.sid)) throw new Error('Twilio SMS response invalid');
+      return { ref: data.sid };
     } finally {
       clearTimeout(timer);
     }
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw new Error(`Twilio SMS failed (${res.status}): ${detail.slice(0, 200)}`);
-    }
-    const data = (await res.json()) as { sid?: string };
-    return { ref: data.sid ?? 'twilio_unknown' };
   }
 }
 
@@ -303,6 +311,6 @@ export function getChannels(): NotificationChannels {
     case 'twilio':
       return { sms: new TwilioSmsProvider(), push: withPushRetry(getPushProvider()), email: getEmailProvider() };
     default:
-      throw new Error(`Unknown NOTIFICATION_PROVIDER: ${provider}`);
+      throw new Error('Unknown NOTIFICATION_PROVIDER');
   }
 }
