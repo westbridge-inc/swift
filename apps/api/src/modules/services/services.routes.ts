@@ -424,6 +424,11 @@ export async function servicesRoutes(app: FastifyInstance) {
     const job = await jobForUser(id, request.user.userId);
     if (job.customerId !== request.user.userId) throw new AppError(403, 'CUSTOMER_ONLY', 'Only the customer can schedule');
     if (job.status !== 'QUOTED') throw new AppError(400, 'BAD_STATE', 'Agree a quote before scheduling');
+    // A slot that has already started cannot be kept: the provider would be
+    // asked to confirm the impossible and the reminder sweep (which looks
+    // forward only) would never fire. Same rule and code as appointments
+    // (BookingService.validateSlot).
+    if (scheduledFor.getTime() <= Date.now()) throw new AppError(400, 'SLOT_IN_PAST', 'Pick a time in the future');
     // [S0] A provider has ONE body: two customers cannot hold the same slot.
     // The judge is the partial unique index on ("providerId", "scheduledFor")
     // for live jobs (service_job_slot_exclusivity migration) — a read-then-check

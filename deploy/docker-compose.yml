@@ -1,11 +1,10 @@
 # ===========================================================================
-# Swift — self-host / STAGING stack. One command stands up the whole platform:
-#     cd deploy && cp .env.deploy.example .env && docker compose up -d
+# Swift — self-host / STAGING stack. The reviewed one-server sequence is
+# deploy/pilot-up.sh with an exact approved commit SHA.
 #
 # This is the SAFE hosting path: a single-host deployment for staging, demos,
 # and pre-launch validation. It is NOT the production cutover — that path is
-# intentionally gated (see deploy/README.md "Production" and the
-# MOVER-AUTHORITY-CUTOVER-RUNBOOK). Everything here is data-safe to run.
+# intentionally gated by .github/workflows/deploy-api.yml.
 #
 # Services: postgres (PostGIS), redis, meilisearch, the API, and a dedicated
 # BullMQ worker (so N API replicas never process a job N times).
@@ -27,8 +26,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
-    # No published port by default — the API reaches it on the private network.
-    # Uncomment to inspect from the host: ports: ["5432:5432"]
+    # No published port — only members of the private Docker network reach it.
+    networks: [private]
 
   redis:
     image: redis:7-alpine
@@ -41,6 +40,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    networks: [private]
 
   meilisearch:
     image: getmeili/meilisearch:v1.9
@@ -56,6 +56,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+    networks: [private]
 
   # One-shot: apply migrations before the API/worker boot. Compose waits on its
   # completion via service_completed_successfully.
@@ -74,6 +75,7 @@ services:
       postgres:
         condition: service_healthy
     restart: "no"
+    networks: [private]
 
   api:
     build:
@@ -95,8 +97,8 @@ services:
       MEILISEARCH_URL: http://meilisearch:7700
       # The API process serves HTTP only; the worker service below owns jobs.
       RUN_WORKERS: "0"
-    ports:
-      - "${API_PORT:-3000}:3000"
+    # No host port: Caddy is the only public entrance.
+    networks: [private]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -127,8 +129,33 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    networks: [private]
+
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    environment:
+      API_HOST: ${API_HOST:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - swift-caddy-data:/data
+      - swift-caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      api:
+        condition: service_started
+    networks: [private]
 
 volumes:
   swift-pgdata:
   swift-redisdata:
   swift-meilidata:
+  swift-caddy-data:
+  swift-caddy-config:
+
+networks:
+  private:
+    name: swift-pilot-private
+    external: true
