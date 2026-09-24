@@ -1,5 +1,5 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { Readable } from 'node:stream';
+import { errorCodes, type FastifyInstance, type FastifyRequest } from 'fastify';
+import { Readable } from 'node:stream';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { BillingService } from './billing.service';
@@ -21,10 +21,51 @@ import { weeklyFeeAmount } from './subscription-fee';
 
 const FRESHNESS_MS = 5 * 60_000;
 
+/** Webhooks are tiny (a bill notification is a few hundred bytes); 128 KB is
+ *  generous headroom. Anything larger is refused BEFORE it is buffered — an
+ *  attacker must not be able to stream a multi-GB body into the process heap
+ *  and OOM the shared API (audit High #3). */
+export const AGENT_CASH_MAX_RAW_BODY_BYTES = 128 * 1024;
+
 function secret(): string | null {
   const s = process.env['AGENT_CASH_WEBHOOK_SECRET'];
   if (!s || s.length < 16) return null;
   return s;
+}
+
+/**
+ * Raw-body capture for HMAC verification, bounded. The declared
+ * `content-length` is refused up front when it already exceeds the cap, and
+ * the same cap is enforced while accumulating so a lying or absent header
+ * cannot stream past it. On rejection nothing is attached to the request and
+ * the 413 is decided before the handler (and therefore before any signature
+ * or billing work).
+ */
+export async function captureRawBody(request: FastifyRequest, payload: Readable): Promise<Readable> {
+  const declared = request.headers['content-length'];
+  if (typeof declared === 'string' && declared.length > 0) {
+    const declaredBytes = Number(declared);
+    if (Number.isFinite(declaredBytes) && declaredBytes > AGENT_CASH_MAX_RAW_BODY_BYTES) {
+      throw new errorCodes.FST_ERR_CTP_BODY_TOO_LARGE();
+    }
+  }
+
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of payload) {
+    const buf = chunk as Buffer;
+    size += buf.length;
+    if (size > AGENT_CASH_MAX_RAW_BODY_BYTES) {
+      chunks.length = 0; // discard the partial buffer before throwing
+      throw new errorCodes.FST_ERR_CTP_BODY_TOO_LARGE();
+    }
+    chunks.push(buf);
+  }
+  const raw = Buffer.concat(chunks);
+  (request as FastifyRequest & { rawBody?: Buffer }).rawBody = raw;
+  const stream = Readable.from(raw) as Readable & { receivedEncodedLength?: number };
+  stream.receivedEncodedLength = raw.length;
+  return stream;
 }
 
 function verifySignature(req: FastifyRequest): { ok: boolean; code?: string } {
@@ -50,16 +91,7 @@ export async function agentCashRoutes(app: FastifyInstance) {
   // parser (empty-json), and re-adding one throws FST_ERR_CTP_ALREADY_PRESENT
   // at BOOT (found by the design session; CI never boots the full server).
   // Encapsulation keeps this hook off every other route.
-  app.addHook('preParsing', async (request, _reply, payload) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of payload) chunks.push(chunk as Buffer);
-    const raw = Buffer.concat(chunks);
-    (request as FastifyRequest & { rawBody?: Buffer }).rawBody = raw;
-    const { Readable } = await import('node:stream');
-    const stream = Readable.from(raw) as Readable & { receivedEncodedLength?: number };
-    stream.receivedEncodedLength = raw.length;
-    return stream;
-  });
+  app.addHook('preParsing', (request, _reply, payload) => captureRawBody(request, payload));
 
   const notifications = new NotificationService(app.prisma, app.io);
   const billing = new BillingService(app.prisma, notifications, getPaymentProvider());

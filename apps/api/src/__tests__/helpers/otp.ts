@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { LightMyRequestResponse } from 'fastify';
 import { storeSignupOtp } from '../../modules/auth/signup-continuation';
+import { guyanaDayKey } from '../../utils/guyana-day';
 
 /**
  * Requests a real OTP through the API, then pins a KNOWN code for the same
@@ -15,14 +16,18 @@ export async function requestOtp(app: FastifyInstance, phone: string): Promise<s
   // Reset the per-phone cooldown, the trial-integrity §5 hourly cap, AND the
   // daily SMS-budget counters so repeated test runs stay deterministic (these
   // caps are cost/abuse guardrails, not test gates — each cap is covered by
-  // its own dedicated suite).
-  const day = new Date().toISOString().slice(0, 10);
+  // its own dedicated suite). The loopback per-IP counter is reset too:
+  // app.inject always sources 127.0.0.1, and the helper must not accumulate
+  // against the new per-IP daily budget across a full run.
+  const day = guyanaDayKey(new Date());
   await app.redis.del(
     `otp_rate:${phone}`,
     `otp_hr:${phone}`,
     `otp_attempt:${phone}`,
     `otp_phone_day:${day}:${phone}`,
     `sms_global_day:${day}`,
+    `sms_known_day:${day}`,
+    `otp_ip_day:${day}:127.0.0.1`,
   );
 
   const res = await app.inject({

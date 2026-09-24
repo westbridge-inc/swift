@@ -6,7 +6,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
-import { agentCashRoutes } from '../modules/billing/agent-cash.routes';
+import { agentCashRoutes, AGENT_CASH_MAX_RAW_BODY_BYTES } from '../modules/billing/agent-cash.routes';
 
 // Boot regression: server.ts composes the GLOBAL empty-json body parser with
 // the agent-cash plugin. The plugin's first cut re-added an application/json
@@ -71,5 +71,32 @@ describe('server composition boot (FST_ERR_CTP_ALREADY_PRESENT regression)', () 
     });
     // Zod then rejects the missing accountNumber — a 400, never a parser 500/boot failure.
     expect([200, 400]).toContain(res.statusCode);
+  });
+
+  it('an oversized webhook body is refused with 413 before any signature work', async () => {
+    // Correctly signed, so the ONLY reason for refusal is the size guard —
+    // the old code buffers this fully, verifies the signature, and only fails
+    // later in zod (400). The cap must fire first.
+    const raw = JSON.stringify({
+      transactionId: 'x'.repeat(AGENT_CASH_MAX_RAW_BODY_BYTES * 2),
+      accountNumber: '472-905-8836',
+      amount: 2100,
+      currency: 'GYD',
+    });
+    const ts = Date.now();
+    const sig = createHmac('sha256', SECRET).update(`${ts}.`).update(Buffer.from(raw)).digest('hex');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/billing/mmg/agent-notification',
+      payload: raw,
+      headers: { 'content-type': 'application/json', 'x-swift-timestamp': String(ts), 'x-swift-signature': sig },
+    });
+    expect(res.statusCode).toBe(413);
+    expect(res.json().error.code).toBe('FST_ERR_CTP_BODY_TOO_LARGE');
+  });
+
+  it('the webhook route itself is registered with the capture hook applied', () => {
+    expect(app.hasRoute({ method: 'POST', url: '/api/v1/billing/mmg/agent-notification' })).toBe(true);
+    expect(app.hasRoute({ method: 'POST', url: '/api/v1/billing/mmg/inquiry' })).toBe(true);
   });
 });
