@@ -74,7 +74,7 @@ if (!existsSync(envPath)) {
  *  bare checkout before anything is installed. */
 function readEnvFile(file: string): Record<string, string> {
   const out: Record<string, string> = {};
-  const literalTwilioFields = new Set(['TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_FROM']);
+  const literalTwilioFields = new Set(['TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID']);
   for (const raw of readFileSync(file, 'utf8').split('\n')) {
     const sourceLine = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
     const line = sourceLine.trim();
@@ -182,6 +182,10 @@ const problems: string[] = [];
 for (let i = 0; i < 40; i += 1) {
   const message = guardMessage(probe);
   if (!message) break;
+  // Stubs only ADD values, so a refusal caused by two variables both being
+  // set (the exactly-one Twilio sender rule) cannot be "seen past". Stop on
+  // the first repeat instead of echoing the same problem 40 times.
+  if (problems.includes(message)) break;
   problems.push(message);
   const targets = varsIn(message);
   if (targets.length === 0) {

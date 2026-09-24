@@ -11,6 +11,7 @@ import { testControlIdentity } from '../modules/ops/test-control';
 // without the OTP-bypass guard. Non-production is unaffected.
 
 const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
+const messagingServiceSid = `MG${'c'.repeat(32)}`;
 const good: Record<string, string | undefined> = {
   NODE_ENV: 'production',
   MASTER_KEK: KEK,
@@ -51,6 +52,7 @@ const paddedTwilioIdentities = ([
   ['TWILIO_ACCOUNT_SID', good['TWILIO_ACCOUNT_SID']],
   ['TWILIO_API_KEY_SID', good['TWILIO_API_KEY_SID']],
   ['TWILIO_FROM', good['TWILIO_FROM']],
+  ['TWILIO_MESSAGING_SERVICE_SID', messagingServiceSid],
 ] as const).flatMap(([name, valid]) => [' ', '\t', '\r', '\n'].flatMap((whitespace) => [
   { name, value: `${whitespace}${valid}`, position: 'leading', whitespace: JSON.stringify(whitespace) },
   { name, value: `${valid}${whitespace}`, position: 'trailing', whitespace: JSON.stringify(whitespace) },
@@ -209,6 +211,39 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     const result = runPreflight(good);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain('PASS — this configuration will not be refused at boot');
+  });
+
+  it('accepts TWILIO_MESSAGING_SERVICE_SID alone as the production sender', () => {
+    expect(() => assertSafeBootConfig({
+      ...good,
+      TWILIO_FROM: undefined,
+      TWILIO_MESSAGING_SERVICE_SID: messagingServiceSid,
+    })).not.toThrow();
+  });
+
+  it('the value-free preflight accepts the Messaging Service SID alone', () => {
+    const result = runPreflight({ ...good, TWILIO_FROM: undefined, TWILIO_MESSAGING_SERVICE_SID: messagingServiceSid });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('PASS — this configuration will not be refused at boot');
+  });
+
+  it('refuses production boot when both Twilio senders are set', () => {
+    expect(() => assertSafeBootConfig({ ...good, TWILIO_MESSAGING_SERVICE_SID: messagingServiceSid }))
+      .toThrow(/TWILIO_FROM and TWILIO_MESSAGING_SERVICE_SID/);
+  });
+
+  it('refuses production boot when neither Twilio sender is set', () => {
+    expect(() => assertSafeBootConfig({ ...good, TWILIO_FROM: undefined }))
+      .toThrow(/TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID/);
+  });
+
+  it('refuses a malformed TWILIO_MESSAGING_SERVICE_SID at production boot', () => {
+    for (const value of ['not-a-messaging-service-sid', `MG${'g'.repeat(32)}`]) {
+      expect(
+        () => assertSafeBootConfig({ ...good, TWILIO_FROM: undefined, TWILIO_MESSAGING_SERVICE_SID: value }),
+        value,
+      ).toThrow(/TWILIO_MESSAGING_SERVICE_SID/);
+    }
   });
 
   it.each(paddedTwilioIdentities.filter(({ whitespace }) => whitespace === '" "' || whitespace === '"\\t"'))(

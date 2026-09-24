@@ -3,10 +3,12 @@ import { getChannels } from '../providers/notifications/channels';
 
 const accountSid = `AC${'a'.repeat(32)}`;
 const keySid = `SK${'b'.repeat(32)}`;
+const messagingServiceSid = `MG${'c'.repeat(32)}`;
 const paddedTwilioIdentities = ([
   ['TWILIO_ACCOUNT_SID', accountSid],
   ['TWILIO_API_KEY_SID', keySid],
   ['TWILIO_FROM', '+15550000000'],
+  ['TWILIO_MESSAGING_SERVICE_SID', messagingServiceSid],
 ] as const).flatMap(([name, valid]) => [' ', '\t', '\r', '\n'].flatMap((whitespace) => [
   { name, value: `${whitespace}${valid}`, position: 'leading', whitespace: JSON.stringify(whitespace) },
   { name, value: `${valid}${whitespace}`, position: 'trailing', whitespace: JSON.stringify(whitespace) },
@@ -19,6 +21,7 @@ function configure() {
   vi.stubEnv('TWILIO_API_KEY_SECRET', 'test-key-secret');
   vi.stubEnv('TWILIO_AUTH_TOKEN', 'legacy-master-token');
   vi.stubEnv('TWILIO_FROM', '+15550000000');
+  vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', '');
 }
 
 afterEach(() => {
@@ -34,6 +37,7 @@ describe('Twilio outbound SMS credentials and error boundary', () => {
     vi.stubEnv('TWILIO_API_KEY_SID', '');
     vi.stubEnv('TWILIO_API_KEY_SECRET', '');
     vi.stubEnv('TWILIO_FROM', '');
+    vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', '');
     expect(() => getChannels()).not.toThrow();
   });
 
@@ -54,6 +58,45 @@ describe('Twilio outbound SMS credentials and error boundary', () => {
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it('sends with MessagingServiceSid — and no From — when TWILIO_MESSAGING_SERVICE_SID is configured', async () => {
+    configure();
+    vi.stubEnv('TWILIO_FROM', '');
+    vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', messagingServiceSid);
+    const messageSid = `SM${'0'.repeat(32)}`;
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ sid: messageSid }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await getChannels().sms.sendSms('+5927000000', 'test body')).toEqual({ ref: messageSid });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0] as [string, { headers: Record<string, string>; body: string; signal: AbortSignal }];
+    expect(url).toBe(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`);
+    // The exact form body Twilio receives: MessagingServiceSid replaces From.
+    expect(init.body).toBe(
+      new URLSearchParams({ To: '+5927000000', MessagingServiceSid: messagingServiceSid, Body: 'test body' }).toString(),
+    );
+    const params = new URLSearchParams(init.body);
+    expect(params.get('MessagingServiceSid')).toBe(messagingServiceSid);
+    expect(params.get('From')).toBeNull();
+  });
+
+  it('keeps From — and never adds MessagingServiceSid — when only TWILIO_FROM is set', async () => {
+    configure();
+    vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', '');
+    const messageSid = `SM${'0'.repeat(32)}`;
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ sid: messageSid }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await getChannels().sms.sendSms('+5927000000', 'test body')).toEqual({ ref: messageSid });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }];
+    expect(init.body).toBe(
+      new URLSearchParams({ To: '+5927000000', From: '+15550000000', Body: 'test body' }).toString(),
+    );
+    const params = new URLSearchParams(init.body);
+    expect(params.get('From')).toBe('+15550000000');
+    expect(params.get('MessagingServiceSid')).toBeNull();
+  });
+
   it('refuses legacy Auth Token as an outbound credential', () => {
     configure();
     delete process.env['TWILIO_API_KEY_SECRET'];
@@ -66,12 +109,32 @@ describe('Twilio outbound SMS credentials and error boundary', () => {
     ['TWILIO_API_KEY_SID', 'not-an-api-key-sid'],
     ['TWILIO_API_KEY_SID', `SK${'g'.repeat(32)}`],
     ['TWILIO_FROM', 'not-a-phone-number'],
+    ['TWILIO_MESSAGING_SERVICE_SID', 'not-a-messaging-service-sid'],
+    ['TWILIO_MESSAGING_SERVICE_SID', `MG${'g'.repeat(32)}`],
   ])('rejects malformed %s before any provider call', (name, value) => {
     configure();
     vi.stubEnv(name, value);
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     expect(() => getChannels()).toThrow(name);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses both TWILIO_FROM and TWILIO_MESSAGING_SERVICE_SID before any provider call', () => {
+    configure();
+    vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', messagingServiceSid);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    expect(() => getChannels()).toThrow(/TWILIO_FROM and TWILIO_MESSAGING_SERVICE_SID/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses neither sender before any provider call', () => {
+    configure();
+    vi.stubEnv('TWILIO_FROM', '');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    expect(() => getChannels()).toThrow(/TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
