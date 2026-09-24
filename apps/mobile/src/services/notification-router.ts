@@ -147,6 +147,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   if (kind === 'mmg_link_change_staged' || kind === 'mmg_link_change_applied' || kind === 'mmg_link_change_cancelled') {
     return { screen: 'Account' };
   }
+  // [Q8 · DS269 F1] Someone on the team moved the store's map pin. The owner
+  // lands on Account, where the Store location card shows it and moves it back.
+  if (kind === 'store_pin_moved') return { screen: 'Account' };
 
   if (kind === 'liveness_locked') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } };

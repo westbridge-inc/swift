@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -10,6 +12,8 @@ import { partnerRoutes } from '../modules/partner/partner.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { STORE_PIN_OUT_OF_MARKET } from '../modules/vendor/store-pin';
+import { VENDOR_PIN_MOVED } from '../modules/vendor/store-pin-move';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // [Q8] Owner report: a store must not simply take the spot its owner signed up
@@ -21,6 +25,10 @@ import { STORE_PIN_OUT_OF_MARKET } from '../modules/vendor/store-pin';
 //
 //   POST /partner/become  (a new store)
 //   PUT  /vendor/profile  (a store moving its pin)
+//
+// [DS269 F1] And a moved pin leaves a trace: an audit row with who moved it,
+// from where and to where, in the transaction that moves it, and a notice to
+// the owner whenever the mover is someone else.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -29,15 +37,16 @@ const PHONE_PREFIX = '+592007183';
 
 let app: FastifyInstance;
 const createdUserIds: string[] = [];
+const createdVendorIds: string[] = [];
 
 let seq = 0;
-async function makeUser(roles: UserRole[], activeRole: UserRole) {
+async function makeUser(roles: UserRole[], activeRole: UserRole, name = { first: 'Pin', last: 'Owner' }) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
       phone: `${PHONE_PREFIX}${String(seq).padStart(2, '0')}`,
-      firstName: 'Pin',
-      lastName: `Owner${seq}`,
+      firstName: name.first,
+      lastName: `${name.last}${seq}`,
       roles,
       activeRole,
       isPhoneVerified: true,
@@ -59,6 +68,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
 }
 
 const GEORGETOWN = { latitude: 6.8013, longitude: -58.1551 };
+const ENTRANCE = { latitude: 6.8102, longitude: -58.1623 };
 
 function business(pin: { latitude: number; longitude: number }) {
   return {
@@ -89,6 +99,32 @@ function putProfile(token: string, vendorId: string, payload: Record<string, unk
   });
 }
 
+/** A store created through the real route at the Georgetown centre, by its owner. */
+async function storeAtGeorgetown() {
+  const owner = await makeUser(['CUSTOMER'], 'CUSTOMER');
+  const created = await become(owner.token, GEORGETOWN);
+  expect(created.statusCode).toBe(201);
+  const vendor = await app.prisma.vendor.findFirstOrThrow({ where: { owner: { userId: owner.userId } } });
+  createdVendorIds.push(vendor.id);
+  return { token: owner.token, ownerUserId: owner.userId, vendorId: vendor.id };
+}
+
+async function pinOf(vendorId: string) {
+  const v = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { latitude: true, longitude: true } });
+  return { latitude: v.latitude, longitude: v.longitude };
+}
+
+/** The store's pin-move audit rows, oldest first. */
+function pinAudits(vendorId: string) {
+  return app.prisma.auditLog.findMany({ where: { entityId: vendorId, action: VENDOR_PIN_MOVED }, orderBy: { createdAt: 'asc' } });
+}
+
+/** The pin-move notices in one account's inbox. */
+async function pinNotices(userId: string) {
+  const rows = await app.prisma.notification.findMany({ where: { userId } });
+  return rows.filter((n) => (n.data as { kind?: unknown } | null)?.kind === 'store_pin_moved');
+}
+
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
@@ -109,7 +145,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Deleting the account cascades its owner row, its store and its sessions.
+  // audit_logs is append-only: this file's rows go through the one named purge.
+  if (createdVendorIds.length > 0) {
+    await purgeAuditLogs(app.prisma, { entityId: { in: createdVendorIds }, action: VENDOR_PIN_MOVED }, 'test-cleanup:store-pin-market');
+  }
+  // Deleting the account cascades its owner row, its store, its staff rows, its inbox and its sessions.
   if (createdUserIds.length > 0) await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   await app.close();
 });
@@ -147,19 +187,6 @@ describe('a new store is created only at a pin inside the market', () => {
 });
 
 describe('a store moves its pin only to a spot inside the market', () => {
-  async function storeAtGeorgetown() {
-    const owner = await makeUser(['CUSTOMER'], 'CUSTOMER');
-    const created = await become(owner.token, GEORGETOWN);
-    expect(created.statusCode).toBe(201);
-    const vendor = await app.prisma.vendor.findFirstOrThrow({ where: { owner: { userId: owner.userId } } });
-    return { token: owner.token, vendorId: vendor.id };
-  }
-
-  async function pinOf(vendorId: string) {
-    const v = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { latitude: true, longitude: true } });
-    return { latitude: v.latitude, longitude: v.longitude };
-  }
-
   it('a pin moved out of the market is refused with the same named 400, and the store stays put', async () => {
     const store = await storeAtGeorgetown();
 
@@ -168,6 +195,8 @@ describe('a store moves its pin only to a spot inside the market', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe(STORE_PIN_OUT_OF_MARKET);
     expect(await pinOf(store.vendorId)).toEqual(GEORGETOWN);
+    // Nothing moved, so nothing is on the record.
+    expect(await pinAudits(store.vendorId)).toHaveLength(0);
   });
 
   it('half a pin is refused: latitude and longitude travel together', async () => {
@@ -185,12 +214,11 @@ describe('a store moves its pin only to a spot inside the market', () => {
 
   it('control: a pin moved within the market is saved, and the profile read returns it', async () => {
     const store = await storeAtGeorgetown();
-    const entrance = { latitude: 6.8102, longitude: -58.1623 };
 
-    const res = await putProfile(store.token, store.vendorId, entrance);
+    const res = await putProfile(store.token, store.vendorId, ENTRANCE);
 
     expect(res.statusCode).toBe(200);
-    expect(await pinOf(store.vendorId)).toEqual(entrance);
+    expect(await pinOf(store.vendorId)).toEqual(ENTRANCE);
   });
 
   it('control: an edit that does not touch the pin is untouched by the pin rule', async () => {
@@ -200,5 +228,109 @@ describe('a store moves its pin only to a spot inside the market', () => {
 
     expect(res.statusCode).toBe(200);
     expect(await pinOf(store.vendorId)).toEqual(GEORGETOWN);
+  });
+});
+
+describe('[DS269 F1] a moved pin is on the record, and the owner hears of a move they did not make', () => {
+  /** A MANAGER on the store: a plain account with a staff row, as the owner adds one. */
+  async function managerOf(store: { vendorId: string; ownerUserId: string }) {
+    const manager = await makeUser(['CUSTOMER'], 'CUSTOMER', { first: 'Marla', last: 'Manager' });
+    await app.prisma.vendorStaff.create({ data: { vendorId: store.vendorId, userId: manager.userId, role: 'MANAGER', invitedBy: store.ownerUserId } });
+    const named = await app.prisma.user.findUniqueOrThrow({ where: { id: manager.userId }, select: { firstName: true, lastName: true } });
+    return { ...manager, name: `${named.firstName} ${named.lastName}` };
+  }
+
+  it('the owner moving the pin writes one audit row — who, from, to — and no notice to themselves', async () => {
+    const store = await storeAtGeorgetown();
+
+    const res = await putProfile(store.token, store.vendorId, ENTRANCE);
+
+    expect(res.statusCode).toBe(200);
+    const rows = await pinAudits(store.vendorId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ userId: store.ownerUserId, entity: 'Vendor', entityId: store.vendorId });
+    // Positions in the one evidence format for a position (cash-rules gpsEvidence, 5 dp).
+    expect(rows[0]!.changes).toEqual({ from: 'gps:6.80130,-58.15510', to: 'gps:6.81020,-58.16230', actorRole: 'OWNER', ownerNotified: false });
+    expect(await pinNotices(store.ownerUserId)).toHaveLength(0);
+  });
+
+  it('an unchanged pin, or an edit that sends no pin, writes no audit row', async () => {
+    const store = await storeAtGeorgetown();
+
+    expect((await putProfile(store.token, store.vendorId, GEORGETOWN)).statusCode).toBe(200);
+    expect((await putProfile(store.token, store.vendorId, { description: 'Roti, curry and dhal puri.' })).statusCode).toBe(200);
+
+    expect(await pinAudits(store.vendorId)).toHaveLength(0);
+  });
+
+  it('a manager moving the pin is recorded as the manager, and the owner is told who moved it', async () => {
+    const store = await storeAtGeorgetown();
+    const manager = await managerOf(store);
+
+    const res = await putProfile(manager.token, store.vendorId, ENTRANCE);
+
+    expect(res.statusCode).toBe(200);
+    expect(await pinOf(store.vendorId)).toEqual(ENTRANCE);
+    const rows = await pinAudits(store.vendorId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ userId: manager.userId, entityId: store.vendorId });
+    expect(rows[0]!.changes).toEqual({ from: 'gps:6.80130,-58.15510', to: 'gps:6.81020,-58.16230', actorRole: 'MANAGER', ownerNotified: true });
+
+    const notices = await pinNotices(store.ownerUserId);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ type: 'SYSTEM_ANNOUNCEMENT', title: 'Your store pin was moved' });
+    expect(notices[0]!.body).toContain(`${manager.name} moved the map pin for Pin Test Roti Shop.`);
+    expect(notices[0]!.data).toEqual({ kind: 'store_pin_moved', vendorId: store.vendorId, audience: 'business' });
+    // The mover is not told about their own move.
+    expect(await pinNotices(manager.userId)).toHaveLength(0);
+  });
+
+  it('control: the owner moving it after a manager records a second move, and tells nobody', async () => {
+    const store = await storeAtGeorgetown();
+    const manager = await managerOf(store);
+    await putProfile(manager.token, store.vendorId, ENTRANCE);
+
+    const back = await putProfile(store.token, store.vendorId, GEORGETOWN);
+
+    expect(back.statusCode).toBe(200);
+    const rows = await pinAudits(store.vendorId);
+    expect(rows.map((r) => [r.userId, (r.changes as { from: string }).from, (r.changes as { to: string }).to])).toEqual([
+      [manager.userId, 'gps:6.80130,-58.15510', 'gps:6.81020,-58.16230'],
+      [store.ownerUserId, 'gps:6.81020,-58.16230', 'gps:6.80130,-58.15510'],
+    ]);
+    // Only the manager's move reached the owner's inbox.
+    expect(await pinNotices(store.ownerUserId)).toHaveLength(1);
+  });
+
+  it('the record and the notice are written by the transaction that moves the pin', () => {
+    // A success cannot show atomicity, so the shape is pinned: lock, read,
+    // move and record share one transaction, and only the fan-out (which cannot
+    // undo anything) runs after it commits.
+    const source = readFileSync(join(__dirname, '..', 'modules', 'vendor', 'vendor.routes.ts'), 'utf8');
+    const start = source.indexOf("app.put('/profile'");
+    expect(start).toBeGreaterThan(-1);
+    const block = source.slice(start, start + source.slice(start).search(/\n {2}app\.(get|post|put|patch|delete)\(/));
+    const txStart = block.indexOf('app.prisma.$transaction(async (tx) => {');
+    expect(txStart, 'the profile write runs in a transaction').toBeGreaterThan(-1);
+    const txEnd = block.indexOf('\n    });', txStart);
+    const inTx = block.slice(txStart, txEnd);
+    const afterTx = block.slice(txEnd);
+
+    expect(inTx).toContain('lockStorePin(tx, vendorId)');
+    expect(inTx.indexOf('lockStorePin(tx, vendorId)')).toBeLessThan(inTx.indexOf('tx.vendor.update('));
+    expect(inTx.indexOf('tx.vendor.update(')).toBeLessThan(inTx.indexOf('recordStorePinMove(tx, {'));
+    expect(afterTx).not.toContain('recordStorePinMove(');
+    expect(afterTx).toContain('notifications.publishPersisted(pinNoticeId)');
+  });
+
+  it('a refused pin writes no record and tells nobody, whoever sends it', async () => {
+    const store = await storeAtGeorgetown();
+    const manager = await managerOf(store);
+
+    const res = await putProfile(manager.token, store.vendorId, { latitude: 0, longitude: 0 });
+
+    expect(res.statusCode).toBe(400);
+    expect(await pinAudits(store.vendorId)).toHaveLength(0);
+    expect(await pinNotices(store.ownerUserId)).toHaveLength(0);
   });
 });

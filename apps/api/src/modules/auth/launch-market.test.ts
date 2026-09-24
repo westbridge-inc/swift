@@ -58,6 +58,18 @@ describe('where a launch market is on the map', () => {
     expect(launchMarketAt(latitude, longitude)).toBeNull();
   });
 
+  // [DS269 F2] The comment on LAUNCH_MARKET_BOUNDS says the box is coarse, and
+  // names what it lets through. These keep that comment true: a box that is
+  // later tightened to the border fails here, and the comment moves with it.
+  it.each([
+    ['open sea off the coast', 7.2, -57.6],
+    ['Boa Vista, Brazil', 2.8235, -60.6758],
+    ['Santa Elena de Uairen, Venezuela', 4.6019, -61.1107],
+    ['Nieuw Nickerie, Suriname', 5.9261, -56.9731],
+  ])('%s lies inside the coarse box, as documented', (_place, latitude, longitude) => {
+    expect(launchMarketAt(latitude, longitude)).toBe('GY');
+  });
+
   it('a coordinate that is not a number is in no market', () => {
     expect(launchMarketAt(Number.NaN, -58.1551)).toBeNull();
     expect(launchMarketAt(6.8013, Number.POSITIVE_INFINITY)).toBeNull();

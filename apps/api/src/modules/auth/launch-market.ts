@@ -30,17 +30,20 @@ export interface MarketBounds {
 }
 
 /**
- * [Q8] Where each launch market is on the map. A store pin is where riders and
- * customers are sent and where "nearby" is measured from, so a pin that lies in
- * no launch market (a phone that signed up abroad, a 0,0 fix, a map dragged out
- * to sea) is refused instead of being put on the map.
+ * [Q8] Where each launch market is on the map, as a coarse country box. A
+ * store pin is where riders and customers are sent and where "nearby" is
+ * measured from, so a pin in no launch market is refused: a phone that signed
+ * up abroad, a 0,0 fix, a swapped or sign-flipped coordinate, garbage.
  *
- * Deliberately a box, not the border. Guyana lies between latitudes 1 and 9
- * degrees north and longitudes 56 and 62 degrees west, and the box is exactly
- * that. It reaches a little into the neighbouring countries on purpose, so no
- * real Guyana store is ever refused (Lethem sits on the Takutu, Corriverton on
- * the Courantyne). The exact spot is confirmed by the owner on the map and
- * checked at store review.
+ * [DS269 F2] It is a box, not the border and not a coastline test. Guyana
+ * lies between latitudes 1 and 9 degrees north and longitudes 56 and 62
+ * degrees west, and the box is exactly that, so it also holds open sea off the
+ * coast (7.2 N 57.6 W) and towns across every border: Boa Vista in Brazil,
+ * Santa Elena de Uairen in Venezuela, Nieuw Nickerie in Suriname. A pin there
+ * is accepted. What the box guarantees is that no real Guyana store is
+ * refused, border towns included (Lethem on the Takutu, Corriverton on the
+ * Courantyne). The exact spot is the owner confirming it on the map, and the
+ * store review.
  *
  * Keyed by the launch list itself: a market added to it without a box stops
  * this Record compiling.
