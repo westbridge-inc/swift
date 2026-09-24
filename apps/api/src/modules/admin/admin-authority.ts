@@ -187,6 +187,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
+  'PUT /users/:id/unban': c('C3', 'user.ban', E.user),
 
   // ── Vendors ─────────────────────────────────────────────────────────────
   'GET /vendors': c('C0', 'vendor.read'),
@@ -204,6 +205,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /drivers/:id': c('C1', 'mover.read'),
   'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify', E.driver),
   'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass', E.driver),
+  // [High #9 · DS109] Approving a pending vehicle assignment grants this driver the
+  // vehicle subject's documents — a person's access to live work, so C3 (reason owed).
+  'POST /drivers/:id/vehicle-assignment/approve': c('C3', 'driver.assignment.approve', E.driver),
 
   // ── Orders and live ops ─────────────────────────────────────────────────
   'GET /orders': c('C1', 'order.read'),
@@ -379,6 +383,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // authorises is still gated on its own class when the requester re-issues it.
   'GET /approvals': c('C0', 'approvals.read'),
   'POST /approvals/:id/decide': c('C3', 'approvals.decide', E.approval),
+  // [DS110-14] Executing a decision is not itself a decision: the approval
+  // already carries the two-person authorisation, and the replayed request
+  // passes through its own C4/C5 gate again. C2 — no new reason, no new
+  // approval — so "apply" can never need a second approval of its own.
+  'POST /approvals/:id/apply': c('C2', 'approvals.apply', E.approval),
 
   // ── Support and audit ───────────────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { discardDeadLetter, errorCode, fetchDeadLetters, requeueDeadLetter, type DeadLetter } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
+import { askReason } from '@/lib/ask-reason';
 
 // ---------------------------------------------------------------------------
 // N4 / WS-8.1 — the dead letters, finally visible.
@@ -87,7 +88,7 @@ export default function JobsPage() {
     onSuccess: refresh,
   });
   const discard = useMutation({
-    mutationFn: ({ row }: { row: DeadLetter }) => discardDeadLetter(row.queue, row.id, row),
+    mutationFn: ({ row, reason }: { row: DeadLetter; reason: string }) => discardDeadLetter(row.queue, row.id, row, reason),
     onMutate: () => setMutationError(null),
     onError: onActionError,
     onSuccess: refresh,
@@ -264,7 +265,7 @@ export default function JobsPage() {
                         </span>
                         <button
                           disabled={busy}
-                          onClick={() => discard.mutate({ row })}
+                          onClick={() => { const reason = askReason({ action: `permanently discard this dead job`, subject: row.name }); if (reason) discard.mutate({ row, reason }); }}
                           className="px-3 py-1.5 rounded-lg text-xs bg-red-600 text-white disabled:opacity-50"
                         >
                           Yes, discard {row.name}

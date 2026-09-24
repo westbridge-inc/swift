@@ -17,8 +17,11 @@ const mocks = vi.hoisted(() => ({
   submitDocument: vi.fn(),
   submitIdentity: vi.fn(),
   becomePartner: vi.fn(),
+  changeVehicle: vi.fn(),
   uploadCourierProof: vi.fn(),
   confirmCourierProof: vi.fn(),
+  uploadCourierPickupProof: vi.fn(),
+  confirmCourierPickupProof: vi.fn(),
   primeNotifications: vi.fn(),
   track: vi.fn(),
 }));
@@ -89,10 +92,12 @@ vi.mock('../services/api', () => ({
     submitDocument: mocks.submitDocument,
     submitIdentity: mocks.submitIdentity,
   },
-  partnerApi: { become: mocks.becomePartner },
+  partnerApi: { become: mocks.becomePartner, changeVehicle: mocks.changeVehicle },
   courierApi: {
     uploadProof: mocks.uploadCourierProof,
     proof: mocks.confirmCourierProof,
+    uploadPickupProof: mocks.uploadCourierPickupProof,
+    pickupProof: mocks.confirmCourierPickupProof,
   },
 }));
 
@@ -143,8 +148,8 @@ import {
   useSelectMoverKind,
   useUploadVehiclePhoto,
 } from './mover';
-import { useBecomePartner, useUploadDocument } from './verification';
-import { useCourierProof } from './courier';
+import { useBecomePartner, useChangeVehicle, useUploadDocument } from './verification';
+import { useCourierPickupProof, useCourierProof } from './courier';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -365,6 +370,68 @@ describe('multi-step authenticated mutation ownership', () => {
     expect(mocks.confirmCourierProof).not.toHaveBeenCalled();
   });
 
+  // [E16] The pickup proof is the same two-step, and the GPS fix always travels.
+  it('confirms A courier pickup with the uploaded photo on the evidence fix', async () => {
+    mocks.uploadCourierPickupProof.mockResolvedValue({ data: { data: { url: '/uploads/courier-proof/order-a/pickup/a.jpg' } } });
+    mocks.lastKnownPosition.mockResolvedValue({ coords: { latitude: 6.81, longitude: -58.155 } });
+    mocks.confirmCourierPickupProof.mockResolvedValue({ data: { data: { status: 'PICKED_UP' } } });
+    const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
+
+    await expect(mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' })).resolves.toEqual({ status: 'PICKED_UP' });
+    expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    expect(mocks.confirmCourierPickupProof).toHaveBeenCalledWith(
+      'order-a',
+      { proofPhotoUrl: '/uploads/courier-proof/order-a/pickup/a.jpg', gps: { lat: 6.81, lng: -58.155 } },
+      accountA,
+    );
+  });
+
+  it('does not confirm A courier pickup as B after the upload', async () => {
+    const upload = deferred<any>();
+    mocks.uploadCourierPickupProof.mockReturnValue(upload.promise);
+    const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
+
+    const result = mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' });
+    expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    mocks.current = { ...accountB };
+    upload.resolve({ data: { data: { url: '/uploads/courier-proof/order-a/pickup/a.jpg' } } });
+
+    await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
+    expect(mocks.confirmCourierPickupProof).not.toHaveBeenCalled();
+  });
+
+  it('does not confirm A courier pickup as B while the location fix is pending', async () => {
+    mocks.uploadCourierPickupProof.mockResolvedValue({ data: { data: { url: '/uploads/courier-proof/order-a/pickup/a.jpg' } } });
+    const location = deferred<any>();
+    mocks.lastKnownPosition.mockReturnValue(location.promise);
+    const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
+
+    const result = mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' });
+    await vi.waitFor(() => expect(mocks.lastKnownPosition).toHaveBeenCalled());
+    mocks.current = { ...accountB };
+    location.resolve({ coords: { latitude: 6.81, longitude: -58.155 } });
+
+    await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
+    expect(mocks.confirmCourierPickupProof).not.toHaveBeenCalled();
+  });
+
+  it('rejects a delayed A pickup-camera result before uploading as B', async () => {
+    const mutation = useCourierPickupProof() as unknown as CapturedMutation<{
+      orderId: string;
+      uri: string;
+      authSession: AuthSessionSnapshot;
+    }>;
+    mocks.current = { ...accountB };
+
+    await expect(mutation.mutationFn({
+      orderId: 'order-a',
+      uri: 'file://account-a-pickup.jpg',
+      authSession: accountA,
+    })).rejects.toBeInstanceOf(mocks.BoundaryError);
+    expect(mocks.uploadCourierPickupProof).not.toHaveBeenCalled();
+    expect(mocks.confirmCourierPickupProof).not.toHaveBeenCalled();
+  });
+
   it('cannot apply a late A partner result to B', async () => {
     const become = deferred<any>();
     mocks.becomePartner.mockReturnValue(become.promise);
@@ -389,6 +456,64 @@ describe('multi-step authenticated mutation ownership', () => {
 // has unmounted, so clearing from the component would keep a submitted phone
 // and address whenever the owner switched away mid-request.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// [VEHICLES] "Change vehicle" answers with the mover's kind and pointer. A move
+// between delivery and taxi work adds that role to THIS session, exactly as
+// "Save vehicle" does; a result that lands after the account changed is never
+// applied to the next account; a retry that changed nothing leaves the session.
+// ---------------------------------------------------------------------------
+describe('changing the vehicle follows the session that asked', () => {
+  type ChangeVars = { vehicleType: 'CAR' | 'BICYCLE'; vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string } };
+  const car: ChangeVars = { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Axio', year: 2019, color: 'White', licensePlate: 'PAB 1234' } };
+
+  it('a move to taxi work adds DRIVER to this session and points it there; the checklist and mover reads refresh', async () => {
+    mocks.changeVehicle.mockResolvedValue({ data: { data: { kind: 'DRIVER', vehicleType: 'CAR', changed: true, activeRole: 'DRIVER', lastMoverRole: 'DRIVER' } } });
+    mocks.setUserIfCurrent.mockReturnValue(true);
+    const mutation = useChangeVehicle() as unknown as CapturedMutation<ChangeVars>;
+    await mutation.mutationFn(car);
+    expect(mocks.changeVehicle).toHaveBeenCalledWith(car, accountA);
+    expect(mocks.setUserIfCurrent).toHaveBeenCalledTimes(1);
+    const [owner, next] = mocks.setUserIfCurrent.mock.calls[0]!;
+    expect(owner).toEqual(accountA);
+    expect(next).toMatchObject({ id: accountA.userId, activeRole: 'DRIVER', lastMoverRole: 'DRIVER' });
+    expect(next.roles).toEqual(expect.arrayContaining(['MOVER', 'DRIVER']));
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['verification'] });
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['mover'] });
+  });
+
+  it('a retry that changed nothing leaves the session as it was', async () => {
+    mocks.changeVehicle.mockResolvedValue({ data: { data: { kind: 'RIDER', vehicleType: 'BICYCLE', changed: false, activeRole: null, lastMoverRole: null } } });
+    const mutation = useChangeVehicle() as unknown as CapturedMutation<ChangeVars>;
+    await mutation.mutationFn({ vehicleType: 'BICYCLE' });
+    expect(mocks.setUserIfCurrent).not.toHaveBeenCalled();
+  });
+
+  it('cannot apply a late A change result to B', async () => {
+    const pending = deferred<any>();
+    mocks.changeVehicle.mockReturnValue(pending.promise);
+    const mutation = useChangeVehicle() as unknown as CapturedMutation<ChangeVars>;
+    const result = mutation.mutationFn(car);
+    mocks.current = { ...accountB };
+    mocks.user = { id: accountB.userId, firstName: 'Account', lastName: 'B' };
+    pending.resolve({ data: { data: { kind: 'DRIVER', vehicleType: 'CAR', changed: true, activeRole: 'DRIVER', lastMoverRole: 'DRIVER' } } });
+    await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
+    expect(mocks.setUserIfCurrent).not.toHaveBeenCalled();
+  });
+
+  it('the step-up guard wraps the call, so a verified mover confirms it is them before the change runs', async () => {
+    mocks.changeVehicle.mockResolvedValue({ data: { data: { kind: 'RIDER', vehicleType: 'BICYCLE', changed: false } } });
+    const wrapped: unknown[] = [];
+    const guard = (<A extends unknown[], R>(fn: (...args: A) => Promise<R>) => (...args: A) => {
+      wrapped.push(args[0]);
+      return fn(...args);
+    }) as Parameters<typeof useChangeVehicle>[0];
+    const mutation = useChangeVehicle(guard) as unknown as CapturedMutation<ChangeVars>;
+    await mutation.mutationFn({ vehicleType: 'BICYCLE' });
+    expect(wrapped).toEqual([{ vehicleType: 'BICYCLE' }]);
+    expect(mocks.changeVehicle).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('business form draft follows the durable store-creation result', () => {
   const vendorRequest = {
     role: 'VENDOR' as const,

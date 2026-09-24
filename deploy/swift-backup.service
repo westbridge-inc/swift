@@ -11,8 +11,26 @@ SupplementaryGroups=docker
 
 # Adjust WorkingDirectory to wherever the repo lives on the server.
 WorkingDirectory=/opt/swift
+# Settings only: deploy/.env holds no secret (pilot-up.sh refuses one).
 EnvironmentFile=/opt/swift/deploy/.env
 Environment=BACKUP_REQUIRED=1
+# The storage keys are systemd encrypted credentials from the same store that
+# swift-secrets writes: decrypted by the service manager with the host key,
+# mounted for this unit's user only at $CREDENTIALS_DIRECTORY, gone when it
+# exits. backup.sh reads them from there (deploy/secret-env.sh). The database
+# password stays inside the postgres container (POSTGRES_PASSWORD_FILE).
+LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred
+LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred
+# deploy/.env legitimately wires AWS_ACCESS_KEY_ID_FILE=/run/secrets/... and
+# AWS_SECRET_ACCESS_KEY_FILE=/run/secrets/... for the API CONTAINERS
+# (STORAGE_PROVIDER=s3; that path exists only inside containers). This unit
+# loads deploy/.env via EnvironmentFile= above, so backup.sh would inherit
+# those container-only paths — and deploy/secret-env.sh checks NAME_FILE
+# BEFORE $CREDENTIALS_DIRECTORY, so the keys this unit declares above would
+# never be reached (observed: "FATAL: AWS_ACCESS_KEY_ID is expected in
+# /run/secrets/AWS_ACCESS_KEY_ID, which cannot be read"). Unset both so the
+# systemd credential directory wins on the host.
+UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE
 ExecStart=/opt/swift/deploy/backup.sh /var/backups/swift
 
 # The script exits non-zero when a dump cannot be verified or the offsite

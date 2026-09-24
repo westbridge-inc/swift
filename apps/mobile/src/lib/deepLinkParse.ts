@@ -33,7 +33,7 @@ export function defaultLinkPolicy(): LinkPolicy {
   if (!policy) {
     const isDev = typeof __DEV__ !== 'undefined' && __DEV__ === true;
     policy = policyFrom({
-      webUrl: process.env['EXPO_PUBLIC_WEB_URL'] ?? (isDev ? 'http://localhost:3001' : 'https://swift.gy'),
+      webUrl: process.env['EXPO_PUBLIC_WEB_URL'] ?? (isDev ? 'http://localhost:3001' : 'https://swiftgy.com'),
       previewHosts: process.env['EXPO_PUBLIC_LINK_PREVIEW_HOSTS'] ?? null,
       scheme: 'swift',
       isDev,

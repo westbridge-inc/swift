@@ -216,6 +216,20 @@ export type SosResolutionCode = 'SAFE' | 'FALSE_ALARM' | 'ABUSE' | 'POLICE_INVOL
 
 export const SOS_RESOLUTION_CODES: SosResolutionCode[] = ['SAFE', 'FALSE_ALARM', 'ABUSE', 'POLICE_INVOLVED', 'UNREACHABLE'];
 
+/** One repeat press as the server summarises it on the alert (`SosAlert.
+ *  retriggers`: the newest `sos_retriggers` rows, oldest first, bounded — the
+ *  rows are the record, this is the board's copy). An entry written before
+ *  notes existed has no `note` key at all. */
+export interface SosRetriggerSummary {
+  seq: number;
+  at: string;
+  note?: string | null;
+  source?: string;
+  lat?: number | null;
+  lng?: number | null;
+  addressText?: string | null;
+}
+
 export interface SosRow {
   id: string;
   actorUserId: string;
@@ -227,9 +241,56 @@ export interface SosRow {
   triggerLat: number | null;
   triggerLng: number | null;
   triggerAddressText: string | null;
+  /** [PRIV2-S1] What they typed when they raised it (the in-ride SOS `note`).
+   *  Ops-only: it lives on the alert and in the evidence bundle, and never on
+   *  the order timeline the other person on the ride reads — which makes this
+   *  console the only place a responder can read it. */
+  triggerNote: string | null;
+  /** The newest repeat presses, oldest first, each with its own words. */
+  retriggers: SosRetriggerSummary[] | null;
   userSafeFlaggedAt: string | null;
   acknowledgedAt: string | null;
   retriggerCount: number;
+}
+
+export interface SosNote {
+  /** 0 = the press that raised the alert; n = the n-th repeat press. */
+  seq: number;
+  at: string;
+  text: string;
+}
+
+/**
+ * What the person said, in the order they said it: the note they raised the
+ * alert with (seq 0, at the trigger time), then each repeat press that carried
+ * words. A press that said nothing is not a message — the "asked again" badge
+ * already counts it — and whitespace is not a message either. The words are
+ * kept exactly (trimmed, never cut or rewritten): they may be read back in an
+ * investigation.
+ *
+ * Defensive on purpose: the summary is JSON the server rebuilds, an older
+ * entry has no `note` key, and a feed is not a type system.
+ */
+export function sosNotes(a: SosRow): SosNote[] {
+  const out: SosNote[] = [];
+  const first = typeof a.triggerNote === 'string' ? a.triggerNote.trim() : '';
+  if (first) out.push({ seq: 0, at: a.triggeredAt, text: first });
+  const repeats = Array.isArray(a.retriggers) ? a.retriggers : [];
+  for (const r of repeats) {
+    const text = typeof r?.note === 'string' ? r.note.trim() : '';
+    if (!text) continue;
+    const seq = typeof r.seq === 'number' && Number.isFinite(r.seq) ? r.seq : Number.MAX_SAFE_INTEGER;
+    out.push({ seq, at: typeof r.at === 'string' ? r.at : a.triggeredAt, text });
+  }
+  return out.sort((x, y) => x.seq - y.seq);
+}
+
+/** Repeat presses the bounded summary no longer carries: the alert's count is
+ *  the truth, the summary keeps only the newest. A board that showed 20 of 25
+ *  without saying so would let a responder believe they had read everything. */
+export function sosPressesNotShown(a: SosRow): number {
+  const shown = Array.isArray(a.retriggers) ? a.retriggers.length : 0;
+  return Math.max(0, (a.retriggerCount ?? 0) - shown);
 }
 
 /**

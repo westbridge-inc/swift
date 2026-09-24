@@ -2,11 +2,11 @@ import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, ty
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
-import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf } from './subjects';
+import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
-import { approvedEvidenceFor, anyChecklistEvidenceFor } from './evidence';
+import { approvedEvidenceFor, anyChecklistEvidenceFor, type EvidenceRow } from './evidence';
 import { compileStorefrontDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
@@ -296,6 +296,15 @@ export class VerificationService {
         await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
       const doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
+      // [High #9 · DS109] An auto-rejection closes the PENDING vehicle link this submission
+      // created on another account's subject — the impostor's link never survives a rejection,
+      // and a later resubmission starts a fresh pending assignment.
+      if (doc.status === 'REJECTED' && subject !== null && subject.kind === 'VEHICLE' && !subject.owned) {
+        await tx.subjectLink.updateMany({
+          where: { accountId: data.userId, subjectId: subject.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null },
+          data: { validTo: new Date() },
+        });
+      }
       // [DOC-1 P4-5] A document waiting on a human has ONE open case, with the
       // SLA clock started here — in the same transaction, so a pending document
       // without a case cannot exist.
@@ -992,6 +1001,24 @@ export class VerificationService {
       }
 
       const updated = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
+      // [High #9 · DS109] The PENDING vehicle link lifecycle rides the doc decision: rejecting
+      // the submission that created a cross-account assignment closes the link, so it can
+      // never be approved later by anything else. An approved document does NOT approve the
+      // assignment — only the explicit, audited admin action (approveVehicleAssignment) does.
+      if (requestedStatus === 'REJECTED' && updated.subjectId && BUCKET_OF[updated.docType] === 'VEHICLE') {
+        // Filter on the RAW stored subjectId on purpose: `resolveSubject` keys the link it
+        // creates at the same root-of-moment value it stores on the document (one transaction),
+        // so this closes exactly the link THIS submission created. Resolving to the current
+        // root instead would miss that link if the subject were merged after submission, and
+        // would close a sibling submission's link — see DRAFT-NOTES, defect D6.
+        const subject = await tx.subject.findUnique({ where: { id: updated.subjectId }, select: { kind: true, createdById: true } });
+        if (subject !== null && subject.kind === 'VEHICLE' && subject.createdById !== updated.userId) {
+          await tx.subjectLink.updateMany({
+            where: { accountId: updated.userId, subjectId: updated.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null },
+            data: { validTo: now },
+          });
+        }
+      }
       // The document decision and provider public/hire projection commit as one
       // authority transition under the same User lock used by hire/profile.
       // [STRAND-1/2] The vendor activation projection commits in the SAME
@@ -1206,10 +1233,14 @@ export class VerificationService {
     if (!user) throw new NotFoundError('User', userId);
 
     const checklist = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
-    const documents = await this.prisma.verificationDocument.findMany({
+    // A SUPERSEDED submission is no longer evidence (its record followed it): a renewal
+    // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
+    // its legacy APPROVED status (a supersession does not rewrite history), so it is left
+    // out here, or the checklist would show an approval GO no longer counts.
+    const documents = (await this.prisma.verificationDocument.findMany({
       where: { userId, docType: { in: [...checklist, IDENTITY_DOC_TYPE] } },
       orderBy: { createdAt: 'desc' },
-    });
+    })).filter((d) => d.state !== 'SUPERSEDED');
 
     const approved = new Set(
       documents
@@ -1472,12 +1503,19 @@ export class VerificationService {
     // all (a genuine pre-checklist account, where nothing can have expired), and it
     // may never override evidence that exists and is no longer current.
     const required = await this.countryConfig.getMoverChecklist(user.countryCode, opts.vehicleType);
+    // [High #9 · DS109] VEHICLE-kind evidence must be about the EXACT vehicle the driver
+    // currently operates — the durable subject named by their profile plate. A retyped
+    // plate counts neither another subject's documents nor the old vehicle's.
+    const vehicleTypes = required.filter((docType) => BUCKET_OF[docType] === 'VEHICLE');
     let baseOk: boolean;
     if (required.length === 0) {
       baseOk = true;
     } else {
       const approvedDocs = await this.approvedEvidence(db, userId, required, now);
-      const approved = new Set(approvedDocs.map((d) => d.docType));
+      const docs = vehicleTypes.length
+        ? await this.evidenceOnCurrentVehicle(db, userId, user.countryCode, approvedDocs, vehicleTypes)
+        : approvedDocs;
+      const approved = new Set(docs.map((d) => d.docType));
       const missing = required.filter((docType) => !approved.has(docType));
       baseOk = missing.length === 0;
       if (!baseOk && (opts.legacyVerified ?? false)) {
@@ -1500,7 +1538,7 @@ export class VerificationService {
     // (bike/motorbike/canter/box-truck) are not gated on hire insurance.
     if (isPassengerVehicle(opts.vehicleType)) {
       // The policy may belong to the vehicle's subject (a fleet car) rather than this account.
-      const insurance = (await this.approvedEvidence(db, userId, ['vehicle_insurance'], now))
+      const insurance = (await this.evidenceOnCurrentVehicle(db, userId, user.countryCode, await this.approvedEvidence(db, userId, ['vehicle_insurance'], now), ['vehicle_insurance']))
         .sort((a, b) => (b.reviewedAt?.getTime() ?? 0) - (a.reviewedAt?.getTime() ?? 0))[0];
       if (
         !insurance ||
@@ -1513,6 +1551,120 @@ export class VerificationService {
     }
 
     return { allowed: true, reason: 'ok' };
+  }
+
+  /**
+   * [High #9 · DS109] The durable vehicle subject named by the mover's CURRENT profile
+   * plate, if any. `enforce: false` = the profile carries no plate (nothing to adopt; the
+   * legacy evidence rules stand). When a plate exists, vehicle-kind evidence must sit on
+   * ITS subject — `subjectId: null` means the plate has no subject yet, and only
+   * pre-subject legacy rows (subjectId null) may count.
+   */
+  private async currentVehicleSubject(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    countryCode: string,
+  ): Promise<{ enforce: boolean; subjectId: string | null }> {
+    const driver = await db.driver.findUnique({ where: { userId }, select: { licensePlate: true } });
+    const rider = driver ? null : await db.rider.findUnique({ where: { userId }, select: { licensePlate: true } });
+    const rawMark = (driver?.licensePlate ?? rider?.licensePlate ?? '').trim();
+    if (!rawMark) return { enforce: false, subjectId: null };
+    const vehicle = await db.vehicleProfile.findUnique({
+      where: { registrationMark_countryCode: { registrationMark: normalizeRegistrationMark(rawMark), countryCode } },
+      select: { subjectId: true },
+    });
+    if (!vehicle) return { enforce: true, subjectId: null };
+    return { enforce: true, subjectId: await rootSubjectId(db, vehicle.subjectId) };
+  }
+
+  /**
+   * Keep non-vehicle rows; keep vehicle rows only when they are about the current plate's
+   * subject. A vehicle row bound to a DIFFERENT subject never counts (the old vehicle's
+   * evidence must not follow a plate change). A legacy row not yet bound to any subject
+   * (`subjectId` null — the pre-backfill posture) still counts for a type the current
+   * subject has no record of, so a partially-backfilled fleet is not refused at GO for
+   * evidence that is real, current and on the plate in question.
+   */
+  private async evidenceOnCurrentVehicle(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    countryCode: string,
+    rows: EvidenceRow[],
+    vehicleTypes: readonly string[],
+  ): Promise<EvidenceRow[]> {
+    if (!rows.some((r) => vehicleTypes.includes(r.docType))) return rows;
+    const target = await this.currentVehicleSubject(db, userId, countryCode);
+    if (!target.enforce) return rows;
+    const kept: EvidenceRow[] = [];
+    for (const row of rows) {
+      if (!vehicleTypes.includes(row.docType) || row.subjectId === target.subjectId) {
+        kept.push(row);
+        continue;
+      }
+      if (target.subjectId !== null && row.subjectId === null) {
+        // Mixed backfill posture: the plate's subject has no record of this type, so the
+        // account's own unbound (legacy) record is the only evidence it can have.
+        const onSubject = rows.some((r) => r.docType === row.docType && r.subjectId === target.subjectId);
+        if (!onSubject) kept.push(row);
+      }
+    }
+    return kept;
+  }
+
+  /**
+   * [High #9 · DS109] The admin-approved vehicle assignment: this mover is verified to
+   * operate the vehicle named by their CURRENT profile plate. Only the PENDING
+   * ASSIGNED_DRIVER link to that plate's subject is promoted (approvedAt stamped), so a
+   * retyped plate never inherits another subject's documents before this explicit, audited
+   * decision. Idempotent — an already-approved or absent link approves nothing.
+   */
+  async approveVehicleAssignment(userId: string): Promise<{ approved: number }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+    if (!user) throw new NotFoundError('User', userId);
+    const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { licensePlate: true } });
+    const rider = driver ? null : await this.prisma.rider.findUnique({ where: { userId }, select: { licensePlate: true } });
+    const rawMark = (driver?.licensePlate ?? rider?.licensePlate ?? '').trim();
+    if (!rawMark) {
+      throw new AppError(400, 'NO_PLATE', 'This mover has no registration mark on their profile to approve.');
+    }
+    const vehicle = await this.prisma.vehicleProfile.findUnique({
+      where: { registrationMark_countryCode: { registrationMark: normalizeRegistrationMark(rawMark), countryCode: user.countryCode } },
+      select: { subjectId: true },
+    });
+    if (!vehicle) {
+      throw new AppError(404, 'NO_VEHICLE_SUBJECT', 'No vehicle is registered under this plate yet — the driver must submit a vehicle document first.');
+    }
+    const updated = await this.prisma.subjectLink.updateMany({
+      where: { accountId: userId, subjectId: vehicle.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null },
+      data: { approvedAt: new Date() },
+    });
+    return { approved: updated.count };
+  }
+
+  /**
+   * [High #9 · DS109] The rider live-operation check: every MOVER-checklist type has an
+   * approved, current record, with VEHICLE-kind evidence restricted to the EXACT vehicle
+   * the rider's current plate names (the same current-vehicle filter the driver gate uses,
+   * minus the taxi-only hire-insurance gate). The legacy `documentsVerified` flag is
+   * applied by the route and is NOT consulted here — a plate change clears it, so a rider
+   * on a new plate must satisfy the checklist against that plate.
+   */
+  async riderLiveOperation(
+    userId: string,
+    vehicleType: VehicleType,
+    db: Prisma.TransactionClient | PrismaClient = this.prisma,
+  ): Promise<boolean> {
+    const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+    if (!user) return false;
+    const required = await this.countryConfig.getMoverChecklist(user.countryCode, vehicleType);
+    if (required.length === 0) return true;
+    const vehicleTypes = required.filter((docType) => BUCKET_OF[docType] === 'VEHICLE');
+    const approvedDocs = await this.approvedEvidence(db, userId, required, new Date());
+    const docs = vehicleTypes.length
+      ? await this.evidenceOnCurrentVehicle(db, userId, user.countryCode, approvedDocs, vehicleTypes)
+      : approvedDocs;
+    const approved = new Set(docs.map((d) => d.docType));
+    return required.every((docType) => approved.has(docType));
   }
 
   // -------------------------------------------------------------------------
