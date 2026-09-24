@@ -304,8 +304,14 @@ describe('scripts — no secret value ever rides in argv', () => {
     const unit = read('swift-backup.service');
     expect(unit).toContain('LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred');
     expect(unit).toContain('LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred');
-    expect(unit).not.toMatch(/Environment=AWS_/);
+    // No Environment= line SETS an AWS_ value: bare, quoted, or anywhere in a
+    // multi-assignment line. (UnsetEnvironment= removes values; it is pinned below.)
+    const setsAws = unit.split('\n').filter((line) => /^\s*Environment=/.test(line) && /(^|[\s"'=])AWS_/.test(line.replace(/^\s*Environment=/, ' ')));
+    expect(setsAws).toEqual([]);
     expect(unit).toContain('BACKUP_REQUIRED=1');
+    // deploy/.env's container-only AWS_*_FILE pointers are unset on the host, so
+    // secret-env.sh reaches the credential directory instead of /run/secrets.
+    expect(unit).toMatch(/^UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE$/m);
   });
 
   it('the materialize unit is a oneshot that runs before Docker', () => {
