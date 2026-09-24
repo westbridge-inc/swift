@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   blockedBecause, decidable, minutesLeft, urgencyOf, describeAction,
   entityLabel, shortFingerprint, noteProblem, BLOCK_COPY,
+  canApply, snapshotEntries,
   type ApprovalRow,
 } from './approvals';
 
@@ -138,5 +139,35 @@ describe('the decision note', () => {
   it('holds the server bound so the request is not rejected at the wire', () => {
     expect(noteProblem('x'.repeat(501), true)).toMatch(/500/);
     expect(noteProblem('x'.repeat(500), true)).toBeNull();
+  });
+
+  it('holds the 12-character floor too — a 5-character note passed the screen and 400’d at the gate', () => {
+    expect(noteProblem('I agree.', true)).toMatch(/why/i);
+    expect(noteProblem('I agree, checked against the statement.', true)).toBeNull();
+  });
+});
+
+describe('[DS110-13] the stored body is what the approver reads and apply replays', () => {
+  it('turns the stored body into labelled fields, leaving the reason to its own place', () => {
+    const entries = snapshotEntries(ROW({
+      bodySnapshot: { params: { id: 'pay_1' }, body: { amount: 2500, subscriptionId: 'SUB-77', reason: 'kept elsewhere' } },
+    }));
+    expect(entries).toEqual([
+      { label: 'Amount', value: '2500' },
+      { label: 'Subscription Id', value: 'SUB-77' },
+    ]);
+  });
+
+  it('returns nothing for a legacy row with no stored body', () => {
+    expect(snapshotEntries(ROW())).toEqual([]);
+    expect(snapshotEntries(ROW({ bodySnapshot: null }))).toEqual([]);
+  });
+
+  it('apply is allowed exactly when a body is on record and the window is still open', () => {
+    const approved = { status: 'APPROVED' as const, bodySnapshot: { body: {} } };
+    expect(canApply(ROW(approved), NOW)).toBe(true);
+    expect(canApply(ROW({ ...approved, bodySnapshot: null }), NOW)).toBe(false);
+    expect(canApply(ROW({ ...approved, expiresAt: at(-1) }), NOW)).toBe(false);
+    expect(canApply(ROW({ status: 'PENDING', bodySnapshot: { body: {} } }), NOW)).toBe(false);
   });
 });

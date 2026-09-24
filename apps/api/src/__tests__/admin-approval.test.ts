@@ -9,7 +9,9 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs } from '../lib/audit-immutability';
-import { APPROVAL_HEADER, APPROVAL_TTL_MS, fingerprintOf, requiresApproval } from '../modules/admin/admin-approval';
+import {
+  APPROVAL_HEADER, APPROVAL_TTL_MS, approvalSubjectOf, fingerprintOf, requiresApproval,
+} from '../modules/admin/admin-approval';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 
 // ---------------------------------------------------------------------------
@@ -294,5 +296,152 @@ describe('[ADM-005] the law itself', () => {
     for (const [key, a] of dual) expect(['C4', 'C5'], key).toContain(a.cls);
     const single = Object.entries(ADMIN_ROUTE_AUTHORITY).filter(([, a]) => !requiresApproval(a.cls));
     for (const [key, a] of single) expect(['C0', 'C1', 'C2', 'C3'], key).toContain(a.cls);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [DS110-13 / DS110-14] The second signature must SEE what it signs, and the
+// approved act must actually happen — through one stored body.
+//
+// Before this, `resolveApproval` hashed the request and threw the body away:
+// the approvals screen showed a truncated id, and APPROVED rows accumulated
+// forever because nothing replayed them. The row now stores a canonical
+// `{ params, body }` snapshot; `POST /approvals/:id/apply` reconstructs THAT
+// body and replays it through the normal gate with `x-swift-approval`, so what
+// executes is always what was displayed and the compare-and-set keeps it to
+// exactly one execution.
+// ---------------------------------------------------------------------------
+
+describe('[DS110] the stored body is what executes — and only that', () => {
+  // `bodySnapshot` enters the generated client with the 20260923180000
+  // migration; cast until the client is regenerated, so the suite compiles
+  // against both generations.
+  const snapshotRow = async (id: string) =>
+    (await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id } })) as unknown as {
+      status: string;
+      fingerprint: string;
+      bodySnapshot: unknown;
+    };
+  const rewriteSnapshot = async (id: string, bodySnapshot: unknown) =>
+    (app.prisma.privilegedApproval as unknown as {
+      update: (args: { where: { id: string }; data: { bodySnapshot: unknown } }) => Promise<unknown>;
+    }).update({ where: { id }, data: { bodySnapshot } });
+
+  it('the request body is stored durably and returned to the approver, bound by the fingerprint', async () => {
+    const asked = await writeConfig(requester.token, { rate: 30 });
+    const approvalId = asked.json().error.details.approvalId as string;
+
+    const row = await snapshotRow(approvalId);
+    expect(row.bodySnapshot).toEqual({
+      params: { key: CONFIG_KEY },
+      body: { value: { rate: 30 }, reason: REASON },
+      query: {},
+    });
+    expect(fingerprintOf({
+      method: 'PUT',
+      routeUrl: '/config/:key',
+      params: { key: CONFIG_KEY },
+      body: { value: { rate: 30 }, reason: REASON },
+      query: {},
+    })).toBe(row.fingerprint);
+
+    const list = await call(approver.token, 'GET', '/api/v1/admin/approvals');
+    const seen = (list.json().data as Array<Record<string, unknown>>).find((r) => r['id'] === approvalId)!;
+    expect(seen['bodySnapshot']).toEqual({
+      params: { key: CONFIG_KEY },
+      body: { value: { rate: 30 }, reason: REASON },
+      query: {},
+    });
+  });
+
+  it('apply replays the stored body and executes exactly once', async () => {
+    const asked = await writeConfig(requester.token, { rate: 31 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true, 'Checked the rate against the price book');
+
+    const applied = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(applied.statusCode, applied.body).toBe(200);
+    expect(applied.json().data.status).toBe('APPLIED');
+
+    const written = await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } });
+    expect(written.value).toEqual({ rate: 31 });
+
+    const approval = await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } });
+    expect(approval.status).toBe('APPLIED');
+    expect(approval.appliedAt).toBeTruthy();
+
+    const again = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(again.statusCode).toBe(403);
+    expect(again.json().error.message).toMatch(/already been used/);
+    // the record did not move again
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value)
+      .toEqual({ rate: 31 });
+  });
+
+  it('two racing applies: exactly one executes — the approval is the authorisation', async () => {
+    const asked = await writeConfig(requester.token, { rate: 32 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true);
+
+    const [a, b] = await Promise.all([
+      call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`),
+      call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`),
+    ]);
+    const codes = [a.statusCode, b.statusCode].sort();
+    expect(codes, `${a.statusCode}/${b.statusCode}`).toEqual([200, 403]);
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value)
+      .toEqual({ rate: 32 });
+  });
+
+  it('a body that no longer matches the reviewed fingerprint is refused before anything executes', async () => {
+    const asked = await writeConfig(requester.token, { rate: 40 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true);
+
+    // tamper with the stored body — the executed value would no longer be the
+    // value the approver read and signed
+    await rewriteSnapshot(approvalId, { params: { key: CONFIG_KEY }, body: { value: { rate: 9999 }, reason: REASON } });
+
+    const applied = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(applied.statusCode).toBe(403);
+    expect(applied.json().error.message).toMatch(/not what was approved/);
+
+    const written = await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } });
+    expect(written.value).not.toEqual({ rate: 9999 });
+    const approval = await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } });
+    expect(approval.status).toBe('APPROVED');
+  });
+
+  it('a snapshot-less legacy row cannot be applied — there is no body to replay', async () => {
+    const asked = await writeConfig(requester.token, { rate: 41 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true);
+    await rewriteSnapshot(approvalId, null);
+
+    const applied = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(applied.statusCode).toBe(403);
+    expect(applied.json().error.message).toMatch(/not what was approved/);
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value)
+      .not.toEqual({ rate: 41 });
+  });
+
+  it('apply is classified as workflow, not as a second approval of itself', () => {
+    const entry = ADMIN_ROUTE_AUTHORITY['POST /approvals/:id/apply'];
+    expect(entry?.cls).toBe('C2');
+    expect(ADMIN_ACTION_CLASSES[entry!.cls].requiresApproval).toBe(false);
+    expect(ADMIN_ACTION_CLASSES[entry!.cls].requiresReason).toBe(false);
+  });
+
+  it('the fingerprint binds the query string too — a replayed route cannot drop what the approver reviewed', () => {
+    const base = { method: 'PUT', routeUrl: '/config/:key', params: { key: 'X' }, body: { a: 1 } };
+    expect(fingerprintOf({ ...base, query: { mode: 'dry' } }))
+      .not.toBe(fingerprintOf({ ...base, query: { mode: 'live' } }));
+    expect(fingerprintOf(base)).toBe(fingerprintOf({ ...base, query: {} }));
+    const rebuilt = approvalSubjectOf({
+      action: 'PUT /config/:key',
+      bodySnapshot: { params: { key: 'X' }, body: { a: 1 }, query: { mode: 'dry' } },
+    });
+    expect(rebuilt).not.toBeNull();
+    expect(fingerprintOf(rebuilt!)).toBe(fingerprintOf({ ...base, query: { mode: 'dry' } }));
   });
 });

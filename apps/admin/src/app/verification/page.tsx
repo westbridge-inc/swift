@@ -8,9 +8,11 @@ import {
   getDocSignedUrl,
   approveDoc,
   rejectDoc,
+  API_URL,
   type InsuranceCheck,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
+import { askReason, reasonTooShort } from '@/lib/ask-reason';
 
 const STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'] as const;
 type Status = (typeof STATUSES)[number];
@@ -84,7 +86,7 @@ export default function VerificationPage() {
   };
 
   const approveMutation = useMutation({
-    mutationFn: ({ id, body }: { id: string; body?: { insurance?: InsuranceCheck } }) => approveDoc(id, body),
+    mutationFn: ({ id, body, reason }: { id: string; body?: { insurance?: InsuranceCheck }; reason: string }) => approveDoc(id, body, reason),
     onMutate: () => setMutationError(null),
     onError: (error) => setMutationError(error),
     onSuccess: refresh,
@@ -108,10 +110,19 @@ export default function VerificationPage() {
     try {
       const res = await getDocSignedUrl(id);
       if (!res?.data?.url) throw new Error('no url');
-      window.open(res.data.url, '_blank', 'noopener');
-      // Only a SUCCESSFUL open counts. A signed-URL failure must not unlock the
+      // [DS110-15] The server returns an absolute URL; an older server's
+      // relative path still resolves against the API origin, never the admin
+      // origin where it 404'd before.
+      const renderUrl = new URL(res.data.url, API_URL);
+      // Open through a same-origin proxy so a failed load is DETECTABLE — a
+      // cross-origin tab cannot report its 404/410 back to this page.
+      const proxyUrl = new URL(renderUrl.pathname + renderUrl.search, window.location.origin);
+      const check = await fetch(proxyUrl.toString());
+      if (!check.ok) throw new Error(`document did not load (HTTP ${check.status})`);
+      // Only a SUCCESSFUL load counts. A render failure must not unlock the
       // decision — that is the "false green" half of this defect.
       setPreviewed((seen) => new Set(seen).add(id));
+      window.open(proxyUrl.toString(), '_blank', 'noopener');
     } catch {
       alert('Could not open document (it may have been purged under retention).');
     }
@@ -355,13 +366,17 @@ export default function VerificationPage() {
                     disabled={decisionPending || approveBlocked}
                     onClick={() => {
                       if (window.confirm(`Approve ${documentLabel} for ${applicantName}? This changes their operating eligibility.`)) {
-                        approveMutation.mutate({
-                          id: selected.id,
-                          body: {
-                            ...(needsExpiry ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
-                            ...(isInsurance ? { insurance } : {}),
-                          },
-                        });
+                        const reason = askReason({ action: `approve this ${documentLabel}`, subject: applicantName });
+                        if (reason) {
+                          approveMutation.mutate({
+                            id: selected.id,
+                            reason,
+                            body: {
+                              ...(needsExpiry ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
+                              ...(isInsurance ? { insurance } : {}),
+                            },
+                          });
+                        }
                       }
                     }}
                     className="w-full px-3 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80 disabled:opacity-40"
@@ -376,7 +391,7 @@ export default function VerificationPage() {
                     rows={2}
                   />
                   <button
-                    disabled={decisionPending || reason.trim().length < 3}
+                    disabled={decisionPending || reasonTooShort(reason)}
                     onClick={() => {
                       const visibleReason = reason.trim();
                       if (window.confirm(`Reject ${documentLabel} for ${applicantName} with reason: "${visibleReason}"?`)) {

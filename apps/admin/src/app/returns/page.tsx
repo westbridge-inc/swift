@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchReturns, resolveReturn, settleReturnRefund } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
+import { askReason } from '@/lib/ask-reason';
 
 const FILTERS = ['REQUESTED', 'APPROVED', 'REFUND_DUE', 'REJECTED', 'REFUNDED'] as const;
 
@@ -13,15 +14,15 @@ export default function ReturnsPage() {
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('REQUESTED');
   const { data, isLoading } = useQuery({ queryKey: ['returns', filter], queryFn: () => fetchReturns(filter) });
   const resolve = useMutation({
-    mutationFn: ({ id, status, note }: { id: string; status: 'APPROVED' | 'REJECTED' | 'REFUND_DUE'; note?: string }) =>
-      resolveReturn(id, status, note),
+    mutationFn: ({ id, status, note, reason }: { id: string; status: 'APPROVED' | 'REJECTED' | 'REFUND_DUE'; note?: string; reason: string }) =>
+      resolveReturn(id, status, note, reason),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['returns'] }),
   });
   // [A-13] Settling is a SEPARATE act from deciding: the money moved, and here
   // is the transfer that moved it.
   const settle = useMutation({
-    mutationFn: ({ id, reference, amount }: { id: string; reference: string; amount: string }) =>
-      settleReturnRefund(id, reference, amount),
+    mutationFn: ({ id, reference, amount, reason }: { id: string; reference: string; amount: string; reason: string }) =>
+      settleReturnRefund(id, reference, amount, undefined, reason),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['returns'] }),
   });
 
@@ -97,7 +98,8 @@ export default function ReturnsPage() {
                       const amount = window.prompt(`Amount you actually refunded, in GYD${r.refundAmount ? ` (owed: ${Number(r.refundAmount).toLocaleString()})` : ''}:`)?.trim();
                       if (!amount) return;
                       if (window.confirm(`Record this refund as PAID? Reference ${reference}, amount ${amount}.`)) {
-                        settle.mutate({ id: r.id, reference, amount });
+                        const reason = askReason({ action: 'record this return refund as paid', subject: `return ${r.id}` });
+                        if (reason) settle.mutate({ id: r.id, reference, amount, reason });
                       }
                     }}
                     disabled={settle.isPending}
@@ -117,7 +119,10 @@ export default function ReturnsPage() {
                         const note = window.prompt(`Note for ${label} (optional):`) ?? undefined;
                         if (window.confirm(s === 'REFUND_DUE'
                           ? 'Record that a refund is OWED on this return? This does not move money — you record the transfer separately once it is sent.'
-                          : `Mark this return ${s}?`)) resolve.mutate({ id: r.id, status: s, note: note || undefined });
+                          : `Mark this return ${s}?`)) {
+                          const reason = askReason({ action: `mark this return ${s.toLowerCase()}`, subject: `return ${r.id}` });
+                          if (reason) resolve.mutate({ id: r.id, status: s, note: note || undefined, reason });
+                        }
                       }}
                       disabled={resolve.isPending}
                       className={`px-4 py-2 rounded-lg text-sm disabled:opacity-50 ${

@@ -1,5 +1,5 @@
 import { screen, waitFor } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import AdsReviewPage from './page';
 import { API_ORIGIN, mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
@@ -58,6 +58,7 @@ function handler(extra?: (_r: ApiRequest) => { body: unknown } | undefined) {
 
 describe('the two ads gates finally have a reviewer', () => {
   it('approving an advertiser hits the endpoint that moves them out of PENDING_REVIEW', async () => {
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Business documents verified and the checklist is complete'));
     const fetchMock = mockApi(handler((r) => {
       if (r.method === 'PUT' && r.url.pathname === '/api/v1/admin/ads/advertisers/adv-1/approve') {
         return { body: { success: true, data: { status: 'APPROVED' } } };

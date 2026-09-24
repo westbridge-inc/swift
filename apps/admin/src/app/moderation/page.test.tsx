@@ -92,6 +92,7 @@ describe('the moderation queues finally have a reviewer', () => {
   });
 
   it('records a content decision through the exact endpoint, with the note', async () => {
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const fetchMock = mockApi(handler((r) => {
       if (r.method === 'PUT' && r.url.pathname === '/api/v1/admin/moderation/reports/report-1') {
         return { body: { success: true, data: {} } };
@@ -112,6 +113,7 @@ describe('the moderation queues finally have a reviewer', () => {
   });
 
   it('upholding a reported REVIEW hits the endpoint that actually removes it', async () => {
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const fetchMock = mockApi(handler((r) => {
       if (r.method === 'POST' && r.url.pathname === '/api/v1/admin/rating-reports/ratingreport-1/resolve') {
         return { body: { success: true, data: { action: 'uphold' } } };
@@ -207,6 +209,7 @@ describe('[A-17] the child-safety case panel', () => {
   });
 
   it('sends the coded disposition and the evidence — and names the authority report when there is one', async () => {
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const { fetchMock, user } = await openCsae();
     await user.type(screen.getByPlaceholderText(/user:banned/), 'user:banned:abc123');
     await user.type(screen.getByPlaceholderText('NCMEC-2026-00417'), 'NCMEC-2026-00417');
@@ -226,6 +229,7 @@ describe('[A-17] the child-safety case panel', () => {
   });
 
   it('a dismissal is PROPOSED, never taken in one click', async () => {
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const { fetchMock, user } = await openCsae();
     expect(screen.queryByRole('button', { name: 'Dismiss' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Propose dismissal' }));

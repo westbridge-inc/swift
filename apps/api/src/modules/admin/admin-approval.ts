@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { ADMIN_ACTION_CLASSES, type AdminActionClass, type AdminRouteAuthority } from './admin-authority';
 
 /**
@@ -37,6 +37,29 @@ export interface ApprovalSubject {
   readonly routeUrl: string;
   readonly params: Record<string, unknown>;
   readonly body: unknown;
+  /** The parsed query string. No C4/C5 route keys off it today (the DLQ
+   *  identity guard is C3, so it never reaches apply), but it is part of WHAT
+   *  EXECUTES — it is stored and fingerprinted exactly like the body, so a
+   *  future route can never take a decision input here and have it silently
+   *  dropped on replay. */
+  readonly query?: Record<string, unknown>;
+}
+
+/**
+ * The columns the apply path reads back from a stored approval row.
+ *
+ * `bodySnapshot` is added to the generated Prisma types when the client is
+ * regenerated after the 20260923180000 migration; until then callers cast the
+ * row to this shape, which is why it is spelled out rather than derived.
+ */
+export interface ApprovalSnapshotRow {
+  readonly id: string;
+  readonly action: string;
+  readonly reason: string;
+  readonly fingerprint: string;
+  readonly status: string;
+  readonly appliedAt: Date | null;
+  readonly bodySnapshot: Prisma.JsonValue | null;
 }
 
 /** Does this class need a second person at all? */
@@ -53,14 +76,14 @@ export function requiresApproval(cls: AdminActionClass): boolean {
  * requester who reworded their justification has not changed the act.
  */
 export function fingerprintOf(subject: ApprovalSubject): string {
-  const canonical = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(canonical);
+  const canonicalWithoutReason = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonicalWithoutReason);
     if (value && typeof value === 'object') {
       return Object.fromEntries(
         Object.entries(value as Record<string, unknown>)
           .filter(([key]) => key !== 'reason')
           .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-          .map(([key, v]) => [key, canonical(v)]),
+          .map(([key, v]) => [key, canonicalWithoutReason(v)]),
       );
     }
     return value;
@@ -68,10 +91,59 @@ export function fingerprintOf(subject: ApprovalSubject): string {
   const payload = JSON.stringify({
     method: subject.method.toUpperCase(),
     route: subject.routeUrl,
-    params: canonical(subject.params ?? {}),
-    body: canonical(subject.body ?? {}),
+    params: canonicalWithoutReason(subject.params ?? {}),
+    body: canonicalWithoutReason(subject.body ?? {}),
+    query: canonicalWithoutReason(subject.query ?? {}),
   });
   return createHash('sha256').update(payload).digest('hex');
+}
+
+/**
+ * [DS110-13] The reviewed request, reconstructed from what the row STORED.
+ *
+ * `action` carries "<METHOD> <route template>"; `bodySnapshot` carries the
+ * canonical `{ params, body, query }` written at creation. The apply step replays
+ * exactly this subject, and the fingerprint above is recomputed over it — so
+ * the executed body is the displayed body, and any disagreement between the
+ * two is refused rather than executed.
+ */
+export function approvalSubjectOf(approval: {
+  action: string;
+  bodySnapshot: Prisma.JsonValue | null;
+}): ApprovalSubject | null {
+  const [method, ...rest] = approval.action.split(' ');
+  if (!method || rest.length === 0) return null;
+  const snapshot = approval.bodySnapshot as { params?: Record<string, unknown>; body?: unknown } | null | undefined;
+  return {
+    method: method.toUpperCase(),
+    routeUrl: rest.join(' '),
+    params: snapshot?.params ?? {},
+    body: snapshot?.body ?? {},
+    query: (snapshot as { query?: Record<string, unknown> } | null | undefined)?.query ?? {},
+  };
+}
+
+/** Substitute route params into a template: `/config/:key` + { key: 'X' } → `/config/X`. */
+export function fillRouteTemplate(routeUrl: string, params: Record<string, unknown>): string {
+  return routeUrl.replace(/:([A-Za-z0-9_]+)/g, (whole, name: string) => {
+    const value = params[name];
+    return value === undefined || value === null ? whole : encodeURIComponent(String(value));
+  });
+}
+
+/** The stored query object back into a query string, for the apply replay.
+ *  Repeated keys arrive as arrays from the parser and are re-emitted as
+ *  arrays, so the replayed request parses to the identical value. */
+export function queryStringOf(query: Record<string, unknown>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (Array.isArray(value)) {
+      for (const item of value) search.append(key, String(item));
+    } else if (value !== undefined && value !== null) {
+      search.append(key, String(value));
+    }
+  }
+  return search.toString();
 }
 
 /** The entity an action names, where its route names one. */
@@ -135,18 +207,25 @@ export async function resolveApproval(
   const fingerprint = fingerprintOf(subject);
 
   if (!approvalId) {
+    const data = {
+      action: `${subject.method.toUpperCase()} ${subject.routeUrl}`,
+      cls: authority.cls,
+      capability: authority.capability,
+      entityId: entityIdOf(subject.params),
+      fingerprint,
+      // [DS110-13] The request that executes and the request the approver
+      // reads are ONE stored value: params, body and query, JSON-safe by
+      // construction, round-trip unchanged through the JSONB column.
+      bodySnapshot: { params: subject.params ?? {}, body: subject.body ?? {}, query: subject.query ?? {} },
+      status: 'PENDING',
+      requestedBy: actor.userId,
+      reason,
+      expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS),
+    };
+    // `bodySnapshot` enters the generated client with the 20260923180000
+    // migration; the assertion keeps this compiling against both generations.
     const created = await prisma.privilegedApproval.create({
-      data: {
-        action: `${subject.method.toUpperCase()} ${subject.routeUrl}`,
-        cls: authority.cls,
-        capability: authority.capability,
-        entityId: entityIdOf(subject.params),
-        fingerprint,
-        status: 'PENDING',
-        requestedBy: actor.userId,
-        reason,
-        expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS),
-      },
+      data: data as unknown as Prisma.PrivilegedApprovalUncheckedCreateInput,
       select: { id: true },
     });
     return { outcome: 'requested', approvalId: created.id, fingerprint };
