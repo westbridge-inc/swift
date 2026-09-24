@@ -5,7 +5,7 @@
 
 import type { Session } from '../client.js';
 import { goOnline, goOffline, ping, asAdmin } from '../provision.js';
-import { GET, POST, PUT, req, sleep, codeOf, orderIdsOf, customerOrder, idemKey, clearCart, ensureAddress, activeLegsOf, riderToDoorFrom, doorOf, TERMINAL, IN_CUSTODY, type Res } from './common.js';
+import { GET, POST, PUT, req, sleep, codeOf, orderIdsOf, customerOrder, idemKey, clearCart, ensureAddress, activeLegsOf, riderToDoorFrom, doorOf, startAndSettle, TERMINAL, IN_CUSTODY, type Res } from './common.js';
 import type { Ctx } from './context.js';
 
 export type MoverId = string;
@@ -97,19 +97,33 @@ export async function doorPinFromRoster(ctx: Ctx, orderId: string): Promise<stri
   return null;
 }
 
+/** PUT /driver/location persists at most one fix per driver per 10 s (driver.routes.ts). */
+const LOCATION_PERSIST_DEBOUNCE_MS = 10_000;
+
 /**
  * [E19] A driver's 'arrived' needs a fresh fix (≤ 2 min) within 300 m of the
- * pickup, read from the driver's own location stream. The suite heartbeat keeps
+ * pickup, read from the driver's PERSISTED position. The suite heartbeat keeps
  * every driver at their roster home, ~3.4 km from the journeys' pickup, so a
  * journey drives the car there first: the override holds the heartbeat at the
- * pickup (a beat can never move the car back between the fix and the tap), the
- * fix is reported the way the app reports it, and then the driver taps arrived.
+ * pickup, the fix is reported the way the app reports it, and the driver taps.
+ *
+ * [DS230 F1] The location route persists one fix per 10 s. A pickup fix that
+ * lands within 10 s of the last persisted heartbeat (the roster home) is
+ * dropped, and the gate rightly answers "far". So one refusal is answered the
+ * way a phone's next GPS tick would answer it: past the debounce, the fix is
+ * reported again — it now persists, or a heartbeat already persisted the
+ * pickup — and the tap is retried once. A second refusal is a real one.
  * The caller clears the override when the journey ends (releaseDrivers).
  */
 export async function driverArrives(ctx: Ctx, driverId: MoverId, rideId: string, pickup: { lat: number; lng: number }): Promise<Res> {
   const d = mover(ctx, driverId);
   ctx.stash.heartbeatOverrides[driverId] = pickup;
-  await PUT('/driver/location', { latitude: pickup.lat, longitude: pickup.lng, accuracy: 5 }, d.session.token);
+  const fix = () => PUT('/driver/location', { latitude: pickup.lat, longitude: pickup.lng, accuracy: 5 }, d.session.token);
+  await fix();
+  const first = await PUT(`/driver/rides/${rideId}/arrived`, {}, d.session.token);
+  if (first.status !== 409 || codeOf(first) !== 'ARRIVAL_NOT_VERIFIED') return first;
+  await sleep(LOCATION_PERSIST_DEBOUNCE_MS + 1_000);
+  await fix();
   return PUT(`/driver/rides/${rideId}/arrived`, {}, d.session.token);
 }
 
@@ -136,6 +150,13 @@ export async function closeRide(ctx: Ctx, passenger: Session, rideId: string, dr
   } else {
     last = await POST(`/rides/${rideId}/cancel`, { reason: 'journey cleanup' }, passenger.token);
     if (!last.ok) last = await asAdmin(ctx.admin.token, 'close a ride a journey left live', 'PUT', `/admin/orders/${rideId}/cancel`, { reason: 'journey runner cleanup of a ride its journey left live' });
+    // [DS230 F2] DRIVER_ARRIVED with the PIN verified is already passenger
+    // custody (rides/passenger-custody.ts): both cancels refuse it, and the
+    // handover needs RIDE_IN_PROGRESS. The driver finishes it the driver's way.
+    if (!last.ok && status === 'DRIVER_ARRIVED') {
+      const holder = await driverHolding(ctx, rideId);
+      if (holder) last = await startAndSettle(holder.session, rideId, dropoff);
+    }
   }
   return last.ok ? null : `${rideId} (${status}) → ${last.status} ${codeOf(last)}`;
 }

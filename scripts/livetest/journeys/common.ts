@@ -191,3 +191,14 @@ export async function riderToDoorFrom(r: Session, orderId: string, status: strin
   }
   return last;
 }
+
+/**
+ * [DS230 F2] Finish a ride whose PIN is verified but which never started: it is
+ * already passenger custody (rides/passenger-custody.ts), so no cancel reaches
+ * it and the fare handover needs RIDE_IN_PROGRESS. Its driver starts it and
+ * settles the fare at the drop-off (cash, paid) — the way a driver would.
+ */
+export async function startAndSettle(driver: Session, rideId: string, dropoff: { lat: number; lng: number }): Promise<Res> {
+  const started = await PUT(`/driver/rides/${rideId}/start`, {}, driver.token);
+  return started.ok ? POST(`/driver/rides/${rideId}/handover`, { outcome: 'paid', gps: dropoff }, driver.token) : started;
+}
