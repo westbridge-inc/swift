@@ -18,7 +18,8 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api-staging.swiftgy.com"
+        "EXPO_PUBLIC_API_URL": "https://api-staging.swiftgy.com",
+        "EAS_PROJECT_ID": "bb17a405-1f85-4384-9186-25de0319122b"
       }
     },
     "staging": {
@@ -26,7 +27,8 @@
       "channel": "staging",
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api-staging.swiftgy.com"
+        "EXPO_PUBLIC_API_URL": "https://api-staging.swiftgy.com",
+        "EAS_PROJECT_ID": "bb17a405-1f85-4384-9186-25de0319122b"
       }
     },
     "production": {

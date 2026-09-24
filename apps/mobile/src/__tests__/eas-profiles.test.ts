@@ -27,6 +27,15 @@ describe('EAS build profiles point at the right server', () => {
     expect(eas.submit.staging.ios?.appleTeamId).toBe(eas.submit.production.ios?.appleTeamId);
   });
 
+  it('the test profiles carry the EAS project id, so push registration works in those builds', () => {
+    // app.config.ts sets extra.eas.projectId only when EAS_PROJECT_ID is in the build env; without it
+    // push.ts returns early and a test build silently never registers for notifications. The id is
+    // public (it ships inside every build as extra.eas.projectId).
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    expect(eas.build.preview.env?.EAS_PROJECT_ID).toMatch(uuid);
+    expect(eas.build.staging.env?.EAS_PROJECT_ID).toBe(eas.build.preview.env?.EAS_PROJECT_ID);
+  });
+
   it('production is not pointed at staging, and no profile uses plain http or a bare IP', () => {
     expect(eas.build.production.env?.EXPO_PUBLIC_API_URL).not.toContain('staging');
     for (const [name, profile] of Object.entries(eas.build)) {
