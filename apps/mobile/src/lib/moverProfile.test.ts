@@ -13,6 +13,29 @@ describe('unwrapOptionalMoverProfile', () => {
     await expect(unwrapOptionalMoverProfile(Promise.reject(new Error('network down'))))
       .rejects.toThrow('network down');
   });
+
+  // [phone feedback P2] A customer opening "Swift Driver" to apply holds no
+  // mover role, so the server answers BOTH profile probes with 403 (its authz
+  // rule — no route oracle for a wrong-role token). For that account, and
+  // only that account, 403 is "no profile": one answer each, no retries, no
+  // error carried into the application screen.
+  it('for an account that holds no mover role, a 403 is a definitive missing profile', async () => {
+    await expect(unwrapOptionalMoverProfile(Promise.reject({ response: { status: 403 } }), { outsider: true }))
+      .resolves.toBeNull();
+  });
+
+  it('for an account that HOLDS a mover role a 403 stays the error it is', async () => {
+    const forbidden = { response: { status: 403 } };
+    await expect(unwrapOptionalMoverProfile(Promise.reject(forbidden), { outsider: false })).rejects.toBe(forbidden);
+    await expect(unwrapOptionalMoverProfile(Promise.reject(forbidden))).rejects.toBe(forbidden);
+  });
+
+  it('an outsider’s outage is still an outage — only 403 and 404 mean absence', async () => {
+    for (const status of [401, 409, 500, 502, 503]) {
+      const failure = { response: { status } };
+      await expect(unwrapOptionalMoverProfile(Promise.reject(failure), { outsider: true })).rejects.toBe(failure);
+    }
+  });
 });
 
 describe('resolveMoverProfile', () => {
