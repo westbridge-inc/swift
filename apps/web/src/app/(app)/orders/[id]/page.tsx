@@ -63,6 +63,8 @@ type OrderDetail = {
     url: string;
   } | null;
   pickupCode?: string | null;
+  /** [MKT-F057] The customer-held delivery door PIN (holder-side only). */
+  ridePin?: string | null;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   estimatedPrepTime?: number | null;
@@ -595,6 +597,12 @@ export default function OrderDetailPage() {
                 <div className={styles.pickupCode}>
                   <span>Show this pickup code</span>
                   <strong>{order.pickupCode}</strong>
+                </div>
+              ) : null}
+              {order.ridePin && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status) ? (
+                <div className={styles.pickupCode}>
+                  <span>Show this delivery code to your rider at the door</span>
+                  <strong>{order.ridePin}</strong>
                 </div>
               ) : null}
             </section>

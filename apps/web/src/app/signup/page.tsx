@@ -80,8 +80,9 @@ export default function SignupPage() {
       throw new Error(`${detail} Request a new verification code to try again.`);
     }
     if (role === 'CUSTOMER') {
-      const next = safeReturnPath();
-      router.replace(`/selfie${next ? `?next=${encodeURIComponent(next)}` : ''}`);
+      // [E27] No profile selfie merely to browse or order: a new customer goes
+      // where they were headed (else to ordering), not to the camera.
+      router.replace(safeReturnPath() || '/order');
     }
     else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
   });

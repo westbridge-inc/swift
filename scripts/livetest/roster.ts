@@ -84,7 +84,9 @@ export async function seedRoster(log: (s: string) => void): Promise<Roster> {
 
   for (const c of CUSTOMERS) {
     const session = await signupOrLogin(c.phone, { firstName: `TEST-${c.first}`, lastName: 'Customer', role: 'CUSTOMER' });
-    // Mandatory signup selfie — without it every order 403s SELFIE_REQUIRED.
+    // Roster customers carry a selfie so taxi journeys can book (rides still
+    // require one). Ordinary checkout no longer does (E27); AUTH-03 proves that
+    // with a fresh, selfie-less account.
     await selfie(session, c.id);
     roster.customers[c.id] = { id: c.id, phone: c.phone, session, lat: c.lat, lng: c.lng };
   }

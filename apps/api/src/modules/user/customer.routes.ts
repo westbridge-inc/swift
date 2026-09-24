@@ -2446,6 +2446,20 @@ export async function customerRoutes(app: FastifyInstance) {
         // counter. It was only in the checkout response before, so it
         // vanished the moment they left the confirmation screen.
         pickupCode: order.pickupCode,
+        // [MKT-F057] The delivery door PIN — the customer HOLDS this and gives
+        // it to the rider at the door (taxi parity: holder sees, verifier enters).
+        // Null on pickup/appointment/courier rows and once a store self-delivers
+        // (its own courier, no verifier); TAXI rows keep their own ride-PIN flow
+        // in the rides module. Surfaces only while the goods are between the
+        // store and the door — the same window the tracking screens show it in —
+        // so the confirmation and history surfaces never carry it.
+        ridePin: order.fulfillment === 'DELIVERY'
+          && order.orderType !== 'COURIER'
+          && order.orderType !== 'TAXI'
+          && order.fulfillmentMode !== 'VENDOR_DELIVERY'
+          && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
+          ? order.ridePin
+          : null,
         // [B9] The SENDER's copy of the public tracking token. Minted at
         // courier checkout since launch and returned once in the create
         // response — which the app discards on navigation — so "Share

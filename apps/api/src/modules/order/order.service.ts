@@ -42,6 +42,7 @@ import { AppError, ConflictError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
+import { newRidePin } from '../rides/ride-pin';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
   hasTaxiPassengerCustody,
@@ -287,6 +288,15 @@ export function assertMmgFulfilmentAllowed(
 function isCancellationTerminalization(sourceStatus: OrderStatus, target: OrderStatus): boolean {
   return target === 'CANCELLED'
     || (target === 'REFUNDED' && !ORDER_TRANSITIONS.REFUNDED.includes(sourceStatus));
+}
+
+/** [E16-B] The door photo the server issued, recorded, to the rider who holds the job. */
+function courierDeliveryProofBound(order: Pick<Order,
+  'riderId' | 'courierProofIssuedUrl' | 'courierProofIssuedRiderId' | 'courierProofPhotoUrl'>): boolean {
+  return order.courierProofPhotoUrl !== null
+    && order.courierProofPhotoUrl === order.courierProofIssuedUrl
+    && order.riderId !== null
+    && order.courierProofIssuedRiderId === order.riderId;
 }
 
 /** [E16] A courier pickup's custody proof is bound on the row: the photo is
@@ -655,7 +665,7 @@ export class OrderService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
-      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true, selfieCapturedAt: true },
+      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true },
     });
 
     // Strike consequences: repeated failed cash handovers
@@ -668,11 +678,12 @@ export class OrderService {
       throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering requires ID verification. Verify your identity to continue.');
     }
 
-    // Universal signup selfie (master plan §3): every account carries a live
-    // profile photo before transacting — the vendor/mover sees who is ordering.
-    if (!user.selfieCapturedAt) {
-      throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before placing orders — it takes a few seconds in the app.');
-    }
+    // [E27] No profile selfie to place an ordinary order (food, grocery,
+    // retail, services). Owner rule: "Do not require an ordinary customer
+    // profile selfie merely to browse/order." The selfie stays where Swift
+    // puts a stranger in front of the account: booking a taxi (rides.service)
+    // and a mover going online. The strike restriction above and the
+    // high-value checks below are unchanged.
 
     // Group the cart by vendor — a multi-vendor cart splits into one order each.
     // [E01] The cart quote groups through the same function, in the same order,
@@ -1285,6 +1296,11 @@ export class OrderService {
             // Takeaway: a collection code the customer shows the vendor at pickup.
             // 6-digit, CSPRNG (not Math.random); handover is vendor-mediated in person.
             pickupCode: plan.fulfillment === 'PICKUP' ? String(randomInt(100000, 1000000)) : null,
+            // [MKT-F057] A customer-held door PIN for every DELIVERY-fulfillment
+            // goods/service order, minted at checkout (taxi parity: the customer
+            // holds, the rider verifies at the door). PICKUP and APPOINTMENT rows
+            // stay null; COURIER orders are created elsewhere and never mint one.
+            ridePin: plan.fulfillment === 'DELIVERY' ? newRidePin() : null,
             // Stamp the redemption on exactly one order (the vendor's plan, or
             // order 0 for a platform code) so per-user usage counting stays correct.
             promoCodeId: index === (promoPlanIndex >= 0 ? promoPlanIndex : 0) ? promoCodeId : null,
@@ -1926,6 +1942,28 @@ export class OrderService {
     if (input.target === 'PICKED_UP' && order.orderType === 'COURIER' && !courierPickupProofBound(order)) {
       throw new AppError(409, 'PICKUP_PROOF_REQUIRED',
         'Photograph the parcel to confirm pickup — this job needs a pickup photo and your location.');
+    }
+    // [E16-B · S2] THE COURIER DELIVERY-PROOF GATE. A parcel reaches DELIVERED
+    // only with the door photo recorded: either set by THIS transition (the
+    // courier /proof path passes terminalMetadata.courierProofPhotoUrl after
+    // exact-matching it to the URL the server issued at /proof-photo) or
+    // already durably on the row and equal to that issued URL. The bare rider
+    // /delivered and /handover routes pass no proof metadata, so a sender-pays
+    // job whose fee was already collected at pickup — and an MMG-paid job —
+    // rolls back here instead of closing without the proof: no deliveredAt, no
+    // earnings, no released rider. COURIER-only: food/grocery/pharmacy, taxi
+    // and service transitions never enter this branch.
+    // [DS145 D3] Bound to the rider who holds the job, like E16's pickup
+    // proof: a door photo issued to a rider who has since been replaced does
+    // not deliver the parcel for the new one.
+    if (input.target === 'DELIVERED' && order.orderType === 'COURIER') {
+      if (!courierDeliveryProofBound(order)) {
+        throw new AppError(
+          409,
+          'DELIVERY_PROOF_REQUIRED',
+          'This courier job closes only through the photo proof step — capture the door photo first, then confirm the handoff.',
+        );
+      }
     }
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }

@@ -335,6 +335,13 @@ export class CountryConfigService {
     return config.subscriptionTiers as unknown as SubscriptionTiers;
   }
 
+  /** The ISO-4217 currency a market bills in — the CountryConfig value, never
+   *  the country code itself ('GY' is a country; 'GYD' is its currency). */
+  async getCurrencyCode(code: string, db: Db = this.prisma): Promise<string> {
+    const config = await this.getByCode(code, db);
+    return config.currencyCode;
+  }
+
   /** The L2 ID-gate threshold converted to local currency. */
   async getIdGateThresholdLocal(code: string): Promise<number> {
     const config = await this.getByCode(code);

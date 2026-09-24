@@ -519,12 +519,21 @@ export class NotificationService {
     // Template guard [SWIFT-UG-NOTIF-02]: a missing/NaN ETA must never render
     // "Arriving in ~undefined min" to a customer.
     const etaPart = typeof eta === 'number' && Number.isFinite(eta) ? ` Arriving in ~${Math.max(1, Math.round(eta))} min.` : '';
+    // [MKT-F057] The delivery PIN belongs in this push: it is the moment of
+    // need, and the customer is its holder. Fetched holder-side because the
+    // caller's order row is already stripped by HANDOVER_SECRETS_OMIT; a fetch
+    // hiccup must never fail the PICKED_UP transition, so it degrades to no PIN.
+    const pin = (await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { ridePin: true },
+    }).catch(() => null))?.ridePin ?? null;
+    const pinPart = pin ? ` Your delivery PIN is ${pin} — give it to your rider at the door.` : '';
     await this.send({
       userId: customerId,
       type: 'ORDER_UPDATE',
       title: 'On Its Way!',
-      body: `${riderName} picked up your order ${orderNumber}.${etaPart}`,
-      data: { orderId, orderNumber, status: 'PICKED_UP', eta },
+      body: `${riderName} picked up your order ${orderNumber}.${etaPart}${pinPart}`,
+      data: { orderId, orderNumber, status: 'PICKED_UP', eta, ...(pin ? { deliveryPin: pin } : {}) },
     });
   }
 
