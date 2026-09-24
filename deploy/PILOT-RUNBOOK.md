@@ -282,14 +282,24 @@ prints it.
 
        openssl rand -hex 32 | tr -d '\n' | sudo swift-secrets set SEED_PLAN_SECRET
 
-2. Each approver signs their own half — read-only; it prints one line,
-   `{"approver":"…","signature":"…"}`, and seeds nothing:
+2. Each approver signs their own half — read-only; it prints one JSON line on
+   stdout, `{"approver":"…","signature":"…"}` (after one guidance line on
+   stderr), and seeds nothing:
 
        cd /opt/swift
        SEED_ADMIN_PHONE=+5920400001 SEED_SIGN_APPROVER=<their-name> ./deploy/seed-production.sh "$SHA"
 
    Never sign both halves yourself: the control is two people, not two
-   commands.
+   commands. Approver names are self-declared, so no code can tell one
+   person signing under two names from two people; the names only catch a
+   slip.
+
+   Run steps 2 and 3 against the same deployment, with no redeploy in
+   between. Each half is bound to this database's fingerprint, which includes
+   the Postgres server's network address; a redeploy that recreates the
+   Postgres container can change it, and then both halves are refused as
+   APPROVAL_INVALID and the ceremony restarts at step 2. It fails closed,
+   never open.
 
 3. The operator promotes with both lines:
 
@@ -298,7 +308,8 @@ prints it.
          ./deploy/seed-production.sh "$SHA"
 
    The promotion re-fingerprints the database and refuses an approval signed
-   for another database or phone, one person twice, or a wrong key. It writes
+   for another database or phone, the same approver name twice, or a wrong
+   key. It writes
    one PROMOTE_SUPER_ADMIN audit row naming both approvers.
 
 4. Pass the new admin to the journeys: `LIVETEST_ADMIN2_PHONE=+5920400001`.
