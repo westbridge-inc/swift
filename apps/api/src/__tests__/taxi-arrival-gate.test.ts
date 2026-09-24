@@ -150,9 +150,8 @@ afterAll(async () => {
   const ids = createdUserIds;
   if (ids.length) {
     await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.orderStatusLog.deleteMany({
-      where: { OR: [{ orderId: { in: createdOrderIds } }, { changedBy: { in: ids } }] },
-    });
+    // order_status_logs is append-only: deleting the parent orders cascades
+    // their logs at the DB level (the suite's sanctioned teardown).
     await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
     await app.prisma.driver.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
@@ -162,7 +161,9 @@ afterAll(async () => {
 
 describe('[E19] the driver-arrival gate refuses a claim the location stream cannot support', () => {
   it('a declaration from across town is refused and leaves the order untouched', async () => {
-    const driver = await makeDriver({ lat: 6.87, lng: -58.1551 }); // ~7.6 km away, fresh
+    // [DS203 D1] A FRESH fix far away — without `at` the fix has no timestamp
+    // and the verdict is 'no-fix', which left the `far` branch untested.
+    const driver = await makeDriver({ lat: 6.87, lng: -58.1551, at: new Date() }); // ~7.6 km away, fresh
     const ride = await makeRide(driver.driverId, customer.userId, PICKUP);
 
     const res = await put(`/api/v1/driver/rides/${ride.id}/arrived`, {}, driver.token);
