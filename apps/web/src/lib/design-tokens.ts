@@ -142,3 +142,20 @@ export const brandPalette = {
   blush: color.brand[100],
   ink: color.text.primary,
 } as const;
+
+/**
+ * The colours of the installed web app's own chrome — the web app manifest and
+ * the theme-color meta. Both are JSON / attribute values, so no CSS variable
+ * resolves there; like the OG card, they read the token object directly.
+ *
+ * `theme` is the surface of the customer shell's header (white), so the status
+ * bar above it reads as part of the same bar — and a light bar keeps the
+ * system's dark status text legible on every platform. `background` is the page
+ * ground (`--swift-canvas`), so Android's launch splash hands over to the first
+ * paint without a flash. The site is light-only, like the native app
+ * (userInterfaceStyle: 'light'), so there is no dark variant to declare.
+ */
+export const appChrome = {
+  theme: color.surface.base,
+  background: color.surface.subtle,
+} as const;
