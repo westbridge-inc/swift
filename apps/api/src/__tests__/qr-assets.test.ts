@@ -22,7 +22,7 @@ import {
 // for structure: page geometry (trim + 2×3mm bleed), embedded brand fonts.
 // ---------------------------------------------------------------------------
 
-const URL = 'https://swift.gy/s/BCDFGHJKMN';
+const URL = 'https://swiftgy.com/s/BCDFGHJKMN';
 const MM_TO_PX_300DPI = 300 / 25.4;
 const MM_TO_PT = 72 / 25.4;
 

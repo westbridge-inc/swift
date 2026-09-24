@@ -175,9 +175,20 @@ const config: ExpoConfig = {
       // certs), so certificate renewals never invalidate the pin; only a CA
       // change does, which is an app update by design. Dev traffic
       // (localhost) and any non-pinned staging domain are unaffected.
+      //
+      // [DOMAIN-1 · 2026-09-24] The pinned host is api.swiftgy.com, the
+      // owner's real zone (the previous name was never Swift's). Re-pointing
+      // the host is safe precisely because these are ROOT-CA pins, valid for
+      // any certificate those CAs issue — nothing here is bound to a leaf
+      // that does not exist yet. What production MUST honour: the certificate
+      // served at api.swiftgy.com chains to ISRG Root X1/X2 or GTS Root R1
+      // (a Cloudflare-proxied host can be issued by SSL.com, which none of
+      // these pins cover). apps/api/src/__tests__/domain-swiftgy-guard.test.ts
+      // keeps this block, the Android plugin and eas.json naming the same host;
+      // deploy/PILOT-RUNBOOK.md carries the go-live certificate check.
       NSAppTransportSecurity: {
         NSPinnedDomains: {
-          'api.swift.gy': {
+          'api.swiftgy.com': {
             NSIncludesSubdomains: true,
             NSPinnedCAIdentities: [
               { 'SPKI-SHA256-BASE64': 'C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=' },
@@ -313,7 +324,7 @@ const config: ExpoConfig = {
         microphonePermission: false,
       },
     ],
-    // Android half of the api.swift.gy TLS pinning (iOS half: NSPinnedDomains
+    // Android half of the api.swiftgy.com TLS pinning (iOS half: NSPinnedDomains
     // in infoPlist above).
     './plugins/withTlsPinning.js',
   ],
