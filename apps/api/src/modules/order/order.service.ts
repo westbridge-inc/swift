@@ -42,6 +42,7 @@ import { AppError, ConflictError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
+import { newRidePin } from '../rides/ride-pin';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
   hasTaxiPassengerCustody,
@@ -1286,6 +1287,11 @@ export class OrderService {
             // Takeaway: a collection code the customer shows the vendor at pickup.
             // 6-digit, CSPRNG (not Math.random); handover is vendor-mediated in person.
             pickupCode: plan.fulfillment === 'PICKUP' ? String(randomInt(100000, 1000000)) : null,
+            // [MKT-F057] A customer-held door PIN for every DELIVERY-fulfillment
+            // goods/service order, minted at checkout (taxi parity: the customer
+            // holds, the rider verifies at the door). PICKUP and APPOINTMENT rows
+            // stay null; COURIER orders are created elsewhere and never mint one.
+            ridePin: plan.fulfillment === 'DELIVERY' ? newRidePin() : null,
             // Stamp the redemption on exactly one order (the vendor's plan, or
             // order 0 for a platform code) so per-user usage counting stays correct.
             promoCodeId: index === (promoPlanIndex >= 0 ? promoPlanIndex : 0) ? promoCodeId : null,

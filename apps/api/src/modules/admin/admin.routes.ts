@@ -40,7 +40,7 @@ import { mintRenderPath } from '../../providers/storage/envelope';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
-import { revealPickupCode, rotatePickupCode, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
+import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
@@ -2161,7 +2161,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // [A-15] the secrets are omitted above, so read the derived status separately
     const handoverRow = await app.prisma.order.findUnique({
       where: { id },
-      select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true },
+      select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true, ridePinAttempts: true },
     });
 
     return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}) } };
@@ -2200,6 +2200,20 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reason } = handoverReasonSchema.parse(request.body ?? {});
     const result = await rotatePickupCode(
+      { prisma: app.prisma },
+      { orderId: id, actorId: request.user.userId, reason, ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    return { success: true, data: result };
+  });
+
+  // [MKT-F057 · decision 5] The delivery PIN's support reset: the same door as the pickup
+  // code (step-up, a written reason, an audit row, a counter). A new PIN, a cleared budget;
+  // the customer reads the new value on their own order screen.
+  app.post('/orders/:id/handover-secret/reset-delivery-pin', { preHandler: [adminGuard] }, async (request) => {
+    await requireStepUp(app, request as never);
+    const { id } = request.params as { id: string };
+    const { reason } = handoverReasonSchema.parse(request.body ?? {});
+    const result = await resetDeliveryPin(
       { prisma: app.prisma },
       { orderId: id, actorId: request.user.userId, reason, ip: request.ip, userAgent: request.headers['user-agent'] },
     );
