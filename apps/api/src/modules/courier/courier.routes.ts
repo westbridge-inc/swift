@@ -17,7 +17,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import type { OrderStatus } from '@prisma/client';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
-import { redactLiveLocation, riderCounterpartySelect } from '../../utils/counterparty';
+import { redactCounterpartyPhone, redactLiveLocation, riderCounterpartySelect } from '../../utils/counterparty';
 import { invalidateHomeCache } from '../user/home-cache';
 
 // ---------------------------------------------------------------------------
@@ -269,7 +269,9 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (!order) throw new NotFoundError('CourierOrder', id);
     // [F-028-11] Same rule for the sender: their own past parcel is not a
     // licence to keep watching the courier.
-    return { success: true, data: redactLiveLocation(order) };
+    // [S1 response-shaping] the sender's past parcel is not a licence to keep
+    // the courier's coordinates — nor their personal phone.
+    return { success: true, data: redactCounterpartyPhone(redactLiveLocation(order)) };
   });
 
   /** GET /track/:token — public recipient tracking link (no auth, opaque token). */

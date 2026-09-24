@@ -4,7 +4,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { authRoutes } from '../modules/auth/auth.routes';
-import { registrationProofFor } from './helpers/otp';
+import { registrationProofFor, mintedRegistrationProofFor } from './helpers/otp';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { countryFromPhone } from '../utils/phone-country';
 import { TRIAL_DAYS } from '../modules/subscription/subscription.service';
@@ -114,9 +114,16 @@ describe('public pricing (price on the door)', () => {
 });
 
 describe('public auth stays inside the launch market', () => {
-  it('rejects a new Trinidad account after phone ownership is proven', async () => {
+  it('rejects a new Trinidad account: refused at send-otp, and again at register even with a minted proof', async () => {
     const phone = `+1868555${String(Math.floor(Math.random() * 9000) + 1000)}`;
-    const registrationProof = await registrationProofFor(app, phone);
+    // Front door first (audit High #2): a foreign number is stopped before any
+    // OTP budget is spent, so it can never prove ownership the normal way.
+    const front = await inject('POST', '/api/v1/auth/send-otp', { phone });
+    expect(front.statusCode).toBe(400);
+    expect(front.json().error.code).toBe('COUNTRY_NOT_ACTIVE');
+    // The register-level gate still holds on its own, with a proof minted
+    // directly — the only way a foreign number can hold one now.
+    const registrationProof = await mintedRegistrationProofFor(app, phone);
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone,
       registrationProof,
