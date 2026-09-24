@@ -102,7 +102,7 @@ const fulfillmentModeSchema = z.object({
 });
 
 const rejectOrderSchema = z.object({
-  reason: z.string().max(500).optional(),
+  reason: z.string().trim().min(1).max(500),
 });
 
 const completePickupSchema = z.object({
@@ -2113,7 +2113,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot reject order in ${order.status} status`);
     }
     const body = rejectOrderSchema.parse(request.body ?? {});
-    const reason = body.reason || 'Rejected by vendor';
+    const reason = body.reason;
     await ackVendorAlert(app, request.user.userId, order.id); // rejecting acknowledges too
 
     // The locked transition re-reads the current status, then commits status,

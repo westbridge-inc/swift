@@ -35,6 +35,10 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   const [seen, setSeen] = useState<Set<string> | null>(null); // null until first poll
   const [queue, setQueue] = useState<VendorOrder[]>([]);
   const [prepTime, setPrepTime] = useState(20);
+  // [E10] The API requires a reason on every rejection. The mobile takeover
+  // collects one of the same three presets; a non-empty default keeps Reject
+  // a single tap while still satisfying the contract.
+  const [rejectReason, setRejectReason] = useState('Out of stock');
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
   const titleRef = useRef<string | null>(null);
@@ -87,7 +91,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     onError: (e) => setError((e as Error).message),
   });
   const reject = useMutation({
-    mutationFn: (id: string) => rejectOrder(id),
+    mutationFn: (id: string) => rejectOrder(id, rejectReason),
     onSuccess: (_r, id) => done(id),
     onError: (e) => setError((e as Error).message),
   });
@@ -135,6 +139,16 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
           >
             Accept
           </button>
+          <select
+            value={rejectReason}
+            onChange={(e) => setRejectReason(e.target.value)}
+            aria-label="Reject reason"
+            className="rounded-lg border border-black/10 px-2 py-3 text-sm"
+          >
+            {(['Out of stock', 'Kitchen is too busy', 'Closing soon'] as const).map((why) => (
+              <option key={why} value={why}>{why}</option>
+            ))}
+          </select>
           <button
             onClick={() => reject.mutate(current.id)}
             disabled={accept.isPending || reject.isPending}

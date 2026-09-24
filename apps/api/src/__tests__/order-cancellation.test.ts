@@ -260,6 +260,37 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
     });
     expect(log).not.toBeNull();
     expect(log!.note).toBe('Out of stock');
+
+    // [E10] The submitted reason is the durable cancellation fact the customer
+    // sees — never the generic fallback the API used to substitute.
+    const cancelled = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(cancelled.cancellationReason).toBe('Out of stock');
+  });
+
+  it('refuses to reject without a reason (E10 RED: the API used to substitute a default)', async () => {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING');
+
+    const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, {}, vendor.token);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('VALIDATION_ERROR');
+
+    const untouched = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(untouched.status).toBe('PENDING');
+    expect(untouched.cancellationReason).toBeNull();
+  });
+
+  it('refuses a blank reason (trimmed to nothing, E10 RED)', async () => {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING');
+
+    const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: '   ' }, vendor.token);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('VALIDATION_ERROR');
+
+    const untouched = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(untouched.status).toBe('PENDING');
+    expect(untouched.cancellationReason).toBeNull();
   });
 
   it('SWIFT-024: notifies the customer, with the reason', async () => {
@@ -288,7 +319,7 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
     });
     const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', { riderId: rider.riderId });
 
-    const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, {}, vendor.token);
+    const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'Out of stock' }, vendor.token);
     expect(res.statusCode).toBe(200);
 
     const freed = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
@@ -460,8 +491,8 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
     await app.prisma.item.update({ where: { id: item.id }, data: { stockQuantity: 2 } }); // post-checkout
 
     const [a, b] = await Promise.allSettled([
-      inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, {}, vendor.token),
-      inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, {}, vendor.token),
+      inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'Closing soon' }, vendor.token),
+      inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'Closing soon' }, vendor.token),
     ]);
     const codes = [a, b].map((r) => (r.status === 'fulfilled' ? r.value.statusCode : 0)).sort();
     expect(codes).toEqual([200, 400]); // one wins, the loser 400s — not a second restock

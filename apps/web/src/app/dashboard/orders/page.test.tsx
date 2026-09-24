@@ -362,3 +362,66 @@ describe('[W-27] removing a line is not a refund', () => {
     expect(screen.getAllByText(/settle item changes with the customer directly/).length).toBeGreaterThan(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [E10] The API now requires a non-empty reason on PUT /vendor/orders/:id/reject.
+// The board used to fire rejectOrder(id) straight off the Reject button, so the
+// server recorded the generic "Rejected by vendor". Now the button opens a
+// reason panel (parity with mobile's presets) and nothing is sent until the
+// store picks one.
+// ---------------------------------------------------------------------------
+describe('[E10] rejecting an order always carries a reason', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  const rejectHandler = (detail: Record<string, unknown>) => (request: ApiRequest) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/orders') {
+      return { body: { success: true, data: [detail], meta: { total: 1 } } };
+    }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/orders/order-live') {
+      return { body: { success: true, data: detail } };
+    }
+    if (request.method === 'PUT' && request.url.pathname === '/api/v1/vendor/orders/order-live/reject') {
+      return { body: { success: true, data: { ...detail, status: 'CANCELLED' } } };
+    }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/items') {
+      return { body: { success: true, data: [] } };
+    }
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  };
+
+  async function openPendingDetail() {
+    const detail = wireVendorOrderDetail();
+    const fetchMock = mockApi(rejectHandler(detail));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    await waitFor(() => expect(screen.getByText('Total (Cash)')).toBeTruthy());
+    return { user, fetchMock };
+  }
+
+  it('the Reject button opens a reason panel and sends nothing until a preset is chosen', async () => {
+    const { user, fetchMock } = await openPendingDetail();
+
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    expect(screen.getByRole('dialog', { name: 'Confirm order rejection' })).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/reject'))).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'Out of stock' }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/orders/order-live/reject'));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call![1]?.body))).toEqual({ reason: 'Out of stock' });
+    });
+  });
+
+  it('"Keep it" closes the panel without rejecting', async () => {
+    const { user, fetchMock } = await openPendingDetail();
+
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await user.click(screen.getByRole('button', { name: 'Keep it' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Confirm order rejection' })).toBeNull());
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/reject'))).toBe(false);
+  });
+});
