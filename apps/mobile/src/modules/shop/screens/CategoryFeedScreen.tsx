@@ -7,7 +7,7 @@ import { useDiscoveryCategories, useVendors } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { vendorPhoto } from '../../../lib/images';
-import { Chip, EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, T, VendorRow } from '../../../kit';
+import { CartBar, useCartBarClearance, Chip, EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, T, VendorRow } from '../../../kit';
 
 // ---------------------------------------------------------------------------
 // The category feed (#17 6.3): chip tap lands here. The EXISTING store-list
@@ -18,6 +18,8 @@ import { Chip, EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen,
 // ---------------------------------------------------------------------------
 
 export function CategoryFeedScreen() {
+  // [E09] While the cart bar floats over the list, the last row must scroll clear of it.
+  const cartClearance = useCartBarClearance();
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const { slug, name, emoji } = route.params as { slug: string; name: string; emoji: string };
@@ -87,7 +89,7 @@ export function CategoryFeedScreen() {
         <FlatList
           data={[...open, ...closed]}
           keyExtractor={(v) => v.id}
-          contentContainerStyle={{ paddingHorizontal: space['2xl'], gap: space.md, paddingBottom: space['3xl'] }}
+          contentContainerStyle={{ paddingHorizontal: space['2xl'], gap: space.md, paddingBottom: space['3xl'] + cartClearance }}
           renderItem={({ item: v, index }) => (
             <>
               {index === open.length && closed.length > 0 ? (
@@ -102,6 +104,8 @@ export function CategoryFeedScreen() {
           )}
         />
       )}
+      {/* [E09] A shopper who has added items can always reach the Cart tab. */}
+      <CartBar />
     </Screen>
   );
 }

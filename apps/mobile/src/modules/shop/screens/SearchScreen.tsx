@@ -13,6 +13,8 @@ import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import {
+  CartBar,
+  useCartBarClearance,
   Chip,
   EmptyState,
   ErrorState,
@@ -146,6 +148,8 @@ function ResultRow({
 }
 
 export function SearchScreen() {
+  // [E09] While the cart bar floats over the list, the last row must scroll clear of it.
+  const cartClearance = useCartBarClearance();
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
@@ -410,7 +414,7 @@ export function SearchScreen() {
             ) : resultsError ? (
               <ErrorState onRetry={() => void retryResults()} />
             ) : results.length === 0 && dishes.length === 0 ? (
-              <ScrollView contentContainerStyle={{ paddingBottom: space['3xl'] }}>
+              <ScrollView contentContainerStyle={{ paddingBottom: space['3xl'] + cartClearance }}>
                 <EmptyState
                   icon="search"
                   title="No matches"
@@ -446,7 +450,7 @@ export function SearchScreen() {
             ) : engineMode ? (
               // [B2] Engine results: PLACES then DISHES — the second section is
               // the whole point ("pepperpot" now finds the dish, not silence).
-              <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] }}>
+              <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] + cartClearance }}>
                 {results.length > 0 ? (
                   <>
                     {/* [Wave 3 vs reference 10] The header says HOW the list is
@@ -593,6 +597,8 @@ export function SearchScreen() {
           ) : null}
         </ScrollView>
       )}
+      {/* [E09] A shopper who has added items can always reach the Cart tab. */}
+      <CartBar />
     </Screen>
   );
 }
