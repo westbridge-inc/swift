@@ -120,19 +120,7 @@ export function IdentityVerificationScreen({ navigation }: any) {
             silent and the row simply stayed empty. */}
         {permErr ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>{permErr}</T> : null}
         {upload.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>That photo didn&apos;t upload — tap the card and try again.</T> : null}
-        {submit.isError ? (
-          // [E27] A customer may now reach this screen without a profile photo.
-          // When the ID check compares against it (face match), the refusal
-          // opens the camera instead of a dead "try again".
-          (submit.error as any)?.response?.data?.error?.code === 'SELFIE_REQUIRED' ? (
-            <>
-              <T variant="label" tone="error" center style={{ marginTop: space.sm }}>Add your profile photo first — the ID check compares against it.</T>
-              <PillButton label="Add your photo" variant="outline" style={{ marginTop: space.sm }} onPress={() => navigation?.navigate?.('Selfie')} />
-            </>
-          ) : (
-            <T variant="label" tone="error" center style={{ marginTop: space.sm }}>Couldn&apos;t submit. Please try again.</T>
-          )
-        ) : null}
+        {submit.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>Couldn&apos;t submit. Please try again.</T> : null}
 
         {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
