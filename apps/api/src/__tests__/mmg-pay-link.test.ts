@@ -10,6 +10,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { grantStepUp } from './helpers/step-up';
+import { stepUpKey } from '../modules/auth/step-up';
 import { applyDueMmgLinkChanges } from '../modules/integrity/money-surface';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { syntheticLocationOwner } from './helpers/online-mover';
@@ -225,6 +226,11 @@ describe('[High #9 · DS109] a plate change needs step-up and closes the driver\
     const currentPlate = before.licensePlate ?? 'PLATE-DEFAULT';
     const formatted = currentPlate.replace(/(\D)(\d)/, '$1 $2'); // same plate, different spacing
     const nextPlate = `PMG${String(Date.now()).slice(-6)}`;
+    // The MMG link tests above stepped this session up (grantStepUp). Start without a live
+    // step-up, so the refusal below is the plate rule itself, not a stale grant, and the
+    // formatting-only edit proves it needs none.
+    const session = await app.prisma.session.findUniqueOrThrow({ where: { token: driver.token }, select: { id: true } });
+    await app.redis.del(stepUpKey(session.id));
 
     await runWithoutTenant(async () => {
       const subject = await app.prisma.subject.create({ data: { kind: 'VEHICLE', countryCode: 'GY', createdById: driver.userId } });

@@ -25,6 +25,11 @@ import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { rlsDdlFor, tenantLineageDdl } from '../lib/tenant-rls';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { authPlugin } from '../plugins/auth';
+import { authRoutes } from '../modules/auth/auth.routes';
+import { adminRoutes } from '../modules/admin/admin.routes';
+import { loginWithOtp } from './helpers/otp';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
 grantSuiteCapability('ddl');
 
@@ -74,7 +79,9 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'test';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
-  await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(socketPlugin);
+  await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(authPlugin); await app.register(socketPlugin);
+  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   const tables = ['subject', 'subject_link', 'person_profile', 'business_profile', 'vehicle_profile'];
   await installDdl(app.prisma, [...tables.flatMap((t) => rlsDdlFor(t)), ...tenantLineageDdl().filter((s) => tables.some((t) => s.includes(`${t}_tenant_matches`)))]);
@@ -89,6 +96,7 @@ afterAll(async () => {
     await app.prisma.subject.deleteMany({ where: { createdById: { in: users } } });
     await app.prisma.driver.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
+    await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.user.deleteMany({ where: { id: { in: users } } });
   });
   await app.close();
@@ -232,6 +240,62 @@ describe('[High #9 · DS109] adopting another car\'s plate inherits nothing', ()
     expect(pending).not.toBeNull();
     expect((await system(() => service.getLiveOperationStatus(a, { vehicleType: 'CAR' }))).allowed).toBe(true);
     expect((await system(() => service.isRoleVerified(a, 'MOVER')))).toBe(true);
+  });
+
+  it('the admin approval route promotes ONLY the pending assignment, with the reason audited; then the vehicle\'s documents count for the driver', async () => {
+    const PLATE_A = `HBA${NUM.slice(-4)}`;
+    const checklist = await countryConfig.getMoverChecklist('GY', 'CAR');
+    const vehicleTypes = checklist.filter((t) => BUCKET_OF[t] === 'VEHICLE');
+    const personalTypes = checklist.filter((t) => BUCKET_OF[t] !== 'VEHICLE');
+
+    // The owner of record: a verified CAR on their own plate.
+    const owner = await mover(11);
+    await system(() => app.prisma.driver.update({ where: { userId: owner }, data: { licensePlate: PLATE_A } }));
+    const subject = (await system(() => resolveSubject(app.prisma, { userId: owner, countryCode: 'GY', docType: 'vehicle_insurance', tenantId: 'swift-default' })))!;
+    for (const t of personalTypes) await approved(owner, t);
+    for (const t of vehicleTypes) {
+      await approved(owner, t, { subjectId: subject.subjectId, ...(t === 'vehicle_insurance' ? { coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true } : {}) });
+    }
+
+    // A second driver of the same car: their submission names the vehicle, the link is PENDING.
+    const second = await mover(12);
+    await system(() => app.prisma.driver.update({ where: { userId: second }, data: { licensePlate: PLATE_A } }));
+    for (const t of personalTypes) await approved(second, t);
+    const named = (await system(() => resolveSubject(app.prisma, { userId: second, countryCode: 'GY', docType: 'vehicle_registration', tenantId: 'swift-default' })))!;
+    expect(named.owned).toBe(false);
+    expect((await system(() => service.getLiveOperationStatus(second, { vehicleType: 'CAR' }))).allowed).toBe(false);
+    const secondDriver = await system(() => app.prisma.driver.findUniqueOrThrow({ where: { userId: second }, select: { id: true } }));
+    const url = `/api/v1/admin/drivers/${secondDriver.id}/vehicle-assignment/approve`;
+
+    // Wrong parties: no session, and the driver's own session, are both refused — nothing moves.
+    expect((await app.inject({ method: 'POST', url, payload: {} })).statusCode).toBe(401);
+    const selfToken = app.jwt.sign({ userId: second, role: 'MOVER', jti: nanoid(8) });
+    await system(() => app.prisma.session.create({ data: { userId: second, token: selfToken, refreshToken: nanoid(48), deviceId: 'fleet-approve', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } }));
+    const self = await app.inject({ method: 'POST', url, payload: {}, headers: { authorization: `Bearer ${selfToken}`, 'x-swift-reason': TEST_ADMIN_REASON, 'content-type': 'application/json' } });
+    expect(self.statusCode).toBe(403);
+    const stillPending = await system(() => app.prisma.subjectLink.findFirst({ where: { accountId: second, subjectId: subject.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null } }));
+    expect(stillPending!.approvedAt).toBeNull();
+
+    // The admin approves through the real route, with the reason the C3 gate demands.
+    const admin = await loginWithOtp(app, '+5926001000');
+    const adminToken: string = admin.json().data.tokens.accessToken;
+    const res = await app.inject({ method: 'POST', url, payload: {}, headers: { authorization: `Bearer ${adminToken}`, 'x-swift-reason': TEST_ADMIN_REASON, 'content-type': 'application/json' } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.approved).toBe(1);
+
+    // Durable: exactly this driver's link is approved; the owner's link is untouched.
+    const links = await system(() => app.prisma.subjectLink.findMany({ where: { subjectId: subject.subjectId, validTo: null }, select: { accountId: true, approvedAt: true } }));
+    expect(links.find((l) => l.accountId === second)?.approvedAt).not.toBeNull();
+    expect(links.filter((l) => l.approvedAt !== null).map((l) => l.accountId).sort()).toEqual([owner, second].sort());
+    const auditRow = await system(() => app.prisma.auditLog.findFirst({ where: { action: 'APPROVE_DRIVER_VEHICLE_ASSIGNMENT', entityId: secondDriver.id }, orderBy: { createdAt: 'desc' } }));
+    expect(auditRow).not.toBeNull();
+    expect(JSON.stringify(auditRow!.changes)).toContain(TEST_ADMIN_REASON);
+
+    // Now the car's documents are the second driver's evidence too; a replay approves nothing new.
+    expect((await system(() => service.getLiveOperationStatus(second, { vehicleType: 'CAR' }))).allowed).toBe(true);
+    const replay = await app.inject({ method: 'POST', url, payload: {}, headers: { authorization: `Bearer ${adminToken}`, 'x-swift-reason': TEST_ADMIN_REASON, 'content-type': 'application/json' } });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json().data.approved).toBe(0);
   });
 
   it('mixed backfill posture: a vehicle type filed only on a legacy null-subject row keeps counting while the current subject has no record of that type', async () => {
