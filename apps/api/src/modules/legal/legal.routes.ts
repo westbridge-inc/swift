@@ -17,8 +17,14 @@ import type { FastifyInstance } from 'fastify';
 // row is retained untouched (legal evidence is never rewritten); the changed
 // words get their own version. legal-version-binding.test.ts now pins every
 // served text to its version, so words can never change under a stamp again.
-export const LEGAL_VERSION = '2026-09-23';
-const LAST_UPDATED = '23 September 2026'; // human form of LEGAL_VERSION
+// [DOMAIN-1 · 2026-09-24] The contact addresses in the Terms (§22), the Privacy
+// Policy (controller, emergency contacts, rights) and the Child Safety
+// Standards named a domain Swift does not own. They now read privacy@ and
+// childsafety@swiftgy.com — the owner's real zone, where the mailboxes live.
+// The words changed, so the version moves (the law above): the 2026-09-23 row
+// stays in every ledger that holds it, and these words get their own stamp.
+export const LEGAL_VERSION = '2026-09-24';
+const LAST_UPDATED = '24 September 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -112,7 +118,7 @@ export const TERMS = page(
 <p>We may update these Terms. Material changes are announced in the app before they take effect, and where the law requires fresh consent we will ask for it. Each version of these Terms is recorded with its date and an integrity hash, so the exact words you agreed to are always provable. Continued use after a change takes effect is acceptance of the updated Terms.</p>
 
 <h2>22. Contact</h2>
-<p>Questions and complaints: the in-app <b>Help &amp; Support</b> section is the fastest channel and creates a tracked ticket. Privacy matters: <b>privacy@swift.gy</b>. Our registered business name and postal address are available on request through either channel.</p>
+<p>Questions and complaints: the in-app <b>Help &amp; Support</b> section is the fastest channel and creates a tracked ticket. Privacy matters: <b>privacy@swiftgy.com</b>. Our registered business name and postal address are available on request through either channel.</p>
 `,
 );
 
@@ -122,7 +128,7 @@ export const PRIVACY = page(
 <p>This policy explains what personal data Swift collects, why, on what legal basis, who it is shared with, how long it is kept, and the rights you have — written to meet Guyana's Data Protection Act 2023. We collect the minimum needed to run a delivery, ride and marketplace platform, and <b>we never sell your data</b>.</p>
 
 <h2>Who is responsible (data controller)</h2>
-<p>Swift is the data controller for the personal data described here, operated in and from Guyana. Our full registered business name and postal address are available on request from the contact below. For anything about your privacy — access, correction, deletion or a complaint — email <b><a href="mailto:privacy@swift.gy">privacy@swift.gy</a></b>. This inbox reaches us even if you can no longer sign in to the app, so you are never locked out of your rights. This policy covers customers, Partners (businesses and movers), advertiser contacts, and visitors to our websites.</p>
+<p>Swift is the data controller for the personal data described here, operated in and from Guyana. Our full registered business name and postal address are available on request from the contact below. For anything about your privacy — access, correction, deletion or a complaint — email <b><a href="mailto:privacy@swiftgy.com">privacy@swiftgy.com</a></b>. This inbox reaches us even if you can no longer sign in to the app, so you are never locked out of your rights. This policy covers customers, Partners (businesses and movers), advertiser contacts, and visitors to our websites.</p>
 
 <h2>1. What we collect</h2>
 <ul>
@@ -132,7 +138,7 @@ export const PRIVACY = page(
 <li><b>Location:</b> your device location while you use the app to set pickup/delivery points. For movers, live location while online — that is what powers dispatch and customer tracking. Background collection for movers happens only after a separate, explicit in-app consent, and stops when you go offline.</li>
 <li><b>Verification documents (partners and, where required, customers):</b> government ID and, for movers, licence, insurance and related documents. These are stored privately; in the app they are viewable only by our verification team through short-lived signed links, each access logged. To confirm a document and selfie match, they are also processed by our identity-verification provider (see the provider list below).</li>
 <li><b>Messages, ratings and reports:</b> order-scoped chat messages, the ratings and review tags you give and receive, reports you file, and your block list.</li>
-<li><b>Emergency contacts:</b> if you add one, their name and phone number. We text them a verification code immediately, use the number only for your safety alerts, and never for marketing. If someone added you and you want the number removed, email <b>privacy@swift.gy</b>.</li>
+<li><b>Emergency contacts:</b> if you add one, their name and phone number. We text them a verification code immediately, use the number only for your safety alerts, and never for marketing. If someone added you and you want the number removed, email <b>privacy@swiftgy.com</b>.</li>
 <li><b>Support and consent records:</b> your Help &amp; Support tickets, and the consent ledger — a tamper-evident record of each policy version you agreed to, when, and on what surface. At consent we may also store a keyed cryptographic digest of your network address as evidence of the event; the address itself cannot be read back from it.</li>
 <li><b>Device and diagnostics:</b> a push-notification token, app version, and crash/error reports.</li>
 <li><b>Partner records (partners only):</b> subscription and payment-confirmation history for the weekly fee, earnings summaries, and operational quality metrics.</li>
@@ -169,7 +175,7 @@ export const PRIVACY = page(
 <p>Swift is for adults: you must be 18 to hold an account, and we do not knowingly process children's data. Our published Child Safety Standards state our zero-tolerance rules and the dedicated reporting channel; anything reported there is prioritised, removed, and reported to the authorities as the law requires.</p>
 
 <h2>9. Your rights under the Data Protection Act 2023</h2>
-<p>You have the right to: <b>access</b> the personal data we hold about you; have it <b>corrected</b>; request its <b>deletion</b>; <b>restrict</b> processing; <b>object</b> to processing based on legitimate interests and to any direct marketing; <b>withdraw a consent</b> at any time; receive a copy of your data in a <b>portable</b> form (the app's "Download my data" does this instantly); and <b>not be subject to a solely automated decision</b> with legal or similarly significant effect — section 4 describes how we already work that way. Exercise any of these by email to <b><a href="mailto:privacy@swift.gy">privacy@swift.gy</a></b> or through Help &amp; Support; we respond within the timeframes the Act sets, and identity is verified before data is released. Each right is subject to the legal retention duties described above, and exercising them never costs you the service. If you believe we have mishandled your data, you have the right to complain to the Data Protection Commissioner of Guyana.</p>
+<p>You have the right to: <b>access</b> the personal data we hold about you; have it <b>corrected</b>; request its <b>deletion</b>; <b>restrict</b> processing; <b>object</b> to processing based on legitimate interests and to any direct marketing; <b>withdraw a consent</b> at any time; receive a copy of your data in a <b>portable</b> form (the app's "Download my data" does this instantly); and <b>not be subject to a solely automated decision</b> with legal or similarly significant effect — section 4 describes how we already work that way. Exercise any of these by email to <b><a href="mailto:privacy@swiftgy.com">privacy@swiftgy.com</a></b> or through Help &amp; Support; we respond within the timeframes the Act sets, and identity is verified before data is released. Each right is subject to the legal retention duties described above, and exercising them never costs you the service. If you believe we have mishandled your data, you have the right to complain to the Data Protection Commissioner of Guyana.</p>
 
 <h2>10. Changes to this policy</h2>
 <p>Material changes are announced in the app before they take effect, and where the law requires fresh consent we ask for it. Every version of this policy is recorded with its date and an integrity hash, so the exact words that applied to you at any time are provable.</p>
@@ -289,7 +295,7 @@ export const CHILD_SAFETY = page(
 <p>It is strictly forbidden to use Swift to create, share, request, or promote any content or conduct that sexually abuses, exploits, or endangers a child. This includes child sexual abuse material (CSAM), grooming, sextortion, trafficking, and any sexualisation of a minor — in ratings, chat messages, profiles, images, listings, or any other surface. There is no exception.</p>
 
 <h2>2. How to report</h2>
-<p>Any user can report content or a person directly in the app: use the <b>Report</b> action on a review, chat message, profile or listing and select the <b>Child safety (CSAE)</b> reason. Reports reach our moderation team immediately and are prioritised. You can also email our child-safety point of contact at <b><a href="mailto:childsafety@swift.gy">childsafety@swift.gy</a></b>.</p>
+<p>Any user can report content or a person directly in the app: use the <b>Report</b> action on a review, chat message, profile or listing and select the <b>Child safety (CSAE)</b> reason. Reports reach our moderation team immediately and are prioritised. You can also email our child-safety point of contact at <b><a href="mailto:childsafety@swiftgy.com">childsafety@swiftgy.com</a></b>.</p>
 
 <h2>3. How we respond</h2>
 <p>CSAE reports are triaged ahead of all other moderation. Confirmed material is removed, the account is banned, and we report to the relevant authorities and, where applicable, to recognised child-protection bodies such as the National Center for Missing &amp; Exploited Children (NCMEC), as the law requires. We preserve evidence needed for those reports.</p>
@@ -298,7 +304,7 @@ export const CHILD_SAFETY = page(
 <p>Every account is phone-verified, higher-trust actions require government-ID verification, and a live registration selfie deters fake accounts. Reports feed an account risk system that restricts and removes abusers.</p>
 
 <h2>5. Point of contact</h2>
-<p>For child-safety matters, including law-enforcement and child-protection enquiries: <b><a href="mailto:childsafety@swift.gy">childsafety@swift.gy</a></b>.</p>
+<p>For child-safety matters, including law-enforcement and child-protection enquiries: <b><a href="mailto:childsafety@swiftgy.com">childsafety@swiftgy.com</a></b>.</p>
 `,
 );
 

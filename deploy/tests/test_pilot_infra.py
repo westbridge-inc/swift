@@ -43,9 +43,11 @@ class PilotInfraContract(unittest.TestCase):
             dump_dir = tmp / "dumps"
             log = tmp / "calls"
             for name, body in {
-                "docker": '#!/bin/sh\necho "docker $*" >> "$CALL_LOG"\ncase "$*" in *pg_dump*) printf "mock custom dump";; esac\n',
+                # The AWS CLI now runs inside a pinned container (STG-B), so
+                # the docker shim stands in for `docker compose exec` (pg_dump)
+                # AND `docker run` (aws s3 cp / s3api head-object).
+                "docker": '#!/bin/sh\necho "docker $*" >> "$CALL_LOG"\ncase "$*" in *pg_dump*) printf "mock custom dump";; *head-object*) printf "16\\n";; esac\n',
                 "pg_restore": '#!/bin/sh\n[ "$1" = "--list" ]\n',
-                "aws": '#!/bin/sh\necho "aws $*" >> "$CALL_LOG"\ncase "$*" in *head-object*) printf "16\\n";; esac\n',
             }.items():
                 path = bin_dir / name
                 path.write_text(body)
@@ -59,6 +61,7 @@ class PilotInfraContract(unittest.TestCase):
                 "BACKUP_REQUIRED": "1",
                 "AWS_ACCESS_KEY_ID": "test",
                 "AWS_SECRET_ACCESS_KEY": "test",
+                "AWS_CLI_IMAGE": "amazon/aws-cli:2.29.12@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
                 "AWS_S3_ENDPOINT": "https://storage.example.invalid",
                 "BACKUP_RETAIN_DAYS": "0",
             })

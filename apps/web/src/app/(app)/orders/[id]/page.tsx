@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { OpenSwiftApp } from '@/components/open-swift-app';
 import { useParams } from 'next/navigation';
+import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
   ArrowLeft,
   Banknote,
@@ -62,6 +63,8 @@ type OrderDetail = {
     url: string;
   } | null;
   pickupCode?: string | null;
+  /** [MKT-F057] The customer-held delivery door PIN (holder-side only). */
+  ridePin?: string | null;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   estimatedPrepTime?: number | null;
@@ -79,6 +82,7 @@ type OrderDetail = {
   timeline?: TimelineEvent[];
   holdExpiresAt?: string | null;
   freeCancellationExpiresAt?: string | null;
+  appointmentSlot?: string | null;
   canCancel?: boolean;
   cancellationFee?: number;
   cancellationReason?: string | null;
@@ -595,6 +599,12 @@ export default function OrderDetailPage() {
                   <strong>{order.pickupCode}</strong>
                 </div>
               ) : null}
+              {order.ridePin && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status) ? (
+                <div className={styles.pickupCode}>
+                  <span>Show this delivery code to your rider at the door</span>
+                  <strong>{order.ridePin}</strong>
+                </div>
+              ) : null}
             </section>
           ) : null}
 
@@ -630,6 +640,7 @@ export default function OrderDetailPage() {
             ))}
           </div>
           <div className={styles.breakdown}>
+            {order.fulfillment === 'APPOINTMENT' && order.appointmentSlot ? <div className={styles.line}><span>Appointment</span><strong>{formatAppointmentSlot(order.appointmentSlot)}</strong></div> : null}
             {typeof order.subtotalCustomer === 'number' ? <div className={styles.line}><span>{isTaxi ? 'Fare' : 'Items'}</span><strong>{money(order.subtotalCustomer)}</strong></div> : null}
             {!isTaxi && typeof order.deliveryFee === 'number' ? <div className={styles.line}><span>Delivery fee</span><strong>{money(order.deliveryFee)}</strong></div> : null}
             {Number(order.discount ?? 0) > 0 ? <div className={styles.line}><span>Discount</span><strong>−{money(Number(order.discount))}</strong></div> : null}
@@ -721,7 +732,7 @@ export default function OrderDetailPage() {
               <p id="cancellation-quote">
                 {effectiveCancelFee > 0
                   ? `Swift’s last server quote shows a ${money(effectiveCancelFee)} cash-only late-cancellation marker. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift does not collect the marker; the server confirms it when you cancel.`
-                  : `Swift’s last server quote showed no fee${order.freeCancellationExpiresAt ? ` through ${formatEventTime(order.freeCancellationExpiresAt)}` : ''}. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift rechecks the fee before cancelling and never collects a late marker.`}
+                  : `Swift’s last server quote showed no fee${order.freeCancellationExpiresAt ? ` through ${order.fulfillment === 'APPOINTMENT' ? formatAppointmentSlot(order.freeCancellationExpiresAt) : formatEventTime(order.freeCancellationExpiresAt)}` : ''}. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift rechecks the fee before cancelling and never collects a late marker.`}
               </p>
               <div className={styles.confirmActions}>
                 <button ref={cancelConfirmButton} type="button" className={styles.primaryButton} aria-describedby="cancellation-quote" disabled={cancelling} onClick={() => void confirmCancellation()}>

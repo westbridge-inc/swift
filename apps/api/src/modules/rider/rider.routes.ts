@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
@@ -28,10 +29,13 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
-import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { requireStepUp } from '../auth/step-up';
+import { normalizeRegistrationMark } from '../verification/subjects';
+import { HANDOVER_SECRETS_OMIT, handoverAttemptState } from '../handover/handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 import { handoverBlockCounter } from '../../plugins/observability';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
+import { mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { log } from '../../utils/logger';
@@ -57,6 +61,7 @@ import {
   TERMINAL_ORDER_STATUSES,
   RIDER_PRE_CUSTODY_STATUSES,
   RIDER_IN_CUSTODY_STATUSES,
+  RIDER_PICKUP_FROM,
 } from '../order/order-status';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -107,6 +112,9 @@ const offerActionSchema = z.object({
 /** Golden-rule handover: GPS is mandatory — a claim is impossible without it. */
 const handoverSchema = z.object({
   outcome: z.enum(['paid', 'no_show', 'refused']),
+  /** [MKT-F057] The customer-held door PIN for a goods delivery (verified on
+   *  the 'paid' outcome only — no_show/refused stay open without one). */
+  ridePin: z.string().min(1).max(10).optional(),
   gps: z.object({
     lat: z.number().min(-90).max(90),
     lng: z.number().min(-180).max(180),
@@ -172,7 +180,7 @@ async function getOwnedOrder(app: FastifyInstance, orderId: string, riderId: str
 const STATUS_TRANSITIONS: Record<string, { from: string[]; to: string; note: string }> = {
   'en-route-pickup': { from: ['RIDER_ASSIGNED'], to: 'RIDER_EN_ROUTE_PICKUP', note: 'Rider started the run to pickup' },
   'arrived-pickup':  { from: ['RIDER_EN_ROUTE_PICKUP'], to: 'RIDER_ARRIVED_PICKUP', note: 'Rider reported arriving at pickup' },
-  'picked-up':       { from: ['RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP'], to: 'PICKED_UP', note: 'Rider confirmed collecting the order' },
+  'picked-up':       { from: [...RIDER_PICKUP_FROM], to: 'PICKED_UP', note: 'Rider confirmed collecting the order' },
   'en-route-delivery': { from: ['PICKED_UP'], to: 'EN_ROUTE_DELIVERY', note: 'Rider started the run to the customer' },
   'arrived':         { from: ['EN_ROUTE_DELIVERY'], to: 'ARRIVED', note: 'Rider reported arriving at the customer' },
 };
@@ -457,6 +465,22 @@ export async function riderRoutes(app: FastifyInstance) {
     const rider = await getRider(app, request.user.userId);
 
     const body = updateRiderProfileSchema.parse(request.body);
+    // [VEHICLES] A different vehicle TYPE is a different vehicle: it goes through the one
+    // vehicle-change writer (PUT /partner/vehicle), which retires the old vehicle's papers
+    // and re-verifies. This route edits the details of the vehicle the rider already has.
+    if (body.vehicleType !== undefined && body.vehicleType !== rider.vehicleType) {
+      throw new AppError(409, 'USE_VEHICLE_CHANGE', 'Change your vehicle from the vehicle screen — a new vehicle needs its own documents.');
+    }
+    // [High #9 · DS109] Changing the plate re-identifies the vehicle the rider operates.
+    // Step-up first (the same proof as a money surface), the old vehicle links close so
+    // GO re-checks the EXACT new vehicle, and live supply retires now — a retyped plate
+    // never carries another subject's approved documents, and the old vehicle's evidence
+    // stops counting.
+    const plateChanged = body.licensePlate !== undefined
+      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(rider.licensePlate ?? '');
+    if (plateChanged) {
+      await requireStepUp(app, request);
+    }
 
     const allowedFields = [
       'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel',
@@ -474,6 +498,14 @@ export async function riderRoutes(app: FastifyInstance) {
     // If documents are re-uploaded, reset verification so admin can re-verify.
     const docFields = ['nationalIdUrl', 'driverLicenseUrl', 'vehicleInsuranceUrl'];
     if (docFields.some((f) => updateData[f] !== undefined)) {
+      updateData['documentsVerified'] = false;
+    }
+    // [High #9 · DS109] A real plate change retires live supply atomically (same shape as
+    // the driver route and the admin reject path) and clears the legacy verification flag,
+    // so the new vehicle must be verified before this rider is dispatchable again.
+    if (plateChanged) {
+      updateData['isOnline'] = false;
+      updateData['locationSessionId'] = null;
       updateData['documentsVerified'] = false;
     }
 
@@ -500,6 +532,16 @@ export async function riderRoutes(app: FastifyInstance) {
       },
     });
 
+    if (plateChanged) {
+      // A plate change never inherits another subject's approved documents: every open
+      // vehicle link closes. New submissions for the new plate create a PENDING assignment
+      // that an admin must approve before its evidence propagates.
+      await app.prisma.subjectLink.updateMany({
+        where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
+        data: { validTo: new Date() },
+      });
+    }
+
     return { success: true, data: updated };
   });
 
@@ -511,6 +553,11 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
     const locationSessionId = request.authSessionId;
+    // [Launch vehicle list] A vehicle Swift does not take on yet cannot go online; the
+    // mover changes it first (PUT /partner/vehicle).
+    if (!isVehicleOffered(rider.vehicleType)) {
+      throw new AppError(403, VEHICLE_NOT_OFFERED, 'Swift is not taking canters and box trucks yet. Change your vehicle to go online.');
+    }
     if (!locationSessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
     }
@@ -527,10 +574,13 @@ export async function riderRoutes(app: FastifyInstance) {
 
     // Verification gate: the country's MOVER checklist must be fully approved.
     // Legacy documentsVerified flag grandfathers pre-checklist accounts.
+    // [High #9 · DS109] VEHICLE-kind evidence must be about the EXACT vehicle the
+    // rider's current plate names (riderLiveOperation) — the legacy flag alone still
+    // grandfathered pre-checklist accounts, and is cleared by any plate change.
     // Fast-fail preview for honest copy — the AUTHORITATIVE check re-runs
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
     const verified = rider.documentsVerified
-      || await verification.isRoleVerified(request.user.userId, 'MOVER');
+      || await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
     }
@@ -599,7 +649,7 @@ export async function riderRoutes(app: FastifyInstance) {
       // stale "verified" through to the online write. The legacy flag comes
       // from the LOCKED profile snapshot, not the preview.
       const liveVerified = snapshot.documentsVerified
-        || await verification.isRoleVerified(request.user.userId, 'MOVER', tx);
+        || await verification.riderLiveOperation(request.user.userId, rider.vehicleType, tx);
       if (!liveVerified) {
         throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
       }
@@ -988,7 +1038,11 @@ export async function riderRoutes(app: FastifyInstance) {
         // open work, and advertising it sends riders to collect food that is
         // already out for delivery. In AND because notHeldFilter already spread
         // an OR key above.
-        AND: [notSelfDeliveredFilter(), riderDispatchReadinessFilter()],
+        // [ORDER-SPINE S1-6] Nor is direct-MMG work nobody has said is paid, or
+        // whose payment claims disagree: the claim below would refuse it. All
+        // three predicates hold at once (cross-lane gate): not self-delivered,
+        // ready for a rider, and MMG-eligible.
+        AND: [notSelfDeliveredFilter(), riderDispatchReadinessFilter(), mmgDispatchEligibleWhere()],
       },
       include: {
         vendor: {
@@ -1410,6 +1464,17 @@ export async function riderRoutes(app: FastifyInstance) {
         );
       }
 
+      // [E16] A courier's PICKED_UP asserts physical custody of someone else's
+      // parcel, so it carries photo + time + location proof. The bare tap is
+      // refused here, before any transaction opens; the courier pickup-proof
+      // step (courier.routes) is the only courier door into PICKED_UP, and the
+      // canonical seam refuses any caller whose row has no bound pickup proof.
+      // Food riders are untouched: the guard is courier-only.
+      if (slug === 'picked-up' && order.orderType === 'COURIER') {
+        throw new AppError(409, 'PICKUP_PROOF_REQUIRED',
+          'Photograph the parcel to confirm pickup — this job needs a pickup photo and your location.');
+      }
+
       // EVIDENCE, NOT A GATE [L3 advisory · L4 shadow-first].
       //
       // `arrived` and `arrived-pickup` are the two rungs where the rider makes
@@ -1526,9 +1591,25 @@ export async function riderRoutes(app: FastifyInstance) {
       // Verify the delivery PIN if one was set on the order.
       // [F-0011] Read the secret ONLY here, where it is compared — the rider is
       // its VERIFIER, so no rider-facing payload may carry it (see getOwnedOrder).
-      const secret = await app.prisma.order.findUnique({ where: { id }, select: { ridePin: true } });
-      if (secret?.ridePin && secret.ridePin !== ridePin) {
-        throw new AppError(400, 'INVALID_PIN', 'Incorrect delivery PIN. Please ask the customer for the correct PIN.');
+      // [MKT-F057] The same shared lockout as the taxi PIN and the pickup code:
+      // 5 wrong tries (MAX_HANDOVER_ATTEMPTS), support-only reset. Legacy rows
+      // without a PIN complete as before (presence-gated), so nothing in flight
+      // strands.
+      const secret = await app.prisma.order.findUnique({ where: { id },
+        select: { ridePin: true, ridePinAttempts: true } });
+      if (secret?.ridePin) {
+        const { locked, remaining } = handoverAttemptState(secret.ridePinAttempts);
+        if (locked) throw new AppError(400, 'MAX_ATTEMPTS',
+          'Too many incorrect delivery-PIN attempts on this order. Please contact support.');
+        if (ridePin == null || ridePin === '') throw new AppError(400, 'MISSING_PIN',
+          "Enter the customer's 6-digit delivery PIN.");
+        if (ridePin !== secret.ridePin) {
+          // A wrong guess burns its attempt as its own committed update BEFORE
+          // the throw — the DELIVERED transition never runs for it.
+          await app.prisma.order.update({ where: { id }, data: { ridePinAttempts: { increment: 1 } } });
+          throw new AppError(400, 'INVALID_PIN',
+            `That PIN does not match. ${remaining} attempt(s) remaining.`);
+        }
       }
 
       // 1. Update order status — handles notifications, sockets, float release,

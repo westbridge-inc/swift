@@ -2,7 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
-import { mondayOfDate, weeksBetween, isMonday } from './ads-weeks';
+import { mondayOfDate, weeksBetween, weekSpan, isMonday } from './ads-weeks';
 
 // Inventory & booking engine (ads-platform spec §7). The reservation is the
 // race-safe core: a single interactive transaction takes a FOR UPDATE row lock
@@ -26,6 +26,11 @@ export interface AvailabilityWeek {
   price: number;
 }
 
+/** The widest availability window one request may ask for (audit DS107 High
+ *  #4): two years of Mondays. The route enforces the same bound; the service
+ *  re-checks so no future caller can reintroduce the write amplification. */
+export const MAX_AVAILABILITY_WEEKS = 104;
+
 /** [R045-ADS-04 · 05 · 06] The campaign aggregate lock: checkout, the hold,
  *  payment confirmation and expiry all take it, so they serialize. */
 export async function lockCampaign(tx: Prisma.TransactionClient, campaignId: string): Promise<void> {
@@ -46,8 +51,9 @@ export class BookingService {
   /** §7.2 — ensure the inventory row exists (capacity = placement.slotsPerWeek).
    *  Idempotent under concurrency: a losing INSERT (P2002) means a peer created
    *  it first, which is fine. The reservation path calls this before locking so
-   *  FOR UPDATE always has a row; availability calls it so both see identical
-   *  rows. Accepts an optional tx so it can run inside the reservation txn. */
+   *  FOR UPDATE always has a row. Availability is a pure read (missing weeks
+   *  fall back to the placement capacity) so a GET never materialises rows.
+   *  Accepts an optional tx so it can run inside the reservation txn. */
   async ensureWeek(
     db: Pick<PrismaClient, 'adInventoryWeek'>,
     placementId: string,
@@ -63,26 +69,40 @@ export class BookingService {
     }
   }
 
-  /** §7.2 availability read — per week for one city, lazily materialising rows. */
+  /** §7.2 availability read — per week for one city, computed on read. A GET
+   *  must never write: missing inventory weeks fall back to the placement
+   *  capacity (booked 0) instead of being materialised, so a hostile range
+   *  cannot be used to churn the inventory table. Reservation still calls
+   *  ensureWeek itself, so the rows it row-locks always exist. */
   async availability(placementId: string, city: string, from: Date, to: Date): Promise<AvailabilityWeek[]> {
     const placement = await this.prisma.adPlacement.findUnique({ where: { id: placementId } });
     if (!placement) throw new NotFoundError('AdPlacement', placementId);
-    const weeks = weeksBetween(mondayOfDate(from), mondayOfDate(to));
-    const out: AvailabilityWeek[] = [];
-    for (const weekStart of weeks) {
-      await this.ensureWeek(this.prisma, placementId, city, weekStart, placement.slotsPerWeek);
-      const inv = await this.prisma.adInventoryWeek.findUniqueOrThrow({
-        where: { placementId_city_weekStart: { placementId, city, weekStart } },
-      });
-      out.push({
-        weekStart: weekStart.toISOString().slice(0, 10),
-        capacity: inv.capacity,
-        booked: inv.booked,
-        available: Math.max(0, inv.capacity - inv.booked),
-        price: Number(placement.weeklyPrice),
-      });
+    const startWeek = mondayOfDate(from);
+    const endWeek = mondayOfDate(to);
+    // Defensive cap — the route enforces this too; this protects every future
+    // caller. Checked arithmetically BEFORE weeksBetween allocates one Date
+    // per week, so a hostile range is refused in O(1) without transient garbage.
+    const span = weekSpan(startWeek, endWeek);
+    if (span > MAX_AVAILABILITY_WEEKS) {
+      throw new AppError(400, 'BAD_RANGE', `Availability range is limited to ${MAX_AVAILABILITY_WEEKS} weeks (got ${span}).`);
     }
-    return out;
+    const weeks = weeksBetween(startWeek, endWeek);
+    const existing = await this.prisma.adInventoryWeek.findMany({
+      where: { placementId, city, weekStart: { in: weeks } },
+    });
+    const byWeek = new Map(existing.map((row) => [row.weekStart.getTime(), row]));
+    return weeks.map((weekStart) => {
+      const inv = byWeek.get(weekStart.getTime());
+      const capacity = inv?.capacity ?? placement.slotsPerWeek;
+      const booked = inv?.booked ?? 0;
+      return {
+        weekStart: weekStart.toISOString().slice(0, 10),
+        capacity,
+        booked,
+        available: Math.max(0, capacity - booked),
+        price: Number(placement.weeklyPrice),
+      };
+    });
   }
 
   /** §7.3 reserve — the race-safe core. One interactive transaction; a
@@ -99,6 +119,15 @@ export class BookingService {
   async reserveAndHold(campaignId: string, opts: { reservationMinutes?: number; within?: (tx: Prisma.TransactionClient) => Promise<void> } = {}): Promise<{ bookings: number; total: number }> {
     const head = await this.prisma.adCampaign.findUnique({ where: { id: campaignId }, include: { placement: true } });
     if (!head) throw new NotFoundError('AdCampaign', campaignId);
+    // [audit DS107 High #4] A campaign drafted before the creation-time bound
+    // (or created by any other caller) can still hold a hostile span — refuse
+    // it here, arithmetically, BEFORE the ensureWeek loop writes one row per
+    // week × city. Covers reserve, checkout (which reserves DRAFT campaigns)
+    // and every future caller of the service.
+    const span = weekSpan(head.startWeek, head.endWeek);
+    if (span > MAX_AVAILABILITY_WEEKS) {
+      throw new AppError(400, 'BAD_RANGE', `Campaign span of ${span} weeks exceeds the ${MAX_AVAILABILITY_WEEKS}-week limit.`);
+    }
     // Ensure every target row exists BEFORE the locking transaction, so the
     // FOR UPDATE always has a row to lock (create-races settle here, not under
     // the lock).

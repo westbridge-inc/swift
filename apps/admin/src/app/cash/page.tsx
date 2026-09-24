@@ -13,6 +13,7 @@ import {
   type UnmatchedPayment, type CashKpis, type CollectionTab, type ContactOutcome,
   type MoneyActionOutcome,
 } from '@/lib/cashRail';
+import { reasonTooShort } from '@/lib/ask-reason';
 
 /**
  * [SAN spec Part 4] The agent-cash rail.
@@ -165,7 +166,9 @@ function UnmatchedCard({ row }: { row: UnmatchedPayment }) {
   });
 
   const busy = attach.isPending || flag.isPending || addNote.isPending;
-  const reasonMissing = reason.trim().length < 5;
+  // [DS110-14] The server floor is 12 characters, not 5 — a short answer
+  // passed this screen and 400'd at the gate.
+  const reasonMissing = reasonTooShort(reason);
 
   return (
     <div className={`rounded-xl border p-5 bg-[var(--panel)] ${age === 'breached' ? 'border-red-500/60' : age === 'aging' ? 'border-amber-500/50' : 'border-[var(--border)]'}`}>

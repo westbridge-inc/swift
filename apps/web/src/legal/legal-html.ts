@@ -33,10 +33,13 @@
 export const LEGAL_BLOCK_ELEMENTS = ['p', 'h2', 'h3', 'ul', 'ol'] as const;
 export const LEGAL_INLINE_ELEMENTS = ['b', 'strong', 'i', 'em', 'br', 'a'] as const;
 export const LEGAL_ELEMENTS = [...LEGAL_BLOCK_ELEMENTS, 'li', ...LEGAL_INLINE_ELEMENTS] as const;
-/** `mailto:` links may address these domains only. */
-export const LEGAL_MAIL_DOMAINS = ['swift.gy'] as const;
-/** `https://` links may point at these hosts only — exact host, no subdomain wildcard. */
-export const LEGAL_LINK_HOSTS = ['swift.gy', 'www.swift.gy', 'swiftgy.com', 'www.swiftgy.com'] as const;
+/** `mailto:` links may address these domains only — the owner's real zone, where
+ *  privacy@ and childsafety@ live. */
+export const LEGAL_MAIL_DOMAINS = ['swiftgy.com'] as const;
+/** `https://` links may point at these hosts only — exact host, no subdomain wildcard.
+ *  The pre-2026-09-24 name is deliberately absent: Swift never owned it, so a legal
+ *  document that links or mails there is a document pointing at a stranger. */
+export const LEGAL_LINK_HOSTS = ['swiftgy.com', 'www.swiftgy.com'] as const;
 export const LEGAL_HTML_MAX_CHARS = 256 * 1024;
 
 export interface LegalHtmlOptions {

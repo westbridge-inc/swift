@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { acceptOrder, money, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
+import { formatAppointmentSlot } from '@/lib/appointmentTime';
 
 /**
  * The NEW-ORDER takeover (alerts spec §A1, web dashboard flavor): the moment
@@ -38,6 +39,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
   const titleRef = useRef<string | null>(null);
+  const currentBooking = queue[0]?.fulfillment === 'APPOINTMENT';
 
   // Detect unseen PENDING orders between polls. The FIRST poll only baselines —
   // a dashboard opened onto an old queue must not scream about stale orders.
@@ -66,7 +68,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     let flash = false;
     const titleTimer = setInterval(() => {
       flash = !flash;
-      document.title = flash ? `(${queue.length}) NEW ORDER — Swift` : titleRef.current!;
+      document.title = flash ? `(${queue.length}) NEW ${currentBooking ? 'BOOKING' : 'ORDER'} — Swift` : titleRef.current!;
     }, 1000);
 
     return () => {
@@ -74,7 +76,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
       clearInterval(titleTimer);
       if (titleRef.current) document.title = titleRef.current;
     };
-  }, [queue.length]);
+  }, [queue.length, currentBooking]);
 
   const done = (id: string) => {
     setQueue((q) => q.filter((o) => o.id !== id));
@@ -82,7 +84,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     queryClient.invalidateQueries({ queryKey: ['orders'] });
   };
   const accept = useMutation({
-    mutationFn: (id: string) => acceptOrder(id, prepTime),
+    mutationFn: (id: string) => acceptOrder(id, queue.find((o) => o.id === id)?.fulfillment === 'APPOINTMENT' ? undefined : prepTime),
     onSuccess: (_r, id) => done(id),
     onError: (e) => setError((e as Error).message),
   });
@@ -101,15 +103,16 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
       <div className="w-full max-w-lg rounded-3xl bg-white p-8 text-center shadow-2xl">
         <p className="text-4xl">🔔</p>
         <h2 className="mt-2 text-3xl font-extrabold text-[var(--swift-red)]">
-          {queue.length > 1 ? `${queue.length} NEW ORDERS` : 'NEW ORDER'}
+          {current.fulfillment === 'APPOINTMENT' ? 'NEW BOOKING' : queue.length > 1 ? `${queue.length} NEW ORDERS` : 'NEW ORDER'}
         </h2>
         <p className="mt-3 text-lg font-bold">
           #{current.orderNumber} · {money(current.totalAmount)}
         </p>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
           {customer} · {current.items.length} item{current.items.length === 1 ? '' : 's'} ·{' '}
-          {current.fulfillment === 'PICKUP' ? 'pickup' : 'delivery'}
+          {current.fulfillment === 'APPOINTMENT' ? 'appointment' : current.fulfillment === 'PICKUP' ? 'pickup' : 'delivery'}
         </p>
+        {current.fulfillment === 'APPOINTMENT' && current.appointmentSlot ? <p className="mt-2 font-semibold">{formatAppointmentSlot(current.appointmentSlot)}</p> : null}
         <div className="mx-auto mt-3 max-h-32 max-w-sm overflow-auto text-left text-sm">
           {current.items.map((i) => (
             <p key={i.id} className="text-[var(--swift-muted)]">
@@ -119,7 +122,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
         </div>
 
         <div className="mt-5 flex items-center justify-center gap-2">
-          <select
+          {current.fulfillment !== 'APPOINTMENT' && <select
             value={prepTime}
             onChange={(e) => setPrepTime(Number(e.target.value))}
             className="rounded-lg border border-black/10 px-2 py-3 text-sm"
@@ -127,7 +130,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
             {[10, 15, 20, 30, 45, 60].map((m) => (
               <option key={m} value={m}>{m} min prep</option>
             ))}
-          </select>
+          </select>}
           <button
             onClick={() => accept.mutate(current.id)}
             disabled={accept.isPending || reject.isPending}
@@ -140,7 +143,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
             disabled={accept.isPending || reject.isPending}
             className="rounded-xl border-2 border-[var(--swift-red)] px-6 py-3 text-lg font-bold text-[var(--swift-red)] disabled:opacity-50"
           >
-            Reject
+            {current.fulfillment === 'APPOINTMENT' ? 'Decline' : 'Reject'}
           </button>
         </div>
         {error && <p className="mt-3 text-sm text-[var(--swift-red)]">{error}</p>}
@@ -148,7 +151,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
           onClick={() => done(current.id)}
           className="mt-4 text-xs text-[var(--swift-muted)] underline"
         >
-          View later (the order stays in your queue)
+          View later (the {current.fulfillment === 'APPOINTMENT' ? 'booking' : 'order'} stays in your queue)
         </button>
       </div>
     </div>

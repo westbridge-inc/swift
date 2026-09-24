@@ -49,6 +49,7 @@ import { ServicesScreen } from '../modules/services/screens/ServicesScreen';
 import { ServiceJobsScreen } from '../modules/services/screens/ServiceJobsScreen';
 import { ServiceProviderScreen } from '../modules/services/screens/ServiceProviderScreen';
 import { IdentityVerificationScreen } from '../modules/account/screens/IdentityVerificationScreen';
+import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -123,7 +124,8 @@ function HomeTabs() {
     >
       <Tab.Screen name="Home" component={HomeScreen} />
       {/* Server depth must positively confirm Market before its route mounts.
-          React Query retains a known-visible verdict during refetch errors. */}
+          React Query retains a known-visible verdict during refetch errors,
+          and the last complete verdict seeds a cold start from device memory. */}
       {marketVisible ? <Tab.Screen name="Market" component={MarketScreen} /> : null}
       <Tab.Screen name="Cart" component={CartScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
@@ -174,6 +176,8 @@ export function CustomerStack() {
       <Stack.Screen name="ServiceJobs" component={ServiceJobsScreen} />
       <Stack.Screen name="ServiceProvider" component={ServiceProviderScreen} />
       <Stack.Screen name="IdentityVerification" component={IdentityVerificationScreen} />
+      {/* [E27] the taxi screen's door when a ride request needs the profile photo */}
+      <Stack.Screen name="Selfie" component={SelfieCaptureScreen} />
     </Stack.Navigator>
   );
 }

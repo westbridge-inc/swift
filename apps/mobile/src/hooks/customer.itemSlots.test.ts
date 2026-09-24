@@ -25,6 +25,7 @@ vi.mock('../services/api', () => ({
 vi.mock('../lib/analytics', () => ({ track: vi.fn() }));
 vi.mock('../lib/checkoutAttemptStore', () => ({ checkoutAttempt: {} }));
 vi.mock('../lib/checkoutAttempt', () => ({ recordCheckoutOutcome: vi.fn(), stableBodyHash: vi.fn() }));
+vi.mock('../lib/marketDepthMemory', () => ({ rememberedMarketDepth: () => null, rememberMarketDepth: vi.fn() }));
 vi.mock('../stores/authStore', () => ({ getAuthSessionSnapshot: vi.fn() }));
 
 import { useItemSlots } from './customer';

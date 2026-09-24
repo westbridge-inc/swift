@@ -300,6 +300,44 @@ describe('[F-0011] the delivery rider never receives the delivery PIN they verif
     assertNoHandoverSecrets(res.payload, 'GET /rider/orders/active');
     expect(res.json().data?.id).toBe(order.id);
   });
+
+  it('[MKT-F057] a goods order with a real door PIN never leaks it on the delivered path', async () => {
+    const rider = await makeRider();
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `SECG-${nanoid(10)}`,
+        orderType: 'FOOD_DELIVERY',
+        customerId: customer.userId,
+        riderId: rider.riderId,
+        status: 'ARRIVED',
+        deliveryAddress: 'somewhere',
+        deliveryLat: 6.81,
+        deliveryLng: -58.16,
+        subtotalBase: 2000,
+        subtotalMarkup: 0,
+        subtotalCustomer: 2000,
+        deliveryFee: 700,
+        totalAmount: 2700,
+        paymentMethod: 'MOBILE_MONEY',
+        paymentStatus: 'CAPTURED',
+        ridePin: '135790',
+      },
+    });
+    createdOrderIds.push(order.id);
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: order.id } });
+
+    // The refusal answers WITHOUT echoing the secret it compared against.
+    const wrong = await put(`/api/v1/rider/orders/${order.id}/delivered`, { ridePin: '000001' }, rider.token);
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json().error.code).toBe('INVALID_PIN');
+    assertNoHandoverSecrets(wrong.payload, 'PUT /rider/orders/:id/delivered (refusal)');
+
+    // The completion answers without echoing it either.
+    const done = await put(`/api/v1/rider/orders/${order.id}/delivered`, { ridePin: '135790' }, rider.token);
+    expect(done.statusCode).toBe(200);
+    expect(done.json().data?.status).toBe('DELIVERED');
+    assertNoHandoverSecrets(done.payload, 'PUT /rider/orders/:id/delivered (success)');
+  });
 });
 
 describe('[F-0011] withholding the code did not break verification (positive controls)', () => {

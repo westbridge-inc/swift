@@ -12,6 +12,7 @@
     "legal:sync": "tsx scripts/sync-legal.ts"
   },
   "dependencies": {
+    "@swift/types": "workspace:*",
     "@tanstack/react-query": "^5.66.0",
     "lucide-react": "^0.475.0",
     "next": "^15.5.24",

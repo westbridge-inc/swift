@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { broadcastNotification } from '@/lib/api';
+import { askReason } from '@/lib/ask-reason';
 
 const AUDIENCES = [
   { value: '', label: 'Everyone (all active users)' },
@@ -19,7 +20,7 @@ export default function BroadcastPage() {
   const [lastSent, setLastSent] = useState<number | null>(null);
 
   const send = useMutation({
-    mutationFn: () => broadcastNotification({ title: title.trim(), body: body.trim(), category, ...(role ? { role } : {}) }),
+    mutationFn: (reason: string) => broadcastNotification({ title: title.trim(), body: body.trim(), category, ...(role ? { role } : {}) }, reason),
     onSuccess: (res: any) => {
       setLastSent(res?.data?.sent ?? 0);
       setTitle('');
@@ -101,7 +102,10 @@ export default function BroadcastPage() {
 
         <button
           onClick={() => {
-            if (window.confirm(`Send this to ${audience}? This cannot be recalled.`)) send.mutate();
+            if (window.confirm(`Send this to ${audience}? This cannot be recalled.`)) {
+              const reason = askReason({ action: `broadcast this notification to ${audience}` });
+              if (reason) send.mutate(reason);
+            }
           }}
           disabled={!canSend}
           className="w-full py-2.5 rounded-lg text-sm font-semibold bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50 transition-colors"

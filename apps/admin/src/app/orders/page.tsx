@@ -17,7 +17,7 @@ export default function OrdersPage() {
     // [ADM-006] The reason was the constant 'Cancelled by admin'. A customer
     // asking why their order was cancelled deserves the actual answer.
     mutationFn: ({ id, refund, reason }: { id: string; refund: boolean; reason: string }) =>
-      cancelOrder(id, { reason, refund }),
+      cancelOrder(id, { refund }, reason),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['orders'] }),
   });
 

@@ -34,12 +34,23 @@ const csp = [
   // UG-SEC-04: the admin app makes NO websocket connections (only the mobile
   // client does) — bare `ws: wss:` was any-host, an injected-script token
   // exfil path. connect-src is now exactly the admin API origins.
-  `connect-src 'self' ${API} https://api.swift.gy`,
+  `connect-src 'self' ${API} https://api.swiftgy.com`,
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",
   "object-src 'none'",
 ].join('; ');
+
+// [DS110-15] The verification render proxy streams the document's OWN mime
+// type, which includes application/pdf (insurance certificates). The page's
+// fetch() succeeds for a PDF — a 200 stream — but the tab Chrome opens then
+// shows a CSP-blocked blank viewer under `object-src 'none'`, which is exactly
+// the "Approve unlocked without seeing the evidence" failure #15 closes. The
+// render path gets its own policy: everything the admin CSP already grants,
+// with object-src relaxed to same-origin so the built-in viewer can render.
+// The response body is still the upstream HMAC-gated stream — this grants no
+// extra read authority, only the ability to display it.
+const renderCsp = csp.replace("object-src 'none'", "object-src 'self'");
 
 const securityHeaders = [
   { key: 'Content-Security-Policy', value: csp },
@@ -53,7 +64,15 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   transpilePackages: ['@swift/types'],
   async headers() {
-    return [{ source: '/:path*', headers: securityHeaders }];
+    return [
+      { source: '/:path*', headers: securityHeaders },
+      // Matching entries are applied in array order and a later entry with the
+      // same key wins, so this specific path overrides the catch-all above.
+      {
+        source: '/api/v1/verification/render/:path*',
+        headers: [{ key: 'Content-Security-Policy', value: renderCsp }],
+      },
+    ];
   },
 };
 

@@ -9,7 +9,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../../../services/api';
 import { color, radius, space } from '@swift/ui';
-import { customerKeys, useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
+import { customerKeys, useDiscoveryCategories, useHome, useToggleFavorite, type HomeFeed, type LiveOrderProjection } from '../../../hooks/customer';
 import { createHomeRefreshGate, homeFeedState, homeQueryKey, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
@@ -18,6 +18,7 @@ import { Scrim } from '../../../kit/scrim';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { locationPrimer } from '../../../lib/location-primer';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -26,7 +27,8 @@ import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
 // photo. `itemImage` used to hand "Mauby" a picture of a cheeseburger.
 import { categoryPhoto, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
-import { orderStatusLabel, orderSubtitle } from '../../../lib/orderStatus';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
+import { orderRecipientNoun, orderStatusLabel, orderSubtitle, presentedVertical } from '../../../lib/orderStatus';
 import { promiseLine } from '../../../lib/promise';
 // ONE hold authority, shared with the tracking screen — never a second
 // countdown that could disagree with it about whether the window is open.
@@ -174,13 +176,17 @@ function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[numb
  * The live order, as Home shows it.
  *
  * Two things it must never do. It must never describe the order with the wrong
- * vertical's words — `orderStatusLabel` needs `orderType`, and Home's feed did
- * not send it, so every order read as a food order. And it must never invent
- * the hold: the countdown comes from `holdRingWindow`, the same seam the
- * tracking screen uses, which returns null unless BOTH ends of the window
+ * vertical's words — `orderStatusLabel` needs the vertical, and Home's feed did
+ * not send it, so every order read as a food order; then it sent `orderType`,
+ * which has no SERVICE member, so a barbershop booking STILL read as a food
+ * order ("Waiting for the store", "The store hasn't been told yet"). The
+ * server now declares `vertical` beside `orderType`; `presentedVertical` reads
+ * it and falls back to the persisted type for an older API. And it must never
+ * invent the hold: the countdown comes from `holdRingWindow`, the same seam
+ * the tracking screen uses, which returns null unless BOTH ends of the window
  * arrived from the server. No local five-minute assumption, one authority.
  */
-function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
+function LiveOrderCard({ order, navigation }: { order: LiveOrderProjection; navigation: any }) {
   // Tick ONLY while a hold is actually running. `holdRingWindow` is pure, so
   // re-evaluating it against a fresh `now` is the whole animation; when the
   // window closes the interval clears itself and the card goes quiet.
@@ -199,6 +205,10 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
   // range is an absolute window and stays true out of the cache); a passed
   // window is never shown as still coming.
   const promise = promiseLine(order.promise, now);
+  // The server's declared vertical decides every word below: SERVICE for a
+  // booking with a service business, otherwise the persisted type.
+  const vertical = presentedVertical(order);
+  const recipient = orderRecipientNoun(vertical);
 
   return (
     <View style={{ paddingHorizontal: GUTTER, marginTop: space.lg }}>
@@ -219,8 +229,8 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
               />
               <T variant="body" weight="semibold">
                 {hold
-                  ? `Held — goes to ${order.vendor?.name ?? 'the store'} in ${mmss}`
-                  : orderStatusLabel(order.status, order.orderType)}
+                  ? `Held — goes to ${order.vendor?.name ?? recipient} in ${mmss}`
+                  : orderStatusLabel(order.status, vertical)}
               </T>
             </View>
             <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
@@ -229,11 +239,17 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
                   // server owns the timer, a skewed device clock can keep this
                   // card alive past the real window, and promising "free" from
                   // that clock is the app making a money claim it cannot keep.
-                  // What stays true on any clock is that the store has not been
-                  // told yet — the cost, if any, is shown before confirming.
-                  `The store hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
+                  // What stays true on any clock is that the recipient — the
+                  // store, or the provider for a booking — has not been told
+                  // yet; the cost, if any, is shown before confirming.
+                  `${recipient.charAt(0).toUpperCase()}${recipient.slice(1)} hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
                 : orderSubtitle(order.vendor?.name, order.orderNumber)}
             </T>
+            {order.fulfillment === 'APPOINTMENT' && order.appointmentSlot ? (
+              <T variant="caption" style={{ marginTop: 4 }}>
+                Appointment: {formatAppointmentSlot(order.appointmentSlot)}
+              </T>
+            ) : null}
             {promise && !hold ? (
               <T variant="caption" style={{ marginTop: 4 }}>
                 {promise.label}
@@ -305,7 +321,15 @@ export function HomeScreen() {
   const { resolve: requestLocation } = useDeviceLocation({ refreshOnMount: false });
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
-  const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
+  const home = useHome<HomeFeed>(locationFix?.latitude, locationFix?.longitude);
+  // STALE-WHILE-REVALIDATE. The skeleton is for the very first load with
+  // nothing cached (homeFeedState → 'loading'); every later focus, foreground
+  // or invalidation refresh keeps the feed on screen and is silent. The pull
+  // spinner is the person's own gesture, so it is NOT bound to the query's
+  // isRefetching — that flag is true during those silent refreshes too, and
+  // on iOS it scrolled the whole feed down behind a spinner on every tab
+  // switch (lib/pullToRefresh).
+  const pull = usePullToRefresh(home.refetch);
   const attentionGate = React.useMemo(
     () => createHomeRefreshGate(() => { void qc.invalidateQueries({ queryKey: customerKeys.homeAll, refetchType: 'active' }); }, 750),
     [qc],
@@ -502,7 +526,7 @@ export function HomeScreen() {
         refreshControl={
           // The pull now happens on paper, not on the maroon wash, so the
           // spinner has to be brand — white on white is an invisible spinner.
-          <RefreshControl refreshing={home.isRefetching} onRefresh={() => home.refetch()} tintColor={color.brand[500]} />
+          <RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />
         }
       >
         {/* THE LIVE ORDER, FIRST — and it used to say so while rendering fourth.
@@ -521,15 +545,15 @@ export function HomeScreen() {
             order this renders nothing and the food is still the first thing on
             Home. An order in flight is not a launcher tile — it is transient,
             it is timed, and while it exists it outranks browsing. */}
+        {/* A failed refresh over retained content says so — honestly, with the
+            way to retry. A refresh that is merely in flight says nothing: the
+            "Updating Home…" line that used to sit here pushed the live-order
+            card down on every tab switch, which read as a reload. */}
         {home.isError && feed ? (
           <Card style={{ marginHorizontal: GUTTER, marginTop: space.lg }}>
             <T variant="label">Couldn’t update Home. Showing the last loaded feed, including its order status.</T>
             <PillButton size="sm" label="Try again" onPress={() => { void home.refetch(); }} />
           </Card>
-        ) : home.isFetching && feed ? (
-          <T variant="caption" tone="muted" style={{ marginHorizontal: GUTTER, marginTop: space.sm }}>
-            Updating Home…
-          </T>
         ) : null}
         {activeOrder ? <LiveOrderCard order={activeOrder} navigation={navigation} /> : null}
 
