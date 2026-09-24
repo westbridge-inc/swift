@@ -6,7 +6,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { Image } from 'expo-image';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
-import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill } from '../../../kit';
+import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill, useLogoutConfirm } from '../../../kit';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
@@ -30,7 +30,13 @@ import { useMoverPreview } from '../../../stores/moverPreview';
 
 export function MoverAccountScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
-  const { user, logout } = useAuthStore();
+  const { user } = useAuthStore();
+  // What the server does when a mover logs out (mover-authority.ts): the mover
+  // goes offline, and a job not yet picked up is released back to dispatch. A
+  // job already in their hands stays theirs; operations are paged.
+  const { requestLogout, logoutDialog } = useLogoutConfirm({
+    body: 'You’ll go offline, and a job you haven’t picked up yet goes back to dispatch. Your earnings, vehicle and documents stay with your account.',
+  });
   const [switcherOpen, setSwitcherOpen] = React.useState(false);
   const { kind, profile } = useMoverKind();
   const standingQ = useMoverStanding<any>(kind);
@@ -257,11 +263,12 @@ export function MoverAccountScreen({ navigation }: any) {
           </T>
         </Card>
 
-        <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={logout} />
+        <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={requestLogout} />
       </ScrollView>
 
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
       {stepUp.sheet}
+      {logoutDialog}
     </Screen>
   );
 }

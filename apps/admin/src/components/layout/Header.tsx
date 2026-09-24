@@ -1,5 +1,6 @@
 'use client';
 
+import { useRef } from 'react';
 import { LogOut } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { logout } from '@/lib/api';
@@ -7,8 +8,15 @@ import { GlobalSearch } from './GlobalSearch';
 
 export function Header() {
   const router = useRouter();
+  const signingOut = useRef(false);
 
   async function handleLogout() {
+    // Ask first, like every sign-out in Swift, in this console's own confirm
+    // (each irreversible admin action asks through window.confirm). Once
+    // confirmed, a second click cannot start a second sign-out.
+    if (signingOut.current) return;
+    if (!window.confirm('Sign out of Swift Admin on this browser?')) return;
+    signingOut.current = true;
     // [A-01] revoke on the server (family + cookies); the shell fails closed to /login either way
     await logout();
     router.replace('/login');

@@ -84,9 +84,11 @@ describe('no business screen is a one-way door', () => {
   it('the vendor header always offers Log out, and Switch app wherever a screen asks for it', () => {
     const header = fn(SHARED, 'TabHeader');
 
-    expect(header).toMatch(/const \{ logout \} = useAuthStore\(\)/);
+    // Log out asks first: the header opens the shared confirm and renders it.
+    expect(header).toMatch(/const \{ requestLogout, logoutDialog \} = useLogoutConfirm\(\{ body: logoutBody \}\)/);
     expect(header).toMatch(/\{onSwitch \? <HeaderAction label="Switch app" onPress=\{onSwitch\} \/> : null\}/);
-    expect(header).toMatch(/\n\s*<HeaderAction label="Log out" tone="muted" onPress=\{logout\} \/>/);
+    expect(header).toMatch(/\n\s*<HeaderAction label="Log out" tone="muted" onPress=\{requestLogout\} \/>/);
+    expect(header).toContain('{logoutDialog}');
   });
 });
 

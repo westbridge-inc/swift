@@ -146,7 +146,13 @@ export function BusinessSetup() {
 
   return (
     <Screen>
-      <TabHeader title="Sell on Swift" onSwitch={() => setSwitcherOpen(true)} />
+      {/* The draft lives in memory and the auth store clears it at logout, so
+          the ask says so: nothing here reaches Swift until it is submitted. */}
+      <TabHeader
+        title="Sell on Swift"
+        onSwitch={() => setSwitcherOpen(true)}
+        logoutBody="Nothing on this form has been sent yet, so what you’ve typed is cleared from this device."
+      />
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <T variant="title">List your business</T>

@@ -72,3 +72,5 @@ export * from './calm-radar';
 export * from './trust-halo';
 // [#910's law] modal exits close in their own tick; navigation goes here.
 export * from './after-dismiss';
+// The one "Log out of Swift?" ask. Every log-out control goes through it.
+export * from './logout-confirm';

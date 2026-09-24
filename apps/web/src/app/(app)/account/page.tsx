@@ -2,12 +2,11 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import { Receipt, MapPin, LogOut, ChevronRight } from 'lucide-react';
-import { apiFetch, logout } from '@/lib/auth';
+import { SignOutButton } from '@/components/sign-out-button';
+import { apiFetch } from '@/lib/auth';
 
 export default function AccountPage() {
-  const router = useRouter();
   const [me, setMe] = useState<any>(null);
   useEffect(() => { apiFetch('/api/v1/customer/profile').then((r) => setMe(r.data)).catch(() => {}); }, []);
 
@@ -38,9 +37,14 @@ export default function AccountPage() {
         ))}
       </div>
 
-      <button onClick={() => { void logout().then(() => router.replace('/')); }} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-[var(--swift-red)] py-3 font-bold text-[var(--swift-red)]">
+      {/* The cart is kept by the server, so it waits for the next sign-in. */}
+      <SignOutButton
+        className="flex w-full items-center justify-center gap-2 rounded-2xl border border-[var(--swift-red)] py-3 font-bold text-[var(--swift-red)]"
+        body="You’ll need to sign in again to order in this browser. Your orders, addresses and cart stay with your account."
+        redirectTo="/"
+      >
         <LogOut className="h-4 w-4" /> Sign out
-      </button>
+      </SignOutButton>
     </div>
   );
 }

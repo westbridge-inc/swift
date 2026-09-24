@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, LabeledInput, LinkText, PillButton, Screen, T } from '../../../kit';
+import { Card, LabeledInput, LinkText, PillButton, Screen, T, useLogoutConfirm } from '../../../kit';
 import { SwiftMark } from '../../../components/SwiftLogo';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
@@ -227,7 +227,13 @@ export function VehicleSetup({
 }
 
 export function MoverOnboardingScreen({ status }: { status: any }) {
-  const { logout, moverPreset } = useAuthStore();
+  const { moverPreset } = useAuthStore();
+  // Signing up is mostly already on the server: the vehicle is saved by its
+  // button and every document uploads the moment it is picked. The only thing
+  // held on this device is a vehicle form not yet saved.
+  const { requestLogout, logoutDialog } = useLogoutConfirm({
+    body: 'Anything you’ve saved or uploaded stays with your account. Vehicle details you haven’t saved yet are cleared.',
+  });
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const savedVehicle: VehicleKind | null = status?.vehicleType ?? null;
   // Default the vehicle from what they picked on the entry screen: a taxi
@@ -253,7 +259,7 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
         <SwiftMark size={28} />
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
           <LinkText label="Switch app" onPress={() => setSwitcherOpen(true)} />
-          <LinkText label="Log out" tone="muted" onPress={logout} />
+          <LinkText label="Log out" tone="muted" onPress={requestLogout} />
         </View>
       </View>
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
@@ -330,6 +336,7 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
 
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
       {stepUp.sheet}
+      {logoutDialog}
     </Screen>
   );
 }

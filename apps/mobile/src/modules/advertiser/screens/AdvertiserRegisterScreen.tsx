@@ -6,7 +6,7 @@ import { color, space } from '@swift/ui';
 import { Card, LabeledInput, PillButton, T } from '../../../kit';
 import { useRegisterAdvertiser } from '../../../hooks/advertiser';
 import { errorMessage } from '../../../lib/apiError';
-import { AdvertiserExitDialog } from '../AdvertiserExitDialog';
+import { useAdvertiserExitDialog } from '../AdvertiserExitDialog';
 
 // §4.2 — the advertiser application. Creates a PENDING_REVIEW Advertiser in
 // the founder's queue; the applicant becomes OWNER and lands in the gated
@@ -28,7 +28,7 @@ export function AdvertiserRegisterScreen() {
   const [contactPhone, setContactPhone] = useState('+592');
   const [website, setWebsite] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [confirmSwitch, setConfirmSwitch] = useState(false);
+  const exitDialog = useAdvertiserExitDialog();
 
   const submit = () => {
     setError(null);
@@ -108,12 +108,12 @@ export function AdvertiserRegisterScreen() {
           label="Log out and switch experience"
           icon="log-out"
           variant="outline"
-          onPress={() => setConfirmSwitch(true)}
+          onPress={exitDialog.requestLogout}
           style={{ marginTop: space.xl }}
         />
       </ScrollView>
 
-      <AdvertiserExitDialog visible={confirmSwitch} onClose={() => setConfirmSwitch(false)} />
+      {exitDialog.logoutDialog}
     </View>
   );
 }
