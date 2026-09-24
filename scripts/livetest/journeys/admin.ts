@@ -8,7 +8,7 @@ import type { Ctx } from './context.js';
 import { asAdmin, submitDoc, approveDoc, vendorOf } from '../provision.js';
 import { freshVendor } from './vendor.js';
 import { twoPerson } from './admin-util.js';
-import { mover, onlineOf, pollOffer, placeExpress, storeAccepts, freeRider, riderToDoor, handoverPaid, storeReadies } from './dispatch.js';
+import { mover, onlineOf, pollOffer, placeExpress, storeAccepts, freeRider, riderToDoor, handoverPaid, doorPin, storeReadies } from './dispatch.js';
 import { registerFresh } from './auth.js';
 
 const FORGED = 'cl0000000000000000000forged';
@@ -109,7 +109,7 @@ export const ADMIN_02: Journey<Ctx> = {
       await storeReadies(ctx, 'R1', id);
       await riderToDoor(mover(ctx, got.moverId).session, id);
       const C5 = ctx.roster.customers.C5!;
-      await handoverPaid(mover(ctx, got.moverId).session, id, { lat: C5.lat, lng: C5.lng });
+      await handoverPaid(mover(ctx, got.moverId).session, id, { lat: C5.lat, lng: C5.lng }, await doorPin(C5.session, id));
     }
     rec.skipAll('the defining case — a food-age hold and its release — cannot be produced here: a hold needs a platform-rider delivery paid by MMG (captured or claimed) whose ready time passes the 45-minute food-age limit, and MMG orders need a vendor pay link (SMS step-up). The redispatch and rider-accept parts above ran for real');
   },
