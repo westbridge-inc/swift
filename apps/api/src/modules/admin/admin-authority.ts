@@ -383,6 +383,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // authorises is still gated on its own class when the requester re-issues it.
   'GET /approvals': c('C0', 'approvals.read'),
   'POST /approvals/:id/decide': c('C3', 'approvals.decide', E.approval),
+  // [DS110-14] Executing a decision is not itself a decision: the approval
+  // already carries the two-person authorisation, and the replayed request
+  // passes through its own C4/C5 gate again. C2 — no new reason, no new
+  // approval — so "apply" can never need a second approval of its own.
+  'POST /approvals/:id/apply': c('C2', 'approvals.apply', E.approval),
 
   // ── Support and audit ───────────────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),

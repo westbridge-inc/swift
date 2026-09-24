@@ -1,4 +1,6 @@
-const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
+export const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
+/** The header the server reads first for the reason law (ADM-006). */
+const REASON_HEADER = 'x-swift-reason';
 
 // ── The session ──────────────────────────────────────────────────────────────
 // [A-01] THE CONSOLE HOLDS NO CREDENTIAL. The session is an HttpOnly cookie pair
@@ -49,15 +51,25 @@ export async function logout(): Promise<void> {
   }
 }
 
-async function apiFetch(path: string, options?: RequestInit) {
+/**
+ * The ONE transport for a stated reason. `reason` rides the `x-swift-reason`
+ * header, which the server reads before the body — some bodies (config, price
+ * books) have no room for a `reason` key, and one mechanism beats twenty-six.
+ * Helpers that also carry a domain `reason` in the body send the SAME string
+ * in both places; the header satisfies the gate, the body keeps the domain
+ * field (the vendor-visible waiver reason, the ban's record, …).
+ */
+async function apiFetch(path: string, options?: RequestInit & { reason?: string }) {
+  const { reason, ...requestOptions } = options ?? {};
   const doFetch = () =>
     fetch(`${API_URL}${path}`, {
-      ...options,
+      ...requestOptions,
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
         ...clientHeaders,
-        ...options?.headers,
+        ...(reason ? { [REASON_HEADER]: reason } : {}),
+        ...requestOptions.headers,
       },
     });
   let res = await doFetch();
@@ -256,9 +268,9 @@ export const fetchVendorDetail = (id: string) => apiFetch(`/api/v1/admin/vendors
 export const fetchRiderDetail = (id: string) => apiFetch(`/api/v1/admin/riders/${id}`);
 export const fetchDriverDetail = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}`);
 export const banUser = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }) });
-export const suspendVendor = (id: string, reason?: string) =>
-  apiFetch(`/api/v1/admin/vendors/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }) });
+  apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+export const suspendVendor = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/vendors/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const featureVendor = (id: string, featured: boolean) =>
   apiFetch(`/api/v1/admin/vendors/${id}/feature`, { method: 'PUT', body: JSON.stringify({ featured }) });
 
@@ -267,41 +279,42 @@ export const fetchSubscriptions = (params?: string) => apiFetch(`/api/v1/admin/s
 // [A-12] The reason is REQUIRED — a waiver with no stated reason is revenue
 // given away with no record of why.
 export const waiveSubscriptionFee = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/subscriptions/${id}/waive-fee`, { method: 'PUT', body: JSON.stringify({ reason }) });
+  apiFetch(`/api/v1/admin/subscriptions/${id}/waive-fee`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 // [M-08] The server REQUIRES an Idempotency-Key on a top-up: a retry after a
 // lost response returns the same result instead of crediting twice. The key
 // belongs to the ATTEMPT and the page owns it — this client never mints one.
 // [A-12] The provider transaction reference is REQUIRED: it is the identity of
 // the money that arrived, and it is what stops one transfer being credited twice.
-export const topUpSubscription = (id: string, amount: number, reference: string, idempotencyKey: string) =>
+export const topUpSubscription = (id: string, amount: number, reference: string, idempotencyKey: string, reason: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/topup`, {
     method: 'POST',
     body: JSON.stringify({ amount, reference }),
     headers: { 'Idempotency-Key': idempotencyKey },
+    reason,
   });
 export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);
 export const fetchSettlements = (params?: string) => apiFetch(`/api/v1/admin/finance/settlements?${params || 'limit=50'}`);
-export const processSettlement = (id: string, reference?: string) =>
-  apiFetch(`/api/v1/admin/finance/settlements/${id}/process`, { method: 'PUT', body: JSON.stringify({ reference }) });
+export const processSettlement = (id: string, reference: string | undefined, reason: string) =>
+  apiFetch(`/api/v1/admin/finance/settlements/${id}/process`, { method: 'PUT', body: JSON.stringify({ reference }), reason });
 export const fetchClaims = (status?: string) =>
   apiFetch(`/api/v1/admin/cash-rules/claims?limit=50${status ? `&status=${status}` : ''}`);
-export const approveClaim = (id: string, reason?: string) =>
-  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/approve`, { method: 'PUT', body: JSON.stringify({ reason }) });
+export const approveClaim = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/approve`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const rejectClaim = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
+  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 // [A-11] The payout carries its evidence: a unique transfer reference AND the
 // amount actually sent, which the server checks against the claim's own figure.
-export const payClaim = (id: string, reference: string, amount: string | number) =>
-  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/paid`, { method: 'PUT', body: JSON.stringify({ reference, amount }) });
+export const payClaim = (id: string, reference: string, amount: string | number, reason: string) =>
+  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/paid`, { method: 'PUT', body: JSON.stringify({ reference, amount }), reason });
 export const fetchCashMetrics = () => apiFetch('/api/v1/admin/cash-rules/metrics');
 // [DOC-1 §31.4 · P31-1] The loss-protection reserve line and the mover's protection.
 export const fetchRlpReserve = (country = 'GY') => apiFetch(`/api/v1/admin/cash-rules/rlp/reserve?country=${encodeURIComponent(country)}`);
-export const adjustRlpReserve = (countryCode: string, amount: number, note: string) =>
-  apiFetch('/api/v1/admin/cash-rules/rlp/reserve/adjust', { method: 'POST', body: JSON.stringify({ countryCode, amount, note }) });
+export const adjustRlpReserve = (countryCode: string, amount: number, note: string, reason: string) =>
+  apiFetch('/api/v1/admin/cash-rules/rlp/reserve/adjust', { method: 'POST', body: JSON.stringify({ countryCode, amount, note }), reason });
 export const suspendLossProtection = (userId: string, reason: string) =>
-  apiFetch(`/api/v1/admin/cash-rules/rlp/movers/${userId}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }) });
-export const reinstateLossProtection = (userId: string, note?: string) =>
-  apiFetch(`/api/v1/admin/cash-rules/rlp/movers/${userId}/reinstate`, { method: 'PUT', body: JSON.stringify({ note }) });
+  apiFetch(`/api/v1/admin/cash-rules/rlp/movers/${userId}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+export const reinstateLossProtection = (userId: string, note: string | undefined, reason: string) =>
+  apiFetch(`/api/v1/admin/cash-rules/rlp/movers/${userId}/reinstate`, { method: 'PUT', body: JSON.stringify({ note }), reason });
 
 // ─── Support & comms ─────────────────────────────────────────────
 export const fetchSupportTickets = (status?: string) =>
@@ -324,17 +337,18 @@ export const fetchReturns = (status?: string) =>
 // [A-13] "Refund" records an OBLIGATION (REFUND_DUE), not a completed payment.
 // A return only reaches REFUNDED through settleReturnRefund below, with the
 // transfer reference and the amount actually sent.
-export const resolveReturn = (id: string, status: 'APPROVED' | 'REJECTED' | 'REFUND_DUE', note?: string) =>
-  apiFetch(`/api/v1/admin/returns/${id}/resolve`, { method: 'PUT', body: JSON.stringify({ status, note }) });
+export const resolveReturn = (id: string, status: 'APPROVED' | 'REJECTED' | 'REFUND_DUE', note: string | undefined, reason: string) =>
+  apiFetch(`/api/v1/admin/returns/${id}/resolve`, { method: 'PUT', body: JSON.stringify({ status, note }), reason });
 
 /** The money actually moved: a unique transfer reference and the amount sent. */
-export const settleReturnRefund = (id: string, reference: string, amount: string | number, note?: string) =>
+export const settleReturnRefund = (id: string, reference: string, amount: string | number, note: string | undefined, reason: string) =>
   apiFetch(`/api/v1/admin/returns/${id}/refund-settled`, {
     method: 'PUT',
     body: JSON.stringify({ reference, amount, ...(note ? { note } : {}) }),
+    reason,
   });
-export const broadcastNotification = (body: { title: string; body: string; role?: string; category: 'service' | 'marketing' }) =>
-  apiFetch('/api/v1/admin/notifications/broadcast', { method: 'POST', body: JSON.stringify(body) });
+export const broadcastNotification = (body: { title: string; body: string; role?: string; category: 'service' | 'marketing' }, reason: string) =>
+  apiFetch('/api/v1/admin/notifications/broadcast', { method: 'POST', body: JSON.stringify(body), reason });
 
 // ─── Live ops + markets ──────────────────────────────────────────
 export interface LiveOps {
@@ -357,10 +371,10 @@ export const fetchCountries = () => apiFetch('/api/v1/admin/countries');
 // ─── Compliance (liability shield) ───────────────────────────────
 export const fetchCompliance = () => apiFetch('/api/v1/admin/compliance');
 export const runComplianceAudit = () => apiFetch('/api/v1/admin/compliance/run', { method: 'POST', body: '{}' });
-export const decideComplianceReview = (id: string, pass: boolean, note?: string) =>
-  apiFetch(`/api/v1/admin/compliance/reviews/${id}/decide`, { method: 'POST', body: JSON.stringify({ pass, ...(note ? { note } : {}) }) });
-export const resolveComplianceViolation = (id: string) =>
-  apiFetch(`/api/v1/admin/compliance/violations/${id}/resolve`, { method: 'POST', body: '{}' });
+export const decideComplianceReview = (id: string, pass: boolean, note: string | undefined, reason: string) =>
+  apiFetch(`/api/v1/admin/compliance/reviews/${id}/decide`, { method: 'POST', body: JSON.stringify({ pass, ...(note ? { note } : {}) }), reason });
+export const resolveComplianceViolation = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/compliance/violations/${id}/resolve`, { method: 'POST', body: '{}', reason });
 
 // ─── Global ⌘K search ────────────────────────────────────────────
 export interface GlobalSearchResult {
@@ -416,33 +430,34 @@ export interface CreatePromoInput {
   maxUses?: number;
   maxUsesPerUser?: number;
 }
-export const createPromo = (body: CreatePromoInput) =>
-  apiFetch('/api/v1/admin/promos', { method: 'POST', body: JSON.stringify(body) });
+export const createPromo = (body: CreatePromoInput, reason: string) =>
+  apiFetch('/api/v1/admin/promos', { method: 'POST', body: JSON.stringify(body), reason });
 export const fetchConfig = (): Promise<Envelope<ConfigRow[]>> => apiFetch('/api/v1/admin/config');
 export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit-logs?${params || 'limit=50'}`);
 
-export const approveVendor = (id: string) => apiFetch(`/api/v1/admin/vendors/${id}/approve`, { method: 'PUT' });
-export const verifyRiderDocuments = (id: string) => apiFetch(`/api/v1/admin/riders/${id}/verify-documents`, { method: 'PUT' });
-export const verifyDriverDocuments = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}/verify-documents`, { method: 'PUT' });
-export const setDriverRideClass = (id: string, rideClass: string) =>
-  apiFetch(`/api/v1/admin/drivers/${id}/ride-class`, { method: 'PUT', body: JSON.stringify({ rideClass }) });
+export const approveVendor = (id: string, reason: string) => apiFetch(`/api/v1/admin/vendors/${id}/approve`, { method: 'PUT', reason });
+export const verifyRiderDocuments = (id: string, reason: string) => apiFetch(`/api/v1/admin/riders/${id}/verify-documents`, { method: 'PUT', reason });
+export const verifyDriverDocuments = (id: string, reason: string) => apiFetch(`/api/v1/admin/drivers/${id}/verify-documents`, { method: 'PUT', reason });
+export const setDriverRideClass = (id: string, rideClass: string, reason: string) =>
+  apiFetch(`/api/v1/admin/drivers/${id}/ride-class`, { method: 'PUT', body: JSON.stringify({ rideClass }), reason });
 // [A-14] `refund: true` records that a refund is OWED. It does not mark
 // anything refunded — settleOrderRefund below is the only thing that can.
-export const cancelOrder = (id: string, body: { reason: string; refund?: boolean }) =>
-  apiFetch(`/api/v1/admin/orders/${id}/cancel`, { method: 'PUT', body: JSON.stringify(body) });
+export const cancelOrder = (id: string, body: { refund?: boolean }, reason: string) =>
+  apiFetch(`/api/v1/admin/orders/${id}/cancel`, { method: 'PUT', body: JSON.stringify({ ...body, reason }), reason });
 
 /** The cash actually went back: a unique reference and the amount handed over. */
-export const settleOrderRefund = (id: string, reference: string, amount: string | number) =>
+export const settleOrderRefund = (id: string, reference: string, amount: string | number, reason: string) =>
   apiFetch(`/api/v1/admin/orders/${id}/refund-settled`, {
     method: 'PUT',
     body: JSON.stringify({ reference, amount }),
+    reason,
   });
 export const suspendUser = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/users/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }) });
-export const unsuspendUser = (id: string) =>
-  apiFetch(`/api/v1/admin/users/${id}/unsuspend`, { method: 'PUT', body: JSON.stringify({}) });
-export const updateConfig = (key: string, value: unknown) =>
-  apiFetch(`/api/v1/admin/config/${key}`, { method: 'PUT', body: JSON.stringify({ value }) });
+  apiFetch(`/api/v1/admin/users/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+export const unsuspendUser = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/unsuspend`, { method: 'PUT', body: JSON.stringify({}), reason });
+export const updateConfig = (key: string, value: unknown, reason: string) =>
+  apiFetch(`/api/v1/admin/config/${key}`, { method: 'PUT', body: JSON.stringify({ value }), reason });
 
 // ─── Verification Center ─────────────────────────────────────────
 export interface InsuranceCheck {
@@ -473,7 +488,8 @@ export const resolveModerationReport = (
     authorityRef?: string;
     evidencePreserved?: boolean;
   },
-) => apiFetch(`/api/v1/admin/moderation/reports/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+  reason: string,
+) => apiFetch(`/api/v1/admin/moderation/reports/${id}`, { method: 'PUT', body: JSON.stringify(body), reason });
 
 // The OTHER two moderation queues, also without a caller until now:
 // `ratings/moderation` returns both the reviews auto-HELD by the profanity
@@ -482,14 +498,15 @@ export const resolveModerationReport = (
 // upholding a rating report REMOVES the review, while resolving a content
 // report only records the decision.
 export const fetchRatingsModeration = () => apiFetch('/api/v1/admin/ratings/moderation');
-export const resolveRatingReport = (id: string, action: 'uphold' | 'dismiss') =>
-  apiFetch(`/api/v1/admin/rating-reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }) });
+export const resolveRatingReport = (id: string, action: 'uphold' | 'dismiss', reason: string) =>
+  apiFetch(`/api/v1/admin/rating-reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }), reason });
 // [ADM-006] `category` says which rule was broken; `reason` is what the
 // operator actually saw, in their words, and the server requires it.
 export const moderateRating = (
   id: string,
-  body: { action: 'publish' | 'remove' | 'exclude'; category?: string; reason: string },
-) => apiFetch(`/api/v1/admin/ratings/${id}/moderate`, { method: 'POST', body: JSON.stringify(body) });
+  body: { action: 'publish' | 'remove' | 'exclude'; category?: string },
+  reason: string,
+) => apiFetch(`/api/v1/admin/ratings/${id}/moderate`, { method: 'POST', body: JSON.stringify({ ...body, reason }), reason });
 
 // Swift Ads review — the two gates on the whole ads revenue path. An
 // advertiser registers from the app and lands at PENDING_REVIEW; a creative
@@ -497,14 +514,14 @@ export const moderateRating = (
 // so nobody could pass either gate and no ad could ever run.
 export const fetchAdvertiserQueue = (status = 'PENDING_REVIEW') =>
   apiFetch(`/api/v1/admin/ads/advertisers/queue?status=${status}`);
-export const approveAdvertiser = (id: string) =>
-  apiFetch(`/api/v1/admin/ads/advertisers/${id}/approve`, { method: 'PUT', body: JSON.stringify({}) });
+export const approveAdvertiser = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/ads/advertisers/${id}/approve`, { method: 'PUT', body: JSON.stringify({}), reason });
 export const rejectAdvertiser = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/ads/advertisers/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
+  apiFetch(`/api/v1/admin/ads/advertisers/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const suspendAdvertiser = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/ads/advertisers/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }) });
-export const reinstateAdvertiser = (id: string) =>
-  apiFetch(`/api/v1/admin/ads/advertisers/${id}/reinstate`, { method: 'PUT', body: JSON.stringify({}) });
+  apiFetch(`/api/v1/admin/ads/advertisers/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+export const reinstateAdvertiser = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/ads/advertisers/${id}/reinstate`, { method: 'PUT', body: JSON.stringify({}), reason });
 
 export const fetchCreativeQueue = () => apiFetch('/api/v1/admin/ads/creatives/queue');
 export const approveCreative = (id: string) =>
@@ -519,10 +536,10 @@ export const fetchVerificationQueue = (status = 'PENDING', role = 'operator') =>
   apiFetch(`/api/v1/admin/verification/queue?status=${status}&role=${role}&limit=100`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
-export const approveDoc = (id: string, body?: { expiresAt?: string; insurance?: InsuranceCheck }) =>
-  apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}) });
+export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck } | undefined, reason: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}), reason });
 export const rejectDoc = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
+  apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 
 // ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
 // GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been
@@ -559,8 +576,8 @@ function identity(row: Pick<DeadLetter, 'name' | 'finishedOn'>): string {
 
 export const requeueDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>) =>
   apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue${identity(row)}`, { method: 'POST' });
-export const discardDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>) =>
-  apiFetch(`/api/v1/admin/dlq/${queue}/${id}${identity(row)}`, { method: 'DELETE' });
+export const discardDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>, reason: string) =>
+  apiFetch(`/api/v1/admin/dlq/${queue}/${id}${identity(row)}`, { method: 'DELETE', reason });
 
 // ---------------------------------------------------------------------------
 // Category discovery governance.
@@ -624,8 +641,8 @@ export const rejectDiscoveryRequest = (id: string, reason: string) =>
 
 /** Merge a category into another. `mergedIntoId` is why an existing slug is
  *  never edited — the redirect is the migration. */
-export const mergeDiscoveryCategory = (id: string, targetId: string) =>
-  apiFetch(`/api/v1/admin/discovery/categories/${id}/merge-into`, { method: 'POST', body: JSON.stringify({ targetId }) });
+export const mergeDiscoveryCategory = (id: string, targetId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/discovery/categories/${id}/merge-into`, { method: 'POST', body: JSON.stringify({ targetId }), reason });
 
 /** Enqueue the backfill. Returns 503 QUEUES_OFF when the worker fleet is not
  *  running — a real and expected state, not a generic failure, so the page says
@@ -687,7 +704,13 @@ export const decideApproval = (id: string, approve: boolean, note: string) =>
   apiFetch(`/api/v1/admin/approvals/${id}/decide`, {
     method: 'POST',
     body: JSON.stringify({ approve, reason: note, note }),
+    reason: note,
   });
+// [DS110-14] Executes an APPROVED action: the server replays the STORED body
+// through the normal gate — the console supplies no body, so what executes is
+// always what the approver read.
+export const applyApproval = (id: string) =>
+  apiFetch(`/api/v1/admin/approvals/${id}/apply`, { method: 'POST', body: '{}' });
 
 // ── The agent-cash rail [SAN spec Part 4] ────────────────────────────────────
 // Partners pay their weekly fee in CASH at an MMG agent, quoting their SAN.
@@ -709,21 +732,37 @@ export const attachAgentPayment = (id: string, subscriptionId: string, reason: s
   apiFetch(`/api/v1/admin/billing/agent-payments/${id}/attach`, {
     method: 'POST',
     body: JSON.stringify({ subscriptionId, reason }),
+    reason,
   });
+// [DS110-14] The reason law reads the HEADER; the route's own schema names the
+// field written to the payment row `note`. Sending `{ reason }` here passed the
+// header gate and then 400'd on the missing required `note` — the same
+// sentence travels as both, exactly like `decideApproval`.
 export const flagAgentPaymentRefund = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/billing/agent-payments/${id}/refund-flag`, {
     method: 'POST',
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify({ note: reason }),
+    reason,
   });
 export const noteAgentPayment = (id: string, note: string) =>
   apiFetch(`/api/v1/admin/billing/agent-payments/${id}/note`, {
     method: 'POST',
     body: JSON.stringify({ note }),
   });
-export const confirmSettlementDeposit = (id: string, reason: string) =>
+// [DS110-14 / M-22] The deposit's EVIDENCE is what the route requires: the
+// amount that landed, when it landed, and the bank reference that identifies
+// it. A `{ reason }` body passed the header gate and then 400'd on the three
+// required fields. No page calls this yet (the Batches tab is read-only), but
+// the helper is correct by construction for the page that will.
+export const confirmSettlementDeposit = (
+  id: string,
+  deposit: { depositedGyd: number; depositedAt: string; bankRef: string },
+  reason: string,
+) =>
   apiFetch(`/api/v1/admin/billing/settlement-batches/${id}/confirm-deposit`, {
     method: 'POST',
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify(deposit),
+    reason,
   });
 export const recordCollectionContact = (
   subscriptionId: string,

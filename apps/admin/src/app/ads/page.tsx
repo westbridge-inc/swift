@@ -13,6 +13,7 @@ import {
   suspendAdvertiser,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
+import { askReason, reasonTooShort } from '@/lib/ask-reason';
 
 // ---------------------------------------------------------------------------
 // Swift Ads has two gates, and until now neither had a human standing at it.
@@ -71,11 +72,11 @@ export default function AdsReviewPage() {
   const onError = (e: unknown) => setMutationError(e);
 
   const advertiserAction = useMutation({
-    mutationFn: ({ id, action }: { id: string; action: 'approve' | 'reject' | 'suspend' | 'reinstate' }) => {
-      if (action === 'approve') return approveAdvertiser(id);
-      if (action === 'reinstate') return reinstateAdvertiser(id);
-      if (action === 'reject') return rejectAdvertiser(id, reason.trim());
-      return suspendAdvertiser(id, reason.trim());
+    mutationFn: ({ id, action, reason: stated }: { id: string; action: 'approve' | 'reject' | 'suspend' | 'reinstate'; reason: string }) => {
+      if (action === 'approve') return approveAdvertiser(id, stated);
+      if (action === 'reinstate') return reinstateAdvertiser(id, stated);
+      if (action === 'reject') return rejectAdvertiser(id, stated);
+      return suspendAdvertiser(id, stated);
     },
     onMutate: () => setMutationError(null),
     onError,
@@ -93,9 +94,9 @@ export default function AdsReviewPage() {
   const advertiserRows: any[] = advertisers.data?.data ?? [];
   const creativeRows: any[] = creatives.data?.data ?? [];
   const busy = advertiserAction.isPending || creativeAction.isPending;
-  // The route demands 3+ characters; disabling here rather than letting the
-  // reviewer discover it as a 400 after typing a decision.
-  const reasonReady = reason.trim().length >= 3;
+  // [DS110-14] The server floor is 12 characters, not 3 — a 3-character
+  // answer passed this screen and 400'd at the gate.
+  const reasonReady = !reasonTooShort(reason);
 
   return (
     <div>
@@ -185,7 +186,7 @@ export default function AdsReviewPage() {
                       <div className="flex gap-2">
                         <button
                           disabled={busy || !reasonReady}
-                          onClick={() => advertiserAction.mutate({ id: a.id, action: status === 'APPROVED' ? 'suspend' : 'reject' })}
+                          onClick={() => advertiserAction.mutate({ id: a.id, action: status === 'APPROVED' ? 'suspend' : 'reject', reason: reason.trim() })}
                           className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
                         >
                           {status === 'APPROVED' ? 'Suspend' : 'Reject'}
@@ -204,7 +205,7 @@ export default function AdsReviewPage() {
                       {status === 'PENDING_REVIEW' || status === 'SUSPENDED' ? (
                         <button
                           disabled={busy}
-                          onClick={() => advertiserAction.mutate({ id: a.id, action: 'approve' })}
+                          onClick={() => { const stated = askReason({ action: 'approve this advertiser', subject: a.companyName }); if (stated) advertiserAction.mutate({ id: a.id, action: 'approve', reason: stated }); }}
                           className="px-3 py-1.5 rounded-lg text-xs bg-green-500/20 text-green-400 disabled:opacity-50"
                         >
                           Approve
@@ -213,7 +214,7 @@ export default function AdsReviewPage() {
                       {status === 'REJECTED' || status === 'SUSPENDED' ? (
                         <button
                           disabled={busy}
-                          onClick={() => advertiserAction.mutate({ id: a.id, action: 'reinstate' })}
+                          onClick={() => { const stated = askReason({ action: 'reinstate this advertiser', subject: a.companyName }); if (stated) advertiserAction.mutate({ id: a.id, action: 'reinstate', reason: stated }); }}
                           className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                         >
                           Reinstate

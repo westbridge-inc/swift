@@ -17,7 +17,7 @@ export default function UsersPage() {
     // [ADM-006] The reason was the constant 'Suspended by admin' — a field,
     // not an explanation. The operator states one, or nothing happens.
     mutationFn: ({ id, suspended, reason }: { id: string; suspended: boolean; reason: string }) =>
-      suspended ? unsuspendUser(id) : suspendUser(id, reason),
+      suspended ? unsuspendUser(id, reason) : suspendUser(id, reason),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
   });
 

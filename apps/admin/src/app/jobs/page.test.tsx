@@ -1,6 +1,6 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import JobsPage from './page';
 import { mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
@@ -93,6 +93,7 @@ describe('discard is permanent, so it asks first', () => {
   });
 
   it('deletes only after the named confirmation', async () => {
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue('The job has exhausted its retries and is safe to discard'));
     const fetchMock = mockApi(
       handler((r) =>
         r.url.pathname === '/api/v1/admin/dlq/settlement/910' && r.method === 'DELETE'
