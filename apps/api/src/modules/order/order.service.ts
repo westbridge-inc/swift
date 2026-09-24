@@ -1274,8 +1274,12 @@ export class OrderService {
             // LIFECYCLE_V2: born held (hidden from the vendor, free-cancel
             // window open). Express skips the hold — the customer paid 1.5x
             // for priority; making them wait would break the product promise.
+            // A booking skips it too [E20]: its free-cancel window is already
+            // slot-relative, so a hold would only delay the provider.
             holdExpiresAt:
-              holdWindowMs() != null && !(input.express === true && plan.fulfillment === 'DELIVERY')
+              holdWindowMs() != null
+              && plan.fulfillment !== 'APPOINTMENT'
+              && !(input.express === true && plan.fulfillment === 'DELIVERY')
                 ? new Date(now.getTime() + holdWindowMs()!)
                 : null,
             tipAmount: planTip,
@@ -1453,7 +1457,17 @@ export class OrderService {
       // one immutable answer for this idempotency key as a receipt. A crash
       // or a queue outage after this point can delay the tail; it can no
       // longer lose it, and a same-key retry can no longer place twice.
-      await persistCheckoutOutboxInTransaction(tx, { orders: created.map((o) => ({ id: o.id, tenantId: o.tenantId })), timing: queueTiming, now });
+      await persistCheckoutOutboxInTransaction(tx, {
+        orders: created.map((o) => ({
+          id: o.id,
+          tenantId: o.tenantId,
+          fulfillment: o.fulfillment,
+          appointmentSlot: o.appointmentSlot,
+          placedAt: o.placedAt,
+        })),
+        timing: queueTiming,
+        now,
+      });
       if (input.idempotency) {
         await persistCheckoutReceiptInTransaction(tx, {
           userId: input.userId, tenantId: user.tenantId, idempotencyKey: input.idempotency.key, requestHash: input.idempotency.requestHash,

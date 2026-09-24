@@ -22,6 +22,70 @@ export const AUTO_REJECT_KEY = 'order_auto_reject_minutes';
 /** The shipped default, used when neither config nor env supplies one. */
 export const DEFAULT_VENDOR_RESPONSE_SLA_MINUTES = 10;
 
+// [E20] A booking's no-response deadline. A food order's clock is hold + SLA
+// after placement — right for a kitchen that sees the order minutes after it
+// is placed, wrong for a haircut booked days ahead, which that clock would
+// cancel before any provider had to answer. A booking's clock is slot-relative
+// instead: the EARLIER of 24 hours after placement and 60 minutes before the
+// slot starts, floored at the ordinary vendor response SLA so a same-day
+// booking still gets the full time to answer.
+
+/** The furthest a booking's auto-cancel may wait: 24 hours after placement. */
+export const APPOINTMENT_AUTO_CANCEL_MAX_MS = 24 * 60 * 60_000;
+
+/** The lead before the slot the auto-cancel must not cross. */
+export const APPOINTMENT_AUTO_CANCEL_SLOT_LEAD_MS = 60 * 60_000;
+
+/**
+ * The delay (ms after placement) a booking's auto-cancel carries — ONE
+ * implementation shared by the checkout outbox writer and the vendor board's
+ * respondBy, so the clock the provider drains toward is the deadline the
+ * auto-cancel job actually enforces.
+ */
+export function appointmentAutoCancelDelayMs(
+  placedAt: Date,
+  appointmentSlot: Date | null,
+  slaMinutes: number,
+): number {
+  const candidates = [placedAt.getTime() + APPOINTMENT_AUTO_CANCEL_MAX_MS];
+  if (appointmentSlot != null) {
+    candidates.push(appointmentSlot.getTime() - APPOINTMENT_AUTO_CANCEL_SLOT_LEAD_MS);
+  }
+  const earliest = Math.min(...candidates);
+  return Math.max(slaMinutes * 60_000, earliest - placedAt.getTime());
+}
+
+/**
+ * The moment the vendor's response window closes for THIS order — the same
+ * deadline the auto-cancel job enforces (enqueued at placement with a delay of
+ * hold window + SLA, or a booking's slot-relative delay), so the vendor's
+ * accept-clock drains toward the real cut-off instead of one the client
+ * invented. Null once the order is no longer awaiting the vendor: a clock on
+ * an accepted order would be a lie.
+ *
+ * `holdMs` is `holdWindowMs() ?? 0` — the food auto-cancel delay includes the
+ * hold window whenever LIFECYCLE_V2 is on, held order or not, so this does
+ * too. A booking ignores the hold: it is born unheld, and its deadline is the
+ * slot-relative clock above.
+ */
+export function vendorRespondBy(
+  order: {
+    status: string;
+    placedAt: Date | null;
+    createdAt: Date;
+    fulfillment?: string | null;
+    appointmentSlot?: Date | null;
+  },
+  opts: { slaMinutes: number; holdMs: number },
+): Date | null {
+  if (order.status !== 'PENDING') return null;
+  const start = order.placedAt ?? order.createdAt;
+  if (order.fulfillment === 'APPOINTMENT') {
+    return new Date(start.getTime() + appointmentAutoCancelDelayMs(start, order.appointmentSlot ?? null, opts.slaMinutes));
+  }
+  return new Date(start.getTime() + opts.holdMs + opts.slaMinutes * 60_000);
+}
+
 /**
  * Minutes a vendor has to accept before the order auto-cancels.
  *
@@ -36,25 +100,6 @@ export const DEFAULT_VENDOR_RESPONSE_SLA_MINUTES = 10;
  * Bounded to a sane range so a typo (0.5, or 100000) cannot either cancel
  * orders out from under a busy kitchen or disable the deadline by inflation.
  */
-/**
- * The moment the vendor's response window closes for THIS order — the same
- * deadline the auto-cancel job enforces (enqueued at placement with a delay of
- * hold window + SLA), so the vendor's accept-clock drains toward the real
- * cut-off instead of one the client invented. Null once the order is no
- * longer awaiting the vendor: a clock on an accepted order would be a lie.
- *
- * `holdMs` is `holdWindowMs() ?? 0` — the auto-cancel delay includes the hold
- * window whenever LIFECYCLE_V2 is on, held order or not, so this does too.
- */
-export function vendorRespondBy(
-  order: { status: string; placedAt: Date | null; createdAt: Date },
-  opts: { slaMinutes: number; holdMs: number },
-): Date | null {
-  if (order.status !== 'PENDING') return null;
-  const start = order.placedAt ?? order.createdAt;
-  return new Date(start.getTime() + opts.holdMs + opts.slaMinutes * 60_000);
-}
-
 export async function vendorResponseSlaMinutes(prisma: PrismaClient): Promise<number> {
   const envFallback = Number(
     process.env['VENDOR_RESPONSE_SLA_MINUTES'] ?? DEFAULT_VENDOR_RESPONSE_SLA_MINUTES,

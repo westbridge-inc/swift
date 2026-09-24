@@ -10,8 +10,9 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { OrderService, ORDER_TRANSITIONS } from '../modules/order/order.service';
+import { OrderService, ORDER_TRANSITIONS, holdWindowMs } from '../modules/order/order.service';
 import { BookingService } from '../modules/booking/booking.service';
+import { vendorResponseSlaMinutes } from '../modules/order/response-sla';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { RatingService } from '../modules/rating/rating.service';
 
@@ -181,6 +182,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
+  await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: createdOrderIds } } });
   if (createdUserIds.length) {
     // A mid-test failure can strand a cart; it blocks user deletion (FK) and
     // poisons the next run with phone collisions. Sweep owned carts first.
@@ -837,6 +839,138 @@ describe('Appointments — booked at acceptance, never double-held', () => {
     expect(res.json().error.code).toBe('MIXED_FULFILLMENT');
 
     await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
+  });
+});
+
+describe('E20 — a booking takes neither of the two food clocks', () => {
+  /** A SERVICE listing bookable every minute of every day, so the test can
+   *  place slots at exact offsets (3 days, 5 hours, 30 minutes) from now. */
+  async function makeAllWeekService() {
+    const svc = await makeVendor({ type: 'SERVICE' });
+    const item = await makeItem(svc.vendorId, svc.categoryId, 'E20 Slots', 1500, {
+      fulfillment: 'APPOINTMENT',
+      bookingConfig: {
+        durationMinutes: 1,
+        slots: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, start: '00:00', end: '24:00' })),
+      },
+    });
+    return { vendorId: svc.vendorId, itemId: item.id };
+  }
+
+  async function checkoutBooking(token: string, vendorId: string, itemId: string, slotStart: Date) {
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, token);
+    return inject('POST', '/api/v1/customer/checkout', {
+      paymentMethod: 'CASH',
+      appointments: [{ itemId, slotStart: slotStart.toISOString() }],
+    }, token);
+  }
+
+  const autoCancelDelay = async (orderId: string) => {
+    const row = await app.prisma.orderOutbox.findFirst({ where: { orderId, kind: 'auto-cancel' } });
+    return row?.delayMs;
+  };
+
+  it('with LIFECYCLE_V2 on, a booking is born unheld while a food order placed the same way is held', async () => {
+    process.env['LIFECYCLE_V2'] = '1';
+    try {
+      const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+      // The booking needs no address (AT_BUSINESS); the food checkout does.
+      await app.prisma.address.create({
+        data: {
+          userId: cust.userId, label: 'Home',
+          addressLine1: '1 E20 Lane', city: 'Georgetown', region: 'Demerara-Mahaica',
+          latitude: 6.8, longitude: -58.15, isDefault: true,
+        },
+      });
+      const svc = await makeAllWeekService();
+      const res = await checkoutBooking(cust.token, svc.vendorId, svc.itemId, new Date(Date.now() + 3 * DAY));
+      expect(res.statusCode, res.body).toBe(200);
+      const bookingId = res.json().data.order.id;
+      createdOrderIds.push(bookingId);
+      const booking = await app.prisma.order.findUniqueOrThrow({
+        where: { id: bookingId },
+        select: { fulfillment: true, holdExpiresAt: true },
+      });
+      expect(booking.fulfillment).toBe('APPOINTMENT');
+      expect(booking.holdExpiresAt).toBeNull();
+
+      // The same flag, the same checkout — food is still born held.
+      const diner = await makeVendor({ type: 'RESTAURANT' });
+      const plate = await makeItem(diner.vendorId, diner.categoryId, 'E20 Plate', 1000);
+      await inject('POST', '/api/v1/customer/cart/items', { vendorId: diner.vendorId, itemId: plate.id, quantity: 1 }, cust.token);
+      const food = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, cust.token);
+      expect(food.statusCode, food.body).toBe(200);
+      const foodId = food.json().data.order.id;
+      createdOrderIds.push(foodId);
+      const foodRow = await app.prisma.order.findUniqueOrThrow({
+        where: { id: foodId },
+        select: { holdExpiresAt: true, placedAt: true },
+      });
+      expect(foodRow.holdExpiresAt).not.toBeNull();
+      expect(foodRow.holdExpiresAt!.getTime()).toBeGreaterThan(foodRow.placedAt.getTime());
+    } finally {
+      delete process.env['LIFECYCLE_V2'];
+    }
+  });
+
+  it('writes the booking auto-cancel on the slot-relative clock, and food on hold + SLA exactly', async () => {
+    process.env['LIFECYCLE_V2'] = '1';
+    try {
+      const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+      await app.prisma.address.create({
+        data: {
+          userId: cust.userId, label: 'Home',
+          addressLine1: '1 E20 Lane', city: 'Georgetown', region: 'Demerara-Mahaica',
+          latitude: 6.8, longitude: -58.15, isDefault: true,
+        },
+      });
+      const svc = await makeAllWeekService();
+      const slaMs = (await vendorResponseSlaMinutes(app.prisma)) * 60_000;
+
+      // Slot 3 days out → the 24-hour cap (slot − 60min would be ~2.96 days).
+      const far = new Date(Date.now() + 3 * DAY);
+      const farRes = await checkoutBooking(cust.token, svc.vendorId, svc.itemId, far);
+      expect(farRes.statusCode, farRes.body).toBe(200);
+      const farId = farRes.json().data.order.id;
+      createdOrderIds.push(farId);
+      expect(await autoCancelDelay(farId)).toBe(24 * 60 * 60_000);
+
+      // Slot 5 hours out → slot − 60 minutes − placement, above the SLA floor.
+      const mid = new Date(Date.now() + 5 * 60 * 60_000);
+      const midRes = await checkoutBooking(cust.token, svc.vendorId, svc.itemId, mid);
+      expect(midRes.statusCode, midRes.body).toBe(200);
+      const midId = midRes.json().data.order.id;
+      createdOrderIds.push(midId);
+      const midRow = await app.prisma.order.findUniqueOrThrow({
+        where: { id: midId },
+        select: { placedAt: true, appointmentSlot: true },
+      });
+      const midExpected = Math.max(
+        slaMs,
+        midRow.appointmentSlot!.getTime() - 60 * 60_000 - midRow.placedAt.getTime(),
+      );
+      expect(await autoCancelDelay(midId)).toBe(midExpected);
+
+      // Slot 30 minutes out → floored at the ordinary vendor response SLA.
+      const soon = new Date(Date.now() + 30 * 60_000);
+      const soonRes = await checkoutBooking(cust.token, svc.vendorId, svc.itemId, soon);
+      expect(soonRes.statusCode, soonRes.body).toBe(200);
+      const soonId = soonRes.json().data.order.id;
+      createdOrderIds.push(soonId);
+      expect(await autoCancelDelay(soonId)).toBe(slaMs);
+
+      // Food keeps today's delay: hold window + SLA, byte for byte.
+      const diner = await makeVendor({ type: 'RESTAURANT' });
+      const plate = await makeItem(diner.vendorId, diner.categoryId, 'E20 Food Clock', 1000);
+      await inject('POST', '/api/v1/customer/cart/items', { vendorId: diner.vendorId, itemId: plate.id, quantity: 1 }, cust.token);
+      const food = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, cust.token);
+      expect(food.statusCode, food.body).toBe(200);
+      const foodId = food.json().data.order.id;
+      createdOrderIds.push(foodId);
+      expect(await autoCancelDelay(foodId)).toBe(holdWindowMs()! + slaMs);
+    } finally {
+      delete process.env['LIFECYCLE_V2'];
+    }
   });
 });
 
