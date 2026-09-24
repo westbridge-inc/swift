@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   blockedBecause, decidable, minutesLeft, urgencyOf, describeAction,
   entityLabel, shortFingerprint, noteProblem, BLOCK_COPY,
-  canApply, snapshotEntries,
+  canApply, awaitsRequester, snapshotEntries,
   type ApprovalRow,
 } from './approvals';
 
@@ -164,10 +164,20 @@ describe('[DS110-13] the stored body is what the approver reads and apply replay
   });
 
   it('apply is allowed exactly when a body is on record and the window is still open', () => {
-    const approved = { status: 'APPROVED' as const, bodySnapshot: { body: {} } };
+    const approved = { status: 'APPROVED' as const, bodySnapshot: { body: {} }, isOwnRequest: true };
     expect(canApply(ROW(approved), NOW)).toBe(true);
     expect(canApply(ROW({ ...approved, bodySnapshot: null }), NOW)).toBe(false);
     expect(canApply(ROW({ ...approved, expiresAt: at(-1) }), NOW)).toBe(false);
-    expect(canApply(ROW({ status: 'PENDING', bodySnapshot: { body: {} } }), NOW)).toBe(false);
+    expect(canApply(ROW({ status: 'PENDING', bodySnapshot: { body: {} }, isOwnRequest: true }), NOW)).toBe(false);
+  });
+
+  it('only the admin who asked may apply; anyone else sees it awaiting the requester', () => {
+    const approved = { status: 'APPROVED' as const, bodySnapshot: { body: {} } };
+    expect(canApply(ROW({ ...approved, isOwnRequest: false }), NOW)).toBe(false);
+    expect(awaitsRequester(ROW({ ...approved, isOwnRequest: false }), NOW)).toBe(true);
+    expect(awaitsRequester(ROW({ ...approved, isOwnRequest: true }), NOW)).toBe(false);
+    // nothing to wait for when there is nothing to execute
+    expect(awaitsRequester(ROW({ ...approved, isOwnRequest: false, bodySnapshot: null }), NOW)).toBe(false);
+    expect(awaitsRequester(ROW({ ...approved, isOwnRequest: false, expiresAt: at(-1) }), NOW)).toBe(false);
   });
 });

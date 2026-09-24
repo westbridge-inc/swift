@@ -35,7 +35,8 @@ const APPROVED_WITH_BODY = {
   appliedAt: null,
   expiresAt: inHours(12),
   createdAt: inHours(-2),
-  isOwnRequest: false,
+  // the viewer is the admin who asked; a second admin (admin-2) approved
+  isOwnRequest: true,
 };
 
 const LEGACY_APPROVED = {
@@ -45,11 +46,14 @@ const LEGACY_APPROVED = {
   entityId: 'pay_legacy',
 };
 
-function approvalsHandler(mutate?: (_request: ApiRequest) => ApiReply | Promise<ApiReply>) {
+function approvalsHandler(
+  mutate?: (_request: ApiRequest) => ApiReply | Promise<ApiReply>,
+  approved: unknown[] = [APPROVED_WITH_BODY, LEGACY_APPROVED],
+) {
   return (request: ApiRequest): ApiReply | Promise<ApiReply> => {
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/approvals') {
       const status = request.url.searchParams.get('status') ?? 'PENDING';
-      return { body: { success: true, data: status === 'APPROVED' ? [APPROVED_WITH_BODY, LEGACY_APPROVED] : [] } };
+      return { body: { success: true, data: status === 'APPROVED' ? approved : [] } };
     }
     if (mutate) return mutate(request);
     throw new Error(`Unexpected request: ${request.method} ${request.url}`);
@@ -90,6 +94,17 @@ describe('the approval card shows what executes', () => {
     expect(await screen.findByText(/predates body capture/i)).toBeTruthy();
     // exactly ONE apply button exists (the row that has a body) — the legacy row has none
     expect(screen.getAllByRole('button', { name: 'Execute the approved action' })).toHaveLength(1);
+  });
+
+  it('an approved action another admin asked for is theirs to execute — no button here', async () => {
+    mockApi(approvalsHandler(undefined, [{ ...APPROVED_WITH_BODY, isOwnRequest: false }]));
+    const { user } = renderWithQuery(<ApprovalsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Approved' }));
+
+    // the body is still readable, but the server would refuse this admin (403)
+    expect(await screen.findByText('2500')).toBeTruthy();
+    expect(screen.getByText('Approved. Only the admin who asked can execute it.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Execute the approved action' })).toBeNull();
   });
 
   it('a PENDING row is a decision to make, not an action to execute', async () => {

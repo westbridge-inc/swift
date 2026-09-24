@@ -188,10 +188,21 @@ function formatSnapshotValue(value: unknown): string {
   return String(value);
 }
 
-/** May this row be executed now? APPROVED, unexpired, and with a body on
+/** Is this row executable at all? APPROVED, unexpired, and with a body on
  *  record — a row raised before the snapshot existed has no body to replay. */
-export function canApply(row: ApprovalRow, now = new Date()): boolean {
+function replayable(row: ApprovalRow, now: Date): boolean {
   if (row.status !== 'APPROVED') return false;
   if (new Date(row.expiresAt).getTime() <= now.getTime()) return false;
   return !!row.bodySnapshot;
+}
+
+/** May THIS admin execute the row now? Only the admin who asked executes, once
+ *  a second admin approved — the server refuses anyone else (403). */
+export function canApply(row: ApprovalRow, now = new Date()): boolean {
+  return !!row.isOwnRequest && replayable(row, now);
+}
+
+/** Approved and replayable, but it is the requester's to execute, not this admin's. */
+export function awaitsRequester(row: ApprovalRow, now = new Date()): boolean {
+  return !row.isOwnRequest && replayable(row, now);
 }

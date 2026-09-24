@@ -7,7 +7,7 @@ import { MutationError } from '@/components/MutationError';
 import {
   blockedBecause, BLOCK_COPY, minutesLeft, urgencyOf, describeAction,
   entityLabel, shortFingerprint, noteProblem, CLASS_MEANING, NOTE_MAX,
-  canApply, snapshotEntries,
+  canApply, awaitsRequester, snapshotEntries,
   type ApprovalRow,
 } from '@/lib/approvals';
 
@@ -202,6 +202,12 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
             </div>
           )}
         </div>
+      )}
+
+      {awaitsRequester(row) && (
+        <p className="text-xs text-[var(--muted)] border-t border-[var(--border)] pt-3 mb-3">
+          Approved. Only the admin who asked can execute it.
+        </p>
       )}
 
       {blocked ? (
