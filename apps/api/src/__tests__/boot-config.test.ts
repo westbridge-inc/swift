@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,10 @@ const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
 const messagingServiceSid = `MG${'c'.repeat(32)}`;
 const good: Record<string, string | undefined> = {
   NODE_ENV: 'production',
+  // [ledger E08] The settled production posture ships the hold ON in both env
+  // examples, so the valid production base carries it explicitly.
+  LIFECYCLE_V2: '1',
+  ORDER_HOLD_MINUTES: '5',
   MASTER_KEK: KEK,
   STORAGE_SIGNING_SECRET: 'a-managed-signing-secret-of-at-least-32-chars',
   STORAGE_PROVIDER: 's3',
@@ -347,6 +352,66 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'test', DEV_OTP_BYPASS: '1' })).not.toThrow();
+  });
+});
+
+// [ledger E08] The order hold is the customer's free-cancel window: while it
+// runs, the order is hidden from the vendor. holdWindowMs()/
+// checkoutQueueTiming() treat a MISSING LIFECYCLE_V2 as hold OFF, so a deploy
+// that omits the variable silently sends new orders straight to the vendor
+// while the app still promises a free-cancel window. Production must choose
+// explicitly — off is a choice, omission is not.
+describe('[ledger E08] production must be explicit about the order hold', () => {
+  it('refuses production when LIFECYCLE_V2 is missing — the hold would be silently OFF', () => {
+    expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: undefined }))
+      .toThrow(/FATAL: LIFECYCLE_V2/);
+    expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: undefined }))
+      .toThrow(/Refusing to start/);
+  });
+
+  it('refuses every LIFECYCLE_V2 value other than an explicit 1 or 0', () => {
+    for (const value of [undefined, '', 'true', '01', 'on', '1 ']) {
+      expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: value }), String(value))
+        .toThrow(/LIFECYCLE_V2/);
+    }
+  });
+
+  it('accepts an explicit hold-off choice (LIFECYCLE_V2=0)', () => {
+    expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '0' })).not.toThrow();
+  });
+
+  it('accepts the settled hold-on posture (LIFECYCLE_V2=1)', () => {
+    expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1' })).not.toThrow();
+  });
+
+  it.each(['abc', '0', '', '-1', 'Infinity', '  ', '0.05', '2', '4.99'])(
+    'refuses ORDER_HOLD_MINUTES=%j when LIFECYCLE_V2=1 — no hold, or a hold shorter than the free-cancel window',
+    (minutes) => {
+      expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }))
+        .toThrow(/ORDER_HOLD_MINUTES/);
+    },
+  );
+
+  it('accepts the unset default and any hold at least as long as the free-cancel window (DS214 D1)', () => {
+    expect(FREE_CANCEL_WINDOW_MIN).toBe(5);
+    for (const minutes of [undefined, '5', '7', '10']) {
+      expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }), String(minutes))
+        .not.toThrow();
+    }
+  });
+
+  it('does not enforce the hold posture outside production', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', LIFECYCLE_V2: undefined, ORDER_HOLD_MINUTES: 'abc' }))
+      .not.toThrow();
+  });
+
+  it('the value-free preflight inherits the refusal and the explicit-off acceptance', () => {
+    const refused = runPreflight({ ...good, LIFECYCLE_V2: undefined });
+    expect(refused.status, refused.stdout + refused.stderr).toBe(1);
+    expect(refused.stdout).toContain('LIFECYCLE_V2');
+    const off = runPreflight({ ...good, LIFECYCLE_V2: '0' });
+    expect(off.status, off.stdout + off.stderr).toBe(0);
   });
 });
 
