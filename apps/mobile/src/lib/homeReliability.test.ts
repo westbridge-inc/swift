@@ -179,6 +179,67 @@ describe('Home body and Market route states', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// [phone feedback P1] Stale-while-revalidate on the Home tab.
+//
+// In a fifteen-minute session on the owner's phone the server answered 26
+// GET /customer/home calls in under half a second each, and every one of them
+// looked like a reload: the focus refresh on each tab switch put a spinner
+// and an "Updating…" line over a feed that was already on screen. The skeleton
+// is for the ONE load with nothing cached; every later refresh keeps the
+// content in place and is silent (the pull spinner is the person's own
+// gesture — lib/pullToRefresh).
+// ---------------------------------------------------------------------------
+describe('stale-while-revalidate on focus', () => {
+  it('a focus refresh over cached content never leaves the content state — and the refetch really runs', async () => {
+    const qc = client();
+    const key = homeQueryKey(6, -58, 'account');
+    const cached = { activeOrder: null, featured: ['cached'] };
+    qc.setQueryData(key, cached);
+    let resolveFresh!: (feed: typeof cached) => void;
+    const load = vi.fn(() => new Promise<typeof cached>((resolve) => { resolveFresh = resolve; }));
+    const observer = new QueryObserver(qc, { queryKey: key, queryFn: load });
+    const seen: string[] = [];
+    const unsubscribe = observer.subscribe((result) => { seen.push(homeFeedState(result)); });
+    expect(homeFeedState(observer.getCurrentResult())).toBe('content');
+
+    // the focus gate: invalidate + refetch the active Home query
+    const gate = createHomeRefreshGate(() => {
+      void qc.invalidateQueries({ queryKey: ['customer', 'home'], refetchType: 'active' });
+    }, 750);
+    expect(gate(1_000, false)).toBe(true);
+    await vi.waitFor(() => expect(observer.getCurrentResult().fetchStatus).toBe('fetching'));
+    // mid-flight: the cached feed is still what is on screen, and it is CONTENT
+    expect(observer.getCurrentResult().data).toEqual(cached);
+    expect(homeFeedState(observer.getCurrentResult())).toBe('content');
+    expect(observer.getCurrentResult().isRefetching).toBe(true); // the flag the spinner must NOT follow
+
+    resolveFresh({ activeOrder: null, featured: ['fresh'] });
+    await vi.waitFor(() => expect(observer.getCurrentResult().data).toEqual({ activeOrder: null, featured: ['fresh'] }));
+    expect(load).toHaveBeenCalledOnce();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(new Set(seen)).toEqual(new Set(['content']));
+    unsubscribe();
+    qc.clear();
+  });
+
+  it('the first load with nothing cached is the one time the skeleton shows', async () => {
+    const qc = client();
+    let resolveFirst!: (feed: { activeOrder: null; featured: string[] }) => void;
+    const load = vi.fn(() => new Promise<{ activeOrder: null; featured: string[] }>((resolve) => { resolveFirst = resolve; }));
+    const observer = new QueryObserver(qc, { queryKey: homeQueryKey(6, -58, 'account'), queryFn: load });
+    const unsubscribe = observer.subscribe(() => {});
+    await vi.waitFor(() => expect(observer.getCurrentResult().fetchStatus).toBe('fetching'));
+    expect(homeFeedState(observer.getCurrentResult())).toBe('loading');
+    expect(observer.getCurrentResult().isRefetching).toBe(false);
+
+    resolveFirst({ activeOrder: null, featured: ['first'] });
+    await vi.waitFor(() => expect(homeFeedState(observer.getCurrentResult())).toBe('content'));
+    unsubscribe();
+    qc.clear();
+  });
+});
+
 describe('external order refresh', () => {
   it('refreshes on focus and one background-to-active transition, then removes the listener on blur', () => {
     const refresh = vi.fn();
