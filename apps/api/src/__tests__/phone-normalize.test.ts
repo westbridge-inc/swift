@@ -7,6 +7,7 @@ import { socketPlugin } from '../plugins/socket';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { normalizePhone } from '../utils/phone';
+import { guyanaDayKey } from '../utils/guyana-day';
 
 // System-wide phone-entry fix: a customer/driver/rider/vendor/admin who types
 // their number with spaces (or a paste) must still match the stored E.164, on
@@ -50,6 +51,10 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(authRoutes, { prefix: '/api/v1/auth' });
   await app.ready();
+  // The per-IP daily SMS budget (utils/sms-budget) counts every send-otp this
+  // suite injects from loopback; reset it so repeated same-day local runs never
+  // accumulate to the cap (same hygiene as helpers/otp.ts and rate-limit.test.ts).
+  await app.redis.del(`otp_ip_day:${guyanaDayKey(new Date())}:127.0.0.1`);
 
   const u = await app.prisma.user.create({
     data: { phone: CLEAN, firstName: 'Norm', lastName: 'Alize', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },

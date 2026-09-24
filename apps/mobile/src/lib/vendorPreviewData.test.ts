@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { vendorPreviewDataset, previewQuery, previewMutation } from './vendorPreviewData';
 import * as PVD from './vendorPreviewData';
 import { useVendorPreview } from '../stores/vendorPreview';
+import { appointmentDayKey, appointmentInstantOfWallClock } from './appointmentTime';
 
 // Vendor PREVIEW (R4 + invariant 5): a prospective owner walks the REAL dashboard
 // of their business type with SAMPLE data, strictly READ-ONLY. These pin the
@@ -132,7 +133,7 @@ describe('the sample never goes stale', () => {
   it('SERVICE: the schedule is today and tomorrow, not a past week', () => {
     const { bookings } = vendorPreviewDataset('SERVICE');
     expect(bookings.length).toBeGreaterThan(0);
-    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+    const startOfToday = new Date(appointmentInstantOfWallClock(appointmentDayKey(new Date()), 0, 0));
     for (const b of bookings) {
       expect(new Date(b.slotStart).getTime()).toBeGreaterThanOrEqual(startOfToday.getTime());
       expect(new Date(b.slotEnd).getTime()).toBeGreaterThan(new Date(b.slotStart).getTime());

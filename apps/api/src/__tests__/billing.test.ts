@@ -336,8 +336,12 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
     expect(types).toContain('CHARGE_SUCCESS');
     expect(types).toContain('REINSTATED');
 
+    // R13: the payer notice is post-commit and historical. It reports the payment
+    // for the period and never promises "access restored", which a cancellation
+    // committed before delivery could make false. The reinstatement itself is the
+    // REINSTATED event and the vendor state asserted above.
     const note = await app.prisma.notification.findFirst({
-      where: { userId: vendorUserId, title: 'Subscription reinstated' },
+      where: { userId: vendorUserId, title: 'Subscription payment received' },
     });
     expect(note).not.toBeNull();
   });

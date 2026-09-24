@@ -2,22 +2,23 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
-import { lineTotal, orderTotal, promoDiscount, promoCapacity } from '../../utils/order-total';
-import { canonicalBillableKm } from '../../utils/billable-distance';
+import { promoDiscount } from '../../utils/order-total';
 import { z } from 'zod';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
-import { deliveryFeeFromRates, expressDeliveryFee, type DeliveryRates } from '../../utils/markup';
+import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
-import { getMapsProvider } from '../../providers/maps/maps-provider';
+import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
 import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
+import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
+import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed';
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
@@ -28,9 +29,10 @@ import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
-import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
+import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { RatingService } from '../rating/rating.service';
-import { NotificationService, tenantOfUser } from '../notification/notification.service';
+import { NotificationService } from '../notification/notification.service';
+import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
 import { AccountService } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
@@ -41,6 +43,7 @@ import {
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
+import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { checkoutRequestHash, drainCheckoutOutbox, findCheckoutReceipt } from '../order/checkout-outbox';
@@ -126,14 +129,18 @@ const cartTipSchema = z.object({
 // 99,999,999 storage ceiling — the same value the cart rejected.
 const MAX_TIP_GYD = 50_000;
 
+// Per-vendor DELIVERY|PICKUP choice for multi-vendor carts. [E01] ONE schema
+// for the checkout body and the cart quote, so the preview accepts exactly the
+// choices checkout does.
+const fulfillmentSelectionsSchema = z.record(z.enum(['DELIVERY', 'PICKUP']));
+
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
   deliveryInstructions: z.string().max(500).optional(),
   tipAmount: zMoneyWhole.max(MAX_TIP_GYD).optional(),
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
-  // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts
-  fulfillmentSelections: z.record(z.enum(['DELIVERY', 'PICKUP'])).optional(),
+  fulfillmentSelections: fulfillmentSelectionsSchema.optional(),
   // Priority delivery: 1.5x delivery fee, dispatched ahead of standard orders
   express: z.boolean().optional(),
   // Requested slots for APPOINTMENT listings (booked at vendor acceptance).
@@ -148,6 +155,44 @@ const checkoutSchema = z.object({
       }),
     )
     .max(10)
+    .optional(),
+});
+
+/**
+ * [E01] GET /cart prices the basket for the choices checkout will be sent.
+ * `express`, `fulfillmentSelections` and `tipAmount` mean exactly what they
+ * mean in the checkout body (same rules), carried in a query string:
+ *   - express: "true" | "false" — never z.coerce.boolean(), which reads the
+ *     string "false" as true and would quote every delivery as express;
+ *   - fulfillmentSelections: checkout's record as JSON — Fastify's querystring
+ *     parser has no bracket syntax for nested objects;
+ *   - tipAmount: whole money under the checkout cap; absent = the cart's tip.
+ * A malformed value is a 400: a quote silently priced for a different choice
+ * than the one on screen is the defect this exists to remove.
+ */
+const cartQuerySchema = latLngQuerySchema.extend({
+  express: z.enum(['true', 'false']).optional().transform((v) => v === 'true'),
+  fulfillmentSelections: z
+    .string()
+    .max(4000)
+    .optional()
+    .transform((raw, ctx) => {
+      if (raw === undefined) return undefined;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = undefined;
+      }
+      const selections = fulfillmentSelectionsSchema.safeParse(parsed);
+      if (!selections.success) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'fulfillmentSelections must be a JSON object of vendor id to DELIVERY or PICKUP' });
+        return z.NEVER;
+      }
+      return selections.data;
+    }),
+  tipAmount: z
+    .preprocess((v) => (typeof v === 'string' && /^\d{1,9}$/.test(v) ? Number(v) : v), zMoneyWhole.max(MAX_TIP_GYD))
     .optional(),
 });
 
@@ -248,12 +293,22 @@ async function resolveCustomer(app: FastifyInstance, userId: string) {
   return customer;
 }
 
+/** [E01] The checkout choices a quote is priced for — the same meaning as the
+ *  checkout body's fields of these names. Absent = checkout's own default
+ *  (standard speed, DELIVERY for every vendor, the cart's persisted tip). */
+interface CartQuoteChoices {
+  express?: boolean;
+  fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
+  tipAmount?: number;
+}
+
 /** Build a typed "cart with computed totals" response from a raw cart. */
 async function buildCartResponse(
   app: FastifyInstance,
   userId: string,
   lat?: number,
   lng?: number,
+  choices: CartQuoteChoices = {},
 ) {
   const cart = await app.prisma.cart.findUnique({
     where: { customerId: userId },
@@ -275,6 +330,9 @@ async function buildCartResponse(
               optionGroups: {
                 select: { name: true, options: { select: { id: true, name: true, additionalPrice: true } } },
               },
+              // [E01] Each line prices against ITS OWN vendor — the tracked
+              // `cart.vendor` is only the most recently added store.
+              vendor: { select: { id: true, name: true, latitude: true, longitude: true, minOrderAmount: true } },
             },
           },
         },
@@ -345,30 +403,39 @@ async function buildCartResponse(
   // set). Same routing source as checkout, so the quote equals the final fee.
   const addrLat = deliveryAddr?.latitude ?? lat;
   const addrLng = deliveryAddr?.longitude ?? lng;
+  const destination: LatLng | null = addrLat != null && addrLng != null ? { lat: addrLat, lng: addrLng } : null;
 
-  let distanceKm = 3; // sensible default
-  if (addrLat && addrLng && cart.vendor) {
-    // [ALG-18] Canonical BEFORE pricing — the same number checkout will freeze
-    // and price from, so the quote and the charge cannot differ by a rounding.
-    distanceKm = canonicalBillableKm((await getMapsProvider().routeKm(
-      { lat: cart.vendor.latitude, lng: cart.vendor.longitude },
-      { lat: addrLat, lng: addrLng },
-    )).km);
-  }
+  // FUL-003b: resolve the same country delivery-fee schedule checkout uses, so
+  // the fee previewed here equals the fee charged (null config → code default).
+  const buyer = await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+  const deliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(buyer?.countryCode ?? '');
+
+  // [E01 · ALG-24] One plan PER VENDOR, through the planner checkout prices
+  // with, in checkout's plan order: a multi-vendor cart is several orders, each
+  // with its own distance, fee and minimum. Services booked as appointments
+  // carry no delivery fee (you go to them / they come to you) — decided per
+  // line exactly as checkout decides it, not from `cart.vendor.vendorType`.
+  // The routing engine is only resolved when a delivery is actually routed.
+  let maps: ReturnType<typeof getMapsProvider> | null = null;
+  const selections = choices.fulfillmentSelections ?? {};
+  const plans = await Promise.all(groupLinesByVendor(cart.items).map(({ vendorId, lines }) => planVendorGroup({
+    vendor: lines[0]!.item.vendor,
+    lines,
+    fulfillment: planFulfillment(lines, selections[vendorId]),
+    destination,
+    deliveryRates,
+    express: choices.express === true,
+    routeKm: (from, to) => (maps ??= getMapsProvider()).routeKm(from, to),
+  })));
 
   // Line items — zero markup: customers pay the vendor base price; platform
   // revenue is weekly subscriptions only. Field names are kept for client
   // compatibility, but markup is always 0 and customerPrice === basePrice.
-  let subtotalBase = 0;
   const subtotalMarkup = 0;
   const unavailableItemIds: string[] = [];
 
   const itemDetails = cart.items.map((ci) => {
-    const base = Number(ci.item.basePrice);
-    const options = resolveSelectedOptions(ci.item, ci.selectedOptions);
-    const unitPrice = base + optionsUnitPrice(options);
-    const lineBase = lineTotal(unitPrice, ci.quantity);
-    subtotalBase += lineBase;
+    const line = priceCartLine(ci);
 
     if (!ci.item.isAvailable) unavailableItemIds.push(ci.id);
 
@@ -377,70 +444,89 @@ async function buildCartResponse(
       itemId: ci.itemId,
       name: ci.item.name,
       imageUrl: ci.item.imageUrl,
-      basePrice: base,
-      customerPrice: unitPrice,
+      basePrice: line.basePrice,
+      customerPrice: line.unitPrice,
       quantity: ci.quantity,
       selectedOptions: ci.selectedOptions,
-      selectedOptionNames: options.map((o) => o.optionName),
+      selectedOptionNames: line.options.map((o) => o.optionName),
       specialInstructions: ci.specialInstructions,
-      lineTotal: lineBase,
+      lineTotal: line.lineTotal,
       isAvailable: ci.item.isAvailable,
       fulfillment: ci.item.fulfillment,
+      // [E01] Which store's order this line joins at checkout.
+      vendorId: ci.item.vendorId,
     };
   });
 
+  // [E01] The flat fields are the per-vendor sums (owner decision): a
+  // multi-vendor basket is several orders, so its aggregates are too. For a
+  // single-vendor cart they are that vendor's plan exactly.
+  const sumOf = (values: number[]) => values.reduce((s, v) => s + v, 0);
+  const subtotalBase = sumOf(plans.map((p) => p.subtotal));
   const subtotalCustomer = subtotalBase;
+  const deliveryFee = sumOf(plans.map((p) => p.deliveryFee));
+  const standardDeliveryFee = sumOf(plans.map((p) => p.standardDeliveryFee));
 
-  // Delivery fee — services are appointments (you go to them / they come to you),
-  // not deliveries, so they never carry a delivery fee.
-  // FUL-003b: resolve the same country delivery-fee schedule checkout uses, so
-  // the fee previewed here equals the fee charged (null config → code default).
-  const isService = cart.vendor?.vendorType === 'SERVICE';
-  const buyer = await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
-  const deliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(buyer?.countryCode ?? '');
-  const deliveryFee = isService ? 0 : deliveryFeeFromRates(distanceKm, deliveryRates);
-
-  // Promo discount
-  let discount = 0;
+  // [E01 · ALG-24 · M-32] The ONE basket pricer checkout uses: the promo basis
+  // (a store's code → its own plan; a platform code → the whole basket), the
+  // funder's capacity clamp (goods, plus the fee only for a platform code,
+  // never the tip), the tip on the first DELIVERY plan only, and every plan's
+  // total. Promo REFUSALS stay at checkout (owner decision for E01): a code
+  // for a store with nothing in the basket discounts nothing here.
+  const promo = promoCodeRecord
+    ? {
+        discountType: promoCodeRecord.discountType,
+        discountValue: promoCodeRecord.discountValue,
+        maxDiscount: promoCodeRecord.maxDiscount,
+        funder: promoCodeRecord.funder,
+        vendorId: promoCodeRecord.vendorId,
+      }
+    : null;
+  // [REPORT-012 F-012-01] The tip the quote is priced with follows checkout's
+  // rule: an explicit tip (0 included) wins; only an absent one inherits the
+  // cart's persisted tip.
+  const tip = resolveTip(choices.tipAmount, cart.tipAmount);
+  const priceWith = (feeOf: (p: VendorPlan) => number) => priceBasket({
+    plans: plans.map((p) => ({ vendorId: p.vendorId, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: feeOf(p) })),
+    promo,
+    tip,
+  });
+  const priced = priceWith((p) => p.deliveryFee);
+  const discount = priced.discount;
+  const totalAmount = sumOf(priced.perPlan.map((p) => p.total));
   let promoInfo: { code: string; discountType: string; description: string } | null = null;
   if (promoCodeRecord) {
-    const promo = promoCodeRecord as {
-      code: string; discountType: string; discountValue: unknown;
-      maxDiscount: unknown; funder?: string | null; description?: string;
-    };
-    // [ALG-24] The one promo switch — the same function checkout's
-    // validatePromoCode applies, so the quote's discount is the charge's.
-    discount = promoDiscount(promo, { subtotal: subtotalCustomer, deliveryFee });
-    // [M-32] The quote absorbs exactly what checkout will: the goods, plus the
-    // delivery fee for a platform code — never the tip. A code larger than the
-    // basket used to be quoted in full and charged clamped.
-    discount = Math.min(discount, promoCapacity(promo.funder, { subtotal: subtotalCustomer, deliveryFee }, promo.discountType));
     promoInfo = {
-      code: promo.code,
-      discountType: promo.discountType,
-      description: promo.description || `${promo.code} applied`,
+      code: promoCodeRecord.code,
+      discountType: promoCodeRecord.discountType,
+      description: promoCodeRecord.description || `${promoCodeRecord.code} applied`,
     };
   }
 
-  const tip = Number(cart.tipAmount) || 0;
-  // [ALG-24] The one total — checkout computes each order's total through the same function.
-  const totalAmount = orderTotal({ subtotal: subtotalCustomer, deliveryFee, tip, discount });
-
   // SWIFT-070: the express premium is computed on the SERVER (same helper as
   // checkout) and handed to the client to RENDER — never re-derived on the
-  // client, so the displayed total can't drift from the charged total. Zero for
-  // services / free delivery.
-  const expressSurcharge = deliveryFee > 0 ? expressDeliveryFee(deliveryFee) - deliveryFee : 0;
-  const expressTotal = totalAmount + expressSurcharge;
+  // client. [E01] `expressTotal` is the same basket priced by the same pricer
+  // with every delivery at its express fee — exact even when a promo's basis
+  // depends on the fee — and IS `totalAmount` when the quote asked for express.
+  // Zero surcharge for services / pickup / free delivery.
+  const expressSurcharge = sumOf(plans.map((p) => p.expressSurcharge));
+  const expressTotal = choices.express === true
+    ? totalAmount
+    : sumOf(priceWith((p) => p.standardDeliveryFee + p.expressSurcharge).perPlan.map((p) => p.total));
 
-  // ETA
+  // ETA — from the tracked store's plan (its delivery leg), as before.
+  const etaPlan = plans.find((p) => p.vendorId === cart.vendor?.id) ?? plans[0];
+  const distanceKm = etaPlan?.distanceKm ?? 0;
   const prepMin = cart.vendor?.estimatedPrepTime || 30;
   const deliveryMin = estimateDeliveryMinutes(distanceKm);
   const etaMin = prepMin + deliveryMin;
 
-  // Min order check
+  // [E09] Min order: every vendor against ITS OWN minimum — checkout refuses
+  // the whole basket on the first short vendor, so the conjunction is the
+  // honest verdict. `minimumOrderAmount` stays the tracked store's for older
+  // clients; `vendors[]` carries each store's own figure.
   const minOrder = cart.vendor ? Number(cart.vendor.minOrderAmount) : 0;
-  const meetsMinimum = subtotalCustomer >= minOrder;
+  const meetsMinimum = plans.every((p) => p.meetsMinimum);
 
   return {
     id: cart.id,
@@ -451,15 +537,38 @@ async function buildCartResponse(
     items: itemDetails,
     itemCount: cart.items.reduce((sum, ci) => sum + ci.quantity, 0),
     unavailableItemIds,
+    // [E01 · E09] One row per future order, in checkout's order: each row is
+    // what checkout writes for that store (subtotal, fee, discount share, tip,
+    // total) plus ITS minimum verdict and how much more it needs.
+    vendors: plans.map((p, i) => ({
+      vendorId: p.vendorId,
+      name: p.vendorName,
+      fulfillment: p.fulfillment,
+      subtotal: p.subtotal,
+      deliveryFee: p.deliveryFee,
+      standardDeliveryFee: p.standardDeliveryFee,
+      expressSurcharge: p.expressSurcharge,
+      discount: priced.perPlan[i]!.discount,
+      tipAmount: priced.perPlan[i]!.tip,
+      totalAmount: priced.perPlan[i]!.total,
+      minOrderAmount: p.minOrderAmount,
+      meetsMinimum: p.meetsMinimum,
+      amountToMinimum: p.amountToMinimum,
+    })),
     subtotalBase,
     subtotalMarkup,
     subtotalCustomer,
     deliveryFee,
+    // The fee without the express premium — the fee rows sit beside the
+    // separate Express row, whichever speed the quote was priced at.
+    standardDeliveryFee,
     deliveryDistanceKm: Math.round(distanceKm * 10) / 10,
     discount,
     promoCode: promoInfo,
     tipAmount: tip,
     totalAmount,
+    // [E01] Whether `totalAmount` includes the express premium.
+    express: choices.express === true,
     expressSurcharge,
     expressTotal,
     deliveryAddress: deliveryAddr ? {
@@ -981,11 +1090,17 @@ export async function customerRoutes(app: FastifyInstance) {
       const homeDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
         (userId ? (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
       );
-      const enriched = allVendors.map((v) => ({
-        ...enrichVendor(v, lat, lng, homeDeliveryRates),
-        isFavorite: favoriteIds.has(v.id),
-        ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
-      }));
+      // [S1 response-shaping · High #6] the card is the ONE public projection —
+      // `phone`/`email` and the staged MMG fields never leave the API.
+      const enriched = allVendors.map((v) => {
+        const card = vendorCardView(v);
+        return {
+          ...enrichVendor(card, lat, lng, homeDeliveryRates),
+          categories: (v.categories ?? []).map((c) => ({ id: c.id, name: c.name, imageUrl: c.imageUrl })),
+          isFavorite: favoriteIds.has(v.id),
+          ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
+        };
+      });
 
       // Sort by distance if location provided, otherwise by rating
       if (lat != null && lng != null) {
@@ -1044,7 +1159,16 @@ export async function customerRoutes(app: FastifyInstance) {
               // store" on Home. That client fix was already correct; it was
               // defeated here, at the select, where nothing failed.
               orderType: true,
-              vendor: { select: { id: true, name: true, logoUrl: true } },
+              // `orderType` alone cannot say what KIND of vendor order this is:
+              // a SERVICE business's appointment is persisted on the FOOD_DELIVERY
+              // spine. The fulfillment is the fact `orderVertical` declares the
+              // card's words from — sent here, at the select, where its absence
+              // never failed anything. The business type rides beside it for the
+              // card; it is not the discriminator (a service business's goods
+              // are deliveries).
+              fulfillment: true,
+              appointmentSlot: true,
+              vendor: { select: { id: true, name: true, logoUrl: true, vendorType: true } },
               // The hold — the window in which the store has not been told yet.
               // `holdExpiresAt` and `placedAt` are its two ends, and the client's
               // `holdRingWindow` refuses to draw anything unless BOTH came from
@@ -1105,7 +1229,9 @@ export async function customerRoutes(app: FastifyInstance) {
     const orderAgain = enriched.filter((v) => recentVendorIds.has(v.id)).slice(0, 6);
 
     const feed = {
-      activeOrder: activeOrder ? { ...activeOrder, promise: promiseView(activeOrder) } : activeOrder,
+      // The declared vertical rides with the card: SERVICE for a service
+      // business's booking, otherwise the persisted type — never a client guess.
+      activeOrder: activeOrder ? { ...activeOrder, vertical: orderVertical(activeOrder), promise: promiseView(activeOrder) } : activeOrder,
       popularItems: discovery.popularItems,
       featured,
       nearby,
@@ -1264,12 +1390,16 @@ export async function customerRoutes(app: FastifyInstance) {
     const browseDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
       (browserId ? (await app.prisma.user.findUnique({ where: { id: browserId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
     );
-    let enriched = vendors.map((v) => ({
-      ...enrichVendor(v, userLat, userLng, browseDeliveryRates),
-      isFavorite: favoriteIds.has(v.id),
-      ...(surfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
-      ...(categoryRow ? { itemsInCategory: itemCounts.get(v.id) ?? null } : {}),
-    }));
+    // [S1 response-shaping · High #6] same ONE public projection as Home.
+    let enriched = vendors.map((v) => {
+      const card = vendorCardView(v);
+      return {
+        ...enrichVendor(card, userLat, userLng, browseDeliveryRates),
+        isFavorite: favoriteIds.has(v.id),
+        ...(surfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
+        ...(categoryRow ? { itemsInCategory: itemCounts.get(v.id) ?? null } : {}),
+      };
+    });
 
     // Re-sort by distance if location provided and no explicit sort
     if (userLat != null && userLng != null && sort === 'distance') {
@@ -1483,8 +1613,9 @@ export async function customerRoutes(app: FastifyInstance) {
     const favDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
       (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode ?? 'GY',
     );
+    // [S1 response-shaping · High #6] favourites are the same card as browse.
     const vendors = (customer?.favoriteVendors ?? []).map((v) => ({
-      ...enrichVendor(v, lat, lng, favDeliveryRates),
+      ...enrichVendor(vendorCardView(v), lat, lng, favDeliveryRates),
       isFavorite: true,
     }));
 
@@ -1552,8 +1683,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // THE availability computation (scheduling law: no double-source):
     // windows MINUS the vendor's exceptions MINUS non-cancelled bookings,
     // honoring buffers + lead time — the same math reservation validates.
-    const dayStart = new Date(Date.UTC(y!, m! - 1, d!));
-    const dayEnd = new Date(Date.UTC(y!, m! - 1, d!, 23, 59, 59, 999));
+    const dayStart = startOfGuyanaDay(date);
+    const dayEnd = endOfGuyanaDay(date);
     const [exceptions, takenRows] = item.isAvailable
       ? await Promise.all([
           bookingService.exceptionsFor(item.vendorId, dayStart),
@@ -1612,6 +1743,7 @@ export async function customerRoutes(app: FastifyInstance) {
           type: 'ORDER_UPDATE',
           title: 'Appointment moved',
           body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
+          audience: 'business',
           data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
         }).catch(() => undefined);
       }
@@ -1624,9 +1756,11 @@ export async function customerRoutes(app: FastifyInstance) {
   // ========================================================================
 
   app.get('/cart', async (request: AuthRequest) => {
-    const { lat, lng } = latLngQuerySchema.parse(request.query);
+    // [E01] The quote is priced for the choices checkout will be sent — the
+    // speed, each store's DELIVERY/PICKUP and the tip — not for defaults.
+    const { lat, lng, express, fulfillmentSelections, tipAmount } = cartQuerySchema.parse(request.query);
 
-    const cart = await buildCartResponse(app, request.user.userId, lat, lng);
+    const cart = await buildCartResponse(app, request.user.userId, lat, lng, { express, fulfillmentSelections, tipAmount });
     return { success: true, data: cart };
   });
 
@@ -1872,6 +2006,25 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: { cart: updatedCart, message: 'Tip updated' } };
   });
 
+  // [E01-B] Remove the applied promo from the cart. The quote discounts with
+  // the cart's stored promo (cart.promoCodeId), and checkout applies a
+  // discount only for the `promoCode` the request body carries — so a customer
+  // who applied a code on the phone could see a discounted total and be
+  // charged full price, with no way back. This clears the stored pointer: the
+  // quote re-prices without it and checkout stops receiving the code.
+  app.delete('/cart/promo', async (request: AuthRequest) => {
+    const { userId } = request.user;
+
+    const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
+    if (!cart) throw new AppError(400, 'NO_CART', 'No active cart');
+
+    await app.prisma.cart.update({ where: { id: cart.id }, data: { promoCodeId: null, lastActivityAt: new Date() } });
+    await app.redis.del(`cart:${userId}`).catch(() => {});
+
+    const updatedCart = await buildCartResponse(app, userId);
+    return { success: true, data: { cart: updatedCart, message: 'Promo removed' } };
+  });
+
   // [DCR-1 NR5-01] PUT /cart/instructions REMOVED: the ingress census proved
   // it purpose-free — stored and echoed, but checkout persists only
   // deliveryInstructions, and no client ever called it. Minimisation at
@@ -2090,6 +2243,9 @@ export async function customerRoutes(app: FastifyInstance) {
       id: o.id,
       orderNumber: o.orderNumber,
       orderType: o.orderType,
+      // The declared vertical — SERVICE for a service business's booking; the
+      // persisted type for everything else. The activity list's words read it.
+      vertical: orderVertical(o),
       status: o.status,
       vendor: o.vendor,
       items: o.items.map((i) => ({
@@ -2106,6 +2262,7 @@ export async function customerRoutes(app: FastifyInstance) {
       totalAmount: Number(o.totalAmount),
       paymentMethod: o.paymentMethod,
       fulfillment: o.fulfillment,
+      appointmentSlot: o.appointmentSlot,
       // Takeaway handover gate — the customer PRESENTS this at the counter,
       // so it must survive past the checkout confirmation screen.
       pickupCode: o.pickupCode,
@@ -2158,7 +2315,11 @@ export async function customerRoutes(app: FastifyInstance) {
         vendor: {
           select: {
             id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true,
-            vendorType: true, phone: true, latitude: true, longitude: true,
+            // [S1 response-shaping · High #6] never `phone` — that is the
+            // store's account/OTP line, not a number it chose to publish, and
+            // it was handed to every customer on every order, for good. The
+            // storefront offers `publicPhone`; the order detail names the store.
+            vendorType: true, latitude: true, longitude: true,
           },
         },
         items: {
@@ -2199,6 +2360,9 @@ export async function customerRoutes(app: FastifyInstance) {
     const validatedOrderMmgUrl = order.paymentMethod === 'MOBILE_MONEY'
       && order.paymentStatus === 'PENDING'
       && !['CANCELLED', 'REFUNDED', 'FAILED'].includes(order.status)
+      // [S1-6] A store claim an operator rejected cannot be replaced by a new
+      // external payment this order could never reconcile: no pay link.
+      && !isRejectedMmgAttempt(order)
       ? safeMmgPayUrl(order.mmgPayUrlSnapshot)
       : null;
     const paymentAction = validatedOrderMmgUrl && order.mmgRecipientNameSnapshot
@@ -2246,6 +2410,8 @@ export async function customerRoutes(app: FastifyInstance) {
         id: order.id,
         orderNumber: order.orderNumber,
         orderType: order.orderType,
+        // The declared vertical — SERVICE for a service business's booking.
+        vertical: orderVertical(order),
         status: order.status,
         vendor: order.vendor,
         items: order.items.map((i) => ({
@@ -2271,11 +2437,29 @@ export async function customerRoutes(app: FastifyInstance) {
         // the pay/track screen can flip from Awaiting to Paid.
         paymentStatus: order.paymentStatus,
         paymentAction,
+        // [S1-6] What each party said about a direct-MMG payment, whether the
+        // order is held on a disagreement, and whether a claim may be made now.
+        mmgClaim: mmgClaimView(order),
         fulfillment: order.fulfillment,
+        appointmentSlot: order.appointmentSlot,
         // Takeaway handover gate — the customer PRESENTS this code at the
         // counter. It was only in the checkout response before, so it
         // vanished the moment they left the confirmation screen.
         pickupCode: order.pickupCode,
+        // [MKT-F057] The delivery door PIN — the customer HOLDS this and gives
+        // it to the rider at the door (taxi parity: holder sees, verifier enters).
+        // Null on pickup/appointment/courier rows and once a store self-delivers
+        // (its own courier, no verifier); TAXI rows keep their own ride-PIN flow
+        // in the rides module. Surfaces only while the goods are between the
+        // store and the door — the same window the tracking screens show it in —
+        // so the confirmation and history surfaces never carry it.
+        ridePin: order.fulfillment === 'DELIVERY'
+          && order.orderType !== 'COURIER'
+          && order.orderType !== 'TAXI'
+          && order.fulfillmentMode !== 'VENDOR_DELIVERY'
+          && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
+          ? order.ridePin
+          : null,
         // [B9] The SENDER's copy of the public tracking token. Minted at
         // courier checkout since launch and returned once in the create
         // response — which the app discards on navigation — so "Share
@@ -2296,7 +2480,10 @@ export async function customerRoutes(app: FastifyInstance) {
         rider: order.rider ? {
           firstName: order.rider.user?.firstName,
           lastName: order.rider.user?.lastName,
-          phone: order.rider.user?.phone,
+          // [S1 response-shaping] the mover's personal number is a handover
+          // convenience, not a permanent gift: null once the order is closed,
+          // exactly like the live coordinates two lines below.
+          phone: liveLocationVisible(order.status) ? order.rider.user?.phone : null,
           avatar: await resolveAvatarUrl(order.rider.user?.avatar), // [F-026-01]
           displayRating: riderSurface?.displayRating ?? null,
           // Trust visibility (master plan §5): the customer sees who and what
@@ -2512,36 +2699,49 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
-  // [DOC-1 §31.5 · §31.6 · P31-2] The customer's OWN claim, from their device. "I paid" (with
-  // the MMG reference) is a second, independent claim beside the store's; a dispute after the
-  // store claimed receipt is a mismatch that holds dispatch until a person resolves it.
+  // [DOC-1 §31.5 · §31.6 · P31-2 · ORDER-SPINE S1-6] The customer's OWN claim, from their device:
+  // "I paid" (with the MMG reference) or "I did not pay", recorded through the one locked claim
+  // authority (order/mmg-claim.service.ts). A denial is durable whichever party speaks first; two
+  // claims that disagree hold fulfilment until a person decides. The state, its evidence and the
+  // notice obligation commit together; the notices are delivered from that obligation.
   app.post('/orders/:id/payment-claim', async (request: AuthRequest) => {
     if (!request.user?.userId) throw new AppError(401, 'UNAUTHENTICATED', 'Sign in first');
     const { id } = request.params as { id: string };
-    const body = z.object({ paid: z.boolean(), reference: z.string().trim().min(3).max(64).optional() }).parse(request.body ?? {});
-    const order = await app.prisma.order.findFirst({ where: { id, customerId: request.user.userId }, select: { id: true, paymentMethod: true, paymentStatus: true, customerClaimedPaidAt: true, mmgClaimMismatchAt: true } });
-    if (!order) throw new NotFoundError('Order', id);
-    if (order.paymentMethod !== 'MOBILE_MONEY') throw new AppError(409, 'NOT_A_WALLET_ORDER', 'Only an MMG order carries a payment claim');
-    const now = new Date();
-    if (body.paid) {
-      const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: now, customerPaymentRef: body.reference ?? null } });
-      await app.prisma.auditLog.create({ data: { userId: request.user.userId, action: 'CUSTOMER_CLAIMED_PAID', entity: 'Order', entityId: id, changes: { reference: body.reference ?? null, claim: 'customer_claimed_paid' } } });
-      return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, customerClaimedPaidAt: updated.customerClaimedPaidAt, storeClaimed: updated.paymentStatus === 'CLAIMED' } };
-    }
-    // a dispute: the store says received, the customer says not — a mismatch, before dispatch
-    const mismatch = order.paymentStatus === 'CLAIMED' && !order.mmgClaimMismatchAt;
-    const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: null, customerPaymentRef: null, ...(mismatch ? { mmgClaimMismatchAt: now } : {}) } });
-    await app.prisma.auditLog.create({ data: { userId: request.user.userId, action: mismatch ? 'MMG_CLAIM_MISMATCH' : 'CUSTOMER_CLAIMED_NOT_PAID', entity: 'Order', entityId: id, changes: { claim: 'customer_claimed_not_paid', storeStatus: order.paymentStatus } } });
-    if (mismatch) {
-      const { notifyAdmins } = await import('../notification/notification.service');
-      await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
-        tenantId: await tenantOfUser(app.prisma, request.user.userId),
-        title: 'MMG payment claims disagree',
-        body: `Order ${id}: the store reported the MMG payment received; the customer says they did not pay. Dispatch is held until someone resolves it.`,
-        data: { kind: 'mmg_claim_mismatch', orderId: id },
+    const body = z.object({ paid: z.boolean(), reference: z.string().max(80).nullish() }).parse(request.body ?? {});
+    const customerId = request.user.userId;
+    const outcome = await app.prisma.$transaction((tx) => recordCustomerMmgClaim(tx, {
+      orderId: id,
+      customerId,
+      tenantId: getTenantId(),
+      paid: body.paid,
+      reference: body.reference ?? null,
+    }));
+    const facts = outcome.facts;
+    if (!outcome.replayed) {
+      app.io.to(`order:${id}`).emit('order:status_changed', {
+        orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
+        mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });
     }
-    return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, mismatch: Boolean(updated.mmgClaimMismatchAt) } };
+    if (outcome.notice && outcome.outboxId) {
+      // The obligation is already durable; this only delivers it now rather than on the next sweep.
+      await completeMmgClaimNotice(
+        { prisma: app.prisma, notifications: new NotificationService(app.prisma, app.io) },
+        { outboxId: outcome.outboxId, notice: outcome.notice },
+      ).catch((err: unknown) => request.log.error({ err, orderId: id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
+    return {
+      success: true,
+      data: {
+        orderId: id,
+        paymentStatus: facts.paymentStatus,
+        customerClaimedPaidAt: facts.customerClaimedPaidAt,
+        storeClaimed: facts.paymentStatus === 'CLAIMED',
+        mismatch: facts.mmgClaimMismatchAt != null,
+        replayed: outcome.replayed,
+        mmgClaim: mmgClaimView(facts),
+      },
+    };
   });
 
   app.post('/orders/:id/cancel', async (request: AuthRequest) => {

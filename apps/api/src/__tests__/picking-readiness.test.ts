@@ -36,7 +36,7 @@ let owner: { userId: string; token: string };
 let customer: { userId: string; token: string };
 const userIds: string[] = [];
 let seq = 0;
-const phoneBase = 592_611_000_000 + Math.floor(Math.random() * 800_000_000);
+const phoneBase = 592_611_000_000 + Math.floor(Math.random() * 300_000_000) /* stays below +593: send-otp refuses non-Guyana numbers (AVAIL-1) */;
 
 async function makeUser(roles: string[], activeRole: string) {
   seq += 1;

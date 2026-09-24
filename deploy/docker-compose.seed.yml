@@ -1,0 +1,42 @@
+# One-off PRODUCTION-SPINE SEED ceremony — used ONLY by deploy/seed-production.sh.
+# Never part of `docker compose up`: the service below exists so `docker compose
+# run --rm seed` can execute prisma/seed-production.ts against the stack's
+# private Postgres. The RUNTIME image carries dist/ but no src/ or tsx, so this
+# service builds the Dockerfile's `build` stage, which has both.
+#
+# Secrets: dist/boot/secret-files.js is imported FIRST and turns *_FILE into
+# process env + assembles DATABASE_URL in memory; tsx inherits them as a child.
+# DATABASE_URL therefore exists only inside the container process, never in
+# this config, in argv, or in any log the wrapper prints.
+services:
+  seed:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+      target: build
+    image: swift-api-seed:${SWIFT_TAG:-local}
+    command:
+      - node
+      - -e
+      - |
+        require('./dist/boot/secret-files.js');
+        const { spawnSync } = require('node:child_process');
+        const result = spawnSync(process.execPath, [require.resolve('tsx/cli'), 'prisma/seed-production.ts'], { stdio: 'inherit' });
+        if (result.error) {
+          console.error('FATAL: could not start tsx: ' + result.error.message);
+          process.exit(1);
+        }
+        process.exit(result.status ?? 1);
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-swift}
+      POSTGRES_DB: ${POSTGRES_DB:-swift}
+      POSTGRES_PASSWORD_FILE: /run/secrets/POSTGRES_PASSWORD
+      # The first SUPER_ADMIN (E.164). Required by seed-production.sh.
+      SEED_ADMIN_PHONE: ${SEED_ADMIN_PHONE:-}
+      SEED_ACTOR: ${SEED_ACTOR:-seed-production}
+    volumes:
+      - /run/swift-secrets:/run/secrets:ro
+    networks: [private]
+    restart: "no"

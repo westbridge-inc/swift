@@ -88,6 +88,7 @@ function collect(node: any, text: string[] = [], chips: any[] = []): { text: str
     return { text, chips };
   }
   if (node.type === 'Chip') chips.push(node.props);
+  if (node.type === 'PillButton' && typeof node.props?.label === 'string') text.push(node.props.label);
   collect(node.props?.children, text, chips);
   return { text, chips };
 }
@@ -111,6 +112,18 @@ beforeEach(() => {
 });
 
 describe('service appointment time states', () => {
+  it('shows a real 13:00Z instant for a 09:00 Guyana booking as 9:00 AM', () => {
+    mocks.selectedSlot = '2026-09-24T13:00:00.000Z';
+    mocks.slots = {
+      ...mocks.slots,
+      data: { slots: [mocks.selectedSlot], bookableWeekdays: [4] },
+    };
+    const ui = render();
+
+    expect(ui.chips.some((chip) => chip.label === '9:00 AM')).toBe(true);
+    expect(ui.text.join(' ')).toContain('Book 9:00 AM');
+  });
+
   it('shows initial loading only while the first bounded request is pending', () => {
     mocks.slots = { ...mocks.slots, isPending: true, isLoading: true, isFetching: true };
     expect(render().text.join(' ')).toContain('Checking times…');
@@ -137,7 +150,7 @@ describe('service appointment time states', () => {
   it('keeps known slots visible during a background freshness check', () => {
     mocks.slots = {
       ...mocks.slots,
-      data: { slots: ['2026-09-24T13:00:00.000Z'], bookableWeekdays: [4] },
+      data: { slots: ['2026-09-24T17:00:00.000Z'], bookableWeekdays: [4] },
       isFetching: true,
     };
     const ui = render();
@@ -149,7 +162,7 @@ describe('service appointment time states', () => {
   it('keeps last-known slots visible after a background refresh failure and offers refresh', () => {
     mocks.slots = {
       ...mocks.slots,
-      data: { slots: ['2026-09-24T13:00:00.000Z'], bookableWeekdays: [4] },
+      data: { slots: ['2026-09-24T17:00:00.000Z'], bookableWeekdays: [4] },
       isError: true,
       error: new Error('server unavailable'),
     };

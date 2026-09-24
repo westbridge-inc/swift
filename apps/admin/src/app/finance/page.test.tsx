@@ -134,7 +134,10 @@ describe('daily revenue renders the GUYANA day, not the browser day [DASH-06]', 
 
 describe('finance settlement mutation', () => {
   it('collects a note, confirms, and acknowledges the digest through the exact endpoint and payload — never a payout', async () => {
-    const prompt = vi.fn().mockReturnValue('BANK-TEST-1');
+    const prompt = vi.fn((msg: string) =>
+      String(msg) === 'Note for Test Vendor (optional):'
+        ? 'BANK-TEST-1'
+        : 'Acknowledged against the weekly settlement report');
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal('prompt', prompt);
     vi.stubGlobal('confirm', confirm);
@@ -176,7 +179,10 @@ describe('finance settlement mutation', () => {
   });
 
   it('renders a settlement failure and keeps the pending settlement visible', async () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('BANK-TEST-2'));
+    vi.stubGlobal('prompt', vi.fn((msg: string) =>
+      String(msg) === 'Note for Test Vendor (optional):'
+        ? 'BANK-TEST-2'
+        : 'Acknowledged against the weekly settlement report'));
     vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
     const fetchMock = mockApi(
       financeHandler((request) => {

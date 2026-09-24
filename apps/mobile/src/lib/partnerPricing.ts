@@ -25,6 +25,8 @@ export interface MoverQuote {
   band: MoverFeeBand;
   tier: MoverTier;
   rate: number;
+  /** [Launch vehicle list] False for a vehicle Swift does not take on yet (lib/vehicleOffer). Absent from older servers. */
+  offered?: boolean;
 }
 
 /** One catalogue step: from `minItems` active items, `rate` per week. */

@@ -68,6 +68,11 @@ export interface SosCreateInput {
   lng?: number | null;
   accuracyM?: number | null;
   addressText?: string | null;
+  /** [PRIV2-S1] The raiser's free-text reason. Ops-only safety records hold
+   *  it: the alert this press raises (`triggerNote`), or, for a repeat press,
+   *  its own `sos_retriggers` row. Never the shared order timeline, which the
+   *  other party on the ride reads verbatim. */
+  note?: string | null;
   clientCreatedAt?: Date | null;
   clientIdempotencyKey?: string | null;
   /** Skip the slide-to-cancel grace → straight to ACTIVE. For a caller whose UI
@@ -191,6 +196,9 @@ export class SosService {
         lng: input.lng ?? null,
         accuracyM: input.accuracyM ?? null,
         addressText: input.addressText ?? null,
+        // [PRIV2-S1] The repeat press's own words, on its own immutable row.
+        // The alert keeps the note it was raised with; nothing is overwritten.
+        note: input.note ?? null,
         counterpartyUserId: input.counterpartyUserId ?? null,
         actorRole: input.actorRole,
         clientCreatedAt: input.clientCreatedAt ?? null,
@@ -242,10 +250,15 @@ export class SosService {
 
       if (merged.count === 1) {
         try {
+          // [PRIV2-S2] The repeat press's own words go to the war room with
+          // it — ops rooms only, joined by ADMIN / SUPER_ADMIN sockets and
+          // never by the other person on the ride. The ops page body stays
+          // free of them (see sos-escalation.ts: it is pushed to phones and
+          // repeated in the on-call SMS).
           this.io.to(warRoomsFor(live.tenantId)).emit('sos:retrigger', {
             sosAlertId: live.id, actorUserId: live.actorUserId, orderId: live.orderId,
             at: now, source, lat: input.lat ?? null, lng: input.lng ?? null,
-            retriggerCount: merged.seq,
+            retriggerCount: merged.seq, note: input.note ?? null,
           });
         } catch { /* the war-room nudge is best-effort; the row is the record */ }
 
@@ -333,6 +346,7 @@ export class SosService {
           triggerLng: input.lng ?? null,
           triggerAccuracyM: input.accuracyM ?? null,
           triggerAddressText: input.addressText ?? null,
+          triggerNote: input.note ?? null,
           clientCreatedAt: input.clientCreatedAt ?? null,
           clientIdempotencyKey: key,
         },

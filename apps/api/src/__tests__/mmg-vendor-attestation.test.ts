@@ -53,7 +53,7 @@ const userIds: string[] = [];
 const orderIds: string[] = [];
 let vendorOwnerId: string;
 let seq = 0;
-const phoneBase = 592_615_000_000 + Math.floor(Math.random() * 800_000_000);
+const phoneBase = 592_615_000_000 + Math.floor(Math.random() * 300_000_000) /* stays below +593: send-otp refuses non-Guyana numbers (AVAIL-1) */;
 
 async function makeUser(roles: string[], activeRole: string) {
   seq += 1;
@@ -189,7 +189,15 @@ describe('[W-25] the authority is the LOCKED row, not the preview', () => {
     // second check is PRESENT rather than proving it fires. Deleting it (which
     // is how this regresses) turns this red.
     const route = readFileSync(join(process.cwd(), 'src/modules/vendor/vendor.routes.ts'), 'utf8');
-    const capture = route.slice(route.indexOf("confirm-payment'"), route.indexOf('complete-appointment'));
+    // The capture runs from the confirm-payment handler to the NEXT route
+    // declaration; a comment elsewhere in the file may mention the word
+    // complete-appointment, so the end anchor is the declaration string,
+    // searched after the start.
+    const start = route.indexOf("confirm-payment'");
+    const end = route.indexOf("'/orders/:id/complete-appointment'", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const capture = route.slice(start, end);
     expect(capture).toMatch(/assertMmgAttestable\(order\)/); // the preview
     expect(capture).toMatch(/assertMmgAttestable\(locked\)/); // the authority
     expect(capture.indexOf('assertMmgAttestable(locked)')).toBeGreaterThan(capture.indexOf('FOR UPDATE'));

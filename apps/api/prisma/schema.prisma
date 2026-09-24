@@ -1726,7 +1726,7 @@ model BookingException {
   itemId    String?
   vendorId  String
   date      DateTime @db.Date
-  start     String? // "13:00" local wall-clock (the UTC-face convention)
+  start     String? // "13:00" market wall-clock for the date-only exception
   end       String?
   reason    String?
   createdAt DateTime @default(now())
@@ -1823,6 +1823,15 @@ model Order {
   // delivery. Cleared implicitly once the order reaches DELIVERED.
   courierProofIssuedUrl     String?
   courierProofIssuedRiderId String?
+  // E16: pickup custody proof. PICKED_UP is a physical-custody claim, so it
+  // carries the same issued-then-exact-matched two-step as delivery proof:
+  // the server-issued URL + the rider it was issued to, the bound photo, and
+  // the rider's location at pickup. Time is pickedUpAt (below).
+  courierPickupProofIssuedUrl     String?
+  courierPickupProofIssuedRiderId String?
+  courierPickupProofPhotoUrl      String?
+  courierPickupProofLat           Float?
+  courierPickupProofLng           Float?
   courierTrackingToken      String?      @unique
 
   taxiPickupAddress  String?
@@ -1893,6 +1902,23 @@ model Order {
   customerClaimedPaidAt    DateTime?
   customerPaymentRef       String?
   mmgClaimMismatchAt       DateTime?
+  /// [ORDER-SPINE S1-6] The customer's statement under the locked claim authority
+  /// (order/mmg-claim.service.ts). UNRECORDED is "nothing said under this contract",
+  /// NOT proof of silence before it; NOT_PAID is durable, so a later store claim finds
+  /// it. `customerClaimedPaidAt`/`customerPaymentRef` stay as its compatibility
+  /// projections. `mmgClaimMismatchAt` remains THE open-disagreement latch every
+  /// fulfilment gate reads; CHECK constraints make an unheld contradiction unwritable.
+  customerMmgClaim         CustomerMmgClaim    @default(UNRECORDED)
+  customerMmgClaimAt       DateTime?
+  /// One generation counter for the claim facts: every changed customer statement,
+  /// first store claim and operator decision advances it; exact repeats do not. An
+  /// operator decision names the generation it reviewed.
+  mmgClaimRevision         Int                 @default(0)
+  /// The latest operator decision and the generation it produced. It covers the
+  /// claim facts only while `mmgClaimResolvedRevision = mmgClaimRevision`.
+  mmgClaimResolution       MmgClaimResolution?
+  mmgClaimResolvedAt       DateTime?
+  mmgClaimResolvedRevision Int?
 
   estimatedPrepTime     Int?
   estimatedDeliveryTime Int?
@@ -2107,6 +2133,23 @@ enum PaymentStatus {
   EXPIRED
   /// Superseded before resolution (another rail paid the week first).
   CANCELLED
+}
+
+/// [ORDER-SPINE S1-6] What the CUSTOMER said about a direct-MMG payment, under
+/// the locked claim authority. Never a payment state: a customer statement
+/// neither authorises fulfilment nor proves money moved.
+enum CustomerMmgClaim {
+  UNRECORDED
+  PAID
+  NOT_PAID
+}
+
+/// [ORDER-SPINE S1-6] An operator's decision on a disagreement between the
+/// store's claim and the customer's statement. CUSTOMER_PAID upholds the
+/// store's claim; CUSTOMER_DID_NOT_PAY rejects that claim attempt for good.
+enum MmgClaimResolution {
+  CUSTOMER_PAID
+  CUSTOMER_DID_NOT_PAY
 }
 
 /// markedUpPrice/markup* fields are V1 dormant (zero-commission) — kept
@@ -2687,6 +2730,12 @@ model BillingEvent {
   /// delivered. Null = the evidence exists but the payer has not been told;
   /// the notice job re-attempts it, and the charge gate does not count it.
   deliveredAt    DateTime?
+  /// Billing notice delivery lease/checkpoint. These are used only for
+  /// noticeVersion=1 nudge, churn and MMG mismatch events; financial facts
+  /// remain immutable while the delivery state can advance after commit.
+  noticeLeaseUntil DateTime?
+  noticeLeaseToken String?
+  noticeSmsSentAt DateTime?
   createdAt      DateTime         @default(now())
 
   @@index([subscriptionId])
@@ -3960,6 +4009,8 @@ model SosRetrigger {
   lng                Float?
   accuracyM          Float?
   addressText        String?
+  /// [PRIV2-S1] What this repeat press said, if anything. Ops-only, like SosAlert.triggerNote.
+  note               String?
   counterpartyUserId String?
   actorRole          String
   clientCreatedAt    DateTime?
@@ -4320,6 +4371,14 @@ model SosAlert {
   triggerLng           Float?
   triggerAccuracyM     Float?
   triggerAddressText   String? // reverse-geocoded, for the on-screen 911 script
+  /// [PRIV2-S1] What the person wrote when they raised this alert (the in-ride
+  /// POST /rides/:id/sos `note`). Ops-only: the ops SOS reads (GET /safety/sos
+  /// and /safety/sos/:id) return it and the evidence bundle snapshots it. It
+  /// must never be copied onto the order timeline — both people on a ride read
+  /// order_status_logs verbatim, so a note like "he's threatening me" would
+  /// reach the person it is about. A repeat press keeps this note and records
+  /// its own on its sos_retriggers row.
+  triggerNote          String?
   clientCreatedAt      DateTime? // device clock — offline reconciliation
   clientIdempotencyKey String? // one alert per trigger PER ACTOR, even on retry — see @@unique below
   /// [F-027-17] How many times this person asked for help again while this
@@ -5661,6 +5720,11 @@ model PrivilegedApproval {
   entityId     String?
   /// SHA-256 over the method, route, params and body that were reviewed
   fingerprint  String
+  /// [DS110-13] Canonical `{ params, body, query }` copy of the request that
+  /// was reviewed. The approver reads THIS, and the apply step replays THIS —
+  /// one stored request, so what executes is always what was displayed. Rows
+  /// raised before this column existed are null and can never be applied.
+  bodySnapshot Json?
   /// PENDING | APPROVED | REJECTED | APPLIED | EXPIRED
   status       String    @default("PENDING")
   requestedBy  String
@@ -6641,6 +6705,12 @@ model SubjectLink {
   relation  SubjectRelation
   validFrom DateTime        @default(now())
   validTo   DateTime?
+  /// [High #9 · DS109] NULL = a PENDING assignment (created when an account submitted a
+  /// VEHICLE-kind document whose plate matched an existing vehicle subject it does not
+  /// own). Pending links never propagate the subject's vehicle evidence; an admin-approved
+  /// assignment stamps this. The subject's registering account gets its link approved at
+  /// creation (the verified owner of record).
+  approvedAt DateTime?
 
   @@unique([accountId, subjectId, relation, validFrom])
   @@index([subjectId])

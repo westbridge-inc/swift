@@ -1,7 +1,7 @@
 import { Prisma, type MoverRole, type OrderStatus, type UserRole, type UserStatus } from '@prisma/client';
 import { freshRidePinReset } from './rides/ride-pin';
 import type { FastifyInstance } from 'fastify';
-import { AppError, ConflictError, NotFoundError } from '../utils/errors';
+import { AppError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { makeDispatchService } from './dispatch/dispatch.service';
 import { reopenPreCustodyLeg } from './dispatch/delivery-watchdog';
 import { closeOnlineSession } from './rider/online-hours';
@@ -545,6 +545,69 @@ export async function transitionUserRoleAuthority(
   return { activeRole: cleanup.activeRole, lastMoverRole: cleanup.lastMoverRole };
 }
 
+// ---------------------------------------------------------------------------
+// [DS110 #12] WHO MAY CHANGE WHOSE ACCOUNT STATUS — one rule, at the seam.
+//
+// The ban route protected targets whose `roles` contained 'ADMIN'. The seed
+// mints the founder as `['SUPER_ADMIN', 'CUSTOMER']`, so that test never fired
+// for the SUPER_ADMIN: any ADMIN could ban the platform's top authority (its
+// sessions revoked in the same commit), suspension had no guard at all, and
+// nothing could lift a ban. The rule now lives INSIDE the status transition,
+// where every admin-initiated change already serialises, so no route — present
+// or future — can forget it:
+//
+//   - never the actor's own account;
+//   - only an account whose highest role ranks BELOW the actor's acting role:
+//     an ADMIN reaches customers, movers and vendor owners; a SUPER_ADMIN
+//     reaches those and ADMINs; nobody reaches a SUPER_ADMIN;
+//   - lifting a ban is SUPER_ADMIN-only, whichever route asks for it.
+//
+// A SUPER_ADMIN acting on another SUPER_ADMIN is refused as well. Changing who
+// holds SUPER_ADMIN is a two-person break-glass ceremony in the ops seed
+// (promoteBootstrapAdmin), never a single console click; the console's own
+// two-person control (ADM-005) is fixed per route class, so "a second
+// signature only when the target is a SUPER_ADMIN" has no seam to hang on.
+// Refusing keeps the last SUPER_ADMIN un-lockable by construction.
+// ---------------------------------------------------------------------------
+
+/** The acting rank of each role. Legacy RIDER/DRIVER and the unified MOVER
+ *  share one mover rank; an account holding several roles is judged by its
+ *  highest. */
+const ROLE_RANK: Readonly<Record<UserRole, number>> = {
+  CUSTOMER: 0,
+  RIDER: 1,
+  DRIVER: 1,
+  MOVER: 1,
+  VENDOR_OWNER: 2,
+  ADMIN: 3,
+  SUPER_ADMIN: 4,
+};
+
+const rankOf = (role: string): number => ROLE_RANK[role as UserRole] ?? 0;
+
+export type UserStatusTarget = 'ACTIVE' | 'SUSPENDED' | 'BANNED';
+/** The restriction an ACTIVE transition lifts: an unsuspend or an unban. */
+export type UserStatusRestriction = 'SUSPENDED' | 'BANNED';
+
+/** The pure rule. `transitionUserStatusAuthority` applies it inside the
+ *  transaction with the actor's role read from the database, never from the
+ *  request, so a caller cannot feed it a stale or forged role. Acting on your
+ *  own account is refused by the same comparison: your own highest role is
+ *  never below the role you act under. */
+export function assertAccountActionAuthority(
+  actor: { role: string },
+  target: { roles: readonly string[] },
+  transition: { targetStatus: UserStatusTarget; lifts: UserStatusRestriction },
+): void {
+  const targetRank = Math.max(0, ...target.roles.map(rankOf));
+  if (targetRank >= rankOf(actor.role)) {
+    throw new ForbiddenError('You cannot act on an account at an equal or higher role, or on your own');
+  }
+  if (transition.targetStatus === 'ACTIVE' && transition.lifts === 'BANNED' && actor.role !== 'SUPER_ADMIN') {
+    throw new ForbiddenError('Only SUPER_ADMIN can unban users');
+  }
+}
+
 /** Linearized admin account-state transition. Suspension/ban refuses an active
  * trip rather than marooning it behind authentication denial, removes all idle
  * supply atomically, and leaves restoration offline until an explicit GO. */
@@ -555,15 +618,37 @@ export interface UserStatusTransitionAuditEvidence {
   userAgent?: string;
 }
 
+export interface UserStatusTransitionOptions {
+  /** For an ACTIVE target: the restriction being lifted. SUSPENDED (an
+   *  unsuspend) unless the caller says BANNED (an unban), so a route can never
+   *  lift the other restriction by accident. */
+  lifts?: UserStatusRestriction;
+}
+
 export async function transitionUserStatusAuthority(
   app: FastifyInstance,
   userId: string,
-  targetStatus: 'ACTIVE' | 'SUSPENDED' | 'BANNED',
+  targetStatus: UserStatusTarget,
   auditEvidence?: UserStatusTransitionAuditEvidence,
+  options: UserStatusTransitionOptions = {},
 ) {
+  const lifts: UserStatusRestriction = options.lifts ?? 'SUSPENDED';
   const result = await app.prisma.$transaction(async (tx) => {
     const authority = await lockUserRoleAuthority(tx, userId);
     const previousStatus = authority.status;
+
+    // [DS110 #12] The actor's authority is judged first, against the
+    // database's own view of both accounts, so a refused party learns nothing
+    // about the target's state and changes nothing. A transition with no
+    // actor is a system transition and is not ranked.
+    if (auditEvidence) {
+      const actor = await tx.user.findUnique({
+        where: { id: auditEvidence.actorUserId },
+        select: { activeRole: true },
+      });
+      if (!actor) throw new ForbiddenError('Acting account not found');
+      assertAccountActionAuthority({ role: actor.activeRole }, { roles: authority.roles }, { targetStatus, lifts });
+    }
 
     if (targetStatus === 'SUSPENDED') {
       if (previousStatus === 'SUSPENDED') {
@@ -573,8 +658,12 @@ export async function transitionUserStatusAuthority(
         throw new AppError(409, 'INVALID_STATUS_TRANSITION', `A ${previousStatus.toLowerCase()} account cannot be suspended`);
       }
     } else if (targetStatus === 'ACTIVE') {
-      if (previousStatus !== 'SUSPENDED') {
-        throw new AppError(400, 'NOT_SUSPENDED', 'User is not suspended');
+      // Restoration lifts exactly the restriction the route names: /unsuspend
+      // never lifts a ban, /unban never lifts a suspension.
+      if (previousStatus !== lifts) {
+        throw lifts === 'BANNED'
+          ? new AppError(400, 'NOT_BANNED', 'User is not banned')
+          : new AppError(400, 'NOT_SUSPENDED', 'User is not suspended');
       }
     } else if (previousStatus === 'BANNED') {
       throw new AppError(400, 'ALREADY_BANNED', 'User is already banned');
@@ -650,7 +739,9 @@ export async function transitionUserStatusAuthority(
         ? 'SUSPEND_USER'
         : targetStatus === 'BANNED'
           ? 'BAN_USER'
-          : 'UNSUSPEND_USER';
+          : lifts === 'BANNED'
+            ? 'UNBAN_USER'
+            : 'UNSUSPEND_USER';
       await tx.auditLog.create({
         data: {
           userId: auditEvidence.actorUserId,

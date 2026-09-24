@@ -1,4 +1,5 @@
 import type { VendorPreviewType } from '../stores/vendorPreview';
+import { addAppointmentDays, appointmentDayKey, appointmentInstantOfWallClock } from './appointmentTime';
 import { vendorQuote, type PartnerPricing } from './partnerPricing';
 
 /**
@@ -61,14 +62,9 @@ const DAY = 24 * HOUR;
 const agoIso = (ms: number, now: number) => new Date(now - ms).toISOString();
 const aheadIso = (ms: number, now: number) => new Date(now + ms).toISOString();
 
-/** A wall-clock time on a day relative to today, in the VIEWER's timezone —
- *  a 10:00 appointment has to read as 10:00 in Georgetown, not as whatever
- *  10:00Z lands on locally. */
+/** Sample appointment at a market wall-clock time on a relative market day. */
 function atLocal(dayOffset: number, hour: number, minute: number, now: number): string {
-  const d = new Date(now);
-  d.setDate(d.getDate() + dayOffset);
-  d.setHours(hour, minute, 0, 0);
-  return d.toISOString();
+  return appointmentInstantOfWallClock(addAppointmentDays(appointmentDayKey(new Date(now)), dayOffset), hour, minute);
 }
 
 // Type-tailored live orders. Services surface as APPOINTMENT; the rest DELIVERY.
