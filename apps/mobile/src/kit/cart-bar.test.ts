@@ -14,6 +14,8 @@ import { readFileSync } from 'node:fs';
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   cart: { data: undefined as any },
+  cartArgs: [] as unknown[],
+  auth: { isAuthenticated: true },
 }));
 
 vi.mock('react-native', () => ({
@@ -36,7 +38,14 @@ vi.mock('@swift/ui', () => ({
 }));
 
 vi.mock('../hooks/customer', () => ({
-  useCart: () => mocks.cart,
+  useCart: (...args: unknown[]) => {
+    mocks.cartArgs = args;
+    return mocks.cart;
+  },
+}));
+
+vi.mock('../stores/authStore', () => ({
+  useAuthStore: (select: (s: typeof mocks.auth) => unknown) => select(mocks.auth),
 }));
 
 vi.mock('./money', () => ({ Money: 'Money' }));
@@ -165,6 +174,38 @@ describe('[E09] a list leaves room for the bar while it floats over it', () => {
     mocks.cart.data = { items: [{ itemId: 'i1', quantity: 1 }], subtotalCustomer: 700, vendorId: 'vendor-1' };
     expect(useCartBarClearance({ vendorId: 'vendor-2' })).toBe(0);
     expect(useCartBarClearance({ vendorId: 'vendor-1' })).toBe(34 + 16 + 52);
+  });
+});
+
+describe('[E09] a signed-out shopper has no basket to reach', () => {
+  it('never reads the cart while signed out: the shared query is disabled, not fired into a 401', () => {
+    mocks.auth.isAuthenticated = false;
+    mocks.cart.data = undefined;
+    try {
+      expect(CartBar({})).toBeNull();
+      // useCart(lat, lng, choices, enabled): the same key as every cart surface, enabled only when signed in
+      expect(mocks.cartArgs).toEqual([undefined, undefined, undefined, false]);
+      expect(useCartBarClearance()).toBe(0);
+    } finally {
+      mocks.auth.isAuthenticated = true;
+    }
+  });
+
+  it('shows nothing and reserves no room signed out, even if a basket were still cached', () => {
+    mocks.auth.isAuthenticated = false;
+    mocks.cart.data = { items: [{ itemId: 'i1', quantity: 2 }], subtotalCustomer: 900, vendorId: 'vendor-1' };
+    try {
+      expect(CartBar({})).toBeNull();
+      expect(useCartBarClearance()).toBe(0);
+    } finally {
+      mocks.auth.isAuthenticated = true;
+    }
+  });
+
+  it('reads the shared query, enabled, once signed in', () => {
+    mocks.cart.data = { items: [{ itemId: 'i1', quantity: 1 }], subtotalCustomer: 700, vendorId: 'vendor-1' };
+    expect(CartBar({})).not.toBeNull();
+    expect(mocks.cartArgs).toEqual([undefined, undefined, undefined, true]);
   });
 });
 

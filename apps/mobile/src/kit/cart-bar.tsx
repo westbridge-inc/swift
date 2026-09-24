@@ -5,12 +5,24 @@ import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, space } from '@swift/ui';
 import { useCart } from '../hooks/customer';
+import { useAuthStore } from '../stores/authStore';
 import { Money } from './money';
 import { T } from './text';
 
 const GUTTER = space['2xl'];
 /** The pill's height, from the storefront's geometry. */
 export const CART_BAR_HEIGHT = 52;
+
+/**
+ * The shared cart query (the same key as every cart surface), fetched only for
+ * a signed-in shopper: a signed-out browser has no basket, and an
+ * unauthenticated read is a guaranteed 401 plus retries on every browse mount.
+ */
+function useBarCart(): any {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const cart = useCart<any>(undefined, undefined, undefined, isAuthenticated);
+  return isAuthenticated ? cart.data : undefined;
+}
 
 /** Items in the basket, and whether the bar shows for this surface. */
 function cartBarState(data: any, vendorId?: string): { count: number; visible: boolean } {
@@ -27,8 +39,8 @@ function cartBarState(data: any, vendorId?: string): { count: number; visible: b
  */
 export function useCartBarClearance({ vendorId }: { vendorId?: string } = {}): number {
   const insets = useSafeAreaInsets();
-  const cart = useCart<any>();
-  return cartBarState(cart.data, vendorId).visible ? insets.bottom + space.lg + CART_BAR_HEIGHT : 0;
+  const data = useBarCart();
+  return cartBarState(data, vendorId).visible ? insets.bottom + space.lg + CART_BAR_HEIGHT : 0;
 }
 
 /**
@@ -39,7 +51,7 @@ export function useCartBarClearance({ vendorId }: { vendorId?: string } = {}): n
  *
  * It reads the cart through the SAME `useCart` hook every other cart surface
  * uses — the query lives under one key, so mounting the bar never issues a
- * second request. When `vendorId` is passed (the storefront), the bar shows
+ * second request — and only for a signed-in shopper. When `vendorId` is passed (the storefront), the bar shows
  * only for THAT store's basket: the cart is single-vendor and carries its
  * vendorId, so browsing another storefront never surfaces another store's
  * items.
@@ -52,9 +64,9 @@ export function useCartBarClearance({ vendorId }: { vendorId?: string } = {}): n
 export function CartBar({ vendorId }: { vendorId?: string } = {}) {
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
-  const cart = useCart<any>();
+  const data = useBarCart();
 
-  const { count, visible } = cartBarState(cart.data, vendorId);
+  const { count, visible } = cartBarState(data, vendorId);
   if (!visible) return null;
 
   return (
@@ -88,7 +100,7 @@ export function CartBar({ vendorId }: { vendorId?: string } = {}) {
             <T variant="body" weight="bold" tone="onBrand">
               {count} item{count === 1 ? '' : 's'} ·
             </T>
-            <Money amount={Number(cart.data?.subtotalCustomer ?? 0)} tone="onBrand" />
+            <Money amount={Number(data?.subtotalCustomer ?? 0)} tone="onBrand" />
           </View>
         </View>
       )}

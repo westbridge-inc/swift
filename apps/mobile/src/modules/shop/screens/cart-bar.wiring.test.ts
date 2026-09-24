@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
-// [E09] A shopper deep in browse (Search, a category feed, Nearby, Recommended)
-// must still be able to reach the Cart tab after adding items. The pinned
+// [E09] A shopper deep in browse (Search, a category feed or the category
+// grid, Nearby, Recommended, Favorites, the store-code scanner) must still be
+// able to reach the Cart tab after adding items. The pinned
 // "View cart" bar is ONE kit component — CartBar — and every one of those
 // surfaces renders it, alongside the storefront that gave birth to it. The
 // screens import react-native, which Vitest cannot load, so this reads them
@@ -18,12 +19,15 @@ const SCREENS: Array<{ name: string; path: string; jsx: string }> = [
   { name: 'CategoryFeedScreen', path: './CategoryFeedScreen.tsx', jsx: '<CartBar />' },
   { name: 'NearbyScreen', path: './NearbyScreen.tsx', jsx: '<CartBar />' },
   { name: 'RecommendedScreen', path: './RecommendedScreen.tsx', jsx: '<CartBar />' },
+  { name: 'CategoryGridScreen', path: './CategoryGridScreen.tsx', jsx: '<CartBar />' },
+  { name: 'FavoritesScreen', path: './FavoritesScreen.tsx', jsx: '<CartBar />' },
+  { name: 'ScanScreen', path: './ScanScreen.tsx', jsx: '<CartBar />' },
   { name: 'RestaurantScreen', path: './RestaurantScreen.tsx', jsx: '<CartBar vendorId={vendorId} />' },
 ];
 
 describe('[E09] every browse list leaves room for the floating bar', () => {
-  // The storefront keeps its own layout; the four browse lists add the bar's
-  // clearance to their bottom padding so the last row scrolls clear of it.
+  // The storefront keeps its own layout; every other browse surface adds the
+  // bar's clearance to its bottom padding so the last row scrolls clear of it.
   for (const { name, path } of SCREENS.filter((x) => x.name !== 'RestaurantScreen')) {
     it(`${name} adds the cart-bar clearance to its list's bottom padding`, () => {
       const src = read(path);

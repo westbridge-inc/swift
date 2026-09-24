@@ -6,7 +6,7 @@ import { space } from '@swift/ui';
 import { useFavorites, useToggleFavorite } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { vendorPhoto } from '../../../lib/images';
-import { EmptyState, ErrorState, FoodCard, Header, LoadingBlock, Screen } from '../../../kit';
+import { CartBar, useCartBarClearance, EmptyState, ErrorState, FoodCard, Header, LoadingBlock, Screen } from '../../../kit';
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
@@ -17,6 +17,8 @@ export function FavoritesScreen() {
   const { isAuthenticated, promptLogin } = useAuthStore();
   const favorites = useFavorites<any>();
   const toggleFav = useToggleFavorite();
+  // [E09] While the cart bar floats over the list, the last row must scroll clear of it.
+  const cartClearance = useCartBarClearance();
 
   if (!isAuthenticated) {
     return (
@@ -50,7 +52,7 @@ export function FavoritesScreen() {
           keyExtractor={(v) => v.id}
           numColumns={2}
           columnWrapperStyle={{ gap: space.lg, paddingHorizontal: GUTTER }}
-          contentContainerStyle={{ gap: space.lg, paddingTop: space.md, paddingBottom: space['3xl'] }}
+          contentContainerStyle={{ gap: space.lg, paddingTop: space.md, paddingBottom: space['3xl'] + cartClearance }}
           renderItem={({ item: v }) => (
             <FoodCard
               width={CARD_W}
@@ -66,6 +68,8 @@ export function FavoritesScreen() {
           )}
         />
       )}
+      {/* [E09] A shopper who has added items can always reach the Cart tab. */}
+      <CartBar />
     </Screen>
   );
 }
