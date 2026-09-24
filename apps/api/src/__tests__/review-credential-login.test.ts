@@ -25,6 +25,7 @@ import { runWithoutTenant } from '../plugins/tenant-context';
 import { AuthService } from '../modules/auth/auth.service';
 import { hashReviewCode, REVIEW_CODE_MAX_ATTEMPTS } from '../modules/review/credentials';
 import { LAUNCH_CITY, LOCATION_HEADER } from '../modules/review/gate';
+import { guyanaDayKey } from '../utils/guyana-day';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
@@ -35,6 +36,9 @@ const P_PLANT = `+59278${NUM}4`;    // a real customer with a credential row pla
 const CODE = '246810';
 const REVIEW = `review-login-${RUN}`;
 const PRODUCTION = 'swift-default';
+// TEST-NET-3 address reserved for this suite: the per-IP daily budget key
+// must not accumulate against other suites across repeat runs.
+const TEST_IP = '203.0.113.122';
 
 let app: FastifyInstance;
 let svc: AuthService;
@@ -100,15 +104,16 @@ afterAll(async () => {
     await app.prisma.tenant.deleteMany({ where: { id: REVIEW } });
   });
   for (const p of [P_REVIEW, P_PROD, P_TRAP, P_PLANT]) await app.redis.del(`otp_rate:${p}`, `otp_hr:${p}`, `otp:${p}`, `review_otp:${p}`, `review_otp_fail:${p}`, `otp_verified:${p}`);
+  await app.redis.del(`otp_ip_day:${guyanaDayKey(new Date())}:${TEST_IP}`);
   await app.close();
 });
 
 describe('[DL-6] send-otp', () => {
   it('a review identifier gets the production answer and NO SMS; a production identifier gets its SMS', async () => {
-    const review = await svc.sendOtp(P_REVIEW);
+    const review = await svc.sendOtp(P_REVIEW, TEST_IP);
     expect(review).toEqual({ message: 'OTP sent successfully', expiresIn: 300 });
     expect(sent).not.toContain(P_REVIEW);
-    const prod = await svc.sendOtp(P_PROD);
+    const prod = await svc.sendOtp(P_PROD, TEST_IP);
     expect(prod).toEqual({ message: 'OTP sent successfully', expiresIn: 300 });
     expect(sent).toContain(P_PROD);
   });
@@ -124,7 +129,7 @@ describe('[Part 3] verify-otp with a static code', () => {
 
   it('the right code logs the fiction’s customer in, the response names tenant.kind REVIEW, and the code is single-use', async () => {
     await app.redis.del(`review_otp_fail:${P_REVIEW}`, `otp_rate:${P_REVIEW}`);
-    await svc.sendOtp(P_REVIEW);
+    await svc.sendOtp(P_REVIEW, TEST_IP);
     const result = await svc.verifyOtp(P_REVIEW, CODE, device);
     expect(result.isNewUser).toBe(false);
     expect(result.user!.id).toBe(reviewUserId);
@@ -141,7 +146,7 @@ describe('[Part 3] verify-otp with a static code', () => {
 
   it('a credential written for a PRODUCTION customer’s number opens nothing: the right code is refused and no registration window opens', async () => {
     await app.redis.del(`otp_rate:${P_TRAP}`);
-    expect(await svc.sendOtp(P_TRAP)).toEqual({ message: 'OTP sent successfully', expiresIn: 300 });
+    expect(await svc.sendOtp(P_TRAP, TEST_IP)).toEqual({ message: 'OTP sent successfully', expiresIn: 300 });
     expect(sent).not.toContain(P_TRAP);
     await expect(svc.verifyOtp(P_TRAP, CODE, device)).rejects.toMatchObject({ code: 'INVALID_OTP' });
     expect(await app.redis.get(`otp_verified:${P_TRAP}`)).toBeNull();
@@ -150,7 +155,7 @@ describe('[Part 3] verify-otp with a static code', () => {
 
   it('a credential row planted under the PRODUCTION tenant is not a review credential: the SMS goes out and the static code means nothing', async () => {
     await app.redis.del(`otp_rate:${P_PLANT}`);
-    await svc.sendOtp(P_PLANT);
+    await svc.sendOtp(P_PLANT, TEST_IP);
     expect(sent).toContain(P_PLANT);
     await expect(svc.verifyOtp(P_PLANT, CODE, device)).rejects.toMatchObject({ code: 'INVALID_OTP', message: 'Invalid OTP code' });
     expect(await system(() => app.prisma.session.count({ where: { userId: plantUserId } }))).toBe(0);
@@ -158,7 +163,7 @@ describe('[Part 3] verify-otp with a static code', () => {
 
   it('a production identifier still takes the real OTP path: the static code means nothing to it', async () => {
     await app.redis.del(`otp_rate:${P_PROD}`);
-    await svc.sendOtp(P_PROD);
+    await svc.sendOtp(P_PROD, TEST_IP);
     await expect(svc.verifyOtp(P_PROD, CODE, device)).rejects.toMatchObject({ code: 'INVALID_OTP', message: 'Invalid OTP code' });
   });
 });
