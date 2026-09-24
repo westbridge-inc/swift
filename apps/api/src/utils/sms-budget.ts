@@ -11,11 +11,19 @@ import { guyanaDayKey } from './guyana-day';
 // so a flood burned the one global budget and 429'd real logins nationwide.
 // Defense in depth, ordered so the SMALLEST bucket trips first:
 //   1. per-phone  — one number cannot be bombed forever (8/day);
-//   2. per-IP     — one actor cannot drain anything shared (100/day);
+//   2. per-IP     — one actor cannot drain anything shared (100/day); this
+//                   counter is for UNKNOWN numbers only, see below;
 //   3. global     — junk/new numbers share one circuit breaker (5000/day);
 //   4. known      — EXISTING verified accounts (and admins) draw from a
 //                   SEPARATE budget, so a flood of new-number requests can
 //                   never lock them out (5000/day).
+// Known numbers deliberately skip the per-IP counter. Guyana's mobile
+// subscribers sit behind carrier-grade NAT, so an attacker (or simply a busy
+// day) on the same carrier IP would otherwise lock every existing account on
+// that NAT pool out of login — the exact outage this budget exists to prevent.
+// A known number is already bounded per phone (1/min, hourly, 8/day) and by
+// the known budget; the per-IP counter's one job is to stop a single actor
+// draining the shared junk budget with throwaway numbers.
 // A provider failure refunds this call's increments, so failed sends don't
 // permanently burn the day's budget.
 //
@@ -48,7 +56,8 @@ export type SmsBudgetReason = 'phone_daily' | 'ip_daily' | 'global_daily' | 'kno
 
 export interface SmsBudgetOptions {
   /** The proxy-resolved client IP. When present, a per-IP daily budget trips
-   *  long before the shared global counter can be drained by one actor. */
+   *  long before the shared global counter can be drained by one actor.
+   *  Not consulted for known phones (carrier-NAT note in the header). */
   ip?: string;
   /** True when the number belongs to an existing verified account/admin.
    *  Such numbers draw from the separate known-phone budget. */
@@ -74,6 +83,8 @@ function deny(reason: SmsBudgetReason): SmsBudgetResult {
  * Per-phone, per-IP and global daily caps on OTP SMS. Atomic INCR per attempt;
  * a send is allowed only while every applicable counter is within its cap, so
  * the number of paid sends can never exceed the caps for a given Guyana day.
+ * Known phones (existing verified accounts, admins) skip the per-IP counter
+ * and draw from their own budget instead of the shared one.
  * Tunable via OTP_PHONE_DAILY_CAP (8), OTP_IP_DAILY_CAP (100),
  * OTP_GLOBAL_DAILY_CAP (5000, junk/new numbers) and OTP_KNOWN_DAILY_CAP
  * (5000, existing verified phones).
@@ -97,7 +108,9 @@ export async function checkOtpDailyBudget(
   spent.push(phoneKey);
   if (phoneCount > phoneCap) return deny('phone_daily');
 
-  if (opts.ip) {
+  // Unknown numbers only: a known account must keep working from a carrier
+  // NAT IP that junk (or a busy day) has already exhausted.
+  if (opts.ip && !opts.knownPhone) {
     const ipKey = `${IP_DAILY_PREFIX}${day}:${opts.ip}`;
     const ipCount = await redis.incr(ipKey);
     if (ipCount === 1) await redis.expire(ipKey, DAY_TTL);

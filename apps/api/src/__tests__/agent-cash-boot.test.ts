@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { createHmac } from 'node:crypto';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { prismaPlugin } from '../plugins/prisma';
@@ -17,6 +19,8 @@ import { agentCashRoutes, AGENT_CASH_MAX_RAW_BODY_BYTES } from '../modules/billi
 
 const SECRET = 'boot-regression-secret-0123456789';
 let app: FastifyInstance;
+/** Route config as fastify registered it — the bodyLimit assertion reads this. */
+const routeBodyLimits = new Map<string, number | undefined>();
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -30,6 +34,9 @@ beforeAll(async () => {
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.register(socketPlugin);
+  app.addHook('onRoute', (route) => {
+    routeBodyLimits.set(`${String(route.method)} ${route.url}`, route.bodyLimit);
+  });
   await app.register(agentCashRoutes, { prefix: '/api/v1/billing/mmg' });
   await app.ready(); // the boot itself is the assertion
 });
@@ -95,8 +102,79 @@ describe('server composition boot (FST_ERR_CTP_ALREADY_PRESENT regression)', () 
     expect(res.json().error.code).toBe('FST_ERR_CTP_BODY_TOO_LARGE');
   });
 
-  it('the webhook route itself is registered with the capture hook applied', () => {
-    expect(app.hasRoute({ method: 'POST', url: '/api/v1/billing/mmg/agent-notification' })).toBe(true);
-    expect(app.hasRoute({ method: 'POST', url: '/api/v1/billing/mmg/inquiry' })).toBe(true);
+  it('both MMG webhook routes are registered with the 128 KB cap as their route bodyLimit', () => {
+    // Belt and braces behind the preParsing guard: fastify's own parser would
+    // refuse an oversized body at this limit even if the hook were removed.
+    for (const url of ['/api/v1/billing/mmg/agent-notification', '/api/v1/billing/mmg/inquiry']) {
+      expect(app.hasRoute({ method: 'POST', url })).toBe(true);
+      expect(routeBodyLimits.get(`POST ${url}`)).toBe(AGENT_CASH_MAX_RAW_BODY_BYTES);
+    }
+  });
+
+  it('on a real socket, a chunked upload past the cap is answered 413 mid-upload — the upload is never taken in', async () => {
+    // inject() cannot show this: the old code buffered a whole upload before
+    // fastify's parser could 413 it, so the answer only came once the client
+    // had sent everything. Here the client is WILLING to send 8 MB; the server
+    // must answer long before that, while the client is still uploading, and
+    // the client must receive that answer cleanly (no reset — the request
+    // stream is drained and dropped, never destroyed). afterAll's app.close()
+    // then proves the socket was released once the client hung up.
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const { port } = app.server.address() as AddressInfo;
+    const BUDGET = 8 * 1024 * 1024;
+    const chunk = Buffer.alloc(64 * 1024, 0x7b);
+
+    const outcome = await new Promise<{ status: number; code: string | undefined; bytesWritten: number }>((resolve, reject) => {
+      let bytesWritten = 0;
+      let settled = false;
+      const request = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: '/api/v1/billing/mmg/agent-notification',
+          headers: {
+            'content-type': 'application/json',
+            'transfer-encoding': 'chunked',
+            'x-swift-timestamp': String(Date.now()),
+            'x-swift-signature': 'irrelevant-the-size-guard-fires-first',
+          },
+        },
+        (res) => {
+          settled = true; // the server answered while the upload was still in flight
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (piece: string) => { body += piece; });
+          res.on('end', () => {
+            let code: string | undefined;
+            try { code = (JSON.parse(body) as { error?: { code?: string } }).error?.code; } catch { code = undefined; }
+            resolve({ status: res.statusCode ?? 0, code, bytesWritten });
+            request.destroy(); // a sane client stops uploading once it has its answer
+          });
+        },
+      );
+      request.on('error', (err) => {
+        if (!settled) reject(err);
+      });
+      const pump = (): void => {
+        if (settled || request.destroyed) return;
+        if (bytesWritten >= BUDGET) {
+          request.end();
+          return;
+        }
+        bytesWritten += chunk.length;
+        if (request.write(chunk)) setImmediate(pump);
+        else request.once('drain', pump);
+      };
+      pump();
+    });
+
+    expect(outcome.status).toBe(413);
+    expect(outcome.code).toBe('FST_ERR_CTP_BODY_TOO_LARGE');
+    // The answer came mid-upload: the client had written a fraction of what it
+    // was willing to send. (Client and server share this event loop, so the
+    // server's refusal — two or three 64 KB chunks in — lands within a couple of
+    // loop turns; the old code needed the whole 8 MB first.)
+    expect(outcome.bytesWritten).toBeLessThan(BUDGET / 4);
   });
 });

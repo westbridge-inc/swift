@@ -1,6 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import type { LightMyRequestResponse } from 'fastify';
-import { storeSignupOtp } from '../../modules/auth/signup-continuation';
+import {
+  armDevelopmentSignupGeneration,
+  issueSignupContinuation,
+  storeSignupOtp,
+} from '../../modules/auth/signup-continuation';
 import { guyanaDayKey } from '../../utils/guyana-day';
 
 /**
@@ -69,6 +73,20 @@ export async function registrationProofFor(app: FastifyInstance, phone: string):
     throw new Error(`verify-otp did not issue a registration proof for new phone ${phone}`);
   }
   return proof;
+}
+
+/**
+ * Mint a registration proof WITHOUT the OTP ceremony. Only for a number the
+ * front door refuses: since audit High #2 a foreign number is stopped at
+ * send-otp itself, so it can never walk the ceremony that issues a proof —
+ * this is the one way to grade the register-level launch-market gate on its
+ * own. Never a shortcut for a Guyana number: those must walk the real ceremony.
+ */
+export async function mintedRegistrationProofFor(app: FastifyInstance, phone: string): Promise<string> {
+  const generation = await armDevelopmentSignupGeneration(app.redis, phone);
+  const issued = await issueSignupContinuation(app.redis, phone, generation);
+  if (!issued) throw new Error(`could not mint a registration proof for ${phone}`);
+  return issued.registrationProof;
 }
 
 /** A 6-digit code guaranteed not to equal the real one. */

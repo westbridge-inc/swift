@@ -8,6 +8,7 @@ import { rateLimitKey } from '../utils/rate-limit-key';
 // bucket; it is an anonymous request and shares the resolved-IP bucket.
 
 let app: FastifyInstance;
+let generator: ReturnType<typeof rateLimitKey>;
 let keyFor: (authorization: string | undefined, ip: string) => Promise<string>;
 
 beforeAll(async () => {
@@ -21,7 +22,7 @@ beforeAll(async () => {
     verify: { algorithms: ['HS256'] },
   });
   await app.ready();
-  const generator = rateLimitKey((token) => app.jwt.verify(token));
+  generator = rateLimitKey((token) => app.jwt.verify(token));
   keyFor = (authorization: string | undefined, ip: string) =>
     generator({ headers: authorization ? { authorization } : {}, ip } as never);
 });
@@ -78,5 +79,16 @@ describe('rate-limit key (D1-01)', () => {
   it('an expired but validly signed token shares the IP bucket', async () => {
     const expired = app.jwt.sign({ userId: 'expired-user', role: 'CUSTOMER' }, { expiresIn: -10 });
     expect(await keyFor(`Bearer ${expired}`, '8.8.8.8')).toBe('8.8.8.8');
+  });
+
+  it('the anonymous fallback is the trustProxy-resolved req.ip, never a client-supplied X-Forwarded-For', async () => {
+    // TRUST_PROXY decides upstream (in fastify) who may set req.ip; the key
+    // generator must not read the header itself, or a forged token plus a
+    // forged X-Forwarded-For would mint a fresh bucket per request again.
+    const k = await generator({
+      headers: { authorization: 'Bearer garbage-token-with-xff', 'x-forwarded-for': '1.2.3.4' },
+      ip: '8.8.8.8',
+    } as never);
+    expect(k).toBe('8.8.8.8');
   });
 });

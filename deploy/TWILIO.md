@@ -29,9 +29,12 @@ Before enabling live sends, restrict Twilio outbound Messaging Geographic
 Permissions to the approved launch destinations (Guyana uses +592); add other
 countries only after launch approval. Set the provider account's available
 spending limit or alerts and verify who receives those alerts. Swift's
-`OTP_PHONE_DAILY_CAP` (default 8) and `OTP_GLOBAL_DAILY_CAP` (default 5000)
-bound OTP volume; they do not cap every alert SMS. Set the global cap to an
-explicit affordable number for the launch volume, then monitor provider usage.
+`OTP_PHONE_DAILY_CAP` (default 8), `OTP_IP_DAILY_CAP` (default 100, unknown
+numbers per client IP), `OTP_GLOBAL_DAILY_CAP` (default 5000, unknown numbers)
+and `OTP_KNOWN_DAILY_CAP` (default 5000, existing verified accounts and admins)
+bound OTP volume; they do not cap every alert SMS. The worst case for one
+Guyana day is the global cap plus the known cap. Set both to explicit
+affordable numbers for the launch volume, then monitor provider usage.
 
 For rotation, create a new application API key, set its SID in `deploy/.env`
 and its secret with `swift-secrets set` (the previous encrypted version is kept

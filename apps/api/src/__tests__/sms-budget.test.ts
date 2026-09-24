@@ -98,6 +98,29 @@ describe('OTP SMS daily budget (cost guardrails)', () => {
     expect(Number(await redis.get(`sms_known_day:${day}`))).toBe(1);
   });
 
+  it('known phones skip the per-IP counter: a NAT IP exhausted by junk still serves existing accounts', async () => {
+    // Guyana's mobile subscribers share carrier-NAT IPs with everyone else on
+    // the carrier — including an attacker. The per-IP counter exists to stop
+    // throwaway numbers draining the SHARED budget; it must never lock an
+    // existing account out of its own login.
+    process.env['OTP_PHONE_DAILY_CAP'] = '1000000';
+    process.env['OTP_IP_DAILY_CAP'] = '1';
+    process.env['OTP_GLOBAL_DAILY_CAP'] = '1000000';
+    process.env['OTP_KNOWN_DAILY_CAP'] = '1000000';
+    await redis.del(`otp_ip_day:${day}:${IP_A}`, `sms_known_day:${day}`);
+
+    const junk1 = await checkOtpDailyBudget(redis, `+592n1${Date.now()}`, { ip: IP_A });
+    const junk2 = await checkOtpDailyBudget(redis, `+592n2${Date.now()}`, { ip: IP_A });
+    const known = await checkOtpDailyBudget(redis, `+592nk${Date.now()}`, { ip: IP_A, knownPhone: true });
+
+    expect(junk1.allowed).toBe(true);
+    expect(junk2).toMatchObject({ allowed: false, reason: 'ip_daily' });
+    expect(known.allowed).toBe(true);
+    // The known send neither consulted nor advanced the exhausted per-IP counter.
+    expect(Number(await redis.get(`otp_ip_day:${day}:${IP_A}`))).toBe(2);
+    expect(Number(await redis.get(`sms_known_day:${day}`))).toBe(1);
+  });
+
   it('refund undoes the counters a provider failure just spent', async () => {
     process.env['OTP_PHONE_DAILY_CAP'] = '1000000';
     process.env['OTP_IP_DAILY_CAP'] = '1000000';
