@@ -48,7 +48,12 @@ if [[ "$ACTION" != down && "$ACTION" != nuke && "$ACTION" != logs ]]; then
     # Fail closed, don't boot broken: the required secrets must be in the store.
     STORE_BIN="$(command -v swift-secrets || true)"
     [[ -n "$STORE_BIN" ]] || STORE_BIN=./swift-secrets
-    stored="$("$STORE_BIN" list 2>/dev/null || true)"
+    # The store's parent is root-only (0700), so list through sudo -n exactly as
+    # pilot-up does; a list that fails is a refusal, never an empty store.
+    stored="$(sudo -n "$STORE_BIN" list)" || {
+      echo "error: could not list the encrypted store (it is root-only; this reads it with sudo -n swift-secrets list)" >&2
+      exit 1
+    }
     missing=()
     for k in POSTGRES_PASSWORD MEILISEARCH_KEY JWT_SECRET OTP_HASH_SECRET MASTER_KEK STORAGE_SIGNING_SECRET CONSENT_IP_PEPPER; do
       grep -qx "$k" <<< "$stored" || missing+=("$k")

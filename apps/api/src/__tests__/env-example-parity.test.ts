@@ -44,7 +44,9 @@ function declared(file: string, name: string): string | undefined {
  * omitted from the other is only a finding when the two EFFECTIVELY differ.
  */
 const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> = [
-  { name: 'LIFECYCLE_V2', whenUnset: '1', what: 'orders are born HELD — the five-minute free-cancel window' },
+  // [DS214 D3] Unset reads as OFF in the code (holdWindowMs, checkoutQueueTiming),
+  // and production now refuses to boot without an explicit value (E08).
+  { name: 'LIFECYCLE_V2', whenUnset: '0', what: 'orders are born HELD — the five-minute free-cancel window' },
   { name: 'ORDER_HOLD_MINUTES', whenUnset: '5', what: 'how long that window lasts' },
   { name: 'DELIVERY_BLOCK_ON_NONE', whenUnset: '1', what: 'whether a no-rider delivery checkout is blocked' },
   { name: 'TAXI_ALLOW_REQUEST_ON_NONE', whenUnset: '1', what: 'whether a passenger may request with no drivers near' },

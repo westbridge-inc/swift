@@ -174,6 +174,49 @@ describe('the tail is written with the order and published exactly once', () => 
     expect((await orderQueue.getJob(cancelId))?.name).toBe('auto-cancel');
     expect((counts['delayed'] ?? 0) + (counts['waiting'] ?? 0) + (counts['active'] ?? 0) + (counts['completed'] ?? 0)).toBeGreaterThanOrEqual(1);
   });
+
+  it('[E36] a replayed drain republishes nothing, and a crash between publish and mark re-drains to the same job id', async () => {
+    const c = await makeCustomer();
+    await fillCart(c);
+    const res = await checkout(c, `dur-${nanoid(10)}`);
+    expect(res.statusCode, res.body).toBe(200);
+    const orderId = res.json().data.orders[0].id as string;
+    const rows = await outboxRows(orderId);
+    expect(rows.every((r) => r.processedAt !== null)).toBe(true);
+    expect(rows.every((r) => r.attempts === 1)).toBe(true); // one claim each, ever
+
+    // A replay of the worker sweep finds nothing claimable: the processedAt
+    // mark is the idempotency fence, so nothing already published is re-added.
+    const replay = await drainCheckoutOutbox(
+      { prisma: app.prisma, queues: { orderQueue, notificationQueue }, log: app.log },
+      { orderIds: [orderId] },
+    );
+    expect(replay).toEqual({ processed: 0, failed: 0 });
+
+    // The crash window: the publish landed (the job exists under the row id)
+    // but the processedAt mark was lost, and the claim lease has lapsed.
+    const cancel = rows.find((r) => r.kind === 'auto-cancel')!;
+    const spy = vi.spyOn(orderQueue, 'add');
+    await app.prisma.orderOutbox.update({
+      where: { id: cancel.id },
+      data: { processedAt: null, claimedAt: new Date(Date.now() - 120_000) },
+    });
+    const redrain = await drainCheckoutOutbox(
+      { prisma: app.prisma, queues: { orderQueue, notificationQueue }, log: app.log },
+      { orderIds: [orderId], claimLeaseMs: 1000 },
+    );
+    expect(redrain.processed).toBe(1);
+    // The re-publish re-adds the SAME deterministic job id; BullMQ collapses a
+    // duplicate id while the first job still exists, so the queue holds one job.
+    const reAdds = spy.mock.calls.filter(
+      (call) => call[0] === 'auto-cancel' && (call[2] as { jobId?: string } | undefined)?.jobId === cancel.id,
+    );
+    expect(reAdds).toHaveLength(1);
+    spy.mockRestore();
+    expect(await orderQueue.getJob(cancel.id)).toBeTruthy(); // exactly one job under the id
+    const rowAfter = await app.prisma.orderOutbox.findUniqueOrThrow({ where: { id: cancel.id } });
+    expect(rowAfter.processedAt).not.toBeNull();
+  });
 });
 
 describe('the result is written with the order and replayed from the database', () => {

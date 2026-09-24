@@ -37,6 +37,7 @@ vi.mock('react-native', () => ({ TurboModuleRegistry: { get: () => null } }));
 vi.mock('../lib/analytics', () => ({ track: vi.fn() }));
 vi.mock('../lib/checkoutAttemptStore', () => ({ checkoutAttempt: {} }));
 vi.mock('../lib/checkoutAttempt', () => ({ recordCheckoutOutcome: vi.fn(), stableBodyHash: vi.fn() }));
+vi.mock('../lib/marketDepthMemory', () => ({ rememberedMarketDepth: () => null, rememberMarketDepth: () => {} }));
 
 import { api } from '../services/api';
 import { useClaimMmgPayment } from './customer';

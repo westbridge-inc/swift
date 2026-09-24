@@ -109,6 +109,8 @@ function readEnvFile(file: string): Record<string, string> {
  *  for real configuration if someone copies this output into a file. */
 const STUBS: Record<string, string> = {
   DEV_OTP_BYPASS: '0',
+  LIFECYCLE_V2: '1',
+  ORDER_HOLD_MINUTES: '5',
   OTP_HASH_SECRET: 'x'.repeat(48),
   JWT_SECRET: 'x'.repeat(48),
   KYC_PROVIDER: 'didit',

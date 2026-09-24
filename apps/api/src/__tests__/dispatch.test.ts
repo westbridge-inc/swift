@@ -12,8 +12,11 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import {
   DISPATCH_LOCATION_FRESH_SECONDS,
   DispatchService,
+  EXHAUST_CAP,
   normalizeDispatchLocationFreshSeconds,
 } from '../modules/dispatch/dispatch.service';
+import { dispatchReplayTag, redispatchJobId } from '../modules/dispatch/dispatch-generation-keys';
+import { Queue, type ConnectionOptions } from 'bullmq';
 import { scoreCandidate, rankCandidates } from '../modules/dispatch/scoring';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { runWithoutTenant } from '../plugins/tenant-context';
@@ -1062,6 +1065,157 @@ describe('The offer cascade', () => {
     expect((await app.redis.get(`dispatch:offer:${order.id}`))!.split(':')[0]).toBe(a.riderId);
 
     await app.prisma.rider.update({ where: { id: a.riderId }, data: { isOnline: false } });
+  });
+
+  it('[E36] a redelivered exhaustion job burns the attempt counter once and collapses the retry push and the REAL BullMQ re-arm', async () => {
+    // The replay needs a retrying cycle (attempts 1 < cap) and a second one
+    // (attempts 2 < cap). A deployment that lowers DISPATCH_EXHAUST_CAP below 3
+    // changes that premise; say so instead of failing on a count.
+    expect(EXHAUST_CAP).toBeGreaterThanOrEqual(3);
+    await app.prisma.rider.updateMany({ data: { isOnline: false } }); // empty pool
+    const order = await makeDeliveryOrder();
+    const exhaustsKey = `dispatch:exhausts:${order.id}`;
+
+    // The re-arm goes to a REAL BullMQ queue (no worker consumes it), so the
+    // job id must be one BullMQ accepts — a custom id with ':' in anything but
+    // three parts throws at add — and a duplicate id is BullMQ's own no-op.
+    const queue = new Queue(`e36-redispatch-${nanoid(6)}`, { connection: app.redis.duplicate() as unknown as ConnectionOptions });
+    const redispatch = async (orderId: string, delayMs: number, replayJobId?: string) => {
+      await queue.add('dispatch-order', { orderId }, { ...(replayJobId ? { jobId: replayJobId } : {}), delay: delayMs });
+      return true;
+    };
+    const replay = new DispatchService(
+      app.prisma, app.redis, app.io, new HaversineMapsProvider(),
+      async (orderId, riderId, delayMs, attemptId) => {
+        scheduled.push({ orderId, riderId, delayMs, attemptId, scheduledAt: Date.now() });
+      },
+      redispatch,
+    );
+    const tag1 = dispatchReplayTag('41');
+    const tag2 = dispatchReplayTag('42');
+    const retrying = () => app.prisma.notification.count({
+      where: { userId: customerId, dedupeKey: { startsWith: `dispatch-retrying:${order.id}:` } },
+    });
+
+    try {
+      const first = await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '41');
+      expect(first).toMatchObject({ exhausted: true });
+      expect(await app.redis.get(exhaustsKey)).toBe('1');
+      expect(await queue.getDelayedCount()).toBe(1);
+      expect((await queue.getJob(redispatchJobId(order.id, tag1)))?.data).toEqual({ orderId: order.id });
+      expect(await retrying()).toBe(1);
+
+      // BullMQ redelivers the SAME job (id 41) after its worker died: the 30s
+      // job lock lapsed, and the 10s exhaust single-flight is long gone —
+      // clear it to model that expiry exactly.
+      await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
+      await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '41');
+      expect(await app.redis.get(exhaustsKey)).toBe('1'); // main: '2'
+      expect(await queue.getDelayedCount()).toBe(1); // main: a second re-arm
+      expect(await retrying()).toBe(1); // main: a second "still looking" push
+
+      // A genuine next cycle is a DIFFERENT job: the counter accumulates, and
+      // it gets its own re-arm and its own notice.
+      await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
+      await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '42');
+      expect(await app.redis.get(exhaustsKey)).toBe('2');
+      expect(await queue.getDelayedCount()).toBe(2);
+      expect(await queue.getJob(redispatchJobId(order.id, tag2))).toBeTruthy();
+      expect(await retrying()).toBe(2);
+
+      // Durable order state untouched: still unassigned and waiting on the vendor.
+      const final = await app.prisma.order.findUniqueOrThrow({
+        where: { id: order.id }, select: { status: true, riderId: true },
+      });
+      expect(final.riderId).toBeNull();
+      expect(final.status).toBe('ACCEPTED');
+      expect(await app.prisma.dispatchSearch.count({
+        where: { subjectId: order.id, status: 'SEARCHING' },
+      })).toBe(0);
+    } finally {
+      await queue.obliterate({ force: true }).catch(() => {});
+      await queue.close();
+      await app.redis.del(
+        exhaustsKey,
+        `dispatch:exhaust-job:${order.id}:${tag1}`,
+        `dispatch:exhaust-job:${order.id}:${tag2}`,
+        `ops_page:dispatch_exhausted:${order.id}`,
+      );
+    }
+  });
+
+  it('[E36] a manual retry that restarts the counter still arms and still tells the customer', async () => {
+    // Keyed by attempt count, the second cycle's re-arm id and push key would
+    // equal the first cycle's: BullMQ keeps a completed job's id (removeOnComplete
+    // 100) and the (user, dedupeKey) unique collapses the push — a legitimate
+    // re-sweep and its notice silently dropped. Keyed by the run, they differ.
+    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    const order = await makeDeliveryOrder();
+    const exhaustsKey = `dispatch:exhausts:${order.id}`;
+    const armedIds: Array<string | undefined> = [];
+    const replay = new DispatchService(
+      app.prisma, app.redis, app.io, new HaversineMapsProvider(),
+      async () => {},
+      async (_orderId, _delayMs, replayJobId) => { armedIds.push(replayJobId); return true; },
+    );
+    try {
+      await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '51');
+      expect(await app.redis.get(exhaustsKey)).toBe('1');
+      // The vendor's retry clears the search memory, counter included.
+      await app.redis.del(exhaustsKey, `dispatch:exhaust-lock:${order.id}`);
+      await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '52');
+      expect(await app.redis.get(exhaustsKey)).toBe('1'); // the counter restarted
+      expect(armedIds).toHaveLength(2);
+      expect(new Set(armedIds).size).toBe(2);
+      expect(await app.prisma.notification.count({
+        where: { userId: customerId, dedupeKey: { startsWith: `dispatch-retrying:${order.id}:` } },
+      })).toBe(2);
+    } finally {
+      await app.redis.del(
+        exhaustsKey,
+        `dispatch:exhaust-job:${order.id}:${dispatchReplayTag('51')}`,
+        `dispatch:exhaust-job:${order.id}:${dispatchReplayTag('52')}`,
+        `ops_page:dispatch_exhausted:${order.id}`,
+      );
+    }
+  });
+
+  it('[E36] a redelivered offer timeout consumes the pair once: one decay, one cascade', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    const rider = await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
+    const order = await makeDeliveryOrder();
+
+    const first = await dispatch.dispatchOrder(order.id);
+    expect(first.offered).toBe(rider.riderId);
+    const live = await app.redis.get(`dispatch:offer:${order.id}`);
+    expect(live).not.toBeNull();
+    const attemptId = live!.split(':')[1]; // `<riderId>:<attemptId>` [F-014-04]
+    // The client provably rendered the card, so this timeout is a scored miss.
+    await dispatch.markOfferSeen(order.id, rider.userId, attemptId);
+
+    await dispatch.handleOfferTimeout(order.id, rider.riderId, attemptId);
+    const afterFirst = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(Number(afterFirst.acceptanceRate)).toBeCloseTo(80, 5); // one EMA step
+
+    // The first timeout's own cascade ran (the only rider declined, so the
+    // search exhausted); remember what it left in the counter.
+    const exhaustsAfterFirst = await app.redis.get(`dispatch:exhausts:${order.id}`);
+
+    // A crash redelivers the SAME timeout job. The atomic pair-consume now
+    // reads `removed === false` and returns before any consequence re-runs:
+    // no second decay, and no second cascade to burn another attempt.
+    await dispatch.handleOfferTimeout(order.id, rider.riderId, attemptId);
+    const afterSecond = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(Number(afterSecond.acceptanceRate)).toBeCloseTo(80, 5); // still one step
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBeNull();
+    expect(await app.redis.get(`dispatch:exhausts:${order.id}`)).toBe(exhaustsAfterFirst);
+
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false } });
+    await app.redis.del(
+      `dispatch:exhausts:${order.id}`,
+      `dispatch:declined:${order.id}`,
+      `ops_page:dispatch_exhausted:${order.id}`,
+    );
   });
 
   it('widens the radius when the inner ring is empty', async () => {
