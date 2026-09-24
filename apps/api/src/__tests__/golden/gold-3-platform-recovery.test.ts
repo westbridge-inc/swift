@@ -52,8 +52,17 @@ import { recoveryFor } from '../../jobs/recovery-policy';
 // the CI run would inherit. The two sweeps this journey needs are enqueued as
 // the exact one-off jobs the schedule adds (its own names and options), which
 // is also exactly what an overdue repeatable tick looks like to a restarted
-// worker. The consumer process watches its parent and dies with it, so no
-// worker can outlive this file.
+// worker — and, while a step waits on a state only a sweep can produce, the
+// same job is enqueued again at the schedule's cadence (`resweep` below),
+// because a sweep is a schedule, not a tick: one checkout-outbox tick drains at
+// most 200 due rows, oldest first, and a row whose publish fails inside a tick
+// is backed off for the NEXT tick while the job itself completes. In CI the
+// single tick this step once relied on spent its whole budget on rows earlier
+// files had left unpublished in the shared database (a checkout test with no
+// queues writes two rows per order and never publishes them; deleting the order
+// leaves them) and never reached this journey's row — twice, with nothing in
+// the worker's stderr. The consumer process watches its parent and dies with
+// it, so no worker can outlive this file.
 //
 // The one simulated fault: step 1's order-queue producer rejects one write
 // (a Redis outage at the moment of checkout). Everything else is organic.
@@ -197,12 +206,51 @@ const orderRow = (id: string) => sys(() => app.prisma.order.findUniqueOrThrow({ 
 const riderRow = (id: string) => sys(() => app.prisma.rider.findUniqueOrThrow({ where: { id } }));
 const offerKey = (orderId: string) => `dispatch:offer:${orderId}`;
 
-async function waitFor<T>(label: string, probe: () => Promise<T>, done: (v: T) => boolean, timeoutMs: number, consumer?: Consumer): Promise<T> {
+type JobState = 'waiting' | 'prioritized' | 'delayed' | 'active' | 'completed' | 'failed';
+const ALL_STATES: JobState[] = ['waiting', 'prioritized', 'delayed', 'active', 'completed', 'failed'];
+
+/** The two recurring sweeps this journey needs (jobs/queue.ts schedules both every 10 s). */
+type SweepName = 'release-held-orders' | 'checkout-outbox';
+
+/** One tick of a sweep, exactly as the schedule adds it: its own job name and options. */
+function tick(name: SweepName): Promise<Job> {
+  return queues.dispatchQueue.add(name, {}, { removeOnComplete: 20, removeOnFail: 20 });
+}
+
+/** Production re-fires each sweep every 10 s for as long as the worker lives.
+ *  The same cadence, compressed: the outbox backs a failed row off 4 s, then
+ *  8 s, and one tick drains at most 200 rows, so 2.5 s reaches every retry and
+ *  every page of a backlog well inside a bounded wait. */
+const SWEEP_EVERY_MS = 2_500;
+
+type WaitOptions = {
+  consumer?: Consumer;
+  /** Keep enqueuing this sweep at the schedule's cadence until the state holds. */
+  resweep?: SweepName;
+  /** Evidence for the timeout error: the rows, the jobs, the clocks. */
+  diagnose?: () => Promise<unknown>;
+};
+
+const dump = (v: unknown) => JSON.stringify(v, (_k, x: unknown) => (typeof x === 'bigint' ? x.toString() : x));
+
+async function waitFor<T>(label: string, probe: () => Promise<T>, done: (v: T) => boolean, timeoutMs: number, opts: WaitOptions = {}): Promise<T> {
   const deadline = Date.now() + timeoutMs;
+  const ticks: Job[] = [];
+  let nextTickAt = Date.now() + SWEEP_EVERY_MS;
   let last = await probe();
   while (!done(last)) {
     if (Date.now() > deadline) {
-      throw new Error(`timed out waiting for ${label}; last: ${JSON.stringify(last)}${consumer ? `; consumer stderr: ${consumer.stderr().slice(-1500)}` : ''}`);
+      const diagnostics = opts.diagnose ? await opts.diagnose().catch((err: unknown) => ({ diagnosticsFailed: String(err) })) : undefined;
+      throw new Error([
+        `timed out waiting for ${label}; last: ${dump(last)}`,
+        diagnostics === undefined ? '' : `diagnostics: ${dump(diagnostics)}`,
+        opts.resweep ? `${opts.resweep} ticks this wait added: ${dump(await describeJobs(ticks))}` : '',
+        opts.consumer ? `consumer stderr: ${opts.consumer.stderr().slice(-1500)}` : '',
+      ].filter(Boolean).join('; '));
+    }
+    if (opts.resweep && Date.now() >= nextTickAt) {
+      ticks.push(await tick(opts.resweep));
+      nextTickAt = Date.now() + SWEEP_EVERY_MS;
     }
     await new Promise((r) => setTimeout(r, 150));
     last = await probe();
@@ -211,9 +259,70 @@ async function waitFor<T>(label: string, probe: () => Promise<T>, done: (v: T) =
 }
 
 /** Jobs of one name about one order, in the given states. */
-async function jobsFor(queue: Queue, name: string, orderId: string, states: Array<'waiting' | 'prioritized' | 'delayed' | 'active' | 'completed' | 'failed'>) {
+async function jobsFor(queue: Queue, name: string, orderId: string, states: JobState[]) {
   const jobs = (await queue.getJobs(states, 0, -1)) as Array<Job | undefined>;
   return jobs.filter((j): j is Job => !!j && j.name === name && (j.data as { orderId?: string }).orderId === orderId);
+}
+
+// ── Diagnostics: what a timed-out wait reports, so a real regression reads
+// differently from a transient and from another file's residue ─────────────
+
+/** Each job re-read from its queue (the instance `add` returns never updates). */
+async function describeJobs(jobs: Job[]) {
+  return Promise.all(jobs.map(async (j) => {
+    const fresh = j.id ? (await queues.dispatchQueue.getJob(j.id)) ?? j : j;
+    return { id: fresh.id, name: fresh.name, state: await fresh.getState(), attemptsMade: fresh.attemptsMade, failedReason: fresh.failedReason, processedOn: fresh.processedOn, finishedOn: fresh.finishedOn };
+  }));
+}
+
+/** Every sweep job of one name on the dispatch queue, in every state. */
+async function sweepJobs(name: SweepName) {
+  const jobs = (await queues.dispatchQueue.getJobs(ALL_STATES, 0, -1)) as Array<Job | undefined>;
+  return describeJobs(jobs.filter((j): j is Job => !!j && j.name === name));
+}
+
+/** The dead letters on every queue: the one place a job that gave up would show. */
+async function deadLetters() {
+  const out: Array<Record<string, unknown>> = [];
+  for (const q of Object.values(queues)) {
+    for (const j of await q.getFailed(0, 50)) out.push({ queue: q.name, id: j.id, name: j.name, attemptsMade: j.attemptsMade, failedReason: j.failedReason, data: j.data });
+  }
+  return out;
+}
+
+/** The outbox row as the drainer judges it (attempts, lease, backoff, error),
+ *  the two clocks its due-ness is compared across, and how many due rows stand
+ *  AHEAD of it in the drain order (oldest first, 200 a tick) — the shape of
+ *  every silent miss. */
+async function outboxDiagnostics(rowId: string) {
+  const row = await sys(() => app.prisma.orderOutbox.findUnique({ where: { id: rowId } }));
+  const [db] = await sys(() => app.prisma.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`);
+  const ahead = row ? await sys(() => app.prisma.orderOutbox.count({ where: { processedAt: null, availableAt: { lte: new Date() }, createdAt: { lt: row.createdAt } } })) : null;
+  return { row, clocks: { db: db?.now, node: new Date() }, dueRowsAheadInDrainOrder: ahead, sweeps: await sweepJobs('checkout-outbox'), deadLetters: await deadLetters() };
+}
+
+/** A held parcel: its hold and release stamps, its card, its dispatch jobs, the release sweeps. */
+async function heldParcelDiagnostics(orderId: string) {
+  const row = await orderRow(orderId);
+  return {
+    order: { status: row.status, holdExpiresAt: row.holdExpiresAt, releasedToVendorAt: row.releasedToVendorAt, riderId: row.riderId },
+    offer: await app.redis.get(offerKey(orderId)),
+    dispatchJobs: await describeJobs(await jobsFor(queues.dispatchQueue, 'dispatch-order', orderId, ALL_STATES)),
+    sweeps: await sweepJobs('release-held-orders'),
+    deadLetters: await deadLetters(),
+  };
+}
+
+/** A parcel in the offer cascade: its card, its timeouts, its dispatch jobs. */
+async function offerDiagnostics(orderId: string) {
+  const row = await orderRow(orderId);
+  return {
+    order: { status: row.status, riderId: row.riderId },
+    offer: await app.redis.get(offerKey(orderId)),
+    offerTimeouts: await describeJobs(await jobsFor(queues.dispatchQueue, 'offer-timeout', orderId, ALL_STATES)),
+    dispatchJobs: await describeJobs(await jobsFor(queues.dispatchQueue, 'dispatch-order', orderId, ALL_STATES)),
+    deadLetters: await deadLetters(),
+  };
 }
 
 type Consumer = { proc: ChildProcess; exited: Promise<{ code: number | null; signal: string | null }>; stderr: () => string };
@@ -233,7 +342,7 @@ async function startConsumer(): Promise<Consumer> {
     proc.once('exit', (code, signal) => { live.delete(proc); resolve({ code, signal }); });
   });
   const consumer: Consumer = { proc, exited, stderr: () => err };
-  await waitFor('the worker process to report ready', async () => ({ out, gone: proc.exitCode !== null || proc.signalCode !== null }), (v) => v.out.includes('consumer-ready') || v.gone, 90_000, consumer);
+  await waitFor('the worker process to report ready', async () => ({ out, gone: proc.exitCode !== null || proc.signalCode !== null }), (v) => v.out.includes('consumer-ready') || v.gone, 90_000, { consumer });
   if (!out.includes('consumer-ready')) throw new Error(`worker process exited before ready: ${err.slice(-2000)}`);
   return consumer;
 }
@@ -473,7 +582,7 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
       rows: await sys(() => app.prisma.alertDelivery.count({ where: { kind: 'MOVER_OFFER', subjectId: o1, recipientId: a.userId } })),
       timeouts: (await jobsFor(queues.dispatchQueue, 'offer-timeout', o1, ['delayed'])).length,
       dispatched: (await jobsFor(queues.dispatchQueue, 'dispatch-order', o1, ['completed'])).length,
-    }), (v) => v.offer?.startsWith(`${a.riderId}:`) === true && v.rows === 1 && v.timeouts === 1 && v.dispatched === 1, 60_000, worker);
+    }), (v) => v.offer?.startsWith(`${a.riderId}:`) === true && v.rows === 1 && v.timeouts === 1 && v.dispatched === 1, 60_000, { consumer: worker, diagnose: () => offerDiagnostics(o1) });
 
     worker.proc.kill('SIGKILL');
     expect(await worker.exited).toEqual({ code: null, signal: 'SIGKILL' });
@@ -499,24 +608,41 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
     // tick is one the schedule would fire after the row's retry backoff.)
     const backoff = (await sys(() => app.prisma.orderOutbox.findUniqueOrThrow({ where: { id: autoCancelRow } }))).availableAt;
     await waitFor('the outbox retry backoff to pass', async () => Date.now(), (t) => t > backoff.getTime() + 250, 30_000);
-    await queues.dispatchQueue.add('release-held-orders', {}, { removeOnComplete: 20, removeOnFail: 20 });
-    await queues.dispatchQueue.add('checkout-outbox', {}, { removeOnComplete: 20, removeOnFail: 20 });
+    await tick('release-held-orders');
+    await tick('checkout-outbox');
     const worker = await startConsumer();
 
-    // O2: released once and offered to Cleo — who takes the card at once.
-    await waitFor('the held parcel to be offered to Cleo', async () => app.redis.get(offerKey(o2)), (v) => v?.startsWith(`${c.riderId}:`) === true, 60_000, worker);
+    // O2: released once and offered to Cleo — who takes the card at once. The
+    // release sweep is re-fired at the schedule's cadence while the card is
+    // missing (one tick releases at most 100 due holds; a tick whose job fails
+    // is BullMQ's to retry, a re-tick of a released row is the no-op proven
+    // below). A dispatch enqueue lost AFTER the flip is not a re-tick's to
+    // recover — production's reconcile-dispatch takes that after 3 minutes —
+    // so it would time out here, named by the diagnostics.
+    await waitFor('the held parcel to be offered to Cleo', async () => app.redis.get(offerKey(o2)), (v) => v?.startsWith(`${c.riderId}:`) === true, 60_000, { consumer: worker, resweep: 'release-held-orders', diagnose: () => heldParcelDiagnostics(o2) });
     const takeO2 = await call('POST', '/api/v1/rider/offers/accept', c.token, { orderId: o2 });
     expect(takeO2.statusCode, takeO2.body).toBe(200);
-    // O1: the timeout born before the crash fires; the card moves to Bebe — who takes it at once.
+    // O1: the timeout born before the crash fires; the card moves to Bebe — who
+    // takes it at once. (No sweep to re-fire: the delayed offer-timeout job is
+    // BullMQ's to run and retry.)
     await waitFor('the parcel to cascade to Bebe', async () => ({
       offer: await app.redis.get(offerKey(o1)),
       rows: await sys(() => app.prisma.alertDelivery.count({ where: { kind: 'MOVER_OFFER', subjectId: o1, recipientId: b.userId } })),
-    }), (v) => v.offer?.startsWith(`${b.riderId}:`) === true && v.rows === 1, 60_000, worker);
+    }), (v) => v.offer?.startsWith(`${b.riderId}:`) === true && v.rows === 1, 60_000, { consumer: worker, diagnose: () => offerDiagnostics(o1) });
     const takeO1 = await call('POST', '/api/v1/rider/offers/accept', b.token, { orderId: o1 });
     expect(takeO1.statusCode, takeO1.body).toBe(200);
     expect(takeO1.json().data.status).toBe('RIDER_ASSIGNED');
-    // C1: the outbox tail published.
-    await waitFor('the checkout tail to be published', async () => (await sys(() => app.prisma.orderOutbox.findUniqueOrThrow({ where: { id: autoCancelRow } }))).processedAt, (v) => v !== null, 60_000, worker);
+    // C1: the outbox tail published — waited for the way production waits for
+    // it: the sweep keeps firing until the row is done. One tick is not what
+    // production offers a row (checkout-outbox.ts drains 200 due rows a tick,
+    // oldest first, and backs a row whose publish failed off for the next tick
+    // while its job completes and logs nothing above info). On timeout the
+    // error carries the row, both clocks, the due rows ahead of it in the drain
+    // order, every sweep job, every dead letter and the worker's stderr.
+    const tail = await waitFor('the checkout tail to be published', async () => {
+      const row = await sys(() => app.prisma.orderOutbox.findUniqueOrThrow({ where: { id: autoCancelRow } }));
+      return { processedAt: row.processedAt, attempts: row.attempts, lastError: row.lastError, claimedAt: row.claimedAt };
+    }, (v) => v.processedAt !== null, 90_000, { consumer: worker, resweep: 'checkout-outbox', diagnose: () => outboxDiagnostics(autoCancelRow) });
 
     // ── O1 ──
     expect((await call('GET', '/api/v1/rider/offers/current', a.token)).json().data.offer).toBeNull();
@@ -536,15 +662,20 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
     o2ReleasedAt = released.releasedToVendorAt;
 
     // ── C1 ──
-    const tail = await sys(() => app.prisma.orderOutbox.findUniqueOrThrow({ where: { id: autoCancelRow } }));
-    expect({ attempts: tail.attempts, lastError: tail.lastError }).toEqual({ attempts: 2, lastError: null });
+    // Attempt 1 was the route's own drain, refused by the injected outage; the
+    // sweep's claim is attempt 2 — or a later one when a tick's own publish was
+    // the transient and the schedule's next tick got it. Whichever it was, the
+    // retry is proven, and the last attempt succeeded cleanly: no error, no
+    // live claim, and (below) exactly one publication.
+    expect(tail.attempts, 'the sweep retried the row the route could not publish').toBeGreaterThanOrEqual(2);
+    expect({ lastError: tail.lastError, claimedAt: tail.claimedAt }).toEqual({ lastError: null, claimedAt: null });
     const autoCancel = await queues.orderQueue.getJob(autoCancelRow);
     expect({ name: autoCancel?.name, data: autoCancel?.data, state: await autoCancel?.getState() }).toEqual({ name: 'auto-cancel', data: { orderId: c1 }, state: 'delayed' });
 
     // ── Once only: a second tick of each sweep changes nothing ──
-    const secondRelease = await queues.dispatchQueue.add('release-held-orders', {}, { removeOnComplete: 20, removeOnFail: 20 });
-    const secondDrain = await queues.dispatchQueue.add('checkout-outbox', {}, { removeOnComplete: 20, removeOnFail: 20 });
-    await waitFor('the second sweep ticks to complete', async () => [await secondRelease.getState(), await secondDrain.getState()], (s) => s.every((x) => x === 'completed'), 60_000, worker);
+    const secondRelease = await tick('release-held-orders');
+    const secondDrain = await tick('checkout-outbox');
+    await waitFor('the second sweep ticks to complete', async () => [await secondRelease.getState(), await secondDrain.getState()], (s) => s.every((x) => x === 'completed'), 60_000, { consumer: worker, diagnose: async () => ({ ticks: await describeJobs([secondRelease, secondDrain]), deadLetters: await deadLetters() }) });
     expect((await orderRow(o2)).releasedToVendorAt).toEqual(o2ReleasedAt);
     expect(await jobsFor(queues.dispatchQueue, 'dispatch-order', o2, ['waiting', 'prioritized', 'delayed', 'active', 'completed', 'failed'])).toHaveLength(1);
     expect((await sys(() => app.prisma.orderOutbox.findUniqueOrThrow({ where: { id: autoCancelRow } }))).processedAt).toEqual(tail.processedAt);
@@ -571,7 +702,10 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
 
     worker.proc.kill('SIGTERM');
     expect(await worker.exited).toEqual({ code: 0, signal: null });
-  }, 180_000);
+    // Room for every bounded wait above (60 + 60 + 90 + 60 s) to expire WITH
+    // its diagnostics before vitest's own timeout cuts the step off; the
+    // journey itself takes about 15 s.
+  }, 300_000);
 
   it('4 · fleet down again, the courier delivers: paid once, nobody left busy, no paid order lost', async () => {
     expect((await orderRow(o1)).riderId, 'step 3 assigned the parcel').toBe(b.riderId);
@@ -613,7 +747,7 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
     const doomed = await queues.dispatchQueue.add('dispatch-order', { orderId: 'gold3-no-such-order' }, { attempts: 1, removeOnFail: false, removeOnComplete: false });
     deadJobId = doomed.id!;
     const worker = await startConsumer();
-    await waitFor('the dispatch job to die', async () => doomed.getState(), (s) => s === 'failed', 60_000, worker);
+    await waitFor('the dispatch job to die', async () => doomed.getState(), (s) => s === 'failed', 60_000, { consumer: worker, diagnose: () => describeJobs([doomed]) });
     worker.proc.kill('SIGTERM');
     expect(await worker.exited).toEqual({ code: 0, signal: null });
     const dead = (await queues.dispatchQueue.getJob(deadJobId))!;

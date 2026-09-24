@@ -309,8 +309,15 @@ describe('GOLD-3 · TAXI-01 — ride request + queue', () => {
   // queue's supply counts are the honest counts of the whole tenant.
   it('no supply: the queue waits honestly; the worker scan auto-requests once a driver comes online, and the driver takes it', async () => {
     const customer = await makeUser('Quinn', ['CUSTOMER'], 'CUSTOMER');
-    const foreignWaiting = await sys(() => app.prisma.rideQueueEntry.count({ where: { status: 'WAITING', expiresAt: { gt: new Date() } } }));
-    expect(foreignWaiting, 'no other file may leave a WAITING queue entry behind').toBe(0);
+    // A live WAITING entry here is another file's residue, not a GOLD-3
+    // failure — so the failure names it: the entry, its customer and the phone
+    // block that identifies the file that owns it.
+    const foreignWaiting = await sys(async () => {
+      const entries = await app.prisma.rideQueueEntry.findMany({ where: { status: 'WAITING', expiresAt: { gt: new Date() } }, select: { id: true, customerId: true, expiresAt: true } });
+      const owners = await app.prisma.user.findMany({ where: { id: { in: entries.map((e) => e.customerId) } }, select: { id: true, phone: true } });
+      return entries.map((e) => ({ ...e, phone: owners.find((u) => u.id === e.customerId)?.phone ?? null }));
+    });
+    expect(foreignWaiting, 'no other file may leave a WAITING queue entry behind (residue of the file that owns that phone block)').toEqual([]);
 
     const join = await call('POST', '/api/v1/rides/queue/join', customer.token, TRIP);
     expect(join.statusCode, join.body).toBe(201);
