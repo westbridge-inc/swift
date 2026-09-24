@@ -12,6 +12,8 @@ import {
   daysUntil,
   sanQrPayload,
   isBillingStopped,
+  isPlanPaused,
+  billingStoppedLine,
   resumeBillingMethod,
 } from './billing';
 
@@ -56,6 +58,26 @@ describe('isBlocked / isBehind', () => {
     expect(isBehind({ status: 'PAST_DUE' })).toBe(true);
     expect(isBehind({ status: 'ACTIVE' })).toBe(false);
     expect(isBehind({ status: 'SUSPENDED' })).toBe(false);
+  });
+});
+
+describe('[E12] a paused plan says how to come back, not a date already past', () => {
+  const now = Date.parse('2026-09-24T12:00:00Z');
+  it('the server PAUSED status is paused', () => {
+    expect(isPlanPaused({ status: 'PAUSED', autoRenew: false, currentPeriodEnd: '2026-09-20T00:00:00Z' }, now)).toBe(true);
+  });
+  it('stopped and past the period end reads paused before the sweep catches up', () => {
+    expect(isPlanPaused({ status: 'ACTIVE', autoRenew: false, currentPeriodEnd: '2026-09-24T11:00:00Z' }, now)).toBe(true);
+  });
+  it('stopped inside the paid period is not paused yet; auto-renewing never is', () => {
+    expect(isPlanPaused({ status: 'ACTIVE', autoRenew: false, currentPeriodEnd: '2026-09-27T00:00:00Z' }, now)).toBe(false);
+    expect(isPlanPaused({ status: 'ACTIVE', autoRenew: true, currentPeriodEnd: '2026-09-20T00:00:00Z' }, now)).toBe(false);
+    expect(isPlanPaused(null, now)).toBe(false);
+  });
+  it('the strip line: paused → resume copy; inside the period → until when', () => {
+    expect(billingStoppedLine({ status: 'PAUSED', autoRenew: false }, 'store', now)).toMatch(/paused .* Resume to start again/);
+    expect(billingStoppedLine({ status: 'ACTIVE', autoRenew: false, currentPeriodEnd: '2026-09-27T00:00:00Z' }, 'driver', now))
+      .toMatch(/^You keep working until /);
   });
 });
 

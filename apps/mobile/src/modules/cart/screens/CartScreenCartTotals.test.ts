@@ -48,13 +48,13 @@ describe('the quote is priced for exactly what the order button submits (E01)', 
     // The old single-store pickup selection is gone, from the order and the retry.
     expect(src).not.toContain("{ [c.vendor.id]: 'PICKUP' }");
     expect(src).not.toMatch(/const vendorId = c\?\.vendor\?\.id;/);
-    expect(src).toContain("onOrder({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });");
+    expect(src).toContain("onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });");
   });
 
   it('money is committed only against a settled quote: priced for the current choices and not mid-refresh', () => {
-    expect(src).toMatch(/const quoteSettled = !cart\.isFetching && !cart\.isPlaceholderData && !updateItem\.isPending && !removeItem\.isPending;/);
+    expect(src).toMatch(/const quoteSettled = !cart\.isFetching && !cart\.isPlaceholderData && !updateItem\.isPending && !removeItem\.isPending && !removePromo\.isPending && !applyPromo\.isPending;/);
     expect(src).toMatch(/disabled=\{!quoteSettled \|\| !c\.meetsMinimum/);
-    expect(src).toMatch(/disabled=\{recovery\.recovering \|\| alreadyPlaced \|\| stillPlacing \|\| !quoteSettled\}/);
+    expect(src).toMatch(/disabled=\{recovery\.recovering \|\| alreadyPlaced \|\| stillPlacing \|\| !quoteSettled \|\| \(confirmPickup && pickupQuote\.isFetching\)\}/);
   });
 
   it('a multi-store basket shows one delivery row per store, from the server’s rows', () => {
@@ -70,5 +70,46 @@ describe('the minimum warning names each short store (E09)', () => {
   it('one row per store below its own minimum, with the amount still to add', () => {
     expect(src).toContain('const short = shortStores(c);');
     expect(src).toContain('{store.name} has a minimum order of {money(store.minOrderAmount)} — add {money(store.amountToAdd)} more to order.');
+  });
+});
+
+describe('the applied promo code rides the one choices object to checkout (E01-B)', () => {
+  const src = code();
+
+  it('the order body sends promoCode exactly when one is applied — the same pricing object the quote was asked with', () => {
+    expect(src).toContain('...(pricing.promoCode ? { promoCode: pricing.promoCode } : {}),');
+    // The applied code is the quote's own echo of the stored promo, kept in
+    // state like quoteBasis so it drops the moment a code is removed.
+    expect(src).toContain('const [appliedPromo, setAppliedPromo] = useState<string | null>(null);');
+    expect(src).toContain('const next = c?.promoCode?.code ?? null;');
+    expect(src).toContain('promoCode: appliedPromo');
+  });
+
+  it('an applied code can be removed: the cart promo is cleared server-side and the quote re-prices', () => {
+    expect(src).toContain('const removePromo = useRemoveCartPromo();');
+    expect(src).toContain('removePromo.mutate();');
+    expect(src).toContain('label="Remove"');
+  });
+
+  it('a checkout promo refusal is shown as the message checkout returned', () => {
+    expect(src).toContain('? checkoutErrorMessage(placeOrder.error)');
+  });
+});
+
+describe('the no-riders pickup retry shows the new total before placing (E01-B)', () => {
+  const src = code();
+
+  it('tapping asks for a pickup quote; only the Alert confirm places the order', () => {
+    // The retry no longer places on one tap.
+    expect(src).toContain('const retryAsPickup = () => {');
+    expect(src).toContain('setConfirmPickup(true);');
+    expect(src).not.toMatch(/retryAsPickup = \(\) => \{\s*[\s\S]*onOrder\(\{ fulfillmentSelections/);
+    // The confirm step reads the NEW pickup total from its own quote.
+    expect(src).toContain('const pickupTotal = Number(pickupQuote.data.totalAmount);');
+    expect(src).toContain('`Your pickup total is ${money(pickupTotal)}. The order is only placed when you confirm.`');
+    expect(src).toContain("text: 'Confirm pickup order'");
+    expect(src).toContain('onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, \'PICKUP\'])) });');
+    expect(src).toContain("Alert.alert('Couldn’t price pickup', 'Try again in a moment.');");
+    expect(src).toContain('const pickupQuote = useCart<any>(latitude ?? undefined, longitude ?? undefined, retryPricing, confirmPickup);');
   });
 });

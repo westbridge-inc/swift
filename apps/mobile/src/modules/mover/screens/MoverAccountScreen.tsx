@@ -204,6 +204,7 @@ export function MoverAccountScreen({ navigation }: any) {
           <SettingsRow icon="shield" label="Guarantee claims" sub="Cash orders where the customer didn't pay" onPress={() => navigation?.navigate?.('Claims')} />
           <SettingsRow icon="clock" label="Job history" sub="Every completed and cancelled job" onPress={() => navigation?.navigate?.('JobHistory')} />
           <SettingsRow icon="file-text" label="Documents" sub="Licences, insurance and renewals" onPress={() => navigation?.navigate?.('MoverDocuments')} />
+          <SettingsRow icon="truck" label="Change vehicle" sub="A new vehicle is checked before you go online" onPress={() => navigation?.navigate?.('MoverVehicle')} />
           <SettingsRow
             icon="credit-card"
             label="Weekly fee"

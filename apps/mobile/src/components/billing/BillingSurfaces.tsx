@@ -16,6 +16,7 @@ import {
   walletLine,
   weeklyFeeGyd,
   weeksCovered,
+  billingStoppedLine,
 } from '../../lib/billing';
 
 // ---------------------------------------------------------------------------
@@ -527,8 +528,10 @@ export function BillingStatusBlock({
 // stays active until the period end the server sent, and after that the store
 // / driver / rider stops receiving work. While stopped the surface says so and
 // offers Resume. Everything here reads server truth (`autoRenew`,
-// `currentPeriodEnd`); a CANCELLED (lapsed) or CHURNED (closed) account hides
-// the control — neither door would be honest, and the server refuses both.
+// `currentPeriodEnd`, `status`). Once the paid period is over the plan is
+// PAUSED and Resume restarts it (this week billed like any renewal). A
+// CANCELLED (closed) or CHURNED account hides the control — neither door would
+// be honest, and the server refuses both.
 // ---------------------------------------------------------------------------
 
 export function BillingStopControl({
@@ -551,11 +554,7 @@ export function BillingStopControl({
   const stopped = isBillingStopped(sub);
   const blocked = isBlocked(sub);
   const periodEnd = shortDate(sub?.currentPeriodEnd);
-  const untilLine = blocked
-    ? 'No more weekly fees will be charged.'
-    : periodEnd
-      ? `You keep working until ${periodEnd}. No more weekly fees will be charged.`
-      : 'The week you paid for still runs out. No more weekly fees will be charged.';
+  const untilLine = billingStoppedLine(sub, who);
   const confirmBody = blocked
     ? `Your ${who} is already paused. Stopping means no more weekly fees will be charged — what you owe still stands until you pay it. You can resume billing anytime.`
     : `Your ${who} keeps working until ${periodEnd ?? 'the end of the current period'}. After that, the ${who} stops receiving work and no more weekly fees are charged. You can resume billing anytime.`;

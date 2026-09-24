@@ -4,8 +4,8 @@ Runs the real bash scripts (deploy/swift-secrets, gen-secrets.sh, the owner
 entry tool, backup.sh and the pilot-up preflight fragment) against shims for
 the host tools they call: a fake `systemd-creds` that records every argument
 and round-trips values through a marker envelope, a fake `findmnt`, `sudo`,
-`id`, `ssh`, `docker`, `aws` and `systemctl`. Nothing here needs root, a
-network, Docker or systemd.
+`id`, `ssh`, `docker` and `systemctl`. Nothing here needs root, a network,
+Docker or systemd.
 
     python3 -m unittest discover -s deploy/tests -v
 """
@@ -628,18 +628,25 @@ class BackupCredentials(unittest.TestCase):
             (creds / "AWS_SECRET_ACCESS_KEY").write_text("secretfromcreds\n")
             dump_dir = tmp / "dumps"
             log = tmp / "calls"
-            sh_shim(bin_dir, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *pg_dump*) printf "mock custom dump";; esac')
+            env_log = tmp / "env"
+            # [STG-B] The AWS CLI now runs inside a pinned container, so the
+            # docker shim emulates `docker compose exec` (pg_dump) AND
+            # `docker run` (aws). The shim process inherits backup.sh's
+            # environment, which is how it observes the credential values
+            # WITHOUT them ever being passed in argv.
+            sh_shim(bin_dir, "docker", 'echo "docker $*" >> "$CALL_LOG"\necho "key=${AWS_ACCESS_KEY_ID:-unset} secret=$( [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && echo set || echo unset )" >> "$ENV_LOG"\ncase "$*" in *pg_dump*) printf "mock custom dump";; *head-object*) printf "16\\n";; esac')
             sh_shim(bin_dir, "pg_restore", '[ "$1" = "--list" ]')
-            sh_shim(bin_dir, "aws", 'echo "aws $* key=${AWS_ACCESS_KEY_ID:-unset} secret=$( [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && echo set || echo unset )" >> "$CALL_LOG"\ncase "$*" in *head-object*) printf "16\\n";; esac')
             env = os.environ.copy()
             for name in ("DATABASE_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
                 env.pop(name, None)
             env.update({
                 "PATH": f"{bin_dir}:{env['PATH']}",
                 "CALL_LOG": str(log),
+                "ENV_LOG": str(env_log),
                 "CREDENTIALS_DIRECTORY": str(creds),
                 "BACKUP_BUCKET": "test-bucket",
                 "BACKUP_REQUIRED": "1",
+                "AWS_CLI_IMAGE": "amazon/aws-cli:2.29.12@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
                 "AWS_S3_ENDPOINT": "https://storage.example.invalid",
                 "BACKUP_RETAIN_DAYS": "0",
             })
@@ -649,7 +656,11 @@ class BackupCredentials(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = log.read_text()
-            self.assertIn("key=AKIDFROMCREDS secret=set", calls)
+            self.assertIn("key=AKIDFROMCREDS secret=set", env_log.read_text())
+            # The values reach the container only by NAME (-e NAME), so the
+            # secret itself never appears in any recorded argv.
+            self.assertNotIn("secretfromcreds", calls)
+            self.assertNotIn("AKIDFROMCREDS", calls)
             dump_call = [l for l in calls.splitlines() if "pg_dump" in l][0]
             self.assertIn("POSTGRES_PASSWORD_FILE", dump_call)
             self.assertNotIn('PGPASSWORD="$POSTGRES_PASSWORD"', dump_call)

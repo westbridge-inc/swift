@@ -3,6 +3,7 @@
 import { useState, useId, cloneElement } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchPromos, createPromo, type CreatePromoInput, type Promo } from '@/lib/api';
+import { askReason } from '@/lib/ask-reason';
 
 const EMPTY: CreatePromoInput = {
   code: '',
@@ -21,14 +22,14 @@ export default function PromosPage() {
   const [error, setError] = useState<string | null>(null);
 
   const create = useMutation({
-    mutationFn: () =>
+    mutationFn: (reason: string) =>
       createPromo({
         ...form,
         code: form.code.trim(),
         discountValue: Number(form.discountValue),
         ...(form.minOrderAmount != null ? { minOrderAmount: Number(form.minOrderAmount) } : {}),
         ...(form.maxUses != null ? { maxUses: Number(form.maxUses) } : {}),
-      }),
+      }, reason),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['promos'] });
       setOpen(false);
@@ -143,7 +144,7 @@ export default function PromosPage() {
             {error && <p className="mt-3 text-sm text-[var(--accent)]">{error}</p>}
             <div className="flex justify-end gap-3 mt-5">
               <button onClick={() => setOpen(false)} className="px-4 py-2 text-sm text-[var(--muted)] hover:text-white">Cancel</button>
-              <button onClick={() => create.mutate()} disabled={create.isPending || form.code.trim().length < 2 || !form.description.trim()}
+              <button onClick={() => { const reason = askReason({ action: `create this promo code`, subject: form.code.trim() }); if (reason) create.mutate(reason); }} disabled={create.isPending || form.code.trim().length < 2 || !form.description.trim()}
                 className="px-5 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50">
                 {create.isPending ? 'Creating…' : 'Create'}
               </button>

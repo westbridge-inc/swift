@@ -42,8 +42,10 @@ import { purgeAuditLogs } from '../../lib/audit-immutability';
 //   · VEND-04: the week is priced by the owner's rate card; unpaid weeks dun
 //     to suspension; one agent-cash payment reinstates with one receipt and
 //     balanced books; its replay changes nothing
-//   · VEND-04: stopping the fee (E12: only by closing the account) stops
-//     billing for good; cash paid to the closed account is never credited
+//   · VEND-04: closing the account stops billing for good; cash paid to the
+//     closed account is never credited
+//   · VEND-04 (E12): the owner stops and resumes the fee self-serve; a stopped
+//     store pauses at its period end and resumes like any renewal
 //   · MONEY-03: the agent channel credits once — a forged, stale or unsigned
 //     notice, the transport retry and the settlement file never add a second
 //     credit; the channel ships dark without its secret
@@ -51,7 +53,7 @@ import { purgeAuditLogs } from '../../lib/audit-immutability';
 //     a decline duns; cash paid while a request is pending pays the next week;
 //     an approval after the account closed banks once and never reopens it
 //     (E13 — fixed by #1280)
-//   · [G2-F1 · it.fails] the weekly fee is billed in GYD
+//   · [G2-F1] the weekly fee is billed in GYD (fixed by G2-F1)
 // ---------------------------------------------------------------------------
 
 // This file's own fixture block (+5920324nnn, 11 characters); user, store and
@@ -442,7 +444,7 @@ describe('GOLD-2 · VEND-04 — the weekly fee and agent cash', () => {
     expect((await inquiry(p.san)).json()).toMatchObject({ valid: true, amountDueGyd: '15000.00' });
   });
 
-  it('stopping the fee: the owner can only close the account (E12) — billing stops for good, and cash paid to the closed account is recorded, never credited', async () => {
+  it('closing the account stops the fee for good — and cash paid to the closed account is recorded, never credited', async () => {
     const p = await makePartner('Wes');
     const period = await trialEnds(p);
     // In good standing: the first week is paid in cash ahead of the bill.
@@ -451,8 +453,8 @@ describe('GOLD-2 · VEND-04 — the weekly fee and agent cash', () => {
     expect((await subRow(p.subId)).nextBillingDate.getTime()).toBe(period.getTime() + WEEK);
     expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
 
-    // No route turns auto-renew off or cancels a subscription (E12): the only
-    // stop a partner has is deleting the account.
+    // Closing the account is the PERMANENT stop (the self-serve pause, E12, is
+    // pinned in its own describe below).
     const closed = await call('DELETE', '/api/v1/customer/account', p.owner.token);
     expect(closed.statusCode, closed.body).toBe(200);
     expect(closed.json().data).toEqual({ deleted: true });
@@ -696,11 +698,11 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
 describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing', () => {
   it('stop sets autoRenew=false keeping the rail, writes exactly one stop event + audit row, and a double-stop adds none', async () => {
     const p = await makePartner('E12a');
-    await chooseMmg(p, `${PHONE_PREFIX}806`);
+    await chooseMmg(p, `${PHONE_PREFIX}807`);
 
     const stop = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
     expect(stop.statusCode, stop.body).toBe(200);
-    expect(stop.json().data).toEqual({ billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: `${PHONE_PREFIX}806` });
+    expect(stop.json().data).toEqual({ billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: `${PHONE_PREFIX}807` });
 
     const row = await subRow(p.subId);
     expect({
@@ -708,7 +710,7 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
       nextRetryAt: row.nextRetryAt,
       billingMethod: row.billingMethod,
       mmgPayerMsisdn: row.mmgPayerMsisdn,
-    }).toEqual({ autoRenew: false, nextRetryAt: null, billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: `${PHONE_PREFIX}806` });
+    }).toEqual({ autoRenew: false, nextRetryAt: null, billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: `${PHONE_PREFIX}807` });
 
     // The GET exposes autoRenew for the app's stop/resume state.
     const get = await call('GET', '/api/v1/vendor/subscription', p.owner.token, undefined, { 'x-vendor-id': p.vendorId });
@@ -757,8 +759,10 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
   it('resume re-arms billing and the next cycle bills the week off the prepaid balance', async () => {
     const p = await makePartner('E12d');
     await trialEnds(p); // ACTIVE and immediately due — the stopped week must not bill
+    // [DS198 D3] the wallet is in the subscription's own currency (GYD since G2-F1)
+    const { currencyCode } = await subRow(p.subId);
     await sys(() => app.prisma.prepaidBalance.create({
-      data: { subscriptionId: p.subId, balance: RATE_CARD_SMALL_VENDOR, currencyCode: 'GY' },
+      data: { subscriptionId: p.subId, balance: RATE_CARD_SMALL_VENDOR, currencyCode },
     }));
 
     const stop = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
@@ -776,29 +780,43 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
     expect(await wallet(p.subId)).toBe(0);
   });
 
-  it('a stopped store lapses CANCELLED at its period end, and resume is refused with 409', async () => {
+  it('a stopped store pauses at its period end, and the owner resumes it self-serve — billed like any renewal', async () => {
     const p = await makePartner('E12e');
+    await trialEnds(p); // [DS198 D1] ACTIVE (the sweep only pauses ACTIVE rows)
+    // trialEnds ages only trialEndDate; in production currentPeriodEnd IS the
+    // trial end, so the period is over too.
+    await sys(() => app.prisma.subscription.update({ where: { id: p.subId }, data: { currentPeriodEnd: new Date(Date.now() - 60_000) } }));
     const stop = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
     expect(stop.statusCode, stop.body).toBe(200);
-    await sys(() => app.prisma.subscription.update({
-      where: { id: p.subId },
-      data: { currentPeriodEnd: new Date(Date.now() - 60_000) },
-    }));
 
     await billing.lapseStoppedSubscriptions(); // may also sweep another file's stopped row; the row-state assertions below are the proof
     const lapsed = await subRow(p.subId);
     expect({ status: lapsed.status, autoRenew: lapsed.autoRenew, nextRetryAt: lapsed.nextRetryAt })
-      .toEqual({ status: 'CANCELLED', autoRenew: false, nextRetryAt: null });
+      .toEqual({ status: 'PAUSED', autoRenew: false, nextRetryAt: null });
+    await billing.runBillingCycle();
+    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(0);
 
+    await sys(() => app.prisma.prepaidBalance.create({
+      data: { subscriptionId: p.subId, balance: RATE_CARD_SMALL_VENDOR, currencyCode: lapsed.currencyCode },
+    }));
+    const resumedAt = Date.now();
     const resume = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'CASH' }, { 'x-vendor-id': p.vendorId });
-    expect(resume.statusCode).toBe(409);
-    expect(resume.json().error.code).toBe('SUBSCRIPTION_CLOSED');
-    expect((await subRow(p.subId)).autoRenew).toBe(false);
+    expect(resume.statusCode, resume.body).toBe(200);
+    const resumed = await subRow(p.subId);
+    expect({ status: resumed.status, autoRenew: resumed.autoRenew }).toEqual({ status: 'ACTIVE', autoRenew: true });
+    expect(resumed.nextBillingDate.getTime()).toBeGreaterThanOrEqual(resumedAt - 1000);
+
+    await billing.runBillingCycle();
+    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
+    const billed = await subRow(p.subId);
+    expect({ status: billed.status, nextBillingDate: billed.nextBillingDate.getTime() })
+      .toEqual({ status: 'ACTIVE', nextBillingDate: resumed.nextBillingDate.getTime() + WEEK });
+    expect(await wallet(p.subId)).toBe(0);
   });
 });
 
 // ---------------------------------------------------------------------------
-// G2-F1 (NEW, proposed S1): every subscription born through activation carries
+// G2-F1 (S1, fixed by G2-F1): every subscription born through activation carried
 // the owner's COUNTRY code as its currency. subscription.service.ts passes
 // `activation.countryCode` into `create(entity, type, weeklyRate, currencyCode)`
 // (:146, :152, :158 → :179-183) — the same call shape since 444bce77. So a
@@ -810,7 +828,8 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
 // (billing.service.ts:1799), so an ISO answer would be held for manual
 // reconciliation. This pins the correct contract on the rows the system itself
 // writes. The activation, the MMG rail and the weekly bill run in beforeAll,
-// so the it.fails can only "pass" on the currency. Flip to `it(...)` when fixed.
+// so this can only fail on the currency. The activation resolvers now read the
+// CountryConfig currency, and a data migration corrects rows already written.
 // ---------------------------------------------------------------------------
 describe('GOLD-2 · VEND-04 / MONEY-03 — [G2-F1] the weekly fee is billed in Guyana dollars', () => {
   let p: Partner;
@@ -822,10 +841,38 @@ describe('GOLD-2 · VEND-04 / MONEY-03 — [G2-F1] the weekly fee is billed in G
     externalRef = (await mmgRequestPending(p)).request.externalRef!;
   });
 
-  it.fails('[G2-F1] the subscription, its charge and the MMG request are all in GYD', async () => {
+  it('[G2-F1] the subscription, its charge and the MMG request are all in GYD', async () => {
     expect((await subRow(p.subId)).currencyCode).toBe('GYD');
     const attempts = await sys(() => app.prisma.billingEvent.findMany({ where: { subscriptionId: p.subId, type: 'CHARGE_ATTEMPT' }, select: { currencyCode: true } }));
     expect(attempts).toEqual([{ currencyCode: 'GYD' }]);
     expect((await getMmgProvider().transactionLookup({ transactionId: externalRef })).currencyCode).toBe('GYD');
+  });
+
+  it('[G2-F1] a request sent before the fix ("GY" on the wire) and approved after the migration settles once — it is not held', async () => {
+    // [DS191 F1] The deploy window: the request went out as "GY", the data
+    // migration then corrected this subscription's rows to "GYD", and the
+    // payer approves afterwards with the provider still echoing "GY".
+    const legacy = await makePartner('Gus');
+    await chooseMmg(legacy, `${PHONE_PREFIX}806`);
+    await sys(() => app.prisma.subscription.update({ where: { id: legacy.subId }, data: { currencyCode: 'GY' } }));
+    const { period, request } = await mmgRequestPending(legacy);
+    const pinned = await sys(() => app.prisma.billingEvent.findMany({ where: { subscriptionId: legacy.subId, type: 'CHARGE_ATTEMPT' }, select: { currencyCode: true } }));
+    expect(pinned).toEqual([{ currencyCode: 'GY' }]);
+    expect((await getMmgProvider().transactionLookup({ transactionId: request.externalRef! })).currencyCode).toBe('GY');
+    // exactly what 20260924150000_g2f1_subscription_currency does to this subscription's rows
+    await sys(async () => {
+      await app.prisma.subscription.update({ where: { id: legacy.subId }, data: { currencyCode: 'GYD' } });
+      await app.prisma.billingEvent.updateMany({ where: { subscriptionId: legacy.subId, currencyCode: 'GY' }, data: { currencyCode: 'GYD' } });
+      await app.prisma.prepaidBalance.updateMany({ where: { subscriptionId: legacy.subId, currencyCode: 'GY' }, data: { currencyCode: 'GYD' } });
+    });
+
+    sandboxSetTxStatus(request.externalRef!, 'approved');
+    await pollBackoffPasses(request.id);
+    await billing.pollPendingMmgCharges();
+    const [settled] = await mmgPayments(legacy.subId);
+    expect({ id: settled!.id, status: settled!.status }).toEqual({ id: request.id, status: 'CAPTURED' });
+    const advanced = await subRow(legacy.subId);
+    expect({ status: advanced.status, nextBillingDate: advanced.nextBillingDate.getTime() }).toEqual({ status: 'ACTIVE', nextBillingDate: period.getTime() + WEEK });
+    expect(await countEvents(legacy.subId, 'CHARGE_SUCCESS')).toBe(1);
   });
 });

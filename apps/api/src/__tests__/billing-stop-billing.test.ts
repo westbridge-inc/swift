@@ -15,6 +15,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { subscriptionOperability } from '../modules/subscription/operate-gate';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // E12 (ledger S1) — the partner's self-serve stop/resume of the weekly fee.
@@ -175,20 +176,36 @@ beforeAll(async () => {
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.ready();
+  await purgeBlock(); // crash recovery: a failed earlier run left this block behind
   billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
 });
 
+/** Everything this file's phone block owns. Run before the suite too, so a
+ *  crashed earlier run cannot leave phones behind that the next run collides
+ *  on. Audit rows are append-only: they go through the sanctioned purge. */
+async function purgeBlock() {
+  const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
+  const ids = users.map((u) => u.id);
+  if (ids.length === 0) return;
+  const subs = await app.prisma.subscription.findMany({
+    where: { OR: [{ rider: { userId: { in: ids } } }, { driver: { userId: { in: ids } } }] },
+    select: { id: true },
+  });
+  const sids = subs.map((sub) => sub.id);
+  await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: sids } } });
+  await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: sids } } });
+  await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: sids } } });
+  await purgeAuditLogs(app.prisma, { OR: [{ entityId: { in: sids } }, { userId: { in: ids } }] }, 'test-cleanup:e12-stop-billing').catch(() => 0);
+  await app.prisma.subscription.deleteMany({ where: { id: { in: sids } } });
+  await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.driver.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+}
+
 afterAll(async () => {
-  await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.auditLog.deleteMany({ where: { entityId: { in: subIds } } });
-  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await purgeBlock();
   await app.close();
 });
 
@@ -289,13 +306,18 @@ describe('E12 — stop/resume for the driver', () => {
     expect(get.json().data.autoRenew).toBe(true);
   });
 
-  it('resume of a cancelled/lapsed subscription is refused with 409 telling the partner to renew', async () => {
+  it('a CANCELLED (wound-down/closed) subscription: resume is refused 409, and so is a stop (DS198 D5)', async () => {
     const { subId, httpToken } = await makeDriverSub({ due: new Date(Date.now() - 60_000), autoRenew: false });
     await app.prisma.subscription.update({ where: { id: subId }, data: { status: 'CANCELLED' } });
     const resume = await putMethod('/api/v1/driver/subscription/billing-method', httpToken, 'CASH');
     expect(resume.statusCode).toBe(409);
     expect(resume.json().error.code).toBe('SUBSCRIPTION_CLOSED');
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).autoRenew).toBe(false);
+    // a stop on a closed row is not a silent 200 no-op either
+    const stop = await putMethod('/api/v1/driver/subscription/billing-method', httpToken, 'NONE');
+    expect(stop.statusCode).toBe(409);
+    expect(stop.json().error.code).toBe('SUBSCRIPTION_CLOSED');
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId } })).toBe(0);
   });
 });
 
@@ -343,20 +365,60 @@ describe('E12 — the stopped subscription and the billing engine', () => {
     })).toBe(1);
   });
 
-  it('lapses an ACTIVE stopped row exactly at its period end — and only that row', async () => {
+  it('pauses an ACTIVE stopped row exactly at its period end — and only that row; the gate refuses work before the sweep runs', async () => {
     const now = new Date();
     const lapsed = await makeRiderSub({ due: new Date(now.getTime() - 60 * 60 * 1000), autoRenew: false });
     const stillBilling = await makeRiderSub({ due: new Date(now.getTime() - 60 * 60 * 1000) });
     const notYet = await makeRiderSub({ due: new Date(now.getTime() + 60 * 60 * 1000), autoRenew: false });
 
+    // [DS198 D2] The paid period is over: the gate refuses work NOW, not an
+    // hour later when the billing job's sweep runs.
+    const before = await app.prisma.subscription.findUniqueOrThrow({ where: { id: lapsed.subId } });
+    expect(subscriptionOperability(before, { missingRow: 'BLOCK' }, now)).toEqual({ operable: false, why: 'BILLING_STOPPED', status: 'ACTIVE' });
+    // …while a stopped row still inside its paid period keeps working
+    const notYetRow = await app.prisma.subscription.findUniqueOrThrow({ where: { id: notYet.subId } });
+    expect(subscriptionOperability(notYetRow, { missingRow: 'BLOCK' }, now)).toEqual({ operable: true });
+
     await billing.lapseStoppedSubscriptions(now);
 
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: lapsed.subId } });
-    expect(after).toMatchObject({ status: 'CANCELLED', autoRenew: false, nextRetryAt: null, isInGracePeriod: false, gracePeriodEnd: null });
-    // Exactly as a lapsed/cancelled subscription: the operate gate blocks it.
-    expect(subscriptionOperability(after, { missingRow: 'BLOCK' }, now)).toEqual({ operable: false, why: 'STATUS', status: 'CANCELLED' });
+    expect(after).toMatchObject({ status: 'PAUSED', autoRenew: false, nextRetryAt: null, isInGracePeriod: false, gracePeriodEnd: null });
+    expect(subscriptionOperability(after, { missingRow: 'BLOCK' }, now)).toEqual({ operable: false, why: 'STATUS', status: 'PAUSED' });
+    // one pause event per paid period, and a second sweep adds none
+    await billing.lapseStoppedSubscriptions(now);
+    const pauseEvents = await app.prisma.billingEvent.findMany({ where: { subscriptionId: lapsed.subId, idempotencyKey: { startsWith: 'pause:' } } });
+    expect(pauseEvents).toHaveLength(1);
+    expect(pauseEvents[0]!.note).toMatch(/weekly billing was stopped/);
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: stillBilling.subId } })).status).toBe('ACTIVE');
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: notYet.subId } })).status).toBe('ACTIVE');
+  });
+
+  it('a PAUSED plan resumes self-serve: ACTIVE and due now, and the next cycle bills this week like any renewal', async () => {
+    const now = new Date();
+    const stopped = await makeRiderSub({ due: new Date(now.getTime() - 2 * DAY), autoRenew: false, prepaid: 12000 });
+    await billing.lapseStoppedSubscriptions(now);
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: stopped.subId } })).status).toBe('PAUSED');
+
+    const resumedAt = Date.now();
+    const resume = await putMethod('/api/v1/rider/subscription/billing-method', stopped.httpToken, 'CASH');
+    expect(resume.statusCode, resume.body).toBe(200);
+    const row = await app.prisma.subscription.findUniqueOrThrow({ where: { id: stopped.subId } });
+    expect({ status: row.status, autoRenew: row.autoRenew, nextRetryAt: row.nextRetryAt }).toEqual({ status: 'ACTIVE', autoRenew: true, nextRetryAt: null });
+    expect(row.nextBillingDate.getTime()).toBeGreaterThanOrEqual(resumedAt - 1000);
+    expect(row.nextBillingDate.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+
+    // The paused weeks are never charged: the next cycle bills ONE week that
+    // starts at the resume, off the prepaid balance.
+    await billing.runBillingCycle(new Date());
+    const [payment] = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: stopped.subId } });
+    expect(payment).toBeDefined();
+    expect(payment!.periodStart.getTime()).toBe(row.nextBillingDate.getTime());
+    expect(await app.prisma.subscriptionPayment.count({ where: { subscriptionId: stopped.subId } })).toBe(1);
+    const billed = await app.prisma.subscription.findUniqueOrThrow({ where: { id: stopped.subId } });
+    expect(billed.status).toBe('ACTIVE');
+    expect(billed.currentPeriodStart.getTime()).toBe(row.nextBillingDate.getTime());
+    expect(billed.nextBillingDate.getTime()).toBe(row.nextBillingDate.getTime() + WEEK);
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: stopped.subId } })).balance)).toBe(0);
   });
 
   it('a PAST_DUE stop keeps the debt, the balance and the status; resume re-arms and the next cycle pays it off', async () => {

@@ -655,7 +655,7 @@ export class OrderService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
-      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true, selfieCapturedAt: true },
+      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true },
     });
 
     // Strike consequences: repeated failed cash handovers
@@ -668,11 +668,12 @@ export class OrderService {
       throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering requires ID verification. Verify your identity to continue.');
     }
 
-    // Universal signup selfie (master plan §3): every account carries a live
-    // profile photo before transacting — the vendor/mover sees who is ordering.
-    if (!user.selfieCapturedAt) {
-      throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before placing orders — it takes a few seconds in the app.');
-    }
+    // [E27] No profile selfie to place an ordinary order (food, grocery,
+    // retail, services). Owner rule: "Do not require an ordinary customer
+    // profile selfie merely to browse/order." The selfie stays where Swift
+    // puts a stranger in front of the account: booking a taxi (rides.service)
+    // and a mover going online. The strike restriction above and the
+    // high-value checks below are unchanged.
 
     // Group the cart by vendor — a multi-vendor cart splits into one order each.
     // [E01] The cart quote groups through the same function, in the same order,
@@ -737,7 +738,7 @@ export class OrderService {
       const vendorSub = await this.prisma.subscription.findFirst({
         where: { vendorId: vendor.id },
         orderBy: { createdAt: 'desc' },
-        select: { status: true, gracePeriodEnd: true },
+        select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true },
       });
       const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' });
       if (!vendorOperability.operable) {
@@ -1112,7 +1113,7 @@ export class OrderService {
         const lockedSub = await tx.subscription.findFirst({
           where: { vendorId: planVendorId },
           orderBy: { createdAt: 'desc' },
-          select: { status: true, gracePeriodEnd: true },
+          select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true },
         });
         const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' });
         if (!lockedOperability.operable) {

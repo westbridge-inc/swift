@@ -5720,6 +5720,11 @@ model PrivilegedApproval {
   entityId     String?
   /// SHA-256 over the method, route, params and body that were reviewed
   fingerprint  String
+  /// [DS110-13] Canonical `{ params, body, query }` copy of the request that
+  /// was reviewed. The approver reads THIS, and the apply step replays THIS —
+  /// one stored request, so what executes is always what was displayed. Rows
+  /// raised before this column existed are null and can never be applied.
+  bodySnapshot Json?
   /// PENDING | APPROVED | REJECTED | APPLIED | EXPIRED
   status       String    @default("PENDING")
   requestedBy  String

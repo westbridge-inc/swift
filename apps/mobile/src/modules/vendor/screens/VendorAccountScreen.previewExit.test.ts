@@ -334,6 +334,7 @@ function landing(): string {
       vendorSamplePreview: useVendorPreview.getState().previewType != null,
     }),
     needsSelfie: auth.isAuthenticated && !auth.user?.selfieCapturedAt,
+    hasUser: !!auth.user,
   });
   return gate === 'main' ? `main:${auth.intent}` : gate;
 }

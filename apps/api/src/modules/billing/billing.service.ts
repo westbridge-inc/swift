@@ -244,31 +244,43 @@ export class BillingService {
   /**
    * [E12] The lapse sweep for a stopped subscription. A partner who stopped
    * weekly billing stays ACTIVE exactly until the period they already paid
-   * for ends — `runBillingCycle` never selects `autoRenew: false`, and nothing
-   * else lapses them, so without this an ACTIVE stopped row would keep
-   * operating for free forever. At period end it takes the wind-down's
-   * terminal shape (`status: 'CANCELLED', autoRenew: false, nextRetryAt:
-   * null`) — CANCELLED is not an OPERABLE_STATUSES member, so the partner
-   * stops receiving work exactly like any other cancelled subscription.
-   * Resuming a cancelled subscription is refused (409) by `setBillingRail`;
-   * the partner must renew instead. Runs in the process-billing job.
+   * for ends (the operate gate refuses work from that instant); nothing bills
+   * or reminds a row with autoRenew=false. At period end the row turns
+   * PAUSED — not operable, owing nothing, and NOT terminal: resuming
+   * (setBillingRail) restarts it with this week's fee billed like any
+   * renewal. CANCELLED stays reserved for wind-down and closed accounts. Each
+   * lapse writes one billing event, keyed per period, so the history says
+   * why the plan stopped. Runs in the process-billing job.
    */
   async lapseStoppedSubscriptions(now = new Date()): Promise<number> {
-    const lapsed = await this.prisma.subscription.updateMany({
-      where: {
-        status: 'ACTIVE',
-        autoRenew: false,
-        currentPeriodEnd: { lte: now },
-      },
-      data: {
-        status: 'CANCELLED',
-        autoRenew: false,
-        nextRetryAt: null,
-        isInGracePeriod: false,
-        gracePeriodEnd: null,
-      },
+    const due = await this.prisma.subscription.findMany({
+      where: { status: 'ACTIVE', autoRenew: false, currentPeriodEnd: { lte: now } },
+      select: { id: true, currencyCode: true, currentPeriodEnd: true },
+      take: 500,
     });
-    return lapsed.count;
+    let paused = 0;
+    for (const sub of due) {
+      const done = await this.prisma.$transaction(async (tx) => {
+        // Guarded: a resume that armed autoRenew in between wins.
+        const flipped = await tx.subscription.updateMany({
+          where: { id: sub.id, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: { lte: now } },
+          data: { status: 'PAUSED', nextRetryAt: null, isInGracePeriod: false, gracePeriodEnd: null },
+        });
+        if (flipped.count !== 1) return false;
+        await tx.billingEvent.create({
+          data: {
+            subscriptionId: sub.id,
+            type: 'TIER_CHANGE',
+            currencyCode: sub.currencyCode,
+            idempotencyKey: `pause:${sub.id}:${sub.currentPeriodEnd.toISOString()}`,
+            note: 'Plan paused at the end of the paid period — weekly billing was stopped by the partner',
+          },
+        });
+        return true;
+      });
+      if (done) paused += 1;
+    }
+    return paused;
   }
 
   /**
@@ -1825,7 +1837,14 @@ export class BillingService {
       || evidence.amountMinor <= 0 || evidence.amountMinor !== expectedMinor) {
       return 'provider amount does not match the durable intent';
     }
-    if (!expectedCurrency || !providerCurrency || providerCurrency !== expectedCurrency) {
+    // [G2-F1] Before the fix a subscription's MMG request carried the COUNTRY
+    // code "GY" as its currency; the data migration corrected the durable
+    // attempt pin to "GYD". A request still in flight across that deploy can
+    // come back with "GY" on its evidence. MMG is a Guyana-only rail, so "GY"
+    // is the same money as "GYD" here — and only that one equivalence: any
+    // other disagreement is still refused.
+    const mmgCurrency = (code: string) => (code === 'GY' ? 'GYD' : code);
+    if (!expectedCurrency || !providerCurrency || mmgCurrency(providerCurrency) !== mmgCurrency(expectedCurrency)) {
       return 'provider currency does not match the durable charge attempt';
     }
     return null;
@@ -2142,6 +2161,11 @@ export class BillingService {
       // the cycle's PAST_DUE/SUSPENDED arm selects on nextRetryAt, which the
       // stop cleared. Arming now lets the next run attempt the owed week.
       const behind = fresh.status === 'PAST_DUE' || fresh.status === 'SUSPENDED';
+      // [E12] A PAUSED plan (stopped, then its paid period ran out) restarts
+      // NOW: ACTIVE and due immediately, so the next cycle charges this week
+      // (its period starts at nextBillingDate) exactly like any renewal, and a
+      // failed charge follows the normal dunning.
+      const paused = fresh.status === 'PAUSED';
       return tx.subscription.update({
         where: { id: subscriptionId },
         data: {
@@ -2149,6 +2173,7 @@ export class BillingService {
           mmgPayerMsisdn: method === 'MOBILE_MONEY' ? mmgPayerMsisdn!.trim() : null,
           autoRenew: true,
           ...(behind ? { nextRetryAt: new Date() } : {}),
+          ...(paused ? { status: 'ACTIVE', nextBillingDate: new Date(), nextRetryAt: null } : {}),
         },
       });
     });
@@ -2199,11 +2224,16 @@ export class BillingService {
    */
   async stopBilling(subscriptionId: string, actorUserId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<Array<{ id: string; autoRenew: boolean; currencyCode: string; updatedAt: Date }>>`
-        SELECT "id", "autoRenew", "currencyCode", "updatedAt" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE
+      const rows = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus; autoRenew: boolean; currencyCode: string; updatedAt: Date }>>`
+        SELECT "id", "status", "autoRenew", "currencyCode", "updatedAt" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE
       `;
       const fresh = rows[0];
       if (!fresh) throw new NotFoundError('Subscription', subscriptionId);
+      // [DS198 D5] A closed subscription has nothing to stop: say so rather
+      // than answering a no-op 200.
+      if (fresh.status === 'CANCELLED' || fresh.status === 'CHURNED') {
+        throw new AppError(409, 'SUBSCRIPTION_CLOSED', 'This subscription has already ended; there is no weekly billing to stop.');
+      }
       if (!fresh.autoRenew) {
         // Idempotent double-stop: already stopped — change nothing, write no
         // second event, add no second audit row.

@@ -33,6 +33,7 @@ import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../.
 import { useAuthStore } from '../../../stores/authStore';
 import { telUrl } from '../../../lib/emergencyPolicy';
 import { orderStatusLabel } from '../../../lib/orderStatus';
+import { taxiDoorFor } from '../../../lib/taxiDoors';
 
 /**
  * The ride's status, in words — from `lib/orderStatus.ts`, the one authority.
@@ -374,7 +375,16 @@ export function TaxiScreen({ navigation }: any) {
   const errBody = errorMatchesCurrentTrip ? (requestRide.error as any)?.response?.data : undefined;
   const errMsg = errBody?.error?.message ?? errBody?.message;
   // L2-before-first-ride (§5): the gate must open a door, never dead-end.
-  const needsL2 = (errBody?.error?.code ?? errBody?.code) === 'ID_VERIFICATION_REQUIRED';
+  // [E27] The profile photo is asked for here, not at sign-in: the same door.
+  const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
+  const needsL2 = door === 'identity';
+  const needsSelfie = door === 'selfie';
+  // Joining the queue passes the same account gates as a request (the route
+  // and the queue share one authority boundary), so its refusal must show,
+  // with the same doors — never a silent tap.
+  const queueErrBody = (joinQueue.error as any)?.response?.data;
+  const queueErrMsg = queueErrBody?.error?.message ?? queueErrBody?.message;
+  const queueDoor = taxiDoorFor(queueErrBody?.error?.code ?? queueErrBody?.code);
 
   // One coherent /supply snapshot owns visible counts, level and ETA. The
   // older /availability read contributes only its rollout gate.
@@ -585,6 +595,14 @@ export function TaxiScreen({ navigation }: any) {
               onPress={() => navigation?.navigate?.('IdentityVerification')}
             />
           ) : null}
+          {needsSelfie ? (
+            <PillButton
+              label="Add your photo — your driver sees it"
+              variant="outline"
+              style={{ marginTop: space.md }}
+              onPress={() => navigation?.navigate?.('Selfie')}
+            />
+          ) : null}
 
           {queue.data ? (
             // 5.5B — you're in line. A supply gap is a service, not an
@@ -642,6 +660,27 @@ export function TaxiScreen({ navigation }: any) {
                 <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
                   Set your destination first — we hold your whole trip in line.
                 </T>
+              ) : null}
+              {queueErrMsg ? (
+                <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.sm }}>
+                  {queueErrMsg}
+                </T>
+              ) : null}
+              {queueDoor === 'selfie' ? (
+                <PillButton
+                  label="Add your photo — your driver sees it"
+                  variant="outline"
+                  style={{ marginTop: space.sm }}
+                  onPress={() => navigation?.navigate?.('Selfie')}
+                />
+              ) : null}
+              {queueDoor === 'identity' ? (
+                <PillButton
+                  label="Verify your ID — takes a minute"
+                  variant="outline"
+                  style={{ marginTop: space.sm }}
+                  onPress={() => navigation?.navigate?.('IdentityVerification')}
+                />
               ) : null}
               <PillButton
                 label={watchMatchesPickup ? "We'll ping you — watching for drivers" : 'Notify me instead'}

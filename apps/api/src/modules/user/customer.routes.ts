@@ -2006,6 +2006,25 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: { cart: updatedCart, message: 'Tip updated' } };
   });
 
+  // [E01-B] Remove the applied promo from the cart. The quote discounts with
+  // the cart's stored promo (cart.promoCodeId), and checkout applies a
+  // discount only for the `promoCode` the request body carries — so a customer
+  // who applied a code on the phone could see a discounted total and be
+  // charged full price, with no way back. This clears the stored pointer: the
+  // quote re-prices without it and checkout stops receiving the code.
+  app.delete('/cart/promo', async (request: AuthRequest) => {
+    const { userId } = request.user;
+
+    const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
+    if (!cart) throw new AppError(400, 'NO_CART', 'No active cart');
+
+    await app.prisma.cart.update({ where: { id: cart.id }, data: { promoCodeId: null, lastActivityAt: new Date() } });
+    await app.redis.del(`cart:${userId}`).catch(() => {});
+
+    const updatedCart = await buildCartResponse(app, userId);
+    return { success: true, data: { cart: updatedCart, message: 'Promo removed' } };
+  });
+
   // [DCR-1 NR5-01] PUT /cart/instructions REMOVED: the ingress census proved
   // it purpose-free — stored and echoed, but checkout persists only
   // deliveryInstructions, and no client ever called it. Minimisation at

@@ -315,6 +315,13 @@ export interface CartQuoteChoices {
   express?: true;
   fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
   tipAmount?: number;
+  /**
+   * [E01-B] The applied promo code. Carried on the ONE choices object so the
+   * order body submits exactly what the customer applied; the quote prices the
+   * cart's STORED promo (cart.promoCodeId), so `cartQuoteParams` deliberately
+   * does not serialize this field into the GET /cart query.
+   */
+  promoCode?: string;
 }
 
 /** [E01] GET /cart query params for a quote's choices. `express` travels only
@@ -410,6 +417,10 @@ export const customerApi = {
     return api.get('/customer/orders', Object.keys(params).length > 0 ? { params } : undefined);
   },
   validatePromo: (code: string) => api.post('/customer/promo/validate', { code }),
+  // [E01-B] Remove the applied promo from the cart: the quote re-prices
+  // without it and checkout stops sending it. (The web cart cannot remove a
+  // promotion yet; the phone can.)
+  removeCartPromo: () => api.delete('/customer/cart/promo'),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message, cancellationFee } } inside the axios
@@ -817,6 +828,12 @@ export const partnerApi = {
     };
   }, session?: AuthSessionSnapshot) =>
     api.post('/partner/become', data, capturedAuthConfig(session)),
+  /** [VEHICLES] Change the vehicle a mover works with: offline until its documents are approved. */
+  changeVehicle: (data: {
+    vehicleType: VehicleKind;
+    vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
+  }, session?: AuthSessionSnapshot) =>
+    api.put('/partner/vehicle', data, capturedAuthConfig(session)),
 };
 
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider

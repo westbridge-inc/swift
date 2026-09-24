@@ -82,15 +82,17 @@ export function RootNavigator() {
   const vendorSamplePreview = useVendorPreview((s) => s.previewType) != null;
   // Each preview opens only its own stack (see previewBypassForIntent).
   const anyPreview = previewBypassForIntent(intent, { moverPreview, vendorSamplePreview });
-  // Mandatory signup selfie (master plan §3): every signed-in account must
-  // carry a camera-captured profile photo before using the app. Guests browse
-  // untouched; the API enforces the same rule on orders/rides/go-online.
+  // Profile selfie (master plan §3): a signed-in EARNER account (mover,
+  // business, advertiser) carries a camera-captured profile photo before using
+  // the app. [E27] Customers are not asked merely to browse or order; the taxi
+  // screen opens the camera when a ride request needs it. The API enforces the
+  // photo on rides and going online, not on ordinary checkout.
   // [MOB-007] Not conditional on a user being present: the store's hydration
   // law guarantees an authenticated state carries a user, and if it ever did
   // not, the gate holds (selfie/recovery) rather than opening the stack.
   const needsSelfie = isAuthenticated && !user?.selfieCapturedAt;
   const Main = mainForIntent(intent);
-  const entryGate = rootEntryGate({ isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie });
+  const entryGate = rootEntryGate({ isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie, hasUser: !!user });
 
   const resumeAuthContinuation = React.useCallback(() => {
     flushAuthContinuation(

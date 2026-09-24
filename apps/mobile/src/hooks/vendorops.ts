@@ -388,7 +388,9 @@ export function useVendorSubscription(enabled = true) {
  *  re-read the subscription so the screen's autoRenew state is server truth. */
 export function useSetVendorBillingMethod() {
   const qc = useQueryClient();
-  return useMutation({
+  // [DS198 D4] Preview-safe like every other vendor write: in the sample
+  // preview, "Stop weekly billing" must never fire a real PUT.
+  return usePreviewSafeMutation({
     mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) =>
       unwrap(vendorApi.setBillingMethod(method, mmgPayerMsisdn)),
     onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'subscription'] }),

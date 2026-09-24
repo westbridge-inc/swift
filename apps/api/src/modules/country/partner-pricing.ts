@@ -1,5 +1,5 @@
 import type { VehicleType } from '@prisma/client';
-import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, moverRoleFor, type MoverFeeBand, type MoverRole } from '../../config/vehicle-classes';
+import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, isVehicleOffered, moverRoleFor, type MoverFeeBand, type MoverRole } from '../../config/vehicle-classes';
 import {
   catalogueStepsFor,
   franchiseRuleFor,
@@ -19,6 +19,10 @@ export interface MoverQuote {
   band: MoverFeeBand;
   tier: MoverTier;
   rate: number;
+  /** [Launch vehicle list] Whether a mover can register or switch to this vehicle
+   *  today (config/vehicle-classes isVehicleOffered). Every vehicle is still priced,
+   *  so the list stays complete; the picker shows only the offered ones. */
+  offered: boolean;
 }
 
 /** One catalogue step: from `minItems` active items, `rate` per week. */
@@ -82,7 +86,7 @@ export function partnerPriceList(rawTiers: unknown): PartnerPriceList {
   const movers = VEHICLE_TYPES_IN_ORDER.map((vehicleType): MoverQuote => {
     const role = moverRoleFor(vehicleType);
     const { rate, tier } = partnerRateFor(tiers, { kind: role, vehicleType });
-    return { vehicleType, label: VEHICLE_CLASSES[vehicleType].label, role, band: feeBandFor(vehicleType), tier: tier as MoverTier, rate };
+    return { vehicleType, label: VEHICLE_CLASSES[vehicleType].label, role, band: feeBandFor(vehicleType), tier: tier as MoverTier, rate, offered: isVehicleOffered(vehicleType) };
   });
 
   // One store, no franchise: the franchise rule is quoted as a rule below.
