@@ -18,7 +18,15 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api-staging.swift.gy"
+        "EXPO_PUBLIC_API_URL": "https://api-staging.swiftgy.com"
+      }
+    },
+    "staging": {
+      "distribution": "store",
+      "channel": "staging",
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://api-staging.swiftgy.com"
       }
     },
     "production": {
@@ -37,6 +45,11 @@
       "android": {
         "serviceAccountKeyPath": "./google-play-service-account.json",
         "track": "internal"
+      }
+    },
+    "staging": {
+      "ios": {
+        "appleTeamId": "N3JV22LC84"
       }
     }
   }
