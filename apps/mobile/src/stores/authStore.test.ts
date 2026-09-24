@@ -88,6 +88,7 @@ function currentRootEntryGate() {
     countryCode: state.countryCode,
     anyPreview: false,
     needsSelfie: state.isAuthenticated && !!state.user && !(state.user as any).selfieCapturedAt,
+    hasUser: !!state.user,
   });
 }
 
@@ -490,7 +491,7 @@ describe('[MOB-007 / TST-008] corrupt persisted auth normalizes SIGNED OUT befor
       expect(setSelectedStore).toHaveBeenCalledWith(null);
       expect(hydrationCounters()).toEqual({ [reason]: 1 });
       // the root gate for this state can never be the main stack
-      expect(rootEntryGate({ isAuthenticated: s.isAuthenticated, wantsAuth: false, intent: s.intent, countryCode: s.countryCode, anyPreview: false, needsSelfie: false })).toBe('role-picker');
+      expect(rootEntryGate({ isAuthenticated: s.isAuthenticated, wantsAuth: false, intent: s.intent, countryCode: s.countryCode, anyPreview: false, needsSelfie: false, hasUser: !!s.user })).toBe('role-picker');
       // durable: storage now holds the normalized tuple, so the next boot is a plain signed-out hydration
       expect(JSON.parse(storageData.get('swift-auth')!)).toMatchObject({ version: 2, state: { isAuthenticated: false, user: null, accessToken: null, refreshToken: null } });
       clearQueryClient.mockClear();
@@ -523,7 +524,9 @@ describe('[MOB-007 / TST-008] corrupt persisted auth normalizes SIGNED OUT befor
     expect(src).toContain('const needsSelfie = isAuthenticated && !user?.selfieCapturedAt;');
     expect(src).not.toContain('isAuthenticated && !!user && !user.selfieCapturedAt');
     // an authenticated state with no user can only reach 'selfie', never 'main'
-    expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent: 'customer', countryCode: 'GY', anyPreview: false, needsSelfie: true })).toBe('selfie');
+    // ([E27] customers skip the selfie only when a user is actually present)
+    expect(src).toContain('hasUser: !!user');
+    expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent: 'customer', countryCode: 'GY', anyPreview: false, needsSelfie: true, hasUser: false })).toBe('selfie');
   });
 });
 

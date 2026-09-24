@@ -33,6 +33,7 @@ import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../.
 import { useAuthStore } from '../../../stores/authStore';
 import { telUrl } from '../../../lib/emergencyPolicy';
 import { orderStatusLabel } from '../../../lib/orderStatus';
+import { taxiDoorFor } from '../../../lib/taxiDoors';
 
 /**
  * The ride's status, in words — from `lib/orderStatus.ts`, the one authority.
@@ -374,7 +375,10 @@ export function TaxiScreen({ navigation }: any) {
   const errBody = errorMatchesCurrentTrip ? (requestRide.error as any)?.response?.data : undefined;
   const errMsg = errBody?.error?.message ?? errBody?.message;
   // L2-before-first-ride (§5): the gate must open a door, never dead-end.
-  const needsL2 = (errBody?.error?.code ?? errBody?.code) === 'ID_VERIFICATION_REQUIRED';
+  // [E27] The profile photo is asked for here, not at sign-in: the same door.
+  const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
+  const needsL2 = door === 'identity';
+  const needsSelfie = door === 'selfie';
 
   // One coherent /supply snapshot owns visible counts, level and ETA. The
   // older /availability read contributes only its rollout gate.
@@ -583,6 +587,14 @@ export function TaxiScreen({ navigation }: any) {
               variant="outline"
               style={{ marginTop: space.md }}
               onPress={() => navigation?.navigate?.('IdentityVerification')}
+            />
+          ) : null}
+          {needsSelfie ? (
+            <PillButton
+              label="Add your photo — your driver sees it"
+              variant="outline"
+              style={{ marginTop: space.md }}
+              onPress={() => navigation?.navigate?.('Selfie')}
             />
           ) : null}
 
