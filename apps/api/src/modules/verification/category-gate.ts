@@ -95,6 +95,45 @@ export async function blockedCategoryIdsForVendors(prisma: Db, tenantId: string,
   return out;
 }
 
+/**
+ * [S2-1] The tenant's hidden-only item ids — items whose discovery tags exist
+ * but point ONLY at categories that are not ACTIVE (HIDDEN, MERGED, PENDING).
+ *
+ * The taxonomy is a join table without a Prisma relation, so the rule is
+ * resolved to ids here and callers exclude them from the ITEM where-clause
+ * BEFORE a page or fixed window is capped. A hidden row ranked ahead of a
+ * listable one must never consume the page budget: the page, its cursor and
+ * the counts then all see the same eligible population. Untagged items and
+ * items with at least one ACTIVE tag are not in the result and stay listable,
+ * exactly as `listableItemsForVendors` judges them.
+ */
+export async function hiddenOnlyItemIds(prisma: Db, tenantId: string): Promise<string[]> {
+  const categories = await prisma.discoveryCategory.findMany({
+    where: { tenantId },
+    select: { id: true, status: true },
+  });
+  const active = new Set(categories.filter((c) => c.status === 'ACTIVE').map((c) => c.id));
+  const nonActive = categories.filter((c) => c.status !== 'ACTIVE').map((c) => c.id);
+  // With no non-ACTIVE category there is nothing that can hide a tagged item.
+  if (nonActive.length === 0) return [];
+  const hiddenTagged = await prisma.itemDiscoveryCategory.findMany({
+    where: { tenantId, categoryId: { in: nonActive } },
+    select: { itemId: true },
+    distinct: ['itemId'],
+  });
+  const candidates = [...new Set(hiddenTagged.map((t) => t.itemId))];
+  // With no ACTIVE category at all, every tagged item is hidden-only; the
+  // rescue lookup below would be dead work with an empty `in`.
+  if (candidates.length === 0 || active.size === 0) return candidates;
+  const rescued = await prisma.itemDiscoveryCategory.findMany({
+    where: { tenantId, itemId: { in: candidates }, categoryId: { in: [...active] } },
+    select: { itemId: true },
+    distinct: ['itemId'],
+  });
+  const rescueIds = new Set(rescued.map((t) => t.itemId));
+  return candidates.filter((id) => !rescueIds.has(id));
+}
+
 /** Shared public-listing projection gate for Market and guest search. */
 export async function listableItemsForVendors<T extends { id: string; vendorId: string }>(
   prisma: Db, tenantId: string, rows: readonly T[],

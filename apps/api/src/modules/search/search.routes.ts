@@ -6,7 +6,7 @@ import { sortByDistance } from '../../utils/distance';
 import { bindPublicMarketTenant, requireRequestTenant } from './search-scope';
 import { visibleVendorInTenant } from '../vendor/vendor-visibility';
 import { ACCESS_COOKIE, REFRESH_COOKIE, parseCookies } from '../auth/browser-session';
-import { listableItemsForVendors } from '../verification/category-gate';
+import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/category-gate';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
 
@@ -40,6 +40,16 @@ const searchQuerySchema = z.object({
 const suggestionsQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),
 });
+
+/**
+ * [S2-2] How many visible vendors inside the bounding box /search/nearby reads
+ * before the exact radius filter. The box is a square and the radius a circle
+ * inscribed in it, so a window of `limit` ordered by rating could still be
+ * taken by a better-rated vendor in a box corner, outside the circle, and the
+ * circle came back empty. The window is the whole box, bounded; a breach is
+ * LOGGED, never silently truncated (the CATEGORY_ITEM_CAP stance).
+ */
+export const NEARBY_CANDIDATE_CAP = 200;
 
 const nearbyQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90),
@@ -165,6 +175,12 @@ export async function searchRoutes(app: FastifyInstance) {
     const userLat = lat ?? null;
     const userLng = lng ?? null;
 
+    // [S2-1] Guest surfaces exclude hidden-only items IN the query, before
+    // the window is capped; the in-memory gate below stays a defensive pass.
+    const hiddenOnly = request.publicTenantId
+      ? await hiddenOnlyItemIds(app.prisma, tenantId)
+      : [];
+
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
         // [B2] The ONE visibility predicate — this fallback previously
@@ -210,6 +226,7 @@ export async function searchRoutes(app: FastifyInstance) {
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
           ],
+          ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
         },
         // The shared select, so the fallback cannot quietly serve fewer fields
         // than the fast path and make the engine visible to the client.
@@ -273,6 +290,11 @@ export async function searchRoutes(app: FastifyInstance) {
     const { q } = suggestionsQuerySchema.parse(request.query);
     if (!q || q.length < 2) return { success: true, data: [] };
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
+    // [S2-1] Hidden-only items never occupy the fixed five-item window: they
+    // are excluded here, before the take, not after it.
+    const hiddenOnly = request.publicTenantId
+      ? await hiddenOnlyItemIds(app.prisma, tenantId)
+      : [];
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
@@ -283,7 +305,12 @@ export async function searchRoutes(app: FastifyInstance) {
       app.prisma.item.findMany({
         // [B2] This query had NO vendor predicate at all — a banned store's
         // dish names kept autocompleting for every customer who typed.
-        where: { isAvailable: true, vendor: { ...visibleVendorInTenant(tenantId), ...(request.publicTenantId && { isCurrentlyOpen: true }) }, name: { contains: q, mode: 'insensitive' } },
+        where: {
+          isAvailable: true,
+          vendor: { ...visibleVendorInTenant(tenantId), ...(request.publicTenantId && { isCurrentlyOpen: true }) },
+          name: { contains: q, mode: 'insensitive' },
+          ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
+        },
         select: { id: true, vendorId: true, name: true },
         take: 5,
       }),
@@ -309,8 +336,17 @@ export async function searchRoutes(app: FastifyInstance) {
   // ("worth trying right now"), and a closed store isn't tryable right now.
   app.get('/search/trending', { preHandler: [browseSearch] }, async (request) => {
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
+    // [S2-1] Same rule, before the fixed take — a hidden-only tag must not
+    // crowd a trending row out of the rail's window.
+    const hiddenOnly = request.publicTenantId
+      ? await hiddenOnlyItemIds(app.prisma, tenantId)
+      : [];
     const items = await app.prisma.item.findMany({
-      where: { isAvailable: true, vendor: { ...visibleVendorInTenant(tenantId), isCurrentlyOpen: true } },
+      where: {
+        isAvailable: true,
+        vendor: { ...visibleVendorInTenant(tenantId), isCurrentlyOpen: true },
+        ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
+      },
       // The shared select again. Trending is the Market tab's fallback rail, so
       // its cards land in the SAME component as the feed's; the fifth hand-built
       // copy of this shape lived here and served an item with no `isNew` and no
@@ -336,12 +372,30 @@ export async function searchRoutes(app: FastifyInstance) {
     const { lat: userLat, lng: userLng, radius: radiusKm, type, limit } = nearbyQuerySchema.parse(request.query);
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
 
+    // [S2-2] The rating-first cap used to run BEFORE any radius predicate: a
+    // five-star vendor outside the radius crowded a four-star vendor at the
+    // caller's coordinates out of the take window, and the post-filter then
+    // returned nothing. The bounding box moves the spatial eligibility INTO
+    // the query; the box is a conservative superset of the radius circle, so
+    // it can never drop an in-radius vendor. It is still a square: the window
+    // reads the whole box (NEARBY_CANDIDATE_CAP), and the exact haversine
+    // filter, distance ordering and `limit` apply after it.
+    const KM_PER_DEG_LAT = 111.32;
+    const cosLat = Math.cos((userLat * Math.PI) / 180);
+    const latDelta = radiusKm / KM_PER_DEG_LAT;
+    // Near the poles a radius circle spans every meridian, so a
+    // degree-derived longitude bound cannot contain it — longitude is left
+    // unbounded there and the exact filter below still applies.
+    const lngDelta = cosLat > 1e-3 ? radiusKm / (KM_PER_DEG_LAT * cosLat) : null;
+
     const vendors = await app.prisma.vendor.findMany({
       where: {
         ...visibleVendorInTenant(tenantId),
         isCurrentlyOpen: true,
         // Empty stores (no orderable item) stay out of nearby discovery.
         items: { some: { isAvailable: true } },
+        latitude: { gte: userLat - latDelta, lte: userLat + latDelta },
+        ...(lngDelta !== null ? { longitude: { gte: userLng - lngDelta, lte: userLng + lngDelta } } : {}),
         ...(type && { vendorType: type }),
       },
       select: {
@@ -360,14 +414,21 @@ export async function searchRoutes(app: FastifyInstance) {
         city: true,
         addressLine1: true,
       },
-      // Same candidate cap/default as public customer browse. Distance work
-      // and serialization are bounded even for anonymous callers.
-      take: limit,
+      // Distance work is bounded even for anonymous callers: the box, then
+      // the cap. The response is bounded by `limit` below.
+      take: NEARBY_CANDIDATE_CAP,
       orderBy: [{ averageRating: 'desc' }, { id: 'asc' }],
     });
+    if (vendors.length === NEARBY_CANDIDATE_CAP) {
+      request.log.warn(
+        { tenantId, radiusKm, cap: NEARBY_CANDIDATE_CAP },
+        'search: nearby candidate cap reached inside the box — the rating-first window decides who is seen',
+      );
+    }
 
     const nearby = sortByDistance(vendors, userLat, userLng)
       .filter((v) => v.distance <= radiusKm)
+      .slice(0, limit)
       .map((v) => ({
         ...v,
         distance: Math.round(v.distance * 10) / 10,

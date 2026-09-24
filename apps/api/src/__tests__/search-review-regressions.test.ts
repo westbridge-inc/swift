@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { guestSearchApp, engine, matches } from './helpers/guest-search';
 import { resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 import { isVendorVisible, VISIBLE_VENDOR_REL } from '../modules/vendor/vendor-visibility';
+import { NEARBY_CANDIDATE_CAP } from '../modules/search/search.routes';
 
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); engine.ready = false; resetBrowserOriginsForTests(); });
 
@@ -170,7 +171,11 @@ it('bounds nearby DB candidates and responses, validates limits, and retains ano
     for (let n = 0; n < 70; n++) vendors.push({ ...vendors[0], id: `near-${n}`, items: [items[0]] });
     const res = await app.inject('/api/v1/search/nearby?lat=6.8&lng=-58.15&limit=3');
     expect(res.statusCode).toBe(200); expect(res.json().data).toHaveLength(3);
-    expect(db.vendor.findMany.mock.calls[0]![0]!['take']).toBe(3);
+    // [S2-2] The DB window is the bounding box, capped — no longer `limit`: a
+    // rating-first window of `limit` let a better-rated vendor in a box corner
+    // (outside the radius) empty the result (search-s2-regressions.test.ts).
+    // The candidate bound is pinned exactly; the response bound is `limit`.
+    expect(db.vendor.findMany.mock.calls[0]![0]!['take']).toBe(NEARBY_CANDIDATE_CAP);
     const defaults = await app.inject('/api/v1/search/nearby?lat=6.8&lng=-58.15');
     expect(defaults.json().data).toHaveLength(20);
     for (const limit of [0, 51]) expect((await app.inject(`/api/v1/search/nearby?lat=6.8&lng=-58.15&limit=${limit}`)).statusCode).toBe(400);
