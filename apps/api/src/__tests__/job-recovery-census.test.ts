@@ -76,7 +76,7 @@ describe('[A-08] every job class has an answer about replaying it', () => {
     // Each of these was certified by reading its handler and landing a
     // red-first replay test that drives the real processor twice: a future
     // change that silently flips one back to NOT_CERTIFIED fails here.
-    for (const name of ['checkout-outbox', 'dispatch-order', 'offer-timeout', 'release-held-orders']) {
+    for (const name of ['checkout-outbox', 'dispatch-order', 'offer-timeout', 'release-held-orders', 'reconcile-dispatch']) {
       expect(JOB_RECOVERY[name as keyof typeof JOB_RECOVERY]?.policy, name).toBe('SAFE_REPLAY');
     }
   });

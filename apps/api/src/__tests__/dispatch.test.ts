@@ -13,7 +13,9 @@ import {
   DISPATCH_LOCATION_FRESH_SECONDS,
   DispatchService,
   EXHAUST_CAP,
+  RECONCILE_STUCK_MINUTES,
   normalizeDispatchLocationFreshSeconds,
+  reconcileStuckDispatch,
 } from '../modules/dispatch/dispatch.service';
 import { dispatchReplayTag, redispatchJobId } from '../modules/dispatch/dispatch-generation-keys';
 import { Queue, type ConnectionOptions } from 'bullmq';
@@ -1216,6 +1218,42 @@ describe('The offer cascade', () => {
       `dispatch:declined:${order.id}`,
       `ops_page:dispatch_exhausted:${order.id}`,
     );
+  });
+
+  it('[E36] a redelivered reconcile sweep re-drives a stranded order once and writes nothing durable', async () => {
+    // Stranded: ready, riderless, no live offer, untouched past the stuck
+    // window — the state a Redis restart leaves behind.
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    const stale = new Date(Date.now() - (RECONCILE_STUCK_MINUTES + 30) * 60_000);
+    // Raw, because Prisma's @updatedAt would stamp "now" over any value given.
+    await app.prisma.$executeRaw`UPDATE "orders" SET "updatedAt" = ${stale} WHERE "id" = ${order.id}`;
+    const cursorKey = 'dispatch:reconcile-scan:v1';
+    const claimKey = `dispatch:reconciled:${order.id}`;
+    await app.redis.del(cursorKey, claimKey);
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    const enqueued: string[] = [];
+    const enqueue = async (orderId: string) => { enqueued.push(orderId); };
+
+    try {
+      const first = await reconcileStuckDispatch(app.prisma, app.redis, enqueue);
+      expect(first.recovered).toContain(order.id);
+      expect(await app.redis.get(claimKey)).not.toBeNull();
+
+      // The worker died mid-sweep and BullMQ redelivers the SAME job. Model the
+      // worst case: the crash came before the cursor advanced, so the replay
+      // scans the same window again. The per-order NX cooldown claim is what
+      // stands between it and a second re-drive.
+      await app.redis.del(cursorKey);
+      const second = await reconcileStuckDispatch(app.prisma, app.redis, enqueue);
+      expect(second.recovered).not.toContain(order.id);
+      expect(enqueued.filter((id) => id === order.id)).toHaveLength(1);
+
+      // The sweep's only durable effect is the re-drive itself (a certified
+      // dispatch-order job): the order row is exactly as it was.
+      expect(await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).toEqual(before);
+    } finally {
+      await app.redis.del(cursorKey, claimKey);
+    }
   });
 
   it('widens the radius when the inner ring is empty', async () => {

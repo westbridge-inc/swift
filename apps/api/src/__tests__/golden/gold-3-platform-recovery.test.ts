@@ -784,12 +784,14 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
     expect(await dead.getState()).toBe('failed');
   }, 120_000);
 
-  // E36 (S1, ledger): the job classes that carry a crash's recovery are not
-  // replay-certified (jobs/recovery-policy.ts), so the DLQ page refuses to
-  // requeue a dead dispatch job (409 REPLAY_NOT_CERTIFIED). This asserts the
-  // CORRECT end state. Its first assertion reads the pure register — a
-  // constant table — so on main it can only fail on the certification itself.
-  it.fails('[E36] the crash-recovery job classes are certified, and the dead dispatch job requeues from the DLQ page', async () => {
+  // E36 (S1, ledger): the job classes that carry a crash's recovery were not
+  // replay-certified (jobs/recovery-policy.ts), so the DLQ page refused to
+  // requeue a dead dispatch job (409 REPLAY_NOT_CERTIFIED). Stage 1 (#1318)
+  // certified dispatch-order, offer-timeout, release-held-orders and
+  // checkout-outbox; stage 2 certified reconcile-dispatch, each with a replay
+  // test that drives the real handler twice. Its first assertion reads the
+  // pure register, so a future uncertification fails here first.
+  it('[E36] the crash-recovery job classes are certified, and the dead dispatch job requeues from the DLQ page', async () => {
     for (const name of ['dispatch-order', 'offer-timeout', 'release-held-orders', 'checkout-outbox', 'reconcile-dispatch']) {
       expect(recoveryFor(name).policy, name).toBe('SAFE_REPLAY');
     }
