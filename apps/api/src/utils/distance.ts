@@ -1,4 +1,4 @@
-const EARTH_RADIUS_KM = 6371;
+export const EARTH_RADIUS_KM = 6371;
 
 function toRad(deg: number): number {
   return deg * (Math.PI / 180);

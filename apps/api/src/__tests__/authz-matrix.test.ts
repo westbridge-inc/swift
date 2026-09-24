@@ -159,6 +159,12 @@ const MATRIX: PrefixSpec[] = [
  *  document/statement render-token model. Anything added here needs the same
  *  written justification. */
 const PUBLIC_BY_DESIGN = new Set([
+  // Guest catalogue reads use the public browse tenant/visibility authority.
+  // The sync operation stays in the authenticated sweep below.
+  'GET /api/v1/search',
+  'GET /api/v1/search/suggestions',
+  'GET /api/v1/search/trending',
+  'GET /api/v1/search/nearby',
   // Service-provider browse is customer discovery (guest-browse doctrine):
   // optionalAuth by design; unauthenticated requests hit schema validation
   // (400 on missing query), never a data leak — the handler serves a public

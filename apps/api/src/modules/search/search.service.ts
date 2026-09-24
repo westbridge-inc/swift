@@ -301,7 +301,7 @@ export class SearchService {
       // surface attributes and trusts the index for visibility. The full
       // re-index (syncAllVendors) has always used the shared predicate, so a
       // reconcile removed them and the next incremental sync put them back.
-      include: { categories: true, tenant: { select: { isActive: true } } },
+      include: { categories: true, tenant: { select: { isActive: true } }, subscription: VISIBLE_VENDOR_SELECT.subscription },
     });
     // A vendor that no longer exists must not keep a document either. The
     // previous early return left the doc in the index until someone happened to

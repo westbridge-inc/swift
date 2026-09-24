@@ -7,27 +7,32 @@ import { ShoppingBag, User, MapPin, Search } from 'lucide-react';
 import { sessionProbe } from '@/lib/auth';
 import { SwiftLogo } from '@/components/swift-logo';
 
-// The customer ordering shell — everything under (app) requires a signed-in
-// customer. Same HttpOnly cookie session as the partner flow; a customer just
+// The customer ordering shell — search is public; private pages require a
+// signed-in customer. Same HttpOnly cookie session as the partner flow; a customer just
 // lands on /order instead of /dashboard.
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const [ready, setReady] = useState(false);
+  const [readyPath, setReadyPath] = useState<string | null>(null);
+  const publicSearch = pathname === '/order/search';
 
   useEffect(() => {
+    if (publicSearch) {
+      setReadyPath(null);
+      return;
+    }
     // [W-01] The session is an HttpOnly cookie: gate on the SERVER's word,
     // never on a token's presence, because there is no token to be present.
     let cancelled = false;
     void sessionProbe().then((session) => {
       if (cancelled) return;
       if (!session.ok) router.replace(`/login?next=${encodeURIComponent(pathname)}`);
-      else setReady(true);
+      else setReadyPath(pathname);
     });
     return () => { cancelled = true; };
-  }, [router, pathname]);
+  }, [router, pathname, publicSearch]);
 
-  if (!ready) {
+  if (!publicSearch && readyPath !== pathname) {
     return (
       <div className="grid min-h-screen place-items-center text-[var(--swift-muted)]">Loading…</div>
     );
