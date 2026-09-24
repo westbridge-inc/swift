@@ -1,12 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AdvertiserService } from './advertiser.service';
-import { BookingService } from './booking.service';
+import { BookingService, MAX_AVAILABILITY_WEEKS } from './booking.service';
 import { AdCheckoutService } from './checkout.service';
 import { CreativeService } from './creative.service';
 import { AdsLifecycleService } from './lifecycle.service';
 import { AdStatsService } from './stats.service';
-import { mondayOfDate, isMonday } from './ads-weeks';
+import { mondayOfDate, weekSpan, isMonday } from './ads-weeks';
 import { AppError, NotFoundError } from '../../utils/errors';
 
 // Advertiser-facing ads routes (ads-platform spec §4.2/§4.3). Registration and
@@ -56,16 +56,35 @@ export async function adsRoutes(app: FastifyInstance) {
   });
 
   /** GET /placements/:id/availability — per-week availability for a city over a
-   *  range; lazily materialises inventory rows (spec §7.2). */
+   *  range; a read-only projection (spec §7.2 — a GET never materialises
+   *  inventory rows). Advertiser-member gated: the ads module's access
+   *  primitive is AdvertiserMember, so a random logged-in user cannot farm
+   *  the inventory engine. */
   app.get<{ Params: { id: string } }>('/placements/:id/availability', auth, async (request) => {
+    const member = await app.prisma.advertiserMember.findFirst({
+      where: { userId: request.user.userId },
+      select: { advertiserId: true },
+    });
+    if (!member) {
+      throw new AppError(403, 'ADVERTISER_REQUIRED', 'Only advertiser accounts can query placement availability.');
+    }
     const q = z.object({
-      city: z.string().trim().min(1).default('*'),
+      // city is a raw inventory key ('*' = tenant-wide); bound its length and
+      // character set so it can never become an unbounded query/response axis.
+      city: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9 _*'.,()-]+$/).default('*'),
       from: z.string().date(),
       to: z.string().date(),
     }).parse(request.query ?? {});
     const from = new Date(`${q.from}T00:00:00Z`);
     const to = new Date(`${q.to}T00:00:00Z`);
     if (to < from) throw new AppError(400, 'BAD_RANGE', 'to must be on or after from.');
+    // Arithmetical span check BEFORE any week array is materialised (audit
+    // DS107 High #4): a hostile from/to pair must be refused in O(1), not
+    // after allocating ~422k Date objects.
+    const span = weekSpan(mondayOfDate(from), mondayOfDate(to));
+    if (span > MAX_AVAILABILITY_WEEKS) {
+      throw new AppError(400, 'BAD_RANGE', `Availability range is limited to ${MAX_AVAILABILITY_WEEKS} weeks (got ${span}).`);
+    }
     return { success: true, data: await booking.availability(request.params.id, q.city, from, to) };
   });
 
@@ -91,6 +110,15 @@ export async function adsRoutes(app: FastifyInstance) {
     const endWeek = mondayOfDate(new Date(`${body.endWeek}T00:00:00Z`));
     if (endWeek < startWeek) throw new AppError(400, 'BAD_RANGE', 'endWeek must be on or after startWeek.');
     if (!isMonday(startWeek) || !isMonday(endWeek)) throw new AppError(500, 'WEEK_SNAP_FAILED', 'Internal week normalization error.');
+    // [audit DS107 High #4] Bound the campaign span at creation: reservation
+    // writes one inventory row + one booking per week × city, so an unbounded
+    // span drafted here is the same write-amplification vector as the
+    // availability GET. The service re-checks the same bound defensively, for
+    // campaigns created before this check (or by any other caller).
+    const span = weekSpan(startWeek, endWeek);
+    if (span > MAX_AVAILABILITY_WEEKS) {
+      throw new AppError(400, 'BAD_RANGE', `A campaign may span at most ${MAX_AVAILABILITY_WEEKS} weeks (got ${span}).`);
+    }
 
     const campaign = await app.prisma.adCampaign.create({
       data: {
