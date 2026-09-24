@@ -16,7 +16,7 @@ import { login, GET, POST, PUT, req, upload, codeOf, type Session, type Res } fr
 import { ensureSelfies, uniquePng, type Roster } from './roster.js';
 import { FICTIONAL_GY, TargetRefused } from './guard.js';
 import type { World, WorldItem } from './journeys/context.js';
-import { activeLegsOf } from './journeys/common.js';
+import { activeLegsOf, customerOrder, riderToDoorFrom, doorOf, startAndSettle, IN_CUSTODY, TERMINAL } from './journeys/common.js';
 
 export interface Item { itemId: string; categoryId: string; price: number }
 export interface Provisioned { admin: Session; items: Record<string, Item>; live: string[] }
@@ -208,31 +208,80 @@ export async function goOffline(m: { kind: 'rider' | 'driver'; session: Session 
   return POST(`/${m.kind}/go-offline`, {}, m.session.token);
 }
 
-/** Cancel whatever a previous (interrupted) run left live, so this run starts clean. */
+/**
+ * End whatever a previous (interrupted) run left live, so this run starts clean.
+ *
+ * Movers first. A job already in a mover's hands (IN_CUSTODY) cannot be
+ * cancelled by anyone — the state machine lets it end only DELIVERED or FAILED —
+ * so it is finished the way a mover finishes it: walked to the door and closed
+ * paid, with the customer's door PIN. Anything short of custody is cancelled by
+ * the operator. The count is of what actually ended; what could not is named.
+ */
 async function heal(roster: Roster, admin: Session, log: (s: string) => void): Promise<void> {
+  const tally = { cancelled: 0, finished: 0 };
+  const stuck: string[] = [];
+  const seen = new Set<string>(); // [DS230 F4] each leftover is attempted, and named, once
+  const settle = (what: string, r: Res, kind: 'cancelled' | 'finished') => { if (r.ok) tally[kind] += 1; else stuck.push(`${what} → ${r.status} ${codeOf(r)}`); };
+  const operatorCancel = (id: string) => asAdmin(admin.token, 'reset a mover job left by an interrupted journey run', 'PUT', `/admin/orders/${id}/cancel`, { reason: 'journey runner reset of an interrupted run' });
   const accounts = [...Object.values(roster.customers), ...Object.values(roster.providers ?? {})];
-  let n = 0;
+  // The door PIN reaches only the customer who placed the order (GET /customer/orders/:id).
+  const doorPin = async (orderId: string): Promise<string | null> => {
+    for (const c of accounts) {
+      const pin = (await customerOrder(c.session, orderId))?.ridePin;
+      if (typeof pin === 'string' && pin) return pin;
+    }
+    return null;
+  };
+
+  for (const m of Object.values(roster.movers)) {
+    if (m.kind === 'rider') {
+      for (const o of activeLegsOf((await GET('/rider/orders/active-legs', m.session.token)).json)) {
+        seen.add(o.id);
+        const what = `${m.id} ${o.orderType ?? 'order'} ${o.id} (${o.status})`;
+        if (!IN_CUSTODY.includes(o.status)) { settle(what, await operatorCancel(o.id), 'cancelled'); continue; }
+        // [DS230 F3] The door handover closes CASH only; an MMG leg would be
+        // walked to the door for nothing. Name it, and leave it untouched.
+        if (o.paymentMethod !== 'CASH') { stuck.push(`${what}: ${o.paymentMethod} in custody — not a cash handover`); continue; }
+        const courier = o.orderType === 'COURIER'; // settles from any custody state; no door PIN
+        const walked = courier ? null : await riderToDoorFrom(m.session, o.id, o.status);
+        if (walked && !walked.ok) { settle(`${what} walking to the door`, walked, 'finished'); continue; }
+        const pin = courier ? null : await doorPin(o.id);
+        settle(what, await POST(`/rider/orders/${o.id}/handover`, { outcome: 'paid', gps: doorOf(o, m), ...(pin ? { ridePin: pin } : {}) }, m.session.token), 'finished');
+      }
+      await PUT('/rider/profile', { riderType: 'BOTH' }, m.session.token);
+    } else {
+      for (const ride of activeLegsOf((await GET('/driver/rides/active', m.session.token)).json)) {
+        seen.add(ride.id);
+        const what = `${m.id} ride ${ride.id} (${ride.status})`;
+        if (!IN_CUSTODY.includes(ride.status)) {
+          const cancel = await operatorCancel(ride.id);
+          // [DS230 F2] DRIVER_ARRIVED with the PIN verified is passenger
+          // custody: the cancel is refused, so the driver starts and settles it.
+          if (!cancel.ok && ride.status === 'DRIVER_ARRIVED') settle(what, await startAndSettle(m.session, ride.id, doorOf(ride, m)), 'finished');
+          else settle(what, cancel, 'cancelled');
+          continue;
+        }
+        settle(what, await POST(`/driver/rides/${ride.id}/handover`, { outcome: 'paid', gps: doorOf(ride, m) }, m.session.token), 'finished');
+      }
+    }
+  }
+
   for (const c of accounts) {
     const live = await GET('/customer/orders?live=true&limit=50', c.session.token);
     for (const o of (live.json?.data ?? []) as any[]) {
+      if (TERMINAL.includes(o.status) || seen.has(o.id)) continue;
       const cancel = await POST(`/customer/orders/${o.id}/cancel`, { reason: 'journey runner reset' }, c.session.token);
-      if (!cancel.ok) await asAdmin(admin.token, `reset a live order left by an interrupted journey run`, 'PUT', `/admin/orders/${o.id}/cancel`, { reason: 'journey runner reset of an interrupted run' });
-      n += 1;
+      settle(`${c.id} order ${o.id} (${o.status})`, cancel.ok ? cancel : await operatorCancel(o.id), 'cancelled');
+    }
+    const ride = (await GET('/rides/active', c.session.token)).json?.data;
+    if (ride?.id && !TERMINAL.includes(ride.status) && !seen.has(ride.id)) {
+      const cancel = await POST(`/rides/${ride.id}/cancel`, { reason: 'journey runner reset' }, c.session.token);
+      settle(`${c.id} ride ${ride.id} (${ride.status})`, cancel.ok ? cancel : await operatorCancel(ride.id), 'cancelled');
     }
     const q = await GET('/rides/queue', c.session.token);
     if (q.json?.data) await POST('/rides/queue/leave', {}, c.session.token);
   }
-  for (const m of Object.values(roster.movers)) {
-    const active = m.kind === 'rider' ? await GET('/rider/orders/active-legs', m.session.token) : await GET('/driver/rides/active', m.session.token);
-    for (const o of activeLegsOf(active.json)) {
-      const id = o.id ?? o.orderId;
-      if (!id) continue;
-      await asAdmin(admin.token, 'reset a mover job left by an interrupted journey run', 'PUT', `/admin/orders/${id}/cancel`, { reason: 'journey runner reset of an interrupted run' });
-      n += 1;
-    }
-    if (m.kind === 'rider') await PUT('/rider/profile', { riderType: 'BOTH' }, m.session.token);
-  }
-  log(`  leftovers from earlier runs cancelled: ${n}`);
+  log(`  leftovers from earlier runs: ${tally.cancelled} cancelled, ${tally.finished} finished at the door${stuck.length ? `; STILL LIVE: ${stuck.join('; ')}` : ''}`);
 }
 
 /** The whole journey world, over HTTP. Never throws for one partner's gap: it is recorded in `notReady`. */

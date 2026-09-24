@@ -7,7 +7,7 @@ import { OTP, BASE, ORIGIN, upload, type Session } from '../client.js';
 import type { Journey, Recorder } from '../journey.js';
 import { GET, POST, PUT, req, sleep, brief, pick, waitFor, codeOf } from './common.js';
 import type { Ctx } from './context.js';
-import { mover, onlineOf, setOnline, pollOffer } from './dispatch.js';
+import { mover, onlineOf, setOnline, pollOffer, driverArrives, releaseDrivers, closeRide } from './dispatch.js';
 import { registerFresh } from './auth.js';
 import { asAdmin, uploadDoc } from '../provision.js';
 import { uniquePng } from '../roster.js';
@@ -122,34 +122,55 @@ export const TAXI_02: Journey<Ctx> = {
   id: 'TAXI-02',
   estimateSeconds: 150,
   title: 'Driver accept → en-route → arrived (H-4)',
-  cases: 'accept; en-route; arrived; cancellation/re-dispatch',
+  cases: 'accept; en-route; arrived (E19: refused from afar, taken at the pickup, or on the passenger’s word); cancellation/re-dispatch',
   async run(rec, ctx) {
     const C7 = ctx.roster.customers.C7!.session;
     rec.require('two drivers online', drivers(ctx).length >= 2, drivers(ctx).join(','));
     const ride = await requestRide(rec, ctx, C7, 'ride');
     rec.require('a ride to drive', !!ride, '');
-    const d1 = await driverTakes(rec, ctx, ride!.id, 'first driver');
-    rec.require('a driver accepted', !!d1, '');
-    const D1 = mover(ctx, d1!);
-    const a1 = await activeRide(C7);
-    rec.check('the passenger sees the assignment and the driver', a1?.status === 'DRIVER_ASSIGNED' && !!a1?.driver, `status=${a1?.status}`);
-    const other = drivers(ctx).find((id) => id !== d1)!;
-    rec.deny('another driver cannot move this ride', await PUT(`/driver/rides/${ride!.id}/en-route`, {}, mover(ctx, other).session.token), [403, 404, 409]);
-    rec.deny('the passenger cannot drive the ride', await PUT(`/driver/rides/${ride!.id}/en-route`, {}, C7.token), [403, 404]);
-    rec.expect('en-route', await PUT(`/driver/rides/${ride!.id}/en-route`, {}, D1.session.token), 200);
-    rec.expect('arrived', await PUT(`/driver/rides/${ride!.id}/arrived`, {}, D1.session.token), 200);
-    const a2 = await activeRide(C7);
-    rec.check('the passenger sees DRIVER_ARRIVED', a2?.status === 'DRIVER_ARRIVED', `status=${a2?.status}`);
+    const moved: string[] = [];
+    try {
+      const d1 = await driverTakes(rec, ctx, ride!.id, 'first driver');
+      rec.require('a driver accepted', !!d1, '');
+      const D1 = mover(ctx, d1!);
+      const a1 = await activeRide(C7);
+      rec.check('the passenger sees the assignment and the driver', a1?.status === 'DRIVER_ASSIGNED' && !!a1?.driver, `status=${a1?.status}`);
+      const other = drivers(ctx).find((id) => id !== d1)!;
+      rec.deny('another driver cannot move this ride', await PUT(`/driver/rides/${ride!.id}/en-route`, {}, mover(ctx, other).session.token), [403, 404, 409]);
+      rec.deny('the passenger cannot drive the ride', await PUT(`/driver/rides/${ride!.id}/en-route`, {}, C7.token), [403, 404]);
+      rec.expect('en-route', await PUT(`/driver/rides/${ride!.id}/en-route`, {}, D1.session.token), 200);
+      // [E19] The heartbeat's fix is fresh but it is the roster home, ~3.4 km out: the claim is refused.
+      const far = await PUT(`/driver/rides/${ride!.id}/arrived`, {}, D1.session.token);
+      rec.deny('arrived while the car is ~3 km from the pickup (E19)', far, [409], ['ARRIVAL_NOT_VERIFIED'], `verdict=${far.json?.error?.details?.verdict} distanceM=${far.json?.error?.details?.distanceM}`);
+      moved.push(d1!);
+      rec.expect('arrived at the pickup', await driverArrives(ctx, d1!, ride!.id, PICKUP), 200);
+      const a2 = await activeRide(C7);
+      rec.check('the passenger sees DRIVER_ARRIVED', a2?.status === 'DRIVER_ARRIVED', `status=${a2?.status}`);
 
-    // cancellation by the driver before pickup: back to PENDING, a new PIN, re-dispatched
-    rec.deny('a cancel reason that is too short', await POST(`/driver/rides/${ride!.id}/cancel`, { reason: 'x' }, D1.session.token), [400], ['VALIDATION_ERROR']);
-    const cx = await POST(`/driver/rides/${ride!.id}/cancel`, { reason: 'vehicle problem before pickup' }, D1.session.token);
-    rec.expect('the driver cancels before pickup', cx, 200, undefined, `status=${cx.json?.data?.status} reDispatched=${cx.json?.data?.reDispatched}`);
-    const a3 = await activeRide(C7);
-    rec.check('the ride is PENDING again with a new PIN', a3?.status === 'PENDING' && String(a3?.ridePin) !== ride!.pin, `status=${a3?.status} pinChanged=${String(a3?.ridePin) !== ride!.pin}`);
-    const d2 = await driverTakes(rec, ctx, ride!.id, 're-dispatch', [d1!]);
-    rec.check('a different driver takes the re-dispatched ride', !!d2 && d2 !== d1, `first=${d1} second=${d2}`);
-    await cancelRide(C7, ride!.id);
+      // cancellation by the driver before pickup: back to PENDING, a new PIN, re-dispatched
+      rec.deny('a cancel reason that is too short', await POST(`/driver/rides/${ride!.id}/cancel`, { reason: 'x' }, D1.session.token), [400], ['VALIDATION_ERROR']);
+      const cx = await POST(`/driver/rides/${ride!.id}/cancel`, { reason: 'vehicle problem before pickup' }, D1.session.token);
+      rec.expect('the driver cancels before pickup', cx, 200, undefined, `status=${cx.json?.data?.status} reDispatched=${cx.json?.data?.reDispatched}`);
+      const a3 = await activeRide(C7);
+      rec.check('the ride is PENDING again with a new PIN', a3?.status === 'PENDING' && String(a3?.ridePin) !== ride!.pin, `status=${a3?.status} pinChanged=${String(a3?.ridePin) !== ride!.pin}`);
+      const d2 = await driverTakes(rec, ctx, ride!.id, 're-dispatch', [d1!]);
+      rec.check('a different driver takes the re-dispatched ride', !!d2 && d2 !== d1, `first=${d1} second=${d2}`);
+
+      // [E19] The escape when the GPS will not say so: the passenger, who can see the car, confirms it.
+      if (d2) {
+        rec.expect('the second driver is en route', await PUT(`/driver/rides/${ride!.id}/en-route`, {}, mover(ctx, d2).session.token), 200);
+        rec.deny('another customer cannot confirm this driver’s arrival', await POST(`/rides/${ride!.id}/confirm-driver-arrival`, {}, ctx.roster.customers.C1!.session.token), [409], ['INVALID_STATUS']);
+        const own = await POST(`/rides/${ride!.id}/confirm-driver-arrival`, {}, C7.token);
+        rec.expect('the passenger confirms “My driver is here” (E19 override)', own, 200, undefined, `status=${own.json?.data?.status}`);
+        const a4 = await activeRide(C7);
+        rec.check('the ride reads DRIVER_ARRIVED on the passenger’s word', a4?.status === 'DRIVER_ARRIVED', `status=${a4?.status}`);
+      }
+      await cancelRide(C7, ride!.id);
+    } finally {
+      const left = await closeRide(ctx, C7, ride!.id, DROPOFF);
+      if (left) ctx.log(`    TAXI-02 left live: ${left}`);
+      releaseDrivers(ctx, moved);
+    }
   },
 };
 
@@ -162,52 +183,65 @@ export const TAXI_03: Journey<Ctx> = {
     const C7 = ctx.roster.customers.C7!.session;
     const ride = await requestRide(rec, ctx, C7, 'ride');
     rec.require('a ride', !!ride, '');
-    const did = await driverTakes(rec, ctx, ride!.id, 'driver');
-    rec.require('a driver', !!did, '');
-    const D = mover(ctx, did!);
-    await PUT(`/driver/rides/${ride!.id}/en-route`, {}, D.session.token);
-    rec.deny('PIN before arrival', await PUT(`/driver/rides/${ride!.id}/verify-pin`, { pin: ride!.pin }, D.session.token), [400], ['INVALID_STATUS']);
-    await PUT(`/driver/rides/${ride!.id}/arrived`, {}, D.session.token);
-    rec.deny('start before the PIN', await PUT(`/driver/rides/${ride!.id}/start`, {}, D.session.token), [400], ['PIN_REQUIRED']);
-    rec.deny('a malformed PIN (not counted)', await PUT(`/driver/rides/${ride!.id}/verify-pin`, { pin: '12ab' }, D.session.token), [400], ['VALIDATION_ERROR']);
-    const wrong = String((Number(ride!.pin) + 1) % 1_000_000).padStart(6, '0');
-    rec.deny('a wrong PIN', await PUT(`/driver/rides/${ride!.id}/verify-pin`, { pin: wrong }, D.session.token), [400], ['INVALID_PIN']);
-    rec.expect('the passenger’s PIN verifies', await PUT(`/driver/rides/${ride!.id}/verify-pin`, { pin: ride!.pin }, D.session.token), 200);
-    rec.expect('the ride starts', await PUT(`/driver/rides/${ride!.id}/start`, {}, D.session.token), 200);
-    rec.check('the passenger sees RIDE_IN_PROGRESS', (await activeRide(C7))?.status === 'RIDE_IN_PROGRESS', '');
-    rec.deny('cash rides cannot use the card completion path', await PUT(`/driver/rides/${ride!.id}/complete`, {}, D.session.token), [409], ['PAYMENT_NOT_CAPTURED']);
+    const made = [ride!.id];
+    const moved: string[] = [];
+    try {
+      const did = await driverTakes(rec, ctx, ride!.id, 'driver');
+      rec.require('a driver', !!did, '');
+      const D = mover(ctx, did!);
+      await PUT(`/driver/rides/${ride!.id}/en-route`, {}, D.session.token);
+      rec.deny('PIN before arrival', await PUT(`/driver/rides/${ride!.id}/verify-pin`, { pin: ride!.pin }, D.session.token), [400], ['INVALID_STATUS']);
+      moved.push(did!);
+      rec.expect('the driver arrives at the pickup', await driverArrives(ctx, did!, ride!.id, PICKUP), 200);
+      rec.deny('start before the PIN', await PUT(`/driver/rides/${ride!.id}/start`, {}, D.session.token), [400], ['PIN_REQUIRED']);
+      rec.deny('a malformed PIN (not counted)', await PUT(`/driver/rides/${ride!.id}/verify-pin`, { pin: '12ab' }, D.session.token), [400], ['VALIDATION_ERROR']);
+      const wrong = String((Number(ride!.pin) + 1) % 1_000_000).padStart(6, '0');
+      rec.deny('a wrong PIN', await PUT(`/driver/rides/${ride!.id}/verify-pin`, { pin: wrong }, D.session.token), [400], ['INVALID_PIN']);
+      rec.expect('the passenger’s PIN verifies', await PUT(`/driver/rides/${ride!.id}/verify-pin`, { pin: ride!.pin }, D.session.token), 200);
+      rec.expect('the ride starts', await PUT(`/driver/rides/${ride!.id}/start`, {}, D.session.token), 200);
+      rec.check('the passenger sees RIDE_IN_PROGRESS', (await activeRide(C7))?.status === 'RIDE_IN_PROGRESS', '');
+      rec.deny('cash rides cannot use the card completion path', await PUT(`/driver/rides/${ride!.id}/complete`, {}, D.session.token), [409], ['PAYMENT_NOT_CAPTURED']);
 
-    // concurrent completion: two handovers at once, one outcome
-    const gps = { lat: DROPOFF.lat, lng: DROPOFF.lng };
-    const [h1, h2] = await Promise.all([
-      POST(`/driver/rides/${ride!.id}/handover`, { outcome: 'paid', gps }, D.session.token),
-      POST(`/driver/rides/${ride!.id}/handover`, { outcome: 'paid', gps }, D.session.token),
-    ]);
-    const oks = [h1!, h2!].filter((r) => r.ok && !r.json?.replayed).length;
-    rec.check('two concurrent completions settle once', oks === 1 && [h1!, h2!].every((r) => r.ok || [409].includes(r.status)),
-      `→ ${brief(h1!)}${h1!.json?.replayed ? ' (replayed)' : ''}, ${brief(h2!)}${h2!.json?.replayed ? ' (replayed)' : ''}`);
-    const ridden = await GET(`/rides/${ride!.id}`, C7.token);
-    rec.check('the ride reads DELIVERED (cash captured)', ridden.json?.data?.status === 'DELIVERED' && ridden.json?.data?.paymentStatus === 'CAPTURED', `status=${ridden.json?.data?.status} payment=${ridden.json?.data?.paymentStatus}`);
-    const earn = await GET('/driver/earnings/today', D.session.token);
-    rec.check('the fare is in the driver’s earnings', earn.ok, `→ ${brief(earn)}`);
+      // concurrent completion: two handovers at once, one outcome
+      const gps = { lat: DROPOFF.lat, lng: DROPOFF.lng };
+      const [h1, h2] = await Promise.all([
+        POST(`/driver/rides/${ride!.id}/handover`, { outcome: 'paid', gps }, D.session.token),
+        POST(`/driver/rides/${ride!.id}/handover`, { outcome: 'paid', gps }, D.session.token),
+      ]);
+      const oks = [h1!, h2!].filter((r) => r.ok && !r.json?.replayed).length;
+      rec.check('two concurrent completions settle once', oks === 1 && [h1!, h2!].every((r) => r.ok || [409].includes(r.status)),
+        `→ ${brief(h1!)}${h1!.json?.replayed ? ' (replayed)' : ''}, ${brief(h2!)}${h2!.json?.replayed ? ' (replayed)' : ''}`);
+      const ridden = await GET(`/rides/${ride!.id}`, C7.token);
+      rec.check('the ride reads DELIVERED (cash captured)', ridden.json?.data?.status === 'DELIVERED' && ridden.json?.data?.paymentStatus === 'CAPTURED', `status=${ridden.json?.data?.status} payment=${ridden.json?.data?.paymentStatus}`);
+      const earn = await GET('/driver/earnings/today', D.session.token);
+      rec.check('the fare is in the driver’s earnings', earn.ok, `→ ${brief(earn)}`);
 
-    // lockout: five wrong PINs, then even the right one is refused
-    const r2 = await requestRide(rec, ctx, C7, 'lockout ride');
-    rec.require('a second ride', !!r2, '');
-    const d2 = await driverTakes(rec, ctx, r2!.id, 'lockout driver');
-    rec.require('a driver for the lockout ride', !!d2, '');
-    const D2 = mover(ctx, d2!);
-    await PUT(`/driver/rides/${r2!.id}/en-route`, {}, D2.session.token);
-    await PUT(`/driver/rides/${r2!.id}/arrived`, {}, D2.session.token);
-    const bad = String((Number(r2!.pin) + 3) % 1_000_000).padStart(6, '0');
-    const tries: string[] = [];
-    for (let i = 0; i < 5; i += 1) tries.push(brief(await PUT(`/driver/rides/${r2!.id}/verify-pin`, { pin: bad }, D2.session.token)));
-    rec.check('wrong PINs are each refused', tries.every((t) => t.startsWith('400')), tries.join(', '));
-    rec.deny('after the lockout the right PIN is refused', await PUT(`/driver/rides/${r2!.id}/verify-pin`, { pin: r2!.pin }, D2.session.token), [400], ['MAX_ATTEMPTS']);
-    rec.deny('the locked ride cannot start', await PUT(`/driver/rides/${r2!.id}/start`, {}, D2.session.token), [400], ['PIN_REQUIRED']);
-    await POST(`/driver/rides/${r2!.id}/cancel`, { reason: 'PIN locked, passenger not verified' }, D2.session.token);
-    await cancelRide(C7, r2!.id);
-    rec.deviceCase('PIN shown on one phone, typed on another', 'the two-phone PIN exchange is the device gate');
+      // lockout: five wrong PINs, then even the right one is refused
+      const r2 = await requestRide(rec, ctx, C7, 'lockout ride');
+      rec.require('a second ride', !!r2, '');
+      made.push(r2!.id);
+      const d2 = await driverTakes(rec, ctx, r2!.id, 'lockout driver');
+      rec.require('a driver for the lockout ride', !!d2, '');
+      const D2 = mover(ctx, d2!);
+      await PUT(`/driver/rides/${r2!.id}/en-route`, {}, D2.session.token);
+      moved.push(d2!);
+      rec.expect('the lockout driver arrives at the pickup', await driverArrives(ctx, d2!, r2!.id, PICKUP), 200);
+      const bad = String((Number(r2!.pin) + 3) % 1_000_000).padStart(6, '0');
+      const tries: string[] = [];
+      for (let i = 0; i < 5; i += 1) tries.push(brief(await PUT(`/driver/rides/${r2!.id}/verify-pin`, { pin: bad }, D2.session.token)));
+      rec.check('wrong PINs are each refused', tries.every((t) => t.startsWith('400')), tries.join(', '));
+      rec.deny('after the lockout the right PIN is refused', await PUT(`/driver/rides/${r2!.id}/verify-pin`, { pin: r2!.pin }, D2.session.token), [400], ['MAX_ATTEMPTS']);
+      rec.deny('the locked ride cannot start', await PUT(`/driver/rides/${r2!.id}/start`, {}, D2.session.token), [400], ['PIN_REQUIRED']);
+      await POST(`/driver/rides/${r2!.id}/cancel`, { reason: 'PIN locked, passenger not verified' }, D2.session.token);
+      await cancelRide(C7, r2!.id);
+      rec.deviceCase('PIN shown on one phone, typed on another', 'the two-phone PIN exchange is the device gate');
+    } finally {
+      for (const id of made) {
+        const left = await closeRide(ctx, C7, id, DROPOFF);
+        if (left) ctx.log(`    TAXI-03 left live: ${left}`);
+      }
+      releaseDrivers(ctx, moved);
+    }
   },
 };
 
@@ -221,47 +255,55 @@ export const TAXI_04: Journey<Ctx> = {
     rec.require('a fresh L2 passenger (a no-show strikes the account)', !!passenger, '');
     const ride = await requestRide(rec, ctx, passenger!, 'ride');
     rec.require('a ride', !!ride, '');
-    const did = await driverTakes(rec, ctx, ride!.id, 'driver');
-    rec.require('a driver', !!did, '');
-    const D = mover(ctx, did!);
-    await PUT(`/driver/rides/${ride!.id}/en-route`, {}, D.session.token);
-    await PUT(`/driver/rides/${ride!.id}/arrived`, {}, D.session.token);
-    await PUT(`/driver/rides/${ride!.id}/verify-pin`, { pin: ride!.pin }, D.session.token);
-    rec.expect('the ride starts', await PUT(`/driver/rides/${ride!.id}/start`, {}, D.session.token), 200);
-    rec.deny('an outcome without GPS proof', await POST(`/driver/rides/${ride!.id}/handover`, { outcome: 'no_show' }, D.session.token), [400], ['VALIDATION_ERROR']);
-    rec.deny('an unknown outcome', await POST(`/driver/rides/${ride!.id}/handover`, { outcome: 'vanished', gps: DROPOFF }, D.session.token), [400], ['VALIDATION_ERROR']);
-    const ns = await POST(`/driver/rides/${ride!.id}/handover`, { outcome: 'no_show', gps: DROPOFF }, D.session.token);
-    const claim = ns.json?.data?.claim;
-    rec.expect('the driver records a no-show outcome', ns, 200, undefined, `status=${ns.json?.data?.status} claim=${claim?.id ? `${claim.status} ${claim.amount}` : 'none'}`);
-    const r = await GET(`/rides/${ride!.id}`, passenger!.token);
-    rec.check('the ride ends FAILED', r.json?.data?.status === 'FAILED', `status=${r.json?.data?.status}`);
-    const mine = await GET('/driver/claims', D.session.token);
-    rec.check('the driver’s claim is on record', JSON.stringify(mine.json?.data ?? null).includes(ride!.id), `→ ${brief(mine)}`);
-    rec.deny('a driver cannot read the admin claim queue', await GET('/admin/cash-rules/claims', D.session.token), [403]);
-    // A claim with complete evidence is AUTO_APPROVED at once; one with flags waits in PENDING_REVIEW.
-    const wanted = String(claim?.status ?? 'PENDING_REVIEW');
-    let queue = await GET(`/admin/cash-rules/claims?status=${encodeURIComponent(wanted)}`, ctx.admin.token);
-    let row = (queue.json?.data ?? []).find((c: any) => c.orderId === ride!.id || c.id === claim?.id);
-    if (!row) {
-      queue = await GET('/admin/cash-rules/claims', ctx.admin.token);
-      row = (queue.json?.data ?? []).find((c: any) => c.orderId === ride!.id || c.id === claim?.id);
-    }
-    const listed: any[] = queue.json?.data ?? [];
-    rec.check('the driver’s claim is in the operator ledger (auto-approved with complete evidence, else under review)', !!row && ['AUTO_APPROVED', 'PENDING_REVIEW', 'APPROVED'].includes(String(row.status)),
-      `claim ${claim?.id ?? '?'} status=${claim?.status ?? '?'}; GET /admin/cash-rules/claims${row ? '' : `?status=${wanted} then unfiltered`} → ${brief(queue)} lists ${listed.length} claim(s) (total ${queue.json?.meta?.total ?? '?'}): ${listed.map((c) => `${c.id}${c.driverId ? ' driver' : c.riderId ? ' rider' : ''}`).join(', ') || 'none'}${row ? '' : ' — the driver claim is absent'}`);
-    if (row) {
-      let settled = ['AUTO_APPROVED', 'APPROVED'].includes(String(row.status));
-      if (!settled) {
-        const settle = await twoPerson(rec, ctx, 'approve the synthetic no-show claim', 'PUT', `/admin/cash-rules/claims/${row.id}/approve`, { reason: 'synthetic no-show verified by the journey runner' });
-        settled = settle.done;
+    const moved: string[] = [];
+    try {
+      const did = await driverTakes(rec, ctx, ride!.id, 'driver');
+      rec.require('a driver', !!did, '');
+      const D = mover(ctx, did!);
+      await PUT(`/driver/rides/${ride!.id}/en-route`, {}, D.session.token);
+      moved.push(did!);
+      rec.expect('the driver arrives at the pickup', await driverArrives(ctx, did!, ride!.id, PICKUP), 200);
+      await PUT(`/driver/rides/${ride!.id}/verify-pin`, { pin: ride!.pin }, D.session.token);
+      rec.expect('the ride starts', await PUT(`/driver/rides/${ride!.id}/start`, {}, D.session.token), 200);
+      rec.deny('an outcome without GPS proof', await POST(`/driver/rides/${ride!.id}/handover`, { outcome: 'no_show' }, D.session.token), [400], ['VALIDATION_ERROR']);
+      rec.deny('an unknown outcome', await POST(`/driver/rides/${ride!.id}/handover`, { outcome: 'vanished', gps: DROPOFF }, D.session.token), [400], ['VALIDATION_ERROR']);
+      const ns = await POST(`/driver/rides/${ride!.id}/handover`, { outcome: 'no_show', gps: DROPOFF }, D.session.token);
+      const claim = ns.json?.data?.claim;
+      rec.expect('the driver records a no-show outcome', ns, 200, undefined, `status=${ns.json?.data?.status} claim=${claim?.id ? `${claim.status} ${claim.amount}` : 'none'}`);
+      const r = await GET(`/rides/${ride!.id}`, passenger!.token);
+      rec.check('the ride ends FAILED', r.json?.data?.status === 'FAILED', `status=${r.json?.data?.status}`);
+      const mine = await GET('/driver/claims', D.session.token);
+      rec.check('the driver’s claim is on record', JSON.stringify(mine.json?.data ?? null).includes(ride!.id), `→ ${brief(mine)}`);
+      rec.deny('a driver cannot read the admin claim queue', await GET('/admin/cash-rules/claims', D.session.token), [403]);
+      // A claim with complete evidence is AUTO_APPROVED at once; one with flags waits in PENDING_REVIEW.
+      const wanted = String(claim?.status ?? 'PENDING_REVIEW');
+      let queue = await GET(`/admin/cash-rules/claims?status=${encodeURIComponent(wanted)}`, ctx.admin.token);
+      let row = (queue.json?.data ?? []).find((c: any) => c.orderId === ride!.id || c.id === claim?.id);
+      if (!row) {
+        queue = await GET('/admin/cash-rules/claims', ctx.admin.token);
+        row = (queue.json?.data ?? []).find((c: any) => c.orderId === ride!.id || c.id === claim?.id);
       }
-      if (settled) {
-        const paid = await twoPerson(rec, ctx, 'mark the synthetic claim paid', 'PUT', `/admin/cash-rules/claims/${row.id}/paid`, { reference: `SYN-T04-${ctx.runId}`.slice(0, 40), amount: row.amount });
-        if (paid.done) {
-          const after = await GET('/admin/cash-rules/claims?status=PAID', ctx.admin.token);
-          rec.check('the claim reads PAID', JSON.stringify(after.json?.data ?? []).includes(row.id), '');
+      const listed: any[] = queue.json?.data ?? [];
+      rec.check('the driver’s claim is in the operator ledger (auto-approved with complete evidence, else under review)', !!row && ['AUTO_APPROVED', 'PENDING_REVIEW', 'APPROVED'].includes(String(row.status)),
+        `claim ${claim?.id ?? '?'} status=${claim?.status ?? '?'}; GET /admin/cash-rules/claims${row ? '' : `?status=${wanted} then unfiltered`} → ${brief(queue)} lists ${listed.length} claim(s) (total ${queue.json?.meta?.total ?? '?'}): ${listed.map((c) => `${c.id}${c.driverId ? ' driver' : c.riderId ? ' rider' : ''}`).join(', ') || 'none'}${row ? '' : ' — the driver claim is absent'}`);
+      if (row) {
+        let settled = ['AUTO_APPROVED', 'APPROVED'].includes(String(row.status));
+        if (!settled) {
+          const settle = await twoPerson(rec, ctx, 'approve the synthetic no-show claim', 'PUT', `/admin/cash-rules/claims/${row.id}/approve`, { reason: 'synthetic no-show verified by the journey runner' });
+          settled = settle.done;
+        }
+        if (settled) {
+          const paid = await twoPerson(rec, ctx, 'mark the synthetic claim paid', 'PUT', `/admin/cash-rules/claims/${row.id}/paid`, { reference: `SYN-T04-${ctx.runId}`.slice(0, 40), amount: row.amount });
+          if (paid.done) {
+            const after = await GET('/admin/cash-rules/claims?status=PAID', ctx.admin.token);
+            rec.check('the claim reads PAID', JSON.stringify(after.json?.data ?? []).includes(row.id), '');
+          }
         }
       }
+    } finally {
+      const left = await closeRide(ctx, passenger!, ride!.id, DROPOFF);
+      if (left) ctx.log(`    TAXI-04 left live: ${left}`);
+      releaseDrivers(ctx, moved);
     }
     void sleep; void pick; void codeOf; void req;
   },

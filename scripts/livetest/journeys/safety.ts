@@ -6,7 +6,7 @@ import type { Session } from '../client.js';
 import type { Journey } from '../journey.js';
 import { GET, POST, PUT, DEL, req, sleep, brief, pick, waitFor } from './common.js';
 import type { Ctx } from './context.js';
-import { mover, onlineOf, pollOffer } from './dispatch.js';
+import { mover, onlineOf, pollOffer, driverArrives, releaseDrivers, closeRide, type Offer } from './dispatch.js';
 import { CONTACT_PHONE } from '../roster.js';
 
 export const SAFE_01: Journey<Ctx> = {
@@ -73,61 +73,69 @@ export const SAFE_02: Journey<Ctx> = {
     rec.expect('the passenger requests a ride', r, 201);
     const ride = r.json?.data?.ride;
     rec.require('a ride', !!ride?.id, '');
-    const got = await pollOffer(ctx, ride.id, onlineOf(ctx, 'driver'));
-    rec.require('a driver is offered the ride', !!got, '');
-    const D: { session: Session } & ReturnType<typeof mover> = mover(ctx, got!.moverId);
-    rec.expect('the driver accepts', await POST('/driver/offers/accept', { orderId: ride.id, offerAttemptId: got!.offer.offerAttemptId }, D.session.token), 200);
-    await PUT(`/driver/rides/${ride.id}/en-route`, {}, D.session.token);
-    await PUT(`/driver/rides/${ride.id}/arrived`, {}, D.session.token);
-    await PUT(`/driver/rides/${ride.id}/verify-pin`, { pin: String(ride.ridePin) }, D.session.token);
-    rec.expect('the trip starts', await PUT(`/driver/rides/${ride.id}/start`, {}, D.session.token), 200);
-
-    // trip share
-    const share = await POST(`/safety/trips/${ride.id}/share`, {}, C7.token);
-    rec.expect('the passenger shares the trip', share, [200, 201], undefined, `expiresAt=${share.json?.data?.expiresAt}`);
-    const token = share.json?.data?.token;
-    rec.deny('a stranger cannot share this trip', await POST(`/safety/trips/${ride.id}/share`, {}, ctx.roster.customers.C2!.session.token), [404]);
-    const pub = await req('GET', `/safety/public/trip/${token}`, {});
-    rec.check('anyone with the link sees the live trip (no sign-in)', pub.ok && pub.json?.data?.ended === false && !!pub.json?.data?.driver, `→ ${brief(pub)} location=${pub.json?.data?.location ? 'shown' : 'none'}`);
-    rec.deny('a guessed link', await req('GET', `/safety/public/trip/${'g'.repeat(32)}`, {}), [404]);
-
-    // check-in: the car stops away from both ends; the guardian asks the passenger
-    ctx.stash.heartbeatOverrides[got!.moverId] = mid;
-    let checkin: any = null;
+    let got: Offer | null = null;
     try {
-      const deadline = Date.now() + 7 * 60_000;
-      while (Date.now() < deadline && !checkin) {
-        await PUT('/driver/location', { latitude: mid.lat, longitude: mid.lng, accuracy: 5 }, D.session.token);
-        const c = await GET('/safety/guardian/checkin', C7.token);
-        if (c.json?.data?.sessionId || c.json?.data?.level) checkin = c.json.data;
-        else await sleep(10_000);
-      }
-      if (checkin) {
-        rec.step('the guardian asks the passenger to check in after an unexplained stop', true, JSON.stringify(checkin).slice(0, 160));
-        rec.deny('a stranger cannot answer the check-in', await POST('/safety/guardian/checkin', { response: 'OK' }, ctx.roster.customers.C2!.session.token), [404, 409]);
-        const help = await POST('/safety/guardian/checkin', { response: 'NEED_HELP' }, C7.token);
-        rec.check('“I need help” escalates to an SOS (guardian alert)', help.ok && help.json?.data?.escalated === true && !!help.json?.data?.sosAlertId, `→ ${brief(help)} ${JSON.stringify(help.json?.data ?? null)}`);
-        const sosId = help.json?.data?.sosAlertId;
-        if (sosId) {
-          await POST(`/safety/sos/${sosId}/ack`, {}, ctx.admin.token);
-          rec.expect('ops resolves the guardian alert', await POST(`/safety/sos/${sosId}/resolve`, { resolutionCode: 'SAFE_CONFIRMED', notes: 'journey guardian drill' }, ctx.admin.token), 200);
-        }
-      } else {
-        rec.skipCase('check-in and guardian alert', 'no check-in was raised within 7 minutes of a stationary position; the detector is time-driven (stopped ≥3–5 min away from both ends, sweep every 15 s)');
-      }
-    } finally {
-      ctx.stash.heartbeatOverrides[got!.moverId] = undefined;
-    }
+      got = await pollOffer(ctx, ride.id, onlineOf(ctx, 'driver'));
+      rec.require('a driver is offered the ride', !!got, '');
+      const D: { session: Session } & ReturnType<typeof mover> = mover(ctx, got!.moverId);
+      rec.expect('the driver accepts', await POST('/driver/offers/accept', { orderId: ride.id, offerAttemptId: got!.offer.offerAttemptId }, D.session.token), 200);
+      await PUT(`/driver/rides/${ride.id}/en-route`, {}, D.session.token);
+      rec.expect('the driver arrives at the pickup', await driverArrives(ctx, got!.moverId, ride.id, pickup), 200);
+      await PUT(`/driver/rides/${ride.id}/verify-pin`, { pin: String(ride.ridePin) }, D.session.token);
+      rec.expect('the trip starts', await PUT(`/driver/rides/${ride.id}/start`, {}, D.session.token), 200);
 
-    // end the trip; the public page stops showing a position; revoke
-    rec.expect('the trip ends (cash paid)', await POST(`/driver/rides/${ride.id}/handover`, { outcome: 'paid', gps: drop }, D.session.token), 200);
-    const ended = await req('GET', `/safety/public/trip/${token}`, {});
-    rec.check('after the trip the shared page withholds the location', ended.ok && ended.json?.data?.ended === true && ended.json?.data?.location == null, `→ ${brief(ended)} ended=${ended.json?.data?.ended} location=${JSON.stringify(ended.json?.data?.location ?? null)}`);
-    rec.deny('a new share of a finished trip', await POST(`/safety/trips/${ride.id}/share`, {}, C7.token), [409], ['TRIP_OVER']);
-    rec.deny('a stranger cannot revoke the link', await DEL(`/safety/share/${token}`, ctx.roster.customers.C2!.session.token), [404]);
-    rec.expect('the passenger revokes the link', await DEL(`/safety/share/${token}`, C7.token), 200);
-    rec.deny('a revoked link shows nothing', await req('GET', `/safety/public/trip/${token}`, {}), [404]);
-    void pick; void waitFor;
+      // trip share
+      const share = await POST(`/safety/trips/${ride.id}/share`, {}, C7.token);
+      rec.expect('the passenger shares the trip', share, [200, 201], undefined, `expiresAt=${share.json?.data?.expiresAt}`);
+      const token = share.json?.data?.token;
+      rec.deny('a stranger cannot share this trip', await POST(`/safety/trips/${ride.id}/share`, {}, ctx.roster.customers.C2!.session.token), [404]);
+      const pub = await req('GET', `/safety/public/trip/${token}`, {});
+      rec.check('anyone with the link sees the live trip (no sign-in)', pub.ok && pub.json?.data?.ended === false && !!pub.json?.data?.driver, `→ ${brief(pub)} location=${pub.json?.data?.location ? 'shown' : 'none'}`);
+      rec.deny('a guessed link', await req('GET', `/safety/public/trip/${'g'.repeat(32)}`, {}), [404]);
+
+      // check-in: the car stops away from both ends; the guardian asks the passenger
+      ctx.stash.heartbeatOverrides[got!.moverId] = mid;
+      let checkin: any = null;
+      try {
+        const deadline = Date.now() + 7 * 60_000;
+        while (Date.now() < deadline && !checkin) {
+          await PUT('/driver/location', { latitude: mid.lat, longitude: mid.lng, accuracy: 5 }, D.session.token);
+          const c = await GET('/safety/guardian/checkin', C7.token);
+          if (c.json?.data?.sessionId || c.json?.data?.level) checkin = c.json.data;
+          else await sleep(10_000);
+        }
+        if (checkin) {
+          rec.step('the guardian asks the passenger to check in after an unexplained stop', true, JSON.stringify(checkin).slice(0, 160));
+          rec.deny('a stranger cannot answer the check-in', await POST('/safety/guardian/checkin', { response: 'OK' }, ctx.roster.customers.C2!.session.token), [404, 409]);
+          const help = await POST('/safety/guardian/checkin', { response: 'NEED_HELP' }, C7.token);
+          rec.check('“I need help” escalates to an SOS (guardian alert)', help.ok && help.json?.data?.escalated === true && !!help.json?.data?.sosAlertId, `→ ${brief(help)} ${JSON.stringify(help.json?.data ?? null)}`);
+          const sosId = help.json?.data?.sosAlertId;
+          if (sosId) {
+            await POST(`/safety/sos/${sosId}/ack`, {}, ctx.admin.token);
+            rec.expect('ops resolves the guardian alert', await POST(`/safety/sos/${sosId}/resolve`, { resolutionCode: 'SAFE_CONFIRMED', notes: 'journey guardian drill' }, ctx.admin.token), 200);
+          }
+        } else {
+          rec.skipCase('check-in and guardian alert', 'no check-in was raised within 7 minutes of a stationary position; the detector is time-driven (stopped ≥3–5 min away from both ends, sweep every 15 s)');
+        }
+      } finally {
+        ctx.stash.heartbeatOverrides[got!.moverId] = undefined;
+      }
+
+      // end the trip; the public page stops showing a position; revoke
+      rec.expect('the trip ends (cash paid)', await POST(`/driver/rides/${ride.id}/handover`, { outcome: 'paid', gps: drop }, D.session.token), 200);
+      const ended = await req('GET', `/safety/public/trip/${token}`, {});
+      rec.check('after the trip the shared page withholds the location', ended.ok && ended.json?.data?.ended === true && ended.json?.data?.location == null, `→ ${brief(ended)} ended=${ended.json?.data?.ended} location=${JSON.stringify(ended.json?.data?.location ?? null)}`);
+      rec.deny('a new share of a finished trip', await POST(`/safety/trips/${ride.id}/share`, {}, C7.token), [409], ['TRIP_OVER']);
+      rec.deny('a stranger cannot revoke the link', await DEL(`/safety/share/${token}`, ctx.roster.customers.C2!.session.token), [404]);
+      rec.expect('the passenger revokes the link', await DEL(`/safety/share/${token}`, C7.token), 200);
+      rec.deny('a revoked link shows nothing', await req('GET', `/safety/public/trip/${token}`, {}), [404]);
+      void pick; void waitFor;
+    } finally {
+      // Whatever step stopped the journey, the passenger is not left "already in a ride".
+      const left = await closeRide(ctx, C7, ride.id, drop);
+      if (left) ctx.log(`    SAFE-02 left live: ${left}`);
+      if (got) releaseDrivers(ctx, [got.moverId]);
+    }
   },
 };
 

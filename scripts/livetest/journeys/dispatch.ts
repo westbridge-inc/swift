@@ -4,8 +4,8 @@
 // hold so a dispatch journey does not wait on it.
 
 import type { Session } from '../client.js';
-import { goOnline, goOffline, ping } from '../provision.js';
-import { GET, POST, PUT, req, sleep, codeOf, orderIdsOf, customerOrder, idemKey, clearCart, ensureAddress, activeLegsOf, type Res } from './common.js';
+import { goOnline, goOffline, ping, asAdmin } from '../provision.js';
+import { GET, POST, PUT, req, sleep, codeOf, orderIdsOf, customerOrder, idemKey, clearCart, ensureAddress, activeLegsOf, riderToDoorFrom, doorOf, startAndSettle, TERMINAL, IN_CUSTODY, type Res } from './common.js';
 import type { Ctx } from './context.js';
 
 export type MoverId = string;
@@ -97,6 +97,79 @@ export async function doorPinFromRoster(ctx: Ctx, orderId: string): Promise<stri
   return null;
 }
 
+/** PUT /driver/location persists at most one fix per driver per 10 s (driver.routes.ts). */
+const LOCATION_PERSIST_DEBOUNCE_MS = 10_000;
+
+/**
+ * [E19] A driver's 'arrived' needs a fresh fix (≤ 2 min) within 300 m of the
+ * pickup, read from the driver's PERSISTED position. The suite heartbeat keeps
+ * every driver at their roster home, ~3.4 km from the journeys' pickup, so a
+ * journey drives the car there first: the override holds the heartbeat at the
+ * pickup, the fix is reported the way the app reports it, and the driver taps.
+ *
+ * [DS230 F1] The location route persists one fix per 10 s. A pickup fix that
+ * lands within 10 s of the last persisted heartbeat (the roster home) is
+ * dropped, and the gate rightly answers "far". So one refusal is answered the
+ * way a phone's next GPS tick would answer it: past the debounce, the fix is
+ * reported again — it now persists, or a heartbeat already persisted the
+ * pickup — and the tap is retried once. A second refusal is a real one.
+ * The caller clears the override when the journey ends (releaseDrivers).
+ */
+export async function driverArrives(ctx: Ctx, driverId: MoverId, rideId: string, pickup: { lat: number; lng: number }): Promise<Res> {
+  const d = mover(ctx, driverId);
+  ctx.stash.heartbeatOverrides[driverId] = pickup;
+  const fix = () => PUT('/driver/location', { latitude: pickup.lat, longitude: pickup.lng, accuracy: 5 }, d.session.token);
+  await fix();
+  const first = await PUT(`/driver/rides/${rideId}/arrived`, {}, d.session.token);
+  if (first.status !== 409 || codeOf(first) !== 'ARRIVAL_NOT_VERIFIED') return first;
+  await sleep(LOCATION_PERSIST_DEBOUNCE_MS + 1_000);
+  await fix();
+  return PUT(`/driver/rides/${rideId}/arrived`, {}, d.session.token);
+}
+
+/** The heartbeat takes these drivers back to their roster homes. */
+export function releaseDrivers(ctx: Ctx, ids: Iterable<MoverId>): void {
+  for (const id of ids) ctx.stash.heartbeatOverrides[id] = undefined;
+}
+
+/**
+ * Close a ride a journey made, whatever step the journey stopped at, so one
+ * failed step cannot leave the passenger "already in a ride" for every journey
+ * after it. Short of pickup the passenger cancels (the operator if that is
+ * refused); with the passenger aboard nobody can cancel (IN_CUSTODY), so the
+ * driver settles the fare at the drop-off. Returns what is still live, or null.
+ */
+export async function closeRide(ctx: Ctx, passenger: Session, rideId: string, dropoff: { lat: number; lng: number }): Promise<string | null> {
+  const status = (await GET(`/rides/${rideId}`, passenger.token)).json?.data?.status;
+  if (!status || TERMINAL.includes(status)) return null;
+  let last: Res;
+  if (IN_CUSTODY.includes(status)) {
+    const holder = await driverHolding(ctx, rideId);
+    if (!holder) return `${rideId} (${status}): no roster driver holds it`;
+    last = await POST(`/driver/rides/${rideId}/handover`, { outcome: 'paid', gps: dropoff }, holder.session.token);
+  } else {
+    last = await POST(`/rides/${rideId}/cancel`, { reason: 'journey cleanup' }, passenger.token);
+    if (!last.ok) last = await asAdmin(ctx.admin.token, 'close a ride a journey left live', 'PUT', `/admin/orders/${rideId}/cancel`, { reason: 'journey runner cleanup of a ride its journey left live' });
+    // [DS230 F2] DRIVER_ARRIVED with the PIN verified is already passenger
+    // custody (rides/passenger-custody.ts): both cancels refuse it, and the
+    // handover needs RIDE_IN_PROGRESS. The driver finishes it the driver's way.
+    if (!last.ok && status === 'DRIVER_ARRIVED') {
+      const holder = await driverHolding(ctx, rideId);
+      if (holder) last = await startAndSettle(holder.session, rideId, dropoff);
+    }
+  }
+  return last.ok ? null : `${rideId} (${status}) → ${last.status} ${codeOf(last)}`;
+}
+
+/** The roster driver whose active ride is `rideId`. */
+async function driverHolding(ctx: Ctx, rideId: string) {
+  for (const id of new Set([...onlineOf(ctx, 'driver'), ...ctx.world.readyMovers.filter((x) => ctx.roster.movers[x]?.kind === 'driver')])) {
+    const d = mover(ctx, id);
+    if (activeLegsOf((await GET('/driver/rides/active', d.session.token)).json).some((r) => r.id === rideId)) return d;
+  }
+  return null;
+}
+
 /** Close a cash delivery at the door as paid, giving the customer's door PIN when the order has one. */
 export async function handoverPaid(r: Session, orderId: string, gps: { lat: number; lng: number }, ridePin?: string | null): Promise<Res> {
   return POST(`/rider/orders/${orderId}/handover`, { outcome: 'paid', gps, ...(ridePin ? { ridePin } : {}) }, r.token);
@@ -129,8 +202,11 @@ export async function freeRider(ctx: Ctx, id: MoverId, customerId?: string): Pro
     if (['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) {
       last = await POST(`/rider/orders/${oid}/handback`, { reason: 'journey runner cleanup: the job is handed back after the check' }, m.session.token);
     } else {
-      await riderToDoor(m.session, oid);
-      last = await handoverPaid(m.session, oid, { lat: m.lat, lng: m.lng }, await doorPinFromRoster(ctx, oid));
+      // In custody: walk on from the rung the leg is on (a leg already carried
+      // past pickup cannot replay 'en-route-pickup'), then close it at the door.
+      // A courier job settles from any custody state and carries no door PIN.
+      if (o.orderType !== 'COURIER') await riderToDoorFrom(m.session, oid, status);
+      last = await handoverPaid(m.session, oid, doorOf(o, m), o.orderType === 'COURIER' ? null : await doorPinFromRoster(ctx, oid));
     }
     if (!last.ok) left.push(`${oid} (${status}) → ${last.status} ${codeOf(last)}`);
   }
