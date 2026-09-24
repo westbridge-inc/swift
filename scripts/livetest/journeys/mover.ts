@@ -6,7 +6,7 @@ import { FIXTURE_PNG, upload, type Session } from '../client.js';
 import type { Journey, Recorder } from '../journey.js';
 import { GET, POST, PUT, req, sleep, codeOf, brief, pick, waitFor, customerOrder, placeOrder, orderIdsOf, ensureAddress, idemKey } from './common.js';
 import type { Ctx } from './context.js';
-import { mover, onlineOf, setOnline, pollOffer, placeExpress, riderToDoor, handoverPaid, storeAccepts, storeReadies, freeRider } from './dispatch.js';
+import { mover, onlineOf, setOnline, pollOffer, placeExpress, riderToDoor, handoverPaid, doorPin, storeAccepts, storeReadies, freeRider } from './dispatch.js';
 import { registerFresh } from './auth.js';
 import { uniquePng } from '../roster.js';
 
@@ -158,7 +158,7 @@ export const RIDE_02: Journey<Ctx> = {
       const door = await riderToDoor(w.session, oid);
       rec.expect(`${oid === e1 ? 'first' : 'raced'} order: rider reaches the door`, door, 200);
       const c = ctx.roster.customers[cust]!;
-      rec.expect(`${oid === e1 ? 'first' : 'raced'} order: paid at the door`, await handoverPaid(w.session, oid, { lat: c.lat, lng: c.lng }), 200);
+      rec.expect(`${oid === e1 ? 'first' : 'raced'} order: paid at the door`, await handoverPaid(w.session, oid, { lat: c.lat, lng: c.lng }, await doorPin(c.session, oid)), 200);
     }
     rec.deviceCase('two-phone latency race', 'the server-side race (one winner, one 409) is proven; the timing of two physical phones is the device gate');
   },
@@ -213,7 +213,7 @@ export const RIDE_03: Journey<Ctx> = {
       const w = mover(ctx, rid);
       await riderToDoor(w.session, oid);
       const c = ctx.roster.customers[cust]!;
-      rec.expect(`${rid} delivers ${oid === first!.orderId ? 'the first' : 'the second'} feast order`, await handoverPaid(w.session, oid, { lat: c.lat, lng: c.lng }), 200);
+      rec.expect(`${rid} delivers ${oid === first!.orderId ? 'the first' : 'the second'} feast order`, await handoverPaid(w.session, oid, { lat: c.lat, lng: c.lng }, await doorPin(c.session, oid)), 200);
     }
     const pa3 = (await GET('/rider/profile', a.session.token)).json?.data;
     rec.check('delivery releases the float', Number(pa3?.float?.committed ?? pa3?.committedFloat ?? 0) === 0, `committed=${pa3?.float?.committed ?? pa3?.committedFloat}`);
@@ -241,11 +241,18 @@ export const RIDE_04: Journey<Ctx> = {
     rec.deny('a handover without GPS proof', await POST(`/rider/orders/${g1!.orderId}/handover`, { outcome: 'paid' }, a.session.token), [400], ['VALIDATION_ERROR']);
     rec.deny('a no-show claimed the moment the rider arrives', await POST(`/rider/orders/${g1!.orderId}/handover`, { outcome: 'no_show', gps: { lat: C1.lat, lng: C1.lng } }, a.session.token), [409], ['NO_SHOW_TOO_EARLY']);
     rec.deny('cash orders cannot use the MMG completion path', await PUT(`/rider/orders/${g1!.orderId}/delivered`, {}, a.session.token), [409], ['PAYMENT_NOT_CAPTURED']);
-    const paid = await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng });
-    rec.expect('cash paid at the door with GPS', paid, 200, undefined, `status=${paid.json?.data?.status}`);
+    // [MKT-F057] The door PIN: the customer holds it while the goods are on
+    // their way; the rider must be given it. Missing and wrong are refused
+    // (a wrong try burns one of the five attempts).
+    const pin = await doorPin(C1.session, g1!.orderId);
+    rec.check('the customer holds a 6-digit door PIN while the goods are on their way', !!pin && /^\d{6}$/.test(pin), `pin ${pin ? 'present' : 'absent'}`);
+    rec.deny('a paid handover without the customer’s PIN', await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng }), [400], ['MISSING_PIN']);
+    rec.deny('a paid handover with the wrong PIN', await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng }, pin === '000000' ? '111111' : '000000'), [400], ['INVALID_PIN']);
+    const paid = await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng }, pin);
+    rec.expect('cash paid at the door with GPS and the PIN', paid, 200, undefined, `status=${paid.json?.data?.status}`);
     const done = await customerOrder(C1.session, g1!.orderId);
     rec.check('the customer sees DELIVERED and a captured cash payment', done?.status === 'DELIVERED' && done?.paymentStatus === 'CAPTURED', `status=${done?.status} payment=${done?.paymentStatus}`);
-    const replay = await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng });
+    const replay = await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng }, pin);
     const afterReplay = await customerOrder(C1.session, g1!.orderId);
     rec.check('a repeated handover answers the same facts and changes nothing', (replay.ok || [400, 409].includes(replay.status)) && afterReplay?.status === 'DELIVERED' && afterReplay?.paymentStatus === 'CAPTURED' && afterReplay?.deliveredAt === done?.deliveredAt,
       `→ ${brief(replay)} status=${afterReplay?.status} payment=${afterReplay?.paymentStatus} deliveredAt unchanged=${afterReplay?.deliveredAt === done?.deliveredAt}`);
@@ -284,7 +291,7 @@ export const RIDE_04: Journey<Ctx> = {
       await storeReadies(ctx, 'R1', g3!.orderId);
       await riderToDoor(d.session, g3!.orderId);
       const C6 = ctx.roster.customers.C6!;
-      rec.expect('the recovered order is delivered', await handoverPaid(d.session, g3!.orderId, { lat: C6.lat, lng: C6.lng }), 200);
+      rec.expect('the recovered order is delivered', await handoverPaid(d.session, g3!.orderId, { lat: C6.lat, lng: C6.lng }, await doorPin(C6.session, g3!.orderId)), 200);
       rec.check('the customer sees DELIVERED', (await customerOrder(C6.session, g3!.orderId))?.status === 'DELIVERED', '');
     }
     for (const id of riders(ctx)) await freeRider(ctx, id);
