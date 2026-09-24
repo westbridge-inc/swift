@@ -159,6 +159,14 @@ export function ActiveJobScreen({ navigation }: any) {
   const retainDriverHandbackHost = driverHandbackFlow?.phase === 'submitting' || driverHandbackFlow?.phase === 'dismissing';
   const job: any = liveJob ?? (retainDriverHandbackHost ? driverHandbackFlow?.job : null) ?? null;
 
+  // [MKT-F057] The entered code belongs to THIS stop. When the displayed job
+  // changes — a stacked-leg switch, a leg dropped from the run (the
+  // selectedLegId fallback), or a new job taking over — forget the typed value
+  // so a guess meant for stop A can never burn one of stop B's five attempts.
+  useEffect(() => {
+    setPin('');
+  }, [job?.id]);
+
   const finishDriverHandbackDismissal = useCallback(() => {
     if (!driverHandbackNavigateAfterDismissRef.current) return;
     driverHandbackNavigateAfterDismissRef.current = false;
@@ -281,8 +289,19 @@ export function ActiveJobScreen({ navigation }: any) {
       active.refetch?.();
     }
   };
+  // [MKT-F057] The server's own words for the door PIN: MISSING_PIN / INVALID_PIN
+  // (with the live countdown) / MAX_ATTEMPTS (support-only reset) surface as a
+  // toast, so the rider reads the tries left. The PIN value itself is never
+  // echoed — the refusal text names the outcome, never the code.
+  const onPinRefused = (err: unknown) => {
+    onHandoverRefused(err);
+    const body = (err as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+    if (body?.code === 'MISSING_PIN' || body?.code === 'INVALID_PIN' || body?.code === 'MAX_ATTEMPTS') {
+      toast.error(body.message ?? "Couldn't verify the delivery code — try again or contact support.");
+    }
+  };
   const markDelivered = () =>
-    isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered', handoverVersion: door.version ?? undefined }, { onError: onHandoverRefused });
+    isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered', pin, handoverVersion: door.version ?? undefined }, { onError: onPinRefused });
   const deliverLabel = isCourier ? 'Capture proof & deliver' : 'Mark delivered';
   // MMG direct-pay: the customer already paid the STORE — the rider collects
   // NOTHING at the door; their delivery fee comes from the store in cash.
@@ -420,6 +439,26 @@ export function ActiveJobScreen({ navigation }: any) {
       // eye lands on the one thing left to do [100x pass §1c].
       style={{ minHeight: 56, ...(opts?.lockedIn ? lockInButtonStyle() : {}) }}
     />
+  );
+
+  // [MKT-F057] The door proof for a goods delivery — the customer holds a
+  // 6-digit code and the rider ENTERS it, exactly like the driver's ride PIN
+  // ceremony. The value never appears on this screen: only the entry boxes.
+  // The server is the authority (MISSING_PIN / INVALID_PIN / MAX_ATTEMPTS come
+  // back as error toasts); a legacy order without a PIN completes as before.
+  const doorPinCeremony = (
+    <View style={{ marginBottom: space.md }}>
+      <View style={{ alignItems: 'center', marginBottom: space.md }}>
+        <Eyebrow>Handover check</Eyebrow>
+        <T variant="body" weight="bold" center style={{ color: dk.text, marginTop: space.xs }}>
+          Ask {custName ?? 'the customer'} for their delivery code
+        </T>
+      </View>
+      <CodeInput value={pin} onChange={setPin} length={RIDE_PIN_LENGTH} error={riderAct.isError} autoFocus={false} />
+      <T variant="caption" center style={{ color: dk.muted, marginTop: space.sm }}>
+        Their code proves you handed the order to the right person.
+      </T>
+    </View>
   );
 
   return (
@@ -799,6 +838,7 @@ export function ActiveJobScreen({ navigation }: any) {
                       : `Customer already paid via MMG. Collect your ${feeLabel} pay (fee + tip) from the store with the order.`}
                   </T>
                 </View>
+                {doorPinCeremony}
                 {bigButton(deliverLabel, markDelivered, { loading: riderAct.isPending || courierProof.isPending, disabled: busy })}
               </>
             ) : (
@@ -813,7 +853,8 @@ export function ActiveJobScreen({ navigation }: any) {
                     hands over + completes the delivery server-side. No plain
                     "mark delivered" here — the server refuses a cash order that
                     wasn't paid (PAYMENT_NOT_CAPTURED), so it must not be offered. */}
-                {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover' }), { loading: riderAct.isPending, disabled: busy })}
+                {doorPinCeremony}
+                {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover', pin }, { onError: onPinRefused }), { loading: riderAct.isPending, disabled: busy })}
                 {/* [M-29] The door's other outcome — the rail existed on the
                     server (strike + guarantee claim) with no way to reach it. */}
                 <PillButton

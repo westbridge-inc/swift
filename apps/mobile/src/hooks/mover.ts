@@ -504,14 +504,27 @@ export function useRiderAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ id, action, reason, outcome, handoverVersion }: { id: string; action: RiderAction; reason?: string; outcome?: FareOutcome; handoverVersion?: string }) => {
+    mutationFn: async ({ id, action, reason, outcome, handoverVersion, pin }: {
+      id: string;
+      action: RiderAction;
+      reason?: string;
+      outcome?: FareOutcome;
+      handoverVersion?: string;
+      /** [MKT-F057] The customer-held delivery PIN the rider enters at the door.
+       *  Omitted when empty so the server answers MISSING_PIN rather than a
+       *  schema refusal; never sent for the failed outcomes (no_show/refused). */
+      pin?: string;
+    }) => {
       switch (action) {
         case 'en-route-pickup': return unwrap(riderApi.enRoutePickup(id));
         case 'arrived-pickup': return unwrap(riderApi.arrivedPickup(id));
         case 'picked-up': return unwrap(riderApi.pickedUp(id));
         case 'en-route-delivery': return unwrap(riderApi.enRouteDelivery(id));
         case 'arrived': return unwrap(riderApi.arrivedAtCustomer(id));
-        case 'delivered': return unwrap(riderApi.delivered(id, handoverVersion ? { handoverVersion } : undefined));
+        case 'delivered': return unwrap(riderApi.delivered(id, {
+          ...(handoverVersion ? { handoverVersion } : {}),
+          ...(pin ? { ridePin: pin } : {}),
+        }));
         case 'handback': return unwrap(riderApi.handback(id, reason ?? 'unable to continue'));
         case 'handover': {
           const owner = requireAuthSessionSnapshot();
@@ -520,7 +533,7 @@ export function useRiderAction() {
           // default; [M-29] 'refused' / 'no_show' are the failed outcomes the
           // unpaid sheet sends explicitly.
           const { gps, current } = await evidenceFix(owner);
-          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps }, current));
+          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(pin ? { ridePin: pin } : {}) }, current));
           requireAuthSessionForPrincipal(owner);
           return result;
         }

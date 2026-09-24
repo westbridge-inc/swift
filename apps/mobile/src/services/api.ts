@@ -832,7 +832,7 @@ export const riderApi = {
   // without it) — an empty body 400s.
   handover: (
     id: string,
-    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
+    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; ridePin?: string },
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
   // Intermediate delivery-leg transitions. The state machine walks
@@ -845,7 +845,7 @@ export const riderApi = {
   enRouteDelivery: (id: string) => api.put(`/rider/orders/${id}/en-route-delivery`),
   arrivedAtCustomer: (id: string) => api.put(`/rider/orders/${id}/arrived`),
   /** [MOB-023] Echoes the handover authority version the screen rendered; the server refuses a stale one. */
-  delivered: (id: string, body?: { handoverVersion?: string }) => api.put(`/rider/orders/${id}/delivered`, body ?? {}),
+  delivered: (id: string, body?: { handoverVersion?: string; ridePin?: string }) => api.put(`/rider/orders/${id}/delivered`, body ?? {}),
   // G14: pre-pickup only — the server refuses with CUSTODY after pickup.
   handback: (id: string, reason: string) => api.post(`/rider/orders/${id}/handback`, { reason }),
   earningsToday: () => api.get('/rider/earnings/today'),

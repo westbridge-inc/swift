@@ -28,7 +28,7 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
-import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { HANDOVER_SECRETS_OMIT, handoverAttemptState } from '../handover/handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 import { handoverBlockCounter } from '../../plugins/observability';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
@@ -108,6 +108,9 @@ const offerActionSchema = z.object({
 /** Golden-rule handover: GPS is mandatory — a claim is impossible without it. */
 const handoverSchema = z.object({
   outcome: z.enum(['paid', 'no_show', 'refused']),
+  /** [MKT-F057] The customer-held door PIN for a goods delivery (verified on
+   *  the 'paid' outcome only — no_show/refused stay open without one). */
+  ridePin: z.string().min(1).max(10).optional(),
   gps: z.object({
     lat: z.number().min(-90).max(90),
     lng: z.number().min(-180).max(180),
@@ -1531,9 +1534,25 @@ export async function riderRoutes(app: FastifyInstance) {
       // Verify the delivery PIN if one was set on the order.
       // [F-0011] Read the secret ONLY here, where it is compared — the rider is
       // its VERIFIER, so no rider-facing payload may carry it (see getOwnedOrder).
-      const secret = await app.prisma.order.findUnique({ where: { id }, select: { ridePin: true } });
-      if (secret?.ridePin && secret.ridePin !== ridePin) {
-        throw new AppError(400, 'INVALID_PIN', 'Incorrect delivery PIN. Please ask the customer for the correct PIN.');
+      // [MKT-F057] The same shared lockout as the taxi PIN and the pickup code:
+      // 5 wrong tries (MAX_HANDOVER_ATTEMPTS), support-only reset. Legacy rows
+      // without a PIN complete as before (presence-gated), so nothing in flight
+      // strands.
+      const secret = await app.prisma.order.findUnique({ where: { id },
+        select: { ridePin: true, ridePinAttempts: true } });
+      if (secret?.ridePin) {
+        const { locked, remaining } = handoverAttemptState(secret.ridePinAttempts);
+        if (locked) throw new AppError(400, 'MAX_ATTEMPTS',
+          'Too many incorrect delivery-PIN attempts on this order. Please contact support.');
+        if (ridePin == null || ridePin === '') throw new AppError(400, 'MISSING_PIN',
+          "Enter the customer's 6-digit delivery PIN.");
+        if (ridePin !== secret.ridePin) {
+          // A wrong guess burns its attempt as its own committed update BEFORE
+          // the throw — the DELIVERED transition never runs for it.
+          await app.prisma.order.update({ where: { id }, data: { ridePinAttempts: { increment: 1 } } });
+          throw new AppError(400, 'INVALID_PIN',
+            `That PIN does not match. ${remaining} attempt(s) remaining.`);
+        }
       }
 
       // 1. Update order status — handles notifications, sockets, float release,

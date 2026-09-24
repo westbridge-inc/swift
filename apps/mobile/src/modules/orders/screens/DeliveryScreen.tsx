@@ -1311,6 +1311,32 @@ export function DeliveryScreen() {
             )
           ) : null}
 
+          {/* [MKT-F057] Delivery handover gate — the RIDER asks for THIS code at
+              the door. Quiet until the goods leave the store; from pickup to the
+              door the customer holds it and shows it to their rider. The rider
+              never sees it — they enter it. */}
+          {o.fulfillment === 'DELIVERY' && o.ridePin && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(o.status) ? (
+            <View
+              style={{
+                alignItems: 'center',
+                borderRadius: radius.lg,
+                backgroundColor: color.brand[50],
+                borderWidth: StyleSheet.hairlineWidth,
+                borderColor: color.brand[500],
+                paddingVertical: space.xl,
+                paddingHorizontal: space.lg,
+                marginTop: space.xl,
+              }}
+            >
+              <T variant="micro" tone="muted">
+                Show this code to your rider at the door
+              </T>
+              <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
+                {o.ridePin}
+              </T>
+            </View>
+          ) : null}
+
           {/* Order lines */}
           <T variant="heading" accessibilityRole="header" style={{ marginTop: space['2xl'], color: verticalTint.ink }}>
             Your {referenceNoun} · #{o.orderNumber}

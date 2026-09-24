@@ -199,6 +199,10 @@ export interface OrderProjection {
   orderType: OrderTypeValue;
   vertical: OrderVertical;
   fulfillment?: OrderFulfillment | null;
+  /** [MKT-F057] The customer-held delivery door PIN (holder-side only: the
+   *  rider payloads omit it). Present on DELIVERY goods/service rows during
+   *  delivery; null elsewhere (and hidden once a store self-delivers). */
+  ridePin?: string | null;
   /** A booking's slot as a TRUE UTC instant (ISO 8601): 09:00 in Guyana
    *  travels as 13:00Z. Present on APPOINTMENT rows; every human-facing
    *  rendering formats it in the market zone (GUYANA_TZ), never in UTC and
