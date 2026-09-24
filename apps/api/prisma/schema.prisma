@@ -394,6 +394,7 @@ model Tenant {
   vendors          Vendor[]
   orders           Order[]
   rideQueueEntries RideQueueEntry[]
+  taxiTripStops    TaxiTripStop[]
   zones            Zone[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
@@ -1295,6 +1296,12 @@ model Driver {
   /// Top taxi tier this vehicle serves (serves all classes <= it). Set via the
   /// driver-profile API and the admin drivers page (premium-fleet onboarding).
   rideClass                RideClass        @default(ECONOMY)
+  /// [TAXI multi-stop] The driver's app can run a ride with intermediate stops.
+  /// To be set from the capabilities the app declares (TAXI_STOPS_V1) on each
+  /// go-online, so a multi-stop ride is offered only to a capable driver. False
+  /// until the app says otherwise: an app that predates stops is never handed
+  /// one. Nothing sets or reads it yet.
+  taxiStopsCapable         Boolean          @default(false)
   /// Vehicle visual identity [rides spec 6B] — additive, nullable, every
   /// consumer handles null. bodyType from the make/model fleet mapping
   /// (UNKNOWN surfaces one-tap classification in admin — never guessed
@@ -1847,6 +1854,14 @@ model Order {
   taxiPassengerCount Int?
   taxiDistance       Float?
   taxiDuration       Int?
+  /// [TAXI multi-stop] How many intermediate stops the ride was requested with
+  /// (1..3; a CHECK holds the range). NULL = a single-leg ride, which is every
+  /// ride today. The stops themselves are `taxiStops`; the pickup stays in
+  /// pickup*, the FINAL destination in delivery* / taxiDropoffAddress, and
+  /// taxiDistance / billableKm / taxiDuration / taxiFareTotal describe the
+  /// whole route.
+  taxiStopCount      Int?
+  taxiStops          TaxiTripStop[]
   /// [ALG-18] THE billable distance — decided once at quote time and frozen
   /// here, with the engine that produced it. The fee path priced this number;
   /// the receipt states it; the earnings sentence will read it. Null on
@@ -2071,6 +2086,52 @@ enum OrderType {
   GROCERY_DELIVERY
   COURIER
   TAXI
+}
+
+/// [TAXI multi-stop] Progress of one intermediate stop. Its edges live in
+/// modules/order/order-status.ts (TAXI_STOP_TRANSITIONS), never here.
+enum TaxiStopStatus {
+  PENDING
+  ARRIVED
+  DEPARTED
+  SKIPPED
+}
+
+/// [TAXI multi-stop] One intermediate stop of ONE taxi ride (an Order), in the
+/// order the passenger chose: sequence 1..3. Only intermediate stops live here.
+/// The pickup stays on the Order (pickup*) and so does the final destination
+/// (delivery* / taxiDropoffAddress). The itinerary is frozen at request: a
+/// trigger refuses any change to id, tenantId, orderId or sequence, and a
+/// ride's stops go with it (ON DELETE CASCADE). Status and its timestamps move
+/// as the driver arrives, departs or skips. No money column: stops carry no fee.
+model TaxiTripStop {
+  id           String         @id @default(cuid())
+  tenantId     String         @default("swift-default")
+  tenant       Tenant         @relation(fields: [tenantId], references: [id])
+  orderId      String
+  order        Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sequence     Int
+  lat          Float
+  lng          Float
+  address      String
+  /// The routed leg that ENDS at this stop (from the pickup or the previous
+  /// stop), as priced at request. Null when the leg was not routed.
+  legMeters    Int?
+  legSeconds   Int?
+  status       TaxiStopStatus @default(PENDING)
+  arrivedAt    DateTime?
+  departedAt   DateTime?
+  skippedAt    DateTime?
+  skipReason   String?
+  /// Who moved the stop last (a user id).
+  actedBy      String?
+  evidenceNote String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@unique([orderId, sequence])
+  @@index([tenantId])
+  @@map("taxi_trip_stops")
 }
 
 /// Taxi vehicle tier. A driver's rideClass is the TOP class their vehicle

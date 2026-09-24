@@ -1,4 +1,4 @@
-import type { OrderStatus } from '@prisma/client';
+import type { OrderStatus, TaxiStopStatus } from '@prisma/client';
 
 // ---------------------------------------------------------------------------
 // THE terminality of an order status — ONE definition.
@@ -438,4 +438,74 @@ export class UndeclaredRecoveryError extends Error {
  */
 export function assertRecoveryTransition(from: OrderStatus, to: OrderStatus): void {
   if (!isRecoveryTransition(from, to)) throw new UndeclaredRecoveryError(from, to);
+}
+
+// ---------------------------------------------------------------------------
+// A TAXI STOP — the TENTH member of this family. [TAXI multi-stop]
+//
+// A ride with intermediate stops adds NO OrderStatus. The passenger is aboard
+// from the pickup to the final destination, so every stop happens inside
+// RIDE_IN_PROGRESS, and the guardian, the custody law above and the cash
+// handover keep keying on that one status. What a stop adds is its own small
+// machine (pending, arrived, departed, skipped), and it is declared here,
+// beside the order's, in the same shape: a Record keyed by the Prisma enum, so
+// a new stop state fails the build until it is classified, and every list
+// derived from it, never hand-written. The single-source suite refuses a copy
+// of a stop list or a stop edge anywhere else.
+//
+// Inert today: nothing reads these yet (the stop endpoints arrive later).
+// ---------------------------------------------------------------------------
+
+/** The order status every stop lives inside. A stop moves only while the
+ *  passenger is aboard: before the pickup there is nothing to stop for, and
+ *  every way out of this status ends the ride. */
+export const TAXI_STOP_PARENT_STATUS = 'RIDE_IN_PROGRESS' as const satisfies OrderStatus;
+
+/** OPEN = the driver still owes the stop an arrival, a departure or a skip;
+ *  a ride is not over while one is open. RESOLVED = done with. */
+export type TaxiStopLaw = 'OPEN' | 'RESOLVED';
+
+/**
+ * Every TaxiStopStatus, classified. **Adding a value to the TaxiStopStatus
+ * enum makes this object fail to type-check until the new state is
+ * classified.** Do not widen the type; classify the state.
+ */
+export const TAXI_STOP_LAW: Record<TaxiStopStatus, TaxiStopLaw> = {
+  // Not reached yet.
+  PENDING: 'OPEN',
+  // The car is at the stop and the passenger may be out of it: the stop is
+  // still owed a departure (or, once the grace has run, a skip).
+  ARRIVED: 'OPEN',
+  DEPARTED: 'RESOLVED',
+  // Passed over, with a reason the passenger is told.
+  SKIPPED: 'RESOLVED',
+};
+
+/** THE open stop statuses. Derived from the law, never hand-written. */
+export const TAXI_STOP_OPEN_STATUSES: TaxiStopStatus[] = (Object.keys(TAXI_STOP_LAW) as TaxiStopStatus[])
+  .filter((s) => TAXI_STOP_LAW[s] === 'OPEN');
+
+/** Predicate form: does this stop still need the driver? */
+export function isTaxiStopOpen(status: TaxiStopStatus): boolean {
+  return TAXI_STOP_LAW[status] === 'OPEN';
+}
+
+/**
+ * The stop machine, in ORDER_TRANSITIONS' convention: key = the target state,
+ * value = the states it may be entered from. A stop is born PENDING; the
+ * driver arrives at it and then departs, or skips it (before arriving, or
+ * after waiting there). Nothing leaves DEPARTED or SKIPPED: a resolved stop is
+ * never re-opened, and the itinerary is frozen at request (no mid-trip add,
+ * change or reorder in v1).
+ */
+export const TAXI_STOP_TRANSITIONS: Record<TaxiStopStatus, TaxiStopStatus[]> = {
+  PENDING: [],
+  ARRIVED: ['PENDING'],
+  DEPARTED: ['ARRIVED'],
+  SKIPPED: ['PENDING', 'ARRIVED'],
+};
+
+/** True when a stop may move from `from` to `to`. */
+export function isTaxiStopTransition(from: TaxiStopStatus, to: TaxiStopStatus): boolean {
+  return TAXI_STOP_TRANSITIONS[to].includes(from);
 }
