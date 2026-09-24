@@ -11,6 +11,7 @@ import { devChannelLog, getChannels, resetDevChannelLog } from '../../providers/
 import { LEGAL_VERSION } from '../../modules/legal/legal.routes';
 import { hashSignal, normalizePhone } from '../../modules/integrity/normalize';
 import { guyanaDayKey } from '../../utils/guyana-day';
+import { OTP_RESEND_WINDOW_S } from '../../utils/otp';
 
 // ---------------------------------------------------------------------------
 // GOLD-6 · AUTH-01 — Guyana-only phone signup + OTP, the pilot's golden journey.
@@ -28,7 +29,8 @@ import { guyanaDayKey } from '../../utils/guyana-day';
 //     consuming the ceremony; a lapsed record refuses the REAL code; five
 //     wrong guesses lock the code even for the real one
 //   · resend throttling: a second send within the 60s cooldown is refused
-//     (429 RATE_LIMITED) before a second SMS leaves, and the armed code stands
+//     (429 RATE_LIMITED, stating the wait and that a code is already out)
+//     before a second SMS leaves, and the armed code stands
 //   · non-Guyana denial: a Trinidad number is refused at the front door
 //     (400 COUNTRY_NOT_ACTIVE) before any budget/rate counter or SMS is spent
 //   · registration replay: the exact same register request replays to a
@@ -356,7 +358,16 @@ describe('GOLD-6 · AUTH-01 — resend throttling', () => {
     const again = await post('/api/v1/auth/send-otp', { phone: phoneNumber });
     expect(again.statusCode).toBe(429);
     expect(again.json().error.code).toBe('RATE_LIMITED');
-    expect(again.json().error.message).toContain('Please wait before requesting another OTP');
+    // An honest refusal: the code is already out, and when a new one may be
+    // asked for (body details and the standard Retry-After header agree).
+    const { retryAfterSeconds, codeAlreadySent } = again.json().error.details;
+    expect(codeAlreadySent).toBe(true);
+    expect(Number.isInteger(retryAfterSeconds)).toBe(true);
+    expect(retryAfterSeconds).toBeGreaterThan(0);
+    expect(retryAfterSeconds).toBeLessThanOrEqual(OTP_RESEND_WINDOW_S);
+    expect(again.headers['retry-after']).toBe(String(retryAfterSeconds));
+    expect(again.json().error.message).toContain('We already sent a code to this number.');
+    expect(again.json().error.message).toContain(`You can request a new one in ${retryAfterSeconds} second`);
     expect(smsTo(phoneNumber)).toHaveLength(1);
 
     const verified = await post('/api/v1/auth/verify-otp', { phone: phoneNumber, code });

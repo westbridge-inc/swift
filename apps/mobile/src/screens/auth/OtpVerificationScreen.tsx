@@ -1,11 +1,13 @@
 /** @jsxImportSource react */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Pressable, TextInput, View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
+import { formatResendWait, OTP_RESEND_WINDOW_S, otpCooldownOf } from '../../lib/otpCooldown';
+import { useCountdown } from '../../hooks/useCountdown';
 import { Header, PillButton, Screen, T } from '../../kit';
 
 const CODE_LEN = 6;
@@ -17,17 +19,16 @@ export function OtpVerificationScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const phone: string = route.params?.phone ?? '';
+  // The phone step hands over the time left when it offers a code already
+  // sent; otherwise a send just happened and the whole server window is ahead.
+  const resendIn: number = route.params?.resendInSeconds ?? OTP_RESEND_WINDOW_S;
   const setAuth = useAuthStore((s) => s.setAuth);
 
   const [code, setCode] = useState('');
-  const [cooldown, setCooldown] = useState(30);
+  const cooldown = useCountdown(resendIn);
+  // A resend refused inside the window sent nothing new: say so.
+  const [resendRefused, setResendRefused] = useState<{ codeAlreadySent: boolean } | null>(null);
   const inputRef = useRef<TextInput>(null);
-
-  useEffect(() => {
-    if (cooldown <= 0) return;
-    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
-    return () => clearTimeout(t);
-  }, [cooldown]);
 
   const verify = useMutation({
     mutationFn: (c: string) => authApi.verifyOtp(phone, c),
@@ -48,7 +49,16 @@ export function OtpVerificationScreen() {
 
   const resend = useMutation({
     mutationFn: () => authApi.sendOtp(phone),
-    onSuccess: () => setCooldown(30),
+    onSuccess: () => {
+      setResendRefused(null);
+      cooldown.start(OTP_RESEND_WINDOW_S);
+    },
+    onError: (error) => {
+      const refusal = otpCooldownOf(error);
+      if (!refusal) return;
+      setResendRefused({ codeAlreadySent: refusal.codeAlreadySent });
+      cooldown.start(refusal.retryAfterSeconds);
+    },
   });
 
   const onChange = (v: string) => {
@@ -134,9 +144,9 @@ export function OtpVerificationScreen() {
           <T variant="label" tone="muted">
             Didn’t get it?
           </T>
-          {cooldown > 0 ? (
+          {cooldown.secondsLeft > 0 ? (
             <T variant="label" tone="faint" accessibilityLiveRegion="polite">
-              Resend in {cooldown}s
+              Resend in {formatResendWait(cooldown.secondsLeft)}
             </T>
           ) : (
             <Pressable
@@ -156,6 +166,13 @@ export function OtpVerificationScreen() {
             </Pressable>
           )}
         </View>
+        {resendRefused && cooldown.secondsLeft > 0 ? (
+          <T testID="otp-resend-wait" variant="label" tone="muted" style={{ marginTop: space.sm }}>
+            {resendRefused.codeAlreadySent
+              ? 'No new code yet: enter the one we texted you moments ago.'
+              : 'A code was just requested for this number. You can resend when the timer ends.'}
+          </T>
+        ) : null}
 
         <View style={{ flex: 1 }} />
         <PillButton

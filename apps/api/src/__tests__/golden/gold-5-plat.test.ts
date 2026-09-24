@@ -19,6 +19,7 @@ import { riderRoutes } from '../../modules/rider/rider.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
 import { rateLimitKey } from '../../utils/rate-limit-key';
 import { devChannelLog, getChannels } from '../../providers/notifications/channels';
+import { OTP_RESEND_WINDOW_S } from '../../utils/otp';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
@@ -581,10 +582,21 @@ describe('GOLD-5 · PLAT-03 — OTP and rate-limit abuse', () => {
     expect(other.statusCode, other.body).toBe(200);
     expect(codeSentTo(phones[5]!)).toHaveLength(1);
 
-    // The per-phone cooldown is the number's, whoever asks and wherever.
+    // The per-phone cooldown is the number's, whoever asks and wherever. The
+    // refusal says so honestly: the first code is out, and when the next
+    // send is allowed, in the body and in the standard header.
     const again = await post(a!, 'send-otp', { phone: phones[0]! }, '10.35.2.3');
     expect(again.statusCode).toBe(429);
-    expect(again.json().error.message).toBe('Please wait before requesting another OTP');
+    const { retryAfterSeconds } = again.json().error.details;
+    expect(Number.isInteger(retryAfterSeconds)).toBe(true);
+    expect(retryAfterSeconds).toBeGreaterThan(0);
+    expect(retryAfterSeconds).toBeLessThanOrEqual(OTP_RESEND_WINDOW_S);
+    expect(again.json().error).toEqual({
+      code: 'RATE_LIMITED',
+      message: `We already sent a code to this number. You can request a new one in ${retryAfterSeconds} second${retryAfterSeconds === 1 ? '' : 's'}.`,
+      details: { retryAfterSeconds, codeAlreadySent: true },
+    });
+    expect(again.headers['retry-after']).toBe(String(retryAfterSeconds));
     expect(codeSentTo(phones[0]!)).toHaveLength(1);
   });
 });

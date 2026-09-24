@@ -16,6 +16,11 @@ describe('phone authentication entry contract', () => {
     expect(source).toContain('testID="auth-browse-guest"');
   });
 
+  it('keeps stable targets for the resend window: the calm notice and the way into code entry', () => {
+    expect(source).toContain('testID="auth-resend-wait"');
+    expect(source).toContain('testID="auth-enter-code"');
+  });
+
   it('pins signup to Guyana without presenting a misleading country picker', () => {
     expect(source).toContain('accessibilityLabel="Guyana calling code +592"');
     expect(source).toContain('+592');

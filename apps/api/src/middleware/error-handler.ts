@@ -25,6 +25,12 @@ export function registerErrorHandler(app: FastifyInstance) {
 
     // Custom app errors
     if (error instanceof AppError) {
+      // A throttle that knows when the caller may retry says so in the
+      // standard header too (whole seconds), not only in the body details.
+      const retryAfter = error.details?.['retryAfterSeconds'];
+      if (error.statusCode === 429 && typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter > 0) {
+        reply.header('Retry-After', String(Math.ceil(retryAfter)));
+      }
       return reply.status(error.statusCode).send({
         success: false,
         error: {
