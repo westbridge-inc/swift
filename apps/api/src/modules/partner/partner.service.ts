@@ -10,6 +10,7 @@ import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { publishLegalDocumentOnce, recordConsent } from '../legal/consent.service';
 import { LEGAL_VERSION, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../legal/legal.routes';
+import { assertStorePinInMarket } from '../vendor/store-pin';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -151,6 +152,8 @@ export class PartnerService {
   private validateInput(input: BecomePartnerInput): void {
     if (input.role === 'VENDOR') {
       if (!input.business) throw new ValidationError('Business details are required to sell on Swift');
+      // [Q8] The pin is where riders and customers are sent: inside a launch market, or refused before anything is written.
+      assertStorePinInMarket(input.business.latitude, input.business.longitude);
       return;
     }
     if (!input.vehicleType) throw new ValidationError('Vehicle type is required to move with Swift');

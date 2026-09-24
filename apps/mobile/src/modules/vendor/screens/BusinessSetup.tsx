@@ -21,7 +21,9 @@ import {
   type BusinessSetupDraft,
 } from '../../../stores/businessSetupDraft';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { STORE_PIN_COPY, businessSetupBlocker, storeCreateErrorCopy, vendorBusinessPayload } from '../../../lib/storePin';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
+import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import { TYPES, TabHeader } from '../shared';
 
 function BizValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
@@ -85,6 +87,7 @@ function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active
 export function BusinessSetup() {
   const become = useBecomePartner();
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [pinPickerOpen, setPinPickerOpen] = useState(false);
   const { latitude, longitude, status: locationStatus } = useLocationStore();
   // The form outlives this screen (stores/businessSetupDraft): a failed
   // background profile read or a trip to Swift and back remounts it, and each
@@ -94,24 +97,22 @@ export function BusinessSetup() {
   const owner = userId ? { userId, generation } : null;
   // [DCR-1] `agree` is the Business Agreement consent — recorded in the ledger
   // with the exact version at store creation, the same way signup records the Terms.
-  const { name, type, phone, addr, city, agree } = useBusinessSetupDraft((s) => businessSetupDraftFor(s, owner));
+  const { name, type, phone, addr, city, agree, pin } = useBusinessSetupDraft((s) => businessSetupDraftFor(s, owner));
   const edit = (patch: Partial<BusinessSetupDraft> | ((draft: BusinessSetupDraft) => Partial<BusinessSetupDraft>)) => {
     editBusinessSetupDraft(getAuthSessionSnapshot(), owner, patch);
   };
-  // [F-027-02] A store's coordinates are where customers are sent and where
-  // dispatch measures from. This used to submit `latitude ?? 6.8013` — pinning
-  // the shop at the Georgetown city centre whenever the device location was
-  // unknown, while the caption below told the owner we had used their current
-  // location. A fabricated pin AND a false statement about it. No location
-  // now means no submission, said out loud.
-  // [F-028-08] Persisted numbers are only a last-known map centre; they are a
-  // STORE PIN — where customers are sent, where dispatch measures from — only
-  // when the grant is live. The old existence check submitted a pin while
-  // status was resolving/denied/unavailable, so a revoked permission could
-  // register a business at wherever the phone last was.
-  const pinFix = grantedLocationFix(latitude, longitude, locationStatus);
-  const hasPin = pinFix !== null;
-  const valid = hasPin && name.trim().length >= 2 && phone.trim().length >= 5 && addr.trim().length >= 3 && city.trim().length >= 2;
+  // A store's coordinates are where customers are sent and where dispatch
+  // measures from. [F-027-02] They were once `latitude ?? 6.8013`, a
+  // fabricated Georgetown centre; [F-028-08] then any last-known fix, even with
+  // the grant revoked; then the phone's live fix. [Q8] That is still the wrong
+  // place whenever the owner signs up from home, an office or a car (owner:
+  // "they can't just use the location they're registering from"). The pin is
+  // now only what the owner confirms on the store map. The phone's live
+  // position goes to that map as a place to START, and is never submitted.
+  const deviceSuggestion = grantedLocationFix(latitude, longitude, locationStatus);
+  const hasPin = pin !== null;
+  const form = { name, type, phone, addr, city, agree, pin };
+  const blocker = businessSetupBlocker(form);
   // [PR1270-S2-04] The price on the door is a condition of the door: the store
   // is created only against a weekly fee that was fetched successfully, is the
   // one the card above shows for THIS business type, and is current. The list
@@ -128,18 +129,13 @@ export function BusinessSetup() {
 
   const submit = () => {
     if (!gate.ok) return; // guarded by the button, restated so no call site can bypass it
-    if (!hasPin) return; // guarded by `valid`, restated so the call site cannot fabricate
+    // Guarded by `blocker`, restated so the call site cannot fabricate a pin:
+    // no confirmed pin, no payload.
+    const business = vendorBusinessPayload(form);
+    if (!business) return;
     become.mutate({
       role: 'VENDOR',
-      business: {
-        name: name.trim(),
-        vendorType: type,
-        phone: phone.trim(),
-        addressLine1: addr.trim(),
-        city: city.trim(),
-        latitude: pinFix!.latitude,
-        longitude: pinFix!.longitude,
-      },
+      business,
       acceptAgreement: agree,
     });
   };
@@ -148,6 +144,17 @@ export function BusinessSetup() {
     <Screen>
       <TabHeader title="Sell on Swift" onSwitch={() => setSwitcherOpen(true)} />
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
+      <StoreLocationPicker
+        visible={pinPickerOpen}
+        current={pin}
+        address={{ line: addr, city }}
+        device={deviceSuggestion}
+        onClose={() => setPinPickerOpen(false)}
+        onConfirm={(confirmed) => {
+          edit({ pin: confirmed });
+          setPinPickerOpen(false);
+        }}
+      />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <T variant="title">List your business</T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
@@ -177,16 +184,56 @@ export function BusinessSetup() {
           <LabeledInput value={phone} onChangeText={(value) => edit({ phone: value })} placeholder="Business phone" keyboardType="phone-pad" />
           <LabeledInput value={addr} onChangeText={(value) => edit({ addr: value })} placeholder="Street address" />
           <LabeledInput value={city} onChangeText={(value) => edit({ city: value })} placeholder="City" />
+          {/* [Q8] The store pin: placed on a map and confirmed by the owner,
+              never taken from where the phone happens to be. */}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={hasPin ? 'Move the store pin' : 'Place your store on the map'}
+            onPress={() => setPinPickerOpen(true)}
+          >
+            {({ pressed }) => (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: space.md,
+                  padding: space.md,
+                  borderRadius: radius.md,
+                  borderWidth: 1,
+                  borderColor: hasPin ? color.border.subtle : color.brand[500],
+                  backgroundColor: color.surface.base,
+                  opacity: pressed ? 0.75 : 1,
+                }}
+              >
+                <MaterialCommunityIcons
+                  name={hasPin ? 'map-marker-check' : 'map-marker-plus'}
+                  size={22}
+                  color={hasPin ? color.success : color.brand[500]}
+                />
+                <View style={{ flex: 1 }}>
+                  <T variant="label" weight="semibold">
+                    {hasPin ? 'Store pin placed' : 'Place your store on the map'}
+                  </T>
+                  <T variant="caption" tone="muted" numberOfLines={2}>
+                    {pin
+                      ? pin.address ?? `${pin.latitude.toFixed(5)}, ${pin.longitude.toFixed(5)}`
+                      : STORE_PIN_COPY.instruction}
+                  </T>
+                </View>
+                <MaterialCommunityIcons name="chevron-right" size={20} color={color.text.muted} />
+              </View>
+            )}
+          </Pressable>
           {/* [two-reds law] `error` is reserved for genuine failure — the palette
               says so, and brand is already red, so a second red must mean
-              something. Nothing has failed here: the app is asking for a
-              permission it has not been given yet. That is `warning` (burnt
-              amber, "cautions"), and the sentence carries the meaning anyway,
-              which is the other half of the law — colour never carries it alone. */}
+              something. Nothing has failed here: the store has not been put
+              on the map yet. That is `warning` (burnt amber, "cautions"), and
+              the sentence carries the meaning anyway, which is the other half
+              of the law — colour never carries it alone. */}
           <T variant="caption" tone={hasPin ? 'muted' : 'warning'}>
             {hasPin
-              ? 'We\u2019ll use your current location as the store pin.'
-              : 'We need your location to pin your store on the map \u2014 turn location on for Swift, then come back. Customers are sent to this pin.'}
+              ? 'Riders and customers will come to this pin. Tap it to move it.'
+              : 'Riders and customers will come to this pin, so put it where your store is — not where you are now.'}
           </T>
         </Card>
 
@@ -211,33 +258,18 @@ export function BusinessSetup() {
         </Pressable>
         {become.isError ? (
           <T variant="label" tone="error" style={{ marginTop: space.md }}>
-            Couldn&apos;t create your store. Try again.
+            {storeCreateErrorCopy(become.error)}
           </T>
         ) : null}
-        {/* [#947's grammar] Disabled names the first missing thing, in the
-            order the form asks for them — the fee first, because without a
-            fee on the door there is nothing to agree to; then the pin, because
-            without it nothing else matters. */}
+        {/* [#947's grammar] Disabled names the first missing thing — the fee
+            first, because without a fee on the door there is nothing to agree
+            to; then the form's own fields in the order it asks for them, the
+            store pin after the address because its map starts from the address
+            (lib/storePin businessSetupBlocker). */}
         <PillButton
-          label={
-            !gate.ok
-              ? QUOTE_GATE_COPY[gate.why]
-              : !hasPin
-              ? 'Turn location on first'
-              : name.trim().length < 2
-                ? 'Name your business'
-                : phone.trim().length < 5
-                  ? 'Add the business phone'
-                  : addr.trim().length < 3
-                    ? 'Add the street address'
-                    : city.trim().length < 2
-                      ? 'Add the city'
-                      : !agree
-                        ? 'Agree to the Business Agreement first'
-                        : 'Create store'
-          }
+          label={!gate.ok ? QUOTE_GATE_COPY[gate.why] : blocker ?? 'Create store'}
           loading={become.isPending}
-          disabled={!gate.ok || !valid || !agree}
+          disabled={!gate.ok || blocker !== null}
           style={{ marginTop: space.lg }}
           onPress={submit}
         />

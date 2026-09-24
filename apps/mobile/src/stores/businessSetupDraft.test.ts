@@ -31,6 +31,8 @@ const typed = {
   addr: '12 Regent Street',
   city: 'Linden',
   agree: true,
+  // [Q8] The store pin the owner confirmed on the map travels with the rest of the form.
+  pin: { latitude: 6.0123, longitude: -58.3045, address: '12 Regent Street, Linden' },
 };
 
 beforeEach(() => {
@@ -38,7 +40,7 @@ beforeEach(() => {
 });
 
 describe('the List-your-business draft', () => {
-  it('starts as the form’s own defaults', () => {
+  it('starts as the form’s own defaults, with no store pin until the owner places one', () => {
     expect(businessSetupDraftFor(useBusinessSetupDraft.getState(), accountA)).toEqual({
       name: '',
       type: 'RESTAURANT',
@@ -46,6 +48,7 @@ describe('the List-your-business draft', () => {
       addr: '',
       city: 'Georgetown',
       agree: false,
+      pin: null,
     });
   });
 
@@ -125,13 +128,14 @@ describe('the List-your-business draft', () => {
       addr: '',
       city: 'Georgetown',
       agree: false,
+      pin: null,
     });
   });
 
-  it('holds the six form fields only, in memory only', () => {
-    expect(Object.keys(EMPTY_BUSINESS_SETUP_DRAFT).sort()).toEqual(['addr', 'agree', 'city', 'name', 'phone', 'type']);
-    // A business phone and street address must not be written to disk, and the
-    // agreement tick must never outlive the process that showed the terms.
+  it('holds the six form fields and the store pin only, in memory only', () => {
+    expect(Object.keys(EMPTY_BUSINESS_SETUP_DRAFT).sort()).toEqual(['addr', 'agree', 'city', 'name', 'phone', 'pin', 'type']);
+    // A business phone, street address and store pin must not be written to
+    // disk, and the agreement tick must never outlive the process that showed the terms.
     const src = readFileSync(new URL('./businessSetupDraft.ts', import.meta.url), 'utf8');
     expect(src).not.toMatch(/zustand\/middleware|persist\(|storage/);
   });

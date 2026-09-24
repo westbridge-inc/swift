@@ -58,6 +58,7 @@ import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
+import { assertStorePinInMarket } from './store-pin';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -92,7 +93,13 @@ const updateVendorProfileSchema = z.object({
   // down. Shape is enforced by publicPhoneForWrite, not here, so the write
   // and read boundaries cannot drift apart on what a valid number is.
   publicPhone: z.string().trim().max(32).nullable().optional(),
-});
+})
+  // [Q8] A store pin is one point. Half of one would move the store along a
+  // single axis to a spot nobody chose, so the two travel together or not at all.
+  .refine((body) => (body.latitude === undefined) === (body.longitude === undefined), {
+    message: 'Send latitude and longitude together',
+    path: ['longitude'],
+  });
 
 const acceptOrderSchema = z.object({
   estimatedPrepTime: z.number().int().min(1).max(480).optional(),
@@ -1151,6 +1158,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const access = await requireVendor(app, request, 'MANAGER');
     const { vendorId } = access;
     const body = updateVendorProfileSchema.parse(request.body);
+    // [Q8] A moved pin is held to the same market rule as a new store, before anything is written.
+    if (body.latitude !== undefined && body.longitude !== undefined) assertStorePinInMarket(body.latitude, body.longitude);
     const mmgPayUrl = body.mmgPayUrl === undefined
       ? undefined
       : mmgPayUrlForWrite(body.mmgPayUrl);

@@ -1,10 +1,12 @@
 import { create } from 'zustand';
 import { samePrincipalBoundary, type AuthPrincipalBoundary } from '../lib/authSession';
+import type { StorePin } from '../lib/storePin';
 
 export type BusinessSetupType = 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
 
-/** What the List-your-business form holds: plain business contact facts and
- *  the agreement tick. Never a document, a credential or an identity fact. */
+/** What the List-your-business form holds: plain business contact facts, the
+ *  store pin its owner confirmed on the map, and the agreement tick. Never a
+ *  document, a credential or an identity fact. */
 export interface BusinessSetupDraft {
   name: string;
   type: BusinessSetupType;
@@ -12,6 +14,8 @@ export interface BusinessSetupDraft {
   addr: string;
   city: string;
   agree: boolean;
+  /** [Q8] Null until the owner confirms a spot on the map; never the phone's position. */
+  pin: StorePin | null;
 }
 
 export const EMPTY_BUSINESS_SETUP_DRAFT: Readonly<BusinessSetupDraft> = Object.freeze({
@@ -21,6 +25,7 @@ export const EMPTY_BUSINESS_SETUP_DRAFT: Readonly<BusinessSetupDraft> = Object.f
   addr: '',
   city: 'Georgetown',
   agree: false,
+  pin: null,
 });
 
 type DraftPatch = Partial<BusinessSetupDraft> | ((draft: BusinessSetupDraft) => Partial<BusinessSetupDraft>);
@@ -40,9 +45,9 @@ interface BusinessSetupDraftState {
  * The List-your-business form, kept OUTSIDE the screen so an ordinary remount
  * does not wipe it: VendorRoot swaps the form for its error screen whenever a
  * background profile refetch fails, and "Switch app" to Swift and back remounts
- * the whole vendor stack. In memory only — a business phone and street address
- * are not written to disk, and the agreement tick never outlives the process
- * that showed the terms. authStore clears it at every login/logout boundary;
+ * the whole vendor stack. In memory only — a business phone, street address and
+ * store pin are not written to disk, and the agreement tick never outlives the
+ * process that showed the terms. authStore clears it at every login/logout boundary;
  * a durable store creation clears it for exactly the account that submitted.
  */
 export const useBusinessSetupDraft = create<BusinessSetupDraftState>((set) => ({

@@ -1103,7 +1103,8 @@ export const vendorApi = {
   deleteBookingException: (id: string) => api.delete(`/vendor/bookings/exceptions/${id}`),
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean }) =>
+  // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),

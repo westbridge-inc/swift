@@ -309,6 +309,8 @@ vi.mock('../../stores/locationStore', () => ({
 }));
 vi.mock('../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: 'DocumentChecklist' }));
 vi.mock('../../components/onboarding/PricingCard', () => ({ PricingCard: 'PricingCard' }));
+// [Q8] The store map: react-native-maps and expo-location are native. Its props are the contract.
+vi.mock('../../components/StoreLocationPicker', () => ({ StoreLocationPicker: 'StoreLocationPicker' }));
 vi.mock('../../components/onboarding/WentLive', () => ({
   useWentLive: () => ({ celebrate: false, dismiss: vi.fn() }),
   WentLivePopup: 'WentLivePopup',
@@ -495,8 +497,18 @@ describe('"Preview your dashboard" on a store waiting for approval', () => {
 });
 
 describe('the List-your-business form keeps what was typed', () => {
-  const blank = { name: '', type: 'RESTAURANT', phone: '', addr: '', city: 'Georgetown', agree: false };
-  const typed = { name: 'Kitty Bakes', type: 'SERVICE', phone: '6001234', addr: '12 Regent Street', city: 'Linden', agree: true };
+  const blank = { name: '', type: 'RESTAURANT', phone: '', addr: '', city: 'Georgetown', agree: false, pin: null };
+  // [Q8] The pin the owner confirmed on the map, at the shop in Linden — not
+  // where the phone is (the mocked live fix, 6.8046 / -58.1553, in Georgetown).
+  const typed = {
+    name: 'Kitty Bakes',
+    type: 'SERVICE',
+    phone: '6001234',
+    addr: '12 Regent Street',
+    city: 'Linden',
+    agree: true,
+    pin: { latitude: 6.0123, longitude: -58.3045, address: '12 Regent Street, Linden' },
+  };
 
   function field(view: View, placeholder: string): Element {
     const input = ofType(view.output, 'LabeledInput').find((el) => el.props.placeholder === placeholder);
@@ -510,6 +522,15 @@ describe('the List-your-business form keeps what was typed', () => {
     return box;
   }
 
+  /** The store-pin row: "Place your store on the map", or "Move the store pin" once placed. */
+  function pinRow(view: View): Element {
+    const row = ofType(view.output, 'Pressable').find((el) => /store on the map|store pin/.test(el.props.accessibilityLabel ?? ''));
+    if (!row) throw new Error('no store-pin row');
+    return row;
+  }
+
+  const picker = (view: View) => only(view.output, 'StoreLocationPicker');
+
   function formOf(view: View) {
     const selected = named(view.output, 'BizTypeTile').filter((el) => el.props.active).map((el) => el.props.t.key);
     return {
@@ -519,11 +540,13 @@ describe('the List-your-business form keeps what was typed', () => {
       addr: field(view, 'Street address').props.value,
       city: field(view, 'City').props.value,
       agree: agreement(view).props.accessibilityState.checked,
+      // The map opens on the draft's pin: the picker's `current` is the pin the form holds.
+      pin: picker(view).props.current,
     };
   }
 
   /** Type into the form the way a person does: one field, one render at a time. */
-  function fill(view: View, form: typeof typed) {
+  function fill(view: View, form: Omit<typeof typed, 'pin'> & { pin: typeof typed.pin | null }) {
     const inputs: Array<[string, string]> = [
       ['Business name', form.name],
       ['Business phone', form.phone],
@@ -538,6 +561,13 @@ describe('the List-your-business form keeps what was typed', () => {
     view.render();
     if (form.agree) {
       agreement(view).props.onPress();
+      view.render();
+    }
+    if (form.pin) {
+      // Open the store map from the form, then confirm the spot on it.
+      pinRow(view).props.onPress();
+      view.render();
+      picker(view).props.onConfirm(form.pin);
       view.render();
     }
   }
@@ -573,8 +603,10 @@ describe('the List-your-business form keeps what was typed', () => {
         phone: '6001234',
         addressLine1: '12 Regent Street',
         city: 'Linden',
-        latitude: 6.8046,
-        longitude: -58.1553,
+        // [Q8] The pin confirmed on the map. This used to be the phone's live
+        // fix (6.8046 / -58.1553) with no pin step at all: the defect.
+        latitude: 6.0123,
+        longitude: -58.3045,
       },
       acceptAgreement: true,
     });
@@ -603,6 +635,98 @@ describe('the List-your-business form keeps what was typed', () => {
     field(stale, 'Business name').props.onChangeText('A leftover');
 
     expect(formOf(fx.mount(BusinessSetup, {}))).toEqual(blank);
+  });
+
+  // [Q8] Owner report: "they can't just use the location they're registering
+  // from for the store, come on now." The form sent the phone's live fix as the
+  // store's coordinates, captioned "We'll use your current location as the
+  // store pin" — and people sign up from home, an office or a car. The phone in
+  // these tests has a granted live fix (6.8046 / -58.1553, Georgetown); the
+  // store is in Linden.
+  describe('[Q8] the store pin is placed on the map, never taken from the phone', () => {
+    const noPin = { ...typed, pin: null };
+
+    it('with every other field filled and agreed, Create stays off until a pin is confirmed, and a press sends nothing', async () => {
+      await signIn('owner-a', ['CUSTOMER']);
+      const form = fx.mount(BusinessSetup, {});
+      fill(form, noPin);
+
+      const create = only(form.output, 'PillButton');
+      expect(create.props.label).toBe('Place your store on the map');
+      expect(create.props.disabled).toBe(true);
+      // The handler restates the gate, so a press that reaches it sends nothing.
+      create.props.onPress();
+      expect(fx.submitStore).not.toHaveBeenCalled();
+    });
+
+    it('the phone’s position reaches the map only as a place to start', async () => {
+      await signIn('owner-a', ['CUSTOMER']);
+      const form = fx.mount(BusinessSetup, {});
+      fill(form, noPin);
+      expect(picker(form).props.visible).toBe(false);
+
+      pinRow(form).props.onPress();
+      form.render();
+
+      expect(picker(form).props).toMatchObject({
+        visible: true,
+        current: null,
+        address: { line: '12 Regent Street', city: 'Linden' },
+        device: { latitude: 6.8046, longitude: -58.1553 },
+      });
+      // Opening the map places nothing.
+      expect(formOf(form).pin).toBeNull();
+      expect(only(form.output, 'PillButton').props.disabled).toBe(true);
+    });
+
+    it('closing the map without confirming leaves the store unpinned', async () => {
+      await signIn('owner-a', ['CUSTOMER']);
+      const form = fx.mount(BusinessSetup, {});
+      fill(form, noPin);
+      pinRow(form).props.onPress();
+      form.render();
+
+      picker(form).props.onClose();
+      form.render();
+
+      expect(picker(form).props.visible).toBe(false);
+      expect(formOf(form).pin).toBeNull();
+      expect(only(form.output, 'PillButton').props).toMatchObject({ label: 'Place your store on the map', disabled: true });
+    });
+
+    it('a confirmed pin enables Create, and the store is sent at exactly that pin', async () => {
+      await signIn('owner-a', ['CUSTOMER']);
+      const form = fx.mount(BusinessSetup, {});
+      fill(form, typed);
+
+      expect(picker(form).props.visible, 'confirming closes the map').toBe(false);
+      expect(pinRow(form).props.accessibilityLabel).toBe('Move the store pin');
+      const create = only(form.output, 'PillButton');
+      expect(create.props).toMatchObject({ label: 'Create store', disabled: false });
+
+      create.props.onPress();
+
+      expect(fx.submitStore).toHaveBeenCalledOnce();
+      const sent = fx.submitStore.mock.calls[0]![0].business;
+      expect({ latitude: sent.latitude, longitude: sent.longitude }).toEqual({ latitude: 6.0123, longitude: -58.3045 });
+    });
+
+    it('"Move the store pin" reopens the map on the placed pin, and the moved pin is what is sent', async () => {
+      await signIn('owner-a', ['CUSTOMER']);
+      const form = fx.mount(BusinessSetup, {});
+      fill(form, typed);
+
+      pinRow(form).props.onPress();
+      form.render();
+      expect(picker(form).props).toMatchObject({ visible: true, current: typed.pin });
+
+      const moved = { latitude: 6.0131, longitude: -58.3052, address: '14 Regent Street, Linden' };
+      picker(form).props.onConfirm(moved);
+      form.render();
+      only(form.output, 'PillButton').props.onPress();
+
+      expect(fx.submitStore.mock.calls[0]![0].business).toMatchObject({ latitude: moved.latitude, longitude: moved.longitude });
+    });
   });
 });
 
