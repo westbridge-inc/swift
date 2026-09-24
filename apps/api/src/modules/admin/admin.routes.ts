@@ -530,18 +530,28 @@ export async function adminRoutes(app: FastifyInstance) {
       complianceViolation: childScope((tenantId) => ({ user: { tenantId } })),
       complianceReviewCase: childScope((tenantId) => ({ user: { tenantId } })),
       // ReimbursementClaim predates relations and carries only loose ids.
-      // Require its rider, order and customer to resolve in the same tenant;
+      // Require its mover, order and customer to resolve in the same tenant;
       // this hides malformed bridge rows rather than accepting whichever leg
       // happened to be local. The CashRulesService CAS and its re-read both
       // inherit this scope.
+      //
+      // [DS110 #19 · G3-F1] The mover leg resolves through EITHER profile: a
+      // rider claim by riderId, a driver (taxi) claim by driverId with riderId
+      // NULL — the database XOR. `riderId IN (...)` alone is never true for a
+      // driver claim, so every taxi guarantee claim was missing from the queue
+      // and approve/reject/paid answered 404, even after two-person approval.
       reimbursementClaim: childScope(async (tenantId) => {
-        const [riders, orders, customers] = await Promise.all([
+        const [riders, drivers, orders, customers] = await Promise.all([
           app.prisma.rider.findMany({ where: { user: { tenantId } }, select: { id: true } }),
+          app.prisma.driver.findMany({ where: { user: { tenantId } }, select: { id: true } }),
           app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
           app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
         ]);
         return {
-          riderId: { in: riders.map((rider) => rider.id) },
+          OR: [
+            { riderId: { in: riders.map((rider) => rider.id) } },
+            { riderId: null, driverId: { in: drivers.map((driver) => driver.id) } },
+          ],
           orderId: { in: orders.map((order) => order.id) },
           customerId: { in: customers.map((customer) => customer.id) },
         };
@@ -1092,6 +1102,8 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
+    // [DS110 #12] Who may suspend whom is decided inside the transition, from
+    // the database's view of both accounts (see mover-authority.ts).
     const { updated } = await transitionUserStatusAuthority(app, id, 'SUSPENDED', {
       actorUserId: request.user.userId,
       reason: reason ?? null,
@@ -1114,6 +1126,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
+    // Restoration obeys the same hierarchy as the act it reverses: an ordinary
+    // ADMIN cannot lift a suspension a SUPER_ADMIN imposed on another ADMIN.
+    // This lifts a SUSPENSION only; a ban is lifted through /unban.
     const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
       actorUserId: request.user.userId,
       ipAddress: request.ip,
@@ -1136,10 +1151,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
-    // Prevent banning other admins unless SUPER_ADMIN
-    if (user.roles.includes('ADMIN') && request.user.role !== 'SUPER_ADMIN') {
-      throw new ForbiddenError('Only SUPER_ADMIN can ban admin users');
-    }
+    // [DS110 #12] The role hierarchy — not an ADMIN-string check — decides who
+    // may ban whom, inside the transition: the seed mints the SUPER_ADMIN as
+    // `['SUPER_ADMIN', 'CUSTOMER']`, so the old `roles.includes('ADMIN')` test
+    // never fired for the founder and any ADMIN could ban the top authority.
 
     const { updated } = await transitionUserStatusAuthority(app, id, 'BANNED', {
       actorUserId: request.user.userId,
@@ -1150,6 +1165,37 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // DPA §3.5 — a banned participant has left: schedule document deletion
     await verification.scheduleDocumentRetention(id);
+
+    return { success: true, data: updated };
+  });
+
+  app.put('/users/:id/unban', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { reason } = reasonSchema.parse(request.body ?? {});
+
+    // [DS110 #12] A ban is the platform's terminal account revocation — the
+    // victim's sessions are deleted in the same transaction, and until now
+    // nothing could reverse one. Lifting a ban is SUPER_ADMIN-only; the
+    // transition enforces that whichever route asks, so an ordinary ADMIN can
+    // never walk a ban back, through this route or /unsuspend.
+    const user = await app.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundError('User', id);
+    const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
+      actorUserId: request.user.userId,
+      reason: reason ?? null,
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
+    }, { lifts: 'BANNED' });
+
+    // Status only: the sessions a ban deleted are not recreated (the person
+    // signs in again) and the device tokens it silenced are re-registered by
+    // the app on its next launch.
+    await notifications.send({
+      userId: id,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Account Restored',
+      body: 'Your account has been unbanned. Welcome back!',
+    });
 
     return { success: true, data: updated };
   });

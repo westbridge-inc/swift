@@ -257,3 +257,56 @@ unknown or a destructive migration occurred, keep serving stopped, preserve
 the failed state and off-site backup, and use a reviewed migration/restore
 procedure. Never point restore.sh at the live database. No command in this
 runbook authorizes a production cutover.
+
+## 7. Pilot journeys on staging (private instance)
+
+The pilot journey suite (scripts/livetest, `--suite=journeys`) drives all 42
+launch-proof journeys over real HTTP: signups, orders, dispatch, taxi, courier,
+services, safety, money records and admin controls. It signs accounts in with
+the dev OTP code, so it runs ONLY against a private instance:
+
+- The public api behind Caddy never carries DEV_OTP_BYPASS or
+  TEST_CONTROL_ENABLED. pilot-up.sh refuses a deploy/.env that gives it either.
+- deploy/docker-compose.journeys.yml adds `api-journeys` (the public api's exact
+  image, settings file and secret mounts, plus DEV_OTP_BYPASS=1 and
+  TEST_CONTROL_ENABLED=1, with TEST_CONTROL_SECRET read from the encrypted
+  store as a NAME_FILE) and the one-shot `journeys` runner. Both sit only on
+  swift-pilot-private, publish no port and have no Caddy route.
+- deploy/verify-journeys-isolation.py checks the rendered model: pilot-up.sh
+  runs it on every cutover, and journeys-run.sh runs it before it starts
+  anything. journeys-run.sh also proves on the live public route that
+  /api/v1/test-control/identity answers 404 and the dev code is refused.
+- The runner refuses by itself unless the target is private, answers
+  /test-control/identity with an environment other than production, declares
+  its data synthetic, and every phone it uses is in the +5920 range (below).
+- api-journeys pins NOTIFICATION_PROVIDER, EMAIL_PROVIDER and PUSH_PROVIDER to
+  `dev` (in memory, nothing leaves the process), whatever deploy/.env says. That
+  does NOT cover the worker: api and api-journeys share ONE worker, and it runs
+  jobs (vendor alert ladders, SOS pages, queue matches, billing notices) with the
+  public provider settings. Once real SMS is on (Phase B) the worker texts the
+  phones on file. So every phone the runner creates, files or sends to is in the
+  never-a-subscriber +5920 range (a 0 after +592 is never a subscriber number;
+  the roster uses the +59204 block), and the runner refuses to start if any
+  leaves it (scripts/livetest/guard.ts, gate p). That range is the real
+  safeguard; keep it.
+
+After pilot-up.sh, the deployment_identity insert (environment `staging`) and
+seed-production with SEED_ADMIN_PHONE=+5920400000, as swift-deploy:
+
+    cd /opt/swift
+    LIVETEST_ADMIN_PHONE=+5920400000 ./deploy/journeys-run.sh
+
+Optional: a second admin (a seed-production break-glass promotion with two
+approvals, e.g. +5920400001) passed as LIVETEST_ADMIN2_PHONE lets the
+two-person admin cases run (refund settlement, settlement import, claim
+settlement, fraud-class rejection); without one they are reported SKIP.
+
+api-journeys exists only while the run lasts; the script removes it on exit.
+Results land in ~/swift-journeys/<run id>/ (override with JOURNEYS_RESULTS_DIR):
+journeys-result.json (per journey: PASS, FAIL or SKIP, the reason, every step
+with its evidence, and the target's deploymentId, environment and buildSha) and
+journeys-summary.md. The exit status is 0 when no journey failed, 1 when one
+did, 2 for a harness error, 3 when the runner refused the target. Record each
+journey's staging gate with the run id. Re-runs reuse the roster (accounts in
+the +59204 block) and create new orders, bookings and rides; accounts a journey
+must create afresh (signup, deletion, onboarding) come from +592049xxxx.
