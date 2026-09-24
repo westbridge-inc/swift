@@ -8,11 +8,13 @@ import { useLocationStore } from '../../../stores/locationStore';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { vendorPhoto } from '../../../lib/images';
-import { EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, VendorRow } from '../../../kit';
+import { CartBar, useCartBarClearance, EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, VendorRow } from '../../../kit';
 
 // Kit frame 13 — "Nearby Restaurant" list. Real proximity only: without a
 // location fix we say so instead of faking distances.
 export function NearbyScreen() {
+  // [E09] While the cart bar floats over the list, the last row must scroll clear of it.
+  const cartClearance = useCartBarClearance();
   const navigation = useNavigation<any>();
   const { latitude, longitude, status } = useLocationStore();
   const { resolve: requestLocation } = useDeviceLocation({ refreshOnMount: false });
@@ -54,7 +56,7 @@ export function NearbyScreen() {
         <FlatList
           data={nearby}
           keyExtractor={(v) => v.id}
-          contentContainerStyle={{ paddingHorizontal: space['2xl'], gap: space.md, paddingBottom: space['3xl'] }}
+          contentContainerStyle={{ paddingHorizontal: space['2xl'], gap: space.md, paddingBottom: space['3xl'] + cartClearance }}
           renderItem={({ item: v }) => (
             <VendorRow
               image={vendorPhoto(v)}
@@ -73,6 +75,8 @@ export function NearbyScreen() {
           )}
         />
       )}
+      {/* [E09] A shopper who has added items can always reach the Cart tab. */}
+      <CartBar />
     </Screen>
   );
 }
