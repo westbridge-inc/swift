@@ -51,8 +51,7 @@ import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
-import { assertAccountActionAuthority, transitionUserStatusAuthority } from '../mover-authority';
-import { reimbursementClaimTenantScope } from './claim-tenant-scope';
+import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { platformStats } from './platform-stats';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
@@ -530,13 +529,17 @@ export async function adminRoutes(app: FastifyInstance) {
       verificationDocument: childScope((tenantId) => ({ user: { tenantId } })),
       complianceViolation: childScope((tenantId) => ({ user: { tenantId } })),
       complianceReviewCase: childScope((tenantId) => ({ user: { tenantId } })),
-      // ReimbursementClaim predates relations and carries only loose ids. It
-      // is tenant-owned through EITHER mover leg — a rider claim resolves its
-      // riderId locally, a driver claim its driverId (riderId NULL) — AND its
-      // order and customer. [DS110 #19] the old riderId-only scope hid every
-      // taxi driver claim; the predicate is built by the shared, batched
-      // helper so no id list can exceed the bind-parameter ceiling. The
-      // CashRulesService CAS and its re-read both inherit this scope.
+      // ReimbursementClaim predates relations and carries only loose ids.
+      // Require its mover, order and customer to resolve in the same tenant;
+      // this hides malformed bridge rows rather than accepting whichever leg
+      // happened to be local. The CashRulesService CAS and its re-read both
+      // inherit this scope.
+      //
+      // [DS110 #19 · G3-F1] The mover leg resolves through EITHER profile: a
+      // rider claim by riderId, a driver (taxi) claim by driverId with riderId
+      // NULL — the database XOR. `riderId IN (...)` alone is never true for a
+      // driver claim, so every taxi guarantee claim was missing from the queue
+      // and approve/reject/paid answered 404, even after two-person approval.
       reimbursementClaim: childScope(async (tenantId) => {
         const [riders, drivers, orders, customers] = await Promise.all([
           app.prisma.rider.findMany({ where: { user: { tenantId } }, select: { id: true } }),
@@ -544,12 +547,14 @@ export async function adminRoutes(app: FastifyInstance) {
           app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
           app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
         ]);
-        return reimbursementClaimTenantScope(
-          riders.map((rider) => rider.id),
-          drivers.map((driver) => driver.id),
-          orders.map((order) => order.id),
-          customers.map((customer) => customer.id),
-        );
+        return {
+          OR: [
+            { riderId: { in: riders.map((rider) => rider.id) } },
+            { riderId: null, driverId: { in: drivers.map((driver) => driver.id) } },
+          ],
+          orderId: { in: orders.map((order) => order.id) },
+          customerId: { in: customers.map((customer) => customer.id) },
+        };
       }),
       // bank-recon's legacy compound lookup embeds swift-default. Correct only
       // that nested discriminator; the base extension still applies the same
@@ -1097,9 +1102,8 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
-    // [DS110 #12] the role hierarchy protects suspension exactly as it protects
-    // a ban: no equal-or-higher role, and never the actor's own account.
-    assertAccountActionAuthority(request.user, user);
+    // [DS110 #12] Who may suspend whom is decided inside the transition, from
+    // the database's view of both accounts (see mover-authority.ts).
     const { updated } = await transitionUserStatusAuthority(app, id, 'SUSPENDED', {
       actorUserId: request.user.userId,
       reason: reason ?? null,
@@ -1123,8 +1127,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
     // Restoration obeys the same hierarchy as the act it reverses: an ordinary
-    // ADMIN must not lift a suspension a SUPER_ADMIN imposed on another ADMIN.
-    assertAccountActionAuthority(request.user, user);
+    // ADMIN cannot lift a suspension a SUPER_ADMIN imposed on another ADMIN.
+    // This lifts a SUSPENSION only; a ban is lifted through /unban.
     const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
       actorUserId: request.user.userId,
       ipAddress: request.ip,
@@ -1147,11 +1151,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
-    // [DS110 #12] a role-hierarchy guard, not an ADMIN-string check: the seed
-    // mints the SUPER_ADMIN with `roles: ['SUPER_ADMIN', 'CUSTOMER']`, so the
-    // old `roles.includes('ADMIN')` test never fired for the founder and any
-    // ADMIN could ban or suspend it. No equal-or-higher role, never self.
-    assertAccountActionAuthority(request.user, user);
+    // [DS110 #12] The role hierarchy — not an ADMIN-string check — decides who
+    // may ban whom, inside the transition: the seed mints the SUPER_ADMIN as
+    // `['SUPER_ADMIN', 'CUSTOMER']`, so the old `roles.includes('ADMIN')` test
+    // never fired for the founder and any ADMIN could ban the top authority.
 
     const { updated } = await transitionUserStatusAuthority(app, id, 'BANNED', {
       actorUserId: request.user.userId,
@@ -1171,13 +1174,10 @@ export async function adminRoutes(app: FastifyInstance) {
     const { reason } = reasonSchema.parse(request.body ?? {});
 
     // [DS110 #12] A ban is the platform's terminal account revocation — the
-    // victim's sessions are deleted in the same transaction and only the ops
-    // seed ceremony could restore a lost SUPER_ADMIN. Unbanning is therefore a
-    // SUPER_ADMIN-only act, so an ordinary ADMIN can never walk a ban back.
-    if (request.user.role !== 'SUPER_ADMIN') {
-      throw new ForbiddenError('Only SUPER_ADMIN can unban users');
-    }
-
+    // victim's sessions are deleted in the same transaction, and until now
+    // nothing could reverse one. Lifting a ban is SUPER_ADMIN-only; the
+    // transition enforces that whichever route asks, so an ordinary ADMIN can
+    // never walk a ban back, through this route or /unsuspend.
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
     const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
@@ -1185,8 +1185,11 @@ export async function adminRoutes(app: FastifyInstance) {
       reason: reason ?? null,
       ipAddress: request.ip,
       userAgent: request.headers['user-agent'],
-    });
+    }, { lifts: 'BANNED' });
 
+    // Status only: the sessions a ban deleted are not recreated (the person
+    // signs in again) and the device tokens it silenced are re-registered by
+    // the app on its next launch.
     await notifications.send({
       userId: id,
       type: 'SYSTEM_ANNOUNCEMENT',

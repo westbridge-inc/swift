@@ -67,6 +67,7 @@ export interface SeedPlan {
   configVersion: string;
   /** The digest of the desired data itself, so a plan names exactly which configuration it applies. */
   configDigest: string;
+  /** When this plan was built — printed for the operators, never digested (see seedPlanDigest). */
   createdAt: string;
   target: TargetFingerprint;
   changes: Change[];
@@ -74,12 +75,15 @@ export interface SeedPlan {
 }
 
 export function seedPlanDigest(body: Omit<SeedPlan, 'digest'>): string {
-  // [DS110 #17] `createdAt` is ceremony display metadata, not plan content. If
-  // the whole body were digested, the plan printed for signature would carry a
-  // fresh timestamp on the re-run and its digest could never equal the one the
-  // two approvers signed — the production sign-off would fail with
-  // APPROVAL_INVALID forever and the spine could never be applied. Digest only
-  // the stable fields; the timestamp stays on the plan for display.
+  // [DS110 #17] `createdAt` is ceremony display metadata, not plan content.
+  // Nothing persists a seed plan between runs: the ceremony prints the digest
+  // and exits, the operators sign it, and the re-run REBUILDS the plan with a
+  // fresh `now`. Digesting the timestamp made every re-run digest differ from
+  // the signed one, so a production target could never pass its two-approver
+  // check (APPROVAL_INVALID, forever) and the spine could never be applied.
+  // The digest covers what the approvers are actually approving — the plan
+  // version, the configuration and its digest, the target database and the
+  // exact changes — and nothing that varies between two honest runs.
   const stable: Omit<SeedPlan, 'digest' | 'createdAt'> = {
     version: body.version,
     configVersion: body.configVersion,

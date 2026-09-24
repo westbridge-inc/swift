@@ -191,7 +191,12 @@ describe('[R048-005] a production target is a ceremony', () => {
       // digest and every signature failed APPROVAL_INVALID — forever.
       const printed = await buildSeedPlan(prisma, URL_, desired, new Date('2026-09-23T10:00:00.000Z'));
       const rebuilt = await buildSeedPlan(prisma, URL_, desired, new Date('2026-09-23T15:45:00.000Z'));
+      expect(rebuilt.createdAt).not.toBe(printed.createdAt);
+      expect(rebuilt.changes).toEqual(printed.changes);
       expect(rebuilt.digest).toBe(printed.digest);
+      // …and the digest still binds the content: other desired data is another plan.
+      const other = await buildSeedPlan(prisma, URL_, desiredFor(11), new Date('2026-09-23T10:00:00.000Z'));
+      expect(other.digest).not.toBe(printed.digest);
 
       // The signatures captured over the PRINTED digest must apply the
       // REBUILT plan — this is the exact boot-deadlock step that used to fail.

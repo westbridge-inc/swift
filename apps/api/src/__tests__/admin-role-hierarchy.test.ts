@@ -18,11 +18,15 @@ import { purgeAuditLogs } from '../lib/audit-immutability';
 // entry — so the guard never fired for the founder. Suspension had no role
 // check at all, and no route could ever unban (the status authority refused
 // BANNED → ACTIVE), so one ordinary admin could lock the platform out of its
-// own governance with a single call.
+// own governance with a single call, and nothing in the console could undo it.
 //
-// The fix is a role hierarchy on ban/suspend (an actor can never act on an
-// equal or higher role, or on themselves), plus an audited SUPER_ADMIN-only
-// unban route.
+// The rule now lives in the status transition itself (mover-authority.ts):
+// never your own account, never an equal-or-higher role, and a ban is lifted
+// by a SUPER_ADMIN only — through /unban, never through /unsuspend.
+//
+// Every refusal here is proven on durable state: status, sessions, audit rows
+// and notifications of the target are read before and after, and must be
+// identical. Fixture range: +59241nnnnn (this file only).
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -30,13 +34,18 @@ const RUN = nanoid(6).toLowerCase();
 const userIds: string[] = [];
 const REASON = 'Repeated platform-control abuse after three documented warnings';
 
-async function makeAdmin(role: 'ADMIN' | 'SUPER_ADMIN'): Promise<{ token: string; userId: string }> {
+type Actor = { token: string; userId: string };
+
+async function makeAccount(role: 'ADMIN' | 'SUPER_ADMIN' | 'CUSTOMER'): Promise<Actor> {
   const phone = `+59241${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const privileged = role !== 'CUSTOMER';
   const user = await app.prisma.user.create({
     data: {
-      phone, firstName: 'Hierarchy', lastName: `${role.slice(0, 3)}${RUN}`,
-      roles: [role, 'CUSTOMER'], activeRole: role, status: 'ACTIVE', isPhoneVerified: true,
-      admin: { create: { permissions: ['*'] } },
+      phone, firstName: 'Hierarchy', lastName: `${role.slice(0, 3)}${RUN}${userIds.length}`,
+      // Exactly how the seed mints the founder: no ADMIN entry beside SUPER_ADMIN.
+      roles: privileged ? [role, 'CUSTOMER'] : ['CUSTOMER'],
+      activeRole: role, status: 'ACTIVE', isPhoneVerified: true,
+      ...(privileged ? { admin: { create: { permissions: ['*'] } } } : {}),
     },
   });
   userIds.push(user.id);
@@ -51,24 +60,51 @@ async function makeAdmin(role: 'ADMIN' | 'SUPER_ADMIN'): Promise<{ token: string
   return { token, userId: user.id };
 }
 
-async function makeCustomer(): Promise<string> {
-  const phone = `+59241${String(Math.floor(Math.random() * 90000) + 10000)}`;
-  const user = await app.prisma.user.create({
-    data: {
-      phone, firstName: 'Hierarchy', lastName: `Victim${RUN}${userIds.length}`,
-      roles: ['CUSTOMER'], activeRole: 'CUSTOMER', status: 'ACTIVE', isPhoneVerified: true,
-    },
+const call = (token: string, method: 'PUT', url: string, payload: Record<string, unknown>) =>
+  app.inject({
+    method, url, payload,
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
   });
-  userIds.push(user.id);
-  return user.id;
+
+/** Everything an account-status action can change about the target. */
+async function snapshot(userId: string) {
+  const [user, sessions, audit, notifications] = await Promise.all([
+    app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { status: true } }),
+    app.prisma.session.count({ where: { userId } }),
+    app.prisma.auditLog.count({ where: { entityId: userId } }),
+    app.prisma.notification.count({ where: { userId } }),
+  ]);
+  return { status: user.status, sessions, audit, notifications };
 }
 
-const call = (token: string, method: string, url: string, payload?: unknown) =>
-  app.inject({
-    method: method as never, url,
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    ...(payload === undefined ? {} : { payload: payload as Record<string, unknown> }),
-  });
+/** The admin audit backstop writes its row AFTER the response is sent; give a
+ *  preceding successful action's hook its turn before reading a baseline. */
+const settled = () => new Promise((r) => setTimeout(r, 300));
+
+/** A refusal must leave the target exactly as it was — status, sessions, audit
+ *  rows and notifications — after the post-response audit hook has had its turn. */
+async function expectRefusedUnchanged(
+  actor: Actor, action: 'ban' | 'suspend' | 'unsuspend' | 'unban', targetId: string,
+  expected: { status: number; code?: string },
+) {
+  await settled();
+  const before = await snapshot(targetId);
+  const res = await call(actor.token, 'PUT', `/api/v1/admin/users/${targetId}/${action}`, { reason: REASON });
+  expect(res.statusCode, `${action}: ${res.body}`).toBe(expected.status);
+  if (expected.code) expect(res.json().error.code).toBe(expected.code);
+  await settled();
+  expect(await snapshot(targetId), `${action} must change nothing`).toEqual(before);
+  return before;
+}
+
+async function waitFor<T>(read: () => Promise<T | null>): Promise<T | null> {
+  for (let i = 0; i < 30; i += 1) {
+    const found = await read();
+    if (found) return found;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return null;
+}
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
@@ -84,7 +120,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await runWithoutTenant(async () => {
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:admin-role-hierarchy').catch(() => 0);
+    await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: userIds } }, { entityId: { in: userIds } }] }, 'test-cleanup:admin-role-hierarchy').catch(() => 0);
+    await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
@@ -93,68 +130,95 @@ afterAll(async () => {
   await app.close();
 });
 
-describe('[DS110 #12] the role hierarchy governs destructive account actions', () => {
-  it('an ADMIN cannot ban the SUPER_ADMIN — the founder account stays ACTIVE', async () => {
-    const admin = await makeAdmin('ADMIN');
-    const superAdmin = await makeAdmin('SUPER_ADMIN');
+describe('[DS110 #12] the role hierarchy governs every account-status action', () => {
+  it('an ADMIN cannot ban the SUPER_ADMIN — refused, and the founder account is untouched', async () => {
+    const admin = await makeAccount('ADMIN');
+    const founder = await makeAccount('SUPER_ADMIN');
 
-    const res = await call(admin.token, 'PUT', `/api/v1/admin/users/${superAdmin.userId}/ban`, { reason: REASON });
-    expect(res.statusCode, res.body).toBe(403);
-
-    // Durable state, not just the status code: no status change, no session
-    // revocation, no retention scheduling.
-    const after = await app.prisma.user.findUniqueOrThrow({ where: { id: superAdmin.userId } });
-    expect(after.status).toBe('ACTIVE');
-    expect(await app.prisma.session.count({ where: { userId: superAdmin.userId } })).toBe(1);
+    const before = await expectRefusedUnchanged(admin, 'ban', founder.userId, { status: 403 });
+    // Still signed in, still ACTIVE: no revocation, no retention scheduling, no notice.
+    expect(before).toMatchObject({ status: 'ACTIVE', sessions: 1 });
   });
 
-  it('an ADMIN cannot suspend the SUPER_ADMIN, and nobody acts on their own account', async () => {
-    const admin = await makeAdmin('ADMIN');
-    const superAdmin = await makeAdmin('SUPER_ADMIN');
+  it('an ADMIN cannot suspend the SUPER_ADMIN, a peer ADMIN, or themselves', async () => {
+    const admin = await makeAccount('ADMIN');
+    const peer = await makeAccount('ADMIN');
+    const founder = await makeAccount('SUPER_ADMIN');
 
-    const suspendFounder = await call(admin.token, 'PUT', `/api/v1/admin/users/${superAdmin.userId}/suspend`, { reason: REASON });
-    expect(suspendFounder.statusCode, suspendFounder.body).toBe(403);
-    const founderAfter = await app.prisma.user.findUniqueOrThrow({ where: { id: superAdmin.userId } });
-    expect(founderAfter.status).toBe('ACTIVE');
-
-    const selfBan = await call(admin.token, 'PUT', `/api/v1/admin/users/${admin.userId}/ban`, { reason: REASON });
-    expect(selfBan.statusCode, selfBan.body).toBe(403);
-    const selfAfter = await app.prisma.user.findUniqueOrThrow({ where: { id: admin.userId } });
-    expect(selfAfter.status).toBe('ACTIVE');
+    await expectRefusedUnchanged(admin, 'suspend', founder.userId, { status: 403 });
+    await expectRefusedUnchanged(admin, 'suspend', peer.userId, { status: 403 });
+    await expectRefusedUnchanged(admin, 'ban', peer.userId, { status: 403 });
+    await expectRefusedUnchanged(admin, 'suspend', admin.userId, { status: 403 });
+    await expectRefusedUnchanged(admin, 'ban', admin.userId, { status: 403 });
   });
 
-  it('the hierarchy still lets a SUPER_ADMIN ban an ordinary account, and its unban is audited', async () => {
-    const superAdmin = await makeAdmin('SUPER_ADMIN');
-    const victimId = await makeCustomer();
+  it('a SUPER_ADMIN cannot act on another SUPER_ADMIN — who holds SUPER_ADMIN is a break-glass ceremony, not a console click', async () => {
+    const founder = await makeAccount('SUPER_ADMIN');
+    const second = await makeAccount('SUPER_ADMIN');
 
-    // The legal path into a ban: SUPER_ADMIN outranks CUSTOMER.
-    const ban = await call(superAdmin.token, 'PUT', `/api/v1/admin/users/${victimId}/ban`, { reason: REASON });
+    await expectRefusedUnchanged(founder, 'ban', second.userId, { status: 403 });
+    await expectRefusedUnchanged(founder, 'suspend', second.userId, { status: 403 });
+    await expectRefusedUnchanged(founder, 'ban', founder.userId, { status: 403 });
+  });
+
+  it('ordinary work is untouched: an ADMIN suspends and restores a customer; a SUPER_ADMIN suspends an ADMIN and only a SUPER_ADMIN restores them', async () => {
+    const admin = await makeAccount('ADMIN');
+    const founder = await makeAccount('SUPER_ADMIN');
+    const customer = await makeAccount('CUSTOMER');
+
+    const suspended = await call(admin.token, 'PUT', `/api/v1/admin/users/${customer.userId}/suspend`, { reason: REASON });
+    expect(suspended.statusCode, suspended.body).toBe(200);
+    expect((await snapshot(customer.userId)).status).toBe('SUSPENDED');
+    const restored = await call(admin.token, 'PUT', `/api/v1/admin/users/${customer.userId}/unsuspend`, { reason: REASON });
+    expect(restored.statusCode, restored.body).toBe(200);
+    expect((await snapshot(customer.userId)).status).toBe('ACTIVE');
+
+    // Down the hierarchy is allowed; sideways is not, in either direction.
+    const target = await makeAccount('ADMIN');
+    const bySuper = await call(founder.token, 'PUT', `/api/v1/admin/users/${target.userId}/suspend`, { reason: REASON });
+    expect(bySuper.statusCode, bySuper.body).toBe(200);
+    expect((await snapshot(target.userId)).status).toBe('SUSPENDED');
+    await expectRefusedUnchanged(admin, 'unsuspend', target.userId, { status: 403 });
+    const lifted = await call(founder.token, 'PUT', `/api/v1/admin/users/${target.userId}/unsuspend`, { reason: REASON });
+    expect(lifted.statusCode, lifted.body).toBe(200);
+    expect((await snapshot(target.userId)).status).toBe('ACTIVE');
+  });
+
+  it('a ban is lifted only by a SUPER_ADMIN, only through /unban, and the unban is audited', async () => {
+    const founder = await makeAccount('SUPER_ADMIN');
+    const admin = await makeAccount('ADMIN');
+    const victim = await makeAccount('CUSTOMER');
+
+    // Authority is judged before state: an ADMIN's unban is refused as a
+    // matter of role, whatever the account's status.
+    await expectRefusedUnchanged(admin, 'unban', victim.userId, { status: 403 });
+
+    const ban = await call(founder.token, 'PUT', `/api/v1/admin/users/${victim.userId}/ban`, { reason: REASON });
     expect(ban.statusCode, ban.body).toBe(200);
-    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: victimId } })).status).toBe('BANNED');
+    expect(await snapshot(victim.userId)).toMatchObject({ status: 'BANNED', sessions: 0 });
 
-    // Only SUPER_ADMIN may unban: an ordinary ADMIN is refused.
-    const admin = await makeAdmin('ADMIN');
-    const denied = await call(admin.token, 'PUT', `/api/v1/admin/users/${victimId}/unban`, { reason: REASON });
-    expect(denied.statusCode, denied.body).toBe(403);
-    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: victimId } })).status).toBe('BANNED');
+    // An ADMIN cannot lift it — not through /unban, and not through /unsuspend.
+    await expectRefusedUnchanged(admin, 'unban', victim.userId, { status: 403 });
+    await expectRefusedUnchanged(admin, 'unsuspend', victim.userId, { status: 400, code: 'NOT_SUSPENDED' });
+    // /unsuspend never lifts a ban, even for a SUPER_ADMIN: the routes stay distinct.
+    await expectRefusedUnchanged(founder, 'unsuspend', victim.userId, { status: 400, code: 'NOT_SUSPENDED' });
 
-    // The unban restores the account and leaves the authority audit row.
-    const unban = await call(superAdmin.token, 'PUT', `/api/v1/admin/users/${victimId}/unban`, { reason: REASON });
+    const unban = await call(founder.token, 'PUT', `/api/v1/admin/users/${victim.userId}/unban`, { reason: REASON });
     expect(unban.statusCode, unban.body).toBe(200);
-    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: victimId } })).status).toBe('ACTIVE');
-    const audit = await app.prisma.auditLog.findFirst({
-      where: { action: 'UNBAN_USER', entity: 'User', entityId: victimId },
-    });
-    expect(audit).toBeTruthy();
-    expect((audit!.changes as { previousStatus: string }).previousStatus).toBe('BANNED');
-    // And the admin audit backstop recorded the route with its before/after diff.
-    const adminAudit = await app.prisma.auditLog.findFirst({
-      where: { userId: superAdmin.userId, action: { contains: '/users/:id/unban' }, entityId: victimId },
-    });
-    expect(adminAudit).toBeTruthy();
+    expect(unban.json().data.status).toBe('ACTIVE');
+    expect((await snapshot(victim.userId)).status).toBe('ACTIVE');
 
-    // A second unban of an ACTIVE account is a refused transition, not a no-op.
-    const again = await call(superAdmin.token, 'PUT', `/api/v1/admin/users/${victimId}/unban`, { reason: REASON });
-    expect(again.statusCode, again.body).toBe(400);
+    // The authority audit row names the act and where the account came from…
+    const audit = await app.prisma.auditLog.findFirst({ where: { action: 'UNBAN_USER', entity: 'User', entityId: victim.userId } });
+    expect(audit?.userId).toBe(founder.userId);
+    expect((audit!.changes as { previousStatus: string }).previousStatus).toBe('BANNED');
+    // …and the admin audit backstop recorded the route against the same account.
+    const backstop = await waitFor(() => app.prisma.auditLog.findFirst({
+      where: { userId: founder.userId, action: 'ADMIN PUT /api/v1/admin/users/:id/unban', entityId: victim.userId },
+    }));
+    expect(backstop, 'the ADMIN PUT /users/:id/unban backstop row').toBeTruthy();
+
+    // A second unban of an ACTIVE account is a refused transition, not a silent no-op.
+    await expectRefusedUnchanged(founder, 'unban', victim.userId, { status: 400, code: 'NOT_BANNED' });
   });
 });

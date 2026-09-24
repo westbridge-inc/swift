@@ -10,34 +10,44 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { cleanupSecondApprovers, injectWithApproval } from './helpers/admin-approval';
 
 // ---------------------------------------------------------------------------
 // [DS110 #19 · G3-F1] TAXI GUARANTEE CLAIMS WERE INVISIBLE TO ADMINS.
 //
 // A driver claim stores `driverId` with `riderId NULL` (the database XOR
 // allows exactly one mover leg). The admin child scope required
-// `riderId IN (local riders)` — `NULL IN (...)` is false — so every taxi
-// guarantee claim vanished from the queue and every approve/reject/paid
-// returned NotFound, however many people approved it. The fix scopes the
-// claim through EITHER local mover leg (and batched id lists under the bind
-// ceiling). This suite proves a driver claim is visible, and can be approved
-// and paid exactly once through the real two-person flow.
+// `riderId IN (local riders)` — `NULL IN (...)` is never true — so every taxi
+// guarantee claim vanished from the queue and approve/reject/paid answered
+// NotFound, however many people had approved it. The scope now resolves the
+// mover through EITHER local profile.
+//
+// This suite proves the claim is visible to its own tenant's admins, hidden
+// from — and unchangeable by — a foreign tenant's admin, and approved and paid
+// exactly once through the real two-person flow. Fixture range: +59242nnnnn
+// (this file only).
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
 const RUN = nanoid(6).toLowerCase();
+const TENANT_B = `driver-claim-b-${RUN}`;
 const userIds: string[] = [];
+const foreignUserIds: string[] = [];
 const orderIds: string[] = [];
 const driverIds: string[] = [];
 const claimIds: string[] = [];
 const RESERVE_NOTE = `driver-claim-fixture-${RUN}`;
 const REASON = 'Guarantee payout approved after two-person review of the taxi evidence';
+const DOOR = { lat: 6.8013, lng: -58.1553 };
+
+type Actor = { token: string; userId: string };
+
+const phone = () => `+59242${String(Math.floor(Math.random() * 90000) + 10000)}`;
 
 async function makeUser(roles: string[], activeRole: string) {
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59242${String(Math.floor(Math.random() * 90000) + 10000)}`,
-      firstName: 'Taxi', lastName: `U${RUN}${userIds.length}`,
+      phone: phone(), firstName: 'Taxi', lastName: `U${RUN}${userIds.length}`,
       roles: roles as never, activeRole: activeRole as never, status: 'ACTIVE', isPhoneVerified: true,
     },
   });
@@ -45,41 +55,83 @@ async function makeUser(roles: string[], activeRole: string) {
   return user;
 }
 
-async function makeAdmin(): Promise<{ token: string; userId: string }> {
+async function mintSession(userId: string, role: 'ADMIN' | 'SUPER_ADMIN', label: string): Promise<Actor> {
+  const token = app.jwt.sign({ userId, role, jti: nanoid(8) });
+  await app.prisma.session.create({
+    data: {
+      userId, token, refreshToken: nanoid(48), authMethod: 'OTP',
+      deviceId: label, deviceType: 'test',
+      expiresAt: new Date(Date.now() + 86_400_000),
+    },
+  });
+  return { token, userId };
+}
+
+async function makeAdmin(role: 'ADMIN' | 'SUPER_ADMIN'): Promise<Actor> {
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59242${String(Math.floor(Math.random() * 90000) + 10000)}`,
-      firstName: 'Taxi', lastName: `Admin${RUN}${userIds.length}`,
-      roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
+      phone: phone(), firstName: 'Taxi', lastName: `${role.slice(0, 3)}${RUN}${userIds.length}`,
+      roles: [role, 'CUSTOMER'], activeRole: role, status: 'ACTIVE', isPhoneVerified: true,
       admin: { create: { permissions: ['*'] } },
     },
   });
   userIds.push(user.id);
-  const token = app.jwt.sign({ userId: user.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
-  await app.prisma.session.create({
-    data: {
-      userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP',
-      deviceId: 'admin-driver-claim', deviceType: 'test',
-      expiresAt: new Date(Date.now() + 86_400_000),
-    },
-  });
-  return { token, userId: user.id };
+  return mintSession(user.id, role, 'admin-driver-claim');
 }
 
-const call = (token: string, method: string, url: string, payload?: unknown, headers: Record<string, string> = {}) =>
-  app.inject({
-    method: method as never, url,
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-swift-reason': REASON, ...headers },
-    ...(payload === undefined ? {} : { payload: payload as Record<string, unknown> }),
-  });
+/** An admin of ANOTHER tenant: the wrong party for this claim. */
+async function makeForeignAdmin(): Promise<Actor> {
+  return runWithoutTenant(async () => {
+    await app.prisma.tenant.create({ data: { id: TENANT_B, name: 'Driver Claim Tenant B', slug: TENANT_B, isActive: true } });
+    const user = await app.prisma.user.create({
+      data: {
+        phone: phone(), firstName: 'Foreign', lastName: `Adm${RUN}`,
+        roles: ['ADMIN', 'CUSTOMER'], activeRole: 'ADMIN', status: 'ACTIVE', isPhoneVerified: true,
+        tenantId: TENANT_B,
+        admin: { create: { permissions: ['*'] } },
+      },
+    });
+    foreignUserIds.push(user.id);
+    return mintSession(user.id, 'ADMIN', 'admin-driver-claim-foreign');
+  }, 'test-fixture:admin-driver-claim');
+}
+
+const headersFor = (token: string, extra: Record<string, string> = {}) => ({
+  authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-swift-reason': REASON, ...extra,
+});
+
+const call = (token: string, method: 'GET' | 'PUT' | 'POST', url: string, payload?: Record<string, unknown>, extra: Record<string, string> = {}) =>
+  app.inject({ method, url, headers: headersFor(token, extra), ...(payload === undefined ? {} : { payload }) });
 
 const approvalIdOf = (res: { statusCode: number; json: () => unknown }): string | null => {
   if (res.statusCode !== 202) return null;
-  try {
-    const body = res.json() as { error?: { code?: string; details?: { approvalId?: string } } };
-    return body?.error?.code === 'APPROVAL_REQUIRED' ? (body.error.details?.approvalId ?? null) : null;
-  } catch { return null; }
+  const body = res.json() as { error?: { code?: string; details?: { approvalId?: string } } };
+  return body?.error?.code === 'APPROVAL_REQUIRED' ? (body.error.details?.approvalId ?? null) : null;
 };
+
+/** The queue is paginated oldest-first and the test database is shared, so
+ *  walk the pages rather than assume the row is on the first one. */
+async function inQueue(token: string, status: string, claimId: string): Promise<boolean> {
+  for (let page = 1; page <= 40; page += 1) {
+    const res = await call(token, 'GET', `/api/v1/admin/cash-rules/claims?status=${status}&page=${page}&limit=50`);
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as { data: Array<{ id: string }>; meta: { hasNext: boolean } };
+    if (body.data.some((row) => row.id === claimId)) return true;
+    if (!body.meta.hasNext) return false;
+  }
+  return false;
+}
+
+const claimState = (claimId: string) => runWithoutTenant(() => app.prisma.reimbursementClaim.findUniqueOrThrow({
+  where: { id: claimId },
+  select: { status: true, reviewedBy: true, reviewedAt: true, paidAt: true, paymentRef: true, paidAmount: true, paidById: true },
+}));
+
+const effects = (claimId: string, moverUserId: string) => runWithoutTenant(async () => ({
+  audit: await app.prisma.auditLog.count({ where: { entityId: claimId } }),
+  notifications: await app.prisma.notification.count({ where: { userId: moverUserId } }),
+  reserve: await app.prisma.rlpReserveEntry.count({ where: { claimId } }),
+}));
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
@@ -94,27 +146,33 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await cleanupSecondApprovers(app);
   await runWithoutTenant(async () => {
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:admin-driver-claim').catch(() => 0);
+    const everyone = [...userIds, ...foreignUserIds];
+    await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: everyone } }, { entityId: { in: [...claimIds, ...everyone] } }] }, 'test-cleanup:admin-driver-claim').catch(() => 0);
     await app.prisma.rlpReserveEntry.deleteMany({ where: { OR: [{ claimId: { in: claimIds } }, { note: RESERVE_NOTE }] } }).catch(() => {});
     await app.prisma.reimbursementClaim.deleteMany({ where: { id: { in: claimIds } } }).catch(() => {});
-    await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: userIds } } }).catch(() => {});
+    await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: everyone } } }).catch(() => {});
+    await app.prisma.notification.deleteMany({ where: { userId: { in: everyone } } }).catch(() => {});
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } }).catch(() => {});
     await app.prisma.driver.deleteMany({ where: { id: { in: driverIds } } }).catch(() => {});
-    await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
-    await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
-    await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
-    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
+    await app.prisma.session.deleteMany({ where: { userId: { in: everyone } } }).catch(() => {});
+    await app.prisma.admin.deleteMany({ where: { userId: { in: everyone } } }).catch(() => {});
+    await app.prisma.customer.deleteMany({ where: { userId: { in: everyone } } }).catch(() => {});
+    await app.prisma.user.deleteMany({ where: { id: { in: everyone } } }).catch(() => {});
+    await app.prisma.tenant.deleteMany({ where: { id: TENANT_B } }).catch(() => {});
   }, 'test-cleanup:admin-driver-claim');
   await app.close();
 });
 
-describe('[DS110 #19] a TAXI driver claim is tenant-owned and payable once', () => {
-  it('appears in the admin queue and completes the approve → paid two-person flow exactly once', async () => {
-    const requester = await makeAdmin();
-    const approver = await makeAdmin();
+describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to its admins, hidden from strangers, payable once', () => {
+  it('is in the queue, is refused to a foreign tenant unchanged, and completes approve → paid through the real two-person flow exactly once', async () => {
+    const requester = await makeAdmin('ADMIN');
+    const approver = await makeAdmin('SUPER_ADMIN');
+    const foreign = await makeForeignAdmin();
 
-    // The fixture: a taxi leg that was never completed, filed by the driver.
+    // The fixture: a taxi ride that ended in a no-show, claimed by the DRIVER
+    // (driverId set, riderId NULL), at the drop-off point.
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const mover = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
     const driver = await app.prisma.driver.create({
@@ -131,9 +189,9 @@ describe('[DS110 #19] a TAXI driver claim is tenant-owned and payable once', () 
       data: {
         orderNumber: `DRV-${RUN}-${nanoid(6)}`, orderType: 'TAXI',
         customerId: customer.id, driverId: driver.id,
-        status: 'CANCELLED',
-        pickupAddress: 'Stabroek Market', pickupLat: 6.801, pickupLng: -58.156,
-        deliveryAddress: 'Camp Street', deliveryLat: 6.801, deliveryLng: -58.156,
+        status: 'FAILED',
+        pickupAddress: 'Stabroek Market', pickupLat: 6.8134, pickupLng: -58.1626,
+        deliveryAddress: 'Camp Street', deliveryLat: DOOR.lat, deliveryLng: DOOR.lng,
         subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000,
         deliveryFee: 0, totalAmount: 2000, taxiFareTotal: 2000,
         paymentMethod: 'CASH',
@@ -147,34 +205,38 @@ describe('[DS110 #19] a TAXI driver claim is tenant-owned and payable once', () 
     const claim = await app.prisma.reimbursementClaim.create({
       data: {
         orderId: order.id, driverId: driver.id, customerId: customer.id,
-        amount: 2000, reason: 'no_show', gpsLat: 6.801, gpsLng: -58.156,
+        amount: 2000, reason: 'no_show', gpsLat: DOOR.lat, gpsLng: DOOR.lng,
         status: 'PENDING_REVIEW', flags: [],
       },
     });
     claimIds.push(claim.id);
+    expect(claim.riderId).toBeNull();
 
-    // The claim is visible: riderId is NULL here, so the pre-fix scope hid it.
-    // The queue is paginated (oldest first) and the test DB is shared, so walk
-    // pages until the row is found rather than assuming it is on page one.
-    const findInQueue = async (): Promise<boolean> => {
-      for (let page = 1; page <= 10; page += 1) {
-        const res = await call(requester.token, 'GET', `/api/v1/admin/cash-rules/claims?status=PENDING_REVIEW&page=${page}&limit=50`);
-        expect(res.statusCode, res.body).toBe(200);
-        const body = res.json() as { data: Array<{ id: string }>; meta: { hasNext: boolean } };
-        if (body.data.some((row) => row.id === claim.id)) return true;
-        if (!body.meta.hasNext) return false;
-      }
-      return false;
-    };
-    expect(await findInQueue(), 'the TAXI driver claim must be in the admin claims queue').toBe(true);
+    // 1. Visible to an ordinary ADMIN of the claim's tenant. (riderId is NULL:
+    //    the old riderId-only scope could never match this row.)
+    expect(await inQueue(requester.token, 'PENDING_REVIEW', claim.id), 'the TAXI driver claim must be in the admin claims queue').toBe(true);
 
-    // Approve: one person asks, a DIFFERENT person decides, the requester
-    // re-issues carrying the approval. The requester cannot self-approve.
+    // 2. The wrong party: a foreign tenant's admin neither sees it nor moves
+    //    it — through the real two-person path, so the refusal is the tenancy
+    //    law and not a missing signature — and the row is untouched.
+    expect(await inQueue(foreign.token, 'PENDING_REVIEW', claim.id)).toBe(false);
+    const stateBefore = await claimState(claim.id);
+    const effectsBefore = await effects(claim.id, mover.id);
+    const foreignApprove = await injectWithApproval(app, {
+      method: 'PUT', url: `/api/v1/admin/cash-rules/claims/${claim.id}/approve`,
+      headers: headersFor(foreign.token), payload: { reason: REASON },
+    });
+    expect(foreignApprove.statusCode, foreignApprove.body).toBe(404);
+    expect(await claimState(claim.id)).toEqual(stateBefore);
+    expect(await effects(claim.id, mover.id)).toEqual(effectsBefore);
+
+    // 3. Approve: one person asks, the SAME person cannot decide, a different
+    //    person decides, the requester re-issues carrying the approval.
     const approveAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/approve`, { reason: REASON });
     expect(approveAsk.statusCode, approveAsk.body).toBe(202);
     const approveId = approvalIdOf(approveAsk);
     expect(approveId).toBeTruthy();
-    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('PENDING_REVIEW');
+    expect((await claimState(claim.id)).status).toBe('PENDING_REVIEW');
 
     const selfDecide = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approveId}/decide`, { approve: true, reason: REASON });
     expect(selfDecide.statusCode, selfDecide.body).toBe(403);
@@ -182,28 +244,38 @@ describe('[DS110 #19] a TAXI driver claim is tenant-owned and payable once', () 
     expect(decided.statusCode, decided.body).toBe(200);
     const approve = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/approve`, { reason: REASON }, { [APPROVAL_HEADER]: approveId! });
     expect(approve.statusCode, approve.body).toBe(200);
-    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('APPROVED');
+    expect(await claimState(claim.id)).toMatchObject({ status: 'APPROVED', reviewedBy: requester.userId });
+    expect(await inQueue(requester.token, 'APPROVED', claim.id)).toBe(true);
 
-    // Pay: the same two-person ceremony, then durable money facts.
-    const paymentRef = `TAXI-${RUN}-P1`;
-    const payAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference: paymentRef, amount: 2000 });
+    // 4. Paid: the same ceremony, then durable money facts.
+    const reference = `TAXI${nanoid(10).replace(/[^A-Za-z0-9]/g, '0').toUpperCase()}`;
+    const payAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference, amount: 2000 });
     expect(payAsk.statusCode, payAsk.body).toBe(202);
     const payId = approvalIdOf(payAsk);
     expect(payId).toBeTruthy();
     const payDecided = await call(approver.token, 'POST', `/api/v1/admin/approvals/${payId}/decide`, { approve: true, reason: REASON });
     expect(payDecided.statusCode, payDecided.body).toBe(200);
-    const paid = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference: paymentRef, amount: 2000 }, { [APPROVAL_HEADER]: payId! });
+    const paid = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference, amount: 2000 }, { [APPROVAL_HEADER]: payId! });
     expect(paid.statusCode, paid.body).toBe(200);
+    expect(paid.json().data.status).toBe('PAID');
 
-    const after = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } });
-    expect(after.status).toBe('PAID');
-    expect(after.paymentRef).toBe(paymentRef.toUpperCase());
-    expect(Number(after.paidAmount)).toBe(2000);
-    expect(after.paidById).toBe(requester.userId);
+    const after = await claimState(claim.id);
+    expect({ ...after, paidAmount: Number(after.paidAmount) }).toMatchObject({
+      status: 'PAID', paymentRef: reference, paidAmount: 2000, paidById: requester.userId, reviewedBy: requester.userId,
+    });
+    expect(after.paidAt).toBeTruthy();
 
-    // Paid exactly once: one reserve draw, and the evidence is on the row.
-    const payouts = await app.prisma.rlpReserveEntry.findMany({ where: { claimId: claim.id, kind: 'PAYOUT' } });
-    expect(payouts).toHaveLength(1);
-    expect(Number(payouts[0]!.amount)).toBe(-2000);
+    // 5. Paid exactly once: one reserve draw, and the DRIVER — not a rider —
+    //    was told at each step.
+    const payouts = await runWithoutTenant(() => app.prisma.rlpReserveEntry.findMany({ where: { claimId: claim.id } }));
+    expect(payouts.map((e) => ({ kind: e.kind, amount: Number(e.amount) }))).toEqual([{ kind: 'PAYOUT', amount: -2000 }]);
+    const told = await runWithoutTenant(() => app.prisma.notification.findMany({ where: { userId: mover.id }, select: { title: true }, orderBy: { createdAt: 'asc' } }));
+    expect(told.map((n) => n.title)).toEqual(['Claim approved', 'Guarantee paid']);
+
+    // The spent approval cannot be spent again: no second draw, no second PAID.
+    const replay = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference, amount: 2000 }, { [APPROVAL_HEADER]: payId! });
+    expect(replay.statusCode, replay.body).toBe(403);
+    expect(await effects(claim.id, mover.id)).toMatchObject({ reserve: 1 });
+    expect(await claimState(claim.id)).toEqual(after);
   });
 });
