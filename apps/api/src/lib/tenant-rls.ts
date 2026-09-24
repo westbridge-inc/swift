@@ -106,6 +106,8 @@ export const TENANT_TABLES = [
   'provider_payments', 'qr_codes',
   'rating_reports', 'rating_tag_defs', 'receipt_counters',
   'ride_queue_entries', 'safety_deletion_holds', 'san_tombstones',
+  // [TAXI multi-stop] The intermediate stops of one ride, walled like the ride itself.
+  'taxi_trip_stops',
   'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
@@ -252,6 +254,8 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.
     parentTenantSql: `SELECT COALESCE((SELECT u."tenantId" FROM users u JOIN riders r ON r."userId" = u.id WHERE r.id = NEW."riderId"), (SELECT u."tenantId" FROM users u JOIN drivers d ON d."userId" = u.id WHERE d.id = NEW."driverId"), (SELECT o."tenantId" FROM orders o WHERE o.id = NEW."orderId"))` },
+  // [TAXI multi-stop] one hop: a stop inherits the tenant of its ride (the delivery_cash_settlements shape)
+  { table: 'taxi_trip_stops', trigger: 'taxi_trip_stops_tenant_matches_order', parent: 'orders', fk: 'orderId' },
 ];
 export function tenantLineageDdl(): string[] {
   return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch }) => [
