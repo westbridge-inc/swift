@@ -32,7 +32,7 @@ import { riderRoutes } from '../../modules/rider/rider.routes';
 //   · delivery recovery: two riders race, one wins; the winner hands it back
 //     before pickup and the other rider completes it (a handback after pickup
 //     is refused)
-//   · [MKT-F057 · it.fails] a cash goods delivery needs the customer's PIN
+//   · [MKT-F057] a cash goods delivery needs the customer's PIN (fixed)
 //   · [E04 · it.fails] a stale "ready" cannot land on a cancelled order
 // The MMG door (a stale screen, DELIVER_NO_CASH, the dispute block) runs in
 // gold-2-mmg.test.ts; the counter pickup code is CUST-05 (GOLD-1).
@@ -130,6 +130,16 @@ async function riderStep(rider: Rider, orderId: string, step: string, expected: 
 }
 
 /** A ready order taken by `rider` and carried to the customer's door. */
+/** [MKT-F057] The customer holds the door PIN: it is on their own order screen while the
+ *  goods are between the store and the door. The rider enters what they are told. */
+async function doorPin(orderId: string, holder: Actor = customer): Promise<string> {
+  const res = await call('GET', `/api/v1/customer/orders/${orderId}`, holder.token);
+  expect(res.statusCode, res.body).toBe(200);
+  const pin: string = res.json().data.ridePin;
+  expect(pin).toMatch(/^\d{6}$/);
+  return pin;
+}
+
 async function orderAtTheDoor(rider: Rider) {
   const order = await placeCashOrder();
   await vendorStep(order.id, 'accept', 'ACCEPTED');
@@ -274,12 +284,14 @@ describe('GOLD-2 · RIDE-04 — the cash door', () => {
     expect(onTheWay).toMatchObject({ rail: 'CASH', paymentState: 'PENDING', custodyState: 'EN_ROUTE_DELIVERY', permitted: 'COLLECT_CASH_THEN_DELIVER', amount: order.total, blockReason: null });
 
     await riderStep(rider, order.id, 'arrived', 'ARRIVED');
+    // [MKT-F057] Every door call below carries the customer's PIN, so each refusal is its OWN rule, never a missing PIN.
+    const pin = await doorPin(order.id);
     const arrivedLog = (await statusLog(order.id)).filter((l) => l.status === 'ARRIVED');
     expect(arrivedLog).toHaveLength(1);
     expect(arrivedLog[0]!.note).toMatch(/^Rider reported arriving at the customer — gps:6\.80450,-58\.15530 \(0 m from the dropoff, fix \d+s old\)$/);
 
     // A screen rendered before the arrival is stale: refresh, never hand over on it.
-    const stale = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: onTheWay.version });
+    const stale = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: onTheWay.version, ridePin: pin });
     expect(stale.statusCode).toBe(409);
     expect(stale.json().error.code).toBe('HANDOVER_STALE');
 
@@ -287,21 +299,21 @@ describe('GOLD-2 · RIDE-04 — the cash door', () => {
     const atTheDoor = await activeHandover(rider);
     expect(atTheDoor.version).not.toBe(onTheWay.version);
     expect(atTheDoor).toMatchObject({ custodyState: 'ARRIVED', permitted: 'COLLECT_CASH_THEN_DELIVER' });
-    const declared = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: atTheDoor.version });
+    const declared = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: atTheDoor.version, ridePin: pin });
     expect(declared.statusCode).toBe(409);
     expect(declared.json().error.code).toBe('PAYMENT_NOT_CAPTURED');
 
     // A claim with no GPS is not a claim.
-    const noGps = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid' });
+    const noGps = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid', ridePin: pin });
     expect(noGps.statusCode).toBe(400);
     expect(noGps.json().error.code).toBe('VALIDATION_ERROR');
 
     // The wrong people cannot record the outcome.
-    const notTheirs = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, otherRider.token, { outcome: 'paid', gps: DOOR });
+    const notTheirs = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, otherRider.token, { outcome: 'paid', gps: DOOR, ridePin: pin });
     expect(notTheirs.statusCode).toBe(404);
-    const theCustomer = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, customer.token, { outcome: 'paid', gps: DOOR });
+    const theCustomer = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, customer.token, { outcome: 'paid', gps: DOOR, ridePin: pin });
     expect(theCustomer.statusCode).toBe(403);
-    const theStore = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, owner.token, { outcome: 'paid', gps: DOOR });
+    const theStore = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, owner.token, { outcome: 'paid', gps: DOOR, ridePin: pin });
     expect(theStore.statusCode).toBe(403);
     expect(await doorFacts(order.id)).toEqual({ status: 'ARRIVED', paymentStatus: 'PENDING', riderId: rider.riderId, deliveredAt: null });
     expect(await earningsOf(order.id)).toEqual([]);
@@ -309,7 +321,7 @@ describe('GOLD-2 · RIDE-04 — the cash door', () => {
     // Cash in hand: capture, delivery and the rider's pay commit together.
     const key = `ride04-paid-${nanoid(10)}`;
     const handedOverFrom = Date.now();
-    const paid = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid', gps: DOOR }, { 'idempotency-key': key });
+    const paid = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid', gps: DOOR, ridePin: pin }, { 'idempotency-key': key });
     expect(paid.statusCode, paid.body).toBe(200);
     expect(paid.json()).toEqual({ success: true, data: { orderId: order.id, status: 'DELIVERED', claim: null }, replayed: false });
     const delivered = await doorFacts(order.id);
@@ -323,10 +335,10 @@ describe('GOLD-2 · RIDE-04 — the cash door', () => {
     expect(await riderRow(rider.riderId)).toEqual({ currentOrderId: null, isAvailable: true, committedFloat: new Prisma.Decimal(0), totalDeliveries: 1 });
 
     // Delivery recovery: the response was lost and the phone retries.
-    const sameKey = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid', gps: DOOR }, { 'idempotency-key': key });
+    const sameKey = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid', gps: DOOR, ridePin: pin }, { 'idempotency-key': key });
     expect(sameKey.statusCode).toBe(200);
     expect(sameKey.json()).toEqual({ success: true, data: { orderId: order.id, status: 'DELIVERED', claim: null }, replayed: true });
-    const newKey = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid', gps: DOOR }, { 'idempotency-key': `ride04-retry-${nanoid(10)}` });
+    const newKey = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid', gps: DOOR, ridePin: pin }, { 'idempotency-key': `ride04-retry-${nanoid(10)}` });
     expect(newKey.statusCode).toBe(200);
     expect(newKey.json().data).toEqual({ orderId: order.id, status: 'DELIVERED', claim: null });
     expect(await earningsOf(order.id)).toEqual(pay);
@@ -422,7 +434,7 @@ describe('GOLD-2 · RIDE-04 — delivery recovery', () => {
     expect(tooLate.json().error.code).toBe('CUSTODY');
     await riderStep(loser, order.id, 'en-route-delivery', 'EN_ROUTE_DELIVERY');
     await riderStep(loser, order.id, 'arrived', 'ARRIVED');
-    const paid = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, loser.token, { outcome: 'paid', gps: DOOR });
+    const paid = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, loser.token, { outcome: 'paid', gps: DOOR, ridePin: await doorPin(order.id) });
     expect(paid.statusCode, paid.body).toBe(200);
     expect(await doorFacts(order.id)).toMatchObject({ status: 'DELIVERED', paymentStatus: 'CAPTURED', riderId: loser.riderId });
     // Paid once, to the rider who carried it.
@@ -439,8 +451,9 @@ describe('GOLD-2 · RIDE-04 — delivery recovery', () => {
 // captures and completes on the rider's word plus GPS alone. §4.6.1 calls for
 // a mandatory cash PIN at the door. This pins the minimal contract any fix
 // must meet: a paid handover that carries no PIN is refused and changes
-// nothing. The order is at the door in beforeAll, so the it.fails can only
-// "pass" on the handover's answer. Flip to `it(...)` when the PIN lands.
+// nothing. The order is at the door in beforeAll, so the assertion is the
+// handover's answer. The PIN landed with MKT-F057 (checkout mints it; the
+// door verifies it), so this is a plain `it` pinning MISSING_PIN.
 // ---------------------------------------------------------------------------
 describe('GOLD-2 · RIDE-04 — [MKT-F057] the cash door needs the customer’s PIN', () => {
   let rider: Rider;
@@ -454,10 +467,10 @@ describe('GOLD-2 · RIDE-04 — [MKT-F057] the cash door needs the customer’s 
     expect({ status: row.status, paymentMethod: row.paymentMethod, paymentStatus: row.paymentStatus }).toEqual({ status: 'ARRIVED', paymentMethod: 'CASH', paymentStatus: 'PENDING' });
   });
 
-  it.fails('[MKT-F057] a paid handover without the customer’s PIN is refused and changes nothing', async () => {
+  it('[MKT-F057] a paid handover without the customer’s PIN is refused and changes nothing', async () => {
     const noPin = await call('POST', `/api/v1/rider/orders/${orderId}/handover`, rider.token, { outcome: 'paid', gps: DOOR });
-    expect(noPin.statusCode).toBeGreaterThanOrEqual(400);
-    expect(noPin.statusCode).toBeLessThan(500);
+    expect(noPin.statusCode).toBe(400);
+    expect(noPin.json().error.code).toBe('MISSING_PIN');
     expect(await doorFacts(orderId)).toMatchObject({ status: 'ARRIVED', paymentStatus: 'PENDING', deliveredAt: null });
     expect(await earningsOf(orderId)).toEqual([]);
   });
