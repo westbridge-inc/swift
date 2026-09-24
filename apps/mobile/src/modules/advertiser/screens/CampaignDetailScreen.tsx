@@ -8,6 +8,7 @@ import { Pressable } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { ErrorState, Card, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
 import { useMyAdvertisers, useAdvertiserCampaigns, useCampaignStats, useAdvertiserActions } from '../../../hooks/advertiser';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { adsApi } from '../../../services/api';
 import { errorMessage } from '../../../lib/apiError';
 import { CAMPAIGN_STATUS } from './AdvertiserHomeScreen';
@@ -56,6 +57,7 @@ export function CampaignDetailScreen() {
   const campaigns = useAdvertiserCampaigns(advertiser?.id);
   const campaign = (campaigns.data ?? []).find((c: any) => c.id === campaignId);
   const stats = useCampaignStats(campaignId);
+  const pull = usePullToRefresh(() => Promise.all([campaigns.refetch(), stats.refetch()])); // the spinner follows the pull, never a background refetch (lib/pullToRefresh)
   const actions = useAdvertiserActions(advertiser?.id);
   const [acting, setActing] = useState(false);
 
@@ -146,7 +148,7 @@ export function CampaignDetailScreen() {
 
       <ScrollView
         contentContainerStyle={{ padding: space['2xl'], paddingBottom: space['3xl'] }}
-        refreshControl={<RefreshControl refreshing={campaigns.isRefetching} onRefresh={() => { void campaigns.refetch(); void stats.refetch(); }} tintColor={color.brand[500]} />}
+        refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
       >
         {/* §6.1 timeline, human-worded. Terminal failures show their reason. */}
         <Card style={{ padding: space.xl }}>

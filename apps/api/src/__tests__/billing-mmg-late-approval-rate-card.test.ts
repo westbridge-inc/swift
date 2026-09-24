@@ -39,7 +39,7 @@ let subscriptions: SubscriptionService;
 const userIds: string[] = [];
 const subIds: string[] = [];
 let seq = 0;
-const phoneBase = 592_730_000_000 + Math.floor(Math.random() * 500_000_000);
+const phoneBase = 592_730_000_000 + Math.floor(Math.random() * 250_000_000) /* stays below +593: send-otp refuses non-Guyana numbers (AVAIL-1) */;
 
 /** The owner's Guyana card as #1270 resolves it: the role picks the tier. */
 const RATE_CARD = {

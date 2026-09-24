@@ -18,6 +18,7 @@ import { Scrim } from '../../../kit/scrim';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { locationPrimer } from '../../../lib/location-primer';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -321,6 +322,14 @@ export function HomeScreen() {
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
   const home = useHome<HomeFeed>(locationFix?.latitude, locationFix?.longitude);
+  // STALE-WHILE-REVALIDATE. The skeleton is for the very first load with
+  // nothing cached (homeFeedState → 'loading'); every later focus, foreground
+  // or invalidation refresh keeps the feed on screen and is silent. The pull
+  // spinner is the person's own gesture, so it is NOT bound to the query's
+  // isRefetching — that flag is true during those silent refreshes too, and
+  // on iOS it scrolled the whole feed down behind a spinner on every tab
+  // switch (lib/pullToRefresh).
+  const pull = usePullToRefresh(home.refetch);
   const attentionGate = React.useMemo(
     () => createHomeRefreshGate(() => { void qc.invalidateQueries({ queryKey: customerKeys.homeAll, refetchType: 'active' }); }, 750),
     [qc],
@@ -517,7 +526,7 @@ export function HomeScreen() {
         refreshControl={
           // The pull now happens on paper, not on the maroon wash, so the
           // spinner has to be brand — white on white is an invisible spinner.
-          <RefreshControl refreshing={home.isRefetching} onRefresh={() => home.refetch()} tintColor={color.brand[500]} />
+          <RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />
         }
       >
         {/* THE LIVE ORDER, FIRST — and it used to say so while rendering fourth.
@@ -536,15 +545,15 @@ export function HomeScreen() {
             order this renders nothing and the food is still the first thing on
             Home. An order in flight is not a launcher tile — it is transient,
             it is timed, and while it exists it outranks browsing. */}
+        {/* A failed refresh over retained content says so — honestly, with the
+            way to retry. A refresh that is merely in flight says nothing: the
+            "Updating Home…" line that used to sit here pushed the live-order
+            card down on every tab switch, which read as a reload. */}
         {home.isError && feed ? (
           <Card style={{ marginHorizontal: GUTTER, marginTop: space.lg }}>
             <T variant="label">Couldn’t update Home. Showing the last loaded feed, including its order status.</T>
             <PillButton size="sm" label="Try again" onPress={() => { void home.refetch(); }} />
           </Card>
-        ) : home.isFetching && feed ? (
-          <T variant="caption" tone="muted" style={{ marginHorizontal: GUTTER, marginTop: space.sm }}>
-            Updating Home…
-          </T>
         ) : null}
         {activeOrder ? <LiveOrderCard order={activeOrder} navigation={navigation} /> : null}
 

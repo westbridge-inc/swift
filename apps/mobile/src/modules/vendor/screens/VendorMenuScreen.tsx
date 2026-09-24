@@ -28,6 +28,7 @@ import {
   useDeleteItem,
   useSetItemAvailability,
 } from '../../../hooks/vendorops';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
 import { inventorySummary } from '../../../lib/vendorInventory';
@@ -420,6 +421,7 @@ function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
 export function VendorMenuScreen({ navigation }: any) {
   const readOnly = !!useVendorPreview((state) => state.previewType);
   const menuQ = useVendorMenu();
+  const pull = usePullToRefresh(menuQ.refetch); // the spinner follows the pull, never a background refetch (lib/pullToRefresh)
   const createCategory = useCreateCategory();
   const { owner, store } = useVendorProfile();
   const myRole = safeVendorRole(owner?.myRole);
@@ -468,7 +470,7 @@ export function VendorMenuScreen({ navigation }: any) {
         <ScrollView
           contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
           showsVerticalScrollIndicator={false}
-          refreshControl={<RefreshControl refreshing={menuQ.isRefetching} onRefresh={() => menuQ.refetch()} tintColor={color.brand[500]} />}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
         >
           {menuQ.isError && menuQ.data ? (
             <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
