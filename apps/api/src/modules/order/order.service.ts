@@ -35,9 +35,10 @@ import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kit
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
 import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction } from './checkout-outbox';
+import { shapeCheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
-import { promiseAtCheckout, promiseView } from '../eta/promise';
+import { promiseAtCheckout } from '../eta/promise';
 import { AppError, ConflictError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
@@ -1452,6 +1453,21 @@ export class OrderService {
           }
         : null;
 
+      // [G3-F2] ONE place shapes the customer's answer: the value stored in
+      // the receipt and the value the fresh caller receives are the same
+      // answer, so a same-key replay is the first answer field for field and
+      // never leaks the order's internal columns. Shaped from the created
+      // rows' wire form — the representation the receipt column holds — so
+      // every field (vendor name, items, promise, estimated times,
+      // scheduledFor, message wording) is computable from what the
+      // transaction has, nothing is deferred past the commit.
+      const answer = shapeCheckoutAnswer({
+        orders: JSON.parse(JSON.stringify(created)),
+        paymentAction,
+        grandTotal,
+        scheduledFor: input.scheduledFor,
+      });
+
       // [M-11] The command's durable tail and result commit WITH the orders:
       // the vendor alert ladder and the auto-cancel as outbox rows, and the
       // one immutable answer for this idempotency key as a receipt. A crash
@@ -1471,13 +1487,13 @@ export class OrderService {
       if (input.idempotency) {
         await persistCheckoutReceiptInTransaction(tx, {
           userId: input.userId, tenantId: user.tenantId, idempotencyKey: input.idempotency.key, requestHash: input.idempotency.requestHash,
-          orderIds: created.map((o) => o.id), result: { orders: created, paymentAction },
+          orderIds: created.map((o) => o.id), result: answer,
         });
       }
       await input.afterDurableTail?.();
-      return { orders: created, paymentAction };
+      return { orders: created, answer };
     });
-    const { orders, paymentAction } = checkoutCommit;
+    const { orders, answer } = checkoutCommit;
 
     // Post-transaction: emit and notify per vendor (best-effort). The socket
     // event goes to that vendor's room only — a global emit would fan out to
@@ -1516,45 +1532,7 @@ export class OrderService {
       log().info({ orderId: order.id, orderNumber: order.orderNumber, vendorId: order.vendorId, orderType: order.orderType, fulfillment: order.fulfillment, total: Number(order.totalAmount), customerId: input.userId }, 'order: placed');
     }
 
-    const summaries = orders.map((order) => ({
-      id: order.id,
-      orderNumber: order.orderNumber,
-      status: order.status,
-      // The confirmation screen shows the free-cancel countdown off this.
-      holdExpiresAt: order.holdExpiresAt,
-      fulfillment: order.fulfillment,
-      appointmentSlot: order.appointmentSlot,
-      pickupCode: order.pickupCode,
-      riskFlagged: order.riskFlagged,
-      vendorName: order.vendor?.name,
-      items: order.items.map((i) => ({ name: i.name, quantity: i.quantity, price: Number(i.totalCustomer) })),
-      subtotal: Number(order.subtotalCustomer),
-      deliveryFee: Number(order.deliveryFee),
-      isExpress: order.isExpress,
-      tip: Number(order.tipAmount),
-      discount: Number(order.discount),
-      total: Number(order.totalAmount),
-      paymentMethod: order.paymentMethod,
-      estimatedPrepTime: order.estimatedPrepTime,
-      estimatedDeliveryTime: order.estimatedDeliveryTime,
-      promise: promiseView(order),
-      deliveryAddress: order.deliveryAddress,
-      placedAt: order.placedAt,
-      scheduledFor: order.scheduledFor,
-    }));
-
-    return {
-      // Single-vendor callers keep their shape; multi-vendor callers get all
-      order: summaries[0]!,
-      orders: summaries,
-      grandTotal,
-      paymentAction,
-      message: orders.length > 1
-        ? `${orders.length} orders placed — each vendor will confirm shortly.`
-        : input.scheduledFor
-          ? `Order scheduled! ${orders[0]!.vendor?.name} will prepare it at the right time.`
-          : `Order placed! ${orders[0]!.vendor?.name} will confirm shortly.`,
-    };
+    return answer;
   }
 
   /**

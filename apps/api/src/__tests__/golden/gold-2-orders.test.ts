@@ -26,7 +26,7 @@ import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 //     and two in-flight submissions of one key place one set
 //   · CARD is refused before anything is written — the key is not consumed
 //   · two different keys racing one cart: exactly one set of orders
-//   · [G3-F2 · it.fails] a same-key replay answers what the first call did
+//   · [G3-F2] a same-key replay answers what the first call did
 //   · [E01] the cart quote prices every vendor it will charge (fixed by #1285)
 // The MMG half of CUST-02 (MMG checkout, dispute hold) is proven through the
 // same routes in gold-2-mmg.test.ts.
@@ -407,16 +407,16 @@ describe('GOLD-2 · CUST-02 — two-vendor cash checkout', () => {
 
 // ---------------------------------------------------------------------------
 // G3-F2 (reported by GOLD-3, proposed S2; CUST-02's duplicate-key case).
-// The receipt stores the raw rows — `{ orders: created, paymentAction }`
-// (order.service.ts:1460) — while the first answer is the curated summary
-// `{ order, orders, grandTotal, paymentAction, message }` (:1534). The replay
-// returns the receipt (customer.routes.ts:1963), so a retried checkout gets a
-// different shape: no `order`, no `grandTotal`, no `message`, and every
-// internal column of every order (riskReason, subtotalBase/subtotalMarkup,
-// customerId, tenantId, …). This pins the contract the code states ("one key,
-// one request, one immutable answer"): the replay answers what the first call
-// answered. Everything the assertion relies on is proven in beforeAll, so the
-// it.fails can only "pass" on the replay's shape. Flip to `it(...)` when fixed.
+// The receipt used to store the raw rows — `{ orders: created, paymentAction }`
+// — while the first answer is the curated summary
+// `{ order, orders, grandTotal, paymentAction, message }`. The replay returns
+// the receipt, so a retried checkout got a different shape: no `order`, no
+// `grandTotal`, no `message`, and every internal column of every order
+// (riskReason, subtotalBase/subtotalMarkup, customerId, tenantId, …). Fixed:
+// the receipt now stores exactly the shaped answer the fresh checkout returns
+// (shapeCheckoutAnswer, built inside the transaction), so the replay is the
+// first answer. This pins the contract the code states ("one key, one
+// request, one immutable answer").
 // ---------------------------------------------------------------------------
 describe('GOLD-2 · CUST-02 — [G3-F2] a same-key replay is the same answer', () => {
   let first: Record<string, unknown>;
@@ -436,7 +436,7 @@ describe('GOLD-2 · CUST-02 — [G3-F2] a same-key replay is the same answer', (
     expect(Object.keys(first).sort()).toEqual(['grandTotal', 'message', 'order', 'orders', 'paymentAction']);
   });
 
-  it.fails('[G3-F2] the replay carries the first answer’s fields and none of the order’s internal columns', () => {
+  it('[G3-F2] the replay carries the first answer’s fields and none of the order’s internal columns', () => {
     expect(Object.keys(replay).sort()).toEqual(Object.keys(first).sort());
     expect(replay['grandTotal']).toBe(first['grandTotal']);
     expect((replay['order'] as { id: string }).id).toBe((first['order'] as { id: string }).id);
@@ -448,6 +448,9 @@ describe('GOLD-2 · CUST-02 — [G3-F2] a same-key replay is the same answer', (
         expect(order).not.toHaveProperty(internal);
       }
     }
+    // [DS244 F1] Field for field, not only the shape: the two-vendor message
+    // wording, every promise window and every per-order value.
+    expect(replay).toEqual(first);
   });
 });
 

@@ -47,6 +47,7 @@ import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { checkoutRequestHash, drainCheckoutOutbox, findCheckoutReceipt } from '../order/checkout-outbox';
+import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
  *  constrained to the known set — never a hardcoded guess. */
@@ -2099,7 +2100,11 @@ export async function customerRoutes(app: FastifyInstance) {
           throw new AppError(422, 'IDEMPOTENCY_KEY_REUSED', 'This Idempotency-Key was already used for a different order request. Use a new key for a new order.');
         }
         checkoutIdempotencyCounter.labels('replayed_receipt').inc();
-        return { success: true, data: receipt.result, replayed: true };
+        // [G3-F2] The replay is the first answer, field for field: a receipt
+        // written by this fix already holds the shaped answer; a pre-fix
+        // receipt (raw rows) is projected through the same shaper so it never
+        // exposes internal order columns.
+        return { success: true, data: shapeStoredCheckoutResult(receipt.result), replayed: true };
       }
       const claimed = await app.redis.set(redisKey, 'IN_FLIGHT', 'EX', 86_400, 'NX');
       if (!claimed) {
