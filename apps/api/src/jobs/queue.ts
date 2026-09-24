@@ -287,9 +287,12 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   // the copy below must never claim "you were not charged" for MMG.
   const paymentPreview = await ctx.prisma.order.findUnique({
     where: { id: orderId },
-    select: { paymentMethod: true, paymentStatus: true },
+    select: { paymentMethod: true, paymentStatus: true, fulfillment: true },
   });
   const mmgAmbiguous = paymentPreview?.paymentMethod === 'MOBILE_MONEY';
+  // [E20] A booking was declined by its PROVIDER, never "the store" — the same
+  // voice the vendor decline copy uses. Food keeps its wording word for word.
+  const booking = paymentPreview?.fulfillment === 'APPOINTMENT';
   let order: { vendorId: string | null; customerId: string; orderNumber: string };
   try {
     ({ order } = await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
@@ -325,10 +328,14 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   await notifications.send({
     userId: order.customerId,
     type: 'ORDER_UPDATE',
-    title: 'Order cancelled — no response',
-    body: mmgAmbiguous
-      ? `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. If you already sent the MMG payment, the store refunds you directly; please try another store.`
-      : `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another store.`,
+    title: booking ? 'Booking cancelled — no response' : 'Order cancelled — no response',
+    body: booking
+      ? (mmgAmbiguous
+        ? `We're sorry — the provider didn't confirm your booking ${order.orderNumber} in time, so it was cancelled. If you already sent the MMG payment, the provider refunds you directly; please try another time or provider.`
+        : `We're sorry — the provider didn't confirm your booking ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another time or provider.`)
+      : (mmgAmbiguous
+        ? `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. If you already sent the MMG payment, the store refunds you directly; please try another store.`
+        : `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another store.`),
     data: { orderId, status: 'CANCELLED' },
   });
   // [REPORT-007-v4 F-02 → REPORT-012 F-012-04] The store holds the only rail

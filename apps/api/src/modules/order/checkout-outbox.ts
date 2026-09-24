@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { Prisma, type PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient, type FulfillmentType } from '@prisma/client';
 import type { Queue } from 'bullmq';
 import type { FastifyBaseLogger } from 'fastify';
-import { vendorResponseSlaMinutes } from './response-sla';
+import { appointmentAutoCancelDelayMs, vendorResponseSlaMinutes } from './response-sla';
 
 /**
  * [M-11] The checkout command's durable tail and result.
@@ -50,6 +50,9 @@ export interface CheckoutQueueTiming {
   alertDelayMs: number;
   /** Hold window (LIFECYCLE_V2) plus the vendor response SLA. */
   autoCancelDelayMs: number;
+  /** The vendor response SLA in minutes — the floor a booking's slot-relative
+   *  auto-cancel delay must never cut through [E20]. */
+  vendorResponseSlaMinutes: number;
 }
 
 export interface CheckoutOutboxRuntime {
@@ -110,7 +113,18 @@ export async function checkoutQueueTiming(prisma: PrismaClient): Promise<Checkou
   return {
     alertDelayMs: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
     autoCancelDelayMs: (holdMin + slaMin) * 60_000,
+    vendorResponseSlaMinutes: slaMin,
   };
+}
+
+/** The order facts the auto-cancel delay is computed from — passed by the
+ *  checkout caller, never re-read inside the transaction [E20]. */
+export interface CheckoutOutboxOrder {
+  id: string;
+  tenantId: string;
+  fulfillment: FulfillmentType;
+  appointmentSlot: Date | null;
+  placedAt: Date;
 }
 
 /**
@@ -121,14 +135,20 @@ export async function checkoutQueueTiming(prisma: PrismaClient): Promise<Checkou
  */
 export async function persistCheckoutOutboxInTransaction(
   tx: Prisma.TransactionClient,
-  input: { orders: Array<{ id: string; tenantId: string }>; timing: CheckoutQueueTiming; now?: Date },
+  input: { orders: CheckoutOutboxOrder[]; timing: CheckoutQueueTiming; now?: Date },
 ): Promise<string[]> {
   const now = input.now ?? new Date();
   const rows: Prisma.OrderOutboxCreateManyInput[] = [];
   for (const order of input.orders) {
+    // [E20] A booking's no-response clock is slot-relative (earlier of 24h and
+    // slot − 60min, floored at the SLA); every other fulfillment keeps the
+    // hold + SLA delay it always had.
+    const autoCancelDelayMs = order.fulfillment === 'APPOINTMENT'
+      ? appointmentAutoCancelDelayMs(order.placedAt, order.appointmentSlot, input.timing.vendorResponseSlaMinutes)
+      : input.timing.autoCancelDelayMs;
     const effects: Array<{ kind: CheckoutOutboxKind; queue: CheckoutOutboxQueue; payload: Prisma.InputJsonValue; delayMs: number }> = [
       { kind: 'vendor-alert-escalate', queue: 'notification', payload: { orderId: order.id, level: 0 }, delayMs: input.timing.alertDelayMs },
-      { kind: 'auto-cancel', queue: 'order', payload: { orderId: order.id }, delayMs: input.timing.autoCancelDelayMs },
+      { kind: 'auto-cancel', queue: 'order', payload: { orderId: order.id }, delayMs: autoCancelDelayMs },
     ];
     for (const e of effects) {
       const dedupeKey = checkoutOutboxDedupeKey(order.id, e.kind);

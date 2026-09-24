@@ -181,6 +181,39 @@ describe('the vendor response deadline', () => {
     }
   });
 
+  it('[E20] a booking\'s deadline is slot-relative — earlier of 24h and slot − 60min, floored at the SLA', () => {
+    const placedAt = new Date('2026-08-30T12:00:00Z');
+    const base = { status: 'PENDING', placedAt, createdAt: placedAt, fulfillment: 'APPOINTMENT' };
+    // 3 days out: the 24-hour cap, not slot − 60min.
+    expect(
+      vendorRespondBy(
+        { ...base, appointmentSlot: new Date('2026-09-02T12:00:00Z') },
+        { slaMinutes: 10, holdMs: 5 * 60_000 },
+      )?.toISOString(),
+    ).toBe('2026-08-31T12:00:00.000Z');
+    // 5 hours out: slot − 60min.
+    expect(
+      vendorRespondBy(
+        { ...base, appointmentSlot: new Date('2026-08-30T17:00:00Z') },
+        { slaMinutes: 10, holdMs: 5 * 60_000 },
+      )?.toISOString(),
+    ).toBe('2026-08-30T16:00:00.000Z');
+    // 30 minutes out: floored at the ordinary SLA.
+    expect(
+      vendorRespondBy(
+        { ...base, appointmentSlot: new Date('2026-08-30T12:30:00Z') },
+        { slaMinutes: 10, holdMs: 5 * 60_000 },
+      )?.toISOString(),
+    ).toBe('2026-08-30T12:10:00.000Z');
+    // A booking that is no longer PENDING reads null, like every other order.
+    expect(
+      vendorRespondBy(
+        { ...base, status: 'ACCEPTED', appointmentSlot: new Date('2026-09-02T12:00:00Z') },
+        { slaMinutes: 10, holdMs: 0 },
+      ),
+    ).toBeNull();
+  });
+
   it('an accepted order reads null on the detail — a clock on an accepted order would be a lie', async () => {
     const accepted = await makeHeldOrder({ holdMsFromNow: -60_000, status: 'PREPARING' });
     const byId = await inject('GET', `/api/v1/vendor/orders/${accepted.id}`, vendorOwner.token);
