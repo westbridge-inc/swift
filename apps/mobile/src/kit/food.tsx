@@ -6,7 +6,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, radius, space, withAlpha } from '@swift/ui';
 import { DARK_BLURHASH } from '../lib/images';
 import { Card } from './card';
-import { PhotoPlaceholder } from './photo-placeholder';
+import { Photo, PhotoPlaceholder } from './photo-placeholder';
 import { Pictogram, type PictogramName } from './pictograms';
 // [B6] The kit no longer reaches into the legacy folder — Scrim is a kit
 // primitive now (DRIFT-09 port), which was the last contamination here.
@@ -38,6 +38,13 @@ function MetaDot() {
  *
  * Segments compose, and the dot is drawn between them rather than in front of
  * each. `extra` alone renders as "Mauby's Snackette", not "· Mauby's Snackette".
+ * A blank `extra` is not a segment at all: "New" plus a whitespace string used
+ * to draw a dot beside nothing.
+ *
+ * The line is ONE line [Q3]. `extra` is the free text (a store name, an ETA, a
+ * distance) and the only segment that can grow without bound, so it is the one
+ * that gives way: it shrinks into whatever width the row is given and ends in
+ * an ellipsis. It never pushes the line out of its card.
  */
 export function RatingMeta({
   rating,
@@ -78,10 +85,11 @@ export function RatingMeta({
     );
   }
 
-  if (extra) {
+  const extraText = extra?.trim();
+  if (extraText) {
     segments.push(
-      <T key="extra" variant="caption" tone="muted">
-        {extra}
+      <T key="extra" variant="caption" tone="muted" numberOfLines={1} ellipsizeMode="tail" style={{ flexShrink: 1 }}>
+        {extraText}
       </T>,
     );
   }
@@ -89,7 +97,7 @@ export function RatingMeta({
   if (segments.length === 0) return null;
 
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 }}>
       {segments.map((seg, i) => (
         <React.Fragment key={i}>
           {i > 0 ? <MetaDot /> : null}
@@ -158,29 +166,35 @@ export function FoodCard({
             </View>
           ) : null}
         </View>
-        <View style={{ paddingTop: space.sm, gap: 4 }}>
+        {/* ONE FACT PER LINE, ALL INSIDE THE CARD [Q3]. The price and the meta
+            used to share one row with `space-between` and nothing bounding
+            either. On a 44%-wide rail card "$1,500" plus "TEST-Kitchen-One ·
+            41 min" is wider than the card, and space-between has no space to
+            hand out once the content overflows — so the price ran straight
+            into the store name ("$1,500TEST-Kitchen-One") and the line ran on
+            under the next card, which clipped "41 min" to "41 mi". Now the
+            price has its own line and the meta has its own, each one line,
+            the meta ending in an ellipsis; and this block clips to the card,
+            so no text can paint into a neighbour. */}
+        <View style={{ paddingTop: space.sm, gap: 4, overflow: 'hidden' }}>
           <T variant="label" weight="semibold" numberOfLines={1}>
             {name}
           </T>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            {priceLabel ? (
-              // MONEY IN INK [100x pass §5]: "Prices were brand-red everywhere
-              // — red stops meaning 'act' when it also means '$2,500'. Money is
-              // now ink, tabular Bricolage; red is reserved for the rail, the
-              // flagship tile, and CTAs." The numM variant is already the
-              // tabular face; only the colour changes.
-              <T variant="numM">
-                {priceLabel}
-              </T>
-            ) : (
-              <View />
-            )}
-            {/* RatingMeta now returns null when it has nothing to say, so this
-                no longer needs to guess. The old guard dropped the WHOLE line
-                whenever rating was absent — which is why the Popular rail never
-                showed a store name the API had been sending all along. */}
-            <RatingMeta rating={rating} bucket={ratingBucket} topRated={topRated} extra={meta} />
-          </View>
+          {priceLabel ? (
+            // MONEY IN INK [100x pass §5]: "Prices were brand-red everywhere
+            // — red stops meaning 'act' when it also means '$2,500'. Money is
+            // now ink, tabular Bricolage; red is reserved for the rail, the
+            // flagship tile, and CTAs." The numM variant is already the
+            // tabular face; only the colour changes.
+            <T variant="numM" numberOfLines={1}>
+              {priceLabel}
+            </T>
+          ) : null}
+          {/* RatingMeta now returns null when it has nothing to say, so this
+              no longer needs to guess. The old guard dropped the WHOLE line
+              whenever rating was absent — which is why the Popular rail never
+              showed a store name the API had been sending all along. */}
+          <RatingMeta rating={rating} bucket={ratingBucket} topRated={topRated} extra={meta} />
         </View>
       </View>
       )}
@@ -429,6 +443,60 @@ export function MerchantCard({
             </View>
           </View>
         </Card>
+      )}
+    </Pressable>
+  );
+}
+
+// The tile's footprint on Home's category rail — carried over unchanged.
+const CATEGORY_TILE_W = 132;
+const CATEGORY_TILE_H = 84;
+
+/**
+ * A menu category as a photograph — the tile on Home's "Find by category" rail.
+ *
+ * [Founder 08-22] Bare outlined text pills were the last clean-minimal islands
+ * on Home. Categories are FOOD: they get photography under a scrim with a white
+ * label, like every other band. The picture is the merchant's own
+ * (`categoryPhoto`), and when there is none `Photo` draws the honest
+ * placeholder — never a stock photograph [F-264].
+ *
+ * EXACTLY ONE LABEL [Q3]. The name is drawn once, white on the scrim. With no
+ * photo the placeholder drew it as well — a centred caps "MENU" behind the
+ * tile's own "Menu", both on an 84pt tile — so every unphotographed category
+ * showed two overlapping labels. The placeholder is told the name is already
+ * on the photo (`showLabel={false}`) and stays a picture: ground and pictogram.
+ */
+export function CategoryTile({
+  name,
+  image,
+  onPress,
+}: {
+  name: string;
+  /** null ⇒ the category has no photo; the placeholder is drawn [F-264]. */
+  image: string | null;
+  onPress?: () => void;
+}) {
+  return (
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={name}>
+      {({ pressed }) => (
+        <View
+          style={{
+            width: CATEGORY_TILE_W,
+            height: CATEGORY_TILE_H,
+            borderRadius: radius.lg,
+            overflow: 'hidden',
+            opacity: pressed ? 0.85 : 1,
+          }}
+        >
+          <Photo uri={image} label={name} showLabel={false} style={{ width: '100%', height: '100%' }} />
+          <Scrim height={CATEGORY_TILE_H} cover />
+          <View style={{ position: 'absolute', left: space.md, right: space.md, bottom: space.sm }}>
+            <T variant="label" weight="semibold" tone="onBrand" numberOfLines={1}>
+              {name}
+            </T>
+          </View>
+        </View>
       )}
     </Pressable>
   );

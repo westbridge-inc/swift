@@ -14,8 +14,8 @@ import { createHomeRefreshGate, homeFeedState, homeQueryKey, subscribeToHomeAtte
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../kit/pressable-scale';
-import { Scrim } from '../../../kit/scrim';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { distanceLabel } from '../../../lib/geo';
 import { locationPrimer } from '../../../lib/location-primer';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
@@ -35,11 +35,11 @@ import { promiseLine } from '../../../lib/promise';
 import { holdRingActive, holdRingWindow } from '../../../kit/hold-window';
 import {
   Card,
+  CategoryTile,
   ErrorState,
   FoodCard,
   LoadingBlock,
   MerchantCard,
-  Photo,
   Pictogram,
   type PictogramName,
   PillButton,
@@ -96,11 +96,9 @@ const SERVICES: {
 // the enum value is READY_FOR_PICKUP — and it described a taxi ride as
 // "Waiting for the store".
 
-function kmLabel(km: unknown): string | undefined {
-  const n = Number(km);
-  if (!Number.isFinite(n)) return undefined;
-  return n < 1 ? '<1 km' : `${n} km`;
-}
+// Store distances are written by lib/geo `distanceLabel`, the one formatter
+// the rest of the app uses too. Home's own `kmLabel` said "<1 km" where every
+// other screen said "0.4 km", and read a null distance as "<1 km" [Q3].
 
 /** The one display-face moment on Home [DESIGN_NOTES 2026-08-18]: a
  *  time-aware greeting — Guyana is a single timezone, the device clock is
@@ -242,7 +240,11 @@ function LiveOrderCard({ order, navigation }: { order: LiveOrderProjection; navi
                   // What stays true on any clock is that the recipient — the
                   // store, or the provider for a booking — has not been told
                   // yet; the cost, if any, is shown before confirming.
-                  `${recipient.charAt(0).toUpperCase()}${recipient.slice(1)} hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
+                  // Joined like every other separator on Home, never
+                  // interpolated: an empty part gets no dot [Q3].
+                  [`${recipient.charAt(0).toUpperCase()}${recipient.slice(1)} hasn’t been told yet`, orderSubtitle(null, order.orderNumber)]
+                    .filter(Boolean)
+                    .join(' · ')
                 : orderSubtitle(order.vendor?.name, order.orderNumber)}
             </T>
             {order.fulfillment === 'APPOINTMENT' && order.appointmentSlot ? (
@@ -708,7 +710,11 @@ export function HomeScreen() {
                   a CTA, which made Swift's most credible claim look like an ad
                   — and an ad is the one thing nobody believes. Stated plainly
                   on paper, in ink, it reads as a fact about how Swift works,
-                  which is what it is. No CTA: it is not selling anything. */}
+                  which is what it is. No CTA: it is not selling anything.
+
+                  The body WRAPS inside the band [Q3]: the text column is
+                  `flex: 1` beside the icon, so it is exactly as wide as the row
+                  has left, and neither line carries a numberOfLines. */}
               <View style={{ paddingHorizontal: GUTTER, flexDirection: 'row', alignItems: 'flex-start', gap: space.sm }}>
                 <Feather name="check-circle" size={16} color={color.success} style={{ marginTop: 2 }} />
                 <View style={{ flex: 1 }}>
@@ -749,33 +755,21 @@ export function HomeScreen() {
                   keyExtractor={(c) => c.id}
                   contentContainerStyle={{ paddingHorizontal: GUTTER, gap: space.md, paddingTop: space.lg }}
                   renderItem={({ item }) => (
-                    // [Founder 08-22] Bare outlined text pills were the last
-                    // clean-minimal islands on the screen. Categories are FOOD
-                    // — they get photography with a scrim and white label,
-                    // like every other band. Real menu categories from the
-                    // live feed; the merchant's own imagery via categoryPhoto.
-                    <Pressable
+                    // A kit tile: photography under a scrim, the name drawn
+                    // exactly ONCE — with no photo the placeholder used to add
+                    // its own caps "MENU" behind the tile's "Menu" [Q3].
+                    //
+                    // The merchant's own picture. This passed
+                    // categoryImage(name), which looked the name up in a map
+                    // keyed by VERTICAL — food, grocery, taxi — and returned a
+                    // stock photo when it missed. Menu categories never match,
+                    // so every chip on Home was the same photograph. The tile's
+                    // Photo draws an honest placeholder for null.
+                    <CategoryTile
+                      name={item.name}
+                      image={categoryPhoto(item)}
                       onPress={() => navigation.navigate('Search', { q: item.name })}
-                      accessibilityRole="button"
-                      accessibilityLabel={item.name}
-                    >
-                      {({ pressed }) => (
-                        <View style={{ width: 132, height: 84, borderRadius: radius.lg, overflow: 'hidden', opacity: pressed ? 0.85 : 1 }}>
-                          {/* The merchant's own picture. This passed
-                              categoryImage(name), which looked the name up in a
-                              map keyed by VERTICAL — food, grocery, taxi — and
-                              returned a stock photo when it missed. Menu
-                              categories never match, so every chip on Home was
-                              the same photograph. Photo already draws an honest
-                              placeholder for null; it was simply never given one. */}
-                          <Photo uri={categoryPhoto(item)} label={item.name} style={{ width: '100%', height: '100%' }} />
-                          <Scrim height={84} cover />
-                          <View style={{ position: 'absolute', left: space.md, right: space.md, bottom: space.sm }}>
-                            <T variant="label" weight="semibold" tone="onBrand" numberOfLines={1}>{item.name}</T>
-                          </View>
-                        </View>
-                      )}
-                    </Pressable>
+                    />
                   )}
                 />
               </>
@@ -824,7 +818,7 @@ export function HomeScreen() {
                     topRated={v.topRated}
                     meta={[
                       v.etaMin ? `${v.etaMin} min` : null,
-                      locationFix ? kmLabel(v.distanceKm) : null,
+                      locationFix ? distanceLabel(v.distanceKm) : null,
                     ].filter(Boolean).join(' · ') || undefined}
                     favorite={v.isFavorite}
                     onToggleFavorite={() => onFavorite(v.id, !!v.isFavorite)}
@@ -893,7 +887,7 @@ export function HomeScreen() {
                           topRated={v.topRated}
                           extra={[
                             v.etaMin ? `${v.etaMin} min` : null,
-                            locationFix ? kmLabel(v.distanceKm) : null,
+                            locationFix ? distanceLabel(v.distanceKm) : null,
                           ].filter(Boolean).join(' · ') || undefined}
                         />
                       }
@@ -975,7 +969,7 @@ export function HomeScreen() {
                             rating={v.displayRating ?? null}
                             bucket={v.ratingBucket}
                             topRated={v.topRated}
-                            extra={locationFix ? kmLabel(v.distanceKm) : undefined}
+                            extra={locationFix ? distanceLabel(v.distanceKm) : undefined}
                           />
                         }
                         onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}

@@ -6,6 +6,7 @@ import { color, space } from '@swift/ui';
 import { useDiscoveryCategories, useVendors } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { distanceLabel } from '../../../lib/geo';
 import { vendorPhoto } from '../../../lib/images';
 import { CartBar, useCartBarClearance, Chip, EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, T, VendorRow } from '../../../kit';
 
@@ -46,7 +47,7 @@ export function CategoryFeedScreen() {
           rating={v.displayRating ?? null}
           bucket={v.ratingBucket}
           topRated={v.topRated}
-          extra={locationFix && v.distanceKm != null ? `${v.distanceKm} km` : undefined}
+          extra={locationFix ? distanceLabel(v.distanceKm) : undefined}
         />
       }
       sub={v.itemsInCategory ? `${v.itemsInCategory} ${name.toLowerCase()} items` : v.etaMin ? `~${v.etaMin} min delivery` : undefined}

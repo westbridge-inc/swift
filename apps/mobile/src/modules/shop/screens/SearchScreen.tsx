@@ -11,6 +11,7 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAppStore } from '../../../stores/appStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { distanceLabel } from '../../../lib/geo';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import {
   CartBar,
@@ -521,8 +522,8 @@ export function SearchScreen() {
                         topRated={v.topRated}
                         extra={v.etaMin
                           ? `${v.etaMin} min`
-                          : locationFix && v.distanceKm != null
-                            ? `${v.distanceKm} km`
+                          : locationFix
+                            ? distanceLabel(v.distanceKm)
                             : undefined}
                       />
                     }
