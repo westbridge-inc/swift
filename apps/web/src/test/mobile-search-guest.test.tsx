@@ -27,6 +27,10 @@ vi.mock('../../../mobile/src/stores/storeSwitcher', () => ({ useStoreSwitcher: {
 vi.mock('../../../mobile/src/stores/locationStore', () => ({ useLocationStore: () => ({ latitude: null, longitude: null, status: 'denied' }) }));
 vi.mock('../../../mobile/src/stores/appStore', () => ({ useAppStore: () => ({ recentSearches: [], pushSearch: () => {}, clearSearches: () => {} }) }));
 vi.mock('../../../mobile/src/lib/storage', () => ({ zustandStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} } }));
+// The Market-depth memory (#1316) persists through react-native-mmkv, a native
+// module whose own react-native import would load the real (Flow-typed)
+// package here. The mobile hook tests replace it the same way.
+vi.mock('../../../mobile/src/lib/marketDepthMemory', () => ({ rememberedMarketDepth: () => null, rememberMarketDepth: () => {} }));
 vi.mock('../../../mobile/src/kit/action-sheet', () => ({ ActionSheet: () => null }));
 vi.mock('../../../mobile/src/kit', () => ({
   Screen: ({ children }: any) => <div>{children}</div>, T: ({ children }: any) => <span>{children}</span>,
