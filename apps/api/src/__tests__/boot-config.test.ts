@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
+import { testControlIdentity } from '../modules/ops/test-control';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
 // secrets that keep KYC documents private (envelope KEK + render HMAC), and
@@ -33,6 +34,7 @@ const good: Record<string, string | undefined> = {
   MMG_PASSWORD: 'mmg-password',
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
+  MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
 };
 
 const cardOff = {
@@ -164,6 +166,8 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: undefined })).toThrow(/MMG_DRIVER/);
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
     expect(() => assertSafeBootConfig({ ...good, MMG_MSECRET: undefined })).toThrow(/MMG_MSECRET/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: 'yes' })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
     expect(() => assertSafeBootConfig({ ...good, MMG_API_URL: 'https://mwallet.mmgtest.net/olive/publisher/v1' })).toThrow(/non-UAT/);
   });
 
@@ -357,6 +361,49 @@ describe('[F-027-15] getPushProvider refuses the in-memory provider in productio
   });
 });
 
+// [R2 C2] The load-test control plane signs its leases with
+// TEST_CONTROL_SECRET. Its fallback, 'test-control-dev-secret', is printed in
+// this PUBLIC repository, so an internet-facing loadtest deployment with the
+// secret unset would hand anyone a forgeable lease. Boot refuses that; the
+// fallback survives only for the isolated `test` mode the suites run in.
+describe('test-control lease secret [C2]', () => {
+  const loadtest: Record<string, string | undefined> = { NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '1' };
+  const prismaDouble = { deploymentIdentity: { findUnique: async () => null } } as unknown as Parameters<typeof testControlIdentity>[0];
+
+  it('refuses loadtest with test control enabled and no TEST_CONTROL_SECRET', () => {
+    expect(() => assertSafeBootConfig(loadtest)).toThrow(/TEST_CONTROL_SECRET/);
+  });
+
+  it.each(['', 'short', 'x'.repeat(31), 'test-control-dev-secret'])('refuses a weak secret (%j)', (secret) => {
+    expect(() => assertSafeBootConfig({ ...loadtest, TEST_CONTROL_SECRET: secret })).toThrow(/TEST_CONTROL_SECRET/);
+  });
+
+  it('accepts a 32+ character secret', () => {
+    expect(() => assertSafeBootConfig({ ...loadtest, TEST_CONTROL_SECRET: 'x'.repeat(32) })).not.toThrow();
+  });
+
+  it('does not require the secret when test control is off', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '0' })).not.toThrow();
+  });
+
+  it('production never registers test control, so the guard adds nothing there', () => {
+    expect(() => assertSafeBootConfig({ ...good, TEST_CONTROL_ENABLED: '1' })).not.toThrow();
+  });
+
+  it('test mode keeps the repository fallback — suites run isolated', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'test', TEST_CONTROL_ENABLED: '1' })).not.toThrow();
+  });
+
+  it('the identity endpoint itself refuses to sign with the fallback outside test mode', async () => {
+    await expect(testControlIdentity(prismaDouble, { NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '1' })).rejects.toThrow(/TEST_CONTROL_SECRET/);
+    const signed = await testControlIdentity(prismaDouble, { NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '1', TEST_CONTROL_SECRET: 'y'.repeat(32) });
+    expect(signed.lease.signature).toMatch(/^[0-9a-f]{64}$/);
+    const inTest = await testControlIdentity(prismaDouble, { NODE_ENV: 'test', TEST_CONTROL_ENABLED: '1' });
+    expect(inTest.lease.signature).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
 // [V8] CONSENT_IP_PEPPER degrades silently (hashIp → null, attribution just
 // stops). Boot must at least be LOUD about it — a warning, not a refusal,
 // because the ledger's core evidence still writes without it.
@@ -382,6 +429,60 @@ describe('CONSENT_IP_PEPPER visibility [V8]', () => {
       expect(pepperWarnings).toHaveLength(0);
     } finally {
       warn.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [R13 on current main] Two production boot rules meet here. #1272 lets a
+// cash-only launch start with the card rail declared OFF; R13 keeps live MMG
+// collection off until sandbox UAT proves the merchant reference round-trips
+// (MMG_REFERENCE_ROUNDTRIP_VERIFIED=1). The merged configuration must keep
+// both: cards OFF is not a way past the MMG gate, and the MMG gate does not
+// stop a cash-only launch. Checked everywhere a booting server consults it:
+// the boot guard, the value-free preflight, and the two provider factories
+// the billing workers construct.
+// ---------------------------------------------------------------------------
+describe('[R13 on current main] cash-only production boot keeps the MMG reference gate', () => {
+  const cashOnly: Record<string, string | undefined> = { ...cardOff, MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' };
+  const unverified = [undefined, '', '0', 'true', 'yes', '1 '];
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('boots with cards OFF once the MMG reference round-trip is verified', () => {
+    expect(() => assertSafeBootConfig(cashOnly)).not.toThrow();
+  });
+
+  it.each(unverified)('refuses cards OFF while the MMG reference round-trip is unverified (%s)', (verified) => {
+    expect(() => assertSafeBootConfig({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: verified }))
+      .toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+  });
+
+  it('the value-free preflight gives the same two verdicts', () => {
+    const pass = runPreflight(cashOnly);
+    expect(pass.status, pass.stdout + pass.stderr).toBe(0);
+    const held = runPreflight({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined });
+    expect(held.status, held.stdout + held.stderr).toBe(1);
+    expect(held.stdout).toContain('MMG_REFERENCE_ROUNDTRIP_VERIFIED');
+  });
+
+  it('the workers get a card rail that refuses locally and live MMG only once verified', async () => {
+    const { getPaymentProvider } = await import('../providers/payment/payment-provider');
+    const { getMmgProvider, LiveMmgProvider } = await import('../providers/mmg/mmg-provider');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('a boot check never contacts a provider'));
+    try {
+      for (const [name, value] of Object.entries(cashOnly)) vi.stubEnv(name, value);
+      const cards = getPaymentProvider();
+      await expect(cards.chargeToken({ token: 'synthetic', amount: 1, currencyCode: 'GYD', idempotencyKey: 'boot-check', description: 'boot check' }))
+        .resolves.toMatchObject({ status: 'failed', code: 'CARD_RAIL_DISABLED' });
+      expect(getMmgProvider()).toBeInstanceOf(LiveMmgProvider);
+      for (const verified of unverified) {
+        vi.stubEnv('MMG_REFERENCE_ROUNDTRIP_VERIFIED', verified);
+        expect(() => getMmgProvider(), String(verified)).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
     }
   });
 });
