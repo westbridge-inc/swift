@@ -3525,17 +3525,22 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /subscription/billing-method — §13 rail selection (owner-only:
-   *  CASH prepaid vs MOBILE_MONEY merchant-initiated on the owner's MMG). */
+   *  CASH prepaid vs MOBILE_MONEY merchant-initiated on the owner's MMG), and
+   *  [E12] the partner's self-serve stop/resume: `NONE` stops weekly billing
+   *  (the paid period still runs out, then the store stops receiving work);
+   *  CASH or MOBILE_MONEY resumes it on that rail. */
   app.put('/subscription/billing-method', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     const body = z.object({
-      method: z.enum(['CASH', 'MOBILE_MONEY']),
+      method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
     const sub = await app.prisma.subscription.findFirst({ where: { vendorId } });
     if (!sub) throw new NotFoundError('Subscription');
     const billingSvc = new BillingService(app.prisma, notifications, getPaymentProvider());
-    const updated = await billingSvc.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
+    const updated = body.method === 'NONE'
+      ? await billingSvc.stopBilling(sub.id, request.user.userId)
+      : await billingSvc.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
     return { success: true, data: { billingMethod: updated.billingMethod, mmgPayerMsisdn: updated.mmgPayerMsisdn } };
   });
 

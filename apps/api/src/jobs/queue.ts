@@ -480,6 +480,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       switch (job.name) {
         case 'process-billing': {
           const result = await billing.runBillingCycle();
+          // [E12] A stopped subscription stays ACTIVE until its paid period
+          // ends, then turns PAUSED (not operable, owing nothing); resuming
+          // restarts it with this week's fee billed like any renewal.
+          const lapse = await billing.lapseStoppedSubscriptions();
           const reminders = await billing.sendUpcomingReminders();
           // §11 stages 6..N: daily reinstatement nudges for the suspended
           // (idempotent per day via the REMINDER event key) + CHURNED terminal
@@ -493,10 +497,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // paid conversion seamless.
           const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
           const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
+          ctx.log.info({ ...result, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
-          const troubled = result.failed + result.errors + result.suspended;
+          // [DS213 F1-1] A stopped plan that fails to pause counts too.
+          const troubled = result.failed + result.errors + result.suspended + lapse.failed;
           const threshold = Number(process.env['BILLING_FAILURE_ALERT_THRESHOLD'] ?? '3');
           if (troubled >= threshold) {
             const { notifyAdmins } = await import('../modules/notification/notification.service');
@@ -507,7 +512,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
                 tenantId: null,
                 title: 'Billing failures spiking',
                 body: `${troubled} subscriptions failed, errored, or suspended this cycle (threshold ${threshold}). Check the billing dashboard before partners start calling.`,
-                data: { kind: 'ops_billing_failures', failed: result.failed, errors: result.errors, suspended: result.suspended },
+                data: { kind: 'ops_billing_failures', failed: result.failed, errors: result.errors, suspended: result.suspended, lapseFailed: lapse.failed },
               }),
             );
           }

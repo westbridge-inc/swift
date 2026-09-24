@@ -39,6 +39,7 @@ import {
   useUpdatePromo,
   useDeletePromo,
   useVendorSubscription,
+  useSetVendorBillingMethod,
   useVendorHours,
   useSetHours,
   type DayHours,
@@ -52,6 +53,8 @@ import { mediaUrl } from '../../../lib/images';
 import { safeVendorRole, TabHeader, VendorBillingNotice } from '../shared';
 import { useAuthStore } from '../../../stores/authStore';
 import { useVendorPreview } from '../../../stores/vendorPreview';
+import { BillingStopControl } from '../../../components/billing/BillingSurfaces';
+import { resumeBillingMethod } from '../../../lib/billing';
 
 export function VendorAccountScreen() {
   const navigation = useNavigation<any>();
@@ -72,6 +75,7 @@ export function VendorAccountScreen() {
   const isOwner = myRole === 'OWNER';
   const isManager = myRole === 'OWNER' || myRole === 'MANAGER';
   const sub = useVendorSubscription(isOwner);
+  const setBilling = useSetVendorBillingMethod();
   const hoursQ = useVendorHours();
   const setHours = useSetHours();
   const qc = useQueryClient();
@@ -176,7 +180,7 @@ export function VendorAccountScreen() {
           )}
         </Card>
 
-        {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} /> : null}
+        {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} setBilling={setBilling} /> : null}
 
         {isManager ? (
           <MmgPayLinkCard
@@ -306,7 +310,7 @@ function VendorDocumentsSection({ vendorType }: { vendorType: string }) {
   );
 }
 
-function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
+function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string; setBilling: any }) {
   const navigation = useNavigation<any>();
   const pill = !sub
     ? { label: 'Inactive', tone: 'brand' as const }
@@ -339,6 +343,20 @@ function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
       {/* Only actionable billing status belongs here. A healthy account stays
           quiet; prepaid fee credit is deliberately not framed as a wallet. */}
       <VendorBillingNotice sub={sub} onPay={() => navigation.navigate('VendorMySwiftNumber')} />
+      <BillingStopControl
+        sub={sub}
+        who="store"
+        pending={setBilling.isPending}
+        onStop={() => setBilling.mutate({ method: 'NONE' })}
+        onResume={() =>
+          setBilling.mutate({
+            method: resumeBillingMethod(sub),
+            ...(sub?.billingMethod === 'MOBILE_MONEY' && sub?.mmgPayerMsisdn
+              ? { mmgPayerMsisdn: sub.mmgPayerMsisdn }
+              : {}),
+          })
+        }
+      />
     </>
   );
 }
