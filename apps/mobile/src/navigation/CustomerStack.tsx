@@ -49,6 +49,7 @@ import { ServicesScreen } from '../modules/services/screens/ServicesScreen';
 import { ServiceJobsScreen } from '../modules/services/screens/ServiceJobsScreen';
 import { ServiceProviderScreen } from '../modules/services/screens/ServiceProviderScreen';
 import { IdentityVerificationScreen } from '../modules/account/screens/IdentityVerificationScreen';
+import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -174,6 +175,8 @@ export function CustomerStack() {
       <Stack.Screen name="ServiceJobs" component={ServiceJobsScreen} />
       <Stack.Screen name="ServiceProvider" component={ServiceProviderScreen} />
       <Stack.Screen name="IdentityVerification" component={IdentityVerificationScreen} />
+      {/* [E27] the taxi screen's door when a ride request needs the profile photo */}
+      <Stack.Screen name="Selfie" component={SelfieCaptureScreen} />
     </Stack.Navigator>
   );
 }
