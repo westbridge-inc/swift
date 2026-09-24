@@ -24,13 +24,13 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
   ca-certificates curl openssh-client openssh-server ufw unattended-upgrades \
-  postgresql-client git openssl libdigest-sha-perl python3 snapd
-# Ubuntu 24.04 ships no awscli apt package. Install AWS CLI v2 from the
-# official snap and expose it on the default service PATH, because systemd
-# units (the nightly backup) do not search /snap/bin.
-snap list aws-cli >/dev/null 2>&1 || snap install aws-cli --classic
-ln -sf /snap/bin/aws /usr/local/bin/aws
-/usr/local/bin/aws --version >/dev/null 2>&1 || die "AWS CLI is not usable after install"
+  postgresql-client git openssl libdigest-sha-perl python3
+# No host AWS CLI. Ubuntu 24.04's only awscli package is a snap, and snaps
+# start through setuid snap-confine — which the hardened backup unit
+# (NoNewPrivileges=true, and that hardening is not weakened) forbids. The
+# backup and restore scripts run the AWS CLI inside a PINNED container image
+# instead (deploy/.env AWS_CLI_IMAGE; deploy/backup.sh), over the docker
+# socket this script's docker group membership grants.
 ssh-keygen -lf "$PUBKEY_FILE" >/dev/null || die "invalid SSH public key"
 KEY="$(head -1 "$PUBKEY_FILE")"
 [[ "$KEY" == ssh-*' '* ]] || die "invalid SSH public key format"

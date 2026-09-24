@@ -26,6 +26,7 @@ import {
   useBusyHours,
   useRepeatCustomers,
 } from '../../../hooks/vendorops';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { getAuthSessionSnapshot, requireAuthSessionForPrincipal, requireAuthSessionSnapshot } from '../../../stores/authStore';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
@@ -720,7 +721,9 @@ export function VendorInsightsScreen() {
   const primaryLoading = (q.isLoading && !q.data) || (revenueQ.isLoading && !revenueQ.data) || (revenueBehindAnalytics && !revenueQ.isError);
   const primaryError = (q.isError && !q.data) || (revenueQ.isError && (!revenueQ.data || revenueBehindAnalytics));
   const showingStale = (q.isError && !!q.data) || (revenueQ.isError && !!revenueQ.data);
-  const refreshing = q.isRefetching || revenueQ.isRefetching || opsQ.isRefetching || popularQ.isRefetching;
+  // The spinner follows the owner's own pull, never the analytics poll or the
+  // revenue catch-up effect above (lib/pullToRefresh). A pull refreshes all four.
+  const pull = usePullToRefresh(() => Promise.all([q.refetch(), revenueQ.refetch(), opsQ.refetch(), popularQ.refetch()]));
   const opsDetail = readOnly
     ? 'Not included in sample'
     : opsQ.isLoading
@@ -747,13 +750,8 @@ export function VendorInsightsScreen() {
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={refreshing}
-            onRefresh={() => {
-              q.refetch();
-              revenueQ.refetch();
-              opsQ.refetch();
-              popularQ.refetch();
-            }}
+            refreshing={pull.refreshing}
+            onRefresh={() => { void pull.onRefresh(); }}
             tintColor={color.brand[500]}
           />
         }

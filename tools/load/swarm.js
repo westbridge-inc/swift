@@ -1,7 +1,7 @@
 // Swift SUSTAINED swarm — hold peak traffic and prove the SLOs + correctness
 // invariants hold [LOAD-001]. Run against STAGING, never prod.
 //
-//   BASE_URL=https://staging-api.swift.gy \
+//   BASE_URL=https://api-staging.swiftgy.com \
 //   ORDER_TOKENS="tokA,tokB" ORDER_VENDOR_ID=<vid> ORDER_ITEM_ID=<item> \
 //   k6 run tools/load/swarm.js
 //

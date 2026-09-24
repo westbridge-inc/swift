@@ -203,6 +203,24 @@ describe('[E16-B] a courier job enters DELIVERED only with the door photo record
     });
   });
 
+  it('[DS145 D3] a door photo issued to a replaced rider does not deliver for the rider who now holds the job', async () => {
+    const sender = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const first = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
+    const firstRider = await makeRider(first.userId);
+    const second = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
+    const secondRider = await makeRider(second.userId);
+    // The first rider's proof is durably on the row (issued to them, recorded
+    // as that exact URL), then the job is reassigned to the second rider.
+    const order = await makeCourierOrder(sender.userId, secondRider.id, { status: 'ARRIVED', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    const url = `/uploads/courier-proof/${order.id}/delivery/first-rider.png`;
+    await app.prisma.order.update({ where: { id: order.id }, data: { courierProofIssuedUrl: url, courierProofIssuedRiderId: firstRider.id, courierProofPhotoUrl: url } });
+
+    const res = await inject('PUT', `/api/v1/rider/orders/${order.id}/delivered`, {}, second.token);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('DELIVERY_PROOF_REQUIRED');
+    expect(await orderFacts(order.id)).toMatchObject({ status: 'ARRIVED', deliveredAt: null, earnings: 0 });
+  });
+
   it('refuses the same bare delivered call from EN_ROUTE_DELIVERY', async () => {
     const sender = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const mover = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
@@ -283,7 +301,8 @@ describe('[E16-B] a courier job enters DELIVERED only with the door photo record
     expect(await app.prisma.earning.findFirst({ where: { orderId: order.id, type: 'DELIVERY_FEE' } })).not.toBeNull();
   });
 
-  it('still refuses a rider who is not assigned the courier job (wrong-party)', async () => {
+  // [DS145 D4] Preservation, not red-first: getOwnedOrder refuses before the gate.
+  it('[preservation] still refuses a rider who is not assigned the courier job (wrong-party)', async () => {
     const sender = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const owner = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
     const ownerRider = await makeRider(owner.userId);

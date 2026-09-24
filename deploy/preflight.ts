@@ -74,7 +74,7 @@ if (!existsSync(envPath)) {
  *  bare checkout before anything is installed. */
 function readEnvFile(file: string): Record<string, string> {
   const out: Record<string, string> = {};
-  const literalTwilioFields = new Set(['TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_FROM']);
+  const literalTwilioFields = new Set(['TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID']);
   for (const raw of readFileSync(file, 'utf8').split('\n')) {
     const sourceLine = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
     const line = sourceLine.trim();
@@ -88,7 +88,12 @@ function readEnvFile(file: string): Record<string, string> {
     let value = literalTwilioFields.has(key)
       ? sourceLine.slice(sourceLine.indexOf('=') + 1)
       : line.slice(eq + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    // A lone quote is an unterminated quote (the value continues on the next
+    // line), not an empty quoted value. Collapsing it to '' let a broken
+    // TWILIO_MESSAGING_SERVICE_SID="… line read as "unset", so a file the host
+    // would not start on passed preflight on TWILIO_FROM alone. Kept as-is, the
+    // guard refuses it as malformed.
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
       value = value.slice(1, -1);
     } else {
       const hash = value.indexOf(' #');
@@ -182,6 +187,13 @@ const problems: string[] = [];
 for (let i = 0; i < 40; i += 1) {
   const message = guardMessage(probe);
   if (!message) break;
+  // Stubs only ADD values, so a refusal caused by two variables both being
+  // set (the exactly-one Twilio sender rule) cannot be "seen past". Stop on
+  // the first repeat instead of echoing the same problem 40 times.
+  if (problems.includes(message)) {
+    console.log('    (stubbing changed nothing — this refusal is about values that are SET, not missing — so the walkthrough stops here)');
+    break;
+  }
   problems.push(message);
   const targets = varsIn(message);
   if (targets.length === 0) {
@@ -196,7 +208,11 @@ if (problems.length === 0) console.log('  none — the guard is satisfied by thi
 console.log('');
 
 // ── THE INVENTORY ──────────────────────────────────────────────────────────
-const WATCHED = Object.keys(STUBS).sort();
+// TWILIO_MESSAGING_SERVICE_SID is read by the guard but is deliberately NOT a
+// stub: exactly one sender may be set, so stubbing it beside TWILIO_FROM would
+// only manufacture the both-set refusal. It is inventoried so the operator
+// can see which sender the file carries.
+const WATCHED = [...Object.keys(STUBS), 'TWILIO_MESSAGING_SERVICE_SID'].sort();
 console.log('VARIABLES THE GUARD READS');
 console.log('─'.repeat(72));
 for (const v of WATCHED) {
@@ -243,15 +259,30 @@ console.log('─'.repeat(72));
   } else if (!objectBucket || !endpoint || !keyId) {
     console.log(`  ✗ STORAGE_PROVIDER=${storage} but AWS_S3_BUCKET / endpoint / credentials are incomplete.`);
   } else {
-    const probe = spawnSync('aws', ['s3api', 'get-bucket-versioning', '--bucket', objectBucket, '--endpoint-url', endpoint, '--output', 'json'], {
-      encoding: 'utf8',
-      env: { ...process.env, AWS_ACCESS_KEY_ID: keyId, AWS_SECRET_ACCESS_KEY: fileEnv['AWS_SECRET_ACCESS_KEY'] ?? '', AWS_REGION: fileEnv['AWS_REGION'] ?? 'auto' },
-    });
-    if (probe.error || probe.status !== 0) {
-      console.log(`  ✗ could not ask ${objectBucket} about versioning (${probe.error ? 'aws CLI not installed' : (probe.stderr || '').trim().split('\n')[0]}).`);
+    // [STG-B] There is no host `aws` binary (the snap-packaged CLI cannot run
+    // under the hardened backup unit, and no host CLI is installed instead).
+    // The same pinned container backup.sh/restore.sh use answers here, with
+    // the credentials passed BY NAME (-e NAME) so the values flow to the
+    // daemon in the container config and never enter this process's argv.
+    const awsImage = fileEnv['AWS_CLI_IMAGE'];
+    // Anchored digest check, as in backup.sh/restore.sh: only
+    // `<image>@sha256:<64 hex chars>` is a pin. A substring test would let
+    // `ubuntu@sha256:` or `aws-cli:2@sha256:zzz` through to fail later at
+    // `docker run` with an unhelpful message.
+    if (!awsImage || !/@sha256:[0-9a-f]{64}$/.test(awsImage) || /[<>]/.test(awsImage) || awsImage.includes('PLACEHOLDER')) {
+      console.log(`  ✗ AWS_CLI_IMAGE is not a pinned image@sha256 digest — cannot ask ${objectBucket} about versioning without a host AWS CLI.`);
       console.log('      Versioning is what lets a deleted or overwritten KYC document be recovered. Verify it by hand.');
     } else {
-      printVerdict(bucketVersioningStatus(objectBucket, endpoint, parseBucketVersioning(probe.stdout)));
+      const probe = spawnSync('docker', ['run', '--rm', '-e', 'AWS_ACCESS_KEY_ID', '-e', 'AWS_SECRET_ACCESS_KEY', '-e', 'AWS_REGION', awsImage, 's3api', 'get-bucket-versioning', '--bucket', objectBucket, '--endpoint-url', endpoint, '--output', 'json'], {
+        encoding: 'utf8',
+        env: { ...process.env, AWS_ACCESS_KEY_ID: keyId, AWS_SECRET_ACCESS_KEY: fileEnv['AWS_SECRET_ACCESS_KEY'] ?? '', AWS_REGION: fileEnv['AWS_REGION'] ?? 'auto' },
+      });
+      if (probe.error || probe.status !== 0) {
+        console.log(`  ✗ could not ask ${objectBucket} about versioning (${probe.error ? probe.error.message : (probe.stderr || '').trim().split('\n')[0]}).`);
+        console.log('      Versioning is what lets a deleted or overwritten KYC document be recovered. Verify it by hand.');
+      } else {
+        printVerdict(bucketVersioningStatus(objectBucket, endpoint, parseBucketVersioning(probe.stdout)));
+      }
     }
   }
   printVerdict(kekEscrowStatus(fileEnv));

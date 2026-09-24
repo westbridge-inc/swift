@@ -9,7 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useRideSos } from '../../../hooks';
+import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useRideSos } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../kit/toast';
@@ -112,6 +112,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const riderAct = useRiderAction();
   const courierProof = useCourierProof();
   const courierCollect = useCourierCollect();
+  const courierPickupProof = useCourierPickupProof();
   const rate = useRateCustomer();
   const { latitude, longitude, status: locationStatus } = useLocationStore();
   const [pin, setPin] = useState('');
@@ -216,7 +217,7 @@ export function ActiveJobScreen({ navigation }: any) {
         ? { ...pickup, latitudeDelta: 0.02, longitudeDelta: 0.02 }
         : undefined;
 
-  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending;
+  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierPickupProof.isPending;
   // Courier deliveries close with a proof-of-delivery photo (D8-02): capture →
   // upload → the handoff transition (which pays the rider). Everything else uses
   // the plain "Mark delivered" action.
@@ -284,6 +285,37 @@ export function ActiveJobScreen({ navigation }: any) {
   const markDelivered = () =>
     isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered', handoverVersion: door.version ?? undefined }, { onError: onHandoverRefused });
   const deliverLabel = isCourier ? 'Capture proof & deliver' : 'Mark delivered';
+  // [E16] Pickup custody proof. PICKED_UP is a physical-custody claim: the
+  // server refuses the bare tap for a courier, so the pickup step captures a
+  // photo and confirms with the rider's location — the same camera flow as the
+  // door proof, but its own mutation and its own words.
+  const captureCourierPickupProof = async () => {
+    try {
+      const owner = preview ? null : requireAuthSessionSnapshot();
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (!perm.granted) {
+        toast.error('Camera access is needed to capture proof of pickup.');
+        return;
+      }
+      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (shot.canceled || !shot.assets?.[0]) return;
+      courierPickupProof.mutate(
+        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        {
+          onSuccess: () => active.refetch?.(),
+          onError: (proofError: any) => {
+            if (!(proofError instanceof AuthSessionBoundaryError)) {
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the pickup proof. Try again.');
+            }
+          },
+        },
+      );
+    } catch (proofError) {
+      if (!(proofError instanceof AuthSessionBoundaryError)) throw proofError;
+    }
+  };
   // MMG direct-pay: the customer already paid the STORE — the rider collects
   // NOTHING at the door; their delivery fee comes from the store in cash.
   const isMmgPaid = door.kind === 'no-cash' && job?.paymentMethod === 'MOBILE_MONEY';
@@ -685,10 +717,12 @@ export function ActiveJobScreen({ navigation }: any) {
                 ) : null}
                 {senderFeeDue && atSender
                   ? bigButton(`Collected ${courierFee} from the sender`, () => collectFromSender('paid'), { loading: courierCollect.isPending, disabled: busy })
-                  : bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
-                    loading: riderAct.isPending,
-                    disabled: busy,
-                  })}
+                  : isCourier && riderStep(job)!.action === 'picked-up'
+                    ? bigButton('Capture pickup photo & confirm pickup', captureCourierPickupProof, { loading: courierPickupProof.isPending, disabled: busy })
+                    : bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
+                      loading: riderAct.isPending,
+                      disabled: busy,
+                    })}
                 {senderFeeDue && atSender ? (
                   <PillButton
                     label="Sender didn't pay"

@@ -6,7 +6,7 @@ import type { AdEventScope } from '../lib/adsCore';
 import { retireAdEventScope } from '../lib/adsQueue';
 import { queryClient } from '../lib/queryClient';
 import { zustandStorage } from '../lib/storage';
-import { landingIntent } from '../lib/roleLanding';
+import { accountHoldsRole, landingIntent } from '../lib/roleLanding';
 import { normalizePersistedAuth, recordHydration, type HydrationReason } from '../lib/authHydration';
 import { track } from '../lib/analytics';
 import { useBookingStore } from './bookingStore';
@@ -196,9 +196,10 @@ export const useAuthStore = create<AuthState>()(
         // driver signing in after a vendor session on a shared device never
         // lands in the vendor dashboard. Pure law + tests: lib/roleLanding.
         const u: any = user;
-        const roles: string[] = u?.roles ?? [];
-        const isMover = roles.includes('DRIVER') || roles.includes('RIDER') || roles.includes('MOVER') || !!u?.driver || !!u?.rider;
-        const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!u?.vendorOwner;
+        // The same predicate the switcher and the earner shells read
+        // (lib/roleLanding accountHoldsRole) — one definition of "holds".
+        const isMover = accountHoldsRole(u, 'mover');
+        const isVendor = accountHoldsRole(u, 'vendor');
         const intent = landingIntent(get().intent, {
           isVendor,
           isMover,

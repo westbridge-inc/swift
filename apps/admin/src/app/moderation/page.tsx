@@ -87,29 +87,30 @@ export default function ModerationPage() {
   const onError = (error: unknown) => setMutationError(error);
 
   const decideReport = useMutation({
-    mutationFn: ({ id, next, csae }: {
+    mutationFn: ({ id, next, reason, csae }: {
       id: string;
       next: 'REVIEWING' | 'ACTIONED' | 'DISMISSED' | 'PROPOSE_DISMISS';
+      reason: string;
       csae?: { disposition: CsaeDisposition; enforcementRef?: string; authorityRef?: string; evidencePreserved?: boolean };
     }) =>
       resolveModerationReport(id, {
         status: next,
         ...(note.trim() ? { note: note.trim() } : {}),
         ...(csae ?? {}),
-      }),
+      }, reason),
     onMutate: () => setMutationError(null),
     onError,
     onSuccess: refresh,
   });
   const decideRatingReport = useMutation({
-    mutationFn: ({ id, action }: { id: string; action: 'uphold' | 'dismiss' }) => resolveRatingReport(id, action),
+    mutationFn: ({ id, action, reason }: { id: string; action: 'uphold' | 'dismiss'; reason: string }) => resolveRatingReport(id, action, reason),
     onMutate: () => setMutationError(null),
     onError,
     onSuccess: refresh,
   });
   const decideHeld = useMutation({
     mutationFn: ({ id, action, reason }: { id: string; action: 'publish' | 'remove' | 'exclude'; reason: string }) =>
-      moderateRating(id, action === 'publish' ? { action, reason } : { action, category: 'MODERATION', reason }),
+      moderateRating(id, action === 'publish' ? { action } : { action, category: 'MODERATION' }, reason),
     onMutate: () => setMutationError(null),
     onError,
     onSuccess: refresh,
@@ -222,22 +223,22 @@ export default function ModerationPage() {
                           <CsaeCase
                             busy={busy}
                             proposedBy={r.dismissProposedBy ?? null}
-                            onAction={(csae) => decideReport.mutate({ id: r.id, next: 'ACTIONED', csae })}
-                            onProposeDismiss={(disposition) => decideReport.mutate({ id: r.id, next: 'PROPOSE_DISMISS', csae: { disposition } })}
-                            onConfirmDismiss={(disposition) => decideReport.mutate({ id: r.id, next: 'DISMISSED', csae: { disposition } })}
+                            onAction={(csae) => { const reason = askReason({ action: 'record this child-safety enforcement' }); if (reason) decideReport.mutate({ id: r.id, next: 'ACTIONED', reason, csae }); }}
+                            onProposeDismiss={(disposition) => { const reason = askReason({ action: 'propose dismissing this child-safety report' }); if (reason) decideReport.mutate({ id: r.id, next: 'PROPOSE_DISMISS', reason, csae: { disposition } }); }}
+                            onConfirmDismiss={(disposition) => { const reason = askReason({ action: 'confirm dismissing this child-safety report' }); if (reason) decideReport.mutate({ id: r.id, next: 'DISMISSED', reason, csae: { disposition } }); }}
                           />
                         ) : (
                         <div className="flex gap-2">
                           <button
                             disabled={busy}
-                            onClick={() => decideReport.mutate({ id: r.id, next: 'ACTIONED' })}
+                            onClick={() => { const reason = askReason({ action: 'record this report as actioned' }); if (reason) decideReport.mutate({ id: r.id, next: 'ACTIONED', reason }); }}
                             className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
                           >
                             Record as actioned
                           </button>
                           <button
                             disabled={busy}
-                            onClick={() => decideReport.mutate({ id: r.id, next: 'DISMISSED' })}
+                            onClick={() => { const reason = askReason({ action: 'dismiss this report' }); if (reason) decideReport.mutate({ id: r.id, next: 'DISMISSED', reason }); }}
                             className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                           >
                             Dismiss
@@ -262,9 +263,9 @@ export default function ModerationPage() {
                           Decide
                         </button>
                         {r.status === 'PENDING' ? (
-                          <button
-                            disabled={busy}
-                            onClick={() => decideReport.mutate({ id: r.id, next: 'REVIEWING' })}
+                        <button
+                          disabled={busy}
+                          onClick={() => { const reason = askReason({ action: 'claim this report for review' }); if (reason) decideReport.mutate({ id: r.id, next: 'REVIEWING', reason }); }}
                             className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                           >
                             Claim (reviewing)
@@ -315,14 +316,14 @@ export default function ModerationPage() {
                   <div className="flex gap-2 mt-3">
                     <button
                       disabled={busy || !r.rating}
-                      onClick={() => decideRatingReport.mutate({ id: r.id, action: 'uphold' })}
+                      onClick={() => { const reason = askReason({ action: 'uphold this report and remove the review' }); if (reason) decideRatingReport.mutate({ id: r.id, action: 'uphold', reason }); }}
                       className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
                     >
                       Uphold &amp; remove review
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => decideRatingReport.mutate({ id: r.id, action: 'dismiss' })}
+                      onClick={() => { const reason = askReason({ action: 'dismiss this review report' }); if (reason) decideRatingReport.mutate({ id: r.id, action: 'dismiss', reason }); }}
                       className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                     >
                       Dismiss

@@ -9,6 +9,7 @@ import {
   setDriverRideClass,
 } from '@/lib/api';
 import { Section, Row, StatusPill, BackLink, ActionButton, gyd } from '@/components/detail';
+import { askReason } from '@/lib/ask-reason';
 
 const RIDE_CLASSES = ['ECONOMY', 'COMFORT', 'XL'];
 
@@ -26,11 +27,11 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
     qc.invalidateQueries({ queryKey: [`${kind}s`] });
   };
   const verify = useMutation({
-    mutationFn: () => (isDriver ? verifyDriverDocuments(id) : verifyRiderDocuments(id)),
+    mutationFn: (reason: string) => (isDriver ? verifyDriverDocuments(id, reason) : verifyRiderDocuments(id, reason)),
     onSuccess: invalidate,
   });
   const rideClass = useMutation({
-    mutationFn: (cls: string) => setDriverRideClass(id, cls),
+    mutationFn: ({ cls, reason }: { cls: string; reason: string }) => setDriverRideClass(id, cls, reason),
     onSuccess: invalidate,
   });
 
@@ -84,7 +85,7 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
             <ActionButton
               label="Verify documents"
               confirm={`Verify ${name}'s documents? Their 14-day trial starts now and they can go online.`}
-              onClick={() => verify.mutate()}
+              onClick={() => { const reason = askReason({ action: 'verify these documents', subject: name }); if (reason) verify.mutate(reason); }}
               disabled={verify.isPending}
             />
           )}
@@ -121,7 +122,10 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
                   <button
                     key={cls}
                     onClick={() => {
-                      if (m.rideClass !== cls && window.confirm(`Set ${name}'s ride class to ${cls}?`)) rideClass.mutate(cls);
+                      if (m.rideClass !== cls && window.confirm(`Set ${name}'s ride class to ${cls}?`)) {
+                        const reason = askReason({ action: `set this driver's ride class to ${cls}`, subject: name });
+                        if (reason) rideClass.mutate({ cls, reason });
+                      }
                     }}
                     disabled={rideClass.isPending}
                     className={`px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50 ${
