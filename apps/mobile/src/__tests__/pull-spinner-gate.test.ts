@@ -61,7 +61,8 @@ function refreshingExpr(element: string): string | null {
   return null;
 }
 
-const FETCH_FLAG = /\bis(Refetching|Fetching|Loading|Pending|FetchingNextPage)\b/;
+const FLAG_NAMES = 'is(?:Refetching|Fetching|Loading|Pending|FetchingNextPage)';
+const FETCH_FLAG = new RegExp(`\\b${FLAG_NAMES}\\b`);
 
 describe('pull spinners follow the pull, never a background refetch', () => {
   const controls = refreshControls();
@@ -85,11 +86,16 @@ describe('pull spinners follow the pull, never a background refetch', () => {
         continue;
       }
       if (FETCH_FLAG.test(expr)) offenders.push(`${file}: refreshing={${expr.trim()}}`);
-      // A bare identifier (`refreshing={refreshing}`) must not be an alias for a fetch flag.
+      // A bare identifier (`refreshing={refreshing}`) must not be an alias for a fetch flag:
+      // a const/let/var declaration (to the end of its statement, across lines), or a
+      // destructured rename such as `const { isRefetching: refreshing } = q`.
       const alias = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(expr)?.[1];
       if (alias) {
-        const decl = new RegExp(`const\\s+${alias}\\s*=\\s*([^;\\n]+)`).exec(source)?.[1] ?? '';
+        const decl = new RegExp(`(?:const|let|var)\\s+${alias}\\s*=\\s*([\\s\\S]*?);`).exec(source)?.[1] ?? '';
         if (FETCH_FLAG.test(decl)) offenders.push(`${file}: refreshing={${alias}} where ${alias} = ${decl.trim()}`);
+        if (new RegExp(`\\b${FLAG_NAMES}\\s*:\\s*${alias}\\b`).test(source)) {
+          offenders.push(`${file}: refreshing={${alias}} where ${alias} is a destructured fetch flag`);
+        }
       }
     }
     expect(offenders).toEqual([]);

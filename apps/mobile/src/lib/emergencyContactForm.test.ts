@@ -38,6 +38,13 @@ describe('the number the API receives', () => {
     expect(emergencyContactPhoneE164('+592', '612 3456')).toBe('+5926123456');
     expect(emergencyContactPhoneE164('+592', '61234567')).toBe('+5926123456');
   });
+
+  it('a pasted full number keeps its own digits: the +592 is the prefix, never the start of the local number', () => {
+    // DS170 F1: clamping alone turned "+592 600 1234" into +5925926001 — a different person.
+    expect(emergencyContactPhoneE164('+592', '+592 600 1234')).toBe('+5926001234');
+    expect(emergencyContactPhoneE164('+592', '592 600 1234')).toBe('+5926001234');
+    expect(emergencyContactPhoneE164('+592', '00592 600 1234')).toBe('+5926001234');
+  });
 });
 
 describe('the form state', () => {
