@@ -118,6 +118,10 @@ const STATUS_LAW: Record<OrderStatus, { custody: Custody; mover: Mover }> = {
   PICKED_UP: { custody: 'MOVER_HOLDING', mover: 'RIDER' },
   EN_ROUTE_DELIVERY: { custody: 'MOVER_HOLDING', mover: 'RIDER' },
   ARRIVED: { custody: 'MOVER_HOLDING', mover: 'RIDER' },
+  // [E17] The return leg is custody too: the rider still physically holds the
+  // parcel on the way back, so no automatic release and no sender cancellation
+  // may touch it. Only the return-proof flow may leave this state.
+  RETURNING: { custody: 'MOVER_HOLDING', mover: 'RIDER' },
 
   // ── Taxi leg: driver committed, passenger not aboard ─────────────────────
   DRIVER_ASSIGNED: { custody: 'ASSIGNED_NOT_HOLDING', mover: 'DRIVER' },
@@ -133,6 +137,7 @@ const STATUS_LAW: Record<OrderStatus, { custody: Custody; mover: Mover }> = {
   CANCELLED: { custody: 'FINISHED', mover: 'NONE' },
   REFUNDED: { custody: 'FINISHED', mover: 'NONE' },
   FAILED: { custody: 'FINISHED', mover: 'NONE' },
+  RETURNED: { custody: 'FINISHED', mover: 'NONE' },
 };
 
 const ALL_STATUSES = Object.keys(STATUS_LAW) as OrderStatus[];
@@ -270,6 +275,11 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   ],
   REFUNDED: ['CANCELLED', 'DELIVERED', 'COMPLETED'],
   FAILED: ['ARRIVED', 'RIDE_IN_PROGRESS', 'PICKED_UP', 'EN_ROUTE_DELIVERY'],
+  // [E17] A return starts from any custody state and ends ONLY at RETURNED —
+  // the return-proof flow is the sole exit, so a returning parcel can never be
+  // "delivered" or "failed" out from under the return.
+  RETURNING: ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'],
+  RETURNED: ['RETURNING'],
 };
 
 /**
@@ -311,6 +321,8 @@ export const RECOVERY_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   CANCELLED: [],
   REFUNDED: [],
   FAILED: [],
+  RETURNING: [],
+  RETURNED: [],
 };
 
 /** True when a RELEASE may move an order from `from` to `to`. */

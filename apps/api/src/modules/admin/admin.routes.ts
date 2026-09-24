@@ -1697,6 +1697,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const ACTIVE_STATUSES = [
       'PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
       'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED',
+      'RETURNING',
       'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS',
     ] as const;
 

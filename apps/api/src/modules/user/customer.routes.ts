@@ -2224,7 +2224,10 @@ export async function customerRoutes(app: FastifyInstance) {
     // [REPORT-006 F-006-01] Captured MMG orders can't cancel in-app (the store
     // holds the money and settles refunds directly) — the button must not
     // offer what the locked cancel path will refuse.
-    const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
+    // [E17 · DS202 D3] A parcel on its way back (RETURNING) is in the mover's
+    // custody like the forward leg, and RETURNED is closed: neither offers a
+    // Cancel the locked cancel path would refuse.
+    const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RETURNING', 'RETURNED'].includes(order.status)
       && !(order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED');
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]

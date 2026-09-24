@@ -57,11 +57,11 @@ const files = walk(SRC);
 const rel = (f: string) => f.slice(join(process.cwd()).length + 1);
 
 describe('the terminal set has one definition', () => {
-  it('it contains all five terminal statuses', () => {
+  it('it contains all six terminal statuses', () => {
     // FAILED is the one that went missing, and it is the one that matters:
     // DELIVERED/COMPLETED are the happy ends nobody forgets.
     expect([...TERMINAL_ORDER_STATUSES].sort()).toEqual(
-      ['CANCELLED', 'COMPLETED', 'DELIVERED', 'FAILED', 'REFUNDED'].sort(),
+      ['CANCELLED', 'COMPLETED', 'DELIVERED', 'FAILED', 'REFUNDED', 'RETURNED'].sort(),
     );
   });
 
@@ -108,7 +108,7 @@ describe('the remaining hand-written copies are recorded, not hidden', () => {
   const KNOWN_INLINE: Array<{ file: string; why: string }> = [
     {
       file: 'modules/mover-authority-cutover-preparation.ts',
-      why: 'raw SQL — the Prisma constant cannot be interpolated into a tagged template safely; it lists all FIVE and is correct',
+      why: 'raw SQL — the Prisma constant cannot be interpolated into a tagged template safely; it lists the physical-custody statuses (RETURNING included since E17), a different question from the terminal set',
     },
   ];
 

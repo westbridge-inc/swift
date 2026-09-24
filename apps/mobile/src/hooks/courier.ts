@@ -105,3 +105,54 @@ export function useCourierCollect() {
   });
   return pv ? previewMutation() : m;
 }
+
+/** [E17] The mover can't deliver after custody: the reason + the rider's
+ *  evidence fix start a support-visible return and notify the sender. The
+ *  server refuses unless the parcel is in THIS rider's custody. */
+export function useCourierReturn() {
+  const pv = useMoverPreview((s) => s.preview);
+  const qc = useQueryClient();
+  const m = useMutation({
+    mutationFn: async ({ orderId, reason }: { orderId: string; reason: string }) => {
+      const owner = requireAuthSessionSnapshot();
+      const { gps, current } = await evidenceFix(owner);
+      const result = await unwrap(courierApi.return(orderId, { reason, gps }, current));
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['courier', 'orders'] });
+      void qc.invalidateQueries({ queryKey: ['mover'] });
+      return result;
+    },
+  });
+  return pv ? previewMutation() : m;
+}
+
+/** [E17] The return photo closes the return leg: capture → upload with the
+ *  rider's location (the multipart lat/lng the server requires) → RETURNED,
+ *  which releases the rider. The sender is notified server-side. */
+export function useCourierReturnProof() {
+  const pv = useMoverPreview((s) => s.preview);
+  const qc = useQueryClient();
+  const m = useMutation({
+    mutationFn: async ({ orderId, uri, authSession }: {
+      orderId: string;
+      uri: string;
+      authSession?: AuthSessionSnapshot;
+    }) => {
+      const owner = authSession ?? requireAuthSessionSnapshot();
+      const { gps, current } = await evidenceFix(owner);
+      const form = new FormData();
+      // [DS202 D1] The location travels BEFORE the photo (the server now reads
+      // every part in any order, and fields first is the safe order for any
+      // multipart reader).
+      form.append('lat', String(gps.lat));
+      form.append('lng', String(gps.lng));
+      form.append('file', { uri, name: 'return-proof.jpg', type: 'image/jpeg' } as unknown as Blob);
+      const result = await unwrap(courierApi.returnProof(orderId, form, current));
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['courier', 'orders'] });
+      void qc.invalidateQueries({ queryKey: ['mover'] });
+      return result;
+    },
+  });
+  return pv ? previewMutation() : m;
+}

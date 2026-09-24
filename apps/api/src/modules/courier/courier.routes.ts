@@ -9,8 +9,7 @@ import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { OrderService, holdWindowMs, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { NotificationService } from '../notification/notification.service';
-import { CashRulesService } from '../cash/cash-rules.service';
-import { orderingRestriction } from '../cash/cash-rules.service';
+import { CashRulesService, gpsEvidence, orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -19,6 +18,7 @@ import type { OrderStatus } from '@prisma/client';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 import { redactLiveLocation, riderCounterpartySelect } from '../../utils/counterparty';
 import { invalidateHomeCache } from '../user/home-cache';
+import { SupportService } from '../support/support.service';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -67,6 +67,10 @@ const collectSchema = z.object({
   outcome: z.enum(['paid', 'refused']),
   gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
 });
+const returnSchema = z.object({
+  reason: z.string().trim().min(1).max(500),
+  gps: pointSchema.optional(),
+});
 
 /** Sender cancellation is safe only before the parcel enters rider custody.
  * Once picked up, a parcel needs an explicit return-to-sender/ops recovery
@@ -89,12 +93,19 @@ const COURIER_CUSTODY_STATUSES = [
   'ARRIVED',
 ] as const satisfies readonly OrderStatus[];
 
+/** [E17] A parcel on its way back is STILL in the rider's custody for the
+ * sender-cancel guard, but it is deliberately NOT in COURIER_CUSTODY_STATUSES:
+ * that array is also the DELIVERED allowedFrom for /proof, and the machine's
+ * only exit from RETURNING is RETURNED (the return-proof flow below). */
+const COURIER_RETURNING_STATUSES = ['RETURNING'] as const satisfies readonly OrderStatus[];
+
 // Proof is custody-bound [REPORT-014 F-014-02]: delivery can only be proven
 // for a parcel the rider physically holds — the historical "full live list"
 // proof window is gone with its last consumer.
 
 function courierNotCancellable(status: OrderStatus): AppError {
-  if ((COURIER_CUSTODY_STATUSES as readonly OrderStatus[]).includes(status)) {
+  if ((COURIER_CUSTODY_STATUSES as readonly OrderStatus[]).includes(status)
+      || (COURIER_RETURNING_STATUSES as readonly OrderStatus[]).includes(status)) {
     return new AppError(
       409,
       'PARCEL_IN_CUSTODY',
@@ -498,5 +509,160 @@ export default async function courierRoutes(app: FastifyInstance) {
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier proof notification failed after commit'));
 
     return { success: true, data: { ...updated, totalDeliveries: updated.rider?.totalDeliveries ?? null } };
+  });
+
+  /** [E17] POST /order/:id/return — the assigned mover (or support on their
+   * behalf via the ticket) can't deliver: the parcel starts its way back.
+   * The reason + mover GPS travel with the canonical locked transition, a
+   * support ticket records it for a human, and the sender is notified. The
+   * fee already collected at pickup is kept peer-to-peer — no refund rail and
+   * no extra return fee (owner decision, pilot). */
+  app.post('/order/:id/return', auth, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = returnSchema.parse(request.body);
+    const rider = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+    if (!rider) throw new NotFoundError('Rider');
+    const order = await app.prisma.order.findFirst({
+      where: { id, orderType: 'COURIER', riderId: rider.id },
+      select: { id: true, status: true, orderNumber: true, customerId: true },
+    });
+    if (!order) throw new NotFoundError('CourierOrder', id);
+    if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
+      throw new AppError(409, 'NOT_IN_CUSTODY', 'The parcel must be in your custody to start a return.');
+    }
+
+    // The rider's physical ownership is re-proved on the LOCKED row; a
+    // watchdog release between the pre-read and the lock refuses instead of
+    // returning a parcel the mover no longer holds.
+    const { order: updated } = await orderService.transitionOrderAtomically({
+      orderId: id,
+      target: 'RETURNING',
+      allowedFrom: COURIER_CUSTODY_STATUSES,
+      expectedRiderId: rider.id,
+      changedBy: request.user.userId,
+      note: `cannot deliver — ${body.reason}${body.gps ? ` — ${gpsEvidence(body.gps.lat, body.gps.lng)}` : ''}`,
+      withinTransaction: async (tx) => {
+        await tx.order.update({
+          where: { id },
+          data: { courierReturnReason: body.reason, courierReturnRequestedAt: new Date() },
+        });
+      },
+      invalidStatus: () => new AppError(409, 'NOT_IN_CUSTODY', 'The parcel must be in your custody to start a return.'),
+    });
+
+    // Post-commit network side effects, never inside the transaction. The
+    // ticket is the support-visible record and pings admins; the sender must
+    // learn the parcel is coming back.
+    await new SupportService(app.prisma, notifications)
+      .createTicket(request.user.userId, {
+        category: 'ORDER_ISSUE',
+        subject: 'Courier return-to-sender requested',
+        message: `${order.orderNumber}: ${body.reason}`,
+        orderId: id,
+      })
+      .catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return support ticket failed after commit'));
+    await notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Parcel coming back',
+      body: "We couldn't reach the recipient — the parcel is on its way back to you.",
+      data: { orderId: id, status: 'RETURNING' },
+    }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return notification failed after commit'));
+    try {
+      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'RETURNING', timestamp: new Date().toISOString() });
+    } catch (error) {
+      request.log.warn({ err: error, orderId: id }, 'courier return socket publication failed after commit');
+    }
+    return { success: true, data: updated };
+  });
+
+  /** [E17] POST /order/:id/return-proof — the return photo (magic-byte checked,
+   * public folder) + the rider's location close the return leg. RETURNED is
+   * terminal, releases the mover and their float, and mints no earnings. The
+   * photo is visible to the sender on GET /order/:id, like drop-off proof. */
+  app.post<{ Params: { id: string } }>('/order/:id/return-proof', auth, async (request) => {
+    const { id } = request.params;
+    const rider = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+    if (!rider) throw new NotFoundError('Rider');
+    const order = await app.prisma.order.findFirst({
+      where: { id, orderType: 'COURIER', riderId: rider.id },
+      select: { id: true, status: true, orderNumber: true, customerId: true },
+    });
+    if (!order) throw new NotFoundError('CourierOrder', id);
+    if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
+      throw new AppError(400, 'NOT_IN_TRANSIT', 'This courier job is already closed');
+    }
+
+    // [DS202 D4] Only a parcel already on its way back can be closed: refuse
+    // before anything is stored, so an early or hostile attempt leaves no
+    // orphan photo in the bucket. The locked transition below still decides.
+    if (order.status !== 'RETURNING') {
+      throw new AppError(409, 'NOT_RETURNING', 'Start the return first — the return proof closes a parcel already on its way back.');
+    }
+
+    // [DS202 D1] Read EVERY part before looking at any field: request.file()
+    // resolves at the file part, so on a real, chunked upload a field sent
+    // after the file has not been parsed yet. Order-independent, like the
+    // admin creative upload.
+    let buffer: Buffer | null = null;
+    let mimetype = '';
+    let filename = '';
+    const fields: Record<string, string> = {};
+    for await (const part of request.parts()) {
+      if (part.type === 'file') {
+        const bytes = await part.toBuffer();
+        if (!buffer) { buffer = bytes; mimetype = part.mimetype; filename = part.filename; }
+      } else if (typeof part.value === 'string') {
+        fields[part.fieldname] = part.value;
+      }
+    }
+    if (!buffer) throw new AppError(400, 'NO_FILE', 'Attach a photo of the return');
+    if (!ALLOWED_IMAGE_TYPES.has(mimetype)) {
+      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG or WebP images are accepted');
+    }
+    if (!looksLikeImage(buffer)) {
+      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    }
+    const latRaw = fields['lat'];
+    const lngRaw = fields['lng'];
+    if (!latRaw || !lngRaw) {
+      throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
+    }
+    const gps = pointSchema.safeParse({ lat: Number(latRaw), lng: Number(lngRaw) });
+    if (!gps.success) {
+      throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
+    }
+
+    const { url } = await storage.upload({ buffer, filename, mimeType: mimetype, folder: `courier-proof/${id}/return` });
+
+    const { order: updated } = await orderService.transitionOrderAtomically({
+      orderId: id,
+      target: 'RETURNED',
+      allowedFrom: ['RETURNING'],
+      expectedRiderId: rider.id,
+      changedBy: request.user.userId,
+      note: `return proof captured — ${gpsEvidence(gps.data.lat, gps.data.lng)}`,
+      withinTransaction: async (tx) => {
+        await tx.order.update({
+          where: { id },
+          data: { courierReturnProofPhotoUrl: url, courierReturnedAt: new Date() },
+        });
+      },
+      invalidStatus: () => new AppError(409, 'NOT_RETURNING', 'Start the return first — the return proof closes a parcel already on its way back.'),
+    });
+
+    try {
+      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'RETURNED', timestamp: new Date().toISOString() });
+    } catch (error) {
+      request.log.warn({ err: error, orderId: id }, 'courier return-proof socket publication failed after commit');
+    }
+    await notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Parcel returned',
+      body: 'The parcel was returned to you — return proof captured.',
+      data: { orderId: id, status: 'RETURNED' },
+    }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return-proof notification failed after commit'));
+    return { success: true, data: updated };
   });
 }

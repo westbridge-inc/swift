@@ -675,6 +675,17 @@ export const courierApi = {
     body: { outcome: 'paid' | 'refused'; gps: { lat: number; lng: number } },
     session?: AuthSessionSnapshot,
   ) => api.post(`/courier/order/${id}/collect`, body, capturedAuthConfig(session)),
+  // [E17] The mover can't deliver: start a return with a reason + GPS, then
+  // close it with the return photo (lat/lng ride the multipart form fields).
+  return: (
+    id: string,
+    body: { reason: string; gps?: { lat: number; lng: number } },
+    session?: AuthSessionSnapshot,
+  ) => api.post(`/courier/order/${id}/return`, body, capturedAuthConfig(session)),
+  returnProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/courier/order/${id}/return-proof`, form, capturedAuthConfig(session, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })),
 };
 
 // Services (mounted at /api/v1/services)

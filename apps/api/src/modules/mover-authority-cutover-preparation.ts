@@ -90,7 +90,7 @@ export async function readMoverAuthorityCutoverState(
       (
         SELECT COUNT(*)::text
         FROM "orders" o
-        WHERE o."status" IN ('PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS')
+        WHERE o."status" IN ('PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS', 'RETURNING')
            OR (
              o."status" = 'DRIVER_ARRIVED'
              AND (o."ridePinVerified" = true OR o."ridePinVerifiedAt" IS NOT NULL)

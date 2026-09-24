@@ -10,7 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 vi.mock('../providers/maps/maps-provider', () => ({ getMapsProvider: () => ({}) }));
 vi.mock('../providers/notifications/channels', () => ({ getChannels: () => ({}) }));
 
-const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'RETURNED'];
 const LIVE = Object.values(OrderStatus).filter((s) => !TERMINAL.includes(s));
 const A = 'home-customer-a';
 const B = 'home-customer-b';

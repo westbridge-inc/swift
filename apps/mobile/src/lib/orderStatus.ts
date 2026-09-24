@@ -26,6 +26,7 @@ const TERMINAL: Record<string, string> = {
   CANCELLED: 'Cancelled',
   REFUNDED: 'Refunded',
   FAILED: 'Failed',
+  RETURNED: 'Returned to sender',
 };
 
 /** A ride. No store, no picking, no packing — a driver and a car. */
@@ -48,6 +49,7 @@ const COURIER: Record<string, string> = {
   PICKED_UP: 'On its way',
   EN_ROUTE_DELIVERY: 'On its way',
   ARRIVED: 'Rider has arrived',
+  RETURNING: 'Returning to you',
 };
 
 /** Food and groceries: a merchant prepares it, then a rider carries it. */

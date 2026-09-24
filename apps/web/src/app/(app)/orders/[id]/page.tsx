@@ -107,6 +107,14 @@ const appointmentStages: Stage[] = [
   { label: 'Completed', statuses: ['COMPLETED', 'DELIVERED'] },
 ];
 
+/** [E17 · DS202 D6] A courier parcel sent back to its sender. */
+const returnStages: Stage[] = [
+  { label: 'Placed', statuses: ['PENDING', 'ACCEPTED'] },
+  { label: 'Picked up', statuses: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'] },
+  { label: 'Coming back to you', statuses: ['RETURNING'] },
+  { label: 'Returned', statuses: ['RETURNED'] },
+];
+
 const taxiStages: Stage[] = [
   { label: 'Requested', statuses: ['PENDING'] },
   { label: 'Driver assigned', statuses: ['ACCEPTED', 'DRIVER_ASSIGNED'] },
@@ -117,6 +125,7 @@ const taxiStages: Stage[] = [
 
 function stagesFor(order: OrderDetail): Stage[] {
   if (order.orderType === 'TAXI') return taxiStages;
+  if (order.status === 'RETURNING' || order.status === 'RETURNED') return returnStages;
   if (order.fulfillment === 'PICKUP') return pickupStages;
   if (order.fulfillment === 'APPOINTMENT') return appointmentStages;
   return deliveryStages;

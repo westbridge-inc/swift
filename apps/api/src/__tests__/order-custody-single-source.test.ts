@@ -41,7 +41,8 @@ describe('order custody — one classification, pinned', () => {
     for (const s of ALL) {
       expect(['UNASSIGNED', 'ASSIGNED_NOT_HOLDING', 'MOVER_HOLDING', 'FINISHED']).toContain(custodyOf(s));
     }
-    expect(ALL).toHaveLength(19);
+    // 19 statuses + [E17] RETURNING/RETURNED.
+    expect(ALL).toHaveLength(21);
   });
 
   it('the four custody classes partition the statuses — no state in two, none in none', () => {
@@ -69,12 +70,14 @@ describe('order custody — one classification, pinned', () => {
   });
 
   it('the DELIVERY in-custody set is exactly what rider.routes and the watchdog declared', () => {
-    expect([...RIDER_IN_CUSTODY_STATUSES].sort()).toEqual(['ARRIVED', 'EN_ROUTE_DELIVERY', 'PICKED_UP']);
+    // [E17] RETURNING is custody too — the rider still holds the parcel on the
+    // way back, so the watchdog must never auto-release it.
+    expect([...RIDER_IN_CUSTODY_STATUSES].sort()).toEqual(['ARRIVED', 'EN_ROUTE_DELIVERY', 'PICKED_UP', 'RETURNING']);
   });
 
   it('mover-holding spans both legs and is order.service’s IN_TRANSIT set', () => {
     expect([...MOVER_HOLDING_STATUSES].sort()).toEqual(
-      ['ARRIVED', 'EN_ROUTE_DELIVERY', 'PICKED_UP', 'RIDE_IN_PROGRESS'],
+      ['ARRIVED', 'EN_ROUTE_DELIVERY', 'PICKED_UP', 'RIDE_IN_PROGRESS', 'RETURNING'],
     );
   });
 
@@ -92,9 +95,9 @@ describe('order custody — one classification, pinned', () => {
 });
 
 describe('order custody — terminality is derived from it, not declared twice', () => {
-  it('terminal is exactly the FINISHED class, and exactly the five known end states', () => {
+  it('terminal is exactly the FINISHED class, and exactly the six known end states', () => {
     expect([...TERMINAL_ORDER_STATUSES].sort()).toEqual(
-      ['CANCELLED', 'COMPLETED', 'DELIVERED', 'FAILED', 'REFUNDED'],
+      ['CANCELLED', 'COMPLETED', 'DELIVERED', 'FAILED', 'REFUNDED', 'RETURNED'],
     );
     expect([...TERMINAL_ORDER_STATUSES].sort()).toEqual(
       ALL.filter((s) => custodyOf(s) === 'FINISHED').sort(),

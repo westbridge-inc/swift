@@ -34,8 +34,8 @@ import {
 const SRC = join(process.cwd(), 'src');
 const OWNER = join('modules', 'order', 'order-status.ts');
 
-/** The five statuses, in any order, as they appear in a literal list. */
-const TERMINAL_NAMES = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+/** The six statuses, in any order, as they appear in a literal list. */
+const TERMINAL_NAMES = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'RETURNED'];
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -65,7 +65,7 @@ describe('terminal order statuses have ONE definition', () => {
     expect(files.some((f) => f.endsWith(OWNER))).toBe(true);
   });
 
-  it('the exported set is exactly the five terminal statuses', () => {
+  it('the exported set is exactly the six terminal statuses', () => {
     expect([...TERMINAL_ORDER_STATUSES].sort()).toEqual([...TERMINAL_NAMES].sort());
   });
 
@@ -81,7 +81,7 @@ describe('terminal order statuses have ONE definition', () => {
   });
 
   it('no file re-declares the set as a TypeScript literal', () => {
-    // A literal array containing all five names, in any order, on one line.
+    // A literal array containing all six names, in any order, on one line.
     const offenders: string[] = [];
     for (const file of files) {
       if (file.endsWith(OWNER)) continue;
@@ -103,7 +103,7 @@ describe('terminal order statuses have ONE definition', () => {
     for (const file of files) {
       if (file.endsWith(OWNER)) continue;
       const code = stripComments(readFileSync(file, 'utf8'));
-      // A SQL IN-list: the five names quoted inside a NOT IN (...) / IN (...).
+      // A SQL IN-list: the six names quoted inside a NOT IN (...) / IN (...).
       const sqlLists = code.match(/\bIN\s*\([^)]*\)/gi) ?? [];
       for (const list of sqlLists) {
         const quoted = list.match(/'[A-Z_]+'/g)?.map((q) => q.slice(1, -1)) ?? [];

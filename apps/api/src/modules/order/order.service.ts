@@ -1843,6 +1843,10 @@ export class OrderService {
     const releasesMover = input.target === 'DELIVERED'
       || input.target === 'CANCELLED'
       || input.target === 'FAILED'
+      // [E17] A completed return frees the rider and their committed float —
+      // the parcel is back with the sender and custody is over. No earnings
+      // are minted (earnings are DELIVERED-only below), no delivery count.
+      || input.target === 'RETURNED'
       || (input.target === 'REFUNDED' && operationalCancellation);
     if (releasesMover && source.riderId) {
       await new FloatService(tx).release(tx, source.riderId, riderFloatForOrder(source));

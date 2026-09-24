@@ -1823,6 +1823,14 @@ model Order {
   // delivery. Cleared implicitly once the order reaches DELIVERED.
   courierProofIssuedUrl     String?
   courierProofIssuedRiderId String?
+  /// [E17] Courier return-to-sender after custody. The mover (or support via
+  /// the ticket) starts a return from any custody state (RETURNING) and closes
+  /// it with a return photo (RETURNED). The reason + timestamps are the
+  /// support-visible record; no fee is minted for the return leg.
+  courierReturnReason         String?
+  courierReturnRequestedAt    DateTime?
+  courierReturnProofPhotoUrl  String?
+  courierReturnedAt           DateTime?
   courierTrackingToken      String?      @unique
 
   taxiPickupAddress  String?
@@ -2070,6 +2078,8 @@ enum OrderStatus {
   CANCELLED
   REFUNDED
   FAILED
+  RETURNING
+  RETURNED
 }
 
 enum PackageSize {
