@@ -81,6 +81,15 @@ describe('[A-08] every job class has an answer about replaying it', () => {
     }
   });
 
+  it('[E36 · DS215 F1] the dispatch worker keys its replay identity by job id AND creation time', () => {
+    // The id alone repeats: the not-my-driver redispatch uses a deterministic
+    // command id, re-added for a NEW episode once the old job left BullMQ
+    // retention. A redelivery keeps the creation time; a re-created job does not.
+    const queueSrc = readFileSync(join(process.cwd(), 'src/jobs/queue.ts'), 'utf8');
+    expect(queueSrc).toContain("dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id ? `${job.id}@${job.timestamp}` : undefined)");
+    expect(queueSrc).not.toMatch(/dispatch\.dispatchOrder\(job\.data\.orderId, job\.data\.tenantId, job\.id\)/);
+  });
+
   it('money and notification jobs are NOT certified — the certified set is small and deliberate', () => {
     // The whole point is that these are the ones a second run would hurt.
     for (const name of ['process-billing', 'poll-mmg-billing', 'convert-trials', 'booking-reminders']) {

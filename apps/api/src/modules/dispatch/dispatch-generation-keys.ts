@@ -22,11 +22,13 @@ export const dispatchExhaustKey = (orderId: string, version?: number | null): st
   `dispatch:exhausts:${orderId}${deliveryGenerationSuffix(version)}`;
 
 /** [E36] The replay identity of one queued dispatch run: a short hash of the
- *  BullMQ job id. A redelivery (the worker died, the job's lock lapsed)
- *  replays the SAME job id, so it gets the same tag; every genuine cycle is a
- *  different job with a different tag. Hashed so it is colon-free (BullMQ
- *  refuses a custom job id containing ':' unless it has exactly three parts)
- *  and so a re-arm chain keyed by its parent's tag never grows in length. */
+ *  BullMQ job's identity (the worker passes `<job id>@<job creation time>`).
+ *  A redelivery (the worker died, the job's lock lapsed) replays the SAME job,
+ *  so it gets the same tag; every genuine cycle is a different job — even one
+ *  re-created under a deterministic command id — with a different tag. Hashed
+ *  so it is colon-free (BullMQ refuses a custom job id containing ':' unless
+ *  it has exactly three parts) and so a re-arm chain keyed by its parent's tag
+ *  never grows in length. */
 export const dispatchReplayTag = (jobId: string): string =>
   createHash('sha256').update(jobId).digest('hex').slice(0, 20);
 
