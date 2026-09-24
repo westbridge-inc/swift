@@ -61,7 +61,7 @@ describe('the allowlist', () => {
     }
     // Identifiers, hostnames and switches are configuration, not secrets: a
     // *_FILE for them would be a file-read primitive with no purpose.
-    for (const never of ['NODE_ENV', 'LOG_LEVEL', 'API_HOST', 'TWILIO_ACCOUNT_SID', 'TWILIO_FROM', 'MMG_MERCHANT_ID', 'KYC_PROVIDER']) {
+    for (const never of ['NODE_ENV', 'LOG_LEVEL', 'API_HOST', 'TWILIO_ACCOUNT_SID', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID', 'MMG_MERCHANT_ID', 'KYC_PROVIDER']) {
       expect(SECRET_FILE_NAMES).not.toContain(never);
     }
     // [R2 C3] AI identity providers are forbidden by the no-AI rule; no store

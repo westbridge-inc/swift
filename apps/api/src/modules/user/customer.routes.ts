@@ -43,6 +43,7 @@ import {
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
+import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { checkoutRequestHash, drainCheckoutOutbox, findCheckoutReceipt } from '../order/checkout-outbox';
@@ -1089,11 +1090,17 @@ export async function customerRoutes(app: FastifyInstance) {
       const homeDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
         (userId ? (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
       );
-      const enriched = allVendors.map((v) => ({
-        ...enrichVendor(v, lat, lng, homeDeliveryRates),
-        isFavorite: favoriteIds.has(v.id),
-        ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
-      }));
+      // [S1 response-shaping · High #6] the card is the ONE public projection —
+      // `phone`/`email` and the staged MMG fields never leave the API.
+      const enriched = allVendors.map((v) => {
+        const card = vendorCardView(v);
+        return {
+          ...enrichVendor(card, lat, lng, homeDeliveryRates),
+          categories: (v.categories ?? []).map((c) => ({ id: c.id, name: c.name, imageUrl: c.imageUrl })),
+          isFavorite: favoriteIds.has(v.id),
+          ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
+        };
+      });
 
       // Sort by distance if location provided, otherwise by rating
       if (lat != null && lng != null) {
@@ -1383,12 +1390,16 @@ export async function customerRoutes(app: FastifyInstance) {
     const browseDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
       (browserId ? (await app.prisma.user.findUnique({ where: { id: browserId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
     );
-    let enriched = vendors.map((v) => ({
-      ...enrichVendor(v, userLat, userLng, browseDeliveryRates),
-      isFavorite: favoriteIds.has(v.id),
-      ...(surfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
-      ...(categoryRow ? { itemsInCategory: itemCounts.get(v.id) ?? null } : {}),
-    }));
+    // [S1 response-shaping · High #6] same ONE public projection as Home.
+    let enriched = vendors.map((v) => {
+      const card = vendorCardView(v);
+      return {
+        ...enrichVendor(card, userLat, userLng, browseDeliveryRates),
+        isFavorite: favoriteIds.has(v.id),
+        ...(surfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
+        ...(categoryRow ? { itemsInCategory: itemCounts.get(v.id) ?? null } : {}),
+      };
+    });
 
     // Re-sort by distance if location provided and no explicit sort
     if (userLat != null && userLng != null && sort === 'distance') {
@@ -1602,8 +1613,9 @@ export async function customerRoutes(app: FastifyInstance) {
     const favDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
       (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode ?? 'GY',
     );
+    // [S1 response-shaping · High #6] favourites are the same card as browse.
     const vendors = (customer?.favoriteVendors ?? []).map((v) => ({
-      ...enrichVendor(v, lat, lng, favDeliveryRates),
+      ...enrichVendor(vendorCardView(v), lat, lng, favDeliveryRates),
       isFavorite: true,
     }));
 
@@ -2283,7 +2295,11 @@ export async function customerRoutes(app: FastifyInstance) {
         vendor: {
           select: {
             id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true,
-            vendorType: true, phone: true, latitude: true, longitude: true,
+            // [S1 response-shaping · High #6] never `phone` — that is the
+            // store's account/OTP line, not a number it chose to publish, and
+            // it was handed to every customer on every order, for good. The
+            // storefront offers `publicPhone`; the order detail names the store.
+            vendorType: true, latitude: true, longitude: true,
           },
         },
         items: {
@@ -2444,7 +2460,10 @@ export async function customerRoutes(app: FastifyInstance) {
         rider: order.rider ? {
           firstName: order.rider.user?.firstName,
           lastName: order.rider.user?.lastName,
-          phone: order.rider.user?.phone,
+          // [S1 response-shaping] the mover's personal number is a handover
+          // convenience, not a permanent gift: null once the order is closed,
+          // exactly like the live coordinates two lines below.
+          phone: liveLocationVisible(order.status) ? order.rider.user?.phone : null,
           avatar: await resolveAvatarUrl(order.rider.user?.avatar), // [F-026-01]
           displayRating: riderSurface?.displayRating ?? null,
           // Trust visibility (master plan §5): the customer sees who and what
