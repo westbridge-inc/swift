@@ -54,6 +54,10 @@ export function inoperableSubscriptionWhere(now = new Date()): Prisma.Subscripti
     OR: [
       { status: { notIn: [...OPERABLE_STATUSES] } },
       { status: 'PAST_DUE', gracePeriodEnd: { lt: now } },
+      // [E12] Billing stopped and the paid period (or trial) over — the same
+      // refusal subscriptionOperability makes, so a catalogue read never shows
+      // a store the gate would refuse.
+      { autoRenew: false, currentPeriodEnd: { lte: now } },
     ],
   };
 }

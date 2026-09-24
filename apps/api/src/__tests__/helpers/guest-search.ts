@@ -116,7 +116,8 @@ export async function guestSearchApp(max = 200) {
   registerErrorHandler(app);
   app.addHook('onRequest', (_request, _reply, done) => { beginRequestTenantContext(); done(); });
   app.decorate('prisma', db as never);
-  await app.register(rateLimit, { max, timeWindow: '1 minute', keyGenerator: rateLimitKey });
+  // The same key main's app.ts builds since AVAIL-1: a verified token keys by its principal.
+  await app.register(rateLimit, { max, timeWindow: '1 minute', keyGenerator: rateLimitKey((token) => app.jwt.verify(token)) });
   await app.register(authPlugin);
   await app.register(searchRoutes, { prefix: '/api/v1' });
   await app.register(marketRoutes, { prefix: '/api/v1/market' });

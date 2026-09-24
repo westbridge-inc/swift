@@ -91,14 +91,20 @@ it.each(['/search?q=Pepper', '/search/suggestions?q=Pepper'])('closed vendors an
 });
 
 const now = Date.now();
+// Every row renews and is inside its paid period unless it says otherwise.
+const renewing = { autoRenew: true, currentPeriodEnd: new Date(now + 7 * 86_400_000) } as const;
 const subscriptionCases = [
   ['legacy', null, true],
-  ['trial', { status: 'TRIAL', gracePeriodEnd: null }, true],
-  ['active', { status: 'ACTIVE', gracePeriodEnd: null }, true],
-  ['grace', { status: 'PAST_DUE', gracePeriodEnd: new Date(now + 86_400_000) }, true],
-  ['no deadline', { status: 'PAST_DUE', gracePeriodEnd: null }, true],
-  ['lapsed', { status: 'PAST_DUE', gracePeriodEnd: new Date(now - 86_400_000) }, false],
-  ...(['PAUSED', 'SUSPENDED', 'CANCELLED', 'CHURNED'] as const).map((status) => [status, { status, gracePeriodEnd: null }, false] as const),
+  ['trial', { status: 'TRIAL', gracePeriodEnd: null, ...renewing }, true],
+  ['active', { status: 'ACTIVE', gracePeriodEnd: null, ...renewing }, true],
+  ['grace', { status: 'PAST_DUE', gracePeriodEnd: new Date(now + 86_400_000), ...renewing }, true],
+  ['no deadline', { status: 'PAST_DUE', gracePeriodEnd: null, ...renewing }, true],
+  ['lapsed', { status: 'PAST_DUE', gracePeriodEnd: new Date(now - 86_400_000), ...renewing }, false],
+  // [E12] Billing stopped: the store works to the end of the week it paid for,
+  // then the gate refuses it — the catalogue must agree at the same instant.
+  ['billing stopped, paid week running', { status: 'ACTIVE', gracePeriodEnd: null, autoRenew: false, currentPeriodEnd: new Date(now + 86_400_000) }, true],
+  ['billing stopped, paid week over', { status: 'ACTIVE', gracePeriodEnd: null, autoRenew: false, currentPeriodEnd: new Date(now - 60_000) }, false],
+  ...(['PAUSED', 'SUSPENDED', 'CANCELLED', 'CHURNED'] as const).map((status) => [status, { status, gracePeriodEnd: null, ...renewing }, false] as const),
 ] as const;
 
 it.each(subscriptionCases)('shared visibility preserves the operate-gate outcome for %s', (_name, subscription, visible) => {
@@ -183,7 +189,7 @@ it('honors cuisine in the guest DB vendor search', async () => {
 
 it('evaluates grace expiry at read time, including the exact deadline', () => {
   const deadline = new Date('2026-09-23T12:00:00Z');
-  const vendor = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, subscription: { status: 'PAST_DUE' as const, gracePeriodEnd: deadline } };
+  const vendor = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, subscription: { status: 'PAST_DUE' as const, gracePeriodEnd: deadline, autoRenew: true, currentPeriodEnd: new Date(deadline.getTime() + 7 * 86_400_000) } };
   vi.useFakeTimers();
   try {
     for (const [offset, visible] of [[-1, true], [0, true], [1, false]] as const) {
