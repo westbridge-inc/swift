@@ -77,7 +77,7 @@ describe('order custody — one classification, pinned', () => {
 
   it('mover-holding spans both legs and is order.service’s IN_TRANSIT set', () => {
     expect([...MOVER_HOLDING_STATUSES].sort()).toEqual(
-      ['ARRIVED', 'EN_ROUTE_DELIVERY', 'PICKED_UP', 'RIDE_IN_PROGRESS', 'RETURNING'],
+      ['ARRIVED', 'EN_ROUTE_DELIVERY', 'PICKED_UP', 'RETURNING', 'RIDE_IN_PROGRESS'],
     );
   });
 

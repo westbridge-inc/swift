@@ -272,6 +272,10 @@ const BOOKING_LAW: Record<OrderStatus, boolean> = {
   REFUNDED: true,
   // A booking has no handover to fail; a no-show is a decline or a cancel.
   FAILED: false,
+  // [E17] Only a parcel in a courier's custody can be sent back; a booking
+  // has nothing to return.
+  RETURNING: false,
+  RETURNED: false,
 };
 
 /** THE statuses a booking may occupy. Derived, never hand-written. */

@@ -13,18 +13,20 @@
 -- FORWARD: two enum values + four nullable columns. Existing rows are
 -- untouched (all four columns NULL; no row is given a new status).
 --
--- ROLLBACK: drop the four columns, then delete this migration's
--- _prisma_migrations row:
+-- ROLLBACK (honest scope). PostgreSQL cannot drop a value from an enum without
+-- rebuilding the type, so the rollback leaves RETURNING and RETURNED in
+-- "OrderStatus" (inert once no row uses them) and drops only the columns.
+-- PRECONDITION: no order may be in RETURNING or RETURNED, because the previous
+-- application's Prisma client cannot read those values (any query that returns
+-- such a row throws). Close every open return first (support moves each order
+-- to a status the old code knows, recording why), then roll the application
+-- back, then run, in one transaction:
 --   ALTER TABLE "orders"
 --     DROP COLUMN "courierReturnReason",
 --     DROP COLUMN "courierReturnRequestedAt",
 --     DROP COLUMN "courierReturnProofPhotoUrl",
 --     DROP COLUMN "courierReturnedAt";
--- PostgreSQL cannot DROP a value from an enum without a full type rebuild, so
--- the rollback deliberately does NOT rebuild the type: the two unused values
--- are inert. Precondition: roll the application back first and have no orders
--- in RETURNING (RETURNED rows would lose their status column on any rebuild,
--- which this rollback never performs).
+--   DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260924160000_courier_return_states';
 
 ALTER TYPE "OrderStatus" ADD VALUE IF NOT EXISTS 'RETURNING';
 ALTER TYPE "OrderStatus" ADD VALUE IF NOT EXISTS 'RETURNED';
