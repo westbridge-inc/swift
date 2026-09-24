@@ -780,7 +780,7 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
     expect(await wallet(p.subId)).toBe(0);
   });
 
-  it('a stopped store pauses at its period end, and the owner resumes it self-serve — billed like any renewal', async () => {
+  it('a stopped store pauses at its period end, and the owner resumes it self-serve — charged at the resume, like a renewal', async () => {
     const p = await makePartner('E12e');
     await trialEnds(p); // [DS198 D1] ACTIVE (the sweep only pauses ACTIVE rows)
     // trialEnds ages only trialEndDate; in production currentPeriodEnd IS the
@@ -802,16 +802,18 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
     const resumedAt = Date.now();
     const resume = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'CASH' }, { 'x-vendor-id': p.vendorId });
     expect(resume.statusCode, resume.body).toBe(200);
-    const resumed = await subRow(p.subId);
-    expect({ status: resumed.status, autoRenew: resumed.autoRenew }).toEqual({ status: 'ACTIVE', autoRenew: true });
-    expect(resumed.nextBillingDate.getTime()).toBeGreaterThanOrEqual(resumedAt - 1000);
-
-    await billing.runBillingCycle();
+    // [DS207 F2] Charged AT the resume, through the instant path a top-up
+    // uses — not an hour later by the cycle, so there is no unpaid window to
+    // work in and stop again. The paused weeks are never charged.
     expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
     const billed = await subRow(p.subId);
-    expect({ status: billed.status, nextBillingDate: billed.nextBillingDate.getTime() })
-      .toEqual({ status: 'ACTIVE', nextBillingDate: resumed.nextBillingDate.getTime() + WEEK });
+    expect({ status: billed.status, autoRenew: billed.autoRenew }).toEqual({ status: 'ACTIVE', autoRenew: true });
+    expect(billed.currentPeriodStart.getTime()).toBeGreaterThanOrEqual(resumedAt - 1000);
+    expect(billed.nextBillingDate.getTime()).toBe(billed.currentPeriodStart.getTime() + WEEK);
     expect(await wallet(p.subId)).toBe(0);
+
+    await billing.runBillingCycle(); // nothing further is due this week
+    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
   });
 });
 

@@ -249,36 +249,46 @@ export class BillingService {
    * PAUSED — not operable, owing nothing, and NOT terminal: resuming
    * (setBillingRail) restarts it with this week's fee billed like any
    * renewal. CANCELLED stays reserved for wind-down and closed accounts. Each
-   * lapse writes one billing event, keyed per period, so the history says
-   * why the plan stopped. Runs in the process-billing job.
+   * lapse writes one billing event, keyed by the row version it paused, so
+   * the history says why the plan stopped. Runs in the process-billing job.
    */
   async lapseStoppedSubscriptions(now = new Date()): Promise<number> {
     const due = await this.prisma.subscription.findMany({
       where: { status: 'ACTIVE', autoRenew: false, currentPeriodEnd: { lte: now } },
-      select: { id: true, currencyCode: true, currentPeriodEnd: true },
+      select: { id: true, currencyCode: true, updatedAt: true },
       take: 500,
     });
     let paused = 0;
     for (const sub of due) {
-      const done = await this.prisma.$transaction(async (tx) => {
-        // Guarded: a resume that armed autoRenew in between wins.
-        const flipped = await tx.subscription.updateMany({
-          where: { id: sub.id, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: { lte: now } },
-          data: { status: 'PAUSED', nextRetryAt: null, isInGracePeriod: false, gracePeriodEnd: null },
+      // [DS207 F1] One row can never stop the sweep (or the rest of the
+      // billing job after it): a failure is logged and the next row runs.
+      try {
+        const done = await this.prisma.$transaction(async (tx) => {
+          // Guarded: a resume that armed autoRenew in between wins.
+          const flipped = await tx.subscription.updateMany({
+            where: { id: sub.id, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: { lte: now } },
+            data: { status: 'PAUSED', nextRetryAt: null, isInGracePeriod: false, gracePeriodEnd: null },
+          });
+          if (flipped.count !== 1) return false;
+          await tx.billingEvent.create({
+            data: {
+              subscriptionId: sub.id,
+              type: 'TIER_CHANGE',
+              currencyCode: sub.currencyCode,
+              // [DS207 F1] Keyed by the row version this lapse paused, not by
+              // the period: a resume that has not been charged yet leaves the
+              // same currentPeriodEnd, and a second stop must be able to pause
+              // it again without colliding with the first pause's event.
+              idempotencyKey: `pause:${sub.id}:${sub.updatedAt.toISOString()}`,
+              note: 'Plan paused at the end of the paid period — weekly billing was stopped by the partner',
+            },
+          });
+          return true;
         });
-        if (flipped.count !== 1) return false;
-        await tx.billingEvent.create({
-          data: {
-            subscriptionId: sub.id,
-            type: 'TIER_CHANGE',
-            currencyCode: sub.currencyCode,
-            idempotencyKey: `pause:${sub.id}:${sub.currentPeriodEnd.toISOString()}`,
-            note: 'Plan paused at the end of the paid period — weekly billing was stopped by the partner',
-          },
-        });
-        return true;
-      });
-      if (done) paused += 1;
+        if (done) paused += 1;
+      } catch (err) {
+        log().error({ err, subscriptionId: sub.id }, 'stopped-plan lapse failed for one subscription — continuing');
+      }
     }
     return paused;
   }
@@ -2143,6 +2153,7 @@ export class BillingService {
     if (method === 'MOBILE_MONEY' && !mmgPayerMsisdn?.trim()) {
       throw new AppError(400, 'MSISDN_REQUIRED', 'Your MMG account number is required to pay the weekly fee via MMG.');
     }
+    let resumedFromPause = false;
     const updated = await this.prisma.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<Array<{ status: SubscriptionStatus }>>`
         SELECT "status" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE
@@ -2167,6 +2178,7 @@ export class BillingService {
       // (its period starts at nextBillingDate) exactly like any renewal, and a
       // failed charge follows the normal dunning.
       const paused = fresh.status === 'PAUSED';
+      resumedFromPause = paused;
       return tx.subscription.update({
         where: { id: subscriptionId },
         data: {
@@ -2204,6 +2216,26 @@ export class BillingService {
         const { captureMmgPayer } = await import('../integrity/capture-hooks');
         const role = human?.rider ? 'RIDER' : human?.driver ? 'DRIVER' : 'VENDOR';
         captureMmgPayer(this.prisma, { userId, role, payerMsisdn: mmgPayerMsisdn.trim() });
+      }
+    }
+    // [DS207 F2] A resumed PAUSED plan is charged NOW, through the same
+    // instant path a top-up uses, not at the next hourly cycle: otherwise a
+    // partner could resume, work until just before the cycle, stop again and
+    // never pay for that work. A failed or in-flight charge follows the normal
+    // dunning; the cycle still retries a row that remains due.
+    if (resumedFromPause) {
+      try {
+        const sub = await this.prisma.subscription.findUnique({
+          where: { id: subscriptionId },
+          include: {
+            rider: { select: { userId: true } },
+            driver: { select: { userId: true } },
+            vendor: { select: { id: true, owner: { select: { userId: true } } } },
+          },
+        });
+        if (sub) await this.billSubscription(sub as SubWithRelations);
+      } catch (err) {
+        log().error({ err, subscriptionId }, 'instant charge after resuming a paused plan failed — the billing cycle retries');
       }
     }
     return updated;
