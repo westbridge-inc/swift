@@ -62,7 +62,10 @@ fi
 STORE_BIN="$(command -v swift-secrets || true)"
 [ -n "$STORE_BIN" ] || STORE_BIN="$HERE/swift-secrets"
 [ -x "$STORE_BIN" ] || die "swift-secrets is not installed (install -m 0755 -o root -g root deploy/swift-secrets /usr/local/sbin/swift-secrets)"
-STORED="$("$STORE_BIN" list)" || die "swift-secrets list failed"
+# The store's parent (/etc/credstore.encrypted) is root-only (0700, the systemd
+# default), so the list runs through sudo like the restart below; an unreadable
+# store fails loudly rather than reading as empty.
+STORED="$(sudo -n "$STORE_BIN" list)" || die "swift-secrets list failed (it reads the root-only credential store through sudo -n)"
 # Everything wired as NAME_FILE — hardwired in Compose or switched on in .env —
 # must be in the store, or the app refuses to boot after the old one is stopped.
 WIRED="$({
