@@ -100,10 +100,15 @@ function VendorRoot() {
   // [MOB-038] An outage is not "you have no business". A failed profile read
   // used to arrive as null and land here as the setup wizard — offered to a
   // working restaurant while its orders were live. Absence is a verified 404
-  // (or a well-formed owner with no stores); everything else says so, and
-  // offers the one thing that helps: try again. It must not be a one-way door:
-  // `intent` persists, so a cold start reopens this same screen — the header's
-  // Switch app and Log out are the ways back to Swift and the welcome.
+  // (or a well-formed owner with no stores) — or the server's 403 to an
+  // account that holds no vendor role at all, which is its way of saying the
+  // same thing to a customer who tapped "Swift Business" to list a first
+  // store (hooks/vendorops, lib/vendorProfile); that account lands on
+  // BusinessSetup below, the JOIN flow, never on this error. Everything else
+  // says so, and offers the one thing that helps: try again. It must not be a
+  // one-way door: `intent` persists, so a cold start reopens this same screen
+  // — the header's Switch app and Log out are the ways back to Swift and the
+  // welcome.
   if (profileState === 'error') {
     return (
       <Screen>
