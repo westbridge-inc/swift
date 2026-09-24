@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
+import { testControlIdentity } from '../modules/ops/test-control';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
 // secrets that keep KYC documents private (envelope KEK + render HMAC), and
@@ -357,6 +358,49 @@ describe('[F-027-15] getPushProvider refuses the in-memory provider in productio
       process.env['PUSH_PROVIDER'] = 'dev';
       expect(() => getPushProvider(), env).not.toThrow();
     }
+  });
+});
+
+// [R2 C2] The load-test control plane signs its leases with
+// TEST_CONTROL_SECRET. Its fallback, 'test-control-dev-secret', is printed in
+// this PUBLIC repository, so an internet-facing loadtest deployment with the
+// secret unset would hand anyone a forgeable lease. Boot refuses that; the
+// fallback survives only for the isolated `test` mode the suites run in.
+describe('test-control lease secret [C2]', () => {
+  const loadtest: Record<string, string | undefined> = { NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '1' };
+  const prismaDouble = { deploymentIdentity: { findUnique: async () => null } } as unknown as Parameters<typeof testControlIdentity>[0];
+
+  it('refuses loadtest with test control enabled and no TEST_CONTROL_SECRET', () => {
+    expect(() => assertSafeBootConfig(loadtest)).toThrow(/TEST_CONTROL_SECRET/);
+  });
+
+  it.each(['', 'short', 'x'.repeat(31), 'test-control-dev-secret'])('refuses a weak secret (%j)', (secret) => {
+    expect(() => assertSafeBootConfig({ ...loadtest, TEST_CONTROL_SECRET: secret })).toThrow(/TEST_CONTROL_SECRET/);
+  });
+
+  it('accepts a 32+ character secret', () => {
+    expect(() => assertSafeBootConfig({ ...loadtest, TEST_CONTROL_SECRET: 'x'.repeat(32) })).not.toThrow();
+  });
+
+  it('does not require the secret when test control is off', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '0' })).not.toThrow();
+  });
+
+  it('production never registers test control, so the guard adds nothing there', () => {
+    expect(() => assertSafeBootConfig({ ...good, TEST_CONTROL_ENABLED: '1' })).not.toThrow();
+  });
+
+  it('test mode keeps the repository fallback — suites run isolated', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'test', TEST_CONTROL_ENABLED: '1' })).not.toThrow();
+  });
+
+  it('the identity endpoint itself refuses to sign with the fallback outside test mode', async () => {
+    await expect(testControlIdentity(prismaDouble, { NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '1' })).rejects.toThrow(/TEST_CONTROL_SECRET/);
+    const signed = await testControlIdentity(prismaDouble, { NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '1', TEST_CONTROL_SECRET: 'y'.repeat(32) });
+    expect(signed.lease.signature).toMatch(/^[0-9a-f]{64}$/);
+    const inTest = await testControlIdentity(prismaDouble, { NODE_ENV: 'test', TEST_CONTROL_ENABLED: '1' });
+    expect(inTest.lease.signature).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 
