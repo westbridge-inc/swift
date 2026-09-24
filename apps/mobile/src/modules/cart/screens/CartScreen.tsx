@@ -50,6 +50,16 @@ import type { MmgDirectPaymentAction } from '@swift/types';
 import { CartPaymentOptions } from '../CartPaymentOptions';
 import { checkoutTipAmount } from '../checkout-tip';
 import {
+  cartPricingChoices,
+  deliveryFeeRows,
+  isBookingsOnly,
+  pickupStoreNames,
+  pricedTip,
+  quoteStoreIds,
+  quotedRiderTip,
+  shortStores,
+} from '../cartQuote';
+import {
   checkoutPaymentMethod,
   normalizeCartPaymentCapabilities,
   paymentActionForCheckout,
@@ -174,10 +184,6 @@ export function CartScreen() {
   const [paySelection, setPaySelection] = useState<CartPaymentSelection>({ method: 'CASH', scope: '' });
   // Pickup spec 2.1: the FIRST decision — it reshapes everything below.
   const [fulfillment, setFulfillment] = useState<'DELIVERY' | 'PICKUP'>('DELIVERY');
-  // [E01] The vendor ids the quote prices. Kept in local state so the quote
-  // request can carry the per-vendor mode selection while the response is
-  // still in flight (the ids come from the quote's own items).
-  const [cartVendorIds, setCartVendorIds] = useState<string[]>([]);
   const [placedPickup, setPlacedPickup] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
@@ -193,29 +199,27 @@ export function CartScreen() {
   const canGoBack = navigation.canGoBack();
   const appointments = useBookingStore((s) => s.appointments);
   const clearAppointments = useBookingStore((s) => s.clear);
-  // [E01] One global pickup toggle applied to EVERY vendor now (owner
-  // decision); per-vendor chips come later and the vendors[] shape already
-  // carries a per-vendor choice. The server prices the pickup quote, so the
-  // screen renders the server's total — never a client-side subtraction.
-  const fulfillmentSelections = useMemo<Record<string, 'DELIVERY' | 'PICKUP'> | undefined>(() => {
-    if (fulfillment !== 'PICKUP' || cartVendorIds.length === 0) return undefined;
-    return Object.fromEntries(cartVendorIds.map((id) => [id, 'PICKUP'] as const));
-  }, [fulfillment, cartVendorIds]);
-  const cartOpts = useMemo(() => ({ express, fulfillment: fulfillmentSelections }), [express, fulfillmentSelections]);
-  const cart = useCart<any>(latitude ?? undefined, longitude ?? undefined, cartOpts);
+  // [E01] What the quote is asked to price: the stores in the cart and whether
+  // it is bookings only — read from the quote's own lines and kept here, so the
+  // next quote request can carry them while it is in flight.
+  const [quoteBasis, setQuoteBasis] = useState<{ storeIds: string[]; bookingsOnly: boolean }>({ storeIds: [], bookingsOnly: false });
+  // [E01] ONE set of pricing choices — the quote is requested with it and the
+  // order button submits it, so the server prices exactly what is charged.
+  const pricing = useMemo(
+    () => cartPricingChoices({ mode: fulfillment, express, storeIds: quoteBasis.storeIds, bookingsOnly: quoteBasis.bookingsOnly, selectedTip }),
+    [fulfillment, express, quoteBasis, selectedTip],
+  );
+  const cart = useCart<any>(latitude ?? undefined, longitude ?? undefined, pricing);
   const c = cart.data; // null = empty cart
-  // The quote's items carry each vendor's id — remember them so the next
-  // selection change (pickup / delivery) can be sent for every vendor.
   useEffect(() => {
-    const ids: string[] = [
-      ...new Set(
-        ((c?.items ?? []) as Array<{ vendorId?: string }>)
-          .map((i) => i?.vendorId)
-          .filter((v): v is string => typeof v === 'string'),
-      ),
-    ];
-    setCartVendorIds((prev) => (prev.length === ids.length && prev.every((v, i) => v === ids[i]) ? prev : ids));
+    const next = { storeIds: quoteStoreIds(c?.items), bookingsOnly: isBookingsOnly(c?.items) };
+    setQuoteBasis((prev) =>
+      prev.bookingsOnly === next.bookingsOnly && prev.storeIds.join('|') === next.storeIds.join('|') ? prev : next);
   }, [c?.items]);
+  // [E01] The screen may only commit money against a SETTLED quote: one priced
+  // for the current choices (not the previous choice's, kept on screen while
+  // the new one loads) and not being refreshed after a cart change.
+  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && !updateItem.isPending && !removeItem.isPending;
   const paymentCapabilities = useMemo(
     () => normalizeCartPaymentCapabilities(c?.paymentCapabilities),
     [c?.paymentCapabilities],
@@ -289,10 +293,16 @@ export function CartScreen() {
     selectedTip,
     cartTip: c?.tipAmount,
   });
-  // [E01] The total is SERVER-owned. The pickup preview is no longer derived
-  // on the client by subtracting a fee — the quote is re-fetched for the
-  // selected mode (and for express), and the screen renders what it priced.
-  const displayedTotal = c ? (express ? c.expressTotal : c.totalAmount) : 0;
+  // [E01] The total is the SERVER's, priced for the choices on screen (the
+  // quote is requested with them) — never derived here. The old screen
+  // subtracted ONE store's fee for pickup and swapped the tip itself: a third
+  // calculator, wrong as soon as a second store joined the cart.
+  const displayedTotal = c ? Number(c.totalAmount) : 0;
+  // The summary's rows come from the same quote as the total.
+  const feeRows = deliveryFeeRows(c);
+  const riderTip = quotedRiderTip(c, displayedTip);
+  // [E09] Every store below its own minimum, named, with the amount to add.
+  const short = shortStores(c);
   const choosePickup = () => {
     setFulfillment('PICKUP');
     setExpress(false); // express is a delivery speed
@@ -307,27 +317,24 @@ export function CartScreen() {
   const needsAddress = (!apptOnly && !pickup) || homeVisit;
 
   const onOrder = (extra?: Record<string, unknown>) => {
-    // [E01] The pickup choice applies to EVERY vendor in the basket (the
-    // owner-approved global toggle), not just the one `cart.vendor` tracks.
-    const pickupVendorIds = [...new Set(items.map((i: any) => i?.vendorId).filter((v: unknown): v is string => typeof v === 'string'))];
-    const asPickup = pickup && pickupVendorIds.length > 0;
-    const pickupSelections = asPickup
-      ? Object.fromEntries(pickupVendorIds.map((id) => [id, 'PICKUP'] as const))
-      : undefined;
-    const submittingPickup = pickup || (extra as any)?.fulfillmentSelections != null;
-    const submittedTip = checkoutTipAmount({
-      pickupOrApptOnly: apptOnly || submittingPickup,
-      selectedTip,
-      cartTip: c?.tipAmount,
-    });
+    // A pickup retry (no riders online) arrives as `extra.fulfillmentSelections`.
+    const pickupRetry = (extra as any)?.fulfillmentSelections != null;
+    const submittingPickup = pickup || pickupRetry;
+    // [E01 · F-013-01] The tip the quote on screen was priced with: the
+    // customer's own choice when made (it outranks the persisted cart tip), none
+    // for a basket with no rider, else the cart's tip the server priced. A
+    // pickup retry has no rider either.
+    const submittedTip = pickupRetry ? 0 : pricedTip(pricing, c);
     const submittedMethod = checkoutPaymentMethod(effectivePaySelection, paymentCapabilities);
     placeOrder.mutate(
       {
         paymentMethod: submittedMethod,
-        ...(express && !pickup ? { express: true } : {}),
+        // [E01] Exactly the choices the quote was priced with: the speed, and
+        // the pickup choice for EVERY store in the basket.
+        ...(pricing.express ? { express: true } : {}),
+        ...(pricing.fulfillmentSelections ? { fulfillmentSelections: pricing.fulfillmentSelections } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() && !pickup ? { deliveryInstructions: instructions.trim() } : {}),
-        ...(pickupSelections ? { fulfillmentSelections: pickupSelections } : {}),
         ...(extra ?? {}),
         tipAmount: submittedTip,
       },
@@ -386,11 +393,11 @@ export function CartScreen() {
   // honestly; pickup is the same food without the wait for a rider.
   const noRiders = (placeOrder.error as any)?.response?.data?.error?.code === 'DELIVERY_NO_RIDERS';
   const retryAsPickup = () => {
-    // [E01] Retry the WHOLE basket as pickup — every vendor, not just the one
-    // `cart.vendor` happens to track.
-    const pickupVendorIds = [...new Set(items.map((i: any) => i?.vendorId).filter((v: unknown): v is string => typeof v === 'string'))];
-    if (pickupVendorIds.length === 0) return;
-    onOrder({ fulfillmentSelections: Object.fromEntries(pickupVendorIds.map((id) => [id, 'PICKUP'] as const)) });
+    // [E01] Every store in the basket collects — not just the one
+    // `cart.vendor` happens to track (the rest would still wait for a rider).
+    const storeIds = quoteStoreIds(c?.items);
+    if (storeIds.length === 0) return;
+    onOrder({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });
   };
 
   return (
@@ -463,7 +470,8 @@ export function CartScreen() {
               <View style={{ flex: 1 }}>
                 <T variant="label" tone="muted">Pick up from</T>
                 <T variant="body" weight="semibold" style={{ marginTop: 2 }} numberOfLines={1}>
-                  {c.vendor?.name ?? 'The store'}
+                  {/* [E01] Every store the pickup quote collects from. */}
+                  {pickupStoreNames(c).join(' · ') || (c.vendor?.name ?? 'The store')}
                 </T>
               </View>
             </View>
@@ -750,36 +758,28 @@ export function CartScreen() {
             <T variant="heading">{apptOnly ? 'Booking summary' : 'Order summary'}</T>
             <View style={{ marginTop: space.md }}>
               <InfoRow label={`Items (${c.itemCount})`} value={money(c.subtotalCustomer)} />
-              {/* [E01] A multi-vendor basket is several orders, so its fees
-                  are several rows — one per vendor, from the server's
-                  per-vendor plans. A single-vendor cart keeps the one row. */}
-              {!apptOnly && !pickup && (c.vendors?.length ?? 0) > 1
-                ? (c.vendors ?? []).map((v: any) => (
-                    <InfoRow
-                      key={v.vendorId}
-                      label={`${v.name} delivery`}
-                      // The STANDARD fee beside the Express premium row — the
-                      // two rows must never both carry the premium.
-                      value={(v.standardDeliveryFee ?? v.deliveryFee) === 0 ? 'Free' : money(v.standardDeliveryFee ?? v.deliveryFee)}
-                    />
+              {/* [E01] A multi-store basket is several orders, so several fees:
+                  one row per delivered store, from the server's per-store plans.
+                  Fees are shown before the express premium (its own row). */}
+              {!apptOnly && !pickup && feeRows?.kind === 'single' ? (
+                <InfoRow label="Delivery fee" value={feeRows.fee === 0 ? 'Free' : money(feeRows.fee)} />
+              ) : null}
+              {!apptOnly && !pickup && feeRows?.kind === 'perStore'
+                ? feeRows.rows.map((row) => (
+                    <InfoRow key={row.vendorId} label={`${row.name} delivery`} value={row.fee === 0 ? 'Free' : money(row.fee)} />
                   ))
                 : null}
-              {!apptOnly && !pickup && (c.vendors?.length ?? 0) <= 1 ? (
-                <InfoRow
-                  label="Delivery fee"
-                  value={(c.standardDeliveryFee ?? c.deliveryFee) === 0 ? 'Free' : money(c.standardDeliveryFee ?? c.deliveryFee)}
-                />
-              ) : null}
               {pickup ? <InfoRow label="Pickup" value="No delivery fee" /> : null}
-              {!pickup && express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
+              {!pickup && c.express && c.expressSurcharge > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
               {c.discount > 0 ? <InfoRow label="Discount" value={`-${money(c.discount)}`} /> : null}
-              {!apptOnly && !pickup && displayedTip > 0 ? <InfoRow label="Rider tip" value={money(displayedTip)} /> : null}
+              {!apptOnly && !pickup && riderTip > 0 ? <InfoRow label="Rider tip" value={money(riderTip)} /> : null}
               <View style={[RULE, { marginVertical: space.sm }]} />
-              {/* [E01] The total is the SERVER's number for the selected mode:
-                  the pickup / express quote was fetched with that selection. */}
+              {/* [E01] The server's total for exactly the choices above. While
+                  a changed choice is being re-priced the previous quote is
+                  still on screen, so the total says so instead of a number. */}
               <InfoRow
                 label={pickup ? 'Total at the counter' : 'Total'}
-                value={money(displayedTotal)}
+                value={cart.isPlaceholderData ? 'Updating…' : money(displayedTotal)}
                 strong
               />
             </View>
@@ -811,29 +811,26 @@ export function CartScreen() {
             ) : null}
           </View>
 
-          {!c.meetsMinimum ? (
-            (c.vendors ?? []).filter((v: any) => !v.meetsMinimum).length > 0 ? (
-              /* [E09] One warning per SHORT VENDOR, naming the store and the
-                 amount still to add — the combined subtotal no longer stands
-                 in for any vendor's own minimum. */
-              <>
-                {(c.vendors ?? []).filter((v: any) => !v.meetsMinimum).map((v: any) => (
-                  <View key={v.vendorId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
-                    <Feather name="alert-circle" size={14} color={color.warning} />
-                    <T variant="label" tone="warning">
-                      {v.name} has a minimum order of {money(v.minOrderAmount)} — add {money(Math.max(0, Number(v.minOrderAmount) - Number(v.subtotal)))} more to order.
-                    </T>
-                  </View>
-                ))}
-              </>
-            ) : (
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
-                <Feather name="alert-circle" size={14} color={color.warning} />
-                <T variant="label" tone="warning">
-                  This store has a minimum order of {money(c.minimumOrderAmount)}.
-                </T>
-              </View>
-            )
+          {!c.meetsMinimum && short.length > 0
+            ? /* [E09] One warning per store below ITS OWN minimum, naming the
+                 store and the amount still to add — checkout refuses the whole
+                 basket while any store is short. */
+              short.map((store) => (
+                <View key={store.vendorId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
+                  <Feather name="alert-circle" size={14} color={color.warning} />
+                  <T variant="label" tone="warning" style={{ flex: 1 }}>
+                    {store.name} has a minimum order of {money(store.minOrderAmount)} — add {money(store.amountToAdd)} more to order.
+                  </T>
+                </View>
+              ))
+            : null}
+          {!c.meetsMinimum && short.length === 0 ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
+              <Feather name="alert-circle" size={14} color={color.warning} />
+              <T variant="label" tone="warning">
+                This store has a minimum order of {money(c.minimumOrderAmount)}.
+              </T>
+            </View>
           ) : null}
           {unslotted.length > 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
@@ -858,7 +855,7 @@ export function CartScreen() {
               size="md"
               style={{ marginTop: space.md }}
               loading={placeOrder.isPending || recovery.recovering}
-              disabled={recovery.recovering || alreadyPlaced || stillPlacing}
+              disabled={recovery.recovering || alreadyPlaced || stillPlacing || !quoteSettled}
               onPress={retryAsPickup}
             />
           ) : null}
@@ -875,7 +872,9 @@ export function CartScreen() {
             onPress={() => onOrder()}
             size="xl"
             loading={placeOrder.isPending || recovery.recovering}
-            disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0 || recovery.recovering || alreadyPlaced || stillPlacing}
+            // [E01] Never commit money against a quote that is not the settled
+            // price of what this button submits.
+            disabled={!quoteSettled || !c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0 || recovery.recovering || alreadyPlaced || stillPlacing}
             style={{ marginTop: space.xl }}
           />
           {needsAddress && !c.deliveryAddress ? (

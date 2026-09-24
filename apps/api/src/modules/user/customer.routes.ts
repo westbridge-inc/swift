@@ -2,14 +2,14 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
-import { lineTotal, promoDiscount } from '../../utils/order-total';
+import { promoDiscount } from '../../utils/order-total';
 import { z } from 'zod';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
-import { getMapsProvider } from '../../providers/maps/maps-provider';
+import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
 import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
 import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
@@ -29,7 +29,7 @@ import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
-import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
+import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
@@ -46,7 +46,6 @@ import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counte
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { checkoutRequestHash, drainCheckoutOutbox, findCheckoutReceipt } from '../order/checkout-outbox';
-import { planVendorGroup, priceBasket } from '../order/cart-plans';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
  *  constrained to the known set — never a hardcoded guess. */
@@ -84,33 +83,6 @@ const updateAddressSchema = createAddressSchema.omit({ isDefault: true }).partia
 const latLngQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90).optional(),
   lng: z.coerce.number().min(-180).max(180).optional(),
-});
-
-// [E01] The cart quote now prices EACH vendor: `express` asks for the priority
-// fee; `fulfillment` overrides vendors' modes as "<vendorId>=MODE" pairs,
-// comma-separated (the bundled fast-querystring has no bracket support, so a
-// JSON record cannot round-trip through the query string). Both mirror
-// checkout's `express` / `fulfillmentSelections` inputs, so the preview and the
-// charge accept the same choices.
-const cartFulfillmentSchema = z
-  .string()
-  .max(2000)
-  .optional()
-  .transform((raw) => {
-    if (!raw) return undefined;
-    const out: Record<string, 'DELIVERY' | 'PICKUP'> = {};
-    for (const part of raw.split(',')) {
-      const eq = part.indexOf('=');
-      const vendorId = eq >= 0 ? part.slice(0, eq) : part;
-      const mode = eq >= 0 ? part.slice(eq + 1) : '';
-      if (vendorId && (mode === 'DELIVERY' || mode === 'PICKUP')) out[vendorId] = mode;
-    }
-    return out;
-  });
-
-const cartQuerySchema = latLngQuerySchema.extend({
-  express: z.coerce.boolean().optional(),
-  fulfillment: cartFulfillmentSchema,
 });
 
 const vendorsBrowseQuerySchema = latLngQuerySchema.extend({
@@ -156,14 +128,18 @@ const cartTipSchema = z.object({
 // 99,999,999 storage ceiling — the same value the cart rejected.
 const MAX_TIP_GYD = 50_000;
 
+// Per-vendor DELIVERY|PICKUP choice for multi-vendor carts. [E01] ONE schema
+// for the checkout body and the cart quote, so the preview accepts exactly the
+// choices checkout does.
+const fulfillmentSelectionsSchema = z.record(z.enum(['DELIVERY', 'PICKUP']));
+
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
   deliveryInstructions: z.string().max(500).optional(),
   tipAmount: zMoneyWhole.max(MAX_TIP_GYD).optional(),
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
-  // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts
-  fulfillmentSelections: z.record(z.enum(['DELIVERY', 'PICKUP'])).optional(),
+  fulfillmentSelections: fulfillmentSelectionsSchema.optional(),
   // Priority delivery: 1.5x delivery fee, dispatched ahead of standard orders
   express: z.boolean().optional(),
   // Requested slots for APPOINTMENT listings (booked at vendor acceptance).
@@ -178,6 +154,44 @@ const checkoutSchema = z.object({
       }),
     )
     .max(10)
+    .optional(),
+});
+
+/**
+ * [E01] GET /cart prices the basket for the choices checkout will be sent.
+ * `express`, `fulfillmentSelections` and `tipAmount` mean exactly what they
+ * mean in the checkout body (same rules), carried in a query string:
+ *   - express: "true" | "false" — never z.coerce.boolean(), which reads the
+ *     string "false" as true and would quote every delivery as express;
+ *   - fulfillmentSelections: checkout's record as JSON — Fastify's querystring
+ *     parser has no bracket syntax for nested objects;
+ *   - tipAmount: whole money under the checkout cap; absent = the cart's tip.
+ * A malformed value is a 400: a quote silently priced for a different choice
+ * than the one on screen is the defect this exists to remove.
+ */
+const cartQuerySchema = latLngQuerySchema.extend({
+  express: z.enum(['true', 'false']).optional().transform((v) => v === 'true'),
+  fulfillmentSelections: z
+    .string()
+    .max(4000)
+    .optional()
+    .transform((raw, ctx) => {
+      if (raw === undefined) return undefined;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = undefined;
+      }
+      const selections = fulfillmentSelectionsSchema.safeParse(parsed);
+      if (!selections.success) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'fulfillmentSelections must be a JSON object of vendor id to DELIVERY or PICKUP' });
+        return z.NEVER;
+      }
+      return selections.data;
+    }),
+  tipAmount: z
+    .preprocess((v) => (typeof v === 'string' && /^\d{1,9}$/.test(v) ? Number(v) : v), zMoneyWhole.max(MAX_TIP_GYD))
     .optional(),
 });
 
@@ -278,13 +292,22 @@ async function resolveCustomer(app: FastifyInstance, userId: string) {
   return customer;
 }
 
+/** [E01] The checkout choices a quote is priced for — the same meaning as the
+ *  checkout body's fields of these names. Absent = checkout's own default
+ *  (standard speed, DELIVERY for every vendor, the cart's persisted tip). */
+interface CartQuoteChoices {
+  express?: boolean;
+  fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
+  tipAmount?: number;
+}
+
 /** Build a typed "cart with computed totals" response from a raw cart. */
 async function buildCartResponse(
   app: FastifyInstance,
   userId: string,
   lat?: number,
   lng?: number,
-  opts?: { express?: boolean; fulfillment?: Record<string, 'DELIVERY' | 'PICKUP'> },
+  choices: CartQuoteChoices = {},
 ) {
   const cart = await app.prisma.cart.findUnique({
     where: { customerId: userId },
@@ -306,6 +329,9 @@ async function buildCartResponse(
               optionGroups: {
                 select: { name: true, options: { select: { id: true, name: true, additionalPrice: true } } },
               },
+              // [E01] Each line prices against ITS OWN vendor — the tracked
+              // `cart.vendor` is only the most recently added store.
+              vendor: { select: { id: true, name: true, latitude: true, longitude: true, minOrderAmount: true } },
             },
           },
         },
@@ -376,63 +402,30 @@ async function buildCartResponse(
   // set). Same routing source as checkout, so the quote equals the final fee.
   const addrLat = deliveryAddr?.latitude ?? lat;
   const addrLng = deliveryAddr?.longitude ?? lng;
-
-  const quoteAddress = addrLat != null && addrLng != null
-    ? { lat: addrLat, lng: addrLng }
-    : null;
+  const destination: LatLng | null = addrLat != null && addrLng != null ? { lat: addrLat, lng: addrLng } : null;
 
   // FUL-003b: resolve the same country delivery-fee schedule checkout uses, so
   // the fee previewed here equals the fee charged (null config → code default).
   const buyer = await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
   const deliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(buyer?.countryCode ?? '');
 
-  // [E01] One plan PER VENDOR — a multi-vendor cart becomes several orders, so
-  // the preview prices several plans through the same routine checkout uses.
-  // The tracked `cart.vendor` is only "the most recent vendor"; each item's own
-  // vendorId is the truth for grouping.
-  const vendorIds = [...new Set(cart.items.map((ci) => ci.item.vendorId))];
-  const vendors = await app.prisma.vendor.findMany({
-    where: { id: { in: vendorIds } },
-    select: {
-      id: true, name: true, slug: true, vendorType: true,
-      estimatedPrepTime: true, minOrderAmount: true,
-      latitude: true, longitude: true, deliveryRadius: true,
-      isCurrentlyOpen: true, acceptingOrders: true, logoUrl: true,
-    },
-  });
-  const selections = opts?.fulfillment ?? {};
-  const plans = await Promise.all(vendorIds.map(async (vendorId) => {
-    const vendor = vendors.find((v) => v.id === vendorId)!;
-    return planVendorGroup({
-      items: cart.items
-        .filter((ci) => ci.item.vendorId === vendorId)
-        .map((ci) => ({
-          itemId: ci.item.id,
-          name: ci.item.name,
-          basePrice: Number(ci.item.basePrice),
-          quantity: ci.quantity,
-          selectedOptions: ci.selectedOptions,
-          fulfillment: ci.item.fulfillment,
-          vendorId: ci.item.vendorId,
-          optionGroups: ci.item.optionGroups,
-        })),
-      vendor: {
-        id: vendor.id,
-        name: vendor.name,
-        vendorType: vendor.vendorType,
-        latitude: vendor.latitude,
-        longitude: vendor.longitude,
-        deliveryRadius: vendor.deliveryRadius,
-        estimatedPrepTime: vendor.estimatedPrepTime,
-        minOrderAmount: Number(vendor.minOrderAmount),
-      },
-      fulfillment: selections[vendorId] ?? 'DELIVERY',
-      address: quoteAddress,
-      deliveryRates,
-      express: opts?.express === true,
-      routeKm: (from, to) => getMapsProvider().routeKm(from, to),
-    });
-  }));
+  // [E01 · ALG-24] One plan PER VENDOR, through the planner checkout prices
+  // with, in checkout's plan order: a multi-vendor cart is several orders, each
+  // with its own distance, fee and minimum. Services booked as appointments
+  // carry no delivery fee (you go to them / they come to you) — decided per
+  // line exactly as checkout decides it, not from `cart.vendor.vendorType`.
+  // The routing engine is only resolved when a delivery is actually routed.
+  let maps: ReturnType<typeof getMapsProvider> | null = null;
+  const selections = choices.fulfillmentSelections ?? {};
+  const plans = await Promise.all(groupLinesByVendor(cart.items).map(({ vendorId, lines }) => planVendorGroup({
+    vendor: lines[0]!.item.vendor,
+    lines,
+    fulfillment: planFulfillment(lines, selections[vendorId]),
+    destination,
+    deliveryRates,
+    express: choices.express === true,
+    routeKm: (from, to) => (maps ??= getMapsProvider()).routeKm(from, to),
+  })));
 
   // Line items — zero markup: customers pay the vendor base price; platform
   // revenue is weekly subscriptions only. Field names are kept for client
@@ -441,10 +434,7 @@ async function buildCartResponse(
   const unavailableItemIds: string[] = [];
 
   const itemDetails = cart.items.map((ci) => {
-    const base = Number(ci.item.basePrice);
-    const options = resolveSelectedOptions(ci.item, ci.selectedOptions);
-    const unitPrice = base + optionsUnitPrice(options);
-    const lineBase = lineTotal(unitPrice, ci.quantity);
+    const line = priceCartLine(ci);
 
     if (!ci.item.isAvailable) unavailableItemIds.push(ci.id);
 
@@ -453,34 +443,36 @@ async function buildCartResponse(
       itemId: ci.itemId,
       name: ci.item.name,
       imageUrl: ci.item.imageUrl,
-      basePrice: base,
-      customerPrice: unitPrice,
+      basePrice: line.basePrice,
+      customerPrice: line.unitPrice,
       quantity: ci.quantity,
       selectedOptions: ci.selectedOptions,
-      selectedOptionNames: options.map((o) => o.optionName),
+      selectedOptionNames: line.options.map((o) => o.optionName),
       specialInstructions: ci.specialInstructions,
-      lineTotal: lineBase,
+      lineTotal: line.lineTotal,
       isAvailable: ci.item.isAvailable,
       fulfillment: ci.item.fulfillment,
+      // [E01] Which store's order this line joins at checkout.
       vendorId: ci.item.vendorId,
     };
   });
 
-  // [E01] Legacy flat fields become the per-vendor sums (owner decision): a
-  // multi-vendor basket is several orders, so its aggregates must be too. For
-  // a single-vendor cart these equal the plan values exactly.
-  const subtotalBase = plans.reduce((sum, p) => sum + p.subtotal, 0);
+  // [E01] The flat fields are the per-vendor sums (owner decision): a
+  // multi-vendor basket is several orders, so its aggregates are too. For a
+  // single-vendor cart they are that vendor's plan exactly.
+  const sumOf = (values: number[]) => values.reduce((s, v) => s + v, 0);
+  const subtotalBase = sumOf(plans.map((p) => p.subtotal));
   const subtotalCustomer = subtotalBase;
-  const deliveryFee = plans.reduce((sum, p) => sum + p.deliveryFee, 0);
-  const standardDeliveryFee = plans.reduce((sum, p) => sum + p.standardDeliveryFee, 0);
+  const deliveryFee = sumOf(plans.map((p) => p.deliveryFee));
+  const standardDeliveryFee = sumOf(plans.map((p) => p.standardDeliveryFee));
 
-  // [E01 · ALG-24] The ONE basket pricer — promo basis (a vendor code → that
-  // vendor's plan; a platform code → the whole basket), the capacity clamp,
-  // the tip rule and every plan's total. Checkout calls the same function, so
-  // the preview and the charge share a computation. Promo REFUSALS are not
-  // surfaced here (owner decision): a code checkout will refuse simply
-  // discounts nothing in the preview.
-  const promoTerms = promoCodeRecord
+  // [E01 · ALG-24 · M-32] The ONE basket pricer checkout uses: the promo basis
+  // (a store's code → its own plan; a platform code → the whole basket), the
+  // funder's capacity clamp (goods, plus the fee only for a platform code,
+  // never the tip), the tip on the first DELIVERY plan only, and every plan's
+  // total. Promo REFUSALS stay at checkout (owner decision for E01): a code
+  // for a store with nothing in the basket discounts nothing here.
+  const promo = promoCodeRecord
     ? {
         discountType: promoCodeRecord.discountType,
         discountValue: promoCodeRecord.discountValue,
@@ -489,17 +481,18 @@ async function buildCartResponse(
         vendorId: promoCodeRecord.vendorId,
       }
     : null;
-  const priced = priceBasket({
-    plans: plans.map((p) => ({
-      vendorId: p.vendor.id,
-      fulfillment: p.fulfillment,
-      subtotal: p.subtotal,
-      deliveryFee: p.deliveryFee,
-    })),
-    promo: promoTerms,
-    tip: Number(cart.tipAmount) || 0,
+  // [REPORT-012 F-012-01] The tip the quote is priced with follows checkout's
+  // rule: an explicit tip (0 included) wins; only an absent one inherits the
+  // cart's persisted tip.
+  const tip = resolveTip(choices.tipAmount, cart.tipAmount);
+  const priceWith = (feeOf: (p: VendorPlan) => number) => priceBasket({
+    plans: plans.map((p) => ({ vendorId: p.vendorId, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: feeOf(p) })),
+    promo,
+    tip,
   });
+  const priced = priceWith((p) => p.deliveryFee);
   const discount = priced.discount;
+  const totalAmount = sumOf(priced.perPlan.map((p) => p.total));
   let promoInfo: { code: string; discountType: string; description: string } | null = null;
   if (promoCodeRecord) {
     promoInfo = {
@@ -509,27 +502,29 @@ async function buildCartResponse(
     };
   }
 
-  const tip = Number(cart.tipAmount) || 0;
-  const totalAmount = priced.perPlan.reduce((sum, p) => sum + p.total, 0);
+  // SWIFT-070: the express premium is computed on the SERVER (same helper as
+  // checkout) and handed to the client to RENDER — never re-derived on the
+  // client. [E01] `expressTotal` is the same basket priced by the same pricer
+  // with every delivery at its express fee — exact even when a promo's basis
+  // depends on the fee — and IS `totalAmount` when the quote asked for express.
+  // Zero surcharge for services / pickup / free delivery.
+  const expressSurcharge = sumOf(plans.map((p) => p.expressSurcharge));
+  const expressTotal = choices.express === true
+    ? totalAmount
+    : sumOf(priceWith((p) => p.standardDeliveryFee + p.expressSurcharge).perPlan.map((p) => p.total));
 
-  // SWIFT-070: the express premium is computed on the SERVER and handed to the
-  // client to RENDER — never re-derived on the client. Now the per-vendor sum;
-  // `expressTotal` is the total under express, which IS totalAmount when the
-  // quote itself was requested with express.
-  const expressSurcharge = plans.reduce((sum, p) => sum + p.expressSurcharge, 0);
-  const expressTotal = opts?.express === true ? totalAmount : totalAmount + expressSurcharge;
-
-  // ETA
-  const distanceKm = plans.find((p) => p.vendor.id === cart.vendor?.id)?.distanceKm ?? 0;
+  // ETA — from the tracked store's plan (its delivery leg), as before.
+  const etaPlan = plans.find((p) => p.vendorId === cart.vendor?.id) ?? plans[0];
+  const distanceKm = etaPlan?.distanceKm ?? 0;
   const prepMin = cart.vendor?.estimatedPrepTime || 30;
   const deliveryMin = estimateDeliveryMinutes(distanceKm);
   const etaMin = prepMin + deliveryMin;
 
-  // Min order check
+  // [E09] Min order: every vendor against ITS OWN minimum — checkout refuses
+  // the whole basket on the first short vendor, so the conjunction is the
+  // honest verdict. `minimumOrderAmount` stays the tracked store's for older
+  // clients; `vendors[]` carries each store's own figure.
   const minOrder = cart.vendor ? Number(cart.vendor.minOrderAmount) : 0;
-  // [E09] Every vendor meets its OWN minimum — the combined subtotal no longer
-  // stands in for any one vendor's. Checkout refuses the whole basket on the
-  // first unmet plan, so the conjunction is the honest preview.
   const meetsMinimum = plans.every((p) => p.meetsMinimum);
 
   return {
@@ -541,31 +536,38 @@ async function buildCartResponse(
     items: itemDetails,
     itemCount: cart.items.reduce((sum, ci) => sum + ci.quantity, 0),
     unavailableItemIds,
-    // [E01 · E09] The per-vendor rows: one plan per vendor with ITS OWN
-    // subtotal, fee, minimum and verdict. Additive — no current consumer reads
-    // it, and mobile renders the per-vendor minimum warning from it.
-    vendors: plans.map((p) => ({
-      vendorId: p.vendor.id,
-      name: p.vendor.name,
+    // [E01 · E09] One row per future order, in checkout's order: each row is
+    // what checkout writes for that store (subtotal, fee, discount share, tip,
+    // total) plus ITS minimum verdict and how much more it needs.
+    vendors: plans.map((p, i) => ({
+      vendorId: p.vendorId,
+      name: p.vendorName,
       fulfillment: p.fulfillment,
       subtotal: p.subtotal,
       deliveryFee: p.deliveryFee,
       standardDeliveryFee: p.standardDeliveryFee,
+      expressSurcharge: p.expressSurcharge,
+      discount: priced.perPlan[i]!.discount,
+      tipAmount: priced.perPlan[i]!.tip,
+      totalAmount: priced.perPlan[i]!.total,
       minOrderAmount: p.minOrderAmount,
       meetsMinimum: p.meetsMinimum,
+      amountToMinimum: p.amountToMinimum,
     })),
     subtotalBase,
     subtotalMarkup,
     subtotalCustomer,
     deliveryFee,
-    // The fee WITHOUT the express premium — the number the fee rows render
-    // beside the separate Express premium row, in both modes.
+    // The fee without the express premium — the fee rows sit beside the
+    // separate Express row, whichever speed the quote was priced at.
     standardDeliveryFee,
     deliveryDistanceKm: Math.round(distanceKm * 10) / 10,
     discount,
     promoCode: promoInfo,
     tipAmount: tip,
     totalAmount,
+    // [E01] Whether `totalAmount` includes the express premium.
+    express: choices.express === true,
     expressSurcharge,
     expressTotal,
     deliveryAddress: deliveryAddr ? {
@@ -1741,9 +1743,11 @@ export async function customerRoutes(app: FastifyInstance) {
   // ========================================================================
 
   app.get('/cart', async (request: AuthRequest) => {
-    const { lat, lng, express, fulfillment } = cartQuerySchema.parse(request.query);
+    // [E01] The quote is priced for the choices checkout will be sent — the
+    // speed, each store's DELIVERY/PICKUP and the tip — not for defaults.
+    const { lat, lng, express, fulfillmentSelections, tipAmount } = cartQuerySchema.parse(request.query);
 
-    const cart = await buildCartResponse(app, request.user.userId, lat, lng, { express, fulfillment });
+    const cart = await buildCartResponse(app, request.user.userId, lat, lng, { express, fulfillmentSelections, tipAmount });
     return { success: true, data: cart };
   });
 
