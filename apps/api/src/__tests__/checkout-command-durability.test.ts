@@ -10,7 +10,7 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { OrderService } from '../modules/order/order.service';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { checkoutOutboxId, checkoutOutboxDedupeKey, drainCheckoutOutbox } from '../modules/order/checkout-outbox';
+import { checkoutOutboxId, checkoutOutboxDedupeKey, checkoutRequestHash, drainCheckoutOutbox } from '../modules/order/checkout-outbox';
 
 // ---------------------------------------------------------------------------
 // [M-11 · S0] Checkout database commit, response and dispatch work are ONE
@@ -36,10 +36,10 @@ const phoneBase = 592_610_000_000 + Math.floor(Math.random() * 300_000_000);
 let vendorId: string;
 let itemId: string;
 
-async function makeCustomer() {
+async function makeCustomer(phone?: string) {
   seq += 1;
   const user = await app.prisma.user.create({
-    data: { phone: `+${phoneBase + seq}`, firstName: 'Durable', lastName: `C${seq}`, roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(), customer: { create: {} } },
+    data: { phone: phone ?? `+${phoneBase + seq}`, firstName: 'Durable', lastName: `C${seq}`, roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(), customer: { create: {} } },
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
@@ -234,6 +234,104 @@ describe('the result is written with the order and replayed from the database', 
     expect(again.json().replayed).toBe(true);
     expect(again.json().data.orders[0].id).toBe(orderId);
     expect(await ordersOf(c.userId)).toBe(1);
+  });
+
+  it('[G3-F2] the receipt stores the shaped answer — the first answer field for field, with none of the order’s internal columns', async () => {
+    const c = await makeCustomer('+5920312001');
+    await fillCart(c);
+    const key = `dur-${nanoid(10)}`;
+    const first = await checkout(c, key);
+    expect(first.statusCode, first.body).toBe(200);
+    const answer = first.json().data as { orders: Array<Record<string, unknown>> };
+
+    // The durable receipt is the source of truth for a replay; it must hold
+    // exactly what the fresh caller received, not the raw created rows.
+    const receipt = await app.prisma.checkoutReceipt.findUniqueOrThrow({
+      where: { userId_idempotencyKey: { userId: c.userId, idempotencyKey: key } },
+    });
+    expect(receipt.result).toEqual(answer);
+    const storedOrders = (receipt.result as { orders?: Array<Record<string, unknown>> }).orders ?? [];
+    for (const order of storedOrders) {
+      for (const internal of ['riskReason', 'subtotalBase', 'subtotalMarkup', 'customerId', 'tenantId']) {
+        expect(order).not.toHaveProperty(internal);
+      }
+    }
+
+    // The DB receipt path itself (Redis forgotten, cart refilled by a
+    // retrying client) answers the same object — and places nothing new.
+    await app.redis.del(`checkout:idem:${c.userId}:${key}`);
+    await fillCart(c);
+    const replay = await checkout(c, key);
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json().replayed).toBe(true);
+    expect(replay.json().data).toEqual(answer);
+    expect(await ordersOf(c.userId)).toBe(1);
+  });
+
+  it('[G3-F2] a receipt written before the fix (raw rows) replays as the shaped answer, not the rows', async () => {
+    const c = await makeCustomer('+5920312002');
+    const key = `dur-${nanoid(10)}`;
+    // A pre-fix receipt: the raw created rows, exactly the `{ orders, paymentAction }`
+    // persistCheckoutReceiptInTransaction stored before G3-F2.
+    const rawOrders = [{
+      id: 'legacy-order',
+      orderNumber: 'L-000001',
+      status: 'PENDING',
+      holdExpiresAt: null,
+      fulfillment: 'DELIVERY',
+      appointmentSlot: null,
+      pickupCode: null,
+      riskFlagged: false,
+      vendor: { id: 'vendor-legacy', name: 'Durable Diner', ownerId: 'owner-legacy' },
+      items: [{ id: 'line-legacy', itemId: 'item-legacy', name: 'Durable Plate', quantity: 1, totalCustomer: '2000' }],
+      subtotalBase: '2000',
+      subtotalMarkup: '0',
+      subtotalCustomer: '2000',
+      deliveryFee: '500',
+      isExpress: false,
+      tipAmount: '0',
+      discount: '0',
+      totalAmount: '2500',
+      paymentMethod: 'CASH',
+      estimatedPrepTime: null,
+      estimatedDeliveryTime: null,
+      promisedAt: null,
+      promiseBaseSeconds: null,
+      promisePadSeconds: null,
+      promiseRevisedAt: null,
+      promiseRevisionReason: null,
+      promiseRevisions: 0,
+      deliveryAddress: '1 Durable, Georgetown',
+      placedAt: new Date().toISOString(),
+      scheduledFor: null,
+      riskReason: null,
+      customerId: c.userId,
+      tenantId: 'swift-default',
+    }];
+    await app.prisma.checkoutReceipt.create({
+      data: {
+        userId: c.userId, idempotencyKey: key,
+        requestHash: checkoutRequestHash({ paymentMethod: 'CASH' }),
+        orderIds: ['legacy-order'],
+        result: { orders: rawOrders, paymentAction: null },
+      },
+    });
+
+    const replay = await checkout(c, key);
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json().replayed).toBe(true);
+    const data = replay.json().data as { order: { id: string }; orders: Array<Record<string, unknown>>; grandTotal: number; message: string };
+    expect(Object.keys(data).sort()).toEqual(['grandTotal', 'message', 'order', 'orders', 'paymentAction']);
+    expect(data.grandTotal).toBe(2500);
+    expect(data.order.id).toBe('legacy-order');
+    expect(data.message).toBe('Order placed! Durable Diner will confirm shortly.');
+    const order = data.orders[0]!;
+    expect(order).toMatchObject({ id: 'legacy-order', vendorName: 'Durable Diner', subtotal: 2000, deliveryFee: 500, total: 2500 });
+    for (const internal of ['riskReason', 'subtotalBase', 'subtotalMarkup', 'customerId', 'tenantId']) {
+      expect(order).not.toHaveProperty(internal);
+    }
+    // The replay answered from the receipt; no order was placed for it.
+    expect(await ordersOf(c.userId)).toBe(0);
   });
 
   it('a same-key request with a DIFFERENT body is refused, never answered with the first order', async () => {
