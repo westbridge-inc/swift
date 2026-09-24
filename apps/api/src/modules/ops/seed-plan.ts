@@ -73,7 +73,22 @@ export interface SeedPlan {
   digest: string;
 }
 
-export function seedPlanDigest(body: Omit<SeedPlan, 'digest'>): string { return sha256(canonical(body)); }
+export function seedPlanDigest(body: Omit<SeedPlan, 'digest'>): string {
+  // [DS110 #17] `createdAt` is ceremony display metadata, not plan content. If
+  // the whole body were digested, the plan printed for signature would carry a
+  // fresh timestamp on the re-run and its digest could never equal the one the
+  // two approvers signed — the production sign-off would fail with
+  // APPROVAL_INVALID forever and the spine could never be applied. Digest only
+  // the stable fields; the timestamp stays on the plan for display.
+  const stable: Omit<SeedPlan, 'digest' | 'createdAt'> = {
+    version: body.version,
+    configVersion: body.configVersion,
+    configDigest: body.configDigest,
+    target: body.target,
+    changes: body.changes,
+  };
+  return sha256(canonical(stable));
+}
 
 const equalJson = (a: unknown, b: unknown): boolean => canonical(normalise(a)) === canonical(normalise(b));
 /** Decimal columns come back as Prisma Decimal objects; compare by number/string value. */

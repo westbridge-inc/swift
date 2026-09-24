@@ -180,6 +180,32 @@ describe('[R048-005] a production target is a ceremony', () => {
       await setIdentity('test');
     }
   });
+
+  it('[DS110 #17] the printed plan digest is STABLE — the re-run rebuilds the same digest, so the two signatures verify', async () => {
+    await setIdentity('production');
+    try {
+      const desired = desiredFor(10);
+      // The same plan built at two different moments: the ceremony prints the
+      // first digest, the operators sign it, and the re-run (a fresh `now`)
+      // rebuilds the plan. Before the fix the fresh `createdAt` changed the
+      // digest and every signature failed APPROVAL_INVALID — forever.
+      const printed = await buildSeedPlan(prisma, URL_, desired, new Date('2026-09-23T10:00:00.000Z'));
+      const rebuilt = await buildSeedPlan(prisma, URL_, desired, new Date('2026-09-23T15:45:00.000Z'));
+      expect(rebuilt.digest).toBe(printed.digest);
+
+      // The signatures captured over the PRINTED digest must apply the
+      // REBUILT plan — this is the exact boot-deadlock step that used to fail.
+      const res = await applySeedPlan(prisma, URL_, desired, rebuilt, {
+        secret: SECRET,
+        approvals: [signSeedApproval(SECRET, 'alice', printed.digest), signSeedApproval(SECRET, 'bob', printed.digest)],
+        actor: 'alice',
+      });
+      expect(res).toMatchObject({ applied: 1, configVersion: 'test-10' });
+      expect(await auditEvents(rebuilt.digest)).toEqual(['APPLIED']);
+    } finally {
+      await setIdentity('test');
+    }
+  });
 });
 
 describe('[R048-005] the first SUPER_ADMIN is bootstrap-only; a second is break-glass', () => {

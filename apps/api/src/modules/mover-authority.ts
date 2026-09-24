@@ -1,7 +1,7 @@
 import { Prisma, type MoverRole, type OrderStatus, type UserRole, type UserStatus } from '@prisma/client';
 import { freshRidePinReset } from './rides/ride-pin';
 import type { FastifyInstance } from 'fastify';
-import { AppError, ConflictError, NotFoundError } from '../utils/errors';
+import { AppError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { makeDispatchService } from './dispatch/dispatch.service';
 import { reopenPreCustodyLeg } from './dispatch/delivery-watchdog';
 import { closeOnlineSession } from './rider/online-hours';
@@ -545,6 +545,49 @@ export async function transitionUserRoleAuthority(
   return { activeRole: cleanup.activeRole, lastMoverRole: cleanup.lastMoverRole };
 }
 
+// ---------------------------------------------------------------------------
+// [DS110 #12] Account-state actions follow the role hierarchy.
+//
+// A destructive account action (ban/suspend) may only be performed by an actor
+// who outranks every role the target holds, and never on the actor's own
+// account. With the seed minting SUPER_ADMIN as `roles: ['SUPER_ADMIN',
+// 'CUSTOMER']` (no ADMIN entry), the old `roles.includes('ADMIN')` test never
+// fired for the founder — an ordinary ADMIN could permanently ban or suspend
+// the SUPER_ADMIN and lock the platform out of its own governance. Ranking the
+// enum's roles closes that hole for every role, not just the two admin tiers.
+// ---------------------------------------------------------------------------
+
+/** The acting-rank of each user role. Legacy RIDER/DRIVER and the unified
+ *  MOVER share one mover rank; an account holding several roles is judged by
+ *  its highest. */
+const ROLE_RANK: Readonly<Record<UserRole, number>> = {
+  CUSTOMER: 0,
+  RIDER: 1,
+  DRIVER: 1,
+  MOVER: 1,
+  VENDOR_OWNER: 2,
+  ADMIN: 3,
+  SUPER_ADMIN: 4,
+};
+
+const rankOf = (role: string): number => ROLE_RANK[role as UserRole] ?? 0;
+
+/** Refuse an account-state action on the actor's own account or on an account
+ *  whose highest role is equal to or above the actor's. Pure: no database
+ *  access, so the hierarchy itself is testable in isolation. */
+export function assertAccountActionAuthority(
+  actor: { userId: string; role: string },
+  target: { id: string; roles: string[] },
+): void {
+  if (target.id === actor.userId) {
+    throw new ForbiddenError('You cannot perform this action on your own account');
+  }
+  const targetRank = Math.max(0, ...target.roles.map(rankOf));
+  if (targetRank >= rankOf(actor.role)) {
+    throw new ForbiddenError('You cannot act on an account at an equal or higher role');
+  }
+}
+
 /** Linearized admin account-state transition. Suspension/ban refuses an active
  * trip rather than marooning it behind authentication denial, removes all idle
  * supply atomically, and leaves restoration offline until an explicit GO. */
@@ -573,8 +616,11 @@ export async function transitionUserStatusAuthority(
         throw new AppError(409, 'INVALID_STATUS_TRANSITION', `A ${previousStatus.toLowerCase()} account cannot be suspended`);
       }
     } else if (targetStatus === 'ACTIVE') {
-      if (previousStatus !== 'SUSPENDED') {
-        throw new AppError(400, 'NOT_SUSPENDED', 'User is not suspended');
+      // Restoration: unsuspend (SUSPENDED → ACTIVE) and unban (BANNED → ACTIVE)
+      // share the same authority transition. A banned account stays banned
+      // until an explicit SUPER_ADMIN unban.
+      if (previousStatus !== 'SUSPENDED' && previousStatus !== 'BANNED') {
+        throw new AppError(400, 'NOT_RESTRICTED', 'User is not suspended or banned');
       }
     } else if (previousStatus === 'BANNED') {
       throw new AppError(400, 'ALREADY_BANNED', 'User is already banned');
@@ -650,7 +696,9 @@ export async function transitionUserStatusAuthority(
         ? 'SUSPEND_USER'
         : targetStatus === 'BANNED'
           ? 'BAN_USER'
-          : 'UNSUSPEND_USER';
+          : previousStatus === 'BANNED'
+            ? 'UNBAN_USER'
+            : 'UNSUSPEND_USER';
       await tx.auditLog.create({
         data: {
           userId: auditEvidence.actorUserId,
