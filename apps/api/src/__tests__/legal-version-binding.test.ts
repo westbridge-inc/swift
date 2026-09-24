@@ -88,6 +88,19 @@ const PUBLISHED: Record<
     driver_agreement: 'aea903e63b7620322010187556e385a501e6e0c82d3e25b1e4809a6cd94bc1a5',
     vendor_agreement: 'af8e9d090a0c2d5323c4b6e1433aacd9cd8e2d0a9cd04a57a536f1331d0dd9a8',
   },
+  // [DOMAIN-1 · owner 2026-09-24] The contact addresses named swift.gy, a domain
+  // Swift does not own: privacy@ and childsafety@ now read @swiftgy.com (Terms §22,
+  // the Privacy Policy's controller, emergency-contact and rights paragraphs, the
+  // Child Safety Standards). Nothing else in the words moved; this was checked
+  // mechanically: the 2026-09-23 source with the domain, version and date swapped
+  // equals this source apart from its comment. The date moves with the words, so all
+  // four documents re-pin; the 2026-09-23 entry stays exactly as consented.
+  '2026-09-24': {
+    terms: '961a3916b1002dd5eb8d5725654baee1813830f362d4d06dc7877cf49f2a92df',
+    privacy: '04bb7a2408b822ab897d49d4ea1ba5a58f97472786881054a0cd9177fa409048',
+    driver_agreement: 'b82cc69dafaf15e5a61dcb58e5bf925ca2ee483ab5b804b3775b9c34d3fdf2f1',
+    vendor_agreement: '3672c61f804747d8977981bcee4c75ff4b9935808c00cd0fcd21800bf67f21e2',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

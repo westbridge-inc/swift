@@ -1743,6 +1743,7 @@ export async function customerRoutes(app: FastifyInstance) {
           type: 'ORDER_UPDATE',
           title: 'Appointment moved',
           body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
+          audience: 'business',
           data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
         }).catch(() => undefined);
       }
