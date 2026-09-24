@@ -407,11 +407,17 @@ export async function ridesRoutes(app: FastifyInstance) {
       immediate: true,
       lat: body.lat ?? null,
       lng: body.lng ?? null,
-      // [PRIV2-S1] The free-text reason stays on the ALERT only (ops / war
-      // room / evidence bundle). It must never reach the shared order
-      // timeline, which both counterparty surfaces read verbatim.
+      // [PRIV2-S1] The free-text reason is recorded by the engine, ops-only:
+      // the alert (and so the evidence bundle), or a repeat press's own row.
       note: body.note ?? null,
     });
+
+    // [PRIV2-S1] Nothing about the SOS goes on the order timeline: not the
+    // note, not the position, not even a neutral "SOS raised" marker. Both
+    // people on the ride read order_status_logs verbatim (the driver's
+    // /driver/rides/active, the passenger's /rides/:id and /customer/orders/:id),
+    // so any row here tells the person the SOS is about that it was raised.
+    // The engine never notifies the other party either — same doctrine.
 
     return { success: true, data: { acknowledged: true, orderId: ride.id, sosAlertId: alert.id, status: alert.status } };
   });

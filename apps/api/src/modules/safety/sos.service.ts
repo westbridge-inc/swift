@@ -68,9 +68,10 @@ export interface SosCreateInput {
   lng?: number | null;
   accuracyM?: number | null;
   addressText?: string | null;
-  /** [PRIV2-S1] The raiser's free-text reason. Stored on the ALERT ONLY —
-   *  ops, the war room and the evidence bundle read it here. Never the shared
-   *  order timeline, which the counterparty reads verbatim. */
+  /** [PRIV2-S1] The raiser's free-text reason. Ops-only safety records hold
+   *  it: the alert this press raises (`triggerNote`), or, for a repeat press,
+   *  its own `sos_retriggers` row. Never the shared order timeline, which the
+   *  other party on the ride reads verbatim. */
   note?: string | null;
   clientCreatedAt?: Date | null;
   clientIdempotencyKey?: string | null;
@@ -195,6 +196,9 @@ export class SosService {
         lng: input.lng ?? null,
         accuracyM: input.accuracyM ?? null,
         addressText: input.addressText ?? null,
+        // [PRIV2-S1] The repeat press's own words, on its own immutable row.
+        // The alert keeps the note it was raised with; nothing is overwritten.
+        note: input.note ?? null,
         counterpartyUserId: input.counterpartyUserId ?? null,
         actorRole: input.actorRole,
         clientCreatedAt: input.clientCreatedAt ?? null,
@@ -229,9 +233,6 @@ export class SosService {
             // The latest position IS the operative one.
             ...(movedTo ? { triggerLat: input.lat ?? null, triggerLng: input.lng ?? null, triggerAccuracyM: input.accuracyM ?? null } : {}),
             ...(input.addressText ? { triggerAddressText: input.addressText } : {}),
-            // [PRIV2-S1] A repeat press may carry a NEW note; the latest one
-            // is what ops must read. Never lands on the shared order timeline.
-            ...(input.note ? { triggerNote: input.note } : {}),
             // A stronger provenance sticks; a weaker one never downgrades the record.
             ...(source !== 'BUTTON' && live.triggerSource === 'BUTTON' ? { triggerSource: source } : {}),
             // A collapsed request that carried a NEW key must store it, or a lost
