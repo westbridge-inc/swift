@@ -117,6 +117,30 @@ describe('[DL-6] send-otp', () => {
     expect(prod).toEqual({ message: 'OTP sent successfully', expiresIn: 300 });
     expect(sent).toContain(P_PROD);
   });
+
+  it('inside the window, a review identifier is refused exactly as a production one is: a code is out, and when to ask again', async () => {
+    // Both identifiers were served just above, so both windows are still open.
+    type Refusal = { statusCode: number; code: string; message: string; details?: Record<string, unknown> };
+    const refusal = (p: string) => svc.sendOtp(p, TEST_IP).then(
+      () => { throw new Error(`expected ${p} to be inside its resend window`); },
+      (e: Refusal) => e,
+    );
+    const masked = (e: Refusal) => ({
+      statusCode: e.statusCode,
+      code: e.code,
+      message: e.message.replace(/\d+ seconds?/, 'N seconds'),
+      details: { ...e.details, retryAfterSeconds: 'N' },
+    });
+    const review = await refusal(P_REVIEW);
+    const prod = await refusal(P_PROD);
+    for (const e of [review, prod]) {
+      expect(e).toMatchObject({ statusCode: 429, code: 'RATE_LIMITED', details: { codeAlreadySent: true } });
+      expect(e.details?.['retryAfterSeconds']).toBeGreaterThan(0);
+    }
+    expect(masked(review)).toEqual(masked(prod));
+    expect(sent).not.toContain(P_REVIEW);
+    expect(sent.filter((p) => p === P_PROD)).toHaveLength(1);
+  });
 });
 
 describe('[Part 3] verify-otp with a static code', () => {

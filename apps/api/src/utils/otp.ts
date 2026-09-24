@@ -6,7 +6,12 @@ const OTP_PREFIX = 'otp:';
 const OTP_TTL = 300; // 5 minutes
 const OTP_RATE_PREFIX = 'otp_rate:';
 const OTP_RATE_TTL = 60; // 1 request per 60 seconds
+// A claim holds '1' until its send delivers a code, then this marker (same expiry).
+const OTP_RATE_DELIVERED = 'sent';
 const OTP_MAX_ATTEMPTS = 5;
+
+/** The per-number resend window, in seconds: one code per number per window. */
+export const OTP_RESEND_WINDOW_S = OTP_RATE_TTL;
 const OTP_ATTEMPT_PREFIX = 'otp_attempt:';
 const OTP_RECORD_VERSION = 'v2';
 const HASH_TAG = 'hmac-sha256:';
@@ -182,4 +187,48 @@ export async function checkOtpRateLimit(redis: Redis, phone: string): Promise<bo
   // letting an attacker fan out SMS (bombing a victim + burning the SMS budget).
   const claimed = await redis.set(`${OTP_RATE_PREFIX}${phone}`, '1', 'EX', OTP_RATE_TTL, 'NX');
   return claimed === 'OK';
+}
+
+export interface OtpCooldown {
+  /** Whole seconds until this number may request another code, at least 1. */
+  retryAfterSeconds: number;
+  /** The send that opened the window delivered a code (valid for OTP_TTL). */
+  codeAlreadySent: boolean;
+}
+
+/**
+ * Why checkOtpRateLimit refused, read from the claim that holds the window.
+ * One MULTI, so the expiry and the delivery marker come from the same claim.
+ * Rounded UP and never 0: a caller that retries on this figure is never
+ * refused early. It only reads; the refusal is already decided, so a failed
+ * read degrades to the whole window and never to an allow.
+ */
+export async function readOtpCooldown(redis: Redis, phone: string): Promise<OtpCooldown> {
+  const key = `${OTP_RATE_PREFIX}${phone}`;
+  try {
+    const replies = await redis.multi().pttl(key).get(key).exec();
+    const [pttlReply, valueReply] = replies ?? [];
+    if (!pttlReply || pttlReply[0] || !valueReply || valueReply[0]) throw new Error('otp cooldown read failed');
+    const pttl = Number(pttlReply[1]);
+    return {
+      // -2: the window closed between the refusal and this read.
+      retryAfterSeconds: pttl > 0 ? Math.ceil(pttl / 1000) : 1,
+      codeAlreadySent: valueReply[1] === OTP_RATE_DELIVERED,
+    };
+  } catch {
+    return { retryAfterSeconds: OTP_RATE_TTL, codeAlreadySent: false };
+  }
+}
+
+/**
+ * Records that the send which claimed the window for this number delivered
+ * its code, so a refusal inside the window can say so. KEEPTTL leaves the
+ * expiry exactly as claimed and XX never recreates an expired claim. Only the
+ * window this send claimed may be marked: nothing ends a claim early, so a
+ * claim younger than the window belongs to this send. Past that, the key could
+ * be the claim of a later caller whose own send has not delivered yet.
+ */
+export async function markOtpCooldownDelivered(redis: Redis, phone: string, claimedAtMs: number): Promise<void> {
+  if (Date.now() - claimedAtMs >= (OTP_RATE_TTL - 1) * 1000) return;
+  await redis.set(`${OTP_RATE_PREFIX}${phone}`, OTP_RATE_DELIVERED, 'KEEPTTL', 'XX');
 }

@@ -15,7 +15,7 @@ import {
   requireAuthSessionSnapshot,
   useAuthStore,
 } from '../../stores/authStore';
-import { PillButton, T } from '../../kit';
+import { PillButton, T, useLogoutConfirm } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
 
 const FRAME = 260;
@@ -36,7 +36,14 @@ export function SelfieCaptureScreen() {
   const [capturing, setCapturing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { setUserIfCurrent, logout } = useAuthStore();
+  const { setUserIfCurrent } = useAuthStore();
+  // The account already exists here; only a photo taken and not yet saved
+  // lives on this device, so that is what the ask names.
+  const { requestLogout, logoutDialog } = useLogoutConfirm({
+    title: 'Sign out of Swift?',
+    body: 'Your account stays — sign back in to finish. A photo you haven’t saved yet is discarded.',
+    confirmLabel: 'Sign out',
+  });
   const sessionGeneration = useAuthStore((state) => state.sessionGeneration);
   // [E27] Pushed from a flow that needs the photo (taxi) rather than shown as
   // the root gate: "Not now" goes back instead of signing out, and a saved
@@ -140,7 +147,7 @@ export function SelfieCaptureScreen() {
             <T variant="label" tone="muted">Not now</T>
           </PressableScale>
         ) : (
-          <PressableScale onPress={logout} hitSlop={12}>
+          <PressableScale onPress={requestLogout} hitSlop={12}>
             <T variant="label" tone="muted">Sign out</T>
           </PressableScale>
         )}
@@ -188,6 +195,7 @@ export function SelfieCaptureScreen() {
       <T variant="micro" tone="muted" center style={{ marginBottom: space.md, paddingHorizontal: space.lg }}>
         Your photo is shown with your orders and rides. You can retake it any time.
       </T>
+      {logoutDialog}
     </SafeAreaView>
   );
 }

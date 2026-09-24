@@ -269,13 +269,18 @@ describe('[W-01] signing out is a server act, because only the server can expire
   });
 
   it('no sign-out button clears local state alone — every one of them asks the server', () => {
+    // Every sign-out now goes through the one shared ask, SignOutButton, and
+    // only its "Sign out" ends the session: through logout(), the server act.
+    const confirm = readFileSync(join(process.cwd(), 'src', 'components', 'sign-out-button.tsx'), 'utf8');
+    expect(code(confirm), 'components/sign-out-button.tsx').toMatch(/logout\(\)/);
+    expect(code(confirm), 'components/sign-out-button.tsx').not.toMatch(/clearSession/);
     for (const file of [
       ['src', 'app', 'portal', 'layout.tsx'],
       ['src', 'app', 'dashboard', 'layout.tsx'],
       ['src', 'app', '(app)', 'account', 'page.tsx'],
     ]) {
       const source = readFileSync(join(process.cwd(), ...file), 'utf8');
-      expect(source, file.join('/')).toMatch(/logout\(\)/);
+      expect(source, file.join('/')).toMatch(/<SignOutButton\b/);
       expect(code(source), file.join('/')).not.toMatch(/clearSession/);
     }
   });

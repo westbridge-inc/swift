@@ -28,6 +28,7 @@ describe('OTP verification accessibility and automation contract', () => {
     expect(source).toContain('accessibilityLabel="Resend verification code"');
     expect(source).toContain('accessibilityState={{ disabled: resend.isPending, busy: resend.isPending }}');
     expect(source).toContain('testID="otp-verify"');
+    expect(source).toContain('testID="otp-resend-wait"');
     expect(source).toContain('accessibilityRole="alert"');
     expect(source).toContain('accessibilityLiveRegion="assertive"');
   });

@@ -6,7 +6,8 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { LayoutDashboard, ClipboardList, Boxes, FileUp, Settings, LogOut, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
-import { getSelectedStore, logout, sessionProbe, setSelectedStore } from '@/lib/auth';
+import { SignOutButton } from '@/components/sign-out-button';
+import { getSelectedStore, sessionProbe, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore } from '@/lib/store-scope';
 
@@ -95,7 +96,6 @@ function Shell({ children, storeId, onSwitch }: {
   onSwitch: (_id: string) => void;
 }) {
   const pathname = usePathname();
-  const router = useRouter();
 
   return (
     <div className="flex min-h-screen bg-[var(--swift-subtle)]">
@@ -123,16 +123,16 @@ function Shell({ children, storeId, onSwitch }: {
             );
           })}
         </nav>
-        <button
-          onClick={() => {
-            // the session lives in a cookie only the server can expire
-            void logout().then(() => router.replace('/login'));
-          }}
+        {/* The orders page polls for new orders and chimes; signing out stops
+            that in this browser, and nothing else. */}
+        <SignOutButton
           className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-[var(--swift-muted)] hover:bg-[var(--swift-subtle)] hover:text-[var(--swift-ink)]"
+          body="New orders stop showing in this browser until you sign in again. Your store, menu and orders stay with your account."
+          redirectTo="/login"
         >
           <LogOut className="h-4 w-4" />
           Sign out
-        </button>
+        </SignOutButton>
       </aside>
       {/* [W-04] The key REMOUNTS every page below on a store change. Query
           data is removed by switchStore; this is the other half — local

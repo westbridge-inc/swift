@@ -422,6 +422,18 @@ class SeedBreakGlassCeremony(SeedProductionScript):
             self.assertIn(line, override)
         # The key is never a plain value anywhere in the ceremony's files.
         self.assertIsNone(re.search(r"(?m)^\s*SEED_PLAN_SECRET\s*[:=]", override))
+
+    def test_the_seed_runs_in_the_stacks_posture_never_an_unset_one(self):
+        # The promotion calls isProduction() (seedFxRate); runtime-mode refuses
+        # an unset NODE_ENV. The seed must take the SAME required NODE_ENV as
+        # the api/worker, and pass the operator's FX rate through.
+        override = (DEPLOY / "docker-compose.seed.yml").read_text()
+        stack = (DEPLOY / "docker-compose.yml").read_text()
+        required = re.search(r"(?m)^\s*NODE_ENV: (\$\{NODE_ENV:\?[^\n]*\})\s*$", override)
+        self.assertIsNotNone(required, "the seed service must require NODE_ENV, never default it")
+        self.assertIn("NODE_ENV: ${NODE_ENV:?", stack)
+        self.assertNotIn("${NODE_ENV:-", override)
+        self.assertIn("SEED_FX_GYD_PER_USD: ${SEED_FX_GYD_PER_USD:-}", override)
         self.assertNotIn("SEED_PLAN_SECRET=", (DEPLOY / "seed-production.sh").read_text())
 
 

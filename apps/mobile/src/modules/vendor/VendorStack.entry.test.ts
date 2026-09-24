@@ -269,11 +269,19 @@ vi.mock('@react-navigation/bottom-tabs', () => ({
 vi.mock('@expo/vector-icons', () => ({ Feather: 'Feather', MaterialCommunityIcons: 'MaterialCommunityIcons' }));
 vi.mock('@swift/ui', () => ({ color: fx.token, font: fx.token, fontSize: fx.token, radius: fx.token, space: fx.token }));
 vi.mock('expo-crypto', () => ({ randomUUID: () => `scope-${Math.random().toString(36).slice(2)}` }));
-vi.mock('../../kit', () =>
-  Object.fromEntries(
+vi.mock('../../kit', async () => ({
+  ...Object.fromEntries(
     ['Card', 'Chip', 'DecorativeIcon', 'ErrorState', 'LabeledInput', 'LoadingBlock', 'Pictogram', 'PillButton', 'PopupCard', 'PopupTitle', 'Screen', 'T', 'TonePill']
       .map((name) => [name, name]),
-  ));
+  ),
+  // The header's Log out asks through the real shared confirm; only its
+  // visuals (below) are stand-ins.
+  useLogoutConfirm: (await vi.importActual<typeof import('../../kit/logout-confirm')>('../../kit/logout-confirm')).useLogoutConfirm,
+}));
+vi.mock('../../kit/card', () => ({ PopupCard: 'PopupCard', PopupTitle: 'PopupTitle' }));
+vi.mock('../../kit/button', () => ({ PillButton: 'PillButton' }));
+vi.mock('../../kit/rows', () => ({ IconChip: 'IconChip' }));
+vi.mock('../../kit/text', () => ({ T: 'T' }));
 vi.mock('../../kit/toast', () => ({ toast: { error: fx.toastError, info: vi.fn(), success: vi.fn() } }));
 vi.mock('../../services/api', () => ({
   API_URL: 'https://api.example.test',
@@ -745,9 +753,15 @@ describe('no business screen is a one-way door', () => {
     expect(only(view.output, RoleSwitcherSheet).props.visible, 'and it closes again').toBe(false);
 
     // What the header itself renders: Switch app, and Log out on every screen.
-    const actions = ofType(fx.mount(TabHeader, only(view.output, TabHeader).props).output, HeaderAction);
+    const headerView = fx.mount(TabHeader, only(view.output, TabHeader).props);
+    const actions = ofType(headerView.output, HeaderAction);
     expect(actions.map((el) => el.props.label)).toEqual(['Switch app', 'Log out']);
-    expect(actions[1]!.props.onPress).toBe(useAuthStore.getState().logout);
+
+    // Log out asks first: the session survives the press, and the ask is open.
+    actions[1]!.props.onPress();
+    headerView.render();
+    expect(useAuthStore.getState().isAuthenticated, 'Log out only asks').toBe(true);
+    expect(only(headerView.output, 'PopupCard').props.visible).toBe(true);
   }
 
   it.each<[string, unknown, unknown]>([
@@ -771,6 +785,14 @@ describe('no business screen is a one-way door', () => {
     const header = fx.mount(TabHeader, only(root.output, TabHeader).props);
 
     ofType(header.output, HeaderAction).find((el) => el.props.label === 'Log out')!.props.onPress();
+    header.render();
+    expect(useAuthStore.getState().isAuthenticated, 'the header only asks').toBe(true);
+    ofType(only(header.output, 'PopupCard'), 'PillButton').find((el) => el.props.label === 'Log out')!.props.onPress();
+    header.render();
+    const closing = only(header.output, 'PopupCard');
+    expect(closing.props.visible, 'the ask closes before the session ends').toBe(false);
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    closing.props.onDismissed(); // iOS: the modal is provably gone
 
     const auth = useAuthStore.getState();
     expect(auth).toMatchObject({ isAuthenticated: false, intent: null });
