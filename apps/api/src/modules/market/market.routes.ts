@@ -221,6 +221,7 @@ export async function marketRoutes(app: FastifyInstance) {
     // INCLUDED in the page, so following it can neither repeat nor skip a row.
     let rawCursorId = cursorId;
     let hasMoreRaw = false;
+    let capExhausted = true;
     let listable: MarketItemRow[] = [];
     for (let pass = 0; pass < PAGE_FILL_CAP; pass += 1) {
       const rows = await app.prisma.item.findMany({
@@ -234,14 +235,17 @@ export async function marketRoutes(app: FastifyInstance) {
         // The previous window was exactly full; the population is exhausted
         // right here, so it cannot also be "there is a next page".
         hasMoreRaw = false;
+        capExhausted = false;
         break;
       }
       hasMoreRaw = rows.length > q.limit;
       rawCursorId = rows[rows.length - 1]!.id;
       listable.push(...(await listableItemsForVendors(app.prisma, tenantId, rows)));
-      if (!hasMoreRaw || listable.length >= q.limit + 1) break;
+      if (!hasMoreRaw || listable.length >= q.limit + 1) { capExhausted = false; break; }
     }
-    if (listable.length < q.limit && hasMoreRaw) {
+    // [DS233 F5] Whenever the cap, not the population, ended the fill, the page
+    // may be short OR its cursor may lead to a page the gate empties — log both.
+    if (capExhausted && hasMoreRaw) {
       // NO SILENT CAPS — the same stance as the category id cap above.
       request.log.warn(
         { tenantId, limit: q.limit, fillCap: PAGE_FILL_CAP },

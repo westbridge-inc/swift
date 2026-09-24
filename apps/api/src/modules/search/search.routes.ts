@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { SearchService } from './search.service';
 import { AppError, ForbiddenError } from '../../utils/errors';
-import { sortByDistance } from '../../utils/distance';
+import { EARTH_RADIUS_KM, sortByDistance } from '../../utils/distance';
 import { bindPublicMarketTenant, requireRequestTenant } from './search-scope';
 import { visibleVendorInTenant } from '../vendor/vendor-visibility';
 import { ACCESS_COOKIE, REFRESH_COOKIE, parseCookies } from '../auth/browser-session';
@@ -312,6 +312,9 @@ export async function searchRoutes(app: FastifyInstance) {
           ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
         },
         select: { id: true, vendorId: true, name: true },
+        // [DS233 F8] A stable window: the most-ordered matches first, never
+        // whatever order the heap scan happens to return.
+        orderBy: [{ totalOrdered: 'desc' }, { id: 'asc' }],
         take: 5,
       }),
     ]);
@@ -380,13 +383,20 @@ export async function searchRoutes(app: FastifyInstance) {
     // it can never drop an in-radius vendor. It is still a square: the window
     // reads the whole box (NEARBY_CANDIDATE_CAP), and the exact haversine
     // filter, distance ordering and `limit` apply after it.
-    const KM_PER_DEG_LAT = 111.32;
-    const cosLat = Math.cos((userLat * Math.PI) / 180);
-    const latDelta = radiusKm / KM_PER_DEG_LAT;
-    // Near the poles a radius circle spans every meridian, so a
-    // degree-derived longitude bound cannot contain it — longitude is left
-    // unbounded there and the exact filter below still applies.
-    const lngDelta = cosLat > 1e-3 ? radiusKm / (KM_PER_DEG_LAT * cosLat) : null;
+    // [DS233 F1/F2] The box is the exact bounding box of the spherical cap
+    // the haversine filter below draws (same Earth radius), so it is a true
+    // superset: the latitude half-width is the cap's angle; the longitude
+    // half-width is asin(sin(angle) / cos(lat)). Where the cap reaches a pole
+    // every meridian is inside it, and where the box would cross the
+    // antimeridian a single range cannot hold it — longitude is left unbounded
+    // in both cases, and the exact filter (behind the cap) still applies.
+    const angle = radiusKm / EARTH_RADIUS_KM;
+    const latDelta = (angle * 180) / Math.PI;
+    const capReachesPole = userLat + latDelta >= 90 || userLat - latDelta <= -90;
+    const lngHalf = capReachesPole
+      ? null
+      : (Math.asin(Math.sin(angle) / Math.cos((userLat * Math.PI) / 180)) * 180) / Math.PI;
+    const lngDelta = lngHalf !== null && userLng - lngHalf >= -180 && userLng + lngHalf <= 180 ? lngHalf : null;
 
     const vendors = await app.prisma.vendor.findMany({
       where: {

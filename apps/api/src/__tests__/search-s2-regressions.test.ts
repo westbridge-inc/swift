@@ -45,8 +45,10 @@ let activeName = '';
 let untaggedId = '';
 let storeVendorId = '';
 let cornerVendorId = '';
+let edgeVendorId = '';
 
 const restoreEnv = process.env['PUBLIC_TENANT_ID'];
+const restoreSearchUrl = process.env['MEILISEARCH_URL'];
 
 beforeAll(async () => {
   // The index is provably unavailable, so every search request runs the DB
@@ -161,6 +163,27 @@ beforeAll(async () => {
     data: { vendorId: corner.id, categoryId: cornerShelf.id, name: `roti ${RUN}`, basePrice: 700, isAvailable: true, totalOrdered: 1, tenantId: TENANT },
   });
   itemIds.push(roti.id);
+
+  // [DS233 F1] The box's outermost band: 49.97 km due north of the caller,
+  // inside a 50 km radius by the haversine the route filters with. A box
+  // built on the equatorial degree (111.32 km) is ~0.11% too tight to hold it.
+  const edge = await app.prisma.vendor.create({
+    data: {
+      ownerId: ownerRow.id, name: `S2 Edge ${RUN}`, slug: `s2-edge-${RUN}`,
+      vendorType: 'RESTAURANT', phone: `${PHONE_PREFIX}005`, addressLine1: '5 S2 Edge Lane', city: 'Linden',
+      region: 'Upper Demerara-Berbice', latitude: 6.8 + (49.97 / 6371) * (180 / Math.PI), longitude: -58.15,
+      status: 'ACTIVE', isVerified: true, isCurrentlyOpen: true, averageRating: 3,
+      tenantId: TENANT,
+    },
+  });
+  vendorIds.push(edge.id);
+  edgeVendorId = edge.id;
+  const edgeShelf = await app.prisma.category.create({ data: { vendorId: edge.id, name: 'S2 edge shelf', sortOrder: 0, tenantId: TENANT } });
+  shelfIds.push(edgeShelf.id);
+  const pepperpot = await app.prisma.item.create({
+    data: { vendorId: edge.id, categoryId: edgeShelf.id, name: `pepperpot ${RUN}`, basePrice: 1500, isAvailable: true, totalOrdered: 1, tenantId: TENANT },
+  });
+  itemIds.push(pepperpot.id);
 });
 
 afterAll(async () => {
@@ -177,6 +200,8 @@ afterAll(async () => {
   }, 'test-cleanup:s2-guest-search');
   if (restoreEnv === undefined) delete process.env['PUBLIC_TENANT_ID'];
   else process.env['PUBLIC_TENANT_ID'] = restoreEnv;
+  if (restoreSearchUrl === undefined) delete process.env['MEILISEARCH_URL'];
+  else process.env['MEILISEARCH_URL'] = restoreSearchUrl;
   await app.close();
 });
 
@@ -252,5 +277,11 @@ describe('[S2-2] nearby cannot let an out-of-radius high rating crowd the radius
     // …and inside a 2 km radius it is served, nearest first.
     const two = await search('/search/nearby?lat=6.8&lng=-58.15&radius=2&limit=10');
     expect(two.json().data.map((v: { id: string }) => v.id)).toEqual([storeVendorId, cornerVendorId]);
+  });
+
+  it('the box holds the whole circle: a vendor 49.97 km due north is inside a 50 km radius', async () => {
+    const res = await search('/search/nearby?lat=6.8&lng=-58.15&radius=50&limit=50');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.map((v: { id: string }) => v.id)).toContain(edgeVendorId);
   });
 });
