@@ -33,7 +33,7 @@ import { riderRoutes } from '../../modules/rider/rider.routes';
 //     before pickup and the other rider completes it (a handback after pickup
 //     is refused)
 //   · [MKT-F057 · it.fails] a cash goods delivery needs the customer's PIN
-//   · [E04 · it.fails] a stale "ready" cannot land on a cancelled order
+//   · [E04] a stale "ready" cannot land on a cancelled order (fixed)
 // The MMG door (a stale screen, DELIVER_NO_CASH, the dispute block) runs in
 // gold-2-mmg.test.ts; the counter pickup code is CUST-05 (GOLD-1).
 // ---------------------------------------------------------------------------
@@ -470,15 +470,16 @@ describe('GOLD-2 · RIDE-04 — [MKT-F057] the cash door needs the customer’s 
 // status row and pushes "Order ready for pickup" to the assigned rider (:1599)
 // — none of it under the order lock the cancellation takes. #1266 left it as is.
 //
-// The race is forced in beforeAll: the vendor's readyAt write is held at the
-// client seam until the customer's cancellation has committed (the rider is
-// freed), then released. On main the stale ready answers 200, stamps readyAt
-// on the CANCELLED order, writes a "ready" row AFTER the CANCELLED row, and
-// pushes the freed rider. The it.fails checks only those outcomes. Flip to
-// `it(...)` when prep progress takes the order lock and rechecks. A fix that
-// moves the write onto the transaction client never reaches this seam, so
-// beforeAll then fails loudly ("never reached the seam") instead of letting
-// the it.fails pass unforced: re-point the seam, or flip, in that change.
+// The race is forced in beforeAll: the route is held between its order read and
+// its write — at the vendor-operability check's subscription read, a seam that
+// exists before and after the fix — until the customer's cancellation has
+// committed (the rider is freed), then released. Before the fix the stale ready
+// answered 200, stamped readyAt on the CANCELLED order, wrote a "ready" row
+// AFTER the CANCELLED row and pushed the freed rider. The fix (E04) takes the
+// order-row lock, re-reads, and refuses with 409 HANDOVER_STALE, writing and
+// pushing nothing. The seam moved off the plain `order.update` (which the fix
+// no longer calls outside its transaction), so this is a plain `it`.
+// gold-2-e04-stale-ready.test.ts covers "preparing" and the double tap.
 // ---------------------------------------------------------------------------
 describe('GOLD-2 · RIDE-04 — [E04] a stale "ready" cannot land on a cancelled order', () => {
   let rider: Rider;
@@ -494,23 +495,26 @@ describe('GOLD-2 · RIDE-04 — [E04] a stale "ready" cannot land on a cancelled
     expect(await doorFacts(orderId)).toMatchObject({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });
     expect((await orderRow(orderId)).readyAt).toBeNull();
 
-    // Hold ONLY the vendor's readyAt write; every other update passes through.
+    // Hold the route between its order read and its write: the vendor-operability
+    // check's subscription read for THIS store, once. Every other read passes through.
     let atSeam!: () => void;
     let release!: () => void;
+    let held = false;
     const reached = new Promise<void>((resolve) => { atSeam = resolve; });
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    const delegate = app.prisma.order;
-    const realUpdate = delegate.update.bind(delegate);
-    const spy = vi.spyOn(delegate, 'update').mockImplementation((async (args: { data?: Record<string, unknown> }) => {
-      if (args?.data && 'readyAt' in args.data) {
+    const delegate = app.prisma.subscription;
+    const realFindFirst = delegate.findFirst.bind(delegate);
+    const spy = vi.spyOn(delegate, 'findFirst').mockImplementation((async (args: Parameters<typeof realFindFirst>[0]) => {
+      if (!held && (args?.where as { vendorId?: string } | undefined)?.vendorId === vendorId) {
+        held = true;
         atSeam();
         await gate;
       }
-      return realUpdate(args as Parameters<typeof realUpdate>[0]);
+      return realFindFirst(args);
     }) as never);
     try {
       const pending = call('PUT', `/api/v1/vendor/orders/${orderId}/ready`, owner.token, undefined, vendorHeaders());
-      await Promise.race([reached, new Promise((_, reject) => setTimeout(() => reject(new Error('the ready write never reached the seam')), 10_000))]);
+      await Promise.race([reached, new Promise((_, reject) => setTimeout(() => reject(new Error('the ready route never reached the pre-write seam')), 10_000))]);
       const cancelled = await call('POST', `/api/v1/customer/orders/${orderId}/cancel`, customer.token, { reason: 'Plans changed' });
       expect(cancelled.statusCode, cancelled.body).toBe(200);
       expect(await doorFacts(orderId)).toMatchObject({ status: 'CANCELLED' });
@@ -523,9 +527,9 @@ describe('GOLD-2 · RIDE-04 — [E04] a stale "ready" cannot land on a cancelled
     }
   });
 
-  it.fails('[E04] the ready that lost the race is refused: no readyAt, no "ready" row after the cancellation, no push to the freed rider', async () => {
-    expect(ready.statusCode).toBeGreaterThanOrEqual(400);
-    expect(ready.statusCode).toBeLessThan(500);
+  it('[E04] the ready that lost the race is refused: no readyAt, no "ready" row after the cancellation, no push to the freed rider', async () => {
+    expect(ready.statusCode, ready.body).toBe(409);
+    expect(ready.json().error.code).toBe('HANDOVER_STALE');
     expect((await orderRow(orderId)).readyAt).toBeNull();
     const log = await statusLog(orderId);
     expect(log[log.length - 1]!.status).toBe('CANCELLED');
