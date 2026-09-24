@@ -1,9 +1,10 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import { Alert, AppState, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
+import { createHomeRefreshGate, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { customerApi } from '../../../services/api';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -242,19 +243,32 @@ export function CartScreen() {
   const pickupQuote = useCart<any>(latitude ?? undefined, longitude ?? undefined, retryPricing, confirmPickup);
   // [E07] A line that went dark while the phone sat in the background stays
   // "available" until the quote is re-fetched. Re-quote when the Cart tab
-  // regains focus so the line marks itself unavailable the moment the customer
-  // looks — the same focus-refetch seam Home uses. The latest refetch is held
-  // in a ref (the useEvent pattern onOrder uses below): the query observer rebuilds
-  // `refetch` on every render, and the focus effect must never re-fire on an
-  // ordinary render.
+  // regains focus AND when the app returns to the foreground with the Cart
+  // already open — backgrounding changes no navigation state, so focus alone
+  // never fires there (DS216 D1). This is Home's attention seam, with its
+  // gate: focus and foreground arriving together refresh once, and a quote
+  // already in flight is never cancelled and restarted (DS216 D6). The latest
+  // refetch/isFetching are held in refs (the useEvent pattern onOrder uses
+  // below) so the subscription never re-arms on an ordinary render.
   const cartRefetchLatest = useRef(cart.refetch);
+  const cartFetchingLatest = useRef(cart.isFetching);
   useEffect(() => {
     cartRefetchLatest.current = cart.refetch;
+    cartFetchingLatest.current = cart.isFetching;
   });
+  const cartAttentionGate = useMemo(
+    () => createHomeRefreshGate(() => { void cartRefetchLatest.current({ cancelRefetch: false }); }, 750),
+    [],
+  );
   useFocusEffect(
     React.useCallback(() => {
-      if (isAuthenticated) void cartRefetchLatest.current();
-    }, [isAuthenticated]),
+      if (!isAuthenticated) return undefined;
+      return subscribeToHomeAttention(
+        AppState.currentState,
+        (callback) => AppState.addEventListener('change', callback),
+        () => cartAttentionGate(Date.now(), cartFetchingLatest.current),
+      );
+    }, [isAuthenticated, cartAttentionGate]),
   );
   useEffect(() => {
     const next = { storeIds: quoteStoreIds(c?.items), bookingsOnly: isBookingsOnly(c?.items) };
