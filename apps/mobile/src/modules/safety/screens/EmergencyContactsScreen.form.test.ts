@@ -119,3 +119,36 @@ describe('everything that already worked still does', () => {
     expect(SCREEN).toContain("?? 'That code did not match. Ask them to read it again.'");
   });
 });
+
+// ---------------------------------------------------------------------------
+// [Q9] "It's not stopping people from using their own number." The rules are
+// tested in lib/emergencyContactForm.test.ts and the refusal in the API's
+// emergency-contact-not-self suite; this pins that the screen feeds the rules
+// the signed-in phone and renders what they decide. The server's refusal, when
+// this phone cannot tell, lands in the form's existing addError line (pinned
+// above: "the server's own refusal ... is shown under the form").
+// ---------------------------------------------------------------------------
+
+const rowRender = SCREEN.slice(SCREEN.indexOf('renderItem={({ item: c }) => {'), SCREEN.indexOf('<PopupCard visible={adding}'));
+
+describe('[Q9] the account’s own number', () => {
+  it('the form is checked against the signed-in phone from the auth store, before anything is sent', () => {
+    expect(SCREEN).toContain("import { useAuthStore } from '../../../stores/authStore';");
+    expect(SCREEN).toContain('const myPhone = useAuthStore((s) => s.user?.phone ?? null);');
+    expect(SCREEN).toMatch(/const form = emergencyContactForm\(\{[\s\S]*?ownPhone: myPhone,[\s\S]*?\}\);/);
+    // the own-number hint rides the phone field's error slot, and the button stays shut
+    expect(addForm).toMatch(/label="Their phone"[\s\S]*?error=\{form\.phoneHint\}/);
+    expect(addForm).toContain('disabled={!form.canSubmit}');
+  });
+
+  it('a listed row holding the account’s own number is marked in the unconfirmed style and never reads as alerted', () => {
+    expect(rowRender).toContain('const ownNumber = isOwnContact(c, myPhone);');
+    expect(rowRender).toContain('const alerted = verified && !ownNumber;');
+    expect(rowRender).toContain('backgroundColor: alerted ? color.soft.success : color.soft.warning,');
+    expect(rowRender).toContain("name={alerted ? 'check-circle' : 'alert-triangle'}");
+    expect(rowRender).toContain('color={alerted ? color.success : color.warning}');
+    expect(rowRender).toContain("{ownNumber ? OWN_NUMBER_ROW : verified ? 'Confirmed — will be alerted' : 'Not confirmed — will NOT be alerted'}");
+    // nothing to confirm or re-send: the server refuses both for this row
+    expect(rowRender).toContain('{verified || ownNumber ? null : (');
+  });
+});
