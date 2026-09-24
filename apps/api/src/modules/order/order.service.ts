@@ -289,9 +289,6 @@ function isCancellationTerminalization(sourceStatus: OrderStatus, target: OrderS
     || (target === 'REFUNDED' && !ORDER_TRANSITIONS.REFUNDED.includes(sourceStatus));
 }
 
-/** [E16] A courier pickup's custody proof is bound on the row: the photo is
- *  exactly the URL the server issued, it was issued to the rider who holds the
- *  job, and the rider's location at pickup is recorded. */
 /** [E16-B] The door photo the server issued, recorded, to the rider who holds the job. */
 function courierDeliveryProofBound(order: Pick<Order,
   'riderId' | 'courierProofIssuedUrl' | 'courierProofIssuedRiderId' | 'courierProofPhotoUrl'>): boolean {
@@ -301,6 +298,9 @@ function courierDeliveryProofBound(order: Pick<Order,
     && order.courierProofIssuedRiderId === order.riderId;
 }
 
+/** [E16] A courier pickup's custody proof is bound on the row: the photo is
+ *  exactly the URL the server issued, it was issued to the rider who holds the
+ *  job, and the rider's location at pickup is recorded. */
 function courierPickupProofBound(order: Pick<Order,
   'riderId' | 'courierPickupProofIssuedUrl' | 'courierPickupProofIssuedRiderId'
   | 'courierPickupProofPhotoUrl' | 'courierPickupProofLat' | 'courierPickupProofLng'>): boolean {
