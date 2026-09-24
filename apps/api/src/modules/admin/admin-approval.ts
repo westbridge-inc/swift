@@ -174,7 +174,8 @@ export type ApprovalRefusal =
   | 'expired'
   | 'already-applied'
   | 'request-changed'
-  | 'self-approval';
+  | 'self-approval'
+  | 'not-requester';
 
 /** What the operator is told, in the terms of what they were trying to do. */
 export function approvalRefusalMessage(code: ApprovalRefusal): string {
@@ -185,6 +186,7 @@ export function approvalRefusalMessage(code: ApprovalRefusal): string {
     case 'already-applied': return 'That approval has already been used. An approval authorises one act, not a standing permission.';
     case 'request-changed': return 'What you are asking for is not what was approved. Request it again so the change is reviewed.';
     case 'self-approval': return 'You approved this yourself. A money or platform action needs a second person.';
+    case 'not-requester': return 'Only the admin who asked for this action can execute it, once a second admin has approved it.';
   }
 }
 
@@ -193,8 +195,8 @@ export function approvalRefusalMessage(code: ApprovalRefusal): string {
  *
  * With no approval id, the request itself is the ASK: a PENDING record is
  * written and the caller is told what to wait for. With one, it must be
- * APPROVED, unexpired, unused, over this exact request, and decided by someone
- * other than the requester.
+ * presented by the requester, APPROVED, unexpired, unused, over this exact
+ * request, and decided by someone other than the requester.
  */
 export async function resolveApproval(
   prisma: PrismaClient,
@@ -235,6 +237,11 @@ export async function resolveApproval(
 
   const approval = await prisma.privilegedApproval.findUnique({ where: { id: approvalId } });
   if (!approval) return { outcome: 'refused', code: 'unknown-approval' };
+  // Separation of duties, at the gate every route passes through: the admin
+  // who ASKED spends the approval. Neither the approver nor a third admin can,
+  // whether they come through POST /approvals/:id/apply or re-send the
+  // original request with the approval header.
+  if (approval.requestedBy !== actor.userId) return { outcome: 'refused', code: 'not-requester', approvalId };
   if (approval.status === 'APPLIED') return { outcome: 'refused', code: 'already-applied', approvalId };
   if (approval.status !== 'APPROVED') return { outcome: 'refused', code: 'not-approved', approvalId };
   if (approval.expiresAt.getTime() <= now.getTime()) return { outcome: 'refused', code: 'expired', approvalId };

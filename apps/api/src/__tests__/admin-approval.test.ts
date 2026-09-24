@@ -371,6 +371,33 @@ describe('[DS110] the stored body is what executes — and only that', () => {
     expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value).toEqual({ rate: 33 });
   });
 
+  it('the gate itself refuses anyone but the requester — re-sending the original request with the approval id moves nothing', async () => {
+    // [DS186 A1] The requester-only rule lives in resolveApproval, the gate
+    // every C4/C5 route passes through, not only in /apply. The approver (and
+    // any third admin) can read the stored body and the approval id from the
+    // queue; re-issuing the original route with that header must not spend it.
+    const bystander = await makeAdmin(['*']);
+    const asked = await writeConfig(requester.token, { rate: 35 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true, 'Checked the rate against the price book');
+    const before = await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } });
+
+    for (const actor of [approver, bystander]) {
+      const direct = await writeConfig(actor.token, { rate: 35 }, approvalId);
+      expect(direct.statusCode, direct.body).toBe(403);
+      expect(direct.json().error.message).toMatch(/Only the admin who asked/);
+      const viaApply = await call(actor.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+      expect(viaApply.statusCode).toBe(403);
+    }
+    expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('APPROVED');
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } }))?.value).toEqual(before?.value);
+
+    // the requester still holds it: the refusals did not burn the approval
+    const own = await writeConfig(requester.token, { rate: 35 }, approvalId);
+    expect(own.statusCode, own.body).toBe(200);
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value).toEqual({ rate: 35 });
+  });
+
   it('the console signs in by cookie: apply replays under that same session', async () => {
     // [A-01] The admin console holds no Bearer; its session is the HttpOnly
     // access cookie. `authenticate` turns a gated cookie into the Authorization
