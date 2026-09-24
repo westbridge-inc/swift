@@ -46,7 +46,31 @@ export const TYPES_FOR_ROLE: Record<SubjectRef['role'], string[]> = {
 };
 
 export class RatingStatsService {
-  constructor(private prisma: PrismaClient) {}
+  constructor(
+    private prisma: PrismaClient,
+    /** [E26] Called AFTER a vendor aggregate commits (any rating create /
+     *  exclude / remove / moderate path). The caller wires the search re-sync
+     *  here; the service itself never fails a rating write on it. */
+    private onVendorAggregateChanged?: (vendorId: string) => void,
+  ) {}
+
+  /**
+   * [E26] The search document mirrors vendor.averageRating/totalRatings, so
+   * every rating write that re-levels a VENDOR aggregate must schedule that
+   * vendor's search re-sync. Best-effort by design — a throw here must never
+   * fail the rating write, and a missed schedule self-heals at the next write
+   * / boot / admin full sync, the same contract as scheduleVendorSearchSync.
+   * Mover/driver/service-provider subjects have no search document: nothing
+   * fires for them.
+   */
+  private notifyVendorAggregateChanged(subject: SubjectRef): void {
+    if (subject.role !== 'VENDOR' || !this.onVendorAggregateChanged) return;
+    try {
+      this.onVendorAggregateChanged(subject.id);
+    } catch {
+      // best-effort — a search side effect must never fail the rating write
+    }
+  }
 
   /**
    * Full recompute for one subject from rows — the reference implementation.
@@ -145,12 +169,19 @@ export class RatingStatsService {
   /** Incremental hook: recompute the subject a rating row touches. */
   async applyRating(rating: Pick<Rating, 'type' | 'vendorId' | 'rateeId'>): Promise<void> {
     const subject = subjectOf(rating);
-    if (subject) await this.recompute(subject);
+    if (subject) {
+      await this.recompute(subject);
+      this.notifyVendorAggregateChanged(subject);
+    }
   }
 
   /** Nightly sweep across every subject with any rating (RAT-H's third leg
    *  is direct SQL in the test; this is the second). */
   async recomputeAll(tenantId = 'swift-default'): Promise<number> {
+    // Deliberately does NOT notify search: this is the nightly reconciliation
+    // over EVERY subject, not a rating write. The write paths above already
+    // scheduled their vendors' syncs, and a per-vendor sync stampede here
+    // would add nothing but queue flood.
     const subjects = new Map<string, SubjectRef>();
     const rows = await this.prisma.rating.findMany({
       select: { type: true, vendorId: true, rateeId: true },
@@ -181,6 +212,7 @@ export class RatingStatsService {
       if (s && !seen.has(`${s.role}:${s.id}`)) {
         seen.add(`${s.role}:${s.id}`);
         await this.recompute(s);
+        this.notifyVendorAggregateChanged(s);
       }
     }
     return targets.length;

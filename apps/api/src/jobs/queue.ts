@@ -12,6 +12,7 @@ import {
   requireActiveDiscoveryTenant,
   runForActiveDiscoveryTenants,
 } from '../modules/discovery/tenant-boundary';
+import { scheduleVendorSearchSync } from '../modules/search/search-sync';
 
 export interface JobContext {
   prisma: PrismaClient;
@@ -983,7 +984,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const released = await svc.releaseDoubleBlind();
         // [R048-008] every command a persisted rating still owes — safety intake, release, stats — is finished here
         // when the process that wrote the rating did not get to it (one row per rating and command: exactly once).
-        const outbox = await new RatingService(ctx.prisma, ctx.io).processRatingOutbox();
+        // [E26] a vendor rating finished here still re-syncs the vendor's search document.
+        const outbox = await new RatingService(
+          ctx.prisma,
+          ctx.io,
+          (vendorId) => scheduleVendorSearchSync({ queues, log: ctx.log }, vendorId),
+        ).processRatingOutbox();
         ctx.log.info(`Rating sweep: ${flagged} flagged, ${released} double-blind released, outbox ${outbox.processed} processed / ${outbox.failed} retried`);
       }
 

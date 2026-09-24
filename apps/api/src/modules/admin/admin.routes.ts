@@ -587,7 +587,9 @@ export async function adminRoutes(app: FastifyInstance) {
   const subscriptions = new SubscriptionService(tenantPrisma);
   const verification = new VerificationService(tenantPrisma, notifications, getKycProvider());
   const cashRules = new CashRulesService(tenantPrisma, notifications, orderService);
-  const ratingStats = new RatingStatsService(tenantPrisma);
+  // [E26] moderation re-levels a vendor aggregate, so the vendor's search
+  // document must re-sync — same seam as every other vendor write here.
+  const ratingStats = new RatingStatsService(tenantPrisma, (vendorId) => scheduleVendorSearchSync(app, vendorId));
 
   const mutationOrNotFound = async <T>(entity: string, id: string, mutate: () => Promise<T>): Promise<T> => {
     try {

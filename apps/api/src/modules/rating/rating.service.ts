@@ -39,9 +39,16 @@ export class RatingService {
   private stats: RatingStatsService;
 
   /** `io` is optional so read-only callers (jobs, release paths) need no
-   *  socket; rating-CREATING routes pass it so safety flags can page ops. */
-  constructor(private prisma: PrismaClient, private io?: Server) {
-    this.stats = new RatingStatsService(prisma);
+   *  socket; rating-CREATING routes pass it so safety flags can page ops.
+   *  [E26] `onVendorAggregateChanged` lets the API layer schedule a vendor's
+   *  search re-sync right after the vendor aggregate commits — mover/driver
+   *  subjects never fire it (no search document). */
+  constructor(
+    private prisma: PrismaClient,
+    private io?: Server,
+    onVendorAggregateChanged?: (vendorId: string) => void,
+  ) {
+    this.stats = new RatingStatsService(prisma, onVendorAggregateChanged);
   }
 
   async rate(input: RateInput) {
