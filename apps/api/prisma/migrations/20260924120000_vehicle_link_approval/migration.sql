@@ -1,0 +1,33 @@
+-- [High #9 · DS109] Vehicle documents propagate only through a VERIFIED owner/driver link.
+--
+-- Before this column, `resolveSubject` created an OPEN ASSIGNED_DRIVER link for ANY account
+-- whose self-typed profile plate matched an existing vehicle subject, and `approvedEvidenceFor`
+-- counted every open link — so a driver could retype another car's plate and inherit that
+-- vehicle's approved insurance, hire permit and registration.
+--
+-- `approvedAt` NULL now means a PENDING assignment: the submission still names the durable
+-- vehicle subject, but its evidence does NOT propagate until an admin approves the assignment
+-- (POST /admin/drivers/:id/vehicle-assignment/approve). The subject's registering account keeps
+-- an approved link.
+--
+-- BACKFILL: every open link that predates this column was created under the old rule, where an
+-- open ASSIGNED_DRIVER link was itself the propagation authority. Leaving those rows PENDING
+-- would silently un-verify every existing fleet driver the moment this ships (their car's
+-- documents stop counting at GO and a fleet lapse stops reaching them) with no way back out.
+-- They are therefore stamped approved as of their validFrom — the pre-migration posture is
+-- preserved exactly. Links created AFTER this migration follow the new rule: cross-account
+-- plate reuse starts PENDING and only the explicit, audited admin approval promotes it.
+--
+-- Residual risk (for the deploy reviewer): a cross-account link that an impostor already
+-- created BEFORE this migration is indistinguishable from a legitimate fleet assignment in
+-- the row itself, so the backfill keeps it approved. Before deploy, run
+--   SELECT count(*) FROM "subject_link" l
+--   JOIN "subject" s ON s.id = l."subjectId"
+--   WHERE l."validTo" IS NULL AND l.relation = 'ASSIGNED_DRIVER' AND l."accountId" <> s."createdById";
+-- and re-review the vehicle subjects with many cross-account links. New adoptions after this
+-- migration cannot create that state.
+--
+-- Rollback: ALTER TABLE "subject_link" DROP COLUMN "approvedAt";
+SET lock_timeout = '10s';
+ALTER TABLE "subject_link" ADD COLUMN "approvedAt" TIMESTAMP(3);
+UPDATE "subject_link" SET "approvedAt" = "validFrom" WHERE "validTo" IS NULL;
