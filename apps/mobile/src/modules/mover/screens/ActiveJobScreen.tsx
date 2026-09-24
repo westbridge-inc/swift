@@ -862,6 +862,19 @@ export function ActiveJobScreen({ navigation }: any) {
                     onPress={() => setHandbackConfirm(true)}
                   />
                 ) : null}
+                {/* [E17 · DS231 F6] A courier who can't deliver mid-route returns
+                    from the rung they are on — the server accepts a return from
+                    every custody state — instead of first tapping a false
+                    "I've arrived" to reach the door's button. */}
+                {isCourier && pickedUp ? (
+                  <PillButton
+                    label="Can't deliver — return to sender"
+                    variant="soft"
+                    style={{ marginTop: space.sm }}
+                    disabled={busy}
+                    onPress={() => setReturnConfirm(true)}
+                  />
+                ) : null}
               </>
             ) : isCourier && returning ? (
               // [E17] The return leg. The door is closed — the parcel is coming

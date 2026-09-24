@@ -36,9 +36,13 @@ const STATUS_LABEL: Record<string, string> = {
   DELIVERED: 'Delivered',
   COMPLETED: 'Delivered',
   CANCELLED: 'This delivery was cancelled',
+  // [E17 · DS231 F5] The courier could not deliver: the parcel goes back.
+  RETURNING: 'Going back to the sender',
+  RETURNED: 'Returned to the sender',
 };
 
-const TERMINAL = new Set(['DELIVERED', 'COMPLETED', 'CANCELLED']);
+// RETURNED is over too: the page stops polling a parcel that has gone back.
+const TERMINAL = new Set(['DELIVERED', 'COMPLETED', 'CANCELLED', 'RETURNED']);
 
 export function TrackClient({ token }: { token: string }) {
   const [view, setView] = useState<ParcelView | null>(null);

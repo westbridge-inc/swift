@@ -144,6 +144,10 @@ function statusHeading(order: OrderDetail): string {
   if (order.status === 'CANCELLED') return order.orderType === 'TAXI' ? 'Ride cancelled' : 'Order cancelled';
   if (order.status === 'REFUNDED') return order.orderType === 'TAXI' ? 'Ride refunded' : 'Order refunded';
   if (order.status === 'FAILED') return order.orderType === 'TAXI' ? 'Ride could not be completed' : 'Order could not be completed';
+  // [E17 · DS231 F4] A courier parcel on its way back, and back: the heading
+  // agrees with the stage rail below instead of falling to "Order placed".
+  if (order.status === 'RETURNING') return 'Your parcel is coming back to you';
+  if (order.status === 'RETURNED') return 'Parcel returned to you';
   if (['DELIVERED', 'COMPLETED'].includes(order.status)) {
     if (order.orderType === 'TAXI') return 'Ride completed';
     if (order.fulfillment === 'APPOINTMENT') return 'Appointment completed';

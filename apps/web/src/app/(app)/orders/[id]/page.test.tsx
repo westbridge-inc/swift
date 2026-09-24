@@ -148,3 +148,17 @@ describe('taxi safety continues in the mobile app', () => {
     expect(screen.queryByText(/Open the Swift app for your safety PIN and SOS/)).toBeNull();
   });
 });
+
+describe('[E17 · DS231 F4] a courier parcel on its way back has its own heading', () => {
+  it.each([
+    ['RETURNING', 'Your parcel is coming back to you'],
+    ['RETURNED', 'Parcel returned to you'],
+  ])('%s reads "%s", never the "Order placed" fallback', async (status, heading) => {
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({
+      ...ORDER, orderType: 'COURIER', status, paymentMethod: 'CASH', paymentAction: null,
+    } as never);
+    render(<OrderDetailPage />);
+    const h1 = await screen.findByRole('heading', { level: 1 });
+    await waitFor(() => expect(h1.textContent).toBe(heading));
+  });
+});
