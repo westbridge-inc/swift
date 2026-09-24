@@ -38,6 +38,8 @@ vi.mock('../../../mobile/src/kit', () => ({
   EmptyState: () => <p>No matches</p>, ErrorState: () => <p>Connection error</p>, LoadingBlock: () => <p>Loading results</p>,
   Money: ({ amount }: any) => <span>{amount}</span>, Photo: () => null, RatingMeta: () => null,
   SectionHeader: ({ title }: any) => <h2>{title}</h2>,
+  // [E09] the shared cart bar: no basket in this guest journey
+  CartBar: () => null, useCartBarClearance: () => 0,
 }));
 vi.mock('../../../mobile/src/hooks/customer', async (original) => ({
   ...await original<any>(), useHome: () => ({ data: { popularItems: [] } }), useVendors: () => ({ data: [] }),
