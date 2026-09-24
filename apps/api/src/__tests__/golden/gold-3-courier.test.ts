@@ -19,8 +19,9 @@ import { recordDispatchQueue } from '../helpers/dispatch-queue';
 // GOLD-3 · COUR-01 / COUR-02 — the courier "Send" journey, through the REAL
 // mounted courier + rider routes as real sessions, asserted on durable rows:
 //
-//   COUR-01  create at the quoted fee → the online courier is offered the job
-//            and accepts the card → run to pickup → the sender's fee is
+//   COUR-01  create at the quoted fee, which is also the seeded card's fee
+//            worked by hand → the online courier is offered the job and
+//            accepts the card → run to pickup → the sender's fee is
 //            collected (once) → custody → run to the door → the delivery
 //            photo is uploaded (a garbage file refused first, then a clean
 //            retry) → the proof with the SERVER-ISSUED url closes the job with
@@ -43,6 +44,28 @@ const PHONE_PREFIX = '+5920332';
 const FIXTURE = 'gold3-courier-fixture';
 const PICKUP = { lat: 6.81462, lng: -58.13718 };
 const DROP = { lat: 6.79875, lng: -58.12944 };
+
+// The COUR-01 fee, worked by hand. GY's courier card is the seeded one: the
+// platform config writes no courierRates for GY, and an absent column prices
+// from the declared defaults — GYD 1,000 base, 300 per km, MEDIUM +500,
+// STANDARD ×1. The priced distance, in the default (haversine) maps mode, is
+// the great-circle distance × 1.3 for the road, canonicalised to 0.01 km
+// [ALG-18]. Written out here and never imported, so a change to the card, the
+// distance model or the formula moves the charge off this number and fails
+// the journey — the estimate alone would move with the charge.
+const GY_COURIER_CARD = { baseFee: 1000, perKm: 300, mediumSurcharge: 500, standardMultiplier: 1 };
+function greatCircleKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const rad = (deg: number) => (deg * Math.PI) / 180;
+  const h = Math.sin(rad(b.lat - a.lat) / 2) ** 2
+    + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(rad(b.lng - a.lng) / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.sqrt(h));
+}
+/** 2.55 km for PICKUP → DROP. */
+const PRICED_KM = Math.round(greatCircleKm(PICKUP, DROP) * 1.3 * 100) / 100;
+/** GYD 2,265 = (1,000 + 2.55 × 300 + 500) × 1. */
+const EXPECTED_FEE = Math.round(
+  (GY_COURIER_CARD.baseFee + PRICED_KM * GY_COURIER_CARD.perKm + GY_COURIER_CARD.mediumSurcharge) * GY_COURIER_CARD.standardMultiplier,
+);
 const UPLOAD_DIR = mkdtempSync(path.join(os.tmpdir(), 'swift-gold3-courier-'));
 
 let app: FastifyInstance;
@@ -238,6 +261,10 @@ describe('GOLD-3 · COUR-01 — courier "Send": create → offer → collect →
     const { orderId, trackingToken, fee } = created.json().data as { orderId: string; trackingToken: string; fee: number };
     expect(fee).toBe(quote.json().data.totalFee);
     expect(fee).toBeGreaterThan(0);
+    // ...and absolutely: the seeded GY card applied to the fixture distance by
+    // this file's own arithmetic (EXPECTED_FEE above). The check against the
+    // estimate alone stays green when a regression moves both together.
+    expect(fee).toBe(EXPECTED_FEE);
 
     const placed = await orderRow(orderId);
     expect({
@@ -245,10 +272,13 @@ describe('GOLD-3 · COUR-01 — courier "Send": create → offer → collect →
       deliveryFee: Number(placed.deliveryFee), total: Number(placed.totalAmount), payer: placed.courierPayer,
       method: placed.paymentMethod, payment: placed.paymentStatus, held: placed.holdExpiresAt,
       recipient: placed.courierRecipientName, recipientPhone: placed.courierRecipientPhone, size: placed.courierPackageSize,
+      pricedKm: Number(placed.billableKm), kmSource: placed.billableKmSource,
     }).toEqual({
       type: 'COURIER', status: 'READY_FOR_PICKUP', customer: sender.userId, rider: null,
       deliveryFee: fee, total: fee, payer: 'SENDER', method: 'CASH', payment: 'PENDING', held: null,
       recipient: 'Aunty Pat', recipientPhone: ORDER_BODY.recipientPhone, size: 'MEDIUM',
+      // The distance the fee was priced from, frozen with its source [ALG-18].
+      pricedKm: PRICED_KM, kmSource: 'haversine',
     });
 
     // ── The public link: narrow, and nobody on the parcel yet ────────────────

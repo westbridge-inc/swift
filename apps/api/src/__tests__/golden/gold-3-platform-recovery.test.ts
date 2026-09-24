@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi, type WorkerGlobalState } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
@@ -59,6 +59,23 @@ import { recoveryFor } from '../../jobs/recovery-policy';
 // (a Redis outage at the moment of checkout). Everything else is organic.
 // Fixture range: +5920334nnn (this file only).
 // ---------------------------------------------------------------------------
+
+// ── One file at a time: checked here, never assumed ─────────────────────────
+// This file obliterates the shared BullMQ queues in the shared test Redis and
+// runs a real consumer against them, which is safe only while no other test
+// file runs beside it. apps/api/vitest.config.ts pins fileParallelism: false.
+// vitest resolves that to maxWorkers = 1, whatever --maxWorkers says, and its
+// scheduler runs this file's group with that resolved number. Each worker
+// receives the same resolved config, so read it from this worker's own state.
+// If files could run side by side, or the value cannot be read, the file
+// refuses to load. That happens before any hook is registered or temp dir is
+// made, so nothing is obliterated.
+const fileSlots = (Reflect.get(globalThis, '__vitest_worker__') as WorkerGlobalState | undefined)?.config?.maxWorkers;
+if (fileSlots !== 1) {
+  throw new Error(
+    `[GOLD-3 PLAT-02] refusing to run: this file wipes and consumes the shared BullMQ queues, so test files must run one at a time, but vitest's resolved maxWorkers is ${String(fileSlots)}, not 1. Keep fileParallelism: false in apps/api/vitest.config.ts and never pass --file-parallelism.`,
+  );
+}
 
 const DAY = 24 * 60 * 60 * 1000;
 const PHONE_PREFIX = '+5920334';
@@ -299,8 +316,9 @@ beforeAll(async () => {
   // nothing else may inherit it (the worker processes spawned below included).
   vi.unstubAllEnvs();
   await purgeFixtures();
-  // Files run one at a time: nothing another file left in the shared queues
-  // (jobs, repeatable schedules, dead letters) may run inside this journey's
+  // Files run one at a time (the guard at the top of this file refuses to load
+  // otherwise): nothing another file left in the shared queues (jobs,
+  // repeatable schedules, dead letters) may run inside this journey's
   // workers. The key set after this is what afterAll restores.
   await obliterateQueues();
   redisKeysBefore = await allRedisKeys();
