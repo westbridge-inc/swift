@@ -407,12 +407,10 @@ export async function ridesRoutes(app: FastifyInstance) {
       immediate: true,
       lat: body.lat ?? null,
       lng: body.lng ?? null,
-    });
-
-    // Keep the free-text reason + coords on the order's immutable timeline (the
-    // SosAlert carries no free-text trigger field; ops correlate via orderId).
-    await app.prisma.orderStatusLog.create({
-      data: { orderId: ride.id, status: ride.status, changedBy: request.user.userId, note: `SOS raised by ${raisedBy}${body.note ? `: ${body.note}` : ''} ${body.lat != null ? `@${body.lat},${body.lng}` : ''}`.trim() },
+      // [PRIV2-S1] The free-text reason stays on the ALERT only (ops / war
+      // room / evidence bundle). It must never reach the shared order
+      // timeline, which both counterparty surfaces read verbatim.
+      note: body.note ?? null,
     });
 
     return { success: true, data: { acknowledged: true, orderId: ride.id, sosAlertId: alert.id, status: alert.status } };

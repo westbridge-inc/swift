@@ -4360,6 +4360,13 @@ model SosAlert {
   triggerLng           Float?
   triggerAccuracyM     Float?
   triggerAddressText   String? // reverse-geocoded, for the on-screen 911 script
+  /// [PRIV2-S1] The raiser's free-text reason (rides POST /rides/:id/sos
+  /// `note`), kept on the ALERT ONLY — ops, the war room and the evidence
+  /// bundle read it here. It must never appear on the shared order timeline:
+  /// both counterparty surfaces (driver GET /rides/active, customer order and
+  /// ride detail) read orderStatusLog.note verbatim, so a note like "he's
+  /// threatening me" plus live coords would reach the person the SOS is about.
+  triggerNote          String?
   clientCreatedAt      DateTime? // device clock — offline reconciliation
   clientIdempotencyKey String? // one alert per trigger PER ACTOR, even on retry — see @@unique below
   /// [F-027-17] How many times this person asked for help again while this

@@ -68,6 +68,10 @@ export interface SosCreateInput {
   lng?: number | null;
   accuracyM?: number | null;
   addressText?: string | null;
+  /** [PRIV2-S1] The raiser's free-text reason. Stored on the ALERT ONLY —
+   *  ops, the war room and the evidence bundle read it here. Never the shared
+   *  order timeline, which the counterparty reads verbatim. */
+  note?: string | null;
   clientCreatedAt?: Date | null;
   clientIdempotencyKey?: string | null;
   /** Skip the slide-to-cancel grace → straight to ACTIVE. For a caller whose UI
@@ -225,6 +229,9 @@ export class SosService {
             // The latest position IS the operative one.
             ...(movedTo ? { triggerLat: input.lat ?? null, triggerLng: input.lng ?? null, triggerAccuracyM: input.accuracyM ?? null } : {}),
             ...(input.addressText ? { triggerAddressText: input.addressText } : {}),
+            // [PRIV2-S1] A repeat press may carry a NEW note; the latest one
+            // is what ops must read. Never lands on the shared order timeline.
+            ...(input.note ? { triggerNote: input.note } : {}),
             // A stronger provenance sticks; a weaker one never downgrades the record.
             ...(source !== 'BUTTON' && live.triggerSource === 'BUTTON' ? { triggerSource: source } : {}),
             // A collapsed request that carried a NEW key must store it, or a lost
@@ -333,6 +340,7 @@ export class SosService {
           triggerLng: input.lng ?? null,
           triggerAccuracyM: input.accuracyM ?? null,
           triggerAddressText: input.addressText ?? null,
+          triggerNote: input.note ?? null,
           clientCreatedAt: input.clientCreatedAt ?? null,
           clientIdempotencyKey: key,
         },

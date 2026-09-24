@@ -1,0 +1,30 @@
+-- [PRIV2-S1] In-ride SOS free-text note: ops-only storage on the alert.
+--
+-- The rides SOS route wrote the raiser's free-text note and coordinates into
+-- orderStatusLog, which both counterparty surfaces read verbatim (driver
+-- GET /rides/active statusHistory, customer GET /orders/:id timeline and
+-- GET /rides/:id statusHistory). The accusation and the live GPS therefore
+-- reached the person the SOS is about within one poll cycle. The note now
+-- lives ONLY on the alert (ops / war room / evidence bundle capture the full
+-- alert row); the shared order timeline no longer receives an SOS row at all.
+--
+-- FORWARD: one nullable TEXT column; existing rows stay NULL (their notes, if
+-- any, live only in the historical order_status_logs rows this fix stops
+-- creating). No backfill: a past timeline note cannot be un-shown from the
+-- counterparty's already-served reads, and copying it onto the alert would
+-- duplicate rather than move it.
+--
+-- ROLLBACK (only after the application is rolled back first; forward repair
+-- is preferred once the column may carry a person's note — dropping it would
+-- destroy life-safety evidence):
+--   BEGIN;
+--   ALTER TABLE "SosAlert" DROP COLUMN "triggerNote";
+--   DO $$ DECLARE n integer; BEGIN
+--     DELETE FROM "_prisma_migrations"
+--       WHERE "migration_name" = '20260923010000_sos_trigger_note';
+--     GET DIAGNOSTICS n = ROW_COUNT;
+--     IF n <> 1 THEN RAISE EXCEPTION 'expected exactly one _prisma_migrations row, deleted %', n; END IF;
+--   END $$;
+--   COMMIT;
+
+ALTER TABLE "SosAlert" ADD COLUMN "triggerNote" TEXT;
