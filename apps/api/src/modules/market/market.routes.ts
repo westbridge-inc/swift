@@ -199,12 +199,8 @@ export async function marketRoutes(app: FastifyInstance) {
 
     // [DOC-1 §18.3 · P18-2] BLOCK_LISTING at read time as well as at publish
     // time: a licence that lapsed after the item was tagged hides it here.
-    const { blockedCategoryIdsForVendors } = await import('../verification/category-gate');
-    const gated = rows.length === 0 ? new Map<string, Set<string>>() : await blockedCategoryIdsForVendors(app.prisma, tenantId, rows.map((r) => r.vendorId));
-    const gatedTags = [...gated.values()].some((set) => set.size > 0)
-      ? await app.prisma.itemDiscoveryCategory.findMany({ where: { itemId: { in: rows.map((r) => r.id) } }, select: { itemId: true, categoryId: true } })
-      : [];
-    const listable = rows.filter((r) => !gatedTags.some((t) => t.itemId === r.id && gated.get(r.vendorId)?.has(t.categoryId)));
+    const { listableItemsForVendors } = await import('../verification/category-gate');
+    const listable = await listableItemsForVendors(app.prisma, tenantId, rows);
     const page = listable.slice(0, q.limit);
     const items: ItemHit[] = page.map(toItemHit);
     const last = page[page.length - 1];
