@@ -110,9 +110,8 @@ export default function VerificationPage() {
     try {
       const res = await getDocSignedUrl(id);
       if (!res?.data?.url) throw new Error('no url');
-      // [DS110-15] The server returns an absolute URL; an older server's
-      // relative path still resolves against the API origin, never the admin
-      // origin where it 404'd before.
+      // [DS110-15] The server returns a path relative to the API origin
+      // (an absolute URL also parses); only its path and query are used.
       const renderUrl = new URL(res.data.url, API_URL);
       // Open through a same-origin proxy so a failed load is DETECTABLE — a
       // cross-origin tab cannot report its 404/410 back to this page.

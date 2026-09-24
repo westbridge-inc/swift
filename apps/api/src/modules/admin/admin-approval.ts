@@ -49,7 +49,7 @@ export interface ApprovalSubject {
  * The columns the apply path reads back from a stored approval row.
  *
  * `bodySnapshot` is added to the generated Prisma types when the client is
- * regenerated after the 20260923180000 migration; until then callers cast the
+ * regenerated after the 20260924140000 migration; until then callers cast the
  * row to this shape, which is why it is spelled out rather than derived.
  */
 export interface ApprovalSnapshotRow {
@@ -58,6 +58,8 @@ export interface ApprovalSnapshotRow {
   readonly reason: string;
   readonly fingerprint: string;
   readonly status: string;
+  /** The admin who asked; only they may apply it once approved. */
+  readonly requestedBy: string;
   readonly appliedAt: Date | null;
   readonly bodySnapshot: Prisma.JsonValue | null;
 }
@@ -222,7 +224,7 @@ export async function resolveApproval(
       reason,
       expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS),
     };
-    // `bodySnapshot` enters the generated client with the 20260923180000
+    // `bodySnapshot` enters the generated client with the 20260924140000
     // migration; the assertion keeps this compiling against both generations.
     const created = await prisma.privilegedApproval.create({
       data: data as unknown as Prisma.PrivilegedApprovalUncheckedCreateInput,

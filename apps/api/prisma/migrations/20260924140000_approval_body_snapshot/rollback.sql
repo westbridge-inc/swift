@@ -1,4 +1,4 @@
--- ROLLBACK for 20260923180000_approval_body_snapshot.
+-- ROLLBACK for 20260924140000_approval_body_snapshot.
 --
 -- Dropping the column discards the stored request body for approvals raised
 -- after the migration. Those rows can no longer be APPLIED (there is no body

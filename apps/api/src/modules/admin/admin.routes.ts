@@ -5048,13 +5048,12 @@ export async function adminRoutes(app: FastifyInstance) {
 
     await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
     const minted = mintRenderPath(id, ttlSeconds);
-    // [DS110-15] `mintRenderPath` returns a path RELATIVE to the API origin.
-    // The admin console opens it from its own origin, where `/api/v1/...`
-    // resolves to nothing — a 404 that still unlocked the Approve button.
-    // Return the absolute URL built from this request's origin instead.
-    const url = `${request.protocol}://${request.host}${minted.path}`;
     await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
-    return { success: true, data: { url, expiresInSeconds: minted.expiresInSeconds } };
+    // [DS110-15] A path RELATIVE to the API origin, on purpose. The console
+    // resolves it against its configured API origin and loads it through its
+    // own same-origin proxy; an origin built here from the Host header would
+    // be client-supplied input, and the console discards it anyway.
+    return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
   });
 
   // ─── Retail returns ──────────────────────────────────────────
@@ -5336,10 +5335,18 @@ export async function adminRoutes(app: FastifyInstance) {
   // means exactly one apply can hold it — a second apply is refused.
   app.post<{ Params: { id: string } }>('/approvals/:id/apply', { preHandler: [adminGuard] }, async (request) => {
     requireTenantId();
-    // `bodySnapshot` enters the generated client with the 20260923180000
+    // `bodySnapshot` enters the generated client with the 20260924140000
     // migration; the assertion keeps this compiling against both generations.
     const approval = (await tenantPrisma.privilegedApproval.findUnique({ where: { id: request.params.id } })) as unknown as ApprovalSnapshotRow | null;
     if (!approval) throw new NotFoundError('Approval', request.params.id);
+    // Separation of duties: the admin who ASKED executes, after a second admin
+    // approved. The approver never executes what they approved, and a third
+    // admin does not act on a request that is not theirs. (Before this route the
+    // requester re-sent their own request with the approval id; this keeps that
+    // shape.)
+    if (approval.requestedBy !== request.user.userId) {
+      throw new ForbiddenError('Only the admin who asked for this action can execute it, once a second admin has approved it.');
+    }
 
     // [DS110-13] The binding: what executes is what was stored and displayed.
     // Recompute the fingerprint over the reconstructed subject — if the stored

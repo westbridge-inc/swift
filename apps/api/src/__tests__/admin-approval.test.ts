@@ -313,7 +313,7 @@ describe('[ADM-005] the law itself', () => {
 // ---------------------------------------------------------------------------
 
 describe('[DS110] the stored body is what executes — and only that', () => {
-  // `bodySnapshot` enters the generated client with the 20260923180000
+  // `bodySnapshot` enters the generated client with the 20260924140000
   // migration; cast until the client is regenerated, so the suite compiles
   // against both generations.
   const snapshotRow = async (id: string) =>
@@ -352,6 +352,22 @@ describe('[DS110] the stored body is what executes — and only that', () => {
       body: { value: { rate: 30 }, reason: REASON },
       query: {},
     });
+  });
+
+  it('only the admin who asked executes: the approver is refused and nothing moves', async () => {
+    const asked = await writeConfig(requester.token, { rate: 33 });
+    const approvalId = asked.json().error.details.approvalId as string;
+    await decide(approver.token, approvalId, true, 'Checked the rate against the price book');
+    const before = await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } });
+
+    const byApprover = await call(approver.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(byApprover.statusCode).toBe(403);
+    expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('APPROVED');
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: CONFIG_KEY } }))?.value).toEqual(before?.value);
+
+    const byRequester = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
+    expect(byRequester.statusCode, byRequester.body).toBe(200);
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value).toEqual({ rate: 33 });
   });
 
   it('apply replays the stored body and executes exactly once', async () => {

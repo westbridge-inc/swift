@@ -50,11 +50,11 @@ function verificationHandler(
     // [A-19] Approving now requires the evidence to have been OPENED, so every
     // review flow fetches a signed URL first.
     if (request.method === 'GET' && request.url.pathname.endsWith('/document-url')) {
-      // [DS110-15] the server returns an ABSOLUTE render URL on the API origin
+      // [DS110-15] the server returns the render PATH, relative to the API origin
       return {
         body: {
           success: true,
-          data: { url: 'http://admin-api.test/api/v1/verification/render/document-target?expires=1&sig=signed' },
+          data: { url: '/api/v1/verification/render/document-target?expires=1&sig=signed' },
         },
       };
     }
@@ -477,7 +477,7 @@ describe('[A-19] the expiring-type list cannot drift from the server', () => {
 // ---------------------------------------------------------------------------
 
 describe('[DS110-15] the document must actually load before Approve unlocks', () => {
-  it('resolves an older server’s relative URL against the API origin and opens the admin proxy', async () => {
+  it('resolves the server’s relative render path and opens it through the admin proxy', async () => {
     const open = vi.fn();
     vi.stubGlobal('open', open);
     const renderPath = '/api/v1/verification/render/document-target?expires=1&sig=signed';
