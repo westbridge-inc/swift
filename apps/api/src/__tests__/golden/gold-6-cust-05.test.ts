@@ -225,7 +225,9 @@ async function purgeRedis(ids: string[]) {
   } while (cursor !== '0');
 }
 
+let vendorSeq = 0;
 async function makeVendor(owner: Actor, name: string, slugTag: string, dish: string) {
+  vendorSeq += 1; // [DS245 G6C05] each store its own phone
   const ownerRow = await sys(() => app.prisma.vendorOwner.create({ data: { userId: owner.userId } }));
   const vendor = await sys(() => app.prisma.vendor.create({
     data: {
@@ -233,7 +235,7 @@ async function makeVendor(owner: Actor, name: string, slugTag: string, dish: str
       name,
       slug: `gold6-c05-${slugTag}-${nanoid(6).toLowerCase()}`,
       vendorType: 'RESTAURANT',
-      phone: `${PHONE_PREFIX}9${String(seq).padStart(2, '0')}`,
+      phone: `${PHONE_PREFIX}9${String(vendorSeq).padStart(2, '0')}`,
       addressLine1: name === 'Counter Diner' ? '6 Counter Lane' : '8 Counter Row',
       city: 'Georgetown',
       region: 'Demerara-Mahaica',

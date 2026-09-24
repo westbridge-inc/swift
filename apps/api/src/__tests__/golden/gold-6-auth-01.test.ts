@@ -392,6 +392,17 @@ describe('GOLD-6 · AUTH-01 — registration replay', () => {
     const proof = verified.json().data.registrationProof as string;
     const payload = { phone: phoneNumber, registrationProof: proof, firstName: 'Replay', lastName: 'Once', acceptTerms: true };
 
+    // Wrong party FIRST, while the proof is still live [DS245 G6A1]: the proof
+    // is phone-bound, so another number cannot spend it. (Tried after the
+    // legitimate register, it would be refused only because the proof was
+    // already consumed — proving nothing about the binding.)
+    const otherPhone = phone();
+    const stolen = await post('/api/v1/auth/register', { ...payload, phone: otherPhone });
+    expect(stolen.statusCode).toBe(403);
+    expect(stolen.json().error.code).toBe('REGISTRATION_PROOF_REQUIRED');
+    expect(await sys(() => app.prisma.user.count({ where: { phone: otherPhone } }))).toBe(0);
+
+    // The owner's proof survived the stolen attempt and still registers.
     const first = await post('/api/v1/auth/register', payload);
     expect(first.statusCode, first.body).toBe(201);
     const userId = first.json().data.user.id as string;
@@ -401,12 +412,6 @@ describe('GOLD-6 · AUTH-01 — registration replay', () => {
     const replay = await post('/api/v1/auth/register', payload);
     expect(replay.statusCode).toBe(403);
     expect(replay.json().error.code).toBe('REGISTRATION_PROOF_REQUIRED');
-
-    // Wrong party: the proof is phone-bound — another number cannot spend it.
-    const otherPhone = phone();
-    const stolen = await post('/api/v1/auth/register', { ...payload, phone: otherPhone });
-    expect(stolen.statusCode).toBe(403);
-    expect(stolen.json().error.code).toBe('REGISTRATION_PROOF_REQUIRED');
 
     // Durable: exactly ONE account, ONE customer, ONE session, ONE consent
     // grant pair and ONE signup-attempt row — the replay wrote nothing.
