@@ -310,3 +310,21 @@ did, 2 for a harness error, 3 when the runner refused the target. Record each
 journey's staging gate with the run id. Re-runs reuse the roster (accounts in
 the +59204 block) and create new orders, bookings and rides; accounts a journey
 must create afresh (signup, deletion, onboarding) come from +592049xxxx.
+
+## 8. Production go-live: the TLS pin on api.swiftgy.com
+
+The iOS and Android apps pin `api.swiftgy.com` (and its subdomains) to three CA roots: ISRG Root X1 and X2
+(Let's Encrypt) and GTS Root R1 (Google Trust Services). See `NSPinnedDomains` in `apps/mobile/app.config.ts`
+and `apps/mobile/plugins/withTlsPinning.js`. `apps/api/src/__tests__/domain-swiftgy-guard.test.ts` keeps both
+naming the same host. Staging (`api-staging.swiftgy.com`) is a sibling domain and is not pinned.
+
+Before the first production build ships, confirm the served chain ends at one of those roots:
+
+```sh
+openssl s_client -connect api.swiftgy.com:443 -servername api.swiftgy.com -showcerts </dev/null 2>/dev/null \
+  | grep -E '^ *[0-9]+ s:|^ *i:'
+```
+
+The last issuer must be ISRG Root X1, ISRG Root X2 or GTS Root R1. A proxied host (for example, behind Cloudflare)
+can be issued under a different root. In that case, a pinned app cannot reach the API until either the certificate or
+the pins change, and changing the pins is an app update.

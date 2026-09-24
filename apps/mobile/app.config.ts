@@ -183,8 +183,8 @@ const config: ExpoConfig = {
       // that does not exist yet. What production MUST honour: the certificate
       // served at api.swiftgy.com chains to ISRG Root X1/X2 or GTS Root R1
       // (a Cloudflare-proxied host can be issued by SSL.com, which none of
-      // these pins cover). src/__tests__/tls-pinning-host.test.ts keeps this
-      // block, the Android plugin and eas.json naming the same host;
+      // these pins cover). apps/api/src/__tests__/domain-swiftgy-guard.test.ts
+      // keeps this block, the Android plugin and eas.json naming the same host;
       // deploy/PILOT-RUNBOOK.md carries the go-live certificate check.
       NSAppTransportSecurity: {
         NSPinnedDomains: {

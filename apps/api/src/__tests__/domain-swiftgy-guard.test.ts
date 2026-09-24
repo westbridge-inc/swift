@@ -23,7 +23,9 @@ const OLD = /swift\.gy(?![a-z0-9-])/i; // swift.gy, never swiftgy.com
 const SCOPES = [
   'apps/api/src', 'apps/api/prisma/seed.ts', 'apps/api/.env.example',
   'apps/mobile/src', 'apps/mobile/app.config.ts', 'apps/mobile/eas.json', 'apps/mobile/plugins', 'apps/mobile/.env.example',
-  'apps/web/src', 'apps/admin/src', 'apps/admin/next.config.ts', 'apps/admin/.env.example',
+  'apps/web/src', 'apps/web/next.config.ts', 'apps/web/.env.example', 'apps/web/public',
+  'apps/admin/src', 'apps/admin/next.config.ts', 'apps/admin/.env.example', 'apps/admin/public',
+  'apps/mobile/package.json', 'apps/mobile/index.js', 'package.json',
   'apps/desktop/src', 'apps/desktop/src-tauri/tauri.conf.json',
   'deploy', 'scripts', 'tools',
 ];
@@ -31,7 +33,7 @@ const SCOPES = [
 /** The two deny-lists, where naming swift.gy is the point. */
 const DENY_LISTS = new Set(['scripts/livetest/guard.ts']);
 
-const SOURCE = /\.(ts|tsx|js|mjs|cjs|json|ya?ml|sh|toml|md|example|conf|caddy|Caddyfile)$|Caddyfile$|\.env\.example$/;
+const SOURCE = /\.(ts|tsx|js|mjs|cjs|json|ya?ml|sh|toml|md|example|conf|caddy|Caddyfile|html|txt|webmanifest|xml)$|Caddyfile$|\.env\.example$/;
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.next', 'target', '.expo', 'coverage', 'gen', '__tests__']);
 
 function walk(path: string, out: string[]): void {
