@@ -481,7 +481,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         case 'process-billing': {
           const result = await billing.runBillingCycle();
           // [E12] A stopped subscription stays ACTIVE until its paid period
-          // ends, then lapses CANCELLED so it cannot keep operating free.
+          // ends, then turns PAUSED (not operable, owing nothing); resuming
+          // restarts it with this week's fee billed like any renewal.
           const lapsed = await billing.lapseStoppedSubscriptions();
           const reminders = await billing.sendUpcomingReminders();
           // §11 stages 6..N: daily reinstatement nudges for the suspended

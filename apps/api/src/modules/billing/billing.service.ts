@@ -2131,9 +2131,10 @@ export class BillingService {
    *
    * [E12] This is also the RESUME action: it arms auto-renew in the same
    * transaction as the rail write, so a partner who stopped weekly billing
-   * resumes on the rail they pick. A subscription already lapsed/cancelled
-   * (period end) or closed (churned) is refused with 409 — resuming must not
-   * silently reopen service without payment; the partner renews instead.
+   * resumes on the rail they pick. A PAUSED plan (stopped, then its paid
+   * period ended) restarts ACTIVE and due now. A CANCELLED (wind-down) or
+   * CHURNED (closed after non-payment) subscription is refused with 409 —
+   * resuming must not silently reopen a closed account.
    */
   async setBillingRail(subscriptionId: string, method: 'CASH' | 'MOBILE_MONEY', mmgPayerMsisdn?: string) {
     if (method !== 'CASH' && method !== 'MOBILE_MONEY') {
