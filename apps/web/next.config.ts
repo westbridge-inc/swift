@@ -103,6 +103,21 @@ export default function createNextConfig(phase: string): NextConfig {
           ],
         },
         {
+          // [PWA-1] The service worker (public/sw.js). Never cached, so a fixed
+          // worker reaches phones on their next visit rather than when a cache
+          // expires; the type is pinned because a browser refuses to install a
+          // worker served as anything but JavaScript. No Service-Worker-Allowed
+          // header: the script sits at the root, so its scope is already the
+          // whole site. The site-wide policy below (CSP included) applies to it
+          // as to every response — the worker only fetches same-origin, which
+          // connect-src 'self' already permits.
+          source: '/sw.js',
+          headers: [
+            { key: 'Content-Type', value: 'application/javascript; charset=utf-8' },
+            { key: 'Cache-Control', value: 'no-cache, no-store, must-revalidate' },
+          ],
+        },
+        {
           source: '/(.*)',
           headers: [
             { key: 'X-Frame-Options', value: 'DENY' },

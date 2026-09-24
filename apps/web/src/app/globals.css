@@ -11,6 +11,13 @@ body {
   font-size: var(--swift-type-body);
   line-height: var(--swift-leading-body);
   -webkit-font-smoothing: antialiased;
+  /* [PWA-1] viewport-fit=cover (root layout) hands the notch to the page, so the
+     sides are padded back: no page puts content under the notch of an iPhone
+     held sideways. Zero everywhere else. Top and bottom belong to the customer
+     shell's header and main — a bottom pad here would make every full-height
+     page scroll by the height of the home bar. */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 button,
