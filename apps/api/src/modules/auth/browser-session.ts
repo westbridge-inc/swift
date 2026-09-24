@@ -97,13 +97,20 @@ export function bearerOrCookieToken(request: Pick<FastifyRequest, 'headers'>): s
   return cookie;
 }
 
+/** Requests whose Authorization header was written HERE from the access cookie. authenticate()
+ *  can run twice for one request (the admin plugin's onRequest hook and the route's own guard);
+ *  the second pass sees a Bearer, and must still report where it came from. */
+const adoptedFromCookie = new WeakSet<object>();
+
 /** The JWT plugin verifies the Authorization header: when a request carries no Bearer but a
  *  cookie credential that passes the gate, the cookie becomes that header for this request. */
 export function adoptCookieCredential(request: FastifyRequest): 'bearer' | 'cookie' | null {
+  if (adoptedFromCookie.has(request)) return 'cookie';
   if (typeof request.headers.authorization === 'string' && request.headers.authorization.startsWith('Bearer ')) return 'bearer';
   const token = bearerOrCookieToken(request);
   if (!token) return null;
   request.headers.authorization = `Bearer ${token}`;
+  adoptedFromCookie.add(request);
   return 'cookie';
 }
 
