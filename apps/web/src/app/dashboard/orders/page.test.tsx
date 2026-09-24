@@ -429,6 +429,26 @@ describe('[E10] rejecting an order always carries a reason', () => {
     });
   });
 
+  it('a booking is declined with its own question, label and booking reasons (DS221 S3)', async () => {
+    const detail = wireVendorOrderDetail({ fulfillment: 'APPOINTMENT', appointmentSlot: '2026-09-24T13:00:00.000Z' });
+    const fetchMock = mockApi(rejectHandler(detail));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    await user.click(await screen.findByRole('button', { name: 'Decline' }));
+
+    expect(screen.getByRole('dialog', { name: 'Confirm booking decline' })).toBeTruthy();
+    expect(screen.getByText('Decline this booking?')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Kitchen is too busy' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Fully booked at that time' }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/orders/order-live/reject'));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call![1]?.body))).toEqual({ reason: 'Fully booked at that time' });
+    });
+  });
+
   it('"Keep it" closes the panel without rejecting', async () => {
     const { user, fetchMock } = await openPendingDetail();
 
