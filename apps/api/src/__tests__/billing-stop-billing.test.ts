@@ -423,6 +423,30 @@ describe('E12 — the stopped subscription and the billing engine', () => {
     expect(await app.prisma.subscriptionPayment.count({ where: { subscriptionId: stopped.subId } })).toBe(1);
   });
 
+  it('the instant charge never bills a week the hourly cycle already took (DS213 F2-1)', async () => {
+    // A resumed plan: ACTIVE, auto-renewing, due at the resume instant.
+    const due = new Date(Date.now() - 60_000);
+    const plan = await makeRiderSub({ due, prepaid: 24000 });
+    // The cycle got there first: it charged the resumed week and moved the row a week on.
+    await billing.runBillingCycle(new Date());
+    expect(await app.prisma.subscriptionPayment.count({ where: { subscriptionId: plan.subId } })).toBe(1);
+    // Re-reading the row and billing it would take the NEXT week (the attempt
+    // key dedupes only within one period). Anchored to the resumed week, the
+    // instant charge sees the row has moved on and bills nothing.
+    await expect(billing.chargeResumedPlan(plan.subId, due)).resolves.toBe('skipped');
+    expect(await app.prisma.subscriptionPayment.count({ where: { subscriptionId: plan.subId } })).toBe(1);
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: plan.subId } })).balance)).toBe(12000);
+  });
+
+  it('the instant charge bills the resumed week when it gets there first, and the cycle then finds nothing due', async () => {
+    const due = new Date(Date.now() - 60_000);
+    const plan = await makeRiderSub({ due, prepaid: 12000 });
+    await expect(billing.chargeResumedPlan(plan.subId, due)).resolves.toBe('succeeded');
+    expect(await app.prisma.subscriptionPayment.count({ where: { subscriptionId: plan.subId } })).toBe(1);
+    await billing.runBillingCycle(new Date());
+    expect(await app.prisma.subscriptionPayment.count({ where: { subscriptionId: plan.subId } })).toBe(1);
+  });
+
   it('a resumed plan whose charge has not landed can be stopped and paused AGAIN — no event-key collision (DS207 F1)', async () => {
     const now = new Date();
     const plan = await makeRiderSub({ due: new Date(now.getTime() - 2 * DAY), autoRenew: false });
@@ -437,7 +461,9 @@ describe('E12 — the stopped subscription and the billing engine', () => {
 
     // Keyed by period, the second pause collided with the first (P2002), the
     // row stayed ACTIVE and the throw aborted the whole billing job, hourly.
-    await expect(billing.lapseStoppedSubscriptions(new Date())).resolves.toBeGreaterThanOrEqual(2);
+    const second = await billing.lapseStoppedSubscriptions(new Date());
+    expect(second.paused).toBeGreaterThanOrEqual(2);
+    expect(second.failed).toBe(0);
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: plan.subId } })).status).toBe('PAUSED');
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: other.subId } })).status).toBe('PAUSED');
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: plan.subId, idempotencyKey: { startsWith: 'pause:' } } })).toBe(2);
@@ -454,7 +480,9 @@ describe('E12 — the stopped subscription and the billing engine', () => {
       data: { subscriptionId: broken.subId, type: 'TIER_CHANGE', currencyCode: row.currencyCode, idempotencyKey: `pause:${broken.subId}:${row.updatedAt.toISOString()}`, note: 'planted' },
     });
 
-    await expect(billing.lapseStoppedSubscriptions(now)).resolves.toBeGreaterThanOrEqual(1);
+    const sweep = await billing.lapseStoppedSubscriptions(now);
+    expect(sweep.paused).toBeGreaterThanOrEqual(1);
+    expect(sweep.failed).toBeGreaterThanOrEqual(1); // counted for the billing-failure page (DS213 F1-1)
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: broken.subId } })).status).toBe('ACTIVE'); // rolled back, retried next run
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: fine.subId } })).status).toBe('PAUSED');
   });
