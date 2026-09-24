@@ -67,6 +67,43 @@ export function isBehind(sub: any): boolean {
   return p === 'grace' || p === 'past_due';
 }
 
+/** [E12] The partner stopped weekly billing (`autoRenew: false`). The paid
+ *  period still runs out; after that the account stops receiving work until
+ *  billing is resumed or the account is renewed. Server truth only — a missing
+ *  row or flag is never invented into a stopped account. */
+export function isBillingStopped(sub: any): boolean {
+  return !!sub && sub.autoRenew === false;
+}
+
+/** [E12] Stopped AND the paid period (or trial) is over: the plan is PAUSED
+ *  (or about to be — the server's gate already refuses work). Resuming bills
+ *  this week like any renewal. */
+export function isPlanPaused(sub: any, now = Date.now()): boolean {
+  if (!sub) return false;
+  if (String(sub.status ?? '').toUpperCase() === 'PAUSED') return true;
+  const end = sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd).getTime() : Number.NaN;
+  return isBillingStopped(sub) && Number.isFinite(end) && end <= now;
+}
+
+/** [E12] The line under "Weekly billing stopped". */
+export function billingStoppedLine(sub: any, who: 'store' | 'driver' | 'rider', now = Date.now()): string {
+  if (isPlanPaused(sub, now)) {
+    return `Your ${who} is paused and receives no work. Resume to start again — this week's fee is charged when you resume.`;
+  }
+  if (isBlocked(sub)) return 'No more weekly fees will be charged.';
+  const periodEnd = shortDate(sub?.currentPeriodEnd);
+  return periodEnd
+    ? `You keep working until ${periodEnd}. No more weekly fees will be charged.`
+    : 'The week you paid for still runs out. No more weekly fees will be charged.';
+}
+
+/** [E12] The rail a resume returns to: the one billing was stopped on. A
+ *  legacy CARD subscription has no self-serve card enrollment, so it resumes
+ *  on the prepaid CASH path — the only rails the boundary accepts. */
+export function resumeBillingMethod(sub: any): 'CASH' | 'MOBILE_MONEY' {
+  return sub?.billingMethod === 'MOBILE_MONEY' ? 'MOBILE_MONEY' : 'CASH';
+}
+
 /** Whole weeks a parked wallet balance covers at the weekly fee. Floors — we
  *  never over-promise coverage. 0 when the fee is unknown or nothing's banked. */
 export function weeksCovered(balanceGyd?: number | null, weeklyGyd?: number | null): number {
