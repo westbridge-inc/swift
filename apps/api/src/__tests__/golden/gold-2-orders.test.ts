@@ -448,6 +448,9 @@ describe('GOLD-2 · CUST-02 — [G3-F2] a same-key replay is the same answer', (
         expect(order).not.toHaveProperty(internal);
       }
     }
+    // [DS244 F1] Field for field, not only the shape: the two-vendor message
+    // wording, every promise window and every per-order value.
+    expect(replay).toEqual(first);
   });
 });
 
