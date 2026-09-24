@@ -63,11 +63,19 @@ export const COUR_01: Journey<Ctx> = {
     const r = mover(ctx, rider);
     const C8 = ctx.roster.customers.C8!.session;
     rec.deny('another customer cannot read the job', await GET(`/courier/order/${main.id}`, ctx.roster.customers.C2!.session.token), [404]);
-    rec.deny('collect before reaching the pickup', await POST(`/courier/order/${main.id}/collect`, { outcome: 'paid', gps: PICK }, r.session.token), [409], ['NOT_AT_PICKUP']);
+    // The sender's fee may be collected from assignment onwards (M-28: collected before the parcel
+    // is carried); what is refused is the wrong rider, or a collection without GPS proof.
+    const other = onlineOf(ctx, 'rider').find((id) => id !== rider);
+    if (other) rec.deny('another rider cannot collect the sender’s fee', await POST(`/courier/order/${main.id}/collect`, { outcome: 'paid', gps: PICK }, mover(ctx, other).session.token), [404]);
+    rec.deny('collecting without GPS proof', await POST(`/courier/order/${main.id}/collect`, { outcome: 'paid' }, r.session.token), [400], ['VALIDATION_ERROR']);
     rec.expect('en route to pickup', await PUT(`/rider/orders/${main.id}/en-route-pickup`, {}, r.session.token), 200);
     rec.expect('arrived at pickup', await PUT(`/rider/orders/${main.id}/arrived-pickup`, {}, r.session.token), 200);
-    rec.expect('the sender pays the fee in cash (collect, GPS)', await POST(`/courier/order/${main.id}/collect`, { outcome: 'paid', gps: PICK }, r.session.token), 200);
-    rec.deny('collecting twice', await POST(`/courier/order/${main.id}/collect`, { outcome: 'paid', gps: PICK }, r.session.token), [409], ['ALREADY_COLLECTED']);
+    const paid = await POST(`/courier/order/${main.id}/collect`, { outcome: 'paid', gps: PICK }, r.session.token);
+    rec.expect('the sender pays the fee in cash (collect, GPS)', paid, 200, undefined, `paymentStatus=${paid.json?.data?.paymentStatus} collected=${paid.json?.data?.collected}`);
+    const again = await POST(`/courier/order/${main.id}/collect`, { outcome: 'paid', gps: PICK }, r.session.token);
+    rec.check('collecting twice answers the fact, never a second capture', again.ok && again.json?.data?.collected === true && again.json?.data?.paymentStatus === 'CAPTURED', `→ ${brief(again)} ${JSON.stringify(again.json?.data ?? null)}`);
+    const senderView = (await GET(`/courier/order/${main.id}`, C8.token)).json?.data;
+    rec.check('the sender sees the fee captured once and the job still in hand', senderView?.paymentStatus === 'CAPTURED' && senderView?.status === 'RIDER_ARRIVED_PICKUP', `status=${senderView?.status} paymentStatus=${senderView?.paymentStatus}`);
     rec.expect('parcel picked up', await PUT(`/rider/orders/${main.id}/picked-up`, {}, r.session.token), 200);
     rec.deny('the sender cannot cancel once the rider holds the parcel', await POST(`/courier/order/${main.id}/cancel`, {}, C8.token), [409], ['PARCEL_IN_CUSTODY']);
     rec.check('pickup photo custody proof (E16)', false, 'no route records a pickup photo: only POST /courier/order/:id/proof-photo at drop-off exists (E16 open)');

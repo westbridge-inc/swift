@@ -118,11 +118,15 @@ export const CUST_01: Journey<Ctx> = {
     rec.expect(`multi-vendor checkout (${delivery ? 'delivery' : 'pickup'})`, co, [200, 201]);
     const orders: any[] = co.json?.data?.orders ?? [];
     rec.check('one order per vendor', orders.length === 2, `orders=${orders.length}`);
-    const sumSub = orders.reduce((s, o) => s + Number(o.subtotalCustomer ?? o.subtotalBase ?? 0), 0);
-    rec.check('the quote subtotal equals the orders’ subtotals', sumSub === Number(q2?.subtotalCustomer), `quote=${q2?.subtotalCustomer} orders=${sumSub}`);
+    // The durable numbers: each order read back through GET /customer/orders/:id (the
+    // checkout confirmation is a summary whose field names differ from the order view).
+    const placedOrders: any[] = (await Promise.all(orders.map((o) => customerOrder(C4, o.id)))).filter(Boolean);
+    const num = (o: any, ...keys: string[]) => Number(pick(o, ...keys) ?? 0);
+    const sumSub = placedOrders.reduce((s, o) => s + num(o, 'subtotalCustomer', 'subtotal', 'subtotalBase'), 0);
+    rec.check('the quote subtotal equals the orders’ subtotals', placedOrders.length === orders.length && sumSub === Number(q2?.subtotalCustomer), `quote=${q2?.subtotalCustomer} orders=${sumSub}`);
     if (delivery) {
-      const sumFee = orders.reduce((s, o) => s + Number(o.deliveryFee ?? 0), 0);
-      const sumTotal = orders.reduce((s, o) => s + Number(o.totalAmount ?? 0), 0);
+      const sumFee = placedOrders.reduce((s, o) => s + num(o, 'deliveryFee'), 0);
+      const sumTotal = placedOrders.reduce((s, o) => s + num(o, 'totalAmount', 'total'), 0);
       rec.check('the multi-vendor quote total equals what checkout charges (E01)', sumTotal === Number(q2?.totalAmount),
         `quote total=${q2?.totalAmount} (fee ${q2?.deliveryFee}) vs orders total=${sumTotal} (fees ${sumFee})`);
     } else {
@@ -183,16 +187,20 @@ export const CUST_02: Journey<Ctx> = {
       const q2 = (await GET('/customer/cart', C5.session.token)).json?.data;
       rec.check('the re-read quote shows the new price', Number(q2?.subtotalCustomer) === newPrice, `before=${q1?.subtotalCustomer} after=${q2?.subtotalCustomer}`);
       const co = await req('POST', '/customer/checkout', { token: C5.session.token, body: { paymentMethod: 'CASH', fulfillmentSelections: { [OV1.vendorId!]: 'PICKUP' } } });
-      const placed = co.json?.data?.orders?.[0];
-      rec.check('checkout charges the current quote, never the stale one', ok2xx(co.status) && Number(placed?.subtotalCustomer ?? placed?.subtotalBase) === newPrice,
-        `→ ${brief(co)} order subtotal=${placed?.subtotalCustomer ?? placed?.subtotalBase} (stale quote ${q1?.subtotalCustomer})`);
+      const placedId = orderIdsOf(co)[0];
+      const placed = placedId ? await customerOrder(C5.session, placedId) : null;
+      const placedSub = Number(pick(placed, 'subtotalCustomer', 'subtotal', 'subtotalBase') ?? NaN);
+      rec.check('checkout charges the current quote, never the stale one', ok2xx(co.status) && placedSub === newPrice,
+        `→ ${brief(co)} order subtotal=${placedSub} (stale quote ${q1?.subtotalCustomer})`);
       await PUT(`/vendor/items/${drift.itemId}`, { basePrice: drift.price }, OV1.session.token);
       for (const id of orderIdsOf(co)) await POST(`/customer/orders/${id}/cancel`, { reason: 'journey cleanup' }, C5.session.token);
     }
 
     const stepUp = await PUT('/vendor/profile', { mmgPayUrl: 'https://pay.mmg.gy/vendor/test' }, R1.session.token);
-    rec.deny('a vendor cannot set an MMG pay link without a step-up', stepUp, [403], ['STEP_UP_REQUIRED']);
-    rec.skipCase('MMG checkout', 'a vendor pay link needs a step-up whose code only reaches the owner by SMS (POST /auth/step-up/verify checks the real code; DEV_OTP_BYPASS does not apply), and Phase A has no SMS provider — no store can hold a link on this target');
+    // Refused for one of two reasons, both closing the door on this target: pay links are not
+    // configured here (MMG_PAY_URL_ALLOWED_HOSTS unset → 503), or they are and a fresh SMS step-up is required.
+    rec.deny('a vendor cannot set an MMG pay link without a step-up (or at all where links are unconfigured)', stepUp, [403, 503], ['STEP_UP_REQUIRED', 'MMG_PAY_LINKS_NOT_CONFIGURED']);
+    rec.skipCase('MMG checkout', `a vendor pay link needs a step-up whose code only reaches the owner by SMS (POST /auth/step-up/verify checks the real code; DEV_OTP_BYPASS does not apply), and Phase A has no SMS provider${codeOf(stepUp) === 'MMG_PAY_LINKS_NOT_CONFIGURED' ? '; pay links are also unconfigured on this target (MMG_PAY_URL_ALLOWED_HOSTS unset)' : ''} — no store can hold a link on this target`);
     rec.skipCase('dispute hold', 'the MMG claim/disagreement hold needs an MMG order, which needs a vendor pay link (step-up by SMS)');
   },
 };

@@ -246,7 +246,9 @@ export const RIDE_04: Journey<Ctx> = {
     const done = await customerOrder(C1.session, g1!.orderId);
     rec.check('the customer sees DELIVERED and a captured cash payment', done?.status === 'DELIVERED' && done?.paymentStatus === 'CAPTURED', `status=${done?.status} payment=${done?.paymentStatus}`);
     const replay = await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng });
-    rec.check('a repeated handover changes nothing', replay.json?.replayed === true || [400, 409].includes(replay.status), `→ ${brief(replay)} replayed=${replay.json?.replayed}`);
+    const afterReplay = await customerOrder(C1.session, g1!.orderId);
+    rec.check('a repeated handover answers the same facts and changes nothing', (replay.ok || [400, 409].includes(replay.status)) && afterReplay?.status === 'DELIVERED' && afterReplay?.paymentStatus === 'CAPTURED' && afterReplay?.deliveredAt === done?.deliveredAt,
+      `→ ${brief(replay)} status=${afterReplay?.status} payment=${afterReplay?.paymentStatus} deliveredAt unchanged=${afterReplay?.deliveredAt === done?.deliveredAt}`);
     const earn = await GET('/rider/earnings/today', a.session.token);
     rec.check('the delivery fee is in the rider’s earnings', earn.ok && JSON.stringify(earn.json?.data ?? '').length > 2, `→ ${brief(earn)}`);
 

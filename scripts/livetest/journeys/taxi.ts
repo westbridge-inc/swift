@@ -238,15 +238,27 @@ export const TAXI_04: Journey<Ctx> = {
     const mine = await GET('/driver/claims', D.session.token);
     rec.check('the driver’s claim is on record', JSON.stringify(mine.json?.data ?? null).includes(ride!.id), `→ ${brief(mine)}`);
     rec.deny('a driver cannot read the admin claim queue', await GET('/admin/cash-rules/claims', D.session.token), [403]);
-    const queue = await GET('/admin/cash-rules/claims?status=PENDING_REVIEW', ctx.admin.token);
-    const row = (queue.json?.data ?? []).find((c: any) => c.orderId === ride!.id || c.id === claim?.id);
-    rec.check('the claim is in the operator queue', !!row || claim?.status === 'APPROVED', `queue → ${brief(queue)}; claim status=${claim?.status}`);
+    // A claim with complete evidence is AUTO_APPROVED at once; one with flags waits in PENDING_REVIEW.
+    const wanted = String(claim?.status ?? 'PENDING_REVIEW');
+    let queue = await GET(`/admin/cash-rules/claims?status=${encodeURIComponent(wanted)}`, ctx.admin.token);
+    let row = (queue.json?.data ?? []).find((c: any) => c.orderId === ride!.id || c.id === claim?.id);
+    if (!row) {
+      queue = await GET('/admin/cash-rules/claims', ctx.admin.token);
+      row = (queue.json?.data ?? []).find((c: any) => c.orderId === ride!.id || c.id === claim?.id);
+    }
+    const listed: any[] = queue.json?.data ?? [];
+    rec.check('the driver’s claim is in the operator ledger (auto-approved with complete evidence, else under review)', !!row && ['AUTO_APPROVED', 'PENDING_REVIEW', 'APPROVED'].includes(String(row.status)),
+      `claim ${claim?.id ?? '?'} status=${claim?.status ?? '?'}; GET /admin/cash-rules/claims${row ? '' : `?status=${wanted} then unfiltered`} → ${brief(queue)} lists ${listed.length} claim(s) (total ${queue.json?.meta?.total ?? '?'}): ${listed.map((c) => `${c.id}${c.driverId ? ' driver' : c.riderId ? ' rider' : ''}`).join(', ') || 'none'}${row ? '' : ' — the driver claim is absent'}`);
     if (row) {
-      const settle = await twoPerson(rec, ctx, 'approve the synthetic no-show claim', 'PUT', `/admin/cash-rules/claims/${row.id}/approve`, { reason: 'synthetic no-show verified by the journey runner' });
-      if (settle.done) {
-        const paid = await twoPerson(rec, ctx, 'mark the synthetic claim paid', 'PUT', `/admin/cash-rules/claims/${row.id}/paid`, { reference: `SYN-${ctx.runId}`.slice(0, 40), amount: row.amount });
+      let settled = ['AUTO_APPROVED', 'APPROVED'].includes(String(row.status));
+      if (!settled) {
+        const settle = await twoPerson(rec, ctx, 'approve the synthetic no-show claim', 'PUT', `/admin/cash-rules/claims/${row.id}/approve`, { reason: 'synthetic no-show verified by the journey runner' });
+        settled = settle.done;
+      }
+      if (settled) {
+        const paid = await twoPerson(rec, ctx, 'mark the synthetic claim paid', 'PUT', `/admin/cash-rules/claims/${row.id}/paid`, { reference: `SYN-T04-${ctx.runId}`.slice(0, 40), amount: row.amount });
         if (paid.done) {
-          const after = await GET(`/admin/cash-rules/claims?status=PAID`, ctx.admin.token);
+          const after = await GET('/admin/cash-rules/claims?status=PAID', ctx.admin.token);
           rec.check('the claim reads PAID', JSON.stringify(after.json?.data ?? []).includes(row.id), '');
         }
       }

@@ -11,7 +11,11 @@ import type { Ctx } from './context.js';
 
 export interface TwoPerson { first: Res; approvalId?: string; decide?: Res; final?: Res; done: boolean }
 
-export async function twoPerson(rec: Recorder, ctx: Ctx, what: string, method: string, path: string, body: unknown): Promise<TwoPerson> {
+/**
+ * `finalStatuses`: what the re-sent request may answer once approved (default success);
+ * a duplicate settlement, for instance, is expected to be refused at that point.
+ */
+export async function twoPerson(rec: Recorder, ctx: Ctx, what: string, method: string, path: string, body: unknown, finalStatuses: number[] = [200, 201]): Promise<TwoPerson> {
   const reason = `journey runner ${ctx.runId}: ${what}`.slice(0, 480);
   const call = (token: string, m: string, p: string, b: unknown, extra: Record<string, string> = {}) =>
     req(m, p, { token, body: b ?? {}, headers: { 'x-swift-reason': reason, ...extra } });
@@ -33,6 +37,6 @@ export async function twoPerson(rec: Recorder, ctx: Ctx, what: string, method: s
   const decide = await call(second.token, 'POST', `/admin/approvals/${approvalId}/decide`, { approve: true, note: 'synthetic journey approval' });
   rec.expect(`${what}: a second admin approves`, decide, 200, undefined, `status=${decide.json?.data?.status}`);
   const final = await call(ctx.admin.token, method, path, body, { 'x-swift-approval': approvalId });
-  rec.expect(`${what}: applied with the approval`, final, [200, 201]);
+  rec.expect(`${what}: ${finalStatuses.every((s) => s < 300) ? 'applied with the approval' : 'answered with the approval'}`, final, finalStatuses);
   return { first, approvalId, decide, final, done: final.ok };
 }

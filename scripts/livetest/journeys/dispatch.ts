@@ -5,7 +5,7 @@
 
 import type { Session } from '../client.js';
 import { goOnline, goOffline, ping } from '../provision.js';
-import { GET, POST, PUT, req, sleep, codeOf, orderIdsOf, customerOrder, idemKey, clearCart, ensureAddress, type Res } from './common.js';
+import { GET, POST, PUT, req, sleep, codeOf, orderIdsOf, customerOrder, idemKey, clearCart, ensureAddress, activeLegsOf, type Res } from './common.js';
 import type { Ctx } from './context.js';
 
 export type MoverId = string;
@@ -95,20 +95,27 @@ export async function storeReadies(ctx: Ctx, vendorKey: string, orderId: string)
   await PUT(`/vendor/orders/${orderId}/ready`, {}, t);
 }
 
-/** Finish (or release) whatever a rider holds, so the next journey starts from a free rider. */
-export async function freeRider(ctx: Ctx, id: MoverId, customerId?: string): Promise<void> {
+/**
+ * Finish (or release) whatever a rider holds, so the next journey starts from a free rider.
+ * Returns what was left in hand (empty when the rider is free), so a journey can record it.
+ */
+export async function freeRider(ctx: Ctx, id: MoverId, customerId?: string): Promise<string[]> {
   const m = mover(ctx, id);
-  const legs = await GET('/rider/orders/active-legs', m.session.token);
-  const list: any[] = Array.isArray(legs.json?.data) ? legs.json.data : legs.json?.data ? [legs.json.data] : [];
+  const list = activeLegsOf((await GET('/rider/orders/active-legs', m.session.token)).json);
+  const left: string[] = [];
   for (const o of list) {
-    const oid = o.orderId ?? o.id;
+    const oid = o.id ?? o.orderId;
     const status = o.status;
+    let last: Res;
     if (['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) {
-      await POST(`/rider/orders/${oid}/handback`, { reason: 'journey cleanup' }, m.session.token);
-      continue;
+      last = await POST(`/rider/orders/${oid}/handback`, { reason: 'journey runner cleanup: the job is handed back after the check' }, m.session.token);
+    } else {
+      await riderToDoor(m.session, oid);
+      last = await handoverPaid(m.session, oid, { lat: m.lat, lng: m.lng });
     }
-    await riderToDoor(m.session, oid);
-    await handoverPaid(m.session, oid, { lat: m.lat, lng: m.lng });
+    if (!last.ok) left.push(`${oid} (${status}) → ${last.status} ${codeOf(last)}`);
   }
-  void customerId; void customerOrder; void codeOf;
+  if (left.length) ctx.log(`    ${id} still holds: ${left.join('; ')}`);
+  void customerId; void customerOrder;
+  return left;
 }

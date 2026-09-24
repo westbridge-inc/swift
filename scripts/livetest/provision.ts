@@ -16,6 +16,7 @@ import { login, GET, POST, PUT, req, upload, codeOf, type Session, type Res } fr
 import { ensureSelfies, uniquePng, type Roster } from './roster.js';
 import { FICTIONAL_GY, TargetRefused } from './guard.js';
 import type { World, WorldItem } from './journeys/context.js';
+import { activeLegsOf } from './journeys/common.js';
 
 export interface Item { itemId: string; categoryId: string; price: number }
 export interface Provisioned { admin: Session; items: Record<string, Item>; live: string[] }
@@ -148,6 +149,18 @@ export async function ensureChecklist(admin: Session, owner: Session, role: stri
   return st?.roleVerified ? 'verified' : `missing=${JSON.stringify(st?.missing ?? [])}`;
 }
 
+/**
+ * The store behind GET /vendor/profile. The route answers the OWNER record
+ * ({ id: ownerId, userId, vendors: [...], myRole }), so a store's status,
+ * flags and verification live on its row in `vendors`: by id when given,
+ * else the first (an owner minted by the runner has exactly one).
+ */
+export function vendorOf(json: any, vendorId?: string): any {
+  const d = json?.data;
+  const rows: any[] = Array.isArray(d?.vendors) ? d.vendors : d?.vendor ? [d.vendor] : d?.status !== undefined ? [d] : [];
+  return (vendorId ? rows.find((r) => r?.id === vendorId) : undefined) ?? rows[0];
+}
+
 async function ensureCategory(owner: Session, name: string): Promise<string | undefined> {
   const cats = await GET('/vendor/categories', owner.token);
   const found = (cats.json?.data ?? []).find((c: any) => c.name === name);
@@ -211,9 +224,8 @@ async function heal(roster: Roster, admin: Session, log: (s: string) => void): P
   }
   for (const m of Object.values(roster.movers)) {
     const active = m.kind === 'rider' ? await GET('/rider/orders/active-legs', m.session.token) : await GET('/driver/rides/active', m.session.token);
-    const legs: any[] = Array.isArray(active.json?.data) ? active.json.data : active.json?.data ? [active.json.data] : [];
-    for (const o of legs) {
-      const id = o.orderId ?? o.id;
+    for (const o of activeLegsOf(active.json)) {
+      const id = o.id ?? o.orderId;
       if (!id) continue;
       await asAdmin(admin.token, 'reset a mover job left by an interrupted journey run', 'PUT', `/admin/orders/${id}/cancel`, { reason: 'journey runner reset of an interrupted run' });
       n += 1;
@@ -232,10 +244,10 @@ export async function provisionJourneyWorld(roster: Roster, admin: Session, log:
   for (const v of Object.values(roster.vendors)) {
     if (!v.vendorId) { world.notReady[v.id] = 'partner/become returned no vendor id'; continue; }
     const docs = await ensureChecklist(admin, v.session, v.vendorType, v.id, 'vendor', log);
-    let prof = (await GET('/vendor/profile', v.session.token)).json?.data;
+    let prof = vendorOf((await GET('/vendor/profile', v.session.token)).json, v.vendorId);
     if (prof?.status === 'SUSPENDED' && docs === 'verified') {
       await asAdmin(admin.token, 'reinstate a synthetic store suspended by an earlier journey run', 'PUT', `/admin/vendors/${v.vendorId}/approve`);
-      prof = (await GET('/vendor/profile', v.session.token)).json?.data;
+      prof = vendorOf((await GET('/vendor/profile', v.session.token)).json, v.vendorId);
     }
     const open = await ensureFlag(v.session.token, '/vendor/vendor/toggle-open', 'isCurrentlyOpen');
     const accepting = await ensureFlag(v.session.token, '/vendor/vendor/toggle-orders', 'acceptingOrders');

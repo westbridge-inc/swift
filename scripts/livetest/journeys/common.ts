@@ -140,3 +140,14 @@ export async function waitForNotification(s: Session, match: (n: any) => boolean
 }
 
 export const brief = (r: Res) => `${r.status}${codeOf(r) ? ` ${codeOf(r)}` : ''}`;
+
+/**
+ * The live jobs a mover holds, from GET /rider/orders/active-legs ({ legs, run }) or
+ * GET /driver/rides/active (one ride or null). Each has `id` (and `status`).
+ */
+export function activeLegsOf(json: any): any[] {
+  const d = json?.data;
+  if (Array.isArray(d)) return d;
+  if (Array.isArray(d?.legs)) return d.legs;
+  return d?.id ? [d] : [];
+}

@@ -5,7 +5,7 @@ import type { Journey, Recorder } from '../journey.js';
 import { GET, POST, PUT, DEL, req, sleep, brief, pick, waitFor, codeOf, placeOrder, orderIdsOf, customerOrder, waitForRelease, clearCart, idemKey, notificationsOf } from './common.js';
 import type { Ctx } from './context.js';
 import { registerFresh } from './auth.js';
-import { submitDoc, approveDoc, asAdmin } from '../provision.js';
+import { submitDoc, approveDoc, asAdmin, vendorOf } from '../provision.js';
 import { vendorAdvance } from './customer.js';
 import { mover, onlineOf, pollOffer, placeExpress, storeAccepts, freeRider } from './dispatch.js';
 import { BUSINESS_PHONE } from '../roster.js';
@@ -35,7 +35,7 @@ export const VEND_01: Journey<Ctx> = {
     const v = await freshVendor(rec, ctx, 'vend01', 'STORE');
     rec.require('a fresh store', !!v, '');
     const { s, vendorId } = v!;
-    const p0 = (await GET('/vendor/profile', s.token)).json?.data;
+    const p0 = vendorOf((await GET('/vendor/profile', s.token)).json, vendorId);
     rec.check('the new store waits for approval, closed', p0?.status === 'PENDING_APPROVAL' && p0?.isCurrentlyOpen === false, `status=${p0?.status} open=${p0?.isCurrentlyOpen}`);
     const cat = await POST('/vendor/categories', { name: 'Menu', sortOrder: 0 }, s.token);
     rec.deny('listing an item before verification', await POST('/vendor/items', { categoryId: cat.json?.data?.id ?? 'x', name: 'Too early', basePrice: 100 }, s.token), [403], ['VERIFICATION_REQUIRED']);
@@ -46,7 +46,10 @@ export const VEND_01: Journey<Ctx> = {
     const st = (await GET('/verification/status?role=STORE', s.token)).json?.data;
     const missing: string[] = st?.missing ?? [];
     rec.check('the STORE checklist is published to the owner', missing.length >= 3, `missing=${JSON.stringify(missing)}`);
-    rec.deny('a document type not on the checklist', (await submitDoc(s, 'STORE', 'gra_restaurant_licence', 'vend01-wrong')).res, [400], ['INVALID_DOC_TYPE']);
+    // A mover's document is never a store's; a category-gate document (a restaurant licence a shop
+    // needs to sell prepared food) IS submittable off-checklist by design (DOC-1 §18.3).
+    rec.deny('a document type that is neither on the STORE checklist nor a category-gate type', (await submitDoc(s, 'STORE', 'drivers_licence', 'vend01-wrong')).res, [400], ['INVALID_DOC_TYPE']);
+    rec.expect('a category-gate document (gra_restaurant_licence) is accepted off-checklist (DOC-1 §18.3)', (await submitDoc(s, 'STORE', 'gra_restaurant_licence', 'vend01-gate')).res, 201);
     const ids: Record<string, string> = {};
     for (const t of missing) {
       const d = await submitDoc(s, 'STORE', t, 'vend01');
@@ -65,7 +68,7 @@ export const VEND_01: Journey<Ctx> = {
       const a = await approveDoc(ctx.admin, ids[t]!, t);
       rec.expect(`the reviewer approves ${t}`, a, 200);
     }
-    const p1 = (await GET('/vendor/profile', s.token)).json?.data;
+    const p1 = vendorOf((await GET('/vendor/profile', s.token)).json, vendorId);
     rec.check('approving the last document activates the store', p1?.status === 'ACTIVE' && p1?.isVerified === true, `status=${p1?.status} isVerified=${p1?.isVerified}`);
     const sub = (await GET('/vendor/subscription', s.token)).json?.data;
     rec.check('activation starts the 14-day trial', sub?.status === 'TRIAL' && !!sub?.trialEndDate, `status=${sub?.status} trialEndDate=${sub?.trialEndDate}`);

@@ -5,7 +5,7 @@
 import type { Journey } from '../journey.js';
 import { GET, POST, PUT, req, sleep, brief, pick, waitFor, placeOrder, orderIdsOf, customerOrder, idemKey, codeOf } from './common.js';
 import type { Ctx } from './context.js';
-import { asAdmin, submitDoc, approveDoc } from '../provision.js';
+import { asAdmin, submitDoc, approveDoc, vendorOf } from '../provision.js';
 import { freshVendor } from './vendor.js';
 import { twoPerson } from './admin-util.js';
 import { mover, onlineOf, pollOffer, placeExpress, storeAccepts, freeRider, riderToDoor, handoverPaid, storeReadies } from './dispatch.js';
@@ -142,8 +142,8 @@ export const ADMIN_03: Journey<Ctx> = {
     if (settle.done) {
       const after = (await GET(`/admin/orders/${id}`, ctx.admin.token)).json?.data;
       rec.check('the refund reads settled (reconciliation)', !!after?.refundSettledAt, `refundSettledAt=${after?.refundSettledAt}`);
-      const again = await twoPerson(rec, ctx, 'settle the same obligation again', 'PUT', `/admin/orders/${id}/refund-settled`, { reference: ref, amount: Number(o?.refundOwedAmount) });
-      rec.check('a second settlement is refused', !again.final?.ok && ['ALREADY_SETTLED', 'REFUND_REF_ALREADY_USED', 'NO_REFUND_DUE'].includes(codeOf(again.final ?? again.first)), `→ ${brief(again.final ?? again.first)}`);
+      const again = await twoPerson(rec, ctx, 'settle the same obligation again', 'PUT', `/admin/orders/${id}/refund-settled`, { reference: ref, amount: Number(o?.refundOwedAmount) }, [400, 409]);
+      rec.check('a second settlement is refused', !!again.final && !again.final.ok && ['ALREADY_SETTLED', 'REFUND_REF_ALREADY_USED', 'NO_REFUND_DUE'].includes(codeOf(again.final)), `→ ${brief(again.final ?? again.first)}`);
     }
     rec.expect('finance revenue is readable', await GET('/admin/finance/revenue', ctx.admin.token), 200);
   },
@@ -162,7 +162,9 @@ export const ADMIN_04: Journey<Ctx> = {
     const sub = (await GET('/vendor/subscription', R1.session.token)).json?.data;
     const san = String(sub?.san ?? '');
     const now = new Date().toISOString();
-    const tx = `SYN-${ctx.runId}`.slice(0, 60);
+    // A reference of this journey's own: a provider transaction id that matches another channel's
+    // receipt (MONEY-03 records SYN-<run>) is refused as PROVIDER_ID_CONFLICT, by design.
+    const tx = `SYN-A04-${ctx.runId}`.slice(0, 60);
     const good = `transaction_id,account_number,amount,paid_at\n${tx},${san},1500,${now}\nTOTAL,1500\n`;
     const bad = `transaction_id,account_number,amount,paid_at\n${tx}-bad,${san},1500,${now}\nTOTAL,9999\n`;
     const before = Number(sub?.walletBalanceGyd ?? 0);
@@ -230,9 +232,15 @@ export const ADMIN_05: Journey<Ctx> = {
       const C6 = ctx.roster.customers.C6!;
       const blocked = await placeOrder(C6.session, R3.vendorId, item.itemId, R3.lat, R3.lng, { pickup: true });
       rec.deny('customers cannot order from a suspended store', blocked, [400], ['VENDOR_UNAVAILABLE', 'VENDOR_CLOSED']);
-      rec.deny('the suspended store cannot reopen itself', await req('PUT', '/vendor/vendor/toggle-open', { token: R3.session.token, body: {} }), [403, 409], ['VENDOR_SUSPENDED', 'VENDOR_NOT_ACTIVE']);
+      // A suspension leaves the doors flag as it was: closing is always allowed, OPENING needs an ACTIVE store.
+      let flip = await req('PUT', '/vendor/vendor/toggle-open', { token: R3.session.token, body: {} });
+      if (flip.ok && flip.json?.data?.isCurrentlyOpen === false) {
+        rec.step('a suspended store may still close its doors (closing is always allowed)', true, `→ ${brief(flip)} isCurrentlyOpen=false`);
+        flip = await req('PUT', '/vendor/vendor/toggle-open', { token: R3.session.token, body: {} });
+      }
+      rec.deny('the suspended store cannot reopen itself', flip, [403, 409], ['VENDOR_SUSPENDED', 'VENDOR_NOT_ACTIVE']);
       rec.expect('the operator reinstates the store', await asAdmin(ctx.admin.token, 'reinstate a synthetic store', 'PUT', `/admin/vendors/${R3.vendorId}/approve`), 200);
-      const p = (await GET('/vendor/profile', R3.session.token)).json?.data;
+      const p = vendorOf((await GET('/vendor/profile', R3.session.token)).json, R3.vendorId);
       rec.check('the store is ACTIVE again', p?.status === 'ACTIVE', `status=${p?.status}`);
       // restore open + accepting for the next run
       const t = R3.session.token;

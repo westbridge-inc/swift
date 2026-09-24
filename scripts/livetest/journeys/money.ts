@@ -93,7 +93,10 @@ export const MONEY_03: Journey<Ctx> = {
       const after = Number((await GET('/vendor/subscription', R1.session.token)).json?.data?.walletBalanceGyd ?? 0);
       rec.check('the receipt credits the store’s fee wallet once', after === before + 1000, `wallet ${before} → ${after}`);
       const dup = await twoPerson(rec, ctx, 'record the same synthetic receipt again', 'POST', '/admin/billing/agent-payments', receipt);
-      rec.check('the same receipt is not credited twice', !dup.done || !dup.final?.ok || dup.final?.json?.data?.duplicate === true, `→ ${dup.final ? brief(dup.final) : 'held'}`);
+      const afterDup = Number((await GET('/vendor/subscription', R1.session.token)).json?.data?.walletBalanceGyd ?? 0);
+      const dupData = dup.final?.json?.data;
+      rec.check('the same receipt is not credited twice (the wallet does not move; the answer names the duplicate)', afterDup === after && (!dup.done || dupData?.status === 'duplicate' || dupData?.duplicate === true || !!dupData?.duplicateOf),
+        `→ ${dup.final ? brief(dup.final) : 'held'} status=${dupData?.status ?? '-'} wallet ${after} → ${afterDup}`);
     }
     rec.skipAll(`the defining case — a weekly bill settled by a signed agent receipt — cannot run here: the bill is produced by the hourly billing job only after the 14-day trial${dark ? ', the agent-cash channel is dark (no webhook secret on this target)' : ''}, and a signed receipt needs the webhook secret, which the runner must never hold`);
     void pick; void codeOf;
