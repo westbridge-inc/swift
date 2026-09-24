@@ -286,7 +286,6 @@ const CENSUS: Case[] = [
   { k: 'billing_final_warning', d: { subscriptionId: 's1' }, to: null, why: 'GAP: suspension is imminent — the highest-value unrouted push' },
   { k: 'billing_suspended', d: { subscriptionId: 's1' }, to: null, why: 'GAP: they cannot earn until they pay' },
   { k: 'billing_suspended_nudge', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
-  { k: 'billing_reinstated', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
   { k: 'billing_reminder', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
   { k: 'billing_banked', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
   { k: 'billing_churned', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
@@ -369,6 +368,7 @@ const CENSUS: Case[] = [
   { k: 'ops_scheduler_never_booted', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'billing_dunning_ops_task', to: null, why: 'admins' },
   { k: 'billing_invariants', to: null, why: 'admins' },
+  { k: 'billing_manual_reconciliation', to: null, why: 'admins — a card instruction the processor never saw; reviewed in the admin console before any new attempt' },
   { k: 'billing_unknown_intents_sla', to: null, why: 'admins' },
   { k: 'reconcile_mismatch', to: null, why: 'admins' },
   { k: 'settlement_trailer_mismatch', to: null, why: 'admins' },
@@ -518,6 +518,8 @@ const NOT_PUSH_KINDS = new Set([
   'low', 'out',                                   // stock event level
   'rider',                                        // admin mover-shape annotation
   'stall',                                        // scheduler-health union
+  'advanced', 'banked', 'held', 'lost',           // MMG settlement outcome union (billing.service.ts)
+  'churned', 'dunned', 'nudged', 'preserved', 'skipped', // dunning/repair outcome unions (billing.service.ts)
 ]);
 
 function filesUnder(dir: string, ext: '.ts' | '.tsx'): string[] {

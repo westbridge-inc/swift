@@ -153,7 +153,36 @@ export async function windDownPartner(
     ? (await prisma.vendor.findMany({ where: { ownerId: owner.id }, select: { id: true } })).map((v) => v.id)
     : [];
 
-  const [items, vendors, staff, subs] = await Promise.all([
+  // Billing suspension takes the subscription row before it updates the
+  // partner's vendor/rider/driver access rows. Keep deletion in that same
+  // order: starting vendor and subscription updates together allowed the
+  // database to choose vendor-first here while billing held subscription-first,
+  // producing a real ABBA deadlock under overlap.
+  const [rider, driver] = await Promise.all([
+    prisma.rider.findUnique({ where: { userId }, select: { id: true } }),
+    prisma.driver.findUnique({ where: { userId }, select: { id: true } }),
+  ]);
+  const links: Prisma.SubscriptionWhereInput[] = [];
+  if (rider) links.push({ riderId: rider.id });
+  if (driver) links.push({ driverId: driver.id });
+  if (vendorIds.length) links.push({ vendorId: { in: vendorIds } });
+  const subs = links.length === 0
+    ? { count: 0 }
+    : await prisma.subscription.updateMany({
+        // CHURNED is already terminal. CANCELLED is included so an idempotent
+        // deletion re-sweep repairs rows written by the old wind-down, which
+        // stopped access but left auto-renew and the retry clock armed.
+        where: {
+          OR: links,
+          AND: [
+            { status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE', 'PAUSED', 'SUSPENDED', 'CANCELLED'] } },
+            { OR: [{ status: { not: 'CANCELLED' } }, { autoRenew: true }, { nextRetryAt: { not: null } }] },
+          ],
+        },
+        data: { status: 'CANCELLED', autoRenew: false, nextRetryAt: null },
+      });
+
+  const [items, vendors, staff] = await Promise.all([
     vendorIds.length
       ? prisma.item.updateMany({ where: { vendorId: { in: vendorIds }, isAvailable: true }, data: { isAvailable: false } })
       : Promise.resolve({ count: 0 }),
@@ -166,29 +195,6 @@ export async function windDownPartner(
     vendorIds.length
       ? prisma.vendorStaff.deleteMany({ where: { vendorId: { in: vendorIds } } })
       : Promise.resolve({ count: 0 }),
-    // A subscription left running keeps billing a person who has left.
-    //
-    // It is NOT keyed on the user: Subscription hangs off riderId, driverId or
-    // vendorId, one of which is set. A `where: { userId }` compiled to nothing
-    // and would have cancelled nothing while reporting success — the type
-    // checker caught it, which is the whole argument for resolving the ids
-    // explicitly rather than assuming a shape.
-    (async () => {
-      const [rider, driver] = await Promise.all([
-        prisma.rider.findUnique({ where: { userId }, select: { id: true } }),
-        prisma.driver.findUnique({ where: { userId }, select: { id: true } }),
-      ]);
-      const links: Prisma.SubscriptionWhereInput[] = [];
-      if (rider) links.push({ riderId: rider.id });
-      if (driver) links.push({ driverId: driver.id });
-      if (vendorIds.length) links.push({ vendorId: { in: vendorIds } });
-      if (links.length === 0) return { count: 0 };
-      return prisma.subscription.updateMany({
-        // CHURNED and CANCELLED are already terminal; SUSPENDED still dunning.
-        where: { OR: links, status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE', 'PAUSED', 'SUSPENDED'] } },
-        data: { status: 'CANCELLED' },
-      });
-    })(),
   ]);
 
   return {

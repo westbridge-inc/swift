@@ -2721,6 +2721,12 @@ model BillingEvent {
   /// delivered. Null = the evidence exists but the payer has not been told;
   /// the notice job re-attempts it, and the charge gate does not count it.
   deliveredAt    DateTime?
+  /// Billing notice delivery lease/checkpoint. These are used only for
+  /// noticeVersion=1 nudge, churn and MMG mismatch events; financial facts
+  /// remain immutable while the delivery state can advance after commit.
+  noticeLeaseUntil DateTime?
+  noticeLeaseToken String?
+  noticeSmsSentAt DateTime?
   createdAt      DateTime         @default(now())
 
   @@index([subscriptionId])
