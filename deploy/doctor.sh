@@ -42,17 +42,66 @@ echo "Swift doctor — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "──────────────────────────────────────────────"
 
 # ── 1. The API, from the outside ────────────────────────────────────────────
-HEALTH=$(curl -fsS -m 8 "$API_URL/health" 2>/dev/null || true)
+# Per-dependency detail is gated behind HEALTH_DETAIL_TOKEN (x-health-detail).
+# The token is a secret: read it from a file and pipe it into `curl -H @-`
+# (stdin), so it appears in no argv and no output line — it is never printed.
+DETAIL_FILE=""
+DETAIL_READER=""
+if [ -n "${HEALTH_DETAIL_TOKEN_FILE:-}" ]; then
+  if [ -r "${HEALTH_DETAIL_TOKEN_FILE}" ]; then
+    DETAIL_FILE="${HEALTH_DETAIL_TOKEN_FILE}"
+  elif sudo -n cat "${HEALTH_DETAIL_TOKEN_FILE}" >/dev/null 2>&1; then
+    DETAIL_FILE="${HEALTH_DETAIL_TOKEN_FILE}"; DETAIL_READER=sudo
+  fi
+fi
+if [ -z "$DETAIL_FILE" ]; then
+  if [ -r "/run/swift-secrets/HEALTH_DETAIL_TOKEN" ]; then
+    DETAIL_FILE="/run/swift-secrets/HEALTH_DETAIL_TOKEN"
+  elif sudo -n cat "/run/swift-secrets/HEALTH_DETAIL_TOKEN" >/dev/null 2>&1; then
+    DETAIL_FILE="/run/swift-secrets/HEALTH_DETAIL_TOKEN"; DETAIL_READER=sudo
+  fi
+fi
+health_curl() {
+  if [ -z "$DETAIL_FILE" ]; then
+    curl -fsS -m 8 "$@"
+  elif [ -n "$DETAIL_READER" ]; then
+    { printf 'x-health-detail: '; sudo -n cat "$DETAIL_FILE"; printf '\r\n'; } | curl -fsS -m 8 -H @- "$@"
+  else
+    { printf 'x-health-detail: '; cat "$DETAIL_FILE"; printf '\r\n'; } | curl -fsS -m 8 -H @- "$@"
+  fi
+}
+HEALTH=$(health_curl "$API_URL/health" 2>/dev/null || true)
 if [ -z "$HEALTH" ]; then
   bad "API unreachable at $API_URL — nothing below it can be healthy for users"
 else
   case "$HEALTH" in
-    *'"database":"ok"'*) ok "API + database answering" ;;
-    *) bad "API up but database check not ok: $HEALTH" ;;
-  esac
-  case "$HEALTH" in
-    *'"redis":"ok"'*) ok "redis answering" ;;
-    *) bad "redis check not ok" ;;
+    # The detailed checks are visible (token accepted, or development mode).
+    *'"database":"ok"'*|*'"database":"error"'*)
+      case "$HEALTH" in
+        *'"database":"ok"'*) ok "API + database answering" ;;
+        *) bad "database check not ok: $HEALTH" ;;
+      esac
+      case "$HEALTH" in
+        *'"redis":"ok"'*) ok "redis answering" ;;
+        *) bad "redis check not ok: $HEALTH" ;;
+      esac
+      ;;
+    # No token, or a rejected one: the API hides the per-check detail and the
+    # only thing a 200 tells us is the aggregate status. That is not a FAIL.
+    # Distinguish the two: with a token file present the header WAS sent, so
+    # a hidden body means the token was rejected or rotated — the operator
+    # must hear that instead of "no token".
+    *'"status":"healthy"'*)
+      if [ -n "$DETAIL_FILE" ]; then
+        warn "health detail hidden despite sending x-health-detail — token rejected or rotated? per-check states not shown"
+      else
+        warn "health detail hidden (no readable HEALTH_DETAIL_TOKEN) — per-check states not shown"
+      fi
+      ok "aggregate /health says healthy (HTTP 200)"
+      ;;
+    *)
+      bad "API answered without detailed checks or a healthy status: $HEALTH"
+      ;;
   esac
 fi
 
