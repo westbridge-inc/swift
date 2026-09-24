@@ -57,12 +57,18 @@ function secret(): string | null {
  */
 export function captureRawBody(request: FastifyRequest, payload: Readable): Promise<Readable> {
   return new Promise<Readable>((resolve, reject) => {
+    // How many body bytes this capture accepted before deciding — an
+    // observability seam (a test's onResponse hook reads it) that proves the
+    // decision was taken within one chunk of the cap, never after the whole
+    // upload. `rawBody` itself is only ever set on success.
+    const seen = (n: number) => { (request as FastifyRequest & { rawBodyBytesSeen?: number }).rawBodyBytesSeen = n; };
     const refuse = () => reject(new errorCodes.FST_ERR_CTP_BODY_TOO_LARGE());
 
     const declared = request.headers['content-length'];
     if (typeof declared === 'string' && declared.length > 0) {
       const declaredBytes = Number(declared);
       if (Number.isFinite(declaredBytes) && declaredBytes > AGENT_CASH_MAX_RAW_BODY_BYTES) {
+        seen(0);
         refuse(); // before a single body byte is read
         return;
       }
@@ -82,6 +88,7 @@ export function captureRawBody(request: FastifyRequest, payload: Readable): Prom
         detach();
         chunks.length = 0; // let go of the partial buffer before refusing
         payload.resume(); // keep it flowing with nobody attached: the rest is dropped on arrival
+        seen(size);
         refuse();
         return;
       }
@@ -90,6 +97,7 @@ export function captureRawBody(request: FastifyRequest, payload: Readable): Prom
     const onEnd = () => {
       detach();
       const raw = Buffer.concat(chunks);
+      seen(raw.length);
       (request as FastifyRequest & { rawBody?: Buffer }).rawBody = raw;
       const stream = Readable.from(raw) as Readable & { receivedEncodedLength?: number };
       stream.receivedEncodedLength = raw.length;

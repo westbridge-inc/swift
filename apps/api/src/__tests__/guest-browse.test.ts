@@ -79,7 +79,7 @@ describe('guest browsing (no account)', () => {
     // An ACTIVE, verified store with zero available items must not surface in
     // discovery — tapping it dead-ends on an empty menu. Once it has one
     // available item, it appears.
-    const rnd = 592_700_000_000 + Math.floor(Math.random() * 900_000_000);
+    const rnd = 592_700_000_000 + Math.floor(Math.random() * 280_000_000) /* stays below +593: send-otp refuses non-Guyana numbers (AVAIL-1) */;
     const user = await app.prisma.user.create({ data: { phone: `+${rnd}`, firstName: 'Empty', lastName: 'Store', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true } });
     const owner = await app.prisma.vendorOwner.create({ data: { userId: user.id } });
     const v = await app.prisma.vendor.create({ data: { ownerId: owner.id, name: `Empty Store ${nanoid(6)}`, slug: `empty-${nanoid(8).toLowerCase()}`, vendorType: 'STORE', phone: `+${rnd + 1}`, addressLine1: '1 Empty', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true } });

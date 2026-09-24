@@ -21,6 +21,9 @@ const SECRET = 'boot-regression-secret-0123456789';
 let app: FastifyInstance;
 /** Route config as fastify registered it — the bodyLimit assertion reads this. */
 const routeBodyLimits = new Map<string, number | undefined>();
+/** What the raw-body capture saw and kept on the LAST webhook request, read
+ *  server-side in onResponse: the proof that nothing past the cap was retained. */
+let lastCapture: { url: string; seen: number | undefined; retained: number | undefined } | undefined;
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -36,6 +39,10 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   app.addHook('onRoute', (route) => {
     routeBodyLimits.set(`${String(route.method)} ${route.url}`, route.bodyLimit);
+  });
+  app.addHook('onResponse', async (request) => {
+    const r = request as typeof request & { rawBodyBytesSeen?: number; rawBody?: Buffer };
+    lastCapture = { url: request.url, seen: r.rawBodyBytesSeen, retained: r.rawBody?.length };
   });
   await app.register(agentCashRoutes, { prefix: '/api/v1/billing/mmg' });
   await app.ready(); // the boot itself is the assertion
@@ -100,6 +107,10 @@ describe('server composition boot (FST_ERR_CTP_ALREADY_PRESENT regression)', () 
     });
     expect(res.statusCode).toBe(413);
     expect(res.json().error.code).toBe('FST_ERR_CTP_BODY_TOO_LARGE');
+    // Server side: the capture decided within one chunk of the cap and kept nothing.
+    expect(lastCapture?.url).toBe('/api/v1/billing/mmg/agent-notification');
+    expect(lastCapture?.retained).toBeUndefined();
+    expect(lastCapture?.seen).toBeLessThanOrEqual(AGENT_CASH_MAX_RAW_BODY_BYTES + 64 * 1024);
   });
 
   it('both MMG webhook routes are registered with the 128 KB cap as their route bodyLimit', () => {
@@ -171,10 +182,18 @@ describe('server composition boot (FST_ERR_CTP_ALREADY_PRESENT regression)', () 
 
     expect(outcome.status).toBe(413);
     expect(outcome.code).toBe('FST_ERR_CTP_BODY_TOO_LARGE');
-    // The answer came mid-upload: the client had written a fraction of what it
-    // was willing to send. (Client and server share this event loop, so the
-    // server's refusal — two or three 64 KB chunks in — lands within a couple of
-    // loop turns; the old code needed the whole 8 MB first.)
-    expect(outcome.bytesWritten).toBeLessThan(BUDGET / 4);
+    // Client side: the answer came MID-upload — before the client had written
+    // everything it was willing to send. How far it got first depends on the
+    // runner (kernel buffers, loop scheduling; a loaded CI box let it write
+    // ~2.7 MB), so the bound is the whole budget, not a fraction of it: the old
+    // code buffered every byte and could only answer once all 8 MB had been
+    // sent and request.end() called, so it fails this bound every time.
+    expect(outcome.bytesWritten).toBeLessThan(BUDGET);
+    // Server side, timing-free: the capture decided within one socket read of
+    // the 128 KB cap and retained nothing — the property that actually matters.
+    expect(lastCapture?.url).toBe('/api/v1/billing/mmg/agent-notification');
+    expect(lastCapture?.retained).toBeUndefined();
+    expect(lastCapture?.seen).toBeGreaterThan(AGENT_CASH_MAX_RAW_BODY_BYTES);
+    expect(lastCapture?.seen).toBeLessThanOrEqual(AGENT_CASH_MAX_RAW_BODY_BYTES + 64 * 1024);
   });
 });
