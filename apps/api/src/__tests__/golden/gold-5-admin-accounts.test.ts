@@ -34,7 +34,7 @@ import { recordDispatchQueue } from '../helpers/dispatch-queue';
 //     permanent; an ADMIN cannot ban another admin
 //   · a suspended STORE refuses new orders and cannot work existing ones;
 //     approval cannot reinstate it without its document checklist
-//   · G5-F4 [it.fails] an ADMIN can permanently ban the SUPER_ADMIN
+//   · G5-F4 an ADMIN cannot ban the SUPER_ADMIN (fixed by #1293)
 //
 // Dispatch runs through the suite's acknowledged route→worker double
 // (helpers/dispatch-queue.ts). Fixture range: +5920357nnn (this file only;
@@ -468,15 +468,17 @@ describe('GOLD-5 · ADMIN-05 — suspend, ban and reinstate', () => {
 });
 
 // ---------------------------------------------------------------------------
-// G5-F4 — an ADMIN can permanently ban the SUPER_ADMIN
+// G5-F4 — an ADMIN cannot ban the SUPER_ADMIN (fixed by #1293)
 // ---------------------------------------------------------------------------
 //
-// admin.routes.ts `PUT /users/:id/ban` guards "banning other admins unless
-// SUPER_ADMIN" with `user.roles.includes('ADMIN')`. A SUPER_ADMIN's roles
-// (the seeded founder's are ['SUPER_ADMIN', 'CUSTOMER']) do not contain
-// 'ADMIN', so an ordinary ADMIN passes the guard, bans the platform owner,
-// deletes every one of their sessions — and there is no unban route. The
-// fixtures are made in beforeAll, so this can only fail on the ban itself.
+// Before #1293, admin.routes.ts `PUT /users/:id/ban` guarded "banning other
+// admins unless SUPER_ADMIN" with `user.roles.includes('ADMIN')`. A
+// SUPER_ADMIN's roles (the seeded founder's are ['SUPER_ADMIN', 'CUSTOMER'])
+// do not contain 'ADMIN', so an ordinary ADMIN passed the guard, banned the
+// platform owner and deleted every one of their sessions. #1293 moved the one
+// authority rule into transitionUserStatusAuthority (never an equal-or-higher
+// role, judged from the database), so this now holds. The fixtures are made in
+// beforeAll, so the assertion is the refusal itself.
 describe('GOLD-5 · ADMIN-05 — G5-F4', () => {
   let ops: Actor;
   let founder: Actor;
@@ -487,7 +489,7 @@ describe('GOLD-5 · ADMIN-05 — G5-F4', () => {
     expect((await userRow(founder.userId)).status).toBe('ACTIVE');
   });
 
-  it.fails('[G5-F4] an ADMIN cannot ban the SUPER_ADMIN, and the owner keeps their sessions', async () => {
+  it('[G5-F4] an ADMIN cannot ban the SUPER_ADMIN, and the owner keeps their sessions', async () => {
     const ban = await admin({ method: 'PUT', url: `/api/v1/admin/users/${founder.userId}/ban`, token: ops.token, payload: {} });
     expect(ban.statusCode).toBe(403);
     expect((await userRow(founder.userId)).status).toBe('ACTIVE');
