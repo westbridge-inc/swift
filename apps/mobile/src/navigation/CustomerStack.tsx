@@ -123,7 +123,8 @@ function HomeTabs() {
     >
       <Tab.Screen name="Home" component={HomeScreen} />
       {/* Server depth must positively confirm Market before its route mounts.
-          React Query retains a known-visible verdict during refetch errors. */}
+          React Query retains a known-visible verdict during refetch errors,
+          and the last complete verdict seeds a cold start from device memory. */}
       {marketVisible ? <Tab.Screen name="Market" component={MarketScreen} /> : null}
       <Tab.Screen name="Cart" component={CartScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />

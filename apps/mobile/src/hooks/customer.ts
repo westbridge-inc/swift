@@ -4,7 +4,8 @@ import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
 import { recordCheckoutOutcome, stableBodyHash, type CheckoutPrincipal } from '../lib/checkoutAttempt';
 import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
-import { homePlaceholderData, homeQueryKey, isHomeFeed, retainedHomeData } from '../lib/homeReliability';
+import { homePlaceholderData, homeQueryKey, isHomeFeed, marketDepthVerdict, retainedHomeData } from '../lib/homeReliability';
+import { rememberMarketDepth, rememberedMarketDepth, type MarketDepthBody } from '../lib/marketDepthMemory';
 import { isAxiosError } from 'axios';
 import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput, type CartQuoteChoices } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
@@ -195,13 +196,26 @@ export type MarketItem = {
  * we are avoiding is showing an empty market, not hiding a full one.
  */
 export function useMarketDepth() {
-  return useQuery({
+  return useQuery<MarketDepthBody>({
     queryKey: ['market', 'depth'],
     queryFn: async () => {
       const res = await marketApi.depth();
-      return (res?.data?.data ?? null) as { visible: boolean; items: number; vendors: number } | null;
+      const data = res?.data?.data ?? null;
+      // An incomplete 200 is a failed read, not data: throwing keeps React
+      // Query on the previous verdict instead of replacing it with 'unknown'.
+      if (marketDepthVerdict(data) === 'unknown') {
+        throw new Error('Market depth response is incomplete');
+      }
+      rememberMarketDepth(data);
+      return data as MarketDepthBody;
     },
     staleTime: 5 * 60_000,
+    // [E29] A cold start seeds the query with the last complete verdict, so a
+    // failing first read shows what the device last knew. The seed is stale
+    // on purpose (0): the server is always asked again, and a later complete
+    // 'hidden' verdict replaces the memory and hides the tab.
+    initialData: () => rememberedMarketDepth() ?? undefined,
+    initialDataUpdatedAt: 0,
   });
 }
 
