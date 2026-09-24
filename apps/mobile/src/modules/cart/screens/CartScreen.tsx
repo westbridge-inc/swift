@@ -1,9 +1,10 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import { Alert, AppState, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
+import { createHomeRefreshGate, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { customerApi } from '../../../services/api';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -51,6 +52,7 @@ import type { MmgDirectPaymentAction } from '@swift/types';
 import { CartPaymentOptions } from '../CartPaymentOptions';
 import { checkoutTipAmount } from '../checkout-tip';
 import {
+  cartStaleCheckoutCode,
   cartPricingChoices,
   checkoutErrorMessage,
   deliveryFeeRows,
@@ -239,6 +241,35 @@ export function CartScreen() {
     [confirmPickup, quoteBasis, appliedPromo],
   );
   const pickupQuote = useCart<any>(latitude ?? undefined, longitude ?? undefined, retryPricing, confirmPickup);
+  // [E07] A line that went dark while the phone sat in the background stays
+  // "available" until the quote is re-fetched. Re-quote when the Cart tab
+  // regains focus AND when the app returns to the foreground with the Cart
+  // already open — backgrounding changes no navigation state, so focus alone
+  // never fires there (DS216 D1). This is Home's attention seam, with its
+  // gate: focus and foreground arriving together refresh once, and a quote
+  // already in flight is never cancelled and restarted (DS216 D6). The latest
+  // refetch/isFetching are held in refs (the useEvent pattern onOrder uses
+  // below) so the subscription never re-arms on an ordinary render.
+  const cartRefetchLatest = useRef(cart.refetch);
+  const cartFetchingLatest = useRef(cart.isFetching);
+  useEffect(() => {
+    cartRefetchLatest.current = cart.refetch;
+    cartFetchingLatest.current = cart.isFetching;
+  });
+  const cartAttentionGate = useMemo(
+    () => createHomeRefreshGate(() => { void cartRefetchLatest.current({ cancelRefetch: false }); }, 750),
+    [],
+  );
+  useFocusEffect(
+    React.useCallback(() => {
+      if (!isAuthenticated) return undefined;
+      return subscribeToHomeAttention(
+        AppState.currentState,
+        (callback) => AppState.addEventListener('change', callback),
+        () => cartAttentionGate(Date.now(), cartFetchingLatest.current),
+      );
+    }, [isAuthenticated, cartAttentionGate]),
+  );
   useEffect(() => {
     const next = { storeIds: quoteStoreIds(c?.items), bookingsOnly: isBookingsOnly(c?.items) };
     setQuoteBasis((prev) =>
@@ -396,6 +427,12 @@ export function CartScreen() {
           if (code.startsWith('MMG_')) {
             setPaySelection(selectCartPaymentMethod('CASH', paymentCapabilities));
           }
+          // [E07] A refusal because the cart went stale — an item was 86'd or
+          // its stock ran out after the last quote. Re-quote now so the
+          // unavailable line marks itself immediately; the order button stays
+          // blocked until it is removed (that guard reads the quote's own
+          // `unavailableItemIds`).
+          if (cartStaleCheckoutCode(err)) void cart.refetch();
         },
       },
     );
@@ -504,7 +541,11 @@ export function CartScreen() {
 
       {cart.isLoading ? (
         <LoadingBlock />
-      ) : cart.isError ? (
+      ) : cart.isError && cart.data === undefined ? (
+        // [E07 · DS222 R1] Only a cart that never loaded is an error screen. A
+        // failed background re-quote (back from the background while offline)
+        // keeps the cart it already has — lines, Remove pills and all — and
+        // the next focus or foreground tries again. (null data = an empty cart.)
         <ErrorState onRetry={() => cart.refetch()} />
       ) : !c || items.length === 0 ? (
         <EmptyState
@@ -723,46 +764,62 @@ export function CartScreen() {
                       </T>
                     ) : null}
                     {!it.isAvailable ? (
-                      <T variant="caption" tone="error" style={{ marginTop: 2 }}>
-                        No longer available — remove to continue
-                      </T>
-                    ) : null}
-                    <View
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        marginTop: space.sm,
-                      }}
-                    >
-                      {/* A quantity stepper is one of the four things allowed
-                          to wear maroon. */}
-                      <AddMorph
-                        qty={it.quantity}
-                        busy={updateItem.isPending}
-                        onAdd={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                        onInc={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                        onDec={() => it.quantity > 1 && updateItem.mutate({ id: it.id, quantity: it.quantity - 1 })}
-                      />
-                      {/* Removing a line is an ordinary action, not an error —
-                          it stops being red. hitSlop holds the 44pt target. */}
-                      <Pressable
-                        onPress={() => removeItem.mutate(it.id)}
-                        hitSlop={14}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Remove ${it.name}`}
+                      <>
+                        <T variant="caption" tone="error" style={{ marginTop: 2 }}>
+                          No longer available — remove to continue
+                        </T>
+                        {/* [E07] One tap to recover: the SAME remove-line
+                            mutation as the trash glyph, labelled so the path
+                            out is not hidden behind an icon. A successful
+                            removal clears the refusal that named this line —
+                            the message described a cart that no longer exists. */}
+                        <PillButton
+                          label="Remove"
+                          variant="outline"
+                          size="sm"
+                          style={{ alignSelf: 'flex-start', marginTop: space.sm }}
+                          loading={removeItem.isPending}
+                          onPress={() => removeItem.mutate(it.id, { onSuccess: () => placeOrder.reset() })}
+                        />
+                      </>
+                    ) : (
+                      <View
+                        style={{
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          marginTop: space.sm,
+                        }}
                       >
-                        {({ pressed }) => (
-                          <View style={{ opacity: pressed ? 0.6 : 1 }}>
-                            <Feather
-                              name="trash-2"
-                              size={18}
-                              color={pressed ? color.text.primary : color.text.muted}
-                            />
-                          </View>
-                        )}
-                      </Pressable>
-                    </View>
+                        {/* A quantity stepper is one of the four things allowed
+                            to wear maroon. */}
+                        <AddMorph
+                          qty={it.quantity}
+                          busy={updateItem.isPending}
+                          onAdd={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
+                          onInc={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
+                          onDec={() => it.quantity > 1 && updateItem.mutate({ id: it.id, quantity: it.quantity - 1 })}
+                        />
+                        {/* Removing a line is an ordinary action, not an error —
+                            it stops being red. hitSlop holds the 44pt target. */}
+                        <Pressable
+                          onPress={() => removeItem.mutate(it.id)}
+                          hitSlop={14}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Remove ${it.name}`}
+                        >
+                          {({ pressed }) => (
+                            <View style={{ opacity: pressed ? 0.6 : 1 }}>
+                              <Feather
+                                name="trash-2"
+                                size={18}
+                                color={pressed ? color.text.primary : color.text.muted}
+                              />
+                            </View>
+                          )}
+                        </Pressable>
+                      </View>
+                    )}
                   </View>
                 </View>
               </View>

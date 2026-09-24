@@ -447,6 +447,23 @@ describe('E12 — the stopped subscription and the billing engine', () => {
     expect(await app.prisma.subscriptionPayment.count({ where: { subscriptionId: plan.subId } })).toBe(1);
   });
 
+  it('one real charge failure is counted once when a stale run reaches the resume branch (DS219 F2-1R1)', async () => {
+    // The resume charge and the hourly cycle race on the same week; both read
+    // failedAttempts 0. The winner fails (an empty wallet) and lands the
+    // failure; the loser collides on the SAME attempt key and finds the
+    // recorded failure. Resuming it at the fresh level would count the one
+    // real failure twice (a premature final warning, an early suspension).
+    const due = new Date(Date.now() - 60_000);
+    const plan = await makeRiderSub({ due, prepaid: 0 });
+    const stale = await subWithRelations(plan.subId); // the loser's snapshot, taken before the winner ran
+    await expect(billing.billSubscription(await subWithRelations(plan.subId))).resolves.toBe('failed');
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: plan.subId } })).failedAttempts).toBe(1);
+
+    await expect(billing.billSubscription(stale)).resolves.toBe('skipped');
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: plan.subId } })).failedAttempts).toBe(1);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: plan.subId, idempotencyKey: { startsWith: 'failed:' } } })).toBe(1);
+  });
+
   it('a resumed plan whose charge has not landed can be stopped and paused AGAIN — no event-key collision (DS207 F1)', async () => {
     const now = new Date();
     const plan = await makeRiderSub({ due: new Date(now.getTime() - 2 * DAY), autoRenew: false });

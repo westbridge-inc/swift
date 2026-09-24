@@ -455,7 +455,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
           </div>
         )}
         {confirmReject && (
-          <div role="dialog" aria-label="Confirm order rejection" className="w-full rounded-xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-4">
+          <div role="dialog" aria-label={order.data?.fulfillment === 'APPOINTMENT' ? 'Confirm booking decline' : 'Confirm order rejection'} className="w-full rounded-xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-4">
             <p className="text-sm font-semibold text-[var(--swift-red)]">{order.data?.fulfillment === 'APPOINTMENT' ? 'Decline this booking?' : 'Reject this order?'}</p>
             <p className="mt-1 text-sm text-[var(--swift-muted)]">The customer is told right away — pick what happened. This can’t be undone.</p>
             <div className="mt-3 flex flex-wrap gap-2">

@@ -78,9 +78,28 @@ export async function riderToDoor(r: Session, orderId: string): Promise<Res> {
   return last!;
 }
 
-/** Close a cash delivery at the door as paid. */
-export async function handoverPaid(r: Session, orderId: string, gps: { lat: number; lng: number }): Promise<Res> {
-  return POST(`/rider/orders/${orderId}/handover`, { outcome: 'paid', gps }, r.token);
+/**
+ * [MKT-F057] The door PIN the customer holds while the goods are on their way:
+ * GET /customer/orders/:id carries it from PICKED_UP to ARRIVED, and no
+ * rider-facing payload does. The journeys ask the customer, as a rider would.
+ */
+export async function doorPin(c: Session, orderId: string): Promise<string | null> {
+  const pin = (await customerOrder(c, orderId))?.ridePin;
+  return typeof pin === 'string' && pin.length > 0 ? pin : null;
+}
+
+/** The PIN from whichever roster customer owns the order (cleanup does not know who placed it). */
+export async function doorPinFromRoster(ctx: Ctx, orderId: string): Promise<string | null> {
+  for (const c of Object.values(ctx.roster.customers)) {
+    const pin = await doorPin(c.session, orderId);
+    if (pin) return pin;
+  }
+  return null;
+}
+
+/** Close a cash delivery at the door as paid, giving the customer's door PIN when the order has one. */
+export async function handoverPaid(r: Session, orderId: string, gps: { lat: number; lng: number }, ridePin?: string | null): Promise<Res> {
+  return POST(`/rider/orders/${orderId}/handover`, { outcome: 'paid', gps, ...(ridePin ? { ridePin } : {}) }, r.token);
 }
 
 /** A released delivery order accepted by its store (dispatch starts ON_ACCEPT). */
@@ -111,7 +130,7 @@ export async function freeRider(ctx: Ctx, id: MoverId, customerId?: string): Pro
       last = await POST(`/rider/orders/${oid}/handback`, { reason: 'journey runner cleanup: the job is handed back after the check' }, m.session.token);
     } else {
       await riderToDoor(m.session, oid);
-      last = await handoverPaid(m.session, oid, { lat: m.lat, lng: m.lng });
+      last = await handoverPaid(m.session, oid, { lat: m.lat, lng: m.lng }, await doorPinFromRoster(ctx, oid));
     }
     if (!last.ok) left.push(`${oid} (${status}) → ${last.status} ${codeOf(last)}`);
   }
