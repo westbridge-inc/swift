@@ -58,6 +58,7 @@ import {
   TERMINAL_ORDER_STATUSES,
   RIDER_PRE_CUSTODY_STATUSES,
   RIDER_IN_CUSTODY_STATUSES,
+  RIDER_PICKUP_FROM,
 } from '../order/order-status';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -173,7 +174,7 @@ async function getOwnedOrder(app: FastifyInstance, orderId: string, riderId: str
 const STATUS_TRANSITIONS: Record<string, { from: string[]; to: string; note: string }> = {
   'en-route-pickup': { from: ['RIDER_ASSIGNED'], to: 'RIDER_EN_ROUTE_PICKUP', note: 'Rider started the run to pickup' },
   'arrived-pickup':  { from: ['RIDER_EN_ROUTE_PICKUP'], to: 'RIDER_ARRIVED_PICKUP', note: 'Rider reported arriving at pickup' },
-  'picked-up':       { from: ['RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP'], to: 'PICKED_UP', note: 'Rider confirmed collecting the order' },
+  'picked-up':       { from: [...RIDER_PICKUP_FROM], to: 'PICKED_UP', note: 'Rider confirmed collecting the order' },
   'en-route-delivery': { from: ['PICKED_UP'], to: 'EN_ROUTE_DELIVERY', note: 'Rider started the run to the customer' },
   'arrived':         { from: ['EN_ROUTE_DELIVERY'], to: 'ARRIVED', note: 'Rider reported arriving at the customer' },
 };
@@ -1415,14 +1416,15 @@ export async function riderRoutes(app: FastifyInstance) {
         );
       }
 
-      // E16: a courier's PICKED_UP asserts physical custody, which must carry
-      // photo + time + location proof. The generic leg keeps serving the food
-      // path byte-identical; the courier pickup-proof flow (courier.routes) is
-      // the only courier entry into PICKED_UP, and PICKED_UP is the sole
-      // predecessor of in-transit and a direct predecessor of courier DELIVERED.
+      // [E16] A courier's PICKED_UP asserts physical custody of someone else's
+      // parcel, so it carries photo + time + location proof. The bare tap is
+      // refused here, before any transaction opens; the courier pickup-proof
+      // step (courier.routes) is the only courier door into PICKED_UP, and the
+      // canonical seam refuses any caller whose row has no bound pickup proof.
+      // Food riders are untouched: the guard is courier-only.
       if (slug === 'picked-up' && order.orderType === 'COURIER') {
         throw new AppError(409, 'PICKUP_PROOF_REQUIRED',
-          'Courier pickup requires a custody photo — complete the pickup-proof flow first.');
+          'Photograph the parcel to confirm pickup — this job needs a pickup photo and your location.');
       }
 
       // EVIDENCE, NOT A GATE [L3 advisory · L4 shadow-first].

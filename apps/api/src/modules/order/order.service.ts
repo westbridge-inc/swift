@@ -288,6 +288,20 @@ function isCancellationTerminalization(sourceStatus: OrderStatus, target: OrderS
     || (target === 'REFUNDED' && !ORDER_TRANSITIONS.REFUNDED.includes(sourceStatus));
 }
 
+/** [E16] A courier pickup's custody proof is bound on the row: the photo is
+ *  exactly the URL the server issued, it was issued to the rider who holds the
+ *  job, and the rider's location at pickup is recorded. */
+function courierPickupProofBound(order: Pick<Order,
+  'riderId' | 'courierPickupProofIssuedUrl' | 'courierPickupProofIssuedRiderId'
+  | 'courierPickupProofPhotoUrl' | 'courierPickupProofLat' | 'courierPickupProofLng'>): boolean {
+  return order.courierPickupProofPhotoUrl !== null
+    && order.courierPickupProofPhotoUrl === order.courierPickupProofIssuedUrl
+    && order.riderId !== null
+    && order.courierPickupProofIssuedRiderId === order.riderId
+    && order.courierPickupProofLat !== null
+    && order.courierPickupProofLng !== null;
+}
+
 // ---------------------------------------------------------------------------
 // LIFECYCLE_V2 hold (spec Part A). While holdExpiresAt is in the FUTURE the
 // order is hidden from the vendor and undispatched — the customer's free-cancel
@@ -1931,6 +1945,17 @@ export class OrderService {
       throw new AppError(409, 'PAYMENT_NOT_CAPTURED', order.orderType === 'COURIER'
         ? 'Record the cash outcome first — a cash courier job completes when the fee is recorded as collected, refused or unpaid; a proof photo never implies money.'
         : 'Record the fare outcome first — a cash ride completes when the fare is recorded as paid, refused or unpaid.');
+    }
+    // [E16] The custody authority's own guard, on the row as it will commit: a
+    // courier parcel enters PICKED_UP only with its pickup proof bound (the
+    // photo the server issued to the rider who holds the job, and that rider's
+    // location). Evaluated after the caller's hook, which is where the courier
+    // pickup-proof step binds it — so the check runs on the locked row, and
+    // every other caller (the generic rider leg, an ops tool, anything added
+    // later) rolls back with nothing written.
+    if (input.target === 'PICKED_UP' && order.orderType === 'COURIER' && !courierPickupProofBound(order)) {
+      throw new AppError(409, 'PICKUP_PROOF_REQUIRED',
+        'Photograph the parcel to confirm pickup — this job needs a pickup photo and your location.');
     }
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }

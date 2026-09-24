@@ -125,12 +125,11 @@ export function useCourierPickupProof() {
       const form = new FormData();
       form.append('file', { uri, name: 'pickup-proof.jpg', type: 'image/jpeg' } as unknown as Blob);
       const up = await courierApi.uploadPickupProof(orderId, form, initial);
-      let current = requireAuthSessionForPrincipal(owner);
+      requireAuthSessionForPrincipal(owner);
       const url = (up as any)?.data?.data?.url as string;
       if (!url) throw new Error('upload failed');
       const fix = await evidenceFix(owner);
-      current = fix.current;
-      const result = await unwrap(courierApi.pickupProof(orderId, { proofPhotoUrl: url, gps: fix.gps }, current));
+      const result = await unwrap(courierApi.pickupProof(orderId, { proofPhotoUrl: url, gps: fix.gps }, fix.current));
       requireAuthSessionForPrincipal(owner);
       void qc.invalidateQueries({ queryKey: ['courier', 'orders'] });
       void qc.invalidateQueries({ queryKey: ['mover'] });

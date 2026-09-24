@@ -19,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   becomePartner: vi.fn(),
   uploadCourierProof: vi.fn(),
   confirmCourierProof: vi.fn(),
+  uploadCourierPickupProof: vi.fn(),
+  confirmCourierPickupProof: vi.fn(),
   primeNotifications: vi.fn(),
   track: vi.fn(),
 }));
@@ -93,6 +95,8 @@ vi.mock('../services/api', () => ({
   courierApi: {
     uploadProof: mocks.uploadCourierProof,
     proof: mocks.confirmCourierProof,
+    uploadPickupProof: mocks.uploadCourierPickupProof,
+    pickupProof: mocks.confirmCourierPickupProof,
   },
 }));
 
@@ -144,7 +148,7 @@ import {
   useUploadVehiclePhoto,
 } from './mover';
 import { useBecomePartner, useUploadDocument } from './verification';
-import { useCourierProof } from './courier';
+import { useCourierPickupProof, useCourierProof } from './courier';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -363,6 +367,68 @@ describe('multi-step authenticated mutation ownership', () => {
     })).rejects.toBeInstanceOf(mocks.BoundaryError);
     expect(mocks.uploadCourierProof).not.toHaveBeenCalled();
     expect(mocks.confirmCourierProof).not.toHaveBeenCalled();
+  });
+
+  // [E16] The pickup proof is the same two-step, and the GPS fix always travels.
+  it('confirms A courier pickup with the uploaded photo on the evidence fix', async () => {
+    mocks.uploadCourierPickupProof.mockResolvedValue({ data: { data: { url: '/uploads/courier-proof/order-a/pickup/a.jpg' } } });
+    mocks.lastKnownPosition.mockResolvedValue({ coords: { latitude: 6.81, longitude: -58.155 } });
+    mocks.confirmCourierPickupProof.mockResolvedValue({ data: { data: { status: 'PICKED_UP' } } });
+    const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
+
+    await expect(mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' })).resolves.toEqual({ status: 'PICKED_UP' });
+    expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    expect(mocks.confirmCourierPickupProof).toHaveBeenCalledWith(
+      'order-a',
+      { proofPhotoUrl: '/uploads/courier-proof/order-a/pickup/a.jpg', gps: { lat: 6.81, lng: -58.155 } },
+      accountA,
+    );
+  });
+
+  it('does not confirm A courier pickup as B after the upload', async () => {
+    const upload = deferred<any>();
+    mocks.uploadCourierPickupProof.mockReturnValue(upload.promise);
+    const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
+
+    const result = mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' });
+    expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    mocks.current = { ...accountB };
+    upload.resolve({ data: { data: { url: '/uploads/courier-proof/order-a/pickup/a.jpg' } } });
+
+    await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
+    expect(mocks.confirmCourierPickupProof).not.toHaveBeenCalled();
+  });
+
+  it('does not confirm A courier pickup as B while the location fix is pending', async () => {
+    mocks.uploadCourierPickupProof.mockResolvedValue({ data: { data: { url: '/uploads/courier-proof/order-a/pickup/a.jpg' } } });
+    const location = deferred<any>();
+    mocks.lastKnownPosition.mockReturnValue(location.promise);
+    const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
+
+    const result = mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' });
+    await vi.waitFor(() => expect(mocks.lastKnownPosition).toHaveBeenCalled());
+    mocks.current = { ...accountB };
+    location.resolve({ coords: { latitude: 6.81, longitude: -58.155 } });
+
+    await expect(result).rejects.toBeInstanceOf(mocks.BoundaryError);
+    expect(mocks.confirmCourierPickupProof).not.toHaveBeenCalled();
+  });
+
+  it('rejects a delayed A pickup-camera result before uploading as B', async () => {
+    const mutation = useCourierPickupProof() as unknown as CapturedMutation<{
+      orderId: string;
+      uri: string;
+      authSession: AuthSessionSnapshot;
+    }>;
+    mocks.current = { ...accountB };
+
+    await expect(mutation.mutationFn({
+      orderId: 'order-a',
+      uri: 'file://account-a-pickup.jpg',
+      authSession: accountA,
+    })).rejects.toBeInstanceOf(mocks.BoundaryError);
+    expect(mocks.uploadCourierPickupProof).not.toHaveBeenCalled();
+    expect(mocks.confirmCourierPickupProof).not.toHaveBeenCalled();
   });
 
   it('cannot apply a late A partner result to B', async () => {
