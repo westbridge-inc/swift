@@ -290,7 +290,7 @@ the failed state and off-site backup, and use a reviewed migration/restore
 procedure. Never point restore.sh at the live database. No command in this
 runbook authorizes a production cutover.
 
-## 7. Pilot journeys on staging (private instance)
+## 8. Pilot journeys on staging (private instance)
 
 The pilot journey suite (scripts/livetest, `--suite=journeys`) drives all 42
 launch-proof journeys over real HTTP: signups, orders, dispatch, taxi, courier,
@@ -343,7 +343,7 @@ journey's staging gate with the run id. Re-runs reuse the roster (accounts in
 the +59204 block) and create new orders, bookings and rides; accounts a journey
 must create afresh (signup, deletion, onboarding) come from +592049xxxx.
 
-## 8. Production go-live: the TLS pin on api.swiftgy.com
+## 9. Production go-live: the TLS pin on api.swiftgy.com
 
 The iOS and Android apps pin `api.swiftgy.com` (and its subdomains) to three CA roots: ISRG Root X1 and X2
 (Let's Encrypt) and GTS Root R1 (Google Trust Services). See `NSPinnedDomains` in `apps/mobile/app.config.ts`
