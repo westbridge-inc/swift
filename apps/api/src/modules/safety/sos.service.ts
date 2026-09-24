@@ -250,10 +250,15 @@ export class SosService {
 
       if (merged.count === 1) {
         try {
+          // [PRIV2-S2] The repeat press's own words go to the war room with
+          // it — ops rooms only, joined by ADMIN / SUPER_ADMIN sockets and
+          // never by the other person on the ride. The ops page body stays
+          // free of them (see sos-escalation.ts: it is pushed to phones and
+          // repeated in the on-call SMS).
           this.io.to(warRoomsFor(live.tenantId)).emit('sos:retrigger', {
             sosAlertId: live.id, actorUserId: live.actorUserId, orderId: live.orderId,
             at: now, source, lat: input.lat ?? null, lng: input.lng ?? null,
-            retriggerCount: merged.seq,
+            retriggerCount: merged.seq, note: input.note ?? null,
           });
         } catch { /* the war-room nudge is best-effort; the row is the record */ }
 
