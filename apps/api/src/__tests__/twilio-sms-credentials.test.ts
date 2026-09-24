@@ -109,14 +109,32 @@ describe('Twilio outbound SMS credentials and error boundary', () => {
     ['TWILIO_API_KEY_SID', 'not-an-api-key-sid'],
     ['TWILIO_API_KEY_SID', `SK${'g'.repeat(32)}`],
     ['TWILIO_FROM', 'not-a-phone-number'],
-    ['TWILIO_MESSAGING_SERVICE_SID', 'not-a-messaging-service-sid'],
-    ['TWILIO_MESSAGING_SERVICE_SID', `MG${'g'.repeat(32)}`],
   ])('rejects malformed %s before any provider call', (name, value) => {
     configure();
     vi.stubEnv(name, value);
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     expect(() => getChannels()).toThrow(name);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // As the SOLE sender, so the only possible refusal is the format itself (with
+  // TWILIO_FROM also set, a wrongly accepted SID would still be refused as
+  // both-set and this test would not notice). The owner-specified format is
+  // exactly ^MG[0-9a-f]{32}$: lowercase hex, 32 digits.
+  it.each([
+    'not-a-messaging-service-sid',
+    `MG${'g'.repeat(32)}`,
+    `MG${'C'.repeat(32)}`,
+    `MG${'c'.repeat(31)}`,
+    `MG${'c'.repeat(33)}`,
+  ])('rejects malformed TWILIO_MESSAGING_SERVICE_SID %s as the sole sender before any provider call', (value) => {
+    configure();
+    vi.stubEnv('TWILIO_FROM', '');
+    vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', value);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    expect(() => getChannels()).toThrow(/^TWILIO_MESSAGING_SERVICE_SID is missing or malformed/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -136,6 +154,25 @@ describe('Twilio outbound SMS credentials and error boundary', () => {
     vi.stubGlobal('fetch', fetchMock);
     expect(() => getChannels()).toThrow(/TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('sender refusals name the variables and never echo a configured Twilio value', () => {
+    const malformedSid = `MG${'g'.repeat(32)}`;
+    const configuredValues = [accountSid, keySid, 'test-key-secret', 'legacy-master-token', '+15550000000', messagingServiceSid, malformedSid];
+    const refusals: Array<[string, () => void]> = [
+      ['both senders', () => vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', messagingServiceSid)],
+      ['neither sender', () => vi.stubEnv('TWILIO_FROM', '')],
+      ['malformed SID', () => { vi.stubEnv('TWILIO_FROM', ''); vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', malformedSid); }],
+    ];
+    for (const [label, arrange] of refusals) {
+      configure();
+      arrange();
+      let message = '';
+      try { getChannels(); } catch (error) { message = (error as Error).message; }
+      expect(message, label).toMatch(/^TWILIO_/);
+      for (const value of configuredValues) expect(message, `${label} echoes ${value}`).not.toContain(value);
+      vi.unstubAllEnvs();
+    }
   });
 
   it.each(paddedTwilioIdentities)('rejects literal $position $whitespace in $name before a provider call', ({ name, value }) => {
@@ -193,5 +230,54 @@ describe('Twilio outbound SMS credentials and error boundary', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// The sender rule lives in the adapter's constructor, which every runtime mode
+// reaches at app build (AuthService is constructed by the auth and socket
+// plugins). Staging runs NODE_ENV=loadtest with NOTIFICATION_PROVIDER=twilio,
+// where the production boot guard does not run — so the adapter itself must
+// refuse and accept exactly as production does.
+describe.each(['loadtest', 'production'] as const)('the exactly-one sender rule under NODE_ENV=%s', (mode) => {
+  function configureMode() {
+    configure();
+    vi.stubEnv('NODE_ENV', mode);
+    // DevPush refuses production on its own; that guard is not under test here.
+    vi.stubEnv('PUSH_PROVIDER', 'expo');
+  }
+
+  it('constructs with the Messaging Service SID alone and sends MessagingServiceSid, not From', async () => {
+    configureMode();
+    vi.stubEnv('TWILIO_FROM', '');
+    vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', messagingServiceSid);
+    const messageSid = `SM${'0'.repeat(32)}`;
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ sid: messageSid }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await getChannels().sms.sendSms('+5927000000', 'test body')).toEqual({ ref: messageSid });
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }];
+    expect(init.body).toBe(
+      new URLSearchParams({ To: '+5927000000', MessagingServiceSid: messagingServiceSid, Body: 'test body' }).toString(),
+    );
+  });
+
+  it('refuses both senders, neither sender and a malformed SID before any provider call', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    configureMode();
+    vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', messagingServiceSid);
+    expect(() => getChannels()).toThrow(/TWILIO_FROM and TWILIO_MESSAGING_SERVICE_SID/);
+
+    configureMode();
+    vi.stubEnv('TWILIO_FROM', '');
+    expect(() => getChannels()).toThrow(/TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID/);
+
+    configureMode();
+    vi.stubEnv('TWILIO_FROM', '');
+    vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', 'not-a-messaging-service-sid');
+    expect(() => getChannels()).toThrow(/TWILIO_MESSAGING_SERVICE_SID/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

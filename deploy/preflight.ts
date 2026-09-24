@@ -88,7 +88,12 @@ function readEnvFile(file: string): Record<string, string> {
     let value = literalTwilioFields.has(key)
       ? sourceLine.slice(sourceLine.indexOf('=') + 1)
       : line.slice(eq + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    // A lone quote is an unterminated quote (the value continues on the next
+    // line), not an empty quoted value. Collapsing it to '' let a broken
+    // TWILIO_MESSAGING_SERVICE_SID="… line read as "unset", so a file the host
+    // would not start on passed preflight on TWILIO_FROM alone. Kept as-is, the
+    // guard refuses it as malformed.
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
       value = value.slice(1, -1);
     } else {
       const hash = value.indexOf(' #');
@@ -185,7 +190,10 @@ for (let i = 0; i < 40; i += 1) {
   // Stubs only ADD values, so a refusal caused by two variables both being
   // set (the exactly-one Twilio sender rule) cannot be "seen past". Stop on
   // the first repeat instead of echoing the same problem 40 times.
-  if (problems.includes(message)) break;
+  if (problems.includes(message)) {
+    console.log('    (stubbing changed nothing — this refusal is about values that are SET, not missing — so the walkthrough stops here)');
+    break;
+  }
   problems.push(message);
   const targets = varsIn(message);
   if (targets.length === 0) {
@@ -200,7 +208,11 @@ if (problems.length === 0) console.log('  none — the guard is satisfied by thi
 console.log('');
 
 // ── THE INVENTORY ──────────────────────────────────────────────────────────
-const WATCHED = Object.keys(STUBS).sort();
+// TWILIO_MESSAGING_SERVICE_SID is read by the guard but is deliberately NOT a
+// stub: exactly one sender may be set, so stubbing it beside TWILIO_FROM would
+// only manufacture the both-set refusal. It is inventoried so the operator
+// can see which sender the file carries.
+const WATCHED = [...Object.keys(STUBS), 'TWILIO_MESSAGING_SERVICE_SID'].sort();
 console.log('VARIABLES THE GUARD READS');
 console.log('─'.repeat(72));
 for (const v of WATCHED) {

@@ -238,12 +238,50 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
   });
 
   it('refuses a malformed TWILIO_MESSAGING_SERVICE_SID at production boot', () => {
-    for (const value of ['not-a-messaging-service-sid', `MG${'g'.repeat(32)}`]) {
+    // The owner-specified format is exactly ^MG[0-9a-f]{32}$: lowercase hex, 32 digits.
+    for (const value of ['not-a-messaging-service-sid', `MG${'g'.repeat(32)}`, `MG${'C'.repeat(32)}`, `MG${'c'.repeat(31)}`, `MG${'c'.repeat(33)}`]) {
       expect(
         () => assertSafeBootConfig({ ...good, TWILIO_FROM: undefined, TWILIO_MESSAGING_SERVICE_SID: value }),
         value,
       ).toThrow(/TWILIO_MESSAGING_SERVICE_SID/);
     }
+  });
+
+  it('the sender refusals name the variables and never echo a configured Twilio value', () => {
+    const malformedSid = `MG${'g'.repeat(32)}`;
+    const cases: Array<[string, Record<string, string | undefined>]> = [
+      ['both senders', { ...good, TWILIO_MESSAGING_SERVICE_SID: messagingServiceSid }],
+      ['neither sender', { ...good, TWILIO_FROM: undefined }],
+      ['malformed SID', { ...good, TWILIO_FROM: undefined, TWILIO_MESSAGING_SERVICE_SID: malformedSid }],
+    ];
+    const configuredValues = [good['TWILIO_ACCOUNT_SID'], good['TWILIO_API_KEY_SID'], good['TWILIO_API_KEY_SECRET'], good['TWILIO_FROM'], messagingServiceSid, malformedSid] as string[];
+    for (const [label, env] of cases) {
+      let message = '';
+      try { assertSafeBootConfig(env); } catch (error) { message = (error as Error).message; }
+      expect(message, label).toMatch(/^FATAL: TWILIO_/);
+      for (const value of configuredValues) expect(message, `${label} echoes ${value}`).not.toContain(value);
+    }
+  });
+
+  it('the value-free preflight refuses both senders once, lists the SID by name, and never prints its value', () => {
+    const result = runPreflight({ ...good, TWILIO_MESSAGING_SERVICE_SID: messagingServiceSid });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain('REFUSED');
+    expect(result.stdout).toContain('TWILIO_FROM and TWILIO_MESSAGING_SERVICE_SID are both set');
+    // A stub can only ADD a value, so the walkthrough cannot see past a
+    // both-set refusal: it prints the problem once and says so, never 40 times.
+    expect(result.stdout.match(/✗ FATAL: TWILIO_FROM and TWILIO_MESSAGING_SERVICE_SID/g)).toHaveLength(1);
+    expect(result.stdout).toContain('the walkthrough stops here');
+    expect(result.stdout).toContain('PRESENT  TWILIO_MESSAGING_SERVICE_SID');
+    expect(result.stdout).not.toContain(messagingServiceSid);
+  });
+
+  it('the value-free preflight refuses neither sender and still walks on to the next problem', () => {
+    const result = runPreflight({ ...good, TWILIO_FROM: undefined, PUSH_PROVIDER: undefined });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain('TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID is required');
+    expect(result.stdout).toContain('✗ FATAL: PUSH_PROVIDER is dev');
+    expect(result.stdout).toContain('MISSING  TWILIO_MESSAGING_SERVICE_SID');
   });
 
   it.each(paddedTwilioIdentities.filter(({ whitespace }) => whitespace === '" "' || whitespace === '"\\t"'))(
