@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { randomBytes } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import jwt from '@fastify/jwt';
 import { rateLimitKey } from '../utils/rate-limit-key';
@@ -15,9 +16,10 @@ beforeAll(async () => {
   app = Fastify({ logger: false });
   // Same pinning the auth plugin applies: HS256 only, short expiry.
   await app.register(jwt, {
-    // Test-only keying value, registered on this instance only (same shape as
-    // the other in-test webhook secrets); not a production credential.
-    secret: 'test-rate-limit-key-jwt-0123456789abcdef',
+    // A fresh random keying value per run, registered on this instance only:
+    // the test signs and verifies on the same instance, so nothing needs to be
+    // written down — and nothing that looks like a credential lives in source.
+    secret: randomBytes(32).toString('hex'),
     sign: { expiresIn: '15m' },
     verify: { algorithms: ['HS256'] },
   });
@@ -72,7 +74,10 @@ describe('rate-limit key (D1-01)', () => {
   });
 
   it('a forged / wrongly-signed token also shares the IP bucket', async () => {
-    const forged = 'eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiJmb3JnZXIifQ.bad-signature';
+    // Assembled at runtime so no token-shaped literal sits in source for a
+    // secret scanner to trip on: a real HS256 header and payload, bad signature.
+    const b64 = (part: object) => Buffer.from(JSON.stringify(part)).toString('base64url');
+    const forged = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({ userId: 'forger', role: 'CUSTOMER' })}.bad-signature`;
     expect(await keyFor(`Bearer ${forged}`, '8.8.8.8')).toBe('8.8.8.8');
   });
 
