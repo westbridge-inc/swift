@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { purgeAuditLogs } from '../lib/audit-immutability';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -153,6 +154,8 @@ afterAll(async () => {
     // order_status_logs is append-only: deleting the parent orders cascades
     // their logs at the DB level (the suite's sanctioned teardown).
     await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
+    // audit_logs is append-only too: the refused-claim records go through the sanctioned purge.
+    await purgeAuditLogs(app.prisma, { entityId: { in: createdOrderIds } }, 'test-cleanup:taxi-arrival-gate').catch(() => 0);
     await app.prisma.driver.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
@@ -180,6 +183,12 @@ describe('[E19] the driver-arrival gate refuses a claim the location stream cann
     expect(order.driverArrivedAt).toBeNull();
     const logs = await app.prisma.orderStatusLog.findMany({ where: { orderId: ride.id, status: 'DRIVER_ARRIVED' } });
     expect(logs).toHaveLength(0);
+    // [DS223 F2] Support can read what the gate saw at the door.
+    const audit = await app.prisma.auditLog.findMany({ where: { entity: 'Order', entityId: ride.id, action: 'TAXI_ARRIVAL_REFUSED' } });
+    expect(audit).toHaveLength(1);
+    expect(audit[0]!.userId).toBe(driver.userId);
+    expect(audit[0]!.changes).toMatchObject({ verdict: 'far' });
+    expect(typeof (audit[0]!.changes as { distanceM?: unknown }).distanceM).toBe('number');
   });
 
   it('a fix that is too old is refused as stale, not credited', async () => {

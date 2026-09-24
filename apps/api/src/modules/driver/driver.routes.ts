@@ -1111,6 +1111,21 @@ export async function driverRoutes(app: FastifyInstance) {
       arrivedAt,
     );
     if (!gate.allowed) {
+      // [E19 · DS223 F2] A refused claim leaves a durable record of what the
+      // gate saw, so support can answer "the app would not let me mark
+      // arrived" from facts, not memory. Best-effort: the refusal stands even
+      // if the record cannot be written.
+      await app.prisma.auditLog.create({
+        data: {
+          userId: request.user.userId,
+          action: 'TAXI_ARRIVAL_REFUSED',
+          entity: 'Order',
+          entityId: id,
+          changes: { verdict: gate.verdict, distanceM: gate.distanceM, fixAgeMs: gate.fixAgeMs },
+          ipAddress: request.ip,
+          userAgent: request.headers['user-agent'] ?? null,
+        },
+      }).catch((err: unknown) => request.log.warn({ err, orderId: id }, 'could not record a refused arrival claim'));
       throw new AppError(409, 'ARRIVAL_NOT_VERIFIED', ARRIVAL_GATE_COPY[gate.verdict], {
         verdict: gate.verdict,
         distanceM: gate.distanceM,
