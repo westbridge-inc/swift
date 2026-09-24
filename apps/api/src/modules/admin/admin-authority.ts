@@ -137,7 +137,8 @@ const E = {
   // refund actually moves; the reference and the amount are the only proof
   // that a refund happened, and they belong in the trail as a diff.
   // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
-  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt'] },
+  // [ORDER-SPINE S1-6] …and a decision's outcome and the claim generation it produced.
+  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt', 'mmgClaimResolution', 'mmgClaimRevision'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
@@ -186,6 +187,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
+  'PUT /users/:id/unban': c('C3', 'user.ban', E.user),
 
   // ── Vendors ─────────────────────────────────────────────────────────────
   'GET /vendors': c('C0', 'vendor.read'),
@@ -203,6 +205,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /drivers/:id': c('C1', 'mover.read'),
   'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify', E.driver),
   'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass', E.driver),
+  // [High #9 · DS109] Approving a pending vehicle assignment grants this driver the
+  // vehicle subject's documents — a person's access to live work, so C3 (reason owed).
+  'POST /drivers/:id/vehicle-assignment/approve': c('C3', 'driver.assignment.approve', E.driver),
 
   // ── Orders and live ops ─────────────────────────────────────────────────
   'GET /orders': c('C1', 'order.read'),
@@ -215,6 +220,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /orders/:id/food-age-hold/release': c('C2', 'order.hold.release'),
   'GET /orders/:id/handover-secret': c('C1', 'order.handover.read'),
   'POST /orders/:id/handover-secret/rotate': c('C2', 'order.handover.rotate'),
+  'POST /orders/:id/handover-secret/reset-delivery-pin': c('C2', 'order.handover.rotate'),
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
@@ -378,6 +384,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // authorises is still gated on its own class when the requester re-issues it.
   'GET /approvals': c('C0', 'approvals.read'),
   'POST /approvals/:id/decide': c('C3', 'approvals.decide', E.approval),
+  // [DS110-14] Executing a decision is not itself a decision: the approval
+  // already carries the two-person authorisation, and the replayed request
+  // passes through its own C4/C5 gate again. C2 — no new reason, no new
+  // approval — so "apply" can never need a second approval of its own.
+  'POST /approvals/:id/apply': c('C2', 'approvals.apply', E.approval),
 
   // ── Support and audit ───────────────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),

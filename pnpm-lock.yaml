@@ -517,6 +517,9 @@ importers:
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.14
+      babel-preset-expo:
+        specifier: ~56.0.15
+        version: 56.0.15(@babel/core@7.29.7)(@babel/runtime@7.29.2)(expo@56.0.12)(react-refresh@0.14.2)
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -529,6 +532,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@swift/types':
+        specifier: workspace:*
+        version: link:../../packages/types
       '@tanstack/react-query':
         specifier: ^5.66.0
         version: 5.91.2(react@19.2.4)

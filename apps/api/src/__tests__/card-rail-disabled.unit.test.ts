@@ -43,7 +43,8 @@ describe('card rail OFF at the billing boundary', () => {
     const billing = new BillingService(
       {
         prepaidBalance: { findUnique: vi.fn(async () => null) },
-        subscriptionPayment: { findUnique },
+        // R13: attemptCharge reads the MMG approval-hold gate first; null = no hold.
+        subscriptionPayment: { findUnique, findFirst: vi.fn(async () => null) },
       } as unknown as PrismaClient,
       {} as NotificationService,
       { chargeToken } as unknown as PaymentProvider,
@@ -65,7 +66,11 @@ describe('card rail OFF at the billing boundary', () => {
     const billing = new BillingService(
       {
         prepaidBalance: { findUnique: vi.fn(async () => null) },
-        subscriptionPayment: { findUnique: vi.fn(async () => ({ status: 'UNKNOWN', id: 'synthetic-intent' })) },
+        // R13: attemptCharge reads the MMG approval-hold gate first; null = no hold.
+        subscriptionPayment: {
+          findUnique: vi.fn(async () => ({ status: 'UNKNOWN', id: 'synthetic-intent' })),
+          findFirst: vi.fn(async () => null),
+        },
       } as unknown as PrismaClient,
       {} as NotificationService,
       {

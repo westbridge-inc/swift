@@ -336,7 +336,8 @@ describe('over HTTP: a row for the reviewer, nothing for the rider', () => {
   it('a cash handover declared 3 km from the drop is measured from the declared position; the payment still lands', async () => {
     const r = await makeRider();
     const order = await makeOrder({ riderId: r.riderId, status: 'ARRIVED', acceptedAt: new Date(Date.now() - 30 * 60_000), paymentMethod: 'CASH', paymentStatus: 'PENDING' });
-    const res = await post(`/api/v1/rider/orders/${order.id}/handover`, r.token, { outcome: 'paid', gps: { lat: DROP.lat + 0.03, lng: DROP.lng } });
+    // [MKT-F057] A paid goods handover carries the customer's door PIN (the fixture holds 123456).
+    const res = await post(`/api/v1/rider/orders/${order.id}/handover`, r.token, { outcome: 'paid', gps: { lat: DROP.lat + 0.03, lng: DROP.lng }, ridePin: '123456' });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('DELIVERED');
     expect(res.json().data.claim).toBeNull();

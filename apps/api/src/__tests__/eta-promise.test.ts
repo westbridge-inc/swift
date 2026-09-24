@@ -79,7 +79,13 @@ describe('the range the customer sees', () => {
     expect(svc).not.toMatch(/estimateDeliveryMinutes\(plan\.distanceKm\) \+ \(plan\.vendor\.estimatedPrepTime \|\| 30\)/);
     const cust = readFileSync(path.join(__dirname, '..', 'modules', 'user', 'customer.routes.ts'), 'utf8');
     expect(cust).toContain('promise: promiseView(order),');
-    expect(cust).toContain('activeOrder: activeOrder ? { ...activeOrder, promise: promiseView(activeOrder) } : activeOrder,');
+    // The Home feed spreads the active order into ONE literal that carries the
+    // promise view beside the declared vertical (the service-vertical lane);
+    // both are asserted inside that literal so neither can be dropped.
+    const home = cust.match(/activeOrder: activeOrder \? \{ \.\.\.activeOrder,([^}]*)\} : activeOrder,/);
+    expect(home, 'the Home feed spreads the active order into one literal').not.toBeNull();
+    expect(home![1]).toContain('promise: promiseView(activeOrder)');
+    expect(home![1]).toContain('vertical: orderVertical(activeOrder)');
     const rider = readFileSync(path.join(__dirname, '..', 'modules', 'rider', 'rider.routes.ts'), 'utf8');
     expect(rider).toContain('void noteLiveEta(');
   });

@@ -58,4 +58,38 @@ describe('new-order takeover', () => {
       expect(JSON.parse(String(call![1]?.body))).toEqual({ reason: 'Out of stock' });
     });
   });
+
+  it('a booking is declined with a booking reason, never a kitchen one (E10 · DS200 D3)', async () => {
+    const fetchMock = mockApi((request) => {
+      if (request.method === 'PUT' && request.url.pathname === '/api/v1/vendor/orders/order-live/reject') {
+        return { body: { success: true, data: { id: 'order-live', status: 'CANCELLED' } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const raw = { ...wireVendorOrder(), fulfillment: 'APPOINTMENT', appointmentSlot: '2026-09-24T13:00:00.000Z' };
+    const { rerender, user } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(raw)]} />);
+
+    await screen.findByText('NEW BOOKING');
+    expect(screen.queryByRole('option', { name: 'Kitchen is too busy' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Decline' }));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/orders/order-live/reject'));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call![1]?.body))).toEqual({ reason: 'Fully booked at that time' });
+    });
+  });
+
+  it('shows a booking at the market time without kitchen prep controls', async () => {
+    const raw = {
+      ...wireVendorOrder(), fulfillment: 'APPOINTMENT', appointmentSlot: '2026-09-24T13:00:00.000Z',
+    };
+    const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(raw)]} />);
+    expect(await screen.findByText('NEW BOOKING')).toBeTruthy();
+    expect(screen.getByText(/9:00 AM/)).toBeTruthy();
+    expect(screen.queryByText('20 min prep')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeTruthy();
+  });
 });

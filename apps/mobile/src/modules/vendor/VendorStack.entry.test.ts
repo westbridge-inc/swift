@@ -650,7 +650,7 @@ describe('no business screen is a one-way door', () => {
 
     const auth = useAuthStore.getState();
     expect(auth).toMatchObject({ isAuthenticated: false, intent: null });
-    expect(rootEntryGate({ ...auth, anyPreview: false, needsSelfie: false })).toBe('role-picker');
+    expect(rootEntryGate({ ...auth, anyPreview: false, needsSelfie: false, hasUser: !!auth.user })).toBe('role-picker');
     expect(useStoreSwitcher.getState().selectedStoreId).toBeNull();
   });
 

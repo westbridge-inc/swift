@@ -31,7 +31,7 @@ export type ActivationEntity = { riderId: string } | { driverId: string } | { ve
  *  hold (nothing to price), or the type, market and rate a new trial is born on. */
 type ActivationPricing =
   | { existing: Subscription }
-  | { existing: null; type: SubscriptionType; priced: PartnerRate; countryCode: string };
+  | { existing: null; type: SubscriptionType; priced: PartnerRate; currencyCode: string };
 
 export class SubscriptionService {
   private countryConfig: CountryConfigService;
@@ -60,12 +60,13 @@ export class SubscriptionService {
     if (!rider) throw new NotFoundError('Rider', riderId);
     if (rider.subscription) return { existing: rider.subscription };
 
-    const tiers = await this.countryConfig.getSubscriptionTiers(rider.user.countryCode, db);
+    const countryCode = rider.user.countryCode;
+    const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
     const type: SubscriptionType = rider.riderType === 'COURIER' ? 'COURIER_RIDER' : 'DELIVERY_RIDER';
     // A rider's fee follows the VEHICLE, not the service: a canter doing
     // deliveries bills heavy delivery exactly like a canter doing courier work.
     const priced = partnerRateFor(tiers, { kind: 'RIDER', vehicleType: rider.vehicleType });
-    return { existing: null, type, priced, countryCode: rider.user.countryCode };
+    return { existing: null, type, priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
   }
 
   private async driverActivation(driverId: string, db: Db): Promise<ActivationPricing> {
@@ -80,11 +81,12 @@ export class SubscriptionService {
     if (!driver) throw new NotFoundError('Driver', driverId);
     if (driver.subscription) return { existing: driver.subscription };
 
-    const tiers = await this.countryConfig.getSubscriptionTiers(driver.user.countryCode, db);
+    const countryCode = driver.user.countryCode;
+    const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
     // A minibus driver is a taxi driver: where the market prices taxis apart
     // the role decides the fee, car or bus; otherwise the vehicle band does.
     const priced = partnerRateFor(tiers, { kind: 'DRIVER', vehicleType: driver.vehicleType });
-    return { existing: null, type: 'TAXI_DRIVER', priced, countryCode: driver.user.countryCode };
+    return { existing: null, type: 'TAXI_DRIVER', priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
   }
 
   private async vendorActivation(vendorId: string, db: Db): Promise<ActivationPricing> {
@@ -116,7 +118,7 @@ export class SubscriptionService {
       activeListings: 0,
       ownedStores: vendor.owner._count.vendors,
     });
-    return { existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, countryCode };
+    return { existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
   }
 
   private activation(entity: ActivationEntity, db: Db): Promise<ActivationPricing> {
@@ -143,19 +145,19 @@ export class SubscriptionService {
   async startTrialForRider(riderId: string) {
     const activation = await this.riderActivation(riderId, this.prisma);
     if (activation.existing) return activation.existing; // idempotent
-    return this.create({ riderId }, activation.type, activation.priced.rate, activation.countryCode);
+    return this.create({ riderId }, activation.type, activation.priced.rate, activation.currencyCode);
   }
 
   async startTrialForDriver(driverId: string) {
     const activation = await this.driverActivation(driverId, this.prisma);
     if (activation.existing) return activation.existing;
-    return this.create({ driverId }, activation.type, activation.priced.rate, activation.countryCode);
+    return this.create({ driverId }, activation.type, activation.priced.rate, activation.currencyCode);
   }
 
   async startTrialForVendor(vendorId: string) {
     const activation = await this.vendorActivation(vendorId, this.prisma);
     if (activation.existing) return activation.existing;
-    return this.create({ vendorId }, activation.type, activation.priced.rate, activation.countryCode);
+    return this.create({ vendorId }, activation.type, activation.priced.rate, activation.currencyCode);
   }
 
   /** The human behind the entity + their trial-law role (§3: the trial

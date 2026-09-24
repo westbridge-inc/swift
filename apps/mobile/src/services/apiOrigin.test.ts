@@ -143,7 +143,7 @@ describe('resolveApiOrigin', () => {
       isDev: false,
       expoHostUri: 'not a host',
       bundleScriptUrl: 'ftp://dev-machine.test/index.bundle',
-    })).toBe('https://api.swift.gy');
+    })).toBe('https://api.swiftgy.com');
   });
 });
 

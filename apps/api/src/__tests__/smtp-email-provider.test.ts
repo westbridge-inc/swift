@@ -50,7 +50,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
 const cfg = (over: Partial<ReturnType<typeof smtpConfigFromEnv>> = {}) => ({
-  host: '127.0.0.1', port, tls: 'none' as const, user: 'no-reply@swift.gy', pass: 'app-password', from: 'Swift <no-reply@swift.gy>', timeoutMs: 3_000, ...over,
+  host: '127.0.0.1', port, tls: 'none' as const, user: 'no-reply@swiftgy.com', pass: 'app-password', from: 'Swift <no-reply@swiftgy.com>', timeoutMs: 3_000, ...over,
 });
 
 describe('SMTP dialogue', () => {
@@ -59,16 +59,16 @@ describe('SMTP dialogue', () => {
     const res = await new SmtpEmailProvider(cfg()).sendEmail('rider@example.gy', 'Your document expires soon', 'Line one\n.starts with a dot\nLast line');
     const ex = exchanges[exchanges.length - 1]!;
     expect(ex.lines[0]).toBe('EHLO swift');
-    expect(ex.lines[1]).toBe(`AUTH PLAIN ${Buffer.from('\0no-reply@swift.gy\0app-password').toString('base64')}`);
-    expect(ex.lines).toContain('MAIL FROM:<no-reply@swift.gy>');
+    expect(ex.lines[1]).toBe(`AUTH PLAIN ${Buffer.from('\0no-reply@swiftgy.com\0app-password').toString('base64')}`);
+    expect(ex.lines).toContain('MAIL FROM:<no-reply@swiftgy.com>');
     expect(ex.lines).toContain('RCPT TO:<rider@example.gy>');
     expect(ex.lines).toContain('DATA');
     expect(ex.lines[ex.lines.length - 1]).toBe('QUIT');
     expect(ex.data).toContain('Subject: Your document expires soon');
-    expect(ex.data).toContain('From: Swift <no-reply@swift.gy>');
+    expect(ex.data).toContain('From: Swift <no-reply@swiftgy.com>');
     expect(ex.data).toContain(`Message-ID: <${res.ref}>`);
     expect(ex.data).toContain('\n..starts with a dot\n');
-    expect(res.ref).toMatch(/^[0-9a-f]{24}@swift\.gy$/);
+    expect(res.ref).toMatch(/^[0-9a-f]{24}@swiftgy\.com$/);
   });
 
   it('falls back to AUTH LOGIN when the server (Microsoft 365) offers no PLAIN', async () => {
@@ -76,7 +76,7 @@ describe('SMTP dialogue', () => {
     await new SmtpEmailProvider(cfg()).sendEmail('a@example.gy', 's', 'b');
     const ex = exchanges[exchanges.length - 1]!;
     expect(ex.lines[1]).toBe('AUTH LOGIN');
-    expect(ex.lines[2]).toBe(Buffer.from('no-reply@swift.gy').toString('base64'));
+    expect(ex.lines[2]).toBe(Buffer.from('no-reply@swiftgy.com').toString('base64'));
     expect(ex.lines[3]).toBe(Buffer.from('app-password').toString('base64'));
   });
 

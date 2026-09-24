@@ -97,6 +97,11 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };
       // [F-026-15] The alert's own tenant decides who is paged; NULL = platform
       // operators only. [F-035-07] No coordinates in a push payload.
+      // [PRIV2-S2] And no note either: this body is pushed through Expo/APNs/
+      // FCM to the admins' phones (lock screens, third-party relays) and is
+      // repeated verbatim in the on-call SMS when nobody acknowledges. The
+      // words the person typed are read on the war-room board (the ops SOS
+      // reads and the war-room socket), which only ops can reach.
       // [S-19] The page is an OpsAlert: per-recipient delivery and
       // acknowledgement with a deadline; unacknowledged, it escalates.
       const page = await openOpsAlert(prisma, notifications, {
@@ -110,7 +115,13 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
     case 'WAR_ROOM': {
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };
       const rooms = warRoomsFor(alert.tenantId);
-      io.to(rooms).emit('sos:active', { sosAlertId: alert.id, tenantId: alert.tenantId, actorRole: alert.actorRole, orderId: alert.orderId, serviceJobId: alert.serviceJobId, lat: alert.triggerLat, lng: alert.triggerLng, triggeredAt: alert.triggeredAt });
+      // [PRIV2-S2] The war room is the one live surface that may carry the
+      // words the person typed: only ADMIN / SUPER_ADMIN sockets join these
+      // rooms (war-room.ts), in-process, no relay, no lock screen. The other
+      // person on the ride is never in them. A repeat press's own words ride
+      // on sos:retrigger (sos.service.ts); this carries the note the alert
+      // was raised with.
+      io.to(rooms).emit('sos:active', { sosAlertId: alert.id, tenantId: alert.tenantId, actorRole: alert.actorRole, orderId: alert.orderId, serviceJobId: alert.serviceJobId, lat: alert.triggerLat, lng: alert.triggerLng, triggeredAt: alert.triggeredAt, note: alert.triggerNote });
       // [F-027-16] Count the sockets actually in the room — a silence receipt has to be able to say zero.
       let listeners = 0;
       try { listeners = (await io.in(rooms).fetchSockets()).length; } catch { listeners = 0; }

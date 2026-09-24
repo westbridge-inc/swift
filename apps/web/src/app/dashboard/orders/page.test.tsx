@@ -78,6 +78,20 @@ describe('vendor order board — money is never invented', () => {
     stubAudioContext();
   });
 
+  it('shows a true appointment instant as the Guyana time on the provider board', async () => {
+    const booking = {
+      ...wireVendorOrder(), fulfillment: 'APPOINTMENT', appointmentSlot: '2026-09-24T13:00:00.000Z',
+    };
+    mockApi(boardHandler([booking], { ...wireVendorOrderDetail(), ...booking }));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    expect(row.textContent).toContain('9:00 AM');
+    await user.click(row);
+    expect(await screen.findAllByText(/Appointment:.*9:00 AM/)).toHaveLength(2);
+    expect(screen.queryByText('20 min prep')).toBeNull();
+  });
+
   it('renders the real order total from the wire Decimal STRING, and never "NaN"', async () => {
     mockApi(boardHandler([wireVendorOrder()], wireVendorOrderDetail()));
     const { user } = renderWithQuery(<OrdersPage />);

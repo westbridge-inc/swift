@@ -51,7 +51,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const { data, isLoading, isError } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
   const cancelMutation = useMutation({
     // [ADM-006] the operator's words, not a template
-    mutationFn: ({ refund, reason }: { refund: boolean; reason: string }) => cancelOrder(id, { reason, refund }),
+    mutationFn: ({ refund, reason }: { refund: boolean; reason: string }) => cancelOrder(id, { refund }, reason),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['order', id] });
       queryClient.invalidateQueries({ queryKey: ['orders'] });
@@ -60,8 +60,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   // [A-14] Closing a refund is a separate act from deciding one is owed, and it
   // needs what a refund actually is: a reference and the amount handed back.
   const settleRefundMutation = useMutation({
-    mutationFn: ({ reference, amount }: { reference: string; amount: string }) =>
-      settleOrderRefund(id, reference, amount),
+    mutationFn: ({ reference, amount, reason }: { reference: string; amount: string; reason: string }) =>
+      settleOrderRefund(id, reference, amount, reason),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['order', id] });
       queryClient.invalidateQueries({ queryKey: ['orders'] });
@@ -172,7 +172,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 `Amount actually handed back (the order owes GY$${Number(o.refundOwedAmount ?? 0).toLocaleString()}):`,
               );
               if (!amount) return;
-              settleRefundMutation.mutate({ reference, amount });
+              const reason = askReason({ action: 'record this refund as handed back', subject: `order ${o.orderNumber}` });
+              if (reason) settleRefundMutation.mutate({ reference, amount, reason });
             }}
             disabled={settleRefundMutation.isPending}
             className="mt-3 px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
@@ -352,6 +353,19 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                     {o.handover.locked
                       ? `Locked — ${o.handover.attempts} wrong tries`
                       : `Issued to the customer${o.handover.attempts > 0 ? ` · ${o.handover.attempts} wrong tries` : ''}`}
+                  </span>
+                </div>
+              )}
+              {/* [MKT-F057] The delivery PIN: the customer holds it, the rider enters it at
+                  the door. Same rule as the pickup code: never the value, only whether it
+                  exists and whether wrong tries have locked the door (support reset). */}
+              {o.handover?.ridePinIssued && !isRide && (
+                <div className="flex justify-between">
+                  <span className="text-[var(--muted)]">Delivery PIN</span>
+                  <span className={o.handover.ridePinLocked ? 'text-[var(--danger)]' : ''}>
+                    {o.handover.ridePinLocked
+                      ? `Locked — ${o.handover.ridePinAttempts} wrong tries (support reset)`
+                      : `Issued to the customer${(o.handover.ridePinAttempts ?? 0) > 0 ? ` · ${o.handover.ridePinAttempts} wrong tries` : ''}`}
                   </span>
                 </div>
               )}

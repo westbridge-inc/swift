@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyReply } from 'fastify';
+import type { FastifyRequest } from 'fastify';
 import {
   ACCESS_COOKIE,
   REFRESH_COOKIE,
+  adoptCookieCredential,
   SIGNUP_CONTINUATION_COOKIE,
   clearSignupContinuationCookie,
   resetBrowserOriginsForTests,
@@ -32,6 +34,42 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env['CORS_ORIGIN'];
   resetBrowserOriginsForTests();
+});
+
+describe('[AUTH-SRC] cookie provenance survives a second authenticate pass', () => {
+  // authenticate() runs twice on admin routes (the plugin's onRequest hook and
+  // the per-route guard). The first pass writes the cookie into Authorization;
+  // the second used to read that Bearer and relabel the session 'bearer', so a
+  // gate keyed on request.authCredentialSource === 'cookie' (the web taxi
+  // refusal, #1271) would have been bypassed on any double-authenticated route.
+  const browser = () => ({
+    headers: { 'x-swift-client': 'admin-web', origin: 'https://swift.example', cookie: `${ACCESS_COOKIE}=cookie-token` } as Record<string, string>,
+  }) as unknown as FastifyRequest;
+
+  it('a cookie session is "cookie" on every pass, the header adopted once', () => {
+    const request = browser();
+    expect(adoptCookieCredential(request)).toBe('cookie');
+    expect(request.headers.authorization).toBe('Bearer cookie-token');
+    expect(adoptCookieCredential(request)).toBe('cookie');
+    expect(adoptCookieCredential(request)).toBe('cookie');
+    expect(request.headers.authorization).toBe('Bearer cookie-token');
+  });
+
+  it('a real Bearer stays "bearer", and a request with neither stays unauthenticated', () => {
+    const native = { headers: { authorization: 'Bearer native-token' } } as unknown as FastifyRequest;
+    expect(adoptCookieCredential(native)).toBe('bearer');
+    expect(adoptCookieCredential(native)).toBe('bearer');
+    const none = { headers: {} } as unknown as FastifyRequest;
+    expect(adoptCookieCredential(none)).toBeNull();
+    expect(none.headers.authorization).toBeUndefined();
+  });
+
+  it('an ungated cookie (no named client) is never adopted, on any pass', () => {
+    const request = { headers: { origin: 'https://swift.example', cookie: `${ACCESS_COOKIE}=cookie-token` } } as unknown as FastifyRequest;
+    expect(adoptCookieCredential(request)).toBeNull();
+    expect(adoptCookieCredential(request)).toBeNull();
+    expect(request.headers.authorization).toBeUndefined();
+  });
 });
 
 describe('browser signup continuation', () => {

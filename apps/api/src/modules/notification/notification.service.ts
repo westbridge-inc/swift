@@ -1,4 +1,5 @@
-import type { Notification, PrismaClient } from '@prisma/client';
+import { createHash } from 'node:crypto';
+import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
@@ -147,27 +148,46 @@ export async function acknowledgeAlert(
  *  must not do is fail closed SILENTLY: a lookup that throws is an outage, and
  *  an outage that quietly redirects a tenant's pages away from that tenant's
  *  own responders is exactly the kind of thing nobody notices for months. */
-export async function tenantOfUser(prisma: PrismaClient, userId: string | null | undefined): Promise<string | null> {
-  if (!userId) return null;
+export async function tenantOfUser(prisma: PrismaClient, userId: string | null | undefined, requireResolved = false): Promise<string | null> {
+  if (!userId) {
+    if (requireResolved) throw new Error('admin page subject unavailable');
+    return null;
+  }
   const u = await prisma.user
     .findUnique({ where: { id: userId }, select: { tenantId: true } })
     .catch((err) => {
+      if (requireResolved) throw err;
       log().error({ err, userId }, '[F-027-20] could not resolve a tenant for an admin page — it will reach PLATFORM OPERATORS ONLY, not this subject’s own admins');
       return null;
     });
+  if (!u && requireResolved) throw new Error('admin page subject unavailable');
   return u?.tenantId ?? null;
 }
 
 /** Same idea for billing: a Subscription carries no tenantId of its own — it
  *  inherits one from the actor it belongs to (rider, driver, or vendor owner).
  *  [NOC-A F45] */
-export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId: string | null | undefined): Promise<string | null> {
-  if (!subscriptionId) return null;
+export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId: string | null | undefined, requireResolved = false): Promise<string | null> {
+  if (!subscriptionId) {
+    if (requireResolved) throw new Error('admin page subscription unavailable');
+    return null;
+  }
   const sub = await prisma.subscription.findUnique({
     where: { id: subscriptionId },
     select: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } },
-  }).catch(() => null);
-  return tenantOfUser(prisma, sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null);
+  }).catch(err => {
+    if (requireResolved) throw err;
+    return null;
+  });
+  // Durable callers cannot acknowledge a platform-only fallback after a failed
+  // lookup. Only a successfully resolved user with tenantId=null is platform scoped.
+  return tenantOfUser(prisma, sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null, requireResolved);
+}
+
+/** The tracking row of one deduped ops page to one admin — derived from the
+ *  notice and the recipient, so the same page sent again maps onto it. */
+function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
+  return `ops_alert_${createHash('sha256').update(`${dedupeKey}:${recipientId}`).digest('hex').slice(0, 24)}`;
 }
 
 export async function notifyAdmins(
@@ -175,7 +195,18 @@ export async function notifyAdmins(
   notifications: NotificationService,
   /** `tenantId` is REQUIRED — pass the subject's tenant, or an explicit
    *  `null` for a genuinely platform-wide notice. See the note below. */
-  input: { title: string; body: string; data?: Record<string, unknown>; tenantId: string | null },
+  input: {
+    title: string; body: string; data?: Record<string, unknown>; tenantId: string | null;
+    /** [ORDER-SPINE S1-6] Per-recipient idempotency key for a page that a
+     *  retried obligation may send again: the retry collapses into the first
+     *  delivery, and its tracking row, for every admin who already has it.
+     *  Omit it everywhere else. [R13] Durable billing callers pass the
+     *  committed event's key; existing callers are unchanged. */
+    dedupeKey?: string;
+    /** [R13] A durable caller's page must reach every admin; otherwise this
+     *  throws so the committed obligation stays retryable. */
+    requireAll?: boolean;
+  },
 ): Promise<number> {
   // [REPORT-014 F-014-03] Background workers carry no tenant ALS, so a
   // tenant-A event used to page tenant-B admins with A's order evidence.
@@ -244,6 +275,7 @@ export async function notifyAdmins(
       title: input.title,
       body: input.body,
       data: input.data,
+      ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
     });
     if (id) reached += 1;
   }
@@ -251,9 +283,20 @@ export async function notifyAdmins(
   // alerts, so /alerts/health can show whether anyone actually SAW them.
   if (admins.length > 0) {
     const subjectId = String((input.data?.['kind'] as string | undefined) ?? 'ops');
-    await prisma.alertDelivery
-      .createMany({ data: admins.map((a) => ({ kind: 'ADMIN_OPS', subjectId, recipientId: a.id })) })
-      .catch(() => {});
+    const rows = admins.map((a) => ({ kind: 'ADMIN_OPS', subjectId, recipientId: a.id }));
+    // [F-R2-ASTRA-01] A deduped page stays ONE notice per admin however often
+    // a retried obligation re-sends it — send() hands back the first delivery
+    // and does not fan out again — so it keeps one tracking row per admin
+    // too: the row id is derived from (notice, admin) and a retry's insert is
+    // skipped. Without a key every call is a new notice, tracked as before.
+    const { dedupeKey } = input;
+    const tracking: Prisma.AlertDeliveryCreateManyArgs = dedupeKey
+      ? { data: rows.map((r) => ({ ...r, id: dedupedOpsAlertId(dedupeKey, r.recipientId) })), skipDuplicates: true }
+      : { data: rows };
+    await prisma.alertDelivery.createMany(tracking).catch(() => {});
+  }
+  if (input.requireAll && (admins.length === 0 || reached !== admins.length)) {
+    throw new Error('admin notice incomplete');
   }
   return reached;
 }
@@ -428,6 +471,20 @@ export class NotificationService {
     });
   }
 
+  /** A SERVICE business confirmed a booking: the customer's slot is reserved.
+   *  No kitchen words — a booking is not prepared. Same data shape as
+   *  orderAccepted, so the app's notification router lands on the same order
+   *  screen it always did. */
+  async bookingConfirmed(customerId: string, orderNumber: string, vendorName: string, orderId: string): Promise<void> {
+    await this.send({
+      userId: customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Booking confirmed',
+      body: `${vendorName} confirmed your booking ${orderNumber}.`,
+      data: { orderId, orderNumber, status: 'ACCEPTED' },
+    });
+  }
+
   async orderPreparing(customerId: string, orderNumber: string, vendorName: string, orderId: string): Promise<void> {
     await this.send({
       userId: customerId,
@@ -462,12 +519,21 @@ export class NotificationService {
     // Template guard [SWIFT-UG-NOTIF-02]: a missing/NaN ETA must never render
     // "Arriving in ~undefined min" to a customer.
     const etaPart = typeof eta === 'number' && Number.isFinite(eta) ? ` Arriving in ~${Math.max(1, Math.round(eta))} min.` : '';
+    // [MKT-F057] The delivery PIN belongs in this push: it is the moment of
+    // need, and the customer is its holder. Fetched holder-side because the
+    // caller's order row is already stripped by HANDOVER_SECRETS_OMIT; a fetch
+    // hiccup must never fail the PICKED_UP transition, so it degrades to no PIN.
+    const pin = (await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { ridePin: true },
+    }).catch(() => null))?.ridePin ?? null;
+    const pinPart = pin ? ` Your delivery PIN is ${pin} — give it to your rider at the door.` : '';
     await this.send({
       userId: customerId,
       type: 'ORDER_UPDATE',
       title: 'On Its Way!',
-      body: `${riderName} picked up your order ${orderNumber}.${etaPart}`,
-      data: { orderId, orderNumber, status: 'PICKED_UP', eta },
+      body: `${riderName} picked up your order ${orderNumber}.${etaPart}${pinPart}`,
+      data: { orderId, orderNumber, status: 'PICKED_UP', eta, ...(pin ? { deliveryPin: pin } : {}) },
     });
   }
 
