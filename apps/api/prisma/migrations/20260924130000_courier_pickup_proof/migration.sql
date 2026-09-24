@@ -10,7 +10,7 @@
 -- EXCLUSIVE lock on "orders"). Existing rows read NULL; only the pickup-proof
 -- routes write these columns.
 -- BACKUP CHECKPOINT: the standard full pre-deploy backup (pg_dump -Fc), named
--- "pre-20260923230000" in the release record.
+-- "pre-20260924130000" in the release record.
 -- ROLLBACK: the exact inverse below, verified on PostgreSQL 16 (PostGIS 3.4),
 -- restores the prior schema exactly and deletes this migration's
 -- _prisma_migrations row, so a later `prisma migrate deploy` re-applies it.
@@ -33,7 +33,7 @@
 --     DROP COLUMN "courierPickupProofLat",
 --     DROP COLUMN "courierPickupProofLng";
 --   DO $$ DECLARE n integer; BEGIN
---     DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260923230000_courier_pickup_proof';
+--     DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260924130000_courier_pickup_proof';
 --     GET DIAGNOSTICS n = ROW_COUNT;
 --     IF n <> 1 THEN RAISE EXCEPTION 'expected exactly one _prisma_migrations row, deleted %', n; END IF;
 --   END $$;
