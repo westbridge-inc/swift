@@ -187,12 +187,12 @@ function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token?: st
   });
 }
 
-function postPhoto(orderId: string, token: string) {
+function postPhoto(orderId: string, token: string, route: 'proof-photo' | 'pickup-proof-photo' = 'proof-photo') {
   const boundary = `----gold3${nanoid(8)}`;
   const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 3)]);
   return app.inject({
     method: 'POST',
-    url: `/api/v1/courier/order/${orderId}/proof-photo`,
+    url: `/api/v1/courier/order/${orderId}/${route}`,
     payload: Buffer.concat([
       Buffer.from(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="door.png"\r\ncontent-type: image/png\r\n\r\n`),
       png,
@@ -715,7 +715,12 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
     }
     const collect = await call('POST', `/api/v1/courier/order/${o1}/collect`, b.token, { outcome: 'paid', gps: O1_PICKUP });
     expect(collect.statusCode, collect.body).toBe(200);
-    for (const slug of ['picked-up', 'en-route-delivery', 'arrived']) {
+    // Custody is photo-proven (E16): the pickup photo, then the confirm with its GPS.
+    const pickupPhoto = await postPhoto(o1, b.token, 'pickup-proof-photo');
+    expect(pickupPhoto.statusCode, pickupPhoto.body).toBe(200);
+    const picked = await call('POST', `/api/v1/courier/order/${o1}/pickup-proof`, b.token, { proofPhotoUrl: pickupPhoto.json().data.url, gps: O1_PICKUP });
+    expect(picked.statusCode, picked.body).toBe(200);
+    for (const slug of ['en-route-delivery', 'arrived']) {
       const step = await call('PUT', `/api/v1/rider/orders/${o1}/${slug}`, b.token, {});
       expect(step.statusCode, step.body).toBe(200);
     }
