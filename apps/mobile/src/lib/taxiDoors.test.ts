@@ -24,10 +24,15 @@ describe('taxiDoorFor', () => {
 describe('the taxi screen wires the selfie door to a reachable screen', () => {
   const src = (rel: string) => readFileSync(join(__dirname, '..', rel), 'utf8');
 
-  it('TaxiScreen navigates to Selfie on the selfie door', () => {
+  it('TaxiScreen opens the doors for BOTH the ride request and the queue join', () => {
     const taxi = src('modules/movement/screens/TaxiScreen.tsx');
-    expect(taxi).toMatch(/taxiDoorFor\(/);
-    expect(taxi).toMatch(/navigate\?\.\('Selfie'\)/);
+    // one mapping for the request's refusal, one for the queue join's
+    expect(taxi.match(/taxiDoorFor\(/g)?.length).toBe(2);
+    expect(taxi).toMatch(/joinQueue\.error/);
+    expect(taxi).toMatch(/queueErrMsg \?/);
+    // the selfie door and the ID door each appear for both paths
+    expect(taxi.match(/navigate\?\.\('Selfie'\)/g)?.length).toBe(2);
+    expect(taxi.match(/navigate\?\.\('IdentityVerification'\)/g)?.length).toBe(2);
   });
 
   it('the customer stack registers the Selfie screen, so the door is not a dead end', () => {

@@ -379,6 +379,12 @@ export function TaxiScreen({ navigation }: any) {
   const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
   const needsL2 = door === 'identity';
   const needsSelfie = door === 'selfie';
+  // Joining the queue passes the same account gates as a request (the route
+  // and the queue share one authority boundary), so its refusal must show,
+  // with the same doors — never a silent tap.
+  const queueErrBody = (joinQueue.error as any)?.response?.data;
+  const queueErrMsg = queueErrBody?.error?.message ?? queueErrBody?.message;
+  const queueDoor = taxiDoorFor(queueErrBody?.error?.code ?? queueErrBody?.code);
 
   // One coherent /supply snapshot owns visible counts, level and ETA. The
   // older /availability read contributes only its rollout gate.
@@ -654,6 +660,27 @@ export function TaxiScreen({ navigation }: any) {
                 <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
                   Set your destination first — we hold your whole trip in line.
                 </T>
+              ) : null}
+              {queueErrMsg ? (
+                <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.sm }}>
+                  {queueErrMsg}
+                </T>
+              ) : null}
+              {queueDoor === 'selfie' ? (
+                <PillButton
+                  label="Add your photo — your driver sees it"
+                  variant="outline"
+                  style={{ marginTop: space.sm }}
+                  onPress={() => navigation?.navigate?.('Selfie')}
+                />
+              ) : null}
+              {queueDoor === 'identity' ? (
+                <PillButton
+                  label="Verify your ID — takes a minute"
+                  variant="outline"
+                  style={{ marginTop: space.sm }}
+                  onPress={() => navigation?.navigate?.('IdentityVerification')}
+                />
               ) : null}
               <PillButton
                 label={watchMatchesPickup ? "We'll ping you — watching for drivers" : 'Notify me instead'}
