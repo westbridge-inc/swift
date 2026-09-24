@@ -36,6 +36,10 @@ describe('[E10] the board collects a reason before it rejects', () => {
     expect(board).toMatch(/orderAction\.mutate\(\{ id: target\.id, action: 'reject', reason: why \}\)/);
   });
 
+  it('the order screen asks the question that fits the order (DS221 S3)', () => {
+    expect(detail).toContain("{order.fulfillment === 'APPOINTMENT' ? 'Decline this booking?' : 'Reject this order?'}");
+  });
+
   it('the order screen and the takeover use the same reasons for the same kind of order', () => {
     expect(detail).toMatch(/rejectReasonsFor\(order\.fulfillment\)\.map/);
     expect(takeover).toMatch(/rejectReasonsFor\(o\?\.fulfillment\)\.map/);
