@@ -306,7 +306,10 @@ describe('scripts — no secret value ever rides in argv', () => {
     expect(unit).toContain('LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred');
     // No Environment= line SETS an AWS_ value: bare, quoted, or anywhere in a
     // multi-assignment line. (UnsetEnvironment= removes values; it is pinned below.)
-    const setsAws = unit.split('\n').filter((line) => /^\s*Environment=/.test(line) && /(^|[\s"'=])AWS_/.test(line.replace(/^\s*Environment=/, ' ')));
+    // Read it the way systemd does (systemd.syntax(7)): a trailing backslash joins
+    // the next line, and whitespace around "=" is ignored.
+    const setsAws = unit.replace(/\\\n/g, ' ').split('\n')
+      .filter((line) => /^\s*Environment\s*=/.test(line) && /(^|[\s"'=])AWS_/.test(line.replace(/^\s*Environment\s*=/, ' ')));
     expect(setsAws).toEqual([]);
     expect(unit).toContain('BACKUP_REQUIRED=1');
     // deploy/.env's container-only AWS_*_FILE pointers are unset on the host, so
