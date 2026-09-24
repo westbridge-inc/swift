@@ -13,7 +13,7 @@ import {
   useAuthStore,
 } from '../stores/authStore';
 import { customerApi } from '../services/api';
-import { roleSwitchAuthorityPayload } from '../lib/roleLanding';
+import { accountHoldsRole, roleSwitchAuthorityPayload } from '../lib/roleLanding';
 import { toast } from '../kit/toast';
 import {
   canonicalMoverAuthority,
@@ -73,12 +73,10 @@ export function RoleSwitcherSheet({
     rider?: unknown;
     vendorOwner?: unknown;
   }) | null;
-  const roles: string[] = user?.roles ?? [];
-  const owns = (intent: Intent): boolean => {
-    if (intent === 'customer') return true;
-    if (intent === 'mover') return roles.includes('MOVER') || roles.includes('DRIVER') || roles.includes('RIDER') || !!user?.driver || !!user?.rider;
-    return roles.includes('VENDOR_OWNER') || !!user?.vendorOwner;
-  };
+  // ONE law for "owned vs. Join" (lib/roleLanding): the earner shells read the
+  // same predicate, so an account that reads "Join" here lands on that
+  // surface's application, never on a dashboard it cannot open.
+  const owns = (intent: Intent): boolean => accountHoldsRole(user, intent);
 
   const pick = async (intent: Intent) => {
     if (switching) return;
@@ -88,14 +86,7 @@ export function RoleSwitcherSheet({
     }
     const operationUser = useAuthStore.getState().user as typeof user;
     const operationRoles: string[] = operationUser?.roles ?? [];
-    const owned = intent === 'customer'
-      || (intent === 'mover'
-        ? operationRoles.includes('MOVER')
-          || operationRoles.includes('DRIVER')
-          || operationRoles.includes('RIDER')
-          || !!operationUser?.driver
-          || !!operationUser?.rider
-        : operationRoles.includes('VENDOR_OWNER') || !!operationUser?.vendorOwner);
+    const owned = accountHoldsRole(operationUser, intent);
     const payload = roleSwitchAuthorityPayload(
       current,
       intent,
