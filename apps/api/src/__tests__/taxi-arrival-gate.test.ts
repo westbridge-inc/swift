@@ -155,12 +155,16 @@ afterAll(async () => {
     // their logs at the DB level (the suite's sanctioned teardown).
     await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
     // audit_logs is append-only too: the refused-claim records go through the sanctioned purge.
-    await purgeAuditLogs(app.prisma, { entityId: { in: createdOrderIds } }, 'test-cleanup:taxi-arrival-gate').catch(() => 0);
+    await purgeAuditLogs(app.prisma, { entity: 'Order', entityId: { in: createdOrderIds } }, 'test-cleanup:taxi-arrival-gate').catch(() => 0);
     await app.prisma.driver.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
   await app.close();
 });
+
+/** The refused-claim records for one ride. */
+const refusals = (orderId: string) =>
+  app.prisma.auditLog.findMany({ where: { entity: 'Order', entityId: orderId, action: 'TAXI_ARRIVAL_REFUSED' } });
 
 describe('[E19] the driver-arrival gate refuses a claim the location stream cannot support', () => {
   it('a declaration from across town is refused and leaves the order untouched', async () => {
@@ -184,11 +188,14 @@ describe('[E19] the driver-arrival gate refuses a claim the location stream cann
     const logs = await app.prisma.orderStatusLog.findMany({ where: { orderId: ride.id, status: 'DRIVER_ARRIVED' } });
     expect(logs).toHaveLength(0);
     // [DS223 F2] Support can read what the gate saw at the door.
-    const audit = await app.prisma.auditLog.findMany({ where: { entity: 'Order', entityId: ride.id, action: 'TAXI_ARRIVAL_REFUSED' } });
+    const audit = await refusals(ride.id);
     expect(audit).toHaveLength(1);
     expect(audit[0]!.userId).toBe(driver.userId);
-    expect(audit[0]!.changes).toMatchObject({ verdict: 'far' });
-    expect(typeof (audit[0]!.changes as { distanceM?: unknown }).distanceM).toBe('number');
+    expect(audit[0]!.changes).toEqual({ verdict: 'far', distanceM: err.details.distanceM, fixAgeMs: err.details.fixAgeMs });
+    expect(typeof err.details.fixAgeMs).toBe('number');
+    // [DS229 F1] The gate's facts, never the driver's network identity.
+    expect(audit[0]!.ipAddress).toBeNull();
+    expect(audit[0]!.userAgent).toBeNull();
   });
 
   it('a fix that is too old is refused as stale, not credited', async () => {
@@ -208,6 +215,9 @@ describe('[E19] the driver-arrival gate refuses a claim the location stream cann
     const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect(order.status).toBe('DRIVER_EN_ROUTE');
     expect(order.driverArrivedAt).toBeNull();
+    const audit = await refusals(ride.id);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]!.changes).toEqual({ verdict: 'stale', distanceM: err.details.distanceM, fixAgeMs: err.details.fixAgeMs });
   });
 
   it('a driver with no fix on record is refused with the passenger escape, never stranded silently', async () => {
@@ -226,6 +236,9 @@ describe('[E19] the driver-arrival gate refuses a claim the location stream cann
     const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect(order.status).toBe('DRIVER_EN_ROUTE');
     expect(order.driverArrivedAt).toBeNull();
+    const audit = await refusals(ride.id);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]!.changes).toMatchObject({ verdict: 'no-fix' });
   });
 
   it('a fresh fix at the door still passes, and the clock + evidence are written', async () => {
@@ -242,6 +255,8 @@ describe('[E19] the driver-arrival gate refuses a claim the location stream cann
       where: { orderId: ride.id, status: 'DRIVER_ARRIVED' },
     });
     expect(log.note).toMatch(/\d+m from the pickup point/);
+    // An accepted claim is evidenced by its status log; it is not a refusal.
+    expect(await refusals(ride.id)).toHaveLength(0);
   });
 });
 

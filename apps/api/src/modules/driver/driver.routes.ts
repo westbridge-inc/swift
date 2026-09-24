@@ -1114,7 +1114,9 @@ export async function driverRoutes(app: FastifyInstance) {
       // [E19 · DS223 F2] A refused claim leaves a durable record of what the
       // gate saw, so support can answer "the app would not let me mark
       // arrived" from facts, not memory. Best-effort: the refusal stands even
-      // if the record cannot be written.
+      // if the record cannot be written. [DS229 F1] The gate's facts only — no
+      // IP or device string: support does not need them, and audit_logs is
+      // append-only with no retention clock to age them out.
       await app.prisma.auditLog.create({
         data: {
           userId: request.user.userId,
@@ -1122,8 +1124,6 @@ export async function driverRoutes(app: FastifyInstance) {
           entity: 'Order',
           entityId: id,
           changes: { verdict: gate.verdict, distanceM: gate.distanceM, fixAgeMs: gate.fixAgeMs },
-          ipAddress: request.ip,
-          userAgent: request.headers['user-agent'] ?? null,
         },
       }).catch((err: unknown) => request.log.warn({ err, orderId: id }, 'could not record a refused arrival claim'));
       throw new AppError(409, 'ARRIVAL_NOT_VERIFIED', ARRIVAL_GATE_COPY[gate.verdict], {
