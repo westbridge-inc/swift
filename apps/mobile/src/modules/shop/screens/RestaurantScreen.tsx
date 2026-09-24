@@ -8,6 +8,7 @@ import { color, font, fontSize, radius, space, withAlpha } from '@swift/ui';
 import { useAddToCart, useCart, useReportContent, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
 import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
+import { distanceLabel } from '../../../lib/geo';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
@@ -242,6 +243,8 @@ export function RestaurantScreen() {
     [allItems],
   );
   const closed = v && !v.isCurrentlyOpen;
+  // The one store-distance formatter (lib/geo) — the same words Home and Search use.
+  const distance = distanceLabel(v?.distanceKm);
   const promos: any[] = v?.activePromos ?? [];
   const isMart = v?.vendorType === 'SUPERMARKET' || v?.vendorType === 'STORE';
   const isServiceStore = v?.vendorType === 'SERVICE';
@@ -331,6 +334,10 @@ export function RestaurantScreen() {
           <Photo
             uri={vendorPhoto(v)}
             label={v.name}
+            // The store's name is set ON this photo, in the title below — so
+            // a store with no cover photo must not print it a second time in
+            // the placeholder's centre. One name, drawn once [Q3].
+            showLabel={false}
             glyph="shops"
             transition={200}
             style={{ width: SCREEN_W, height: 300 }}
@@ -443,7 +450,7 @@ export function RestaurantScreen() {
               caption="See reviews"
               onPress={() => navigation.navigate('VendorReviews', { vendorId })}
             />
-            {v.distanceKm != null ? <StatCol icon="map-pin" value={`${v.distanceKm} km`} caption="Distance" /> : null}
+            {distance ? <StatCol icon="map-pin" value={distance} caption="Distance" /> : null}
             {v.etaMin != null ? <StatCol icon="clock" value={`${v.etaMin} min`} caption="Arrive" /> : null}
             {/* Pickup spec 2.4 — quiet honesty: goods stores take order-ahead
                 pickup; the Cart's mode toggle is where it's chosen. */}

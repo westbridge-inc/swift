@@ -7,6 +7,7 @@ import { useHome } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { distanceLabel } from '../../../lib/geo';
 import { vendorPhoto } from '../../../lib/images';
 import { CartBar, useCartBarClearance, EmptyState, ErrorState, Header, LoadingBlock, RatingMeta, Screen, VendorRow } from '../../../kit';
 
@@ -66,7 +67,7 @@ export function NearbyScreen() {
                   rating={v.displayRating ?? null}
                   bucket={v.ratingBucket}
                   topRated={v.topRated}
-                  extra={v.distanceKm != null ? `${v.distanceKm} km` : undefined}
+                  extra={distanceLabel(v.distanceKm)}
                 />
               }
               sub={v.etaMin ? `~${v.etaMin} min delivery` : undefined}

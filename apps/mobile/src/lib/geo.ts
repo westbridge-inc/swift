@@ -17,3 +17,26 @@ export function haversineKm(a: { latitude: number; longitude: number }, b: { lat
 export function streetEtaMin(a: { latitude: number; longitude: number }, b: { latitude: number; longitude: number }): number {
   return Math.max(1, Math.round((haversineKm(a, b) * 1.3) / (22 / 60)));
 }
+
+/**
+ * THE words for how far away a store is — every store distance in the app is
+ * written by this one function.
+ *
+ * Guyana is metric and so is Swift: the server sends `distanceKm` (already
+ * rounded to 100 m) and nothing in the product speaks miles. There used to be
+ * two formatters and they disagreed. Home had its own `kmLabel` ("<1 km")
+ * while Nearby, Search, the category feed and the store page printed the
+ * number as sent ("0.4 km"), so one store could be two distances. And
+ * `kmLabel` read `Number(null)` as 0: Home keeps the previous feed on screen
+ * while the located one loads, so a feed fetched before the location fix —
+ * every `distanceKm` null — told the customer that every store was "<1 km"
+ * away.
+ *
+ * Unknown is silence: null, a non-number or a negative returns undefined and
+ * the caller drops the segment. Under 100 m reads "<0.1 km", never "0 km".
+ */
+export function distanceLabel(km: unknown): string | undefined {
+  if (typeof km !== 'number' || !Number.isFinite(km) || km < 0) return undefined;
+  const tenths = Math.round(km * 10) / 10;
+  return tenths < 0.1 ? '<0.1 km' : `${tenths} km`;
+}
