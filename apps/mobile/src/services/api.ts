@@ -36,7 +36,7 @@ export const API_URL = resolveApiOrigin({
  *  is typeof-guarded: unlike API_URL's, this line actually evaluates in the
  *  node test env, where the RN global does not exist.) */
 // eslint-disable-next-line no-undef
-export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swift.gy');
+export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swiftgy.com');
 
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,

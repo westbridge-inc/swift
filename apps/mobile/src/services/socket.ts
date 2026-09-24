@@ -10,7 +10,7 @@ import { canTeardownRuntime } from '../lib/runtimeOwnership';
 
 // The realtime socket rides the SAME origin as the REST API — including the
 // EXPO_PUBLIC_API_URL override — so a staging/preview EAS build repoints both at
-// once. The previous `__DEV__ ? localhost : api.swift.gy` hardcode had no env
+// once. The previous `__DEV__ ? localhost : api.swiftgy.com` hardcode had no env
 // escape hatch, so a non-prod build could never reach a non-prod socket.
 const SOCKET_URL = API_URL;
 
