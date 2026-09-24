@@ -2,17 +2,24 @@
 // ZIP central-directory pre-scan for the Excel menu import (audit DS107 High
 // #5). exceljs inflates a workbook with JSZip, so a small .xlsx whose central
 // directory *advertises* a multi-GB entry would be inflated in memory before
-// any header/row validation could refuse it. This scanner walks only the
-// central directory — a few bytes of pointer math per entry, never the
-// payload — and sums the advertised uncompressed sizes, so a bomb is refused
-// before the first byte is inflated. Hand-rolled because jszip/yauzl are not
+// any header/row validation could refuse it. This scanner first walks the
+// central directory (pointer math only) and refuses an archive whose
+// ADVERTISED sizes break the budget; then it inflates each entry itself with a
+// hard output cap and refuses one whose real size differs from its claim, so a
+// lying directory cannot smuggle a bomb past the first pass. Hand-rolled because jszip/yauzl are not
 // direct dependencies of apps/api (installing them needs a network the deploy
 // pipeline may not have), and a real catalogue workbook stays far below every
 // bound below.
 // ---------------------------------------------------------------------------
 
+import { inflateRawSync } from 'node:zlib';
+
 const EOCD_SIGNATURE = 0x06054b50; // End of Central Directory
 const CENTRAL_DIR_SIGNATURE = 0x02014b50; // Central directory file header
+const LOCAL_HEADER_SIGNATURE = 0x04034b50; // Local file header
+const LOCAL_HEADER_FIXED_SIZE = 30;
+const METHOD_STORED = 0;
+const METHOD_DEFLATE = 8;
 const EOCD_FIXED_SIZE = 22;
 const CENTRAL_ENTRY_FIXED_SIZE = 46;
 const MAX_EOCD_COMMENT = 0xffff; // ZIP spec §4.3.16
@@ -34,7 +41,7 @@ export interface XlsxZipScan {
 
 export class XlsxZipGuardError extends Error {
   constructor(
-    public readonly reason: 'not-zip' | 'zip64' | 'multi-disk' | 'malformed' | 'entries' | 'entry-size' | 'total-size',
+    public readonly reason: 'not-zip' | 'zip64' | 'multi-disk' | 'malformed' | 'entries' | 'entry-size' | 'total-size' | 'inflated-size',
     message: string,
   ) {
     super(message);
@@ -50,7 +57,8 @@ export const XLSX_IMPORT_ZIP_BUDGET: XlsxZipBudget = {
   maxEntries: 2000, // a workbook has ~12–50 entries; media-heavy ones < 100
 };
 
-/** Sum the ZIP's advertised uncompressed sizes without inflating anything.
+/** Check the ZIP's advertised sizes against the budget, then inflate each
+ *  entry under a hard cap and require its real size to equal its claim.
  *  Throws XlsxZipGuardError on the first budget/structure violation. */
 export function scanXlsxZip(buffer: Buffer, budget: XlsxZipBudget): XlsxZipScan {
   const eocd = findEocd(buffer);
@@ -84,12 +92,15 @@ export function scanXlsxZip(buffer: Buffer, budget: XlsxZipBudget): XlsxZipScan 
   let pos = cdOffset;
   let totalUncompressed = 0;
   let maxEntryUncompressed = 0;
+  const located: Array<{ method: number; compressed: number; uncompressed: number; localOffset: number }> = [];
   for (let i = 0; i < totalEntries; i += 1) {
     if (pos + CENTRAL_ENTRY_FIXED_SIZE > end || buffer.readUInt32LE(pos) !== CENTRAL_DIR_SIGNATURE) {
       throw new XlsxZipGuardError('malformed', 'The ZIP central directory is malformed.');
     }
+    const method = buffer.readUInt16LE(pos + 10);
     const compressed = buffer.readUInt32LE(pos + 20);
     const uncompressed = buffer.readUInt32LE(pos + 24);
+    const localOffset = buffer.readUInt32LE(pos + 42);
     const nameLen = buffer.readUInt16LE(pos + 28);
     const extraLen = buffer.readUInt16LE(pos + 30);
     const commentLen = buffer.readUInt16LE(pos + 32);
@@ -114,7 +125,46 @@ export function scanXlsxZip(buffer: Buffer, budget: XlsxZipBudget): XlsxZipScan 
     if (pos + entrySize > end) {
       throw new XlsxZipGuardError('malformed', 'The ZIP central directory is malformed.');
     }
+    located.push({ method, compressed, uncompressed, localOffset });
     pos += entrySize;
+  }
+
+  // The ADVERTISED sizes above are only what the directory claims. A crafted
+  // archive can declare a tiny size while its deflate stream expands a
+  // thousand-fold, and JSZip (under exceljs) inflates the real stream, not
+  // the claim. So every entry is also inflated here with a hard output cap,
+  // and must inflate to exactly the size it declares: a lie is refused before
+  // exceljs sees the file. The work is bounded by the same budget.
+  let inflatedTotal = 0;
+  for (const entry of located) {
+    const lh = entry.localOffset;
+    if (lh + LOCAL_HEADER_FIXED_SIZE > buffer.length || buffer.readUInt32LE(lh) !== LOCAL_HEADER_SIGNATURE) {
+      throw new XlsxZipGuardError('malformed', 'A ZIP entry points outside the archive.');
+    }
+    const dataStart = lh + LOCAL_HEADER_FIXED_SIZE + buffer.readUInt16LE(lh + 26) + buffer.readUInt16LE(lh + 28);
+    const dataEnd = dataStart + entry.compressed;
+    if (dataEnd > buffer.length) {
+      throw new XlsxZipGuardError('malformed', 'A ZIP entry is truncated.');
+    }
+    let actual: number;
+    if (entry.method === METHOD_STORED) {
+      actual = entry.compressed;
+    } else if (entry.method === METHOD_DEFLATE) {
+      try {
+        actual = inflateRawSync(buffer.subarray(dataStart, dataEnd), { maxOutputLength: budget.maxEntryUncompressed }).length;
+      } catch {
+        throw new XlsxZipGuardError('inflated-size', `An entry inflates past ${budget.maxEntryUncompressed} bytes or is corrupt.`);
+      }
+    } else {
+      throw new XlsxZipGuardError('malformed', 'A ZIP entry uses an unsupported compression method.');
+    }
+    if (actual !== entry.uncompressed) {
+      throw new XlsxZipGuardError('inflated-size', 'A ZIP entry inflates to a different size than it declares.');
+    }
+    inflatedTotal += actual;
+    if (inflatedTotal > budget.maxTotalUncompressed) {
+      throw new XlsxZipGuardError('total-size', `The archive inflates past ${budget.maxTotalUncompressed} bytes.`);
+    }
   }
   return { entries: totalEntries, totalUncompressed, maxEntryUncompressed };
 }

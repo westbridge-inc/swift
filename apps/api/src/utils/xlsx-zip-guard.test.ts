@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { deflateRawSync } from 'node:zlib';
 import ExcelJS from 'exceljs';
 import { scanXlsxZip, XlsxZipGuardError, XLSX_IMPORT_ZIP_BUDGET } from './xlsx-zip-guard';
 
@@ -41,6 +42,49 @@ function declareUncompressed(buffer: Buffer, count: number, size: number): void 
     pos += 46 + nameLen + extraLen + commentLen;
   }
 }
+
+/** A one-entry deflate ZIP built by hand, whose central directory (and local
+ *  header) DECLARE `declared` uncompressed bytes whatever the stream holds. */
+function handZip(content: Buffer, declared: number): Buffer {
+  const name = Buffer.from('xl/worksheets/sheet1.xml');
+  const data = deflateRawSync(content);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(8, 8);
+  local.writeUInt32LE(data.length, 18); local.writeUInt32LE(declared, 22);
+  local.writeUInt16LE(name.length, 26); local.writeUInt16LE(0, 28);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(8, 10); central.writeUInt32LE(data.length, 20); central.writeUInt32LE(declared, 24);
+  central.writeUInt16LE(name.length, 28); central.writeUInt32LE(0, 42);
+  const cdOffset = local.length + name.length + data.length;
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(1, 8); eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(central.length + name.length, 12); eocd.writeUInt32LE(cdOffset, 16);
+  return Buffer.concat([local, name, data, central, name, eocd]);
+}
+
+const reasonOf = (buffer: Buffer) => {
+  try { scanXlsxZip(buffer, XLSX_IMPORT_ZIP_BUDGET); return 'accepted'; } catch (err) { return (err as XlsxZipGuardError).reason; }
+};
+
+describe('scanXlsxZip — a directory that lies about its sizes', () => {
+  it('accepts an honest hand-built entry (the builder itself is sound)', () => {
+    const content = Buffer.from('<worksheet/>'.repeat(100));
+    expect(reasonOf(handZip(content, content.length))).toBe('accepted');
+  });
+
+  it('refuses a bomb that DECLARES 100 bytes but inflates past the per-entry cap, without inflating past it', () => {
+    // 12 MB of zeros deflates to a few KB: the advertised pass sees 100 bytes
+    // and would wave it through; the capped inflate stops at 10 MB.
+    const bomb = handZip(Buffer.alloc(12 * 1024 * 1024), 100);
+    expect(bomb.length).toBeLessThan(64 * 1024);
+    expect(reasonOf(bomb)).toBe('inflated-size');
+  });
+
+  it('refuses an entry whose real size differs from its claim, even under budget', () => {
+    expect(reasonOf(handZip(Buffer.alloc(5000, 7), 100))).toBe('inflated-size');
+  });
+});
 
 describe('scanXlsxZip', () => {
   it('accepts a real workbook inside budget and reports its true sizes', async () => {
