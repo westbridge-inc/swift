@@ -7,7 +7,7 @@ review endpoints, then asserts behaviour against the live API.
 
 This needs live infra (API + Postgres + Redis) and `DEV_OTP_BYPASS=1`, so it is
 **not** part of unit CI — run it against a local stack or the staging pilot's
-PRIVATE `api-journeys` instance (see `deploy/PILOT-RUNBOOK.md` §7).
+PRIVATE `api-journeys` instance (see `deploy/PILOT-RUNBOOK.md` §8, Pilot journeys).
 
 ## Run
 
