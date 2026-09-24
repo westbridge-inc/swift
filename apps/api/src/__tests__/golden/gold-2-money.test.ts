@@ -303,7 +303,10 @@ beforeAll(async () => {
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);
-  await app.register(rateLimit, { keyGenerator: rateLimitKey, max: 200, timeWindow: '1 minute' });
+  // Production's key generator (app.ts): a VERIFIED token buckets per userId,
+  // anything else shares the resolved-IP bucket. app.jwt is read lazily, so
+  // registering authPlugin below is in time.
+  await app.register(rateLimit, { keyGenerator: rateLimitKey((token) => app.jwt.verify(token)), max: 200, timeWindow: '1 minute' });
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.register(authPlugin);
