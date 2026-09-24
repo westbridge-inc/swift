@@ -306,7 +306,11 @@ export const CUST_04: Journey<Ctx> = {
     // store sees them at once and a report is filed against the review's id.
     const storeView = await GET('/vendor/reviews?limit=20', R2.session.token);
     const rows: any[] = Array.isArray(storeView.json?.data) ? storeView.json.data : [];
-    const review = rows.find((r) => String(r.comment ?? '').includes(ctx.runId) && r.orderId === id) ?? rows.find((r) => String(r.comment ?? '').includes(ctx.runId));
+    // Match the review by its ORDER, which is unique to this run. The comment cannot carry
+    // the run id: the review scrub masks any 7+ digit run as a possible phone number
+    // (rating/review-scrub.ts), so "journey staging-2026…" is stored as
+    // "journey staging-[number removed]…" — the product protecting PII, not a lost review.
+    const review = rows.find((r) => r.orderId === id);
     rec.check('the store sees the new review', !!review, `→ ${brief(storeView)} ${rows.length} review(s)`);
     const publicView = await GET(`/customer/vendors/${R2.vendorId}/reviews`, C2.token);
     rec.check('the public listing holds it back (double-blind until both sides rate or 72 h)', !JSON.stringify(publicView.json?.data?.reviews ?? []).includes(review?.id ?? '§'), '');
