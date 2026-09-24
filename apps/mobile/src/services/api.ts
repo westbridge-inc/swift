@@ -806,6 +806,12 @@ export const partnerApi = {
     };
   }, session?: AuthSessionSnapshot) =>
     api.post('/partner/become', data, capturedAuthConfig(session)),
+  /** [VEHICLES] Change the vehicle a mover works with: offline until its documents are approved. */
+  changeVehicle: (data: {
+    vehicleType: VehicleKind;
+    vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
+  }, session?: AuthSessionSnapshot) =>
+    api.put('/partner/vehicle', data, capturedAuthConfig(session)),
 };
 
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
