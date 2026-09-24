@@ -34,6 +34,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { telUrl } from '../../../lib/emergencyPolicy';
 import { orderStatusLabel } from '../../../lib/orderStatus';
 import { taxiDoorFor } from '../../../lib/taxiDoors';
+import { TaxiSignedOut } from '../TaxiSignedOut';
 
 /**
  * The ride's status, in words — from `lib/orderStatus.ts`, the one authority.
@@ -238,7 +239,22 @@ function SearchingCard() {
   );
 }
 
-export function TaxiScreen({ navigation }: any) {
+/**
+ * [Q4] Taxi needs an account. Every ride read behind this door (active ride,
+ * supply, availability, presence, queue) is authenticated, so a visitor with
+ * no session — a guest, or someone whose session just ended — used to sit on
+ * a booking screen polling five endpoints into 401s: "loading forever". The
+ * door is checked BEFORE any ride hook mounts, so a signed-out visitor fires
+ * no ride request at all and is shown the one way in.
+ */
+export function TaxiScreen(props: any) {
+  const isAuthenticated = useAuthStore((st) => st.isAuthenticated);
+  const promptLogin = useAuthStore((st) => st.promptLogin);
+  if (!isAuthenticated) return <TaxiSignedOut navigation={props.navigation} onSignIn={promptLogin} />;
+  return <TaxiBooking {...props} />;
+}
+
+function TaxiBooking({ navigation }: any) {
   const { height: winH } = useWindowDimensions();
   const scheme = useColorScheme();
   const insets = useSafeAreaInsets();
