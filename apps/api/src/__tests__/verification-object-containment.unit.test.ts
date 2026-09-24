@@ -919,6 +919,14 @@ describe('review corrections: deletion obligations and retry progress', () => {
   function retentionRaceHarness() {
     const h = erasureRaceHarness();
     Object.assign(h.person, { activeRole: 'CUSTOMER', lastMoverRole: null });
+    // [DS110 #12] The ban now judges the acting admin against the target inside
+    // the transaction, from the database's view of BOTH accounts — so the
+    // reviewer who bans here must exist as a SUPER_ADMIN row, not only as a claim
+    // on the request.
+    h.people.set('reviewer', {
+      ...h.people.get(A)!, id: 'reviewer', avatar: '', selfieCapturedAt: new Date(0),
+      ...({ activeRole: 'SUPER_ADMIN', roles: ['SUPER_ADMIN', 'CUSTOMER'], phone: 'reviewer-phone' } as Record<string, unknown>),
+    });
     Object.assign(h.doc, { role: 'CUSTOMER', docType: 'national_id' });
     h.db.$queryRaw.mockImplementation(async (query: unknown, userId: string) => {
       const user = h.people.get(userId);

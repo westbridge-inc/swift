@@ -18,7 +18,9 @@ import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
+  useAuthStore,
 } from '../stores/authStore';
+import { accountHoldsRole } from '../lib/roleLanding';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
 import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
@@ -64,13 +66,20 @@ function usePreviewSafeMutation<TData = unknown, TError = unknown, TVars = void,
  *  `myRole` is OWNER / MANAGER / STAFF (drives which tools the UI shows). */
 export function useVendorProfile() {
   const pv = usePreviewDataset();
+  // A customer who tapped "Swift Business" to list a first store holds no
+  // vendor role yet. The server's 403 on their own profile read is then the
+  // confirmation of "no business" that routes them to the setup wizard (the
+  // JOIN flow), not a permission error. The same predicate decides "Join" in
+  // the switcher, so the two screens can never disagree.
+  const outsider = useAuthStore((s) => !accountHoldsRole(s.user as Parameters<typeof accountHoldsRole>[0], 'vendor'));
   const q = useQuery({
-    // [MOB-038] Absence is a 404 and nothing else. This used to run through a
-    // helper that turned EVERY failure into null, and the shell read null as
+    // [MOB-038] Absence is a 404 and nothing else — or a 403 for an account
+    // that holds no vendor role (lib/vendorProfile). This used to run through
+    // a helper that turned EVERY failure into null, and the shell read null as
     // "you have no business" — so an outage offered a working restaurant the
     // setup wizard while its orders were live.
     queryKey: ['vendor', 'profile'],
-    queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile()),
+    queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile(), { outsider }),
     retry: false,
     refetchInterval: 20000,
     enabled: !pv,

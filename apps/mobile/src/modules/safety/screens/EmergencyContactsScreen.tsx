@@ -7,6 +7,7 @@ import {
   Card,
   CodeInput,
   ConfirmDialog,
+  DecorativeIcon,
   EmptyState,
   ErrorState,
   Header,
@@ -27,6 +28,10 @@ import {
   useVerifyEmergencyContact,
   type EmergencyContact,
 } from '../../../hooks/safety';
+import { DialCodeChip } from '../../../kit/dial-code-chip';
+import { DEFAULT_COUNTRY } from '../../../lib/markets';
+import { clampPhone, phoneExample } from '../../../lib/phone';
+import { EMERGENCY_CONTACT_CTA, emergencyContactForm } from '../../../lib/emergencyContactForm';
 
 /**
  * The people an SOS actually reaches.
@@ -54,8 +59,12 @@ export function EmergencyContactsScreen() {
 
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState('');
-  const [phone, setPhone] = useState('+592');
+  // Local digits only, typed the way sign-in takes a number: the market's
+  // calling code is fixed in front (lib/emergencyContactForm composes E.164).
+  const [digits, setDigits] = useState('');
   const [relationship, setRelationship] = useState('');
+  const [nameTouched, setNameTouched] = useState(false);
+  const [phoneTouched, setPhoneTouched] = useState(false);
 
   const [verifying, setVerifying] = useState<EmergencyContact | null>(null);
   const [code, setCode] = useState('');
@@ -70,23 +79,34 @@ export function EmergencyContactsScreen() {
     ? ((verify.error as any)?.response?.data?.error?.message ?? 'That code did not match. Ask them to read it again.')
     : undefined;
 
-  const canAdd = name.trim().length >= 2 && /^\+[1-9]\d{6,14}$/.test(phone.trim());
+  const form = emergencyContactForm({
+    name,
+    digits,
+    dialCode: DEFAULT_COUNTRY.dialCode,
+    countryCode: DEFAULT_COUNTRY.code,
+    nameTouched,
+    phoneTouched,
+  });
+
+  const resetAdd = () => {
+    setAdding(false);
+    setName('');
+    setDigits('');
+    setRelationship('');
+    setNameTouched(false);
+    setPhoneTouched(false);
+    add.reset();
+  };
 
   const submitAdd = () => {
+    if (!form.canSubmit) return; // guarded by the button, restated so no call site can bypass it
     add.mutate(
       {
         name: name.trim(),
-        phoneE164: phone.trim(),
+        phoneE164: form.phoneE164,
         ...(relationship.trim() ? { relationship: relationship.trim() } : {}),
       },
-      {
-        onSuccess: () => {
-          setAdding(false);
-          setName('');
-          setPhone('+592');
-          setRelationship('');
-        },
-      },
+      { onSuccess: resetAdd },
     );
   };
 
@@ -209,53 +229,94 @@ export function EmergencyContactsScreen() {
         </>
       )}
 
-      <PopupCard visible={adding} onClose={() => setAdding(false)}>
-        <PopupTitle>Add an emergency contact</PopupTitle>
-        <T variant="caption" tone="muted">
-          We text them a 6-digit code now. Ask them to read it back to you, so we know the number
-          is right before an emergency depends on it.
-        </T>
-        <LabeledInput label="Their name" icon="user" placeholder="e.g. Anita" value={name} onChangeText={setName} />
-        <LabeledInput
-          label="Their phone"
-          icon="phone"
-          placeholder="+5926001234"
-          value={phone}
-          onChangeText={setPhone}
-          keyboardType="phone-pad"
-        />
-        <LabeledInput
-          label="Relationship (optional)"
-          icon="heart"
-          placeholder="Sister, partner, neighbour…"
-          value={relationship}
-          onChangeText={setRelationship}
-          error={addError}
-        />
-        {/* [#947's grammar] Disabled says the ask. */}
-        <PillButton
-          label={canAdd ? 'Send the code' : 'Enter their name and full number'}
-          loading={add.isPending}
-          disabled={!canAdd}
-          onPress={submitAdd}
-        />
+      <PopupCard visible={adding} onClose={resetAdd}>
+        {/* THE FORM IS A STRETCHED COLUMN. PopupCard centres its content —
+            right for the pictogram-and-two-buttons dialogs it was built for —
+            so a child with no width of its own shrinks to its content. These
+            three inputs used to sit directly in the card and came out as
+            ~140px boxes, centred, placeholders cut to "Sister, pa…": the
+            broken form on the owner's phone. Every other popup form in the app
+            wraps its fields in `alignSelf: 'stretch'`; this one now does too.
+            The card's own KeyboardAvoidingView + ScrollView keep the fields
+            and the button above the keyboard. */}
+        <View style={{ alignSelf: 'stretch', gap: space.lg }}>
+          <PopupTitle>Add an emergency contact</PopupTitle>
+          <T variant="caption" tone="muted">
+            We text them a 6-digit code now. Ask them to read it back to you, so we know the number
+            is right before an emergency depends on it.
+          </T>
+          <LabeledInput
+            label="Their name"
+            icon="user"
+            placeholder="e.g. Anita"
+            value={name}
+            onChangeText={setName}
+            onBlur={() => setNameTouched(true)}
+            autoCapitalize="words"
+            error={form.nameHint}
+          />
+          {/* Local digits on the numeric keypad behind a fixed +592, exactly as
+              sign-in takes a number; the value sent is E.164. */}
+          <LabeledInput
+            label="Their phone"
+            icon="phone"
+            accessibilityLabel="Their phone number"
+            accessibilityHint="Enter their number without the country calling code"
+            placeholder={phoneExample(DEFAULT_COUNTRY.code)}
+            keyboardType="phone-pad"
+            maxLength={15}
+            value={digits}
+            onChangeText={(typed) => setDigits(clampPhone(DEFAULT_COUNTRY.dialCode, typed))}
+            onBlur={() => setPhoneTouched(true)}
+            error={form.phoneHint}
+            right={<DialCodeChip countryCode={DEFAULT_COUNTRY.code} dialCode={DEFAULT_COUNTRY.dialCode} countryName={DEFAULT_COUNTRY.name} />}
+          />
+          <LabeledInput
+            label="Relationship (optional)"
+            icon="heart"
+            placeholder="Sister, partner, neighbour…"
+            value={relationship}
+            onChangeText={setRelationship}
+          />
+          {/* The server's own words for a refused save (too many contacts, the
+              number's SMS budget, a send failure) — under the form, not under
+              a field they are not about. */}
+          {addError ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <DecorativeIcon>
+                <Feather name="alert-circle" size={13} color={color.error} />
+              </DecorativeIcon>
+              <T variant="caption" tone="error" style={{ flex: 1 }}>{addError}</T>
+            </View>
+          ) : null}
+          {/* The button says what it does; what is missing is said under the
+              field it belongs to (lib/emergencyContactForm), never here. */}
+          <PillButton
+            label={EMERGENCY_CONTACT_CTA}
+            loading={add.isPending}
+            disabled={!form.canSubmit}
+            onPress={submitAdd}
+          />
+        </View>
       </PopupCard>
 
       <PopupCard visible={verifying != null} onClose={() => { setVerifying(null); setCode(''); }}>
-        <PopupTitle>{`Confirm ${verifying?.name ?? 'this contact'}`}</PopupTitle>
-        <T variant="caption" tone="muted">
-          {`Ask ${verifying?.name ?? 'them'} for the 6-digit code we texted to ${verifying?.phoneE164 ?? 'their phone'}.`}
-        </T>
-        <CodeInput value={code} onChange={setCode} error={verify.isError} />
-        {verifyError ? (
-          <T variant="caption" style={{ color: color.error }}>{verifyError}</T>
-        ) : null}
-        <PillButton
-          label="Confirm"
-          loading={verify.isPending}
-          disabled={code.length < 4}
-          onPress={submitVerify}
-        />
+        <View style={{ alignSelf: 'stretch', gap: space.lg }}>
+          <PopupTitle>{`Confirm ${verifying?.name ?? 'this contact'}`}</PopupTitle>
+          <T variant="caption" tone="muted">
+            {`Ask ${verifying?.name ?? 'them'} for the 6-digit code we texted to ${verifying?.phoneE164 ?? 'their phone'}.`}
+          </T>
+          <CodeInput value={code} onChange={setCode} error={verify.isError} />
+          {verifyError ? (
+            <T variant="caption" style={{ color: color.error }}>{verifyError}</T>
+          ) : null}
+          <PillButton
+            label="Confirm"
+            loading={verify.isPending}
+            disabled={code.length < 4}
+            onPress={submitVerify}
+          />
+        </View>
       </PopupCard>
 
       <ConfirmDialog

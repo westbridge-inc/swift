@@ -50,6 +50,7 @@ import { assertVelocity } from '../integrity/velocity';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { arrivalEvidence } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
+import { normalizeRegistrationMark } from '../verification/subjects';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -166,6 +167,15 @@ export async function driverRoutes(app: FastifyInstance) {
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
     const me = await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
+    // [High #9 · DS109] Changing the plate re-identifies the vehicle the driver operates.
+    // Step-up first (the same proof as a money surface), and the old vehicle links close so
+    // GO re-checks the EXACT new vehicle — a retyped plate never carries another subject's
+    // approved documents, and the old vehicle's evidence stops counting.
+    const plateChanged = body.licensePlate !== undefined
+      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(me.licensePlate ?? '');
+    if (plateChanged) {
+      await requireStepUp(app, request);
+    }
     const mmgPayUrl = body.mmgPayUrl === undefined
       ? undefined
       : mmgPayUrlForWrite(body.mmgPayUrl);
@@ -195,6 +205,10 @@ export async function driverRoutes(app: FastifyInstance) {
         ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
         ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
         ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
+        // [High #9 · DS109] A real plate change re-identifies the vehicle: retire live supply
+        // NOW (same atomic shape as the admin reject path) and clear the legacy verification
+        // flag, so the new vehicle must be verified before this driver is dispatchable again.
+        ...(plateChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
       },
       include: {
         user: {
@@ -211,6 +225,15 @@ export async function driverRoutes(app: FastifyInstance) {
         },
       },
     });
+    if (plateChanged) {
+      // A plate change never inherits another subject's approved documents: every open
+      // vehicle link closes. New submissions for the new plate create a PENDING assignment
+      // that an admin must approve before its evidence propagates.
+      await app.prisma.subjectLink.updateMany({
+        where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
+        data: { validTo: new Date() },
+      });
+    }
     if (mmgPayUrl === null) {
       await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'DRIVER', entityId: me.id, userId: request.user.userId });
     } else if (mmgPayUrl !== undefined) {
