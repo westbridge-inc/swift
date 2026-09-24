@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * Redis search memory is scoped to a delivery-custody generation after the
  * first ownership switch. Generation zero deliberately keeps the historical
@@ -19,15 +21,29 @@ export const dispatchRoundKey = (orderId: string, version?: number | null): stri
 export const dispatchExhaustKey = (orderId: string, version?: number | null): string =>
   `dispatch:exhausts:${orderId}${deliveryGenerationSuffix(version)}`;
 
-/** [E36] Per-job one-shot exhaustion token. A BullMQ redelivery replays the
- *  SAME job id, so recording which job already committed the attempt-count
- *  increment lets the exhaustion script reuse that count instead of INCRing
- *  again. A genuine next cycle is a different BullMQ job, hence a different
- *  token, so accumulation up to EXHAUST_CAP is preserved. The key lives only
- *  as long as the terminal window (EXHAUST_TERMINAL_TTL_SECONDS): a replay
- *  after that window is a legitimate fresh search. */
-export const exhaustJobKey = (orderId: string, version?: number | null, jobToken?: string | null): string =>
-  `dispatch:exhaust-job:${orderId}${deliveryGenerationSuffix(version)}:${jobToken ?? ''}`;
+/** [E36] The replay identity of one queued dispatch run: a short hash of the
+ *  BullMQ job id. A redelivery (the worker died, the job's lock lapsed)
+ *  replays the SAME job id, so it gets the same tag; every genuine cycle is a
+ *  different job with a different tag. Hashed so it is colon-free (BullMQ
+ *  refuses a custom job id containing ':' unless it has exactly three parts)
+ *  and so a re-arm chain keyed by its parent's tag never grows in length. */
+export const dispatchReplayTag = (jobId: string): string =>
+  createHash('sha256').update(jobId).digest('hex').slice(0, 20);
+
+/** [E36] Marks that the run with this replay tag already committed its
+ *  exhaustion attempt-count increment for this search, so a redelivery reuses
+ *  that count instead of INCRing again. Lives for the terminal window
+ *  (EXHAUST_TERMINAL_TTL_SECONDS), like the counter itself. */
+export const exhaustJobKey = (orderId: string, version: number | null | undefined, replayTag: string): string =>
+  `dispatch:exhaust-job:${orderId}${deliveryGenerationSuffix(version)}:${replayTag}`;
+
+/** [E36] The re-arm a run schedules, keyed by that run's replay tag: a
+ *  redelivered run re-adds the SAME job id and BullMQ keeps the first. Keyed
+ *  by the parent run, never by the attempt count: the counter restarts at 1
+ *  after a manual retry, and an id reused from a retained completed job would
+ *  make BullMQ silently drop a legitimate re-sweep. */
+export const redispatchJobId = (orderId: string, replayTag: string): string =>
+  `redispatch-${orderId}-${replayTag}`;
 
 export const dispatchExhaustLockKey = (orderId: string, version?: number | null): string =>
   `dispatch:exhaust-lock:${orderId}${deliveryGenerationSuffix(version)}`;

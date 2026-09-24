@@ -41,8 +41,10 @@ import {
   dispatchExhaustKey,
   dispatchExhaustLockKey,
   dispatchGenerationInitKey,
+  dispatchReplayTag,
   dispatchRoundKey,
   exhaustJobKey,
+  redispatchJobId,
 } from './dispatch-generation-keys';
 
 declare module 'fastify' {
@@ -330,11 +332,11 @@ export type TimeoutScheduler = (orderId: string, riderId: string, delayMs: numbe
 /** Schedules a delayed full re-dispatch. Returns false when no queue is up
  *  (tests, degraded boot) so exhaustion falls through to the honest "no
  *  movers" notices instead of promising a retry that will never run.
- *  [E36] `attempts` and `searchVersion` ride along so the scheduler can derive
- *  a deterministic BullMQ jobId — a redelivered exhaustion that re-runs the
- *  schedule step then collides with the still-existing job and no-ops instead
- *  of arming a second re-sweep. */
-export type RedispatchScheduler = (orderId: string, delayMs: number, attempts: number, searchVersion?: number) => Promise<boolean>;
+ *  [E36] `replayJobId`, when present, is the BullMQ job id to use: derived
+ *  from the replay tag of the queued run that is scheduling, so a redelivery
+ *  of that run re-adds the SAME id and BullMQ keeps the first re-arm. Absent
+ *  for runs with no queue job behind them (routes, the reconciler). */
+export type RedispatchScheduler = (orderId: string, delayMs: number, replayJobId?: string) => Promise<boolean>;
 
 interface GeoCandidateRow {
   id: string;
@@ -2660,7 +2662,10 @@ export class DispatchService {
   }, jobToken?: string) {
     const pool = poolForOrder(order);
     const searchVersion = pool === 'RIDER' ? order.fulfillmentModeVersion : undefined;
-    const attempts = await this.recordExhaustion(order, jobToken);
+    // [E36] The replay identity of this queued run (absent for route and
+    // reconciler triggers, which BullMQ never redelivers).
+    const replayTag = jobToken ? dispatchReplayTag(jobToken) : undefined;
+    const attempts = await this.recordExhaustion(order, replayTag);
     if (attempts === null) return false;
     // The decision above is serialized with installation. A new search can
     // start after it commits; do not publish an earlier exhaustion over a card
@@ -2670,7 +2675,7 @@ export class DispatchService {
       const authority = await this.offerAuthority(order.id, pool, order.fulfillmentModeVersion);
       if (!authority.offerable) return false;
     }
-    return this.publishExhaustion(order, pool, searchVersion, attempts);
+    return this.publishExhaustion(order, pool, searchVersion, attempts, replayTag);
   }
 
   /** Decide whether this search is exhausted beside offer installation, under
@@ -2679,7 +2684,7 @@ export class DispatchService {
    * notification or provider operation runs while the row is locked. */
   private async recordExhaustion(
     order: { id: string; orderType: string; fulfillmentModeVersion: number },
-    jobToken?: string,
+    replayTag?: string,
   ): Promise<number | null> {
     const pool = poolForOrder(order);
     const searchVersion = pool === 'RIDER' ? order.fulfillmentModeVersion : undefined;
@@ -2709,23 +2714,24 @@ export class DispatchService {
           -- R8_EXHAUST_EPOCH: an old command can outlive its DB transaction.
           -- Check installation history even if the new pair already expired
           -- or promotion already cleared its recovery marker (no ABA).
-          -- [E36] A redelivered BullMQ job carries its id as a one-shot token:
-          -- if THIS exact job already committed an exhaustion for this search,
-          -- reuse the existing count instead of INCRing again. The counter is
-          -- then burned once, and the downstream publish step re-reads the same
-          -- count, so its dedupeKey pushes and deterministic jobId re-arm
-          -- collapse too. A genuine next cycle is a different job, hence a
-          -- different token, so accumulation up to EXHAUST_CAP is preserved.
-          if ARGV[5] ~= '' and redis.call('EXISTS', KEYS[7]) == 1 then
-            local n = redis.call('GET', KEYS[1]); if not n then return 0 end; return tonumber(n) end
           if redis.call('EXISTS', KEYS[3]) == 1
             or (redis.call('GET', KEYS[4]) or '') ~= ARGV[2]
             or (redis.call('GET', KEYS[2]) or '') ~= ARGV[3]
             or (redis.call('GET', KEYS[1]) or '') ~= ARGV[4] then return 0 end
+          -- [E36] A redelivered queue run (same replay tag) that already
+          -- committed this search's exhaustion returns the count IT committed
+          -- (stored with its marker) instead of INCRing again, so it re-takes
+          -- the same branch and every publish collapses under its tag. This
+          -- runs AFTER the guards above: a replay that arrives once a newer
+          -- search owns the order is refused like any stale command.
+          if ARGV[5] ~= '' then
+            local committed = redis.call('GET', KEYS[7])
+            if committed then return tonumber(committed) end
+          end
           local n = redis.call('INCR', KEYS[1])
           redis.call('EXPIRE', KEYS[1], ARGV[1])
           redis.call('DEL', KEYS[2], KEYS[5], KEYS[6])
-          if ARGV[5] ~= '' then redis.call('SET', KEYS[7], '1'); redis.call('EXPIRE', KEYS[7], ARGV[6]) end
+          if ARGV[5] ~= '' then redis.call('SET', KEYS[7], n, 'EX', ARGV[1]) end
           return n
         `,
         7,
@@ -2735,10 +2741,10 @@ export class DispatchService {
         offerEpochKey(order.id, searchVersion),
         roundKey(order.id, searchVersion),
         declinedKey(order.id, searchVersion),
-        exhaustJobKey(order.id, searchVersion, jobToken),
+        exhaustJobKey(order.id, searchVersion, replayTag ?? '-'),
         String(EXHAUST_TERMINAL_TTL_SECONDS),
         epoch ?? '', recovery ?? '', exhaustion ?? '',
-        jobToken ?? '', String(EXHAUST_TERMINAL_TTL_SECONDS),
+        replayTag ?? '',
       );
       if (aborted || typeof attempts !== 'number' || !Number.isInteger(attempts) || attempts <= 0) return null;
 
@@ -2771,14 +2777,14 @@ export class DispatchService {
     id: string; orderNumber: string; customerId: string; isExpress?: boolean;
     tenantId: string; orderType: string; fulfillmentModeVersion: number;
     vendor: { name: string; owner: { userId: string } } | null;
-  }, pool: DispatchPool, searchVersion: number | undefined, attempts: number): Promise<boolean> {
+  }, pool: DispatchPool, searchVersion: number | undefined, attempts: number, replayTag?: string): Promise<boolean> {
     if (pool === 'RIDER') {
       const authority = await this.offerAuthority(order.id, pool, order.fulfillmentModeVersion);
       if (!authority.offerable) return false;
     }
     if (attempts < EXHAUST_CAP && this.scheduleRedispatch) {
       const retryDelay = order.isExpress ? EXPRESS_REDISPATCH_DELAY_MS : REDISPATCH_DELAY_MS;
-      if (await this.scheduleRedispatch(order.id, retryDelay, attempts, searchVersion)) {
+      if (await this.scheduleRedispatch(order.id, retryDelay, replayTag ? redispatchJobId(order.id, replayTag) : undefined)) {
         if (await this.redis.get(offerKey(order.id))) return false;
         if (pool === 'RIDER') {
           const authority = await this.offerAuthority(order.id, pool, order.fulfillmentModeVersion);
@@ -2791,9 +2797,11 @@ export class DispatchService {
           body: `All nearby movers are busy right now — we are automatically retrying for order ${order.orderNumber}.`,
           audience: 'customer',
           data: { kind: 'dispatch_retrying', orderId: order.id },
-          // [E36] A redelivery re-runs this send with the same attempt count —
-          // the deterministic key collapses it into the first inbox row/push.
-          dedupeKey: `dispatch-retrying:${order.id}:${searchVersion ?? 'none'}:${attempts}`,
+          // [E36] A redelivered run re-sends under the same replay tag, and
+          // the (user, dedupeKey) unique collapses it into the first row. Not
+          // keyed by the attempt count: that restarts at 1 after a manual
+          // retry, and a genuine new cycle must still be told.
+          ...(replayTag ? { dedupeKey: `dispatch-retrying:${order.id}:${replayTag}` } : {}),
         });
         return true;
       }
@@ -2816,7 +2824,7 @@ export class DispatchService {
       if (row?.orderType === 'TAXI' && row.status === 'PENDING' && !row.driverId) {
         const ageMs = Date.now() - row.placedAt.getTime();
         if (ageMs < TAXI_WAIT_LIMIT_MIN * 60_000) {
-          if (await this.scheduleRedispatch(order.id, TAXI_RESCAN_MS, attempts, searchVersion)) {
+          if (await this.scheduleRedispatch(order.id, TAXI_RESCAN_MS, replayTag ? redispatchJobId(order.id, replayTag) : undefined)) {
             // The open screen still needs its honest dead-state card.
             this.io.to(`order:${order.id}`).emit('dispatch:exhausted', { orderId: order.id, orderNumber: order.orderNumber });
             // Supply drought is still an ops fact — page once per terminal window.
@@ -2876,9 +2884,8 @@ export class DispatchService {
       body: `We could not find a mover for order ${order.orderNumber}. ${order.vendor?.name ?? 'The vendor'} can hold it or cancel — we will keep you posted.`,
       audience: 'customer',
       data: { kind: 'dispatch_exhausted', orderId: order.id },
-      // [E36] One terminal notice per attempt count: a same-job redelivery
-      // re-reads the same count and this key collapses the duplicate send.
-      dedupeKey: `dispatch-exhausted:${order.id}:${searchVersion ?? 'none'}:${attempts}`,
+      // [E36] A redelivered run collapses into its first terminal notice.
+      ...(replayTag ? { dedupeKey: `dispatch-exhausted:${order.id}:${replayTag}` } : {}),
     });
     // Terminal socket signal to the rider's LIVE screen (mirrors the assigned
     // emit) — so a taxi rider's ActiveRide can flip from "contacting drivers…"
@@ -2893,7 +2900,7 @@ export class DispatchService {
         body: `No mover accepted order ${order.orderNumber}. You can hold it and retry, or cancel it.`,
         audience: 'business',
         data: { kind: 'dispatch_exhausted', orderId: order.id },
-        dedupeKey: `dispatch-exhausted:${order.id}:${searchVersion ?? 'none'}:${attempts}`,
+        ...(replayTag ? { dedupeKey: `dispatch-exhausted:${order.id}:${replayTag}` } : {}),
       });
     }
 
@@ -2967,13 +2974,11 @@ export function makeDispatchService(app: FastifyInstance): DispatchService {
       removeOnFail: 50,
     });
   };
-  const redispatch: RedispatchScheduler = async (orderId, delayMs, attempts, searchVersion) => {
+  const redispatch: RedispatchScheduler = async (orderId, delayMs, replayJobId) => {
     if (!app.dispatchQueue) return false; // no queue -> exhaustion stays final
     await app.dispatchQueue.add('dispatch-order', { orderId }, {
-      // [E36] Deterministic jobId: a redelivery that re-runs the exhaustion
-      // tail re-adds the SAME id, which BullMQ collapses into the still-
-      // existing delayed job instead of arming a second re-sweep.
-      jobId: `redispatch:${orderId}:${searchVersion ?? 'none'}:${attempts}`,
+      // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
+      ...(replayJobId ? { jobId: replayJobId } : {}),
       delay: delayMs,
       removeOnComplete: 100,
       removeOnFail: 50,

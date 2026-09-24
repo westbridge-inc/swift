@@ -1157,12 +1157,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               removeOnFail: 50,
             });
           },
-          async (orderId, delayMs, attempts, searchVersion) => {
+          async (orderId, delayMs, replayJobId) => {
             await queues.dispatchQueue.add('dispatch-order', { orderId }, {
-              // [E36] Deterministic jobId: a redelivery that re-runs the
-              // exhaustion tail re-adds the SAME id, which BullMQ collapses
-              // into the still-existing delayed job instead of arming twice.
-              jobId: `redispatch:${orderId}:${searchVersion ?? 'none'}:${attempts}`,
+              // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
+              ...(replayJobId ? { jobId: replayJobId } : {}),
               delay: delayMs,
               removeOnComplete: 100,
               removeOnFail: 50,
@@ -1916,9 +1914,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             removeOnFail: 50,
           });
         },
-        async (orderId, delayMs, attempts, searchVersion) => {
+        async (orderId, delayMs, replayJobId) => {
           await queues.dispatchQueue.add('dispatch-order', { orderId }, {
-            jobId: `redispatch:${orderId}:${searchVersion ?? 'none'}:${attempts}`,
+            // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
+            ...(replayJobId ? { jobId: replayJobId } : {}),
             delay: delayMs,
             removeOnComplete: 100,
             removeOnFail: 50,
@@ -1928,8 +1927,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       );
 
       if (job.name === 'dispatch-order') {
-        // [E36] The job id is the replay token: a redelivery of THIS job
-        // proves it already committed the exhaustion side effects once.
+        // [E36] The job id is the replay identity: a redelivery of THIS job
+        // reuses what it already committed instead of repeating it.
         await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id);
       } else if (job.name === 'offer-timeout') {
         await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId);
