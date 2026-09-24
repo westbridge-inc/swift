@@ -163,6 +163,16 @@ async function checkoutMmg(lines: Array<{ vendorId: string; itemId: string; quan
   }
   return call('POST', '/api/v1/customer/checkout', who.token, { paymentMethod: 'MOBILE_MONEY' }, { 'idempotency-key': `gold2-mmg-${nanoid(10)}` });
 }
+/** [MKT-F057] The customer holds the door PIN: it is on their own order screen while the
+ *  goods are between the store and the door. The rider enters what they are told. */
+async function doorPin(orderId: string, holder: Actor = customer): Promise<string> {
+  const res = await call('GET', `/api/v1/customer/orders/${orderId}`, holder.token);
+  expect(res.statusCode, res.body).toBe(200);
+  const pin: string = res.json().data.ridePin;
+  expect(pin).toMatch(/^\d{6}$/);
+  return pin;
+}
+
 async function dinerOrder(quantity = 1) {
   const res = await checkoutMmg([{ vendorId: dinerId, itemId: dinerItemId, quantity }]);
   expect(res.statusCode, res.body).toBe(200);
@@ -459,8 +469,10 @@ describe('GOLD-2 · VEND-03 / MONEY-02 / CUST-02 — an MMG order end to end', (
       expect((await riderStep(rider, order.id, step)).statusCode).toBe(200);
     }
 
+    // [MKT-F057] Every door call below carries the customer's PIN, so each refusal is its OWN rule.
+    const pin = await doorPin(order.id);
     // The rider can never self-attest MMG at the door.
-    const cashDoor = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid', gps: HOME });
+    const cashDoor = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid', gps: HOME, ridePin: pin });
     expect(cashDoor.statusCode).toBe(409);
     expect(cashDoor.json().error.code).toBe('CASH_HANDOVER_ONLY');
     expect(await claimFacts(order.id)).toMatchObject({ status: 'EN_ROUTE_DELIVERY', paymentStatus: 'CLAIMED' });
@@ -469,16 +481,16 @@ describe('GOLD-2 · VEND-03 / MONEY-02 / CUST-02 — an MMG order end to end', (
     const onTheWay = await activeHandover(rider);
     expect(onTheWay).toMatchObject({ rail: 'MOBILE_MONEY', paymentState: 'CLAIMED', custodyState: 'EN_ROUTE_DELIVERY', permitted: 'DELIVER_NO_CASH', blockReason: null });
     expect((await riderStep(rider, order.id, 'arrived')).statusCode).toBe(200);
-    const stale = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: onTheWay.version });
+    const stale = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: onTheWay.version, ridePin: pin });
     expect(stale.statusCode).toBe(409);
     expect(stale.json().error.code).toBe('HANDOVER_STALE');
     expect(await claimFacts(order.id)).toMatchObject({ status: 'ARRIVED' });
-    const notTheRider = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, otherRider.token, {});
+    const notTheRider = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, otherRider.token, { ridePin: pin });
     expect(notTheRider.statusCode).toBe(403);
     expect(notTheRider.json().error.code).toBe('NOT_YOUR_ORDER');
     const fresh = await activeHandover(rider);
     expect(fresh).toMatchObject({ custodyState: 'ARRIVED', permitted: 'DELIVER_NO_CASH' });
-    const delivered = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: fresh.version });
+    const delivered = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: fresh.version, ridePin: pin });
     expect(delivered.statusCode, delivered.body).toBe(200);
     expect(delivered.json().data).toMatchObject({ orderId: order.id, status: 'DELIVERED', deliveryFee: order.deliveryFee, tip: 0, earning: order.deliveryFee });
     // Swift never turned the store's word into a capture.
@@ -583,7 +595,9 @@ describe('GOLD-2 · VEND-03 / CUST-02 — a disputed payment holds the order unt
     expect(arrive.statusCode).toBe(409);
     expect(arrive.json().error.code).toBe('MMG_CLAIM_MISMATCH');
     expect(await activeHandover(rider)).toMatchObject({ permitted: 'BLOCKED', blockReason: 'MMG_CLAIM_MISMATCH' });
-    const deliver = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, {});
+    // Even with the customer's PIN the door stays shut: the hold is the rule here.
+    const pin = await doorPin(order.id);
+    const deliver = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { ridePin: pin });
     expect(deliver.statusCode).toBe(409);
     expect(deliver.json().error.code).toBe('MMG_CLAIM_MISMATCH');
     expect(await claimFacts(order.id)).toEqual(disputed);
@@ -611,7 +625,7 @@ describe('GOLD-2 · VEND-03 / CUST-02 — a disputed payment holds the order unt
     expect((await riderStep(rider, order.id, 'arrived')).statusCode).toBe(200);
     const open = await activeHandover(rider);
     expect(open).toMatchObject({ permitted: 'DELIVER_NO_CASH', blockReason: null });
-    const delivered = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: open.version });
+    const delivered = await call('PUT', `/api/v1/rider/orders/${order.id}/delivered`, rider.token, { handoverVersion: open.version, ridePin: pin });
     expect(delivered.statusCode, delivered.body).toBe(200);
     expect(await claimFacts(order.id)).toMatchObject({ status: 'DELIVERED', paymentStatus: 'CLAIMED' });
   });

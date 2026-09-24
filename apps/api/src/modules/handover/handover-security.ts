@@ -76,19 +76,28 @@ export interface HandoverStatus {
   locked: boolean;
   /** tries left after the next one */
   remaining: number;
+  /** [MKT-F057] Wrong delivery-PIN tries so far, and whether the door is locked (support reset). */
+  ridePinAttempts: number;
+  ridePinLocked: boolean;
 }
 
 export function handoverStatus(
-  row: { pickupCode?: string | null; ridePin?: string | null; pickupCodeAttempts?: number | null },
+  row: { pickupCode?: string | null; ridePin?: string | null; pickupCodeAttempts?: number | null; ridePinAttempts?: number | null },
   max: number = MAX_HANDOVER_ATTEMPTS,
 ): HandoverStatus {
   const attempts = row.pickupCodeAttempts ?? 0;
   const { locked, remaining } = handoverAttemptState(attempts, max);
+  // [MKT-F057] The delivery PIN keeps its own budget; support must see ITS lockout,
+  // not the pickup code's, before reaching for the reset.
+  const pinAttempts = row.ridePinAttempts ?? 0;
+  const pin = handoverAttemptState(pinAttempts, max);
   return {
     pickupCodeIssued: typeof row.pickupCode === 'string' && row.pickupCode.length > 0,
     ridePinIssued: typeof row.ridePin === 'string' && row.ridePin.length > 0,
     attempts,
     locked,
     remaining,
+    ridePinAttempts: pinAttempts,
+    ridePinLocked: pin.locked,
   };
 }

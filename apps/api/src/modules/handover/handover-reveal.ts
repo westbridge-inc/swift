@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { randomInt } from 'crypto';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { handoverBreakGlassCounter } from '../../plugins/observability';
+import { newRidePin } from '../rides/ride-pin';
 
 // ---------------------------------------------------------------------------
 // [A-15] THE ONE AUDITED DOOR TO A HANDOVER SECRET.
@@ -186,5 +187,66 @@ export async function rotatePickupCode(deps: HandoverRevealDeps, input: RevealIn
   });
 
   handoverBreakGlassCounter.labels('rotate').inc();
+  return { auditId: audit.id, rotated: true };
+}
+
+/** The door window a goods delivery PIN lives in (the customer's screen shows it only then). */
+const DELIVERY_PIN_WINDOW = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'] as const;
+
+/**
+ * [MKT-F057 · decision 5: "5 attempts, with a support reset"] Issue a new delivery PIN
+ * and clear its guessing budget. Five wrong door attempts lock the order (MAX_ATTEMPTS),
+ * and without this the only ways out were failing a paid delivery (no_show/refused) or a
+ * force-cancel with a refund. Same door as the pickup code: step-up at the route, a
+ * written reason, a compare-and-set on the PIN that was read (two operators never hand
+ * out two PINs), and an audit row in the same transaction. Nobody reads the new value
+ * here: the customer holds it and sees it on their own order screen, and the rider enters
+ * what the customer reads out.
+ */
+export async function resetDeliveryPin(deps: HandoverRevealDeps, input: RevealInput): Promise<RotateResult> {
+  const reason = assertReason(input.reason);
+  const order = await deps.prisma.order.findUnique({
+    where: { id: input.orderId },
+    select: { id: true, orderNumber: true, customerId: true, status: true, fulfillment: true, orderType: true, fulfillmentMode: true, ridePin: true, ridePinAttempts: true },
+  });
+  if (!order) throw new NotFoundError('Order', input.orderId);
+  const goodsDelivery = order.fulfillment === 'DELIVERY' && order.orderType !== 'TAXI' && order.orderType !== 'COURIER' && order.fulfillmentMode !== 'VENDOR_DELIVERY';
+  if (!goodsDelivery || !order.ridePin) {
+    throw new AppError(404, 'NO_DELIVERY_PIN', 'This order has no delivery PIN to reset.');
+  }
+  if (!(DELIVERY_PIN_WINDOW as readonly string[]).includes(order.status)) {
+    throw new AppError(409, 'NOT_AT_THE_DOOR', 'A delivery PIN can be reset only while the order is on its way or at the door.');
+  }
+
+  const next = newRidePin();
+  const { audit } = await deps.prisma.$transaction(async (tx) => {
+    const updated = await tx.order.updateMany({
+      where: { id: order.id, ridePin: order.ridePin },
+      data: { ridePin: next, ridePinAttempts: 0 },
+    });
+    if (updated.count !== 1) {
+      throw new AppError(409, 'ROTATION_RACED', 'This delivery PIN was reset by someone else — reload the order.');
+    }
+    const row = await tx.auditLog.create({
+      data: {
+        userId: input.actorId,
+        action: 'RESET_DELIVERY_PIN',
+        entity: 'Order',
+        entityId: order.id,
+        changes: {
+          reason,
+          orderNumber: order.orderNumber,
+          customerId: order.customerId,
+          orderStatus: order.status,
+          attemptsCleared: order.ridePinAttempts,
+        },
+        ipAddress: input.ip,
+        userAgent: input.userAgent,
+      },
+    });
+    return { audit: row };
+  });
+
+  handoverBreakGlassCounter.labels('reset_delivery_pin').inc();
   return { auditId: audit.id, rotated: true };
 }
