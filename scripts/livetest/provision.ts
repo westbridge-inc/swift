@@ -15,6 +15,7 @@ import { randomBytes } from 'node:crypto';
 import { login, GET, POST, PUT, req, upload, codeOf, type Session, type Res } from './client.js';
 import { ensureSelfies, uniquePng, type Roster } from './roster.js';
 import { FICTIONAL_GY, TargetRefused } from './guard.js';
+import { isJourneyMintedStore } from './store-retire.js';
 import type { World, WorldItem } from './journeys/context.js';
 import { activeLegsOf, customerOrder, riderToDoorFrom, doorOf, startAndSettle, IN_CUSTODY, TERMINAL } from './journeys/common.js';
 
@@ -208,18 +209,7 @@ export async function goOffline(m: { kind: 'rider' | 'driver'; session: Session 
   return POST(`/${m.kind}/go-offline`, {}, m.session.token);
 }
 
-// [DS258] The stores the journeys mint for themselves are named `TEST-<slot>`
-// by freshVendor (journeys/vendor.ts); its call sites use the slots 'vend01'
-// (VEND-01) and 'admin01' (ADMIN-01). A journey retires its own store in a
-// finally, but an interrupted run can leave one ACTIVE — heal retires those
-// leftovers by exact name. The seeded roster stores stay: they are other
-// journeys' fixtures and the owner's manual test targets, and are allowlisted
-// so no name match can ever retire them.
-const FRESH_STORE_NAMES = new Set(['TEST-vend01', 'TEST-admin01']);
-const NEVER_RETIRE_STORE_NAMES = new Set([
-  'TEST-Kitchen-One', 'TEST-Kitchen-Two', 'TEST-Kitchen-Three',
-  'TEST-Grocery-One', 'TEST-Pharma-One', 'TEST-Sparks',
-]);
+
 
 /**
  * End whatever a previous (interrupted) run left live, so this run starts clean.
@@ -299,27 +289,35 @@ async function heal(roster: Roster, admin: Session, log: (s: string) => void): P
   // each (removes it from public discovery for shoppers), never a seeded store.
   // Collect every page first, THEN suspend: suspending while paging would
   // shift the ACTIVE list under the cursor and skip rows on later pages.
-  const leftovers: Array<{ id: string; name: string }> = [];
-  for (let page = 1; page <= 20; page += 1) {
-    const list = await GET(`/admin/vendors?status=ACTIVE&limit=50&page=${page}`, admin.token);
-    if (!list.ok) {
-      log(`    fresh-store sweep unreadable: GET /admin/vendors → ${list.status} ${codeOf(list)}`);
-      break;
+  // A network failure here must never abort the whole run [DS265 F3]: the
+  // sweep is housekeeping, so it logs and the journeys proceed.
+  try {
+    const leftovers: Array<{ id: string; name: string }> = [];
+    const PAGE_CAP = 40;
+    let truncated = false;
+    for (let page = 1; ; page += 1) {
+      if (page > PAGE_CAP) { truncated = true; break; }
+      const list = await GET(`/admin/vendors?status=ACTIVE&limit=50&page=${page}`, admin.token);
+      if (!list.ok) {
+        log(`    fresh-store sweep unreadable: GET /admin/vendors → ${list.status} ${codeOf(list)}`);
+        break;
+      }
+      const rows: any[] = list.json?.data ?? [];
+      for (const row of rows) if (isJourneyMintedStore(row)) leftovers.push({ id: row.id, name: row.name });
+      if (!list.json?.meta?.hasNext) break;
     }
-    const rows: any[] = list.json?.data ?? [];
-    for (const row of rows) {
-      if (FRESH_STORE_NAMES.has(row.name) && !NEVER_RETIRE_STORE_NAMES.has(row.name)) leftovers.push({ id: row.id, name: row.name });
+    if (truncated) log(`    fresh-store sweep stopped at ${PAGE_CAP} pages of ACTIVE stores; later pages were not checked [DS265 F5]`);
+    let retired = 0;
+    const stillLive: string[] = [];
+    for (const row of leftovers) {
+      const susp = await asAdmin(admin.token, 'retire a synthetic store left live by an interrupted journey run', 'PUT', `/admin/vendors/${row.id}/suspend`, { reason: 'Journey runner heal: a synthetic store was left live by an interrupted run.' });
+      if (susp.ok) retired += 1;
+      else stillLive.push(`${row.name} → ${susp.status} ${codeOf(susp)}`);
     }
-    if (!list.json?.meta?.hasNext) break;
+    log(`  fresh stores from earlier runs: ${retired} retired${stillLive.length ? `; still live: ${stillLive.join('; ')}` : ''}`);
+  } catch (e: any) {
+    log(`    fresh-store sweep failed (${e?.message ?? e}); continuing: leftovers stay until the next run`);
   }
-  let retired = 0;
-  const stillLive: string[] = [];
-  for (const row of leftovers) {
-    const susp = await asAdmin(admin.token, 'retire a synthetic store left live by an interrupted journey run', 'PUT', `/admin/vendors/${row.id}/suspend`, { reason: 'Journey runner heal: a synthetic store was left live by an interrupted run.' });
-    if (susp.ok) retired += 1;
-    else stillLive.push(`${row.name} → ${susp.status} ${codeOf(susp)}`);
-  }
-  log(`  fresh stores from earlier runs: ${retired} retired${stillLive.length ? `; still live: ${stillLive.join('; ')}` : ''}`);
   log(`  leftovers from earlier runs: ${tally.cancelled} cancelled, ${tally.finished} finished at the door${stuck.length ? `; STILL LIVE: ${stuck.join('; ')}` : ''}`);
 }
 
