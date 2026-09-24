@@ -10,7 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 vi.mock('../providers/maps/maps-provider', () => ({ getMapsProvider: () => ({}) }));
 vi.mock('../providers/notifications/channels', () => ({ getChannels: () => ({}) }));
 
-const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'RETURNED'];
 const LIVE = Object.values(OrderStatus).filter((s) => !TERMINAL.includes(s));
 const A = 'home-customer-a';
 const B = 'home-customer-b';
@@ -211,7 +211,8 @@ describe('Home authoritative order projection through real Fastify registration/
       holdExpiresAt: true, scheduledFor: true, estimatedDeliveryTime: true, placedAt: true,
       promisedAt: true, promiseRevisedAt: true, promiseRevisionReason: true, promiseRevisions: true,
     }, orderBy: { placedAt: 'desc' } });
-    expect((h.prisma.order.findFirst.mock.calls[0]![0].where!.status as { notIn: string[] }).notIn).toHaveLength(5);
+    // Exactly the terminal set — arrayContaining above plus the same length (6 since E17's RETURNED).
+    expect((h.prisma.order.findFirst.mock.calls[0]![0].where!.status as { notIn: string[] }).notIn).toHaveLength(TERMINAL.length);
     expect(h.prisma.order.findMany.mock.calls[0]![0]).toEqual({ where: { customerId: A, status: { in: ['DELIVERED', 'COMPLETED'] } }, select: { vendorId: true }, orderBy: { placedAt: 'desc' }, take: 20, distinct: ['vendorId'] });
   });
   it('separates two principals at the same coordinates and binds a changing session once', async () => {

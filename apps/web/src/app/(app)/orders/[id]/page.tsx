@@ -111,6 +111,14 @@ const appointmentStages: Stage[] = [
   { label: 'Completed', statuses: ['COMPLETED', 'DELIVERED'] },
 ];
 
+/** [E17 · DS202 D6] A courier parcel sent back to its sender. */
+const returnStages: Stage[] = [
+  { label: 'Placed', statuses: ['PENDING', 'ACCEPTED'] },
+  { label: 'Picked up', statuses: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'] },
+  { label: 'Coming back to you', statuses: ['RETURNING'] },
+  { label: 'Returned', statuses: ['RETURNED'] },
+];
+
 const taxiStages: Stage[] = [
   { label: 'Requested', statuses: ['PENDING'] },
   { label: 'Driver assigned', statuses: ['ACCEPTED', 'DRIVER_ASSIGNED'] },
@@ -121,6 +129,7 @@ const taxiStages: Stage[] = [
 
 function stagesFor(order: OrderDetail): Stage[] {
   if (order.orderType === 'TAXI') return taxiStages;
+  if (order.status === 'RETURNING' || order.status === 'RETURNED') return returnStages;
   if (order.fulfillment === 'PICKUP') return pickupStages;
   if (order.fulfillment === 'APPOINTMENT') return appointmentStages;
   return deliveryStages;
@@ -135,6 +144,10 @@ function statusHeading(order: OrderDetail): string {
   if (order.status === 'CANCELLED') return order.orderType === 'TAXI' ? 'Ride cancelled' : 'Order cancelled';
   if (order.status === 'REFUNDED') return order.orderType === 'TAXI' ? 'Ride refunded' : 'Order refunded';
   if (order.status === 'FAILED') return order.orderType === 'TAXI' ? 'Ride could not be completed' : 'Order could not be completed';
+  // [E17 · DS231 F4] A courier parcel on its way back, and back: the heading
+  // agrees with the stage rail below instead of falling to "Order placed".
+  if (order.status === 'RETURNING') return 'Your parcel is coming back to you';
+  if (order.status === 'RETURNED') return 'Parcel returned to you';
   if (['DELIVERED', 'COMPLETED'].includes(order.status)) {
     if (order.orderType === 'TAXI') return 'Ride completed';
     if (order.fulfillment === 'APPOINTMENT') return 'Appointment completed';

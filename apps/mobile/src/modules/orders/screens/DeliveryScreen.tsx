@@ -47,6 +47,9 @@ const LIVE_TRACKING_STATUSES = new Set([
   'DRIVER_EN_ROUTE',
   'DRIVER_ARRIVED',
   'RIDE_IN_PROGRESS',
+  // [E17 · DS231 F2] The return leg is live-trackable on the server
+  // (counterparty.ts); the sender sees where their parcel is on its way back.
+  'RETURNING',
 ]);
 const LIVE_ETA_STATUSES = new Set([
   'RIDER_ASSIGNED',
@@ -62,7 +65,7 @@ const validMapCoordinate = coordinateOf;
 
 function isTerminalOrderSnapshot(order: any): boolean {
   const status = String(order?.status ?? '').toUpperCase();
-  return ['CANCELLED', 'REFUNDED', 'FAILED', 'DELIVERED', 'COMPLETED'].includes(status)
+  return ['CANCELLED', 'REFUNDED', 'FAILED', 'DELIVERED', 'COMPLETED', 'RETURNED'].includes(status)
     || (order?.fulfillment === 'PICKUP' && status === 'PICKED_UP');
 }
 
@@ -85,6 +88,10 @@ function timelineIndex(order: any, holdActive: boolean, releasePending: boolean)
   const status = String(order.status ?? '').toUpperCase();
   const pickup = order.fulfillment === 'PICKUP';
   const courier = order.orderType === 'COURIER';
+  // [E17 · DS231 F3] On its way back: the travel step, relabelled below. A
+  // RETURNED parcel has no step — the forward timeline would promise a
+  // delivery — so it falls to the plain status line.
+  if (courier && status === 'RETURNING') return 3;
   if (['DELIVERED', 'COMPLETED'].includes(status) || (pickup && status === 'PICKED_UP')) return 4;
   if (pickup && status === 'READY_FOR_PICKUP') return 3;
   if (['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'].includes(status)) return 3;
@@ -143,6 +150,9 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
   } else if (status === 'ARRIVED') {
     transitLabel = 'Rider arrived';
     transitDescription = 'The rider reached the delivery address.';
+  } else if (courier && status === 'RETURNING') {
+    transitLabel = 'Coming back to you';
+    transitDescription = `${order.rider?.firstName ?? 'The rider'} couldn’t deliver the parcel and is bringing it back to you.`;
   }
   const steps: TimelineStep[] = [
     {
@@ -688,7 +698,11 @@ export function DeliveryScreen() {
   const failed = o.status === 'FAILED';
   const complete = ['DELIVERED', 'COMPLETED'].includes(o.status)
     || (o.fulfillment === 'PICKUP' && o.status === 'PICKED_UP');
-  const terminal = cancelled || failed || complete;
+  // [E17 · DS231 F3] A parcel returned to its sender is over: no live-rider
+  // controls, tracking link or cancel once the return is complete. The rider's
+  // identity card stays, exactly as it does on a delivered order.
+  const returned = o.status === 'RETURNED';
+  const terminal = cancelled || failed || complete || returned;
   const verticalTint = o.orderType === 'COURIER'
     ? SEND_TINT
     : o.fulfillment === 'APPOINTMENT' ? SERVICES_TINT : ORDER_TINT;
@@ -798,6 +812,10 @@ export function DeliveryScreen() {
   if (cancelled) etaCopy = 'Cancelled';
   else if (failed) etaCopy = 'Couldn’t complete this order';
   else if (complete) etaCopy = 'Completed';
+  // [E17 · DS236 F3-R2] The creation-time estimate is the forward leg's; a
+  // parcel on its way back (or back) must not show a countdown to the door.
+  else if (returned) etaCopy = 'Returned to you';
+  else if (orderStatus === 'RETURNING') etaCopy = 'Coming back to you';
   else if (arrivalReached) {
     etaCopy = orderStatus === 'RIDER_ARRIVED_PICKUP' ? 'Rider reached the pickup' : 'Your rider has arrived';
   } else if (o.fulfillment === 'APPOINTMENT' && orderStatus === 'ACCEPTED') {
@@ -820,7 +838,8 @@ export function DeliveryScreen() {
   // ticking clock so a passed window is never shown as still coming
   // (R-12.2.4). The live line above is labelled live; this is the commitment
   // (L7). Delivery orders only, and only while the order is still coming.
-  const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete ? promiseLine(o.promise, nowTs) : null;
+  // A returning parcel is not coming to the door: the forward promise is over too.
+  const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete && !returned && orderStatus !== 'RETURNING' ? promiseLine(o.promise, nowTs) : null;
   const promiseUpdate = promiseNote(o.promise);
 
   return (

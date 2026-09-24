@@ -7,6 +7,7 @@ import { getOrders, money } from '@/lib/customer';
 const LABEL: Record<string, string> = {
   PENDING: 'Pending', ACCEPTED: 'Accepted', PREPARING: 'Preparing', READY_FOR_PICKUP: 'Ready',
   RIDER_ASSIGNED: 'Rider on the way', PICKED_UP: 'Picked up', EN_ROUTE_DELIVERY: 'On the way',
+  RETURNING: 'Returning to sender', RETURNED: 'Returned to sender',
   DELIVERED: 'Delivered', COMPLETED: 'Completed', CANCELLED: 'Cancelled',
 };
 

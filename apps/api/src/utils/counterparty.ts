@@ -80,6 +80,9 @@ const TRACKABLE_STATUSES = new Set([
   'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
   'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
   'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED',
+  // [E17 · DS202 D5] The return leg is live too: the sender is told the
+  // parcel is coming back, so they can see where it is.
+  'RETURNING',
   'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS',
 ]);
 

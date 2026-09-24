@@ -9,7 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useRideSos } from '../../../hooks';
+import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof, useRideSos } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../kit/toast';
@@ -85,7 +85,9 @@ function railFor(status: string | undefined, isDriver: boolean): { steps: Timeli
   let currentIndex = keys.indexOf(s);
   if (currentIndex < 0) {
     if (s === 'COMPLETED' || s === 'DELIVERED') currentIndex = keys.length - 1;
-    else if (!isDriver && (s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED')) currentIndex = 1;
+    // [E17] A returning parcel is still with the rider — the same "picked up"
+    // node, never the unclaimed "assigned" node an unknown status would show.
+    else if (!isDriver && (s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED' || s === 'RETURNING')) currentIndex = 1;
     else currentIndex = 0;
   }
   const steps: TimelineStep[] = isDriver
@@ -113,6 +115,8 @@ export function ActiveJobScreen({ navigation }: any) {
   const courierProof = useCourierProof();
   const courierCollect = useCourierCollect();
   const courierPickupProof = useCourierPickupProof();
+  const courierReturn = useCourierReturn();
+  const courierReturnProof = useCourierReturnProof();
   const rate = useRateCustomer();
   const { latitude, longitude, status: locationStatus } = useLocationStore();
   const [pin, setPin] = useState('');
@@ -138,6 +142,9 @@ export function ActiveJobScreen({ navigation }: any) {
   const driverHandbackNavigateAfterDismissRef = useRef(false);
   // G14: pre-pickup handback — a two-step with preset reasons, never one tap.
   const [handbackConfirm, setHandbackConfirm] = useState(false);
+  // [E17] Post-custody return-to-sender — a two-step with preset reasons, never
+  // one tap. The server makes it support-visible and tells the sender.
+  const [returnConfirm, setReturnConfirm] = useState(false);
   // [M-29] The unpaid sheet — the failed fare outcome (driver) or failed
   // handover (rider): refused, or nobody / left without paying.
   const [unpaidSheet, setUnpaidSheet] = useState(false);
@@ -225,7 +232,7 @@ export function ActiveJobScreen({ navigation }: any) {
         ? { ...pickup, latitudeDelta: 0.02, longitudeDelta: 0.02 }
         : undefined;
 
-  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierPickupProof.isPending;
+  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierPickupProof.isPending || courierReturn.isPending || courierReturnProof.isPending;
   // Courier deliveries close with a proof-of-delivery photo (D8-02): capture →
   // upload → the handoff transition (which pays the rider). Everything else uses
   // the plain "Mark delivered" action.
@@ -354,6 +361,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const canStillCollect = atSender || jobStatus === 'PICKED_UP';
   const courierFee = jobAmount(job);
   const pickedUp = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(String(job?.status ?? '').toUpperCase());
+  const returning = jobStatus === 'RETURNING';
   // The store owes the rider fee PLUS any prepaid tip on MMG — the settlement
   // ledger records fee + tip, so the door copy must claim the same number
   // [REPORT-006 carryover: fee-only copy under-claimed the rider's pay].
@@ -459,6 +467,58 @@ export function ActiveJobScreen({ navigation }: any) {
         onError: (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the sender's payment — try again or call support."),
       },
     );
+  };
+
+  // [E17] The mover can't deliver after custody. The reason + the rider's GPS
+  // start a support-visible return (the server refuses unless the parcel is in
+  // THIS rider's custody) and the sender is notified the parcel is coming back.
+  const startReturn = (reason: string) => {
+    setReturnConfirm(false);
+    if (preview || !job?.id) return;
+    courierReturn.mutate(
+      { orderId: job.id, reason },
+      {
+        onSuccess: () => {
+          haptic.success();
+          toast.show('Return started', 'The sender has been notified the parcel is coming back.');
+          active.refetch?.();
+        },
+        onError: (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't start the return — try again or call support."),
+      },
+    );
+  };
+  // [E17] The return photo closes the return leg — the same capture flow as the
+  // door proof, uploading with the rider's location and releasing the rider.
+  const captureReturnProof = async () => {
+    try {
+      const owner = preview ? null : requireAuthSessionSnapshot();
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (!perm.granted) {
+        toast.error('Camera access is needed to capture the return proof.');
+        return;
+      }
+      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (shot.canceled || !shot.assets?.[0]) return;
+      courierReturnProof.mutate(
+        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        {
+          onSuccess: () => {
+            haptic.success();
+            toast.show('Return complete', 'The parcel is back with the sender — return proof saved.');
+            active.refetch?.();
+          },
+          onError: (proofError: any) => {
+            if (!(proofError instanceof AuthSessionBoundaryError)) {
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the return proof. Try again.');
+            }
+          },
+        },
+      );
+    } catch (proofError) {
+      if (!(proofError instanceof AuthSessionBoundaryError)) throw proofError;
+    }
   };
 
   const closeRating = () => {
@@ -802,6 +862,33 @@ export function ActiveJobScreen({ navigation }: any) {
                     onPress={() => setHandbackConfirm(true)}
                   />
                 ) : null}
+                {/* [E17 · DS231 F6] A courier who can't deliver mid-route returns
+                    from the rung they are on — the server accepts a return from
+                    every custody state — instead of first tapping a false
+                    "I've arrived" to reach the door's button. */}
+                {isCourier && pickedUp ? (
+                  <PillButton
+                    label="Can't deliver — return to sender"
+                    variant="soft"
+                    style={{ marginTop: space.sm }}
+                    disabled={busy}
+                    onPress={() => setReturnConfirm(true)}
+                  />
+                ) : null}
+              </>
+            ) : isCourier && returning ? (
+              // [E17] The return leg. The door is closed — the parcel is coming
+              // back — and the only action is the return photo that completes
+              // the return and releases the rider. No cash step exists here:
+              // whatever was collected at pickup is already settled peer-to-peer.
+              <>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.14), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginBottom: space.md }}>
+                  <Feather name="rotate-ccw" size={15} color={dk.accent} style={{ marginTop: 1 }} />
+                  <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
+                    This parcel is on its way back to the sender. Capture the return photo to complete the return.
+                  </T>
+                </View>
+                {bigButton('Capture return photo & complete return', captureReturnProof, { loading: courierReturnProof.isPending, disabled: busy })}
               </>
             ) : isCourier ? (
               // [M-28] The courier's door. The proof photo ALWAYS closes the
@@ -850,6 +937,16 @@ export function ActiveJobScreen({ navigation }: any) {
                     {bigButton('Capture proof & deliver', () => captureCourierProof(), { loading: courierProof.isPending, disabled: busy })}
                   </>
                 )}
+                {/* [E17] After custody the job cannot be handed back (the server
+                    refuses) — the honest out is a return: support-visible, the
+                    sender notified, and the proof photo closes it back home. */}
+                <PillButton
+                  label="Can't deliver — return to sender"
+                  variant="soft"
+                  style={{ marginTop: space.sm }}
+                  disabled={busy}
+                  onPress={() => setReturnConfirm(true)}
+                />
               </>
             ) : doorBlocked ? (
               <>
@@ -1130,6 +1227,27 @@ export function ActiveJobScreen({ navigation }: any) {
           />
         ))}
         <PillButton label="Keep the delivery" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setHandbackConfirm(false)} />
+      </PopupCard>
+
+      {/* [E17] Return-to-sender after custody — reason required, honesty first:
+          the server opens a support-visible return, notifies the sender the
+          parcel is coming back, and the proof photo closes it at the pickup. */}
+      <PopupCard visible={returnConfirm} onClose={() => setReturnConfirm(false)}>
+        <PopupTitle variant="title" center>Return this parcel to the sender?</PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          The parcel goes back to the sender, a support ticket is opened, and the sender is notified. Pick what happened:
+        </T>
+        {(['Recipient unreachable', 'Recipient refused the parcel', 'Wrong or incomplete address'] as const).map((why) => (
+          <PillButton
+            key={why}
+            label={why}
+            variant="outline"
+            style={{ alignSelf: 'stretch', marginTop: space.md }}
+            disabled={busy}
+            onPress={() => startReturn(why)}
+          />
+        ))}
+        <PillButton label="Keep the parcel" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setReturnConfirm(false)} />
       </PopupCard>
 
       {/* Post-trip passenger rating — DRIVER_TO_CUSTOMER, once per ride */}

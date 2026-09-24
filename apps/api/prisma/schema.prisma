@@ -1823,6 +1823,14 @@ model Order {
   // delivery. Cleared implicitly once the order reaches DELIVERED.
   courierProofIssuedUrl     String?
   courierProofIssuedRiderId String?
+  /// [E17] Courier return-to-sender after custody. The mover (or support via
+  /// the ticket) starts a return from any custody state (RETURNING) and closes
+  /// it with a return photo (RETURNED). The reason + timestamps are the
+  /// support-visible record; no fee is minted for the return leg.
+  courierReturnReason         String?
+  courierReturnRequestedAt    DateTime?
+  courierReturnProofPhotoUrl  String?
+  courierReturnedAt           DateTime?
   // E16: pickup custody proof. PICKED_UP is a physical-custody claim, so it
   // carries the same issued-then-exact-matched two-step as delivery proof:
   // the server-issued URL + the rider it was issued to, the bound photo, and
@@ -2096,6 +2104,8 @@ enum OrderStatus {
   CANCELLED
   REFUNDED
   FAILED
+  RETURNING
+  RETURNED
 }
 
 enum PackageSize {

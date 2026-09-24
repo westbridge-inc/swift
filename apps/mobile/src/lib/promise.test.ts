@@ -48,7 +48,9 @@ describe('the screens read the promise from the server, on the clock, in ink', (
   const home = readFileSync(join(process.cwd(), 'src/modules/shop/screens/HomeScreen.tsx'), 'utf8');
 
   it('the tracking screen renders the promise line from the server view against its own ticking clock, and the note under it', () => {
-    expect(delivery).toContain("const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete ? promiseLine(o.promise, nowTs) : null;");
+    // [E17] A parcel going back to its sender (or back) is not coming to the
+    // door: the forward promise is withheld on the return leg too.
+    expect(delivery).toContain("const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete && !returned && orderStatus !== 'RETURNING' ? promiseLine(o.promise, nowTs) : null;");
     expect(delivery).toContain('const promiseUpdate = promiseNote(o.promise);');
     expect(delivery).toContain('testID="promise-range"');
     // Ink, never brand: the range carries no tone prop.

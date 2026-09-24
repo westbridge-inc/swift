@@ -25,6 +25,8 @@ export enum OrderStatus {
   CANCELLED = 'CANCELLED',
   REFUNDED = 'REFUNDED',
   FAILED = 'FAILED',
+  RETURNING = 'RETURNING',
+  RETURNED = 'RETURNED',
 }
 
 export enum PackageSize {
