@@ -36,6 +36,7 @@ import {
   verifySignupOtp,
 } from './signup-continuation';
 import { publicLaunchCountryFromPhone } from './launch-market';
+import { runWithoutTenant } from '../../plugins/tenant-context';
 
 interface DeviceInfo {
   deviceId: string;
@@ -78,7 +79,14 @@ export class AuthService {
     this.channels = channels ?? getChannels();
   }
 
-  async sendOtp(phone: string) {
+  async sendOtp(phone: string, ip: string) {
+    // GY-only product rule (#1259). Refuse foreign and invalid numbers BEFORE
+    // any Redis counter is spent — a flood of throwaway numbers must not burn
+    // the shared daily SMS budget (audit High #2).
+    if (!publicLaunchCountryFromPhone(phone)) {
+      throw new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Swift is currently available in Guyana only');
+    }
+
     // Rate limiting
     const allowed = await checkOtpRateLimit(this.app.redis, phone);
     if (!allowed) {
@@ -108,12 +116,27 @@ export class AuthService {
       throw new AppError(429, 'RATE_LIMITED', `Too many codes requested for this number. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
     }
 
-    // Hard daily cost ceilings (per-phone + global circuit breaker) so an abuse
-    // spike can't run up the SMS bill. Checked before any SMS is generated/sent.
-    const budget = await checkOtpDailyBudget(this.app.redis, phone);
+    // Hard daily cost ceilings so an abuse spike can't run up the SMS bill,
+    // checked before any SMS is generated/sent. A number owned by an EXISTING
+    // verified account (or an admin) draws from the separate known-phone budget
+    // — a flood of new-number requests can never lock real logins out. The
+    // lookup is a system-mode read: authentication runs before any tenant is
+    // bound, and the deny posture must not turn the budget classifier into a 500.
+    const knownPhone = await runWithoutTenant(
+      () => this.app.prisma.user.findUnique({
+        where: { phone },
+        select: { isPhoneVerified: true, roles: true },
+      }).then((u) =>
+        !!u && (u.isPhoneVerified || u.roles.includes('ADMIN') || u.roles.includes('SUPER_ADMIN')),
+      ),
+      'otp-known-phone-budget',
+    );
+    const budget = await checkOtpDailyBudget(this.app.redis, phone, { ip, knownPhone });
     if (!budget.allowed) {
       if (budget.reason === 'global_daily') {
         this.app.log.error('[sms-budget] global daily OTP cap reached — refusing further sends until reset');
+      } else if (budget.reason === 'known_daily') {
+        this.app.log.error('[sms-budget] known-phone daily OTP cap reached — refusing further sends until reset');
       }
       throw new AppError(429, 'RATE_LIMITED', 'Too many verification requests right now. Please try again later.');
     }
@@ -137,6 +160,9 @@ export class AuthService {
     try {
       await this.channels.sms.sendSms(phone, `Your Swift verification code is: ${otp}`);
     } catch (err) {
+      // The provider failed: give back the budget this attempt just spent so
+      // undeliverable sends don't permanently burn the day's ceiling.
+      await budget.refund?.().catch(() => {});
       this.app.log.error({ err, phone: phone.slice(0, 5) + '***' }, '[otp] SMS send failed');
       throw new AppError(502, 'SMS_SEND_FAILED', "We couldn't send your code right now. Please try again in a moment.");
     }

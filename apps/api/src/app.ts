@@ -150,10 +150,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(rateLimit, {
     // Global ceiling. Tunable via RATE_LIMIT_MAX so a load test or a busy launch
     // can raise it without a code change (per-route limits on auth/OTP stay tight
-    // regardless). Authenticated callers are bucketed per session token, anonymous
-    // ones per resolved IP (never the spoofable X-Forwarded-For) — see D1-01.
+    // regardless). Callers with a VERIFIED token are bucketed per userId;
+    // anonymous and unverifiable requests share the resolved-IP bucket (never
+    // the spoofable X-Forwarded-For) — see D1-01.
     ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: 'swift-rl:' } : {}),
-    keyGenerator: rateLimitKey,
+    // The key generator verifies the bearer token (captured lazily via the
+    // closure — app.jwt is decorated by authPlugin, registered below) so an
+    // attacker cannot mint a fresh bucket per fake token; unverified and
+    // anonymous requests share the resolved-IP bucket.
+    keyGenerator: rateLimitKey((token) => app.jwt.verify(token)),
     max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
     timeWindow: '1 minute',
   });
