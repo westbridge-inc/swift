@@ -96,7 +96,7 @@ export class TripShareService {
     });
     tripShareCounter.labels('minted').inc();
 
-    const url = `${process.env['APP_PUBLIC_URL'] ?? 'https://swift.gy'}/trip/${token}`;
+    const url = `${process.env['APP_PUBLIC_URL'] ?? 'https://swiftgy.com'}/trip/${token}`;
     if (opts.sendToPhone) {
       const allowed = await checkOtpRateLimit(this.redis, `tripshare:${opts.sendToPhone}`);
       if (!allowed) throw new AppError(429, 'RATE_LIMITED', 'That number was just sent a link. Try again in a minute.');

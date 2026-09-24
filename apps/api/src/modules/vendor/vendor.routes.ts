@@ -3167,6 +3167,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         type: 'ORDER_UPDATE',
         title: 'Your appointment moved',
         body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
+        audience: 'customer',
         data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
       }).catch(() => undefined);
     }

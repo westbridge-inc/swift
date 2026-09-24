@@ -60,8 +60,8 @@ describe('vendorPhoto / itemPhoto — never invent a photograph [F-264]', () => 
 
 describe('categoryPhoto — the merchant\'s own picture or nothing [S8]', () => {
   it("returns the category's own image when the merchant set one", () => {
-    expect(categoryPhoto({ name: 'Mains', imageUrl: 'https://cdn.swift.gy/c/mains.webp' }))
-      .toBe('https://cdn.swift.gy/c/mains.webp');
+    expect(categoryPhoto({ name: 'Mains', imageUrl: 'https://cdn.swiftgy.com/c/mains.webp' }))
+      .toBe('https://cdn.swiftgy.com/c/mains.webp');
   });
 
   it('returns null when there is no picture — the caller draws PhotoPlaceholder', () => {
