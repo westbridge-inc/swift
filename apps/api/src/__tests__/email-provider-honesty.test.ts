@@ -116,6 +116,7 @@ describe('the guard is on the SEND, not the constructor', () => {
       keySid: process.env['TWILIO_API_KEY_SID'],
       keySecret: process.env['TWILIO_API_KEY_SECRET'],
       from: process.env['TWILIO_FROM'],
+      messagingServiceSid: process.env['TWILIO_MESSAGING_SERVICE_SID'],
     };
     try {
       process.env['NOTIFICATION_PROVIDER'] = 'twilio';
@@ -124,6 +125,7 @@ describe('the guard is on the SEND, not the constructor', () => {
       process.env['TWILIO_API_KEY_SID'] = `SK${'b'.repeat(32)}`;
       process.env['TWILIO_API_KEY_SECRET'] = 'test_not_a_real_secret';
       process.env['TWILIO_FROM'] = '+15550000000';
+      process.env['TWILIO_MESSAGING_SERVICE_SID'] = '';
       process.env['NODE_ENV'] = 'production';
       expect(() => getChannels()).not.toThrow();
     } finally {
@@ -134,6 +136,7 @@ describe('the guard is on the SEND, not the constructor', () => {
       restoreEnv('TWILIO_API_KEY_SID', prev.keySid);
       restoreEnv('TWILIO_API_KEY_SECRET', prev.keySecret);
       restoreEnv('TWILIO_FROM', prev.from);
+      restoreEnv('TWILIO_MESSAGING_SERVICE_SID', prev.messagingServiceSid);
     }
   });
 });
