@@ -1932,6 +1932,27 @@ export class OrderService {
         ? 'Record the cash outcome first — a cash courier job completes when the fee is recorded as collected, refused or unpaid; a proof photo never implies money.'
         : 'Record the fare outcome first — a cash ride completes when the fare is recorded as paid, refused or unpaid.');
     }
+    // [E16-B · S2] THE COURIER DELIVERY-PROOF GATE. A parcel reaches DELIVERED
+    // only with the door photo recorded: either set by THIS transition (the
+    // courier /proof path passes terminalMetadata.courierProofPhotoUrl after
+    // exact-matching it to the URL the server issued at /proof-photo) or
+    // already durably on the row and equal to that issued URL. The bare rider
+    // /delivered and /handover routes pass no proof metadata, so a sender-pays
+    // job whose fee was already collected at pickup — and an MMG-paid job —
+    // rolls back here instead of closing without the proof: no deliveredAt, no
+    // earnings, no released rider. COURIER-only: food/grocery/pharmacy, taxi
+    // and service transitions never enter this branch.
+    if (input.target === 'DELIVERED' && order.orderType === 'COURIER') {
+      const proofUrl = order.courierProofPhotoUrl;
+      const issuedUrl = order.courierProofIssuedUrl;
+      if (!issuedUrl || !proofUrl || proofUrl !== issuedUrl) {
+        throw new AppError(
+          409,
+          'DELIVERY_PROOF_REQUIRED',
+          'This courier job closes only through the photo proof step — capture the door photo first, then confirm the handoff.',
+        );
+      }
+    }
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }
 
