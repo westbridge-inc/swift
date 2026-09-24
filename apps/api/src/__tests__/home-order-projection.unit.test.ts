@@ -303,10 +303,10 @@ describe('Home authoritative order projection through real Fastify registration/
     const old = `home:${A}:x:x`; h.cache.set(old, JSON.stringify({ activeOrder: { id: 'old-order' }, orderAgain: [] }));
     const feed = await h.home(); expect(feed.activeOrder.id).toBe(`order-${A}`);
     const key = homeCacheKey(A, undefined, undefined);
-    expect(key).toBe(`home:${A}:discovery:v2:x:x`); expect(h.redis.get.mock.calls[0]![0]).toBe(key);
+    expect(key).toBe(`home:${A}:discovery:v3:x:x`); expect(h.redis.get.mock.calls[0]![0]).toBe(key);
     expect(h.cache.get(old)).toContain('old-order');
     expect(await runWithTenant('other-context', async () => homeCacheKey(A, undefined, undefined))).toBe(key);
-    expect(await runWithTenant('guest-context', async () => homeCacheKey(undefined, undefined, undefined))).toBe('t:guest-context:home:guest:discovery:v2:x:x');
+    expect(await runWithTenant('guest-context', async () => homeCacheKey(undefined, undefined, undefined))).toBe('t:guest-context:home:guest:discovery:v3:x:x');
     await h.home(B); await h.home(A, '?lat=7&lng=8');
     await runWithTenant('invalidation-context', () => invalidateHomeCache(h.app, A));
     expect([...h.cache.keys()]).toEqual([homeCacheKey(B, undefined, undefined)]);

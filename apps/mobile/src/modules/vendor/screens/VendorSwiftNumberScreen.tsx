@@ -18,6 +18,7 @@ import {
 import { GUTTER } from '../shared';
 import { CopyButton } from '../../../components/billing/BillingSurfaces';
 import { useVendorSubscription } from '../../../hooks/vendorops';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { moneyOrDash } from '../../../lib/money';
 import { payScreenState, type PayBandTone } from '../../../lib/billing';
 
@@ -35,6 +36,7 @@ const PAY_BAND_INK: Record<PayBandTone, string> = {
 
 export function VendorSwiftNumberScreen({ navigation }: any) {
   const q = useVendorSubscription();
+  const pull = usePullToRefresh(q.refetch); // the spinner follows the pull, never a background refetch (lib/pullToRefresh)
   const insets = useSafeAreaInsets();
   const [aboutOpen, setAboutOpen] = useState(false);
   const sub: any = q.data;
@@ -101,7 +103,7 @@ export function VendorSwiftNumberScreen({ navigation }: any) {
         <ScrollView
           contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
           showsVerticalScrollIndicator={false}
-          refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor={color.brand[500]} />}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
         >
           {q.isError ? (
             <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>

@@ -34,7 +34,7 @@ const csp = [
   // UG-SEC-04: the admin app makes NO websocket connections (only the mobile
   // client does) — bare `ws: wss:` was any-host, an injected-script token
   // exfil path. connect-src is now exactly the admin API origins.
-  `connect-src 'self' ${API} https://api.swift.gy`,
+  `connect-src 'self' ${API} https://api.swiftgy.com`,
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",

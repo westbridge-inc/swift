@@ -38,11 +38,16 @@
 #
 # Reads the bundled Postgres through its private Compose network. No host
 # DATABASE_URL or published database port is needed.
-# Offsite settings come from the environment, then deploy/.env:
+# Offsite SETTINGS come from the environment, then deploy/.env:
 #   BACKUP_BUCKET      bucket for dumps (e.g. swift-backups)
 #   AWS_S3_ENDPOINT    R2/S3 endpoint
-#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 #   BACKUP_PREFIX      key prefix, default "db"
+# The storage KEYS never come from deploy/.env: AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY are read from the environment, from *_FILE, or from
+# $CREDENTIALS_DIRECTORY, where systemd puts them for swift-backup.service via
+# LoadCredentialEncrypted= (deploy/secret-env.sh). The database password never
+# reaches this host process at all: pg_dump runs inside the postgres container
+# and reads POSTGRES_PASSWORD_FILE there.
 
 set -euo pipefail
 
@@ -61,9 +66,12 @@ aws_s3() {
   if [ -n "${AWS_S3_ENDPOINT:-}" ]; then aws --endpoint-url "$AWS_S3_ENDPOINT" "$@"
   else aws "$@"; fi
 }
-for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_BUCKET AWS_S3_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION BACKUP_HEARTBEAT_URL; do
+for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_BUCKET AWS_S3_ENDPOINT AWS_REGION BACKUP_HEARTBEAT_URL; do
   if [ -z "${!var:-}" ]; then export "$var=$(env_value "$var")"; fi
 done
+# The storage keys: environment, *_FILE or systemd's credentials directory.
+. "$HERE/secret-env.sh"
+load_secret_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || exit 1
 BACKUP_PREFIX="${BACKUP_PREFIX:-db}"
 AWS_REGION="${AWS_REGION:-auto}"
 
@@ -89,8 +97,10 @@ TARGET="$OUT_DIR/swift-$STAMP.dump"
 echo "dumping → $(basename "$TARGET")"
 # Write to a partial name first: a backup job killed mid-write must never leave
 # a truncated file that looks like a good backup.
+# The container holds the password as a file (POSTGRES_PASSWORD_FILE); it is
+# read there, by the exec'd shell, and never crosses to this host.
 "${COMPOSE[@]}" exec -T postgres sh -c \
-  'export PGPASSWORD="$POSTGRES_PASSWORD"; exec pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+  'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
   > "$TARGET.partial"
 mv "$TARGET.partial" "$TARGET"
 chmod 600 "$TARGET"
@@ -143,7 +153,7 @@ fi
 # backup that actually worked; the staleness check will catch a real outage.
 if command -v docker >/dev/null 2>&1; then
   "${COMPOSE[@]}" exec -T postgres sh -c \
-    'export PGPASSWORD="$POSTGRES_PASSWORD"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q -v ON_ERROR_STOP=1' \
+    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q -v ON_ERROR_STOP=1' \
     <<SQL >/dev/null 2>&1 || echo "note: heartbeat write failed (backup itself is fine)" >&2
 -- id has no database-side default (Prisma mints the cuid), so supply one.
 INSERT INTO platform_config (id, key, value, "updatedAt")

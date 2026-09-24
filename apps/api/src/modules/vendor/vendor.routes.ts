@@ -56,7 +56,7 @@ import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integr
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
-import { riderCounterpartySelect } from '../../utils/counterparty';
+import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -1474,7 +1474,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The response-SLA deadline rides on the read so the board's accept-clock
     // drains toward the auto-cancel cut-off the server actually enforces.
     const respondOpts = { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 };
-    const data = orders.map((order) => ({
+    // [S1 response-shaping] a terminal order no longer hands floor staff the
+    // customer's phone, the rider's phone, or the delivery address/GPS — the
+    // live order keeps all of it, which is the only thing a handover needs.
+    const data = orders.map((order) => redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
       items: order.items.map((item) => coerceMoney(item, ORDER_ITEM_MONEY_FIELDS)),
       respondBy: vendorRespondBy(order, respondOpts),
@@ -1489,7 +1492,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The takeover polls this read: the response-SLA deadline is computed here,
     // from the same inputs the auto-cancel job was enqueued with.
     const respondBy = vendorRespondBy(order, { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 });
-    return { success: true, data: { ...order, respondBy } };
+    // [S1 response-shaping] same redaction as the board — closed order, no
+    // customer contact, rider contact, or delivery destination.
+    return { success: true, data: redactCustomerContact({ ...order, respondBy }) };
   });
 
   /** PUT /orders/:id/accept — Accept an incoming order */
@@ -3119,6 +3124,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         type: 'ORDER_UPDATE',
         title: 'Your appointment moved',
         body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
+        audience: 'customer',
         data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
       }).catch(() => undefined);
     }

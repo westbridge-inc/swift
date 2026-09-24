@@ -151,9 +151,15 @@ describe('booking + service-job pushes land on the job [S0]', () => {
 
   it('a moved APPOINTMENT opens the store’s Schedule agenda, not the jobs list', () => {
     // booking_rescheduled is the one booking_ kind that is not a service job:
-    // it carries bookingId (a slot on a vendor calendar). Its other recipient
-    // is the customer, who has no appointments screen anywhere in the app.
-    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1' })).toEqual({ screen: 'Schedule' });
+    // it carries bookingId (a slot on a vendor calendar). The STORE's copy is
+    // tagged audience:'business' and opens their Schedule agenda.
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1', audience: 'business' })).toEqual({ screen: 'Schedule' });
+    // The customer's copy is tagged audience:'customer'. The customer stack
+    // never mounts Schedule, so a tap aimed there was silently dropped [E28].
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1', audience: 'customer' })).toBeNull();
+    // Untagged legacy rows are nobody-placeable: opening the app normally is
+    // the safe answer, never a dead navigate into a vendor-only screen.
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1' })).toBeNull();
   });
 });
 
@@ -271,7 +277,7 @@ const CENSUS: Case[] = [
   { k: 'booking_completed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both — job done, rate it' },
   { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
   { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both, 24h out — GAP when refId is an APPOINTMENT: no customer appointments screen exists' },
-  { k: 'booking_rescheduled', d: { bookingId: 'b1' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda; the customer half has no screen [GAP]' },
+  { k: 'booking_rescheduled', d: { bookingId: 'b1', audience: 'business' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda [E28: the business copy is tagged audience, the customer copy opens normally]' },
 
   // ── Money the recipient must act on — no deep screen wired yet [GAPS].
   { k: 'billing_mmg_pending', d: { subscriptionId: 's1' }, to: null, why: 'GAP: vendor/mover weekly fee — a billing screen exists but is unrouted' },
@@ -466,6 +472,36 @@ describe('every destination is a route the app actually registers', () => {
       if (screen && !mounted.has(screen)) unreachable.push(`${kind} -> ${screen} (${why})`);
     }
     expect(unreachable, 'a mover tapping these opens nothing — the screen is in another stack').toEqual([]);
+  });
+
+  // [E28] THE SAME LESSON FOR THE CUSTOMER. booking_rescheduled goes to two
+  // people. Its customer copy was aimed at Schedule, a screen only VendorStack
+  // mounts, and no test asked whether the customer could reach it. The census
+  // keeps one row per kind, so the customer copies of two-audience kinds are
+  // listed here as well as every census row the API tags for the customer.
+  const CUSTOMER_COPIES: Record<string, unknown>[] = [
+    { kind: 'booking_rescheduled', bookingId: 'b1', audience: 'customer' },
+  ];
+
+  it('a push aimed at a CUSTOMER lands on a screen CustomerStack mounts', () => {
+    const stack = readFileSync(join(process.cwd(), 'src', 'navigation', 'CustomerStack.tsx'), 'utf8');
+    const mounted = new Set([...stack.matchAll(/\.Screen[^>]*?name="([A-Za-z0-9_]+)"/g)].map((m) => m[1]!));
+    // Every role stack sits under the root route Main, so it is reachable too.
+    mounted.add('Main');
+    expect(mounted.size, 'the scan itself found the stack').toBeGreaterThan(5);
+
+    const payloads = [
+      ...CENSUS.filter((c) => c.d?.['audience'] === 'customer').map((c) => ({ kind: c.k, ...c.d })),
+      ...CUSTOMER_COPIES,
+    ];
+    expect(payloads.length, 'the census still tags customer pushes').toBeGreaterThan(5);
+
+    const unreachable: string[] = [];
+    for (const payload of payloads) {
+      const screen = destinationFor(payload)?.screen;
+      if (screen && !mounted.has(screen)) unreachable.push(`${String(payload['kind'])} -> ${screen}`);
+    }
+    expect(unreachable, 'a customer tapping these opens nothing — the screen is in another stack').toEqual([]);
   });
 });
 

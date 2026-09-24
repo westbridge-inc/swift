@@ -36,7 +36,7 @@ export const API_URL = resolveApiOrigin({
  *  is typeof-guarded: unlike API_URL's, this line actually evaluates in the
  *  node test env, where the RN global does not exist.) */
 // eslint-disable-next-line no-undef
-export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swift.gy');
+export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swiftgy.com');
 
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,
@@ -304,6 +304,33 @@ export const marketApi = {
   depth: () => api.get('/market/depth'),
 };
 
+/**
+ * [E01] The checkout choices a cart quote is priced for — the same meaning as
+ * the checkout body's fields of these names. The cart screen requests the quote
+ * with ONE of these and submits the same one, so the total shown is the total
+ * charged. Absent = checkout's default (standard speed, every store delivered,
+ * the cart's persisted tip).
+ */
+export interface CartQuoteChoices {
+  express?: true;
+  fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
+  tipAmount?: number;
+}
+
+/** [E01] GET /cart query params for a quote's choices. `express` travels only
+ *  as "true" (the API refuses anything but "true"/"false"); the store-by-store
+ *  selection travels as checkout's own record in JSON, because the API's query
+ *  parser has no bracket syntax for nested objects. */
+export function cartQuoteParams(choices?: CartQuoteChoices): Record<string, string | number> {
+  const params: Record<string, string | number> = {};
+  if (choices?.express) params['express'] = 'true';
+  if (choices?.fulfillmentSelections && Object.keys(choices.fulfillmentSelections).length > 0) {
+    params['fulfillmentSelections'] = JSON.stringify(choices.fulfillmentSelections);
+  }
+  if (choices?.tipAmount != null) params['tipAmount'] = choices.tipAmount;
+  return params;
+}
+
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
   myRating: () => api.get('/customer/rating'),
@@ -434,7 +461,8 @@ export const customerApi = {
     session?: AuthSessionSnapshot,
   ) => api.post(`/customer/orders/${id}/rate`, body, capturedAuthConfig(session)),
   // Cart
-  getCart: (lat?: number, lng?: number) => api.get('/customer/cart', { params: { lat, lng } }),
+  getCart: (lat?: number, lng?: number, choices?: CartQuoteChoices) =>
+    api.get('/customer/cart', { params: { lat, lng, ...cartQuoteParams(choices) } }),
   addToCart: (data: {
     vendorId: string;
     itemId: string;
