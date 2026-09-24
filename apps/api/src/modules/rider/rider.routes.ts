@@ -28,6 +28,8 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
+import { requireStepUp } from '../auth/step-up';
+import { normalizeRegistrationMark } from '../verification/subjects';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 import { handoverBlockCounter } from '../../plugins/observability';
@@ -458,6 +460,16 @@ export async function riderRoutes(app: FastifyInstance) {
     const rider = await getRider(app, request.user.userId);
 
     const body = updateRiderProfileSchema.parse(request.body);
+    // [High #9 · DS109] Changing the plate re-identifies the vehicle the rider operates.
+    // Step-up first (the same proof as a money surface), the old vehicle links close so
+    // GO re-checks the EXACT new vehicle, and live supply retires now — a retyped plate
+    // never carries another subject's approved documents, and the old vehicle's evidence
+    // stops counting.
+    const plateChanged = body.licensePlate !== undefined
+      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(rider.licensePlate ?? '');
+    if (plateChanged) {
+      await requireStepUp(app, request);
+    }
 
     const allowedFields = [
       'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel',
@@ -475,6 +487,14 @@ export async function riderRoutes(app: FastifyInstance) {
     // If documents are re-uploaded, reset verification so admin can re-verify.
     const docFields = ['nationalIdUrl', 'driverLicenseUrl', 'vehicleInsuranceUrl'];
     if (docFields.some((f) => updateData[f] !== undefined)) {
+      updateData['documentsVerified'] = false;
+    }
+    // [High #9 · DS109] A real plate change retires live supply atomically (same shape as
+    // the driver route and the admin reject path) and clears the legacy verification flag,
+    // so the new vehicle must be verified before this rider is dispatchable again.
+    if (plateChanged) {
+      updateData['isOnline'] = false;
+      updateData['locationSessionId'] = null;
       updateData['documentsVerified'] = false;
     }
 
@@ -500,6 +520,16 @@ export async function riderRoutes(app: FastifyInstance) {
         },
       },
     });
+
+    if (plateChanged) {
+      // A plate change never inherits another subject's approved documents: every open
+      // vehicle link closes. New submissions for the new plate create a PENDING assignment
+      // that an admin must approve before its evidence propagates.
+      await app.prisma.subjectLink.updateMany({
+        where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
+        data: { validTo: new Date() },
+      });
+    }
 
     return { success: true, data: updated };
   });
@@ -528,10 +558,13 @@ export async function riderRoutes(app: FastifyInstance) {
 
     // Verification gate: the country's MOVER checklist must be fully approved.
     // Legacy documentsVerified flag grandfathers pre-checklist accounts.
+    // [High #9 · DS109] VEHICLE-kind evidence must be about the EXACT vehicle the
+    // rider's current plate names (riderLiveOperation) — the legacy flag alone still
+    // grandfathered pre-checklist accounts, and is cleared by any plate change.
     // Fast-fail preview for honest copy — the AUTHORITATIVE check re-runs
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
     const verified = rider.documentsVerified
-      || await verification.isRoleVerified(request.user.userId, 'MOVER');
+      || await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
     }
@@ -600,7 +633,7 @@ export async function riderRoutes(app: FastifyInstance) {
       // stale "verified" through to the online write. The legacy flag comes
       // from the LOCKED profile snapshot, not the preview.
       const liveVerified = snapshot.documentsVerified
-        || await verification.isRoleVerified(request.user.userId, 'MOVER', tx);
+        || await verification.riderLiveOperation(request.user.userId, rider.vehicleType, tx);
       if (!liveVerified) {
         throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
       }

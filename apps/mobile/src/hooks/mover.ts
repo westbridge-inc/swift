@@ -33,6 +33,7 @@ import {
   resolveMoverProfile,
   unwrapOptionalMoverProfile,
 } from '../lib/moverProfile';
+import { accountHoldsRole } from '../lib/roleLanding';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import { confirmRiderCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
@@ -75,17 +76,23 @@ export function useMoverKind() {
     lastMoverRole?: string | null;
   }) | null;
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
+  // An account with no mover role (a customer opening "Swift Driver" to
+  // apply) gets 403 on both probes by the server's authz rule. For that
+  // account 403 IS "no profile": one answer each, no retries, no error carried
+  // into the application screen (lib/moverProfile). The switcher's "Join"
+  // uses the same predicate.
+  const outsider = !accountHoldsRole(authority, 'mover');
   const retryDelay = (attempt: number) => Math.min(500 * (2 ** attempt), 2_000);
   const driver = useQuery<any | null>({
     queryKey: ['mover', 'driverProfile'],
-    queryFn: () => unwrapOptionalMoverProfile(driverApi.profile()),
+    queryFn: () => unwrapOptionalMoverProfile(driverApi.profile(), { outsider }),
     retry: 2,
     retryDelay,
     enabled: !pv,
   });
   const rider = useQuery<any | null>({
     queryKey: ['mover', 'riderProfile'],
-    queryFn: () => unwrapOptionalMoverProfile(riderApi.profile()),
+    queryFn: () => unwrapOptionalMoverProfile(riderApi.profile(), { outsider }),
     retry: 2,
     retryDelay,
     enabled: !pv,

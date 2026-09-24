@@ -127,10 +127,11 @@ class TwilioSmsProvider implements SmsProvider {
   private keySid = process.env['TWILIO_API_KEY_SID'] ?? '';
   private keySecret = process.env['TWILIO_API_KEY_SECRET']?.trim() ?? '';
   private from = process.env['TWILIO_FROM'] ?? '';
+  private messagingServiceSid = process.env['TWILIO_MESSAGING_SERVICE_SID'] ?? '';
 
   constructor() {
-    const invalidField = firstInvalidTwilioConfig(process.env);
-    if (invalidField) throw new Error(`${invalidField} is missing or malformed for the twilio provider`);
+    const invalidConfig = firstInvalidTwilioConfig(process.env);
+    if (invalidConfig) throw new Error(`${invalidConfig} for the twilio provider`);
   }
 
   async sendSms(to: string, body: string): Promise<{ ref: string }> {
@@ -141,10 +142,15 @@ class TwilioSmsProvider implements SmsProvider {
     try {
       let res: Response;
       try {
+        // A Messaging Service sends on its own sender pool; a bare From
+        // number is the legacy path. Validation guarantees exactly one.
+        const sender: Record<string, string> = this.messagingServiceSid
+          ? { MessagingServiceSid: this.messagingServiceSid }
+          : { From: this.from };
         res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
           method: 'POST',
           headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ To: to, From: this.from, Body: body }).toString(),
+          body: new URLSearchParams({ To: to, ...sender, Body: body }).toString(),
           signal: controller.signal,
         });
       } catch {

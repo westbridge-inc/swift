@@ -105,7 +105,7 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post('/send-otp', otpRateLimit, async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
-    const result = await authService.sendOtp(body.phone);
+    const result = await authService.sendOtp(body.phone, request.ip);
     return reply.send({ success: true, data: result });
   });
 
@@ -390,7 +390,7 @@ export async function authRoutes(app: FastifyInstance) {
   // Reset request = just the normal OTP send; reset proves ownership again
   app.post('/password/reset-request', otpRateLimit, async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
-    const result = await authService.sendOtp(body.phone);
+    const result = await authService.sendOtp(body.phone, request.ip);
     return reply.send({ success: true, data: result });
   });
 

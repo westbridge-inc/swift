@@ -36,6 +36,7 @@ import {
 import { disconnectSocket } from '../../../services/socket';
 import { docLabel } from '../../../components/onboarding/DocumentUploadCard';
 import { useVerificationStatus } from '../../../hooks/verification';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import {
   useVendorProfile,
   useVendorOrderHistory,
@@ -856,6 +857,10 @@ export function VendorOps({ store, navigation }: any) {
     : [];
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   const qc = useQueryClient();
+  // The board polls its orders every few seconds. A spinner bound to
+  // isRefetching dropped the whole board behind a spinner on every poll; it
+  // now shows only while the owner's own pull is in flight (lib/pullToRefresh).
+  const pull = usePullToRefresh(() => qc.invalidateQueries({ queryKey: ['vendor'] }));
   const switchStore = async (id: string) => {
     if (id === store.id || switchingStore) return;
     setSwitchingStore(true);
@@ -936,8 +941,8 @@ export function VendorOps({ store, navigation }: any) {
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={ordersQ.isRefetching || analyticsQ.isRefetching}
-            onRefresh={() => void qc.invalidateQueries({ queryKey: ['vendor'] })}
+            refreshing={pull.refreshing}
+            onRefresh={() => { void pull.onRefresh(); }}
             tintColor={color.brand[500]}
           />
         }
