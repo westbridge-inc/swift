@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { RefreshControl, ScrollView, TextInput, View } from 'react-native';
 import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot, useCompleteJob } from '../../../hooks';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 // [B3] The emergency path for BOTH people on a service job — the provider
 // working inside a stranger's home, and the customer whose home it is. Every
 // other in-flight surface had a button; this one had nothing.
@@ -313,6 +314,7 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
 
 export function ServiceJobsScreen({ navigation }: any) {
   const q = useServiceJobs<any[]>();
+  const pull = usePullToRefresh(q.refetch); // the spinner follows the pull, never a background refetch (lib/pullToRefresh)
   const jobs = q.data ?? [];
 
   return (
@@ -321,7 +323,7 @@ export function ServiceJobsScreen({ navigation }: any) {
       <ScrollView
         contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingTop: space.sm, paddingBottom: space['3xl'] }}
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor={color.brand[500]} />}
+        refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
       >
         {q.isLoading ? (
           <LoadingBlock />

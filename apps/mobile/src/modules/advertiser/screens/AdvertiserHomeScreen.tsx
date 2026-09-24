@@ -8,6 +8,7 @@ import { color, radius, space } from '@swift/ui';
 import { Card, EmptyState, ErrorState, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
 import { moneyOrDash as money } from '../../../lib/money';
 import { useMyAdvertisers, useAdvertiserCampaigns } from '../../../hooks/advertiser';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 
 // §14.1/§14.2 — onboarding status banner (gated-preview pattern) + the
 // campaign list. Statuses speak human (§6.1 states, human-worded).
@@ -30,6 +31,7 @@ export function AdvertiserHomeScreen() {
   const me = useMyAdvertisers();
   const advertiser = (me.data ?? [])[0];
   const campaigns = useAdvertiserCampaigns(advertiser?.id);
+  const pull = usePullToRefresh(campaigns.refetch); // the spinner follows the pull, never a background refetch (lib/pullToRefresh)
   const approved = advertiser?.status === 'APPROVED';
 
   const rows = campaigns.data ?? [];
@@ -47,7 +49,7 @@ export function AdvertiserHomeScreen() {
 
       <ScrollView
         contentContainerStyle={{ padding: space['2xl'], paddingBottom: space['3xl'] }}
-        refreshControl={<RefreshControl refreshing={campaigns.isRefetching} onRefresh={() => campaigns.refetch()} tintColor={color.brand[500]} />}
+        refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
       >
         {/* §14.1 status banner — the gated-preview truth-teller. */}
         {advertiser && advertiser.status !== 'APPROVED' ? (
