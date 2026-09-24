@@ -40,6 +40,8 @@ describe('EAS build profiles point at the right server', () => {
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
     expect(eas.build.preview.env?.EAS_PROJECT_ID).toMatch(uuid);
     expect(eas.build.staging.env?.EAS_PROJECT_ID).toBe(eas.build.preview.env?.EAS_PROJECT_ID);
+    // Production registers for push the same way (DS177 F1).
+    expect(eas.build.production.env?.EAS_PROJECT_ID).toBe(eas.build.preview.env?.EAS_PROJECT_ID);
   });
 
   it('production is not pointed at staging, and no profile uses plain http or a bare IP', () => {
