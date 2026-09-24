@@ -28,6 +28,14 @@ services:
         }
         process.exit(result.status ?? 1);
     environment:
+      # The same posture as the api/worker (deploy/.env). The seed calls
+      # isProduction() (seedFxRate), and runtime-mode refuses an unset
+      # NODE_ENV rather than guessing, so without this line the promotion
+      # died before any write while sign mode (which returns earlier) passed.
+      NODE_ENV: ${NODE_ENV:?set NODE_ENV explicitly (production|development|test|loadtest) — the seed refuses to guess its posture}
+      # The operator-recorded GYD/USD rate. Required only on a production
+      # posture (seedFxRate); empty elsewhere falls back to the dev/test rate.
+      SEED_FX_GYD_PER_USD: ${SEED_FX_GYD_PER_USD:-}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_USER: ${POSTGRES_USER:-swift}
