@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
-import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
@@ -14,6 +14,7 @@ import {
   CheckoutAlreadyPlacedError,
   CheckoutInFlightError,
   useRemoveCartItem,
+  useRemoveCartPromo,
   useSetCartTip,
   useUpdateCartItem,
 } from '../../../hooks/customer';
@@ -51,8 +52,10 @@ import { CartPaymentOptions } from '../CartPaymentOptions';
 import { checkoutTipAmount } from '../checkout-tip';
 import {
   cartPricingChoices,
+  checkoutErrorMessage,
   deliveryFeeRows,
   isBookingsOnly,
+  pickupRetryChoices,
   pickupStoreNames,
   pricedTip,
   quoteStoreIds,
@@ -139,6 +142,7 @@ export function CartScreen() {
   const removeItem = useRemoveCartItem();
   const clearCart = useClearCart();
   const setTip = useSetCartTip();
+  const removePromo = useRemoveCartPromo();
   const placeOrder = usePlaceOrder<any>();
   // [MOB-020] An intent this account sent and never heard back about (the app
   // died mid-request) is resolved against the server before the button is
@@ -184,6 +188,13 @@ export function CartScreen() {
   const [paySelection, setPaySelection] = useState<CartPaymentSelection>({ method: 'CASH', scope: '' });
   // Pickup spec 2.1: the FIRST decision — it reshapes everything below.
   const [fulfillment, setFulfillment] = useState<'DELIVERY' | 'PICKUP'>('DELIVERY');
+  // [E01-B] The no-riders retry is no longer one tap: armed only once the
+  // customer asks to switch, and the pickup quote it fetches is shown in a
+  // confirm step BEFORE anything is placed.
+  const [confirmPickup, setConfirmPickup] = useState(false);
+  // Re-arms the confirm effect on every tap of the retry button (a dismissed
+  // Alert must not leave the retry dead).
+  const [pickupAttempt, setPickupAttempt] = useState(0);
   const [placedPickup, setPlacedPickup] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
@@ -203,23 +214,40 @@ export function CartScreen() {
   // it is bookings only — read from the quote's own lines and kept here, so the
   // next quote request can carry them while it is in flight.
   const [quoteBasis, setQuoteBasis] = useState<{ storeIds: string[]; bookingsOnly: boolean }>({ storeIds: [], bookingsOnly: false });
+  // [E01-B] The applied promo code — read from the quote's own echo of the
+  // stored promo (the same state+effect pattern as quoteBasis), so it is
+  // exactly present while a code is applied and gone the moment one is removed.
+  const [appliedPromo, setAppliedPromo] = useState<string | null>(null);
   // [E01] ONE set of pricing choices — the quote is requested with it and the
   // order button submits it, so the server prices exactly what is charged.
   const pricing = useMemo(
-    () => cartPricingChoices({ mode: fulfillment, express, storeIds: quoteBasis.storeIds, bookingsOnly: quoteBasis.bookingsOnly, selectedTip }),
-    [fulfillment, express, quoteBasis, selectedTip],
+    // [E01-B] The applied promo rides this SAME object to the order body: it
+    // is read from the quote's own echo of the stored promo, so it appears
+    // exactly while a code is applied and drops the moment one is removed.
+    () => cartPricingChoices({ mode: fulfillment, express, storeIds: quoteBasis.storeIds, bookingsOnly: quoteBasis.bookingsOnly, selectedTip, promoCode: appliedPromo }),
+    [fulfillment, express, quoteBasis, selectedTip, appliedPromo],
   );
   const cart = useCart<any>(latitude ?? undefined, longitude ?? undefined, pricing);
   const c = cart.data; // null = empty cart
+  // [E01-B] The retry's own quote, requested only once the customer asked to
+  // switch (no riders): every store collects, no express, no tip, promo kept.
+  // Its total is shown in the confirm step; it is never requested otherwise.
+  const retryPricing = useMemo(
+    () => (confirmPickup
+      ? pickupRetryChoices({ storeIds: quoteBasis.storeIds, bookingsOnly: quoteBasis.bookingsOnly, promoCode: appliedPromo })
+      : undefined),
+    [confirmPickup, quoteBasis, appliedPromo],
+  );
+  const pickupQuote = useCart<any>(latitude ?? undefined, longitude ?? undefined, retryPricing, confirmPickup);
   useEffect(() => {
     const next = { storeIds: quoteStoreIds(c?.items), bookingsOnly: isBookingsOnly(c?.items) };
     setQuoteBasis((prev) =>
       prev.bookingsOnly === next.bookingsOnly && prev.storeIds.join('|') === next.storeIds.join('|') ? prev : next);
   }, [c?.items]);
-  // [E01] The screen may only commit money against a SETTLED quote: one priced
-  // for the current choices (not the previous choice's, kept on screen while
-  // the new one loads) and not being refreshed after a cart change.
-  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && !updateItem.isPending && !removeItem.isPending;
+  useEffect(() => {
+    const next = c?.promoCode?.code ?? null;
+    setAppliedPromo((prev) => (prev === next ? prev : next));
+  }, [c?.promoCode?.code]);
   const paymentCapabilities = useMemo(
     () => normalizeCartPaymentCapabilities(c?.paymentCapabilities),
     [c?.paymentCapabilities],
@@ -258,20 +286,12 @@ export function CartScreen() {
     },
   });
 
-  if (!isAuthenticated) {
-    return (
-      <Screen>
-        <CartHeader onBack={canGoBack ? () => navigation.goBack() : undefined} />
-        <EmptyState
-          picto="groceries"
-          title="Sign in to start a cart"
-          body="Your basket lives on your account so it follows you between devices."
-          actionLabel="Sign in"
-          onAction={promptLogin}
-        />
-      </Screen>
-    );
-  }
+  // [E01] The screen may only commit money against a SETTLED quote: one priced
+  // for the current choices (not the previous choice's, kept on screen while
+  // the new one loads) and not being refreshed after a cart change — including
+  // while a promo apply/remove is in flight, so the code in the body is the
+  // code the quote on screen was priced with.
+  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && !updateItem.isPending && !removeItem.isPending && !removePromo.isPending && !applyPromo.isPending;
 
   const items: any[] = c?.items ?? [];
 
@@ -329,6 +349,10 @@ export function CartScreen() {
     placeOrder.mutate(
       {
         paymentMethod: submittedMethod,
+        // [E01-B] The applied promo code — the charge must carry the code the
+        // quote discounted with, and only while one is applied (removal drops
+        // it from this same `pricing` object).
+        ...(pricing.promoCode ? { promoCode: pricing.promoCode } : {}),
         // [E01] Exactly the choices the quote was priced with: the speed, and
         // the pickup choice for EVERY store in the basket.
         ...(pricing.express ? { express: true } : {}),
@@ -377,6 +401,80 @@ export function CartScreen() {
     );
   };
 
+  // The confirm effect lives with the hooks above the auth gate, but the order
+  // placement it confirms is defined below the gate's data. Keep the latest
+  // callback in a ref (the useEvent pattern) so the Alert never calls a stale
+  // closure and the effect's deps stay stable.
+  const onOrderLatest = useRef(onOrder);
+  useEffect(() => {
+    onOrderLatest.current = onOrder;
+  });
+  // [E01-B] The retry's confirm step shows the NEW pickup total before
+  // anything is placed: the pickup quote (requested when the customer asked to
+  // switch) settles, the Alert shows its server total, and only the Alert's
+  // confirm button places the order.
+  const pickupConfirmShown = useRef(false);
+  useEffect(() => {
+    if (!confirmPickup) {
+      pickupConfirmShown.current = false;
+      return;
+    }
+    // The retry may only place through the confirm step, so a quote that
+    // cannot be priced must say so instead of silently dead-ending the
+    // customer's only escape.
+    if (pickupQuote.isError) {
+      setConfirmPickup(false);
+      Alert.alert('Couldn’t price pickup', 'Try again in a moment.');
+      return;
+    }
+    if (pickupQuote.isFetching || pickupQuote.isPlaceholderData || !pickupQuote.data || pickupConfirmShown.current) return;
+    const pickupTotal = Number(pickupQuote.data.totalAmount);
+    if (!Number.isFinite(pickupTotal)) return;
+    pickupConfirmShown.current = true;
+    Alert.alert(
+      'Order for pickup instead?',
+      `Your pickup total is ${money(pickupTotal)}. The order is only placed when you confirm.`,
+      [
+        { text: 'Not now', style: 'cancel', onPress: () => setConfirmPickup(false) },
+        {
+          text: 'Confirm pickup order',
+          onPress: () => {
+            setConfirmPickup(false);
+            // [E01] Every store in the basket collects — not just the one
+            // `cart.vendor` happens to track (the rest would still wait for a
+            // rider).
+            const storeIds = quoteStoreIds(c?.items);
+            if (storeIds.length === 0) return;
+            onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });
+          },
+        },
+      ],
+    );
+  }, [confirmPickup, pickupAttempt, pickupQuote.isFetching, pickupQuote.isPlaceholderData, pickupQuote.isError, pickupQuote.data, c?.items]);
+  const retryAsPickup = () => {
+    if (quoteStoreIds(c?.items).length === 0) return;
+    // Re-arm on every tap: a dismissed (rather than cancelled) Alert must not
+    // leave the retry dead — the attempt counter forces the effect to re-run.
+    pickupConfirmShown.current = false;
+    setConfirmPickup(true);
+    setPickupAttempt((n) => n + 1);
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <Screen>
+        <CartHeader onBack={canGoBack ? () => navigation.goBack() : undefined} />
+        <EmptyState
+          picto="groceries"
+          title="Sign in to start a cart"
+          body="Your basket lives on your account so it follows you between devices."
+          actionLabel="Sign in"
+          onAction={promptLogin}
+        />
+      </Screen>
+    );
+  }
+
   // [MOB-020] The two answers that are NOT failures: the order already exists
   // (a replayed key under a changed body, or a resolved earlier intent) and
   // the order is still being placed (a concurrent twin). Neither is retried.
@@ -387,18 +485,13 @@ export function CartScreen() {
     : stillPlacing
       ? 'This order is already being placed — hold on a moment.'
       : placeOrder.isError
-        ? ((placeOrder.error as any)?.response?.data?.error?.message ?? 'Could not place the order. Try again.')
+        // [E01-B] A refusal at CHECKOUT (promo refusals included) is shown as
+        // the message checkout returned — exactly what the web cart shows.
+        ? checkoutErrorMessage(placeOrder.error)
         : undefined;
   // Availability spec §2: zero riders online → the server refuses delivery
   // honestly; pickup is the same food without the wait for a rider.
   const noRiders = (placeOrder.error as any)?.response?.data?.error?.code === 'DELIVERY_NO_RIDERS';
-  const retryAsPickup = () => {
-    // [E01] Every store in the basket collects — not just the one
-    // `cart.vendor` happens to track (the rest would still wait for a rider).
-    const storeIds = quoteStoreIds(c?.items);
-    if (storeIds.length === 0) return;
-    onOrder({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });
-  };
 
   return (
     <Screen>
@@ -536,9 +629,22 @@ export function CartScreen() {
             {c.promoCode ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm, paddingLeft: space.lg }}>
                 <Feather name="check-circle" size={13} color={color.success} />
-                <T variant="caption" tone="success">
+                <T variant="caption" tone="success" style={{ flex: 1 }}>
                   {c.promoCode.code} — {c.promoCode.description}
                 </T>
+                {/* [E01-B] The customer can remove an applied code: the quote
+                    re-prices without it and checkout stops sending it (the
+                    web cart cannot remove a promotion yet). */}
+                <PillButton
+                  label="Remove"
+                  variant="soft"
+                  size="sm"
+                  loading={removePromo.isPending}
+                  onPress={() => {
+                    setPromoMsg(null);
+                    removePromo.mutate();
+                  }}
+                />
               </View>
             ) : null}
           </View>
@@ -854,8 +960,10 @@ export function CartScreen() {
               variant="outline"
               size="md"
               style={{ marginTop: space.md }}
-              loading={placeOrder.isPending || recovery.recovering}
-              disabled={recovery.recovering || alreadyPlaced || stillPlacing || !quoteSettled}
+              // [E01-B] Tapping asks for the pickup quote whose total the
+              // confirm step then shows — the button waits for that quote.
+              loading={placeOrder.isPending || recovery.recovering || (confirmPickup && pickupQuote.isFetching)}
+              disabled={recovery.recovering || alreadyPlaced || stillPlacing || !quoteSettled || (confirmPickup && pickupQuote.isFetching)}
               onPress={retryAsPickup}
             />
           ) : null}

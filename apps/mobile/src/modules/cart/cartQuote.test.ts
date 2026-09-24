@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  cartPricingChoices, deliveryFeeRows, isBookingsOnly, pickupStoreNames, pricedTip,
-  quoteStoreIds, quotedRiderTip, shortStores, type CartQuote,
+  cartPricingChoices, CHECKOUT_PROMO_REFUSAL_CODES, checkoutErrorMessage, deliveryFeeRows, isBookingsOnly,
+  pickupRetryChoices, pickupStoreNames, pricedTip, quoteStoreIds, quotedRiderTip, shortStores, type CartQuote,
 } from './cartQuote';
 import { checkoutTipAmount } from './checkout-tip';
 
@@ -27,7 +27,7 @@ describe('the stores a quote prices', () => {
 });
 
 describe('ONE set of choices for the quote and the order', () => {
-  const base = { mode: 'DELIVERY' as const, express: false, storeIds: ['far', 'near'], bookingsOnly: false, selectedTip: null };
+  const base = { mode: 'DELIVERY' as const, express: false, storeIds: ['far', 'near'], bookingsOnly: false, selectedTip: null, promoCode: null as string | null };
 
   it('delivery with no choices made asks for checkout’s defaults — nothing to send', () => {
     expect(cartPricingChoices(base)).toEqual({});
@@ -49,6 +49,17 @@ describe('ONE set of choices for the quote and the order', () => {
   it('bookings only: no pickup selection and no tip, whatever the toggle says', () => {
     expect(cartPricingChoices({ ...base, mode: 'PICKUP', bookingsOnly: true, selectedTip: 500 })).toEqual({ tipAmount: 0 });
   });
+  it('[E01-B] the applied promo code rides the one choices object — present exactly while applied, on every mode', () => {
+    expect(cartPricingChoices({ ...base, promoCode: 'SAVE10' })).toEqual({ promoCode: 'SAVE10' });
+    expect(cartPricingChoices({ ...base, mode: 'PICKUP', promoCode: 'SAVE10' })).toEqual({
+      fulfillmentSelections: { far: 'PICKUP', near: 'PICKUP' },
+      tipAmount: 0,
+      promoCode: 'SAVE10',
+    });
+    // Removal drops it from the same object the order body is built from.
+    expect(cartPricingChoices(base)).not.toHaveProperty('promoCode');
+    expect(cartPricingChoices({ ...base, promoCode: '' })).not.toHaveProperty('promoCode');
+  });
 });
 
 describe('the tip submitted is the tip the quote was priced with', () => {
@@ -64,7 +75,7 @@ describe('the tip submitted is the tip the quote was priced with', () => {
       for (const bookingsOnly of [false, true]) {
         for (const selectedTip of [null, 0, 200, 1000]) {
           for (const persisted of [null, 0, 500]) {
-            const choices = cartPricingChoices({ mode, express: false, storeIds: ['a'], bookingsOnly, selectedTip });
+            const choices = cartPricingChoices({ mode, express: false, storeIds: ['a'], bookingsOnly, selectedTip, promoCode: null });
             // The server echoes the tip it priced: the sent one, else the cart's.
             const quote: CartQuote = { tipAmount: choices.tipAmount ?? persisted };
             const pickup = !bookingsOnly && mode === 'PICKUP';
@@ -119,5 +130,42 @@ describe('[E09] each short store is named with the amount still to add', () => {
     };
     expect(shortStores(quote)).toEqual([{ vendorId: 'big', name: 'Big', minOrderAmount: 5000, amountToAdd: 2000 }]);
     expect(shortStores({})).toEqual([]);
+  });
+});
+
+describe('[E01-B] the no-riders pickup retry is quoted with its own choices', () => {
+  it('every store collects, express and the tip are gone, the applied promo stays', () => {
+    expect(pickupRetryChoices({ storeIds: ['far', 'near'], bookingsOnly: false, promoCode: 'SAVE10' })).toEqual({
+      fulfillmentSelections: { far: 'PICKUP', near: 'PICKUP' },
+      tipAmount: 0,
+      promoCode: 'SAVE10',
+    });
+    expect(pickupRetryChoices({ storeIds: ['far'], bookingsOnly: false, promoCode: null })).toEqual({
+      fulfillmentSelections: { far: 'PICKUP' },
+      tipAmount: 0,
+    });
+  });
+});
+
+describe('[E01-B] a checkout promo refusal is shown as the server’s message', () => {
+  const refused = (code: string, message: string) => ({ response: { data: { error: { code, message } } } });
+
+  it('every refusal code order.service.ts returns reaches the display verbatim — none invented, none swallowed', () => {
+    expect(CHECKOUT_PROMO_REFUSAL_CODES).toEqual([
+      'INVALID_PROMO',
+      'EXPIRED_PROMO',
+      'USED_PROMO',
+      'PROMO_WRONG_VENDOR',
+      'MIN_ORDER_PROMO',
+      'PROMO_UNAVAILABLE_CASH_DELIVERY',
+    ]);
+    for (const code of CHECKOUT_PROMO_REFUSAL_CODES) {
+      expect(checkoutErrorMessage(refused(code, `server message for ${code}`)), code).toBe(`server message for ${code}`);
+    }
+  });
+
+  it('no response at all (offline, timeout) keeps the one generic fallback — never invented promo copy', () => {
+    expect(checkoutErrorMessage(null)).toBe('Could not place the order. Try again.');
+    expect(checkoutErrorMessage({ response: { data: { error: { code: 'PROMO_UNAVAILABLE_CASH_DELIVERY' } } } })).toBe('Could not place the order. Try again.');
   });
 });

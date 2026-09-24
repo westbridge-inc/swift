@@ -670,10 +670,11 @@ export function useCheckoutRecovery(): { recovering: boolean; placedOrderIds: st
 
 // --- Cart ---------------------------------------------------------------------
 
-export function useCart<T = any>(lat?: number, lng?: number, choices?: CartQuoteChoices) {
+export function useCart<T = any>(lat?: number, lng?: number, choices?: CartQuoteChoices, enabled = true) {
   return useQuery<T>({
     queryKey: customerKeys.cart(lat, lng, choices),
     queryFn: () => unwrap<T>(customerApi.getCart(lat, lng, choices)),
+    enabled,
     // [E01] A changed choice (pickup, express, tip) is a new quote. Keep the
     // last one on screen — flagged `isPlaceholderData` — while the server
     // prices the new choice, instead of blanking the cart; the screen holds
@@ -740,6 +741,14 @@ export function useSetCartTip() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (amount: number) => unwrap(customerApi.setCartTip(amount)),
+    onSuccess: () => invalidateCart(qc),
+  });
+}
+
+export function useRemoveCartPromo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => unwrap(customerApi.removeCartPromo()),
     onSuccess: () => invalidateCart(qc),
   });
 }

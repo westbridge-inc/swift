@@ -78,4 +78,11 @@ describe('GET /customer/cart carries the checkout choices', () => {
     expect(q.get('tipAmount')).toBe('500');
     expect(q.has('fulfillmentSelections')).toBe(false);
   });
+
+  it('[E01-B] the applied promo code does NOT travel with the quote — the quote prices the cart’s STORED promo; the code goes to the ORDER body', async () => {
+    const seen = capture();
+    await customerApi.getCart(undefined, undefined, { promoCode: 'SAVE10', tipAmount: 0 });
+    expect(sentQuery(seen[0]!).has('promoCode')).toBe(false);
+    expect(sentQuery(seen[0]!).get('tipAmount')).toBe('0');
+  });
 });
