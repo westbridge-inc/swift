@@ -13,7 +13,7 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue } from '../../../hooks';
+import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfirmDriverArrival, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue } from '../../../hooks';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -248,6 +248,8 @@ export function TaxiScreen({ navigation }: any) {
   const { data: activeRide, isLoading: loadingActive } = useActiveRide<any>(true);
   const requestRide = useRequestRide();
   const cancelRide = useCancelRide();
+  // [E19] The passenger's own eyes override the driver-arrival GPS gate.
+  const confirmDriverArrival = useConfirmDriverArrival();
   const qc = useQueryClient();
 
   // Post-trip closure: the ride that just completed, held so we can show the
@@ -345,6 +347,7 @@ export function TaxiScreen({ navigation }: any) {
         navigation={navigation}
         ride={activeRide}
         cancelRide={cancelRide}
+        confirmDriverArrival={confirmDriverArrival}
         insets={insets}
         rematching={rematching}
       />
@@ -967,7 +970,7 @@ function AssignedRideCard({
   );
 }
 
-function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
+function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets, rematching }: any) {
   const { height: winH } = useWindowDimensions();
   const scheme = useColorScheme();
   const sheetRef = useRef<BottomSheet>(null);
@@ -1383,6 +1386,26 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
                 showStartCode={showStartCode}
                 onWrongDriver={() => setConfirmNotMyDriver(true)}
               />
+              {/* [E19] The passenger can see the car: one tap overrides the
+                  driver-arrival GPS gate, so a driver with a stale or missing
+                  fix is never stranded at the door. */}
+              {status === 'DRIVER_EN_ROUTE' ? (
+                <PillButton
+                  label="My driver is here"
+                  variant="soft"
+                  icon="map-pin"
+                  style={{ marginTop: space.md, alignSelf: 'stretch' }}
+                  loading={confirmDriverArrival.isPending}
+                  onPress={() => confirmDriverArrival.mutate(
+                    { id: ride.id },
+                    {
+                      onError: (error: any) => {
+                        toast.show(error?.response?.data?.error?.message ?? "Couldn't confirm your driver's arrival — try again.");
+                      },
+                    },
+                  )}
+                />
+              ) : null}
             </>
           ) : (
             <>
