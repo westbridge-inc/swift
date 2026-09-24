@@ -108,7 +108,7 @@ export async function runJourneySuite(o: SuiteOpts): Promise<number> {
     const r = runs.get(j.id)!.result(target, o.runId);
     o.log(`  ${r.status.padEnd(4)} ${j.id} ${j.title} (${Math.round((Date.now() - t0) / 1000)}s)`);
     // The evidence, as it happens: a failed step is visible in the log before the run ends.
-    for (const s of r.steps) if (!s.ok) o.log(`       ✗ ${s.name} — ${s.detail.slice(0, 300)}`);
+    for (const s of r.steps) if (!s.ok) o.log(`       ${s.cleanup ? '⚠' : '✗'} ${s.name} — ${s.detail.slice(0, 300)}`);
     if (r.status === 'SKIP' && r.reason) o.log(`       ○ ${r.reason.slice(0, 300)}`);
   };
 

@@ -26,6 +26,84 @@ export async function freshVendor(rec: Recorder, ctx: Ctx, slot: string, type: '
   return { s, vendorId: become.json.data.id };
 }
 
+/** Retire the synthetic store a journey approved, so shoppers never see it on
+ *  the next run. Preferred: an admin suspension (status → SUSPENDED removes it
+ *  from public discovery). If that is refused, the owner closes the doors and
+ *  stops accepting orders. Recorded as a cleanup step — visible in the report,
+ *  but a failed cleanup never fails the journey's product checks. */
+async function retireFreshStore(rec: Recorder, ctx: Ctx, s: Session, vendorId: string, name: string): Promise<void> {
+  try {
+    const susp = await asAdmin(ctx.admin.token, `retire the synthetic ${name} store the journey approved`, 'PUT', `/admin/vendors/${vendorId}/suspend`, { reason: `Journey cleanup: ${name} is a synthetic store and must not stay live for shoppers.` });
+    if (susp.ok) {
+      rec.cleanup(`${name} retired after the journey`, true, `→ ${brief(susp)} status=${susp.json?.data?.status}`);
+      return;
+    }
+    // The open/orders toggles FLIP rather than set, so read the state back and flip again until the off side holds.
+    const off = async (path: string, field: 'isCurrentlyOpen' | 'acceptingOrders'): Promise<boolean> => {
+      for (let i = 0; i < 2; i += 1) {
+        const r = await PUT(path, {}, s.token);
+        if (r.json?.data?.[field] === false) return true;
+      }
+      return false;
+    };
+    const closed = await off('/vendor/vendor/toggle-open', 'isCurrentlyOpen');
+    const stopped = await off('/vendor/vendor/toggle-orders', 'acceptingOrders');
+    rec.cleanup(`${name} retired after the journey`, closed && stopped, `suspend refused (→ ${brief(susp)}); owner closed=${closed} acceptingOrders-off=${stopped}`);
+  } catch (e: any) {
+    // A cleanup request that throws (timeout, aborted fetch) is still only a
+    // cleanup failure: visible, never fatal to the journey's assertions.
+    rec.cleanup(`${name} retired after the journey`, false, `cleanup threw: ${e?.message ?? e}`);
+  }
+}
+
+/** VEND-01's steps; the store it approves is retired in `run`'s finally. */
+async function vend01Steps(rec: Recorder, ctx: Ctx, s: Session, vendorId: string): Promise<void> {
+  const p0 = vendorOf((await GET('/vendor/profile', s.token)).json, vendorId);
+  rec.check('the new store waits for approval, closed', p0?.status === 'PENDING_APPROVAL' && p0?.isCurrentlyOpen === false, `status=${p0?.status} open=${p0?.isCurrentlyOpen}`);
+  const cat = await POST('/vendor/categories', { name: 'Menu', sortOrder: 0 }, s.token);
+  rec.deny('listing an item before verification', await POST('/vendor/items', { categoryId: cat.json?.data?.id ?? 'x', name: 'Too early', basePrice: 100 }, s.token), [403], ['VERIFICATION_REQUIRED']);
+  rec.deny('opening a store that is not active', await PUT('/vendor/vendor/toggle-open', {}, s.token), [409], ['VENDOR_NOT_ACTIVE']);
+  rec.deny('a customer cannot use the vendor surface', await POST('/vendor/categories', { name: 'x' }, ctx.roster.customers.C2!.session.token), [403]);
+  rec.deny('the new owner cannot approve itself', await asAdmin(s.token, 'self approval attempt', 'PUT', `/admin/vendors/${vendorId}/approve`), [403]);
+
+  const st = (await GET('/verification/status?role=STORE', s.token)).json?.data;
+  const missing: string[] = st?.missing ?? [];
+  rec.check('the STORE checklist is published to the owner', missing.length >= 3, `missing=${JSON.stringify(missing)}`);
+  // A mover's document is never a store's; a category-gate document (a restaurant licence a shop
+  // needs to sell prepared food) IS submittable off-checklist by design (DOC-1 §18.3).
+  rec.deny('a document type that is neither on the STORE checklist nor a category-gate type', (await submitDoc(s, 'STORE', 'drivers_licence', 'vend01-wrong')).res, [400], ['INVALID_DOC_TYPE']);
+  rec.expect('a category-gate document (gra_restaurant_licence) is accepted off-checklist (DOC-1 §18.3)', (await submitDoc(s, 'STORE', 'gra_restaurant_licence', 'vend01-gate')).res, 201);
+  const ids: Record<string, string> = {};
+  for (const t of missing) {
+    const d = await submitDoc(s, 'STORE', t, 'vend01');
+    if (rec.expect(`submit ${t}`, d.res, 201)) ids[t] = d.id!;
+  }
+  // rejection, then a corrected resubmission
+  const first = missing[0]!;
+  const rej = await asAdmin(ctx.admin.token, `reject the synthetic ${first}: the scan is illegible`, 'PUT', `/admin/verification/${ids[first]}/reject`, { reason: 'The scan is illegible; please upload a clear copy.' });
+  rec.expect(`the reviewer rejects ${first}`, rej, 200);
+  const st2 = (await GET('/verification/status?role=STORE', s.token)).json?.data;
+  rec.check('the owner sees the rejection and the document missing again', (st2?.missing ?? []).includes(first), `missing=${JSON.stringify(st2?.missing)}`);
+  const re = await submitDoc(s, 'STORE', first, 'vend01-retry');
+  rec.expect(`resubmit ${first}`, re.res, 201);
+  ids[first] = re.id!;
+  for (const t of missing) {
+    const a = await approveDoc(ctx.admin, ids[t]!, t);
+    rec.expect(`the reviewer approves ${t}`, a, 200);
+  }
+  const p1 = vendorOf((await GET('/vendor/profile', s.token)).json, vendorId);
+  rec.check('approving the last document activates the store', p1?.status === 'ACTIVE' && p1?.isVerified === true, `status=${p1?.status} isVerified=${p1?.isVerified}`);
+  const sub = (await GET('/vendor/subscription', s.token)).json?.data;
+  rec.check('activation starts the 14-day trial', sub?.status === 'TRIAL' && !!sub?.trialEndDate, `status=${sub?.status} trialEndDate=${sub?.trialEndDate}`);
+  rec.deny('a second store approval is refused (already active)', await asAdmin(ctx.admin.token, 'approve an already-active synthetic store', 'PUT', `/admin/vendors/${vendorId}/approve`), [400], ['ALREADY_ACTIVE']);
+  const open = await PUT('/vendor/vendor/toggle-open', {}, s.token);
+  rec.check('the owner opens the store', open.ok && open.json?.data?.isCurrentlyOpen === true, `→ ${brief(open)}`);
+  const item = await POST('/vendor/items', { categoryId: cat.json?.data?.id, name: `VEND-01 item ${ctx.runId}`, basePrice: 500 }, s.token);
+  rec.expect('the verified store lists an item', item, [200, 201]);
+  await PUT('/vendor/vendor/toggle-open', {}, s.token); // close again: a synthetic store should not stay open
+  rec.deviceCase('document camera capture', 'photographing real papers on a phone is the device gate; this target proves upload, review, rejection and activation');
+}
+
 export const VEND_01: Journey<Ctx> = {
   id: 'VEND-01',
   estimateSeconds: 90,
@@ -35,50 +113,11 @@ export const VEND_01: Journey<Ctx> = {
     const v = await freshVendor(rec, ctx, 'vend01', 'STORE');
     rec.require('a fresh store', !!v, '');
     const { s, vendorId } = v!;
-    const p0 = vendorOf((await GET('/vendor/profile', s.token)).json, vendorId);
-    rec.check('the new store waits for approval, closed', p0?.status === 'PENDING_APPROVAL' && p0?.isCurrentlyOpen === false, `status=${p0?.status} open=${p0?.isCurrentlyOpen}`);
-    const cat = await POST('/vendor/categories', { name: 'Menu', sortOrder: 0 }, s.token);
-    rec.deny('listing an item before verification', await POST('/vendor/items', { categoryId: cat.json?.data?.id ?? 'x', name: 'Too early', basePrice: 100 }, s.token), [403], ['VERIFICATION_REQUIRED']);
-    rec.deny('opening a store that is not active', await PUT('/vendor/vendor/toggle-open', {}, s.token), [409], ['VENDOR_NOT_ACTIVE']);
-    rec.deny('a customer cannot use the vendor surface', await POST('/vendor/categories', { name: 'x' }, ctx.roster.customers.C2!.session.token), [403]);
-    rec.deny('the new owner cannot approve itself', await asAdmin(s.token, 'self approval attempt', 'PUT', `/admin/vendors/${vendorId}/approve`), [403]);
-
-    const st = (await GET('/verification/status?role=STORE', s.token)).json?.data;
-    const missing: string[] = st?.missing ?? [];
-    rec.check('the STORE checklist is published to the owner', missing.length >= 3, `missing=${JSON.stringify(missing)}`);
-    // A mover's document is never a store's; a category-gate document (a restaurant licence a shop
-    // needs to sell prepared food) IS submittable off-checklist by design (DOC-1 §18.3).
-    rec.deny('a document type that is neither on the STORE checklist nor a category-gate type', (await submitDoc(s, 'STORE', 'drivers_licence', 'vend01-wrong')).res, [400], ['INVALID_DOC_TYPE']);
-    rec.expect('a category-gate document (gra_restaurant_licence) is accepted off-checklist (DOC-1 §18.3)', (await submitDoc(s, 'STORE', 'gra_restaurant_licence', 'vend01-gate')).res, 201);
-    const ids: Record<string, string> = {};
-    for (const t of missing) {
-      const d = await submitDoc(s, 'STORE', t, 'vend01');
-      if (rec.expect(`submit ${t}`, d.res, 201)) ids[t] = d.id!;
+    try {
+      await vend01Steps(rec, ctx, s, vendorId);
+    } finally {
+      await retireFreshStore(rec, ctx, s, vendorId, 'TEST-vend01');
     }
-    // rejection, then a corrected resubmission
-    const first = missing[0]!;
-    const rej = await asAdmin(ctx.admin.token, `reject the synthetic ${first}: the scan is illegible`, 'PUT', `/admin/verification/${ids[first]}/reject`, { reason: 'The scan is illegible; please upload a clear copy.' });
-    rec.expect(`the reviewer rejects ${first}`, rej, 200);
-    const st2 = (await GET('/verification/status?role=STORE', s.token)).json?.data;
-    rec.check('the owner sees the rejection and the document missing again', (st2?.missing ?? []).includes(first), `missing=${JSON.stringify(st2?.missing)}`);
-    const re = await submitDoc(s, 'STORE', first, 'vend01-retry');
-    rec.expect(`resubmit ${first}`, re.res, 201);
-    ids[first] = re.id!;
-    for (const t of missing) {
-      const a = await approveDoc(ctx.admin, ids[t]!, t);
-      rec.expect(`the reviewer approves ${t}`, a, 200);
-    }
-    const p1 = vendorOf((await GET('/vendor/profile', s.token)).json, vendorId);
-    rec.check('approving the last document activates the store', p1?.status === 'ACTIVE' && p1?.isVerified === true, `status=${p1?.status} isVerified=${p1?.isVerified}`);
-    const sub = (await GET('/vendor/subscription', s.token)).json?.data;
-    rec.check('activation starts the 14-day trial', sub?.status === 'TRIAL' && !!sub?.trialEndDate, `status=${sub?.status} trialEndDate=${sub?.trialEndDate}`);
-    rec.deny('a second store approval is refused (already active)', await asAdmin(ctx.admin.token, 'approve an already-active synthetic store', 'PUT', `/admin/vendors/${vendorId}/approve`), [400], ['ALREADY_ACTIVE']);
-    const open = await PUT('/vendor/vendor/toggle-open', {}, s.token);
-    rec.check('the owner opens the store', open.ok && open.json?.data?.isCurrentlyOpen === true, `→ ${brief(open)}`);
-    const item = await POST('/vendor/items', { categoryId: cat.json?.data?.id, name: `VEND-01 item ${ctx.runId}`, basePrice: 500 }, s.token);
-    rec.expect('the verified store lists an item', item, [200, 201]);
-    await PUT('/vendor/vendor/toggle-open', {}, s.token); // close again: a synthetic store should not stay open
-    rec.deviceCase('document camera capture', 'photographing real papers on a phone is the device gate; this target proves upload, review, rejection and activation');
   },
 };
 
