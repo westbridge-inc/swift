@@ -699,7 +699,8 @@ export function DeliveryScreen() {
   const complete = ['DELIVERED', 'COMPLETED'].includes(o.status)
     || (o.fulfillment === 'PICKUP' && o.status === 'PICKED_UP');
   // [E17 · DS231 F3] A parcel returned to its sender is over: no live-rider
-  // card, tracking link or cancel once the return is complete.
+  // controls, tracking link or cancel once the return is complete. The rider's
+  // identity card stays, exactly as it does on a delivered order.
   const returned = o.status === 'RETURNED';
   const terminal = cancelled || failed || complete || returned;
   const verticalTint = o.orderType === 'COURIER'
@@ -811,6 +812,10 @@ export function DeliveryScreen() {
   if (cancelled) etaCopy = 'Cancelled';
   else if (failed) etaCopy = 'Couldn’t complete this order';
   else if (complete) etaCopy = 'Completed';
+  // [E17 · DS236 F3-R2] The creation-time estimate is the forward leg's; a
+  // parcel on its way back (or back) must not show a countdown to the door.
+  else if (returned) etaCopy = 'Returned to you';
+  else if (orderStatus === 'RETURNING') etaCopy = 'Coming back to you';
   else if (arrivalReached) {
     etaCopy = orderStatus === 'RIDER_ARRIVED_PICKUP' ? 'Rider reached the pickup' : 'Your rider has arrived';
   } else if (o.fulfillment === 'APPOINTMENT' && orderStatus === 'ACCEPTED') {
@@ -833,7 +838,8 @@ export function DeliveryScreen() {
   // ticking clock so a passed window is never shown as still coming
   // (R-12.2.4). The live line above is labelled live; this is the commitment
   // (L7). Delivery orders only, and only while the order is still coming.
-  const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete ? promiseLine(o.promise, nowTs) : null;
+  // A returning parcel is not coming to the door: the forward promise is over too.
+  const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete && !returned && orderStatus !== 'RETURNING' ? promiseLine(o.promise, nowTs) : null;
   const promiseUpdate = promiseNote(o.promise);
 
   return (

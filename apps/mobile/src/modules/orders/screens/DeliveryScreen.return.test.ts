@@ -37,9 +37,18 @@ describe('a returned parcel is over', () => {
     expect(block(/function isTerminalOrderSnapshot\(/, /\n}\n/)).toMatch(/'RETURNED'/);
   });
 
-  it('the screen treats RETURNED as terminal, so no live-rider card, tracking link or cancel remains', () => {
+  it('the screen treats RETURNED as terminal, so no live-rider controls, tracking link or cancel remain', () => {
     expect(SCREEN).toMatch(/const returned = o\.status === 'RETURNED';/);
     expect(SCREEN).toMatch(/const terminal = cancelled \|\| failed \|\| complete \|\| returned;/);
+  });
+
+  it('[DS236 F3-R2] no forward countdown or delivery promise on a parcel going back, or back', () => {
+    expect(SCREEN).toMatch(/else if \(returned\) etaCopy = 'Returned to you';/);
+    expect(SCREEN).toMatch(/else if \(orderStatus === 'RETURNING'\) etaCopy = 'Coming back to you';/);
+    // Both return copies come before the stale creation-time estimate can.
+    const eta = block(/let etaCopy = pendingSummary;/, /\n\n/);
+    expect(eta.indexOf("'Coming back to you'")).toBeLessThan(eta.indexOf('Server estimate'));
+    expect(SCREEN).toMatch(/!complete && !returned && orderStatus !== 'RETURNING' \? promiseLine\(/);
   });
 
   it('RETURNED has no forward-timeline step (the timeline would promise a delivery)', () => {
