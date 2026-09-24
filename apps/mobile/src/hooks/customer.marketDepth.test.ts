@@ -40,8 +40,9 @@ vi.mock('../lib/marketDepthMemory', () => ({
 
 import { useMarketDepth } from './customer';
 
-const VISIBLE = { visible: true, items: 180, vendors: 3 };
-const HIDDEN = { visible: false, items: 0, vendors: 0 };
+// The server's real body also carries the thresholds and the reason (DS206).
+const VISIBLE = { visible: true, items: 180, vendors: 3, minItems: 150, minVendors: 2, reason: 'ok' };
+const HIDDEN = { visible: false, items: 0, vendors: 0, minItems: 150, minVendors: 2, reason: 'too_few_items_and_vendors' };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -99,8 +100,13 @@ describe('useMarketDepth cold start and verdict handling', () => {
     expect(marketTabVisible(data)).toBe(false);
     expect(mocks.remember).toHaveBeenCalledExactlyOnceWith(HIDDEN);
 
+    mocks.depth.mockClear();
     const { qc, observer, unsubscribe } = observe(mocks.queryOptions!);
+    // The seed shows at once, and is stale on purpose: mounting asks the
+    // server again (DS206 D4), whose complete 'hidden' verdict replaces it.
+    expect(marketTabVisible(observer.getCurrentResult().data)).toBe(true);
     await vi.waitFor(() => expect(observer.getCurrentResult().data).toEqual(HIDDEN));
+    expect(mocks.depth).toHaveBeenCalledTimes(1);
     expect(marketTabVisible(observer.getCurrentResult().data)).toBe(false);
     unsubscribe();
     qc.clear();

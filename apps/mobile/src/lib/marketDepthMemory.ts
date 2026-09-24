@@ -15,6 +15,10 @@ const DEPTH_SLOT = 'depth';
 // guarded plain-MMKV pattern as the ads cache — the encrypted store is for
 // auth. A stale memory is harmless: it only seeds the depth query until the
 // next COMPLETE server verdict arrives, and an unknown body never writes.
+// One slot, not per account: the server computes depth for the single public
+// market tenant (resolvePublicMarketTenant), the same for every viewer, and
+// logout's queryClient.clear() does not need to touch it. If depth ever
+// becomes per-country or per-tenant, key this slot by that scope (DS206 D5).
 let store: MMKV | null = null;
 try {
   store = new MMKV({ id: STORE_ID });
