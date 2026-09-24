@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  cartPricingChoices, CHECKOUT_PROMO_REFUSAL_CODES, checkoutErrorMessage, deliveryFeeRows, isBookingsOnly,
+  cartPricingChoices, cartStaleCheckoutCode, CHECKOUT_PROMO_REFUSAL_CODES, checkoutErrorMessage, deliveryFeeRows, isBookingsOnly,
   pickupRetryChoices, pickupStoreNames, pricedTip, quoteStoreIds, quotedRiderTip, shortStores, type CartQuote,
 } from './cartQuote';
 import { checkoutTipAmount } from './checkout-tip';
@@ -167,5 +167,33 @@ describe('[E01-B] a checkout promo refusal is shown as the server’s message', 
   it('no response at all (offline, timeout) keeps the one generic fallback — never invented promo copy', () => {
     expect(checkoutErrorMessage(null)).toBe('Could not place the order. Try again.');
     expect(checkoutErrorMessage({ response: { data: { error: { code: 'PROMO_UNAVAILABLE_CASH_DELIVERY' } } } })).toBe('Could not place the order. Try again.');
+  });
+});
+
+describe('[E07] a checkout refusal because the cart went stale is read as such', () => {
+  const refused = (code: string, message?: string) => ({
+    response: { data: { error: message === undefined ? { code } : { code, message } } },
+  });
+
+  it('ITEM_UNAVAILABLE and INSUFFICIENT_STOCK are the stale-cart refusals; every other code is not', () => {
+    expect(cartStaleCheckoutCode(refused('ITEM_UNAVAILABLE'))).toBe('ITEM_UNAVAILABLE');
+    expect(cartStaleCheckoutCode(refused('INSUFFICIENT_STOCK'))).toBe('INSUFFICIENT_STOCK');
+    for (const code of CHECKOUT_PROMO_REFUSAL_CODES) {
+      expect(cartStaleCheckoutCode(refused(code)), code).toBeNull();
+    }
+    expect(cartStaleCheckoutCode(refused('DELIVERY_NO_RIDERS'))).toBeNull();
+    expect(cartStaleCheckoutCode(new Error('network down'))).toBeNull();
+    expect(cartStaleCheckoutCode(undefined)).toBeNull();
+  });
+
+  it('maps to a clear recovery message — the server’s when it named the item, the phone’s when it sent none', () => {
+    expect(checkoutErrorMessage(refused('ITEM_UNAVAILABLE', 'Kale is no longer available — remove it to continue')))
+      .toBe('Kale is no longer available — remove it to continue');
+    expect(checkoutErrorMessage(refused('ITEM_UNAVAILABLE'))).toMatch(/no longer available/i);
+    expect(checkoutErrorMessage(refused('INSUFFICIENT_STOCK'))).toMatch(/not available in that quantity/i);
+  });
+
+  it('a refusal with no response keeps the one generic fallback — never invented availability copy', () => {
+    expect(checkoutErrorMessage(null)).toBe('Could not place the order. Try again.');
   });
 });

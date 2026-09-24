@@ -113,3 +113,48 @@ describe('the no-riders pickup retry shows the new total before placing (E01-B)'
     expect(src).toContain('const pickupQuote = useCart<any>(latitude ?? undefined, longitude ?? undefined, retryPricing, confirmPickup);');
   });
 });
+
+describe('an unavailable line recovers on the phone (E07)', () => {
+  const src = code();
+
+  it('the cart re-quotes on focus AND on return to the foreground, through Home’s tested attention seam (DS216 D1)', () => {
+    // Backgrounding the phone with the Cart open changes no navigation state,
+    // so a focus-only refetch never ran in the exact E07 case. The seam is
+    // subscribeToHomeAttention (focus refresh + AppState foreground listener,
+    // removed on blur) — unit-tested in lib/homeReliability.test.ts.
+    expect(src).toMatch(/useFocusEffect\(\s*React\.useCallback\(\(\) => \{[\s\S]*?subscribeToHomeAttention\(\s*AppState\.currentState,\s*\(callback\) => AppState\.addEventListener\('change', callback\),/);
+    expect(src).toContain('cartRefetchLatest.current = cart.refetch;');
+  });
+
+  it('a refresh in flight is never cancelled and restarted, and focus + foreground together refresh once (DS216 D6)', () => {
+    expect(src).toContain('createHomeRefreshGate(() => { void cartRefetchLatest.current({ cancelRefetch: false }); }, 750)');
+    expect(src).toContain('() => cartAttentionGate(Date.now(), cartFetchingLatest.current)');
+    // the draft's shape: a bare refetch that restarts an in-flight quote on every focus
+    expect(src).not.toContain('void cartRefetchLatest.current();');
+  });
+
+  it('a stale-cart checkout refusal re-quotes immediately, so the line marks itself unavailable', () => {
+    expect(src).toContain('if (cartStaleCheckoutCode(err)) void cart.refetch();');
+  });
+
+  it('an unavailable line is one tap from recovery: its own Remove pill calls the existing remove-line mutation (DS216 D3)', () => {
+    // Pinned by what only the new control has — the promo pill also says "Remove".
+    expect(src).toContain('loading={removeItem.isPending}');
+    expect(src).toContain('removeItem.mutate(it.id, { onSuccess: () => placeOrder.reset() })');
+  });
+
+  it('an unavailable line offers no quantity stepper — the only way forward is Remove (DS216 D3)', () => {
+    const unavailableBranch = src.slice(src.indexOf('{!it.isAvailable ? ('), src.indexOf(') : (', src.indexOf('{!it.isAvailable ? (')));
+    expect(unavailableBranch).toContain('No longer available — remove to continue');
+    expect(unavailableBranch).not.toContain('<AddMorph');
+  });
+
+  it('a failed background re-quote keeps the cart on screen — only a cart that never loaded is an error (DS222 R1)', () => {
+    expect(src).toContain(') : cart.isError && cart.data === undefined ? (');
+    expect(src).not.toMatch(/\) : cart\.isError \? \(/);
+  });
+
+  it('checkout stays blocked while any unavailable line remains', () => {
+    expect(src).toMatch(/disabled=\{!quoteSettled \|\| !c\.meetsMinimum \|\| c\.unavailableItemIds\?\.length > 0/);
+  });
+});
