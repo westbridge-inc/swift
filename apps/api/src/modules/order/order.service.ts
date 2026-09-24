@@ -290,6 +290,15 @@ function isCancellationTerminalization(sourceStatus: OrderStatus, target: OrderS
     || (target === 'REFUNDED' && !ORDER_TRANSITIONS.REFUNDED.includes(sourceStatus));
 }
 
+/** [E16-B] The door photo the server issued, recorded, to the rider who holds the job. */
+function courierDeliveryProofBound(order: Pick<Order,
+  'riderId' | 'courierProofIssuedUrl' | 'courierProofIssuedRiderId' | 'courierProofPhotoUrl'>): boolean {
+  return order.courierProofPhotoUrl !== null
+    && order.courierProofPhotoUrl === order.courierProofIssuedUrl
+    && order.riderId !== null
+    && order.courierProofIssuedRiderId === order.riderId;
+}
+
 /** [E16] A courier pickup's custody proof is bound on the row: the photo is
  *  exactly the URL the server issued, it was issued to the rider who holds the
  *  job, and the rider's location at pickup is recorded. */
@@ -1933,6 +1942,28 @@ export class OrderService {
     if (input.target === 'PICKED_UP' && order.orderType === 'COURIER' && !courierPickupProofBound(order)) {
       throw new AppError(409, 'PICKUP_PROOF_REQUIRED',
         'Photograph the parcel to confirm pickup — this job needs a pickup photo and your location.');
+    }
+    // [E16-B · S2] THE COURIER DELIVERY-PROOF GATE. A parcel reaches DELIVERED
+    // only with the door photo recorded: either set by THIS transition (the
+    // courier /proof path passes terminalMetadata.courierProofPhotoUrl after
+    // exact-matching it to the URL the server issued at /proof-photo) or
+    // already durably on the row and equal to that issued URL. The bare rider
+    // /delivered and /handover routes pass no proof metadata, so a sender-pays
+    // job whose fee was already collected at pickup — and an MMG-paid job —
+    // rolls back here instead of closing without the proof: no deliveredAt, no
+    // earnings, no released rider. COURIER-only: food/grocery/pharmacy, taxi
+    // and service transitions never enter this branch.
+    // [DS145 D3] Bound to the rider who holds the job, like E16's pickup
+    // proof: a door photo issued to a rider who has since been replaced does
+    // not deliver the parcel for the new one.
+    if (input.target === 'DELIVERED' && order.orderType === 'COURIER') {
+      if (!courierDeliveryProofBound(order)) {
+        throw new AppError(
+          409,
+          'DELIVERY_PROOF_REQUIRED',
+          'This courier job closes only through the photo proof step — capture the door photo first, then confirm the handoff.',
+        );
+      }
     }
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }
