@@ -79,7 +79,7 @@ export class RatingStatsService {
    * queries anyway; the nightly job re-runs it across all subjects so
    * RAT-H's three answers stay one value by construction).
    */
-  async recompute(subject: SubjectRef, tenantId = 'swift-default'): Promise<void> {
+  async recompute(subject: SubjectRef, tenantId = 'swift-default'): Promise<boolean> {
     const where = {
       type: { in: TYPES_FOR_ROLE[subject.role] as never },
       state: 'ACTIVE' as const,
@@ -156,7 +156,14 @@ export class RatingStatsService {
       totalRatings: lifetimeCount,
     };
     if (subject.role === 'VENDOR') {
-      await this.prisma.vendor.updateMany({ where: { id: subject.id }, data: legacy });
+      // [E26] Written only when the stored stars differ, so the count answers
+      // whether the store's search stars must re-sync: the nightly sweep
+      // re-syncs exactly the stores it healed (normally none), not every store.
+      const moved = await this.prisma.vendor.updateMany({
+        where: { id: subject.id, OR: [{ averageRating: { not: legacy.averageRating } }, { totalRatings: { not: legacy.totalRatings } }] },
+        data: legacy,
+      });
+      return moved.count > 0;
     } else if (subject.role === 'RIDER') {
       await this.prisma.rider.updateMany({ where: { userId: subject.id }, data: legacy });
     } else if (subject.role === 'DRIVER') {
@@ -164,6 +171,7 @@ export class RatingStatsService {
     } else if (subject.role === 'SERVICE_PROVIDER') {
       await this.prisma.serviceProvider.updateMany({ where: { userId: subject.id }, data: legacy });
     }
+    return false;
   }
 
   /** Incremental hook: recompute the subject a rating row touches. */
@@ -178,10 +186,6 @@ export class RatingStatsService {
   /** Nightly sweep across every subject with any rating (RAT-H's third leg
    *  is direct SQL in the test; this is the second). */
   async recomputeAll(tenantId = 'swift-default'): Promise<number> {
-    // Deliberately does NOT notify search: this is the nightly reconciliation
-    // over EVERY subject, not a rating write. The write paths above already
-    // scheduled their vendors' syncs, and a per-vendor sync stampede here
-    // would add nothing but queue flood.
     const subjects = new Map<string, SubjectRef>();
     const rows = await this.prisma.rating.findMany({
       select: { type: true, vendorId: true, rateeId: true },
@@ -190,7 +194,15 @@ export class RatingStatsService {
       const s = subjectOf(r);
       if (s) subjects.set(`${s.role}:${s.id}`, s);
     }
-    for (const s of subjects.values()) await this.recompute(s, tenantId);
+    for (const s of subjects.values()) {
+      // [E26] The sweep is also a HEALER: a store whose persisted stars had
+      // drifted is re-written here, and only then must its search stars
+      // re-sync (the same debounced, best-effort schedule a rating write
+      // fires). A store already in sync schedules nothing, so the nightly run
+      // is not a per-store queue flood. Mover/driver/provider subjects have
+      // no search document and never fire.
+      if (await this.recompute(s, tenantId)) this.notifyVendorAggregateChanged(s);
+    }
     return subjects.size;
   }
 
