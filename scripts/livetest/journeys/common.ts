@@ -151,3 +151,43 @@ export function activeLegsOf(json: any): any[] {
   if (Array.isArray(d?.legs)) return d.legs;
   return d?.id ? [d] : [];
 }
+
+/** The statuses an order or ride never leaves (order-status.ts TERMINAL_ORDER_STATUSES). */
+export const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+
+/**
+ * A leg whose goods (or passenger) are already with the mover. The state machine
+ * lets these end only DELIVERED or FAILED (ORDER_TRANSITIONS.CANCELLED lists
+ * pre-custody states alone), so neither the customer nor the operator can cancel
+ * one: it is finished the way a mover finishes it.
+ */
+export const IN_CUSTODY = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'];
+
+/** Where a leg (or a ride) ends: the order's own delivery point, else where the mover is. */
+export const doorOf = (o: any, m: { lat: number; lng: number }) =>
+  typeof o?.deliveryLat === 'number' && typeof o?.deliveryLng === 'number' ? { lat: o.deliveryLat as number, lng: o.deliveryLng as number } : { lat: m.lat, lng: m.lng };
+
+/** Each rider rung and the PUT that moves the leg on from it, assignment to the door. */
+const RIDER_RUNGS: ReadonlyArray<readonly [status: string, slug: string]> = [
+  ['RIDER_ASSIGNED', 'en-route-pickup'],
+  ['RIDER_EN_ROUTE_PICKUP', 'arrived-pickup'],
+  ['RIDER_ARRIVED_PICKUP', 'picked-up'],
+  ['PICKED_UP', 'en-route-delivery'],
+  ['EN_ROUTE_DELIVERY', 'arrived'],
+];
+
+/**
+ * Walk a rider's leg to the door (ARRIVED) from the rung it is on, skipping the
+ * rungs it already passed. Returns the first refusal, else the last answer, or
+ * null when there was nothing to walk (already at the door).
+ */
+export async function riderToDoorFrom(r: Session, orderId: string, status: string): Promise<Res | null> {
+  const from = RIDER_RUNGS.findIndex(([s]) => s === status);
+  if (from < 0) return null;
+  let last: Res | null = null;
+  for (const [, slug] of RIDER_RUNGS.slice(from)) {
+    last = await PUT(`/rider/orders/${orderId}/${slug}`, {}, r.token);
+    if (!last.ok) return last;
+  }
+  return last;
+}
