@@ -113,3 +113,26 @@ describe('the no-riders pickup retry shows the new total before placing (E01-B)'
     expect(src).toContain('const pickupQuote = useCart<any>(latitude ?? undefined, longitude ?? undefined, retryPricing, confirmPickup);');
   });
 });
+
+describe('an unavailable line recovers on the phone (E07)', () => {
+  const src = code();
+
+  it('the cart re-quotes when the Cart tab regains focus', () => {
+    expect(src).toContain('useFocusEffect(');
+    expect(src).toContain('cartRefetchLatest.current = cart.refetch;');
+    expect(src).toContain('cartRefetchLatest.current()');
+  });
+
+  it('a stale-cart checkout refusal re-quotes immediately, so the line marks itself unavailable', () => {
+    expect(src).toContain('if (cartStaleCheckoutCode(err)) void cart.refetch();');
+  });
+
+  it('an unavailable line is one tap from recovery: Remove calls the existing remove-line mutation with that line’s id', () => {
+    expect(src).toContain('removeItem.mutate(it.id, { onSuccess: () => placeOrder.reset() })');
+    expect(src).toContain('label="Remove"');
+  });
+
+  it('checkout stays blocked while any unavailable line remains', () => {
+    expect(src).toMatch(/disabled=\{!quoteSettled \|\| !c\.meetsMinimum \|\| c\.unavailableItemIds\?\.length > 0/);
+  });
+});

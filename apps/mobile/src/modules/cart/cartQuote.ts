@@ -107,10 +107,38 @@ export const CHECKOUT_PROMO_REFUSAL_CODES = [
   'PROMO_UNAVAILABLE_CASH_DELIVERY',
 ] as const;
 
+/** [E07] Checkout refusal codes that mean the CART went stale — an item was
+ *  86'd (`isAvailable` flipped) or its stock ran out between the last quote
+ *  and this order. The phone maps these to a named recovery message and
+ *  re-quotes the cart so the line marks itself unavailable. The exact codes
+ *  come from order.service.ts (the pre-lock inventory guard and its
+ *  post-lock twin, both 409). */
+export const CART_STALE_CHECKOUT_CODES = ['ITEM_UNAVAILABLE', 'INSUFFICIENT_STOCK'] as const;
+
+/** The code when a checkout refusal means an item changed under the customer
+ *  — available when quoted, gone by the time the order was placed. Everything
+ *  else (promo refusals, no riders, offline) is null: not a stale cart. */
+export function cartStaleCheckoutCode(err: unknown): string | null {
+  const code = (err as { response?: { data?: { error?: { code?: string } } } } | null | undefined)
+    ?.response?.data?.error?.code;
+  return code && (CART_STALE_CHECKOUT_CODES as readonly string[]).includes(code) ? code : null;
+}
+
 /** The message a refused checkout shows: the server's own message (every promo
  *  refusal above reaches the customer verbatim), with the generic fallback only
- *  when the response carried none. */
+ *  when the response carried none. A stale-cart refusal keeps the server's
+ *  message when it sent one (it names the item), and otherwise names the
+ *  recovery step itself. */
 export function checkoutErrorMessage(err: unknown): string {
+  const stale = cartStaleCheckoutCode(err);
+  if (stale) {
+    const message = (err as { response?: { data?: { error?: { message?: string } } } })
+      .response?.data?.error?.message;
+    if (message) return message;
+    return stale === 'ITEM_UNAVAILABLE'
+      ? 'One of your items is no longer available — remove it to continue.'
+      : 'One of your items is not available in that quantity — adjust the quantity or remove it.';
+  }
   return errorMessage(err, 'Could not place the order. Try again.');
 }
 
