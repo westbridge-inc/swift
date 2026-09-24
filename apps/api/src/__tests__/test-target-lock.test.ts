@@ -59,9 +59,9 @@ describe('the structural proof', () => {
   it('a SYSTEM_DATABASE_URL — the second socket — is held to the same proof', () => {
     const ok = assessTestTarget({ ...GOOD, SYSTEM_DATABASE_URL: 'postgresql://swift:swift@127.0.0.1:5434/swift_test' });
     expect(ok.ok).toBe(true);
-    const bad = assessTestTarget({ ...GOOD, SYSTEM_DATABASE_URL: 'postgresql://app:x@db.prod.swift.gy:5432/swift' });
+    const bad = assessTestTarget({ ...GOOD, SYSTEM_DATABASE_URL: 'postgresql://app:x@db.prod.swiftgy.com:5432/swift' });
     expect(bad.ok).toBe(false);
-    if (!bad.ok) expect(bad.problems.join('\n')).toMatch(/SYSTEM_DATABASE_URL host "db.prod.swift.gy" looks like a real deployment/);
+    if (!bad.ok) expect(bad.problems.join('\n')).toMatch(/SYSTEM_DATABASE_URL host "db.prod.swiftgy.com" looks like a real deployment/);
     const foreign = assessTestTarget({ ...GOOD, SYSTEM_DATABASE_URL: 'postgresql://swift:swift@localhost:5434/swift' });
     expect(foreign.ok).toBe(false);
     if (!foreign.ok) expect(foreign.problems.join('\n')).toMatch(/SYSTEM_DATABASE_URL database "swift" is not a disposable test database/);

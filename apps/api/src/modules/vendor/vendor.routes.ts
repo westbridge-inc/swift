@@ -14,9 +14,11 @@ import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
 import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/observability';
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
+import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
+import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
 import { VerificationService } from '../verification/verification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -30,6 +32,7 @@ import { DECLARATION_DOC_TYPE } from '../verification/doc-registry';
 import { validRegistrationRecord } from './vendor-tier';
 import { parseCsvWithHeader } from '../../utils/csv';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
+import { scanXlsxZip, XlsxZipGuardError, XLSX_IMPORT_ZIP_BUDGET } from '../../utils/xlsx-zip-guard';
 import { parseMenuText } from '../../utils/menu-text-parse';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
@@ -54,7 +57,7 @@ import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integr
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
-import { riderCounterpartySelect } from '../../utils/counterparty';
+import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -102,7 +105,7 @@ const fulfillmentModeSchema = z.object({
 });
 
 const rejectOrderSchema = z.object({
-  reason: z.string().max(500).optional(),
+  reason: z.string().trim().min(1).max(500),
 });
 
 const completePickupSchema = z.object({
@@ -264,6 +267,13 @@ const importCsvSchema = z.object({
 });
 
 const MAX_IMPORT_ROWS = 5000;
+// Excel-import guards (audit DS107 High #5): the zip-bomb budget lives in
+// utils/xlsx-zip-guard; these bound the workbook shape once exceljs has parsed
+// it. 1 MB compressed is generous for a catalogue workbook (text compresses
+// ~10:1, and the confirm step already caps 5000 rows).
+const XLSX_MAX_COMPRESSED_BYTES = 1 * 1024 * 1024;
+const MAX_XLSX_COLUMNS = 100;
+const MAX_XLSX_CELL_TEXT = 2000;
 
 /** One CSV row of the import template. Coercions keep messy files importable. */
 const csvRowSchema = z.object({
@@ -1472,7 +1482,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The response-SLA deadline rides on the read so the board's accept-clock
     // drains toward the auto-cancel cut-off the server actually enforces.
     const respondOpts = { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 };
-    const data = orders.map((order) => ({
+    // [S1 response-shaping] a terminal order no longer hands floor staff the
+    // customer's phone, the rider's phone, or the delivery address/GPS — the
+    // live order keeps all of it, which is the only thing a handover needs.
+    const data = orders.map((order) => redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
       items: order.items.map((item) => coerceMoney(item, ORDER_ITEM_MONEY_FIELDS)),
       respondBy: vendorRespondBy(order, respondOpts),
@@ -1487,7 +1500,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The takeover polls this read: the response-SLA deadline is computed here,
     // from the same inputs the auto-cancel job was enqueued with.
     const respondBy = vendorRespondBy(order, { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 });
-    return { success: true, data: { ...order, respondBy } };
+    // [S1 response-shaping] same redaction as the board — closed order, no
+    // customer contact, rider contact, or delivery destination.
+    return { success: true, data: redactCustomerContact({ ...order, respondBy }) };
   });
 
   /** PUT /orders/:id/accept — Accept an incoming order */
@@ -1553,7 +1568,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  then rides the preparingAt/readyAt timestamps instead of the status —
    *  without this, a rider accepting within seconds of the vendor (the normal
    *  case) killed the vendor's Start-preparing/Mark-ready buttons with 400s. */
-  const COURIER_ACTIVE: string[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+  const COURIER_ACTIVE: OrderStatus[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
   async function recordPrepProgress(
     order: {
@@ -1569,42 +1584,92 @@ export async function vendorRoutes(app: FastifyInstance) {
     // payment-first law applies to them exactly as it does to the transitions.
     assertMmgFulfilmentAllowed(order, phase === 'PREPARING' ? 'PREPARING' : 'READY_FOR_PICKUP');
     const now = new Date();
-    // Marking READY implies preparing happened — backfill it for the timeline.
-    const data: Record<string, Date> = phase === 'PREPARING'
-      ? { preparingAt: now }
-      : { readyAt: now, ...(order.preparingAt ? {} : { preparingAt: now }) };
-    const updated = await app.prisma.order.update({ where: { id: order.id }, data });
-    await app.prisma.orderStatusLog.create({
-      data: {
-        orderId: order.id,
-        status: order.status,
-        changedBy: userId,
-        note: phase === 'PREPARING' ? 'Vendor started preparing (rider already assigned)' : 'Order ready for pickup (rider already assigned)',
-      },
+    // [E04] The milestone write, the status-log append and the ownership check
+    // share ONE transaction on the order-row lock (the
+    // stageCanonicalOrderTransition / lockPickableOrder pattern), so a
+    // cancellation — or a rider release/handback — that commits after the
+    // route's read is seen on the LOCKED re-read and refuses here with nothing
+    // written, nothing logged and nothing pushed. Pinning riderId refuses the
+    // release-then-regrab path (the stale screen's rider is no longer the
+    // owner); the empty-milestone check keeps two rapid taps from
+    // double-logging and double-pushing.
+    const stale = () => new AppError(
+      409,
+      'HANDOVER_STALE',
+      'This order changed since the screen was loaded — refresh before acting on it.',
+    );
+    const { row, alreadyStamped } = await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      const live = await tx.order.findUniqueOrThrow({
+        where: { id: order.id },
+        omit: HANDOVER_SECRETS_OMIT,
+      });
+      if (!COURIER_ACTIVE.includes(live.status)) throw stale();
+      if (live.riderId !== order.riderId) throw stale();
+      // Payment-first, evaluated on the locked fresh row (the canonical seam's
+      // rule) — a capture/dispute that landed after the route's read is not
+      // stamped over.
+      assertMmgFulfilmentAllowed(live, phase === 'PREPARING' ? 'PREPARING' : 'READY_FOR_PICKUP');
+      const stamped = phase === 'PREPARING' ? live.preparingAt : live.readyAt;
+      if (stamped) return { row: live, alreadyStamped: true as const };
+      // Marking READY implies preparing happened — backfill it for the timeline
+      // (from the fresh row, not the stale pre-read).
+      const next = await tx.order.update({
+        where: { id: order.id },
+        data: phase === 'PREPARING'
+          ? { preparingAt: now }
+          : { readyAt: now, ...(live.preparingAt ? {} : { preparingAt: now }) },
+      });
+      await tx.orderStatusLog.create({
+        data: {
+          orderId: order.id,
+          status: live.status,
+          changedBy: userId,
+          note: phase === 'PREPARING' ? 'Vendor started preparing (rider already assigned)' : 'Order ready for pickup (rider already assigned)',
+        },
+      });
+      return { row: next, alreadyStamped: false as const };
     });
+    if (alreadyStamped) return row;
     const evt = { orderId: order.id, prep: phase, timestamp: new Date().toISOString() };
     app.io.to(`order:${order.id}`).emit('order:prep_update', evt);
     if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:prep_update', evt);
-    // The rider at (or heading to) the store is the one who needs "it's ready".
-    if (phase === 'READY' && order.riderId) {
-      const rider = await app.prisma.rider.findUnique({ where: { id: order.riderId }, select: { userId: true } });
-      if (rider) {
-        await notifications.send({
-          userId: rider.userId,
-          type: 'ORDER_UPDATE',
-          title: 'Order ready for pickup',
-          body: `Order ${order.orderNumber} is packed and waiting at the counter.`,
-          data: { orderId: order.id, kind: 'prep_ready' },
-        });
+    // The rider on the FRESH row is the one who needs "it's ready" — never the
+    // rider the stale screen read. Re-check after commit and push only while
+    // that rider still owns the order, so a cancellation landing right after
+    // this milestone never notifies a freed rider.
+    if (phase === 'READY' && row.riderId) {
+      const stillOwns = await app.prisma.order.findFirst({
+        where: { id: order.id, riderId: row.riderId, status: { in: COURIER_ACTIVE } },
+        select: { id: true },
+      });
+      if (stillOwns) {
+        const rider = await app.prisma.rider.findUnique({ where: { id: row.riderId }, select: { userId: true } });
+        if (rider) {
+          await notifications.send({
+            userId: rider.userId,
+            type: 'ORDER_UPDATE',
+            title: 'Order ready for pickup',
+            body: `Order ${row.orderNumber} is packed and waiting at the counter.`,
+            data: { orderId: order.id, kind: 'prep_ready' },
+          });
+        }
       }
     }
-    return updated;
+    return row;
   }
 
   /** PUT /orders/:id/preparing — Mark order as being prepared */
   app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!);
+    // A booking has no kitchen: it is confirmed, then completed with
+    // complete-appointment. Marking it "preparing" sent the customer kitchen
+    // pushes for a haircut and stranded it (complete-appointment requires
+    // ACCEPTED). The canonical transition refuses this too, for every caller.
+    if (order.fulfillment === 'APPOINTMENT') {
+      throw new AppError(400, 'NOT_A_KITCHEN_ORDER', 'A booking is not prepared — confirm it, then mark it complete.');
+    }
     if (order.status === 'ACCEPTED') {
       const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
       return { success: true, data: updated };
@@ -1621,6 +1686,11 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!);
+    // A booking is never "ready for pickup" — see /preparing above; a booking
+    // that already sits in PREPARING is not reopened into the kitchen path.
+    if (order.fulfillment === 'APPOINTMENT') {
+      throw new AppError(400, 'NOT_A_KITCHEN_ORDER', 'A booking is not marked ready — confirm it, then mark it complete.');
+    }
     // Grocery/goods picking gate (§5.3): the bag never closes with an open
     // question in it — every line picked, or its substitution resolved.
     // Restaurants don't shelf-pick, so only quantity-tracked store types gate.
@@ -1875,8 +1945,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     // CAPTURED under their lock and refuse. The CAS keeps lifecycle + payment
     // predicates as defense in depth, and two concurrent confirm taps by store
     // staff still have exactly one winner (no duplicate push).
+    // [ORDER-SPINE S1-6] It is also the lock the customer's claim and an
+    // operator's decision take (order/mmg-claim.service.ts): the three
+    // commands on one order's payment claims serialize here, in either order.
+    const now = new Date();
     const capture = await app.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} AND "tenantId" = ${order.tenantId} FOR UPDATE`;
       // [REPORT-005 F-005-04] The vendor is the pickup-code VERIFIER: every
       // read here must omit handover secrets exactly like resolveOwnedOrder,
       // or this response hands the verifier the code (and the ride PIN).
@@ -1884,12 +1958,18 @@ export async function vendorRoutes(app: FastifyInstance) {
         where: { id: order.id },
         omit: HANDOVER_SECRETS_OMIT,
       });
+      await mmgClaimLockObserver.afterLock?.({ orderId: order.id, actor: 'STORE' });
       if (ORDER_CLOSED_STATUSES.includes(locked.status)) throw orderClosedError();
       // [W-25] the preview above is UX; THIS is the authority — a payment that
       // failed or was reversed between the tap and the lock is refused here
       assertMmgAttestable(locked);
-      if (locked.paymentStatus === 'CAPTURED' || locked.paymentStatus === 'CLAIMED') {
-        return { won: false, order: locked }; // idempotent under the lock
+      // [S1-6] The claim is decided on the LOCKED row: a repeat tap writes
+      // nothing; an attempt an operator rejected cannot be revived; and a
+      // durable customer denial — or a different reference — becomes the
+      // disagreement in the SAME statement that writes CLAIMED.
+      const decision = decideStoreMmgClaim(locked, reference, now);
+      if (decision.kind === 'ALREADY_CLAIMED') {
+        return { won: false, order: locked, notice: null as MmgClaimNotice | null, outboxId: null as string | null }; // idempotent under the lock
       }
       // [DOC-1 §31.5 · DOC-INV-48 · P31-2] The store's word is a CLAIM. It lands as CLAIMED —
       // never CAPTURED, which is reserved for a provider's own evidence — so nothing
@@ -1899,8 +1979,9 @@ export async function vendorRoutes(app: FastifyInstance) {
           id: order.id,
           paymentStatus: { notIn: ['CAPTURED', 'CLAIMED'] },
           status: { notIn: ORDER_CLOSED_STATUSES as OrderStatus[] },
+          mmgClaimRevision: locked.mmgClaimRevision,
         },
-        data: { paymentStatus: 'CLAIMED' },
+        data: { paymentStatus: 'CLAIMED', ...decision.data },
       });
       // [LB-015 / REPORT-004 F-004-08] The capture and its evidence row commit
       // or vanish together, the evidence records the FRESH lifecycle status
@@ -1911,6 +1992,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         where: { id: order.id },
         omit: HANDOVER_SECRETS_OMIT,
       });
+      let notice: MmgClaimNotice | null = null;
+      let outboxId: string | null = null;
       if (cas.count > 0) {
         // [W-25] The capture and the evidence behind it commit together: the
         // provider reference, who attested and when, plus an audit row naming
@@ -1939,21 +2022,29 @@ export async function vendorRoutes(app: FastifyInstance) {
           userId: request.user.userId, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED', entity: 'Order', entityId: order.id,
           changes: { reference, amount: String(fresh.totalAmount), claim: 'payment_claimed_by_vendor' },
         } });
+        // [S1-6] The disagreement's evidence and the durable notice obligation
+        // commit with the claim; the customer is told what the STORE said.
+        ({ notice, outboxId } = await stageStoreMmgClaim(tx, { facts: fresh, decision, actorId: request.user.userId, reference, now }));
+        // Answer with the row as it now stands, attestation evidence included.
+        const claimedRow = await tx.order.findUniqueOrThrow({ where: { id: order.id }, omit: HANDOVER_SECRETS_OMIT });
+        return { won: true, order: claimedRow, notice, outboxId };
       }
-      return { won: cas.count > 0, order: fresh };
+      return { won: false, order: fresh, notice, outboxId };
     });
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
     const updated = capture.order;
-    app.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED' });
-    // The socket covers an open order screen; the notification survives it.
-    await notifications.send({
-      userId: order.customerId,
-      type: 'PAYMENT_RECEIVED',
-      title: 'Payment received',
-      body: `Your MMG payment for order #${order.orderNumber} is confirmed.`,
-      data: { orderId: order.id, kind: 'mmg_payment_confirmed' },
+    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+      orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
+      mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
     });
+    // The socket covers an open order screen; the notification survives it. It
+    // is delivered from the obligation committed above, in the STORE's words —
+    // never as a confirmation, and as a dispute notice when the claims disagree.
+    if (capture.notice && capture.outboxId) {
+      await completeMmgClaimNotice({ prisma: app.prisma, notifications }, { outboxId: capture.outboxId, notice: capture.notice })
+        .catch((err: unknown) => request.log.error({ err, orderId: order.id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
     return { success: true, data: updated };
   });
 
@@ -2113,7 +2204,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot reject order in ${order.status} status`);
     }
     const body = rejectOrderSchema.parse(request.body ?? {});
-    const reason = body.reason || 'Rejected by vendor';
+    const reason = body.reason;
     await ackVendorAlert(app, request.user.userId, order.id); // rejecting acknowledges too
 
     // The locked transition re-reads the current status, then commits status,
@@ -2148,14 +2239,19 @@ export async function vendorRoutes(app: FastifyInstance) {
     // learn their order was declined (it just silently vanished).
     // [REPORT-010 F-03] An unattested-MMG decline carries the refund guidance
     // — the customer may have already paid the store's link.
+    // A booking is declined by its PROVIDER: the words follow the appointment
+    // fulfillment, exactly as the acceptance push does, so a haircut is never
+    // "an order declined by the store". Food, grocery and retail keep theirs.
+    const booking = order.fulfillment === 'APPOINTMENT';
+    const decliner = booking ? 'the provider' : 'the store';
     const mmgGuidance = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING'
-      ? ' If you already sent the MMG payment, the store refunds you directly.'
+      ? ` If you already sent the MMG payment, ${decliner} refunds you directly.`
       : '';
     await notifications.send({
       userId: updated.customer.id,
       type: 'ORDER_UPDATE',
-      title: 'Order declined',
-      body: `Your order ${updated.orderNumber} was declined by the store. ${reason}${mmgGuidance}`.trim(),
+      title: booking ? 'Booking declined' : 'Order declined',
+      body: `Your ${booking ? 'booking' : 'order'} ${updated.orderNumber} was declined by ${decliner}. ${reason}${mmgGuidance}`.trim(),
       data: { orderId: order.id, status: 'CANCELLED' },
     });
 
@@ -2386,10 +2482,36 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  confirm flow as CSV. */
   app.post('/items/import/xlsx', auth, async (request) => {
     await requireVendor(app, request, 'MANAGER');
-    const file = await request.file();
-    if (!file) throw new AppError(400, 'NO_FILE', 'Attach an .xlsx file');
+    // Compressed transport cap: the global multipart limit is 5 MB (KYC/
+    // selfie photos); a catalogue workbook is far smaller, so hold THIS route
+    // to 1 MB on disk. The guard below bounds what it can expand TO. An
+    // over-cap upload is translated into this route's own 400 vocabulary, not
+    // busboy's raw 413.
+    let buffer: Buffer;
+    try {
+      const file = await request.file({ limits: { fileSize: XLSX_MAX_COMPRESSED_BYTES, files: 1 } });
+      if (!file) throw new AppError(400, 'NO_FILE', 'Attach an .xlsx file');
+      buffer = await file.toBuffer();
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      if ((err as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') {
+        throw new AppError(400, 'XLSX_TOO_LARGE', `That workbook is too large: the compressed file must be under ${XLSX_MAX_COMPRESSED_BYTES / (1024 * 1024)} MB.`);
+      }
+      throw err;
+    }
+    // Zip-bomb guard: refuse by the ZIP central directory's ADVERTISED sizes
+    // BEFORE exceljs inflates anything. A tiny .xlsx can legally declare a
+    // multi-GB sharedStrings.xml; exceljs would try to inflate it and OOM the
+    // process before any header validation could refuse it.
+    try {
+      scanXlsxZip(buffer, XLSX_IMPORT_ZIP_BUDGET);
+    } catch (err) {
+      if (err instanceof XlsxZipGuardError) {
+        throw new AppError(400, 'BAD_XLSX', `That workbook is not importable: ${err.message}`);
+      }
+      throw err;
+    }
 
-    const buffer = await file.toBuffer();
     const ExcelJS = (await import('exceljs')).default;
     const workbook = new ExcelJS.Workbook();
     try {
@@ -2401,22 +2523,38 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!sheet || sheet.rowCount < 2) {
       throw new AppError(400, 'EMPTY_CSV', 'No data rows found in the first worksheet');
     }
+    // Post-load shape caps: the central-directory guard bounds what exceljs
+    // can inflate; these bound what the row loop below can build. Keep the
+    // row cap in lock-step with the CSV confirm step's MAX_IMPORT_ROWS.
+    if (sheet.rowCount - 1 > MAX_IMPORT_ROWS) {
+      throw new AppError(400, 'TOO_MANY_ROWS', `Import is limited to ${MAX_IMPORT_ROWS} rows per file (got ${sheet.rowCount - 1})`);
+    }
+    if (sheet.columnCount > MAX_XLSX_COLUMNS) {
+      throw new AppError(400, 'BAD_XLSX', `Import is limited to ${MAX_XLSX_COLUMNS} columns per file (got ${sheet.columnCount})`);
+    }
 
-    const cellText = (v: unknown): string => {
-      if (v === null || v === undefined) return '';
-      if (typeof v === 'object') {
+    const cellText = (v: unknown, where: string): string => {
+      let text: string;
+      if (v === null || v === undefined) {
+        text = '';
+      } else if (typeof v === 'object') {
         const rich = v as { richText?: Array<{ text: string }>; text?: string; result?: unknown };
-        if (rich.richText) return rich.richText.map((t) => t.text).join('');
-        if (rich.text) return rich.text;
-        if (rich.result !== undefined) return String(rich.result);
-        return '';
+        if (rich.richText) text = rich.richText.map((t) => t.text).join('');
+        else if (rich.text) text = rich.text;
+        else if (rich.result !== undefined) text = String(rich.result);
+        else text = '';
+      } else {
+        text = String(v);
       }
-      return String(v);
+      if (text.length > MAX_XLSX_CELL_TEXT) {
+        throw new AppError(400, 'BAD_XLSX', `Cell text at ${where} exceeds ${MAX_XLSX_CELL_TEXT} characters.`);
+      }
+      return text;
     };
 
     const headerRow = sheet.getRow(1);
     const headers: string[] = [];
-    headerRow.eachCell({ includeEmpty: false }, (cell, col) => { headers[col - 1] = cellText(cell.value).trim(); });
+    headerRow.eachCell({ includeEmpty: false }, (cell, col) => { headers[col - 1] = cellText(cell.value, `header column ${col}`).trim(); });
 
     const rows: Record<string, string>[] = [];
     sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
@@ -2425,7 +2563,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       let hasValue = false;
       headers.forEach((h, i) => {
         if (!h) return;
-        const value = cellText(row.getCell(i + 1).value).trim();
+        const value = cellText(row.getCell(i + 1).value, `row ${rowNumber}, column ${i + 1}`).trim();
         record[h] = value;
         if (value) hasValue = true;
       });
@@ -2959,10 +3097,17 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.get('/bookings', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const { from, to } = z
-      .object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() })
+      .object({ from: z.string().optional(), to: z.string().optional() })
       .parse(request.query);
-    const start = from ?? new Date(new Date().setHours(0, 0, 0, 0));
-    const end = to ?? new Date(start.getTime() + 14 * 24 * 60 * 60 * 1000);
+    const start = from
+      ? isDateOnly(from) ? startOfGuyanaDay(from) : z.coerce.date().parse(from)
+      : startOfGuyanaDay(guyanaDayKey(new Date()));
+    const baseKey = guyanaDayKey(start);
+    const [year, month, day] = baseKey.split('-').map(Number);
+    const endKey = new Date(Date.UTC(year!, month! - 1, day! + 14)).toISOString().slice(0, 10);
+    const end = to
+      ? isDateOnly(to) ? startOfGuyanaDay(to) : z.coerce.date().parse(to)
+      : startOfGuyanaDay(endKey);
     const bookings = await app.prisma.booking.findMany({
       where: { item: { vendorId }, slotStart: { gte: start, lt: end }, status: { not: 'CANCELLED' } },
       select: {
@@ -3005,7 +3150,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { from, to } = z
       .object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() })
       .parse(request.query ?? {});
-    const start = from ?? new Date(new Date().setUTCHours(0, 0, 0, 0));
+    const start = from ?? new Date(`${guyanaDayKey(new Date())}T00:00:00.000Z`);
     const end = to ?? new Date(start.getTime() + 30 * 24 * 60 * 60 * 1000);
     const exceptions = await app.prisma.bookingException.findMany({
       where: { vendorId, date: { gte: start, lte: end } },
@@ -3072,6 +3217,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         type: 'ORDER_UPDATE',
         title: 'Your appointment moved',
         body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
+        audience: 'customer',
         data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
       }).catch(() => undefined);
     }
@@ -3379,17 +3525,22 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /subscription/billing-method — §13 rail selection (owner-only:
-   *  CASH prepaid vs MOBILE_MONEY merchant-initiated on the owner's MMG). */
+   *  CASH prepaid vs MOBILE_MONEY merchant-initiated on the owner's MMG), and
+   *  [E12] the partner's self-serve stop/resume: `NONE` stops weekly billing
+   *  (the paid period still runs out, then the store stops receiving work);
+   *  CASH or MOBILE_MONEY resumes it on that rail. */
   app.put('/subscription/billing-method', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     const body = z.object({
-      method: z.enum(['CASH', 'MOBILE_MONEY']),
+      method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
     const sub = await app.prisma.subscription.findFirst({ where: { vendorId } });
     if (!sub) throw new NotFoundError('Subscription');
     const billingSvc = new BillingService(app.prisma, notifications, getPaymentProvider());
-    const updated = await billingSvc.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
+    const updated = body.method === 'NONE'
+      ? await billingSvc.stopBilling(sub.id, request.user.userId)
+      : await billingSvc.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
     return { success: true, data: { billingMethod: updated.billingMethod, mmgPayerMsisdn: updated.mmgPayerMsisdn } };
   });
 

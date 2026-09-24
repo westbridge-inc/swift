@@ -90,12 +90,18 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
 
   // An appointment MOVED (booking_rescheduled) is a Booking on a STORE's
   // calendar — it carries bookingId, never jobId — so it takes its own branch
-  // before the service-job family below: the vendor's Schedule agenda is the
-  // screen that shows that slot. The other recipient of the same kind is the
-  // customer whose appointment the store moved, and the app has no
-  // customer-side appointments screen at all — that tap opens the app
-  // normally, exactly as it does today, until one exists [reported].
-  if (kind === 'booking_rescheduled') return { screen: 'Schedule' };
+  // before the service-job family below. It has TWO recipients, told apart
+  // by the audience the API tags [E28]. business = the STORE whose calendar
+  // owns the slot; their Schedule agenda shows it. customer = the person whose
+  // appointment moved. Schedule is mounted ONLY by VendorStack, so a customer
+  // tap aimed there opened nothing. The customer copy returns null (the app
+  // opens normally) because no customer screen shows the moved time: the
+  // order screen renders Order.appointmentSlot, which a reschedule does not
+  // update, so a Delivery deep link would show the OLD time. An untagged row
+  // cannot say whose it is, so it also opens the app normally.
+  if (kind === 'booking_rescheduled') {
+    return audience === 'business' ? { screen: 'Schedule' } : null;
+  }
 
   // BOOKINGS + SERVICE JOBS [S0: a push landing on a dead screen]. Every other
   // booking_* kind is a service JOB event carrying jobId/refId and no orderId

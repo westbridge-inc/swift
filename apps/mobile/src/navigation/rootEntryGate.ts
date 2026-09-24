@@ -9,6 +9,9 @@ export interface RootEntryState {
   countryCode: string | null;
   anyPreview: boolean;
   needsSelfie: boolean;
+  /** An authenticated state carries a user (the hydration law). If it ever
+   *  does not, the gate holds on the selfie screen [MOB-007]. */
+  hasUser: boolean;
 }
 
 export interface PreviewFlags {
@@ -43,7 +46,7 @@ export function rootNavigatorBoundaryKey(sessionGeneration: number): string {
  * deliberately no marketing-onboarding state in this decision.
  */
 export function rootEntryGate(state: RootEntryState): RootEntryGate {
-  const { isAuthenticated, wantsAuth, intent, anyPreview, needsSelfie } = state;
+  const { isAuthenticated, wantsAuth, intent, anyPreview, needsSelfie, hasUser } = state;
 
   // Sign-in-first must win over the intent question so the account answers.
   if (wantsAuth && !isAuthenticated) return 'auth';
@@ -51,6 +54,11 @@ export function rootEntryGate(state: RootEntryState): RootEntryGate {
 
   const isEarner = intent === 'mover' || intent === 'vendor' || intent === 'advertiser';
   if (isEarner && !isAuthenticated && !anyPreview) return 'auth';
-  if (needsSelfie) return 'selfie';
+  // [E27] No profile selfie merely to browse or order: a signed-in customer
+  // goes straight in. Taxi asks for one when a ride is booked (the driver sees
+  // it); earners keep this gate, since a mover cannot go online without it.
+  // [MOB-007] An authenticated state with no user never opens the app for
+  // anyone: it holds on the selfie screen, whose "Sign out" is the way back.
+  if (needsSelfie && (intent !== 'customer' || !hasUser)) return 'selfie';
   return 'main';
 }

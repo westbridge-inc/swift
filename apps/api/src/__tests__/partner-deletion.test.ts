@@ -196,11 +196,13 @@ describe('[5.1.1v] a partner deletes their own account', () => {
       data: {
         riderId: p.riderId, type: 'DELIVERY_RIDER', status: 'ACTIVE', weeklyRate: 2000,
         currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * 86_400_000),
-        nextBillingDate: new Date(Date.now() + 86_400_000),
+        nextBillingDate: new Date(Date.now() + 86_400_000), nextRetryAt: new Date(Date.now() + 2 * 86_400_000),
       },
     });
     expect((await del(p.token)).statusCode).toBe(200);
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(after.status).toBe('CANCELLED');
+    expect(after.autoRenew).toBe(false);
+    expect(after.nextRetryAt).toBeNull();
   });
 });

@@ -356,6 +356,39 @@ export async function ridesRoutes(app: FastifyInstance) {
     return { success: true, data: result };
   });
 
+  /** POST /:id/confirm-driver-arrival — the passenger's own eyes override the
+   *  arrival GPS gate [E19]. Ownership and the status CAS are one `updateMany`,
+   *  so the confirm itself IS the override transaction: no new column, no
+   *  migration, and nobody but this ride's customer can start the clock. */
+  app.post<{ Params: { id: string } }>('/:id/confirm-driver-arrival', auth, async (request) => {
+    const now = new Date();
+    const claimed = await app.prisma.order.updateMany({
+      where: {
+        id: request.params.id,
+        customerId: request.user.userId,
+        orderType: 'TAXI',
+        status: 'DRIVER_EN_ROUTE',
+        driverId: { not: null },
+      },
+      data: { status: 'DRIVER_ARRIVED', driverArrivedAt: now },
+    });
+    if (claimed.count === 0) {
+      throw new AppError(409, 'INVALID_STATUS',
+        'The driver has not started this ride, or it is no longer waiting for pickup.');
+    }
+    await app.prisma.orderStatusLog.create({
+      data: {
+        orderId: request.params.id,
+        status: 'DRIVER_ARRIVED',
+        changedBy: request.user.userId,
+        note: 'Driver arrival confirmed by the passenger — GPS gate overridden',
+      },
+    });
+    app.io.to(`order:${request.params.id}`).emit('order:status_changed',
+      { orderId: request.params.id, status: 'DRIVER_ARRIVED' });
+    return { success: true, data: { orderId: request.params.id, status: 'DRIVER_ARRIVED' } };
+  });
+
   /** POST /:id/sos — passenger or driver raises an emergency on an active ride.
    *  The app also dials the local emergency number; this raises a first-class
    *  alert in the ONE SOS engine (safety §4) so ops get paged, the war-room
@@ -407,13 +440,17 @@ export async function ridesRoutes(app: FastifyInstance) {
       immediate: true,
       lat: body.lat ?? null,
       lng: body.lng ?? null,
+      // [PRIV2-S1] The free-text reason is recorded by the engine, ops-only:
+      // the alert (and so the evidence bundle), or a repeat press's own row.
+      note: body.note ?? null,
     });
 
-    // Keep the free-text reason + coords on the order's immutable timeline (the
-    // SosAlert carries no free-text trigger field; ops correlate via orderId).
-    await app.prisma.orderStatusLog.create({
-      data: { orderId: ride.id, status: ride.status, changedBy: request.user.userId, note: `SOS raised by ${raisedBy}${body.note ? `: ${body.note}` : ''} ${body.lat != null ? `@${body.lat},${body.lng}` : ''}`.trim() },
-    });
+    // [PRIV2-S1] Nothing about the SOS goes on the order timeline: not the
+    // note, not the position, not even a neutral "SOS raised" marker. Both
+    // people on the ride read order_status_logs verbatim (the driver's
+    // /driver/rides/active, the passenger's /rides/:id and /customer/orders/:id),
+    // so any row here tells the person the SOS is about that it was raised.
+    // The engine never notifies the other party either — same doctrine.
 
     return { success: true, data: { acknowledged: true, orderId: ride.id, sosAlertId: alert.id, status: alert.status } };
   });

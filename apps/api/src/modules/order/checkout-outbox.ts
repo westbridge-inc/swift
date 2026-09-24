@@ -38,6 +38,13 @@ const DEFAULT_RETRY_MAX_MS = 5 * 60_000;
 export type CheckoutOutboxKind = 'vendor-alert-escalate' | 'auto-cancel';
 export type CheckoutOutboxQueue = 'order' | 'notification' | 'dispatch';
 
+/** [ORDER-SPINE S1-6 · R2] Outbox kinds this publisher must never claim. A
+ *  published row is consumed the moment its queue accepts the job, so a kind
+ *  whose delivery must be CONFIRMED before the row may close (a direct-MMG
+ *  claim notice stays owed until its recipients hold inbox rows) is drained in
+ *  process by the same sweep instead — see `drainMmgClaimNotices`. */
+export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice'];
+
 export interface CheckoutQueueTiming {
   /** The vendor alert ladder's first re-alert. */
   alertDelayMs: number;
@@ -205,7 +212,8 @@ function retryDelayMs(attempts: number): number {
 
 /** Claim one due row with a lease: a crashed drainer's row becomes
  *  claimable again when its lease lapses; two drainers never hold one row
- *  (FOR UPDATE SKIP LOCKED). Same shape as the mover-revocation outbox. */
+ *  (FOR UPDATE SKIP LOCKED). Same shape as the mover-revocation outbox. Rows
+ *  of an in-process kind are never this publisher's to claim. */
 async function claimNextRow(prisma: PrismaClient, options: { orderIds?: string[]; leaseMs: number }): Promise<ClaimedRow | null> {
   const orderFilter = options.orderIds?.length ? Prisma.sql`AND "orderId" = ANY(${options.orderIds})` : Prisma.empty;
   const rows = await prisma.$queryRaw<ClaimedRow[]>(Prisma.sql`
@@ -218,6 +226,7 @@ async function claimNextRow(prisma: PrismaClient, options: { orderIds?: string[]
           "claimedAt" IS NULL
           OR "claimedAt" < CURRENT_TIMESTAMP - (${options.leaseMs} * INTERVAL '1 millisecond')
         )
+        AND NOT ("kind" = ANY(${[...IN_PROCESS_OUTBOX_KINDS]}))
         ${orderFilter}
       ORDER BY "createdAt" ASC
       FOR UPDATE SKIP LOCKED

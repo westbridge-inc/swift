@@ -33,6 +33,7 @@ import {
   resolveMoverProfile,
   unwrapOptionalMoverProfile,
 } from '../lib/moverProfile';
+import { accountHoldsRole } from '../lib/roleLanding';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import { confirmRiderCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
@@ -75,17 +76,23 @@ export function useMoverKind() {
     lastMoverRole?: string | null;
   }) | null;
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
+  // An account with no mover role (a customer opening "Swift Driver" to
+  // apply) gets 403 on both probes by the server's authz rule. For that
+  // account 403 IS "no profile": one answer each, no retries, no error carried
+  // into the application screen (lib/moverProfile). The switcher's "Join"
+  // uses the same predicate.
+  const outsider = !accountHoldsRole(authority, 'mover');
   const retryDelay = (attempt: number) => Math.min(500 * (2 ** attempt), 2_000);
   const driver = useQuery<any | null>({
     queryKey: ['mover', 'driverProfile'],
-    queryFn: () => unwrapOptionalMoverProfile(driverApi.profile()),
+    queryFn: () => unwrapOptionalMoverProfile(driverApi.profile(), { outsider }),
     retry: 2,
     retryDelay,
     enabled: !pv,
   });
   const rider = useQuery<any | null>({
     queryKey: ['mover', 'riderProfile'],
-    queryFn: () => unwrapOptionalMoverProfile(riderApi.profile()),
+    queryFn: () => unwrapOptionalMoverProfile(riderApi.profile(), { outsider }),
     retry: 2,
     retryDelay,
     enabled: !pv,
@@ -504,14 +511,27 @@ export function useRiderAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ id, action, reason, outcome, handoverVersion }: { id: string; action: RiderAction; reason?: string; outcome?: FareOutcome; handoverVersion?: string }) => {
+    mutationFn: async ({ id, action, reason, outcome, handoverVersion, pin }: {
+      id: string;
+      action: RiderAction;
+      reason?: string;
+      outcome?: FareOutcome;
+      handoverVersion?: string;
+      /** [MKT-F057] The customer-held delivery PIN the rider enters at the door.
+       *  Omitted when empty so the server answers MISSING_PIN rather than a
+       *  schema refusal; never sent for the failed outcomes (no_show/refused). */
+      pin?: string;
+    }) => {
       switch (action) {
         case 'en-route-pickup': return unwrap(riderApi.enRoutePickup(id));
         case 'arrived-pickup': return unwrap(riderApi.arrivedPickup(id));
         case 'picked-up': return unwrap(riderApi.pickedUp(id));
         case 'en-route-delivery': return unwrap(riderApi.enRouteDelivery(id));
         case 'arrived': return unwrap(riderApi.arrivedAtCustomer(id));
-        case 'delivered': return unwrap(riderApi.delivered(id, handoverVersion ? { handoverVersion } : undefined));
+        case 'delivered': return unwrap(riderApi.delivered(id, {
+          ...(handoverVersion ? { handoverVersion } : {}),
+          ...(pin ? { ridePin: pin } : {}),
+        }));
         case 'handback': return unwrap(riderApi.handback(id, reason ?? 'unable to continue'));
         case 'handover': {
           const owner = requireAuthSessionSnapshot();
@@ -520,7 +540,7 @@ export function useRiderAction() {
           // default; [M-29] 'refused' / 'no_show' are the failed outcomes the
           // unpaid sheet sends explicitly.
           const { gps, current } = await evidenceFix(owner);
-          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps }, current));
+          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(pin ? { ridePin: pin } : {}) }, current));
           requireAuthSessionForPrincipal(owner);
           return result;
         }
@@ -606,6 +626,20 @@ export function useMoverSubscription(kind: MoverKind | null) {
     isError: sample == null && pricing.isError === true,
     refetch: pricing.refetch,
   };
+}
+
+/** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the mover's weekly fee,
+ *  then re-read the subscription so the screen's autoRenew state is server
+ *  truth. Preview is read-only: the mutation is a no-op there. */
+export function useSetMoverBillingMethod(kind: MoverKind | null) {
+  const pv = usePreview();
+  const qc = useQueryClient();
+  const m = useMutation({
+    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) =>
+      unwrap<any>(svc(kind as MoverKind).setBillingMethod(method, mmgPayerMsisdn)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['mover', 'subscription', kind] }),
+  });
+  return pv ? PV.previewMutation() : m;
 }
 
 /** Post-trip DRIVER_TO_CUSTOMER rating (409 when already rated — treat as done). */

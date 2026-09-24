@@ -9,10 +9,11 @@ import type {
   PromoFunder,
 } from '@prisma/client';
 import type { Server } from 'socket.io';
-import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
+import { clampDriverFare, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
-import { lineTotal, orderTotal, promoDiscount, promoCapacity, allocatePromo, allocateAcrossLines, type PromoAllocation } from '../../utils/order-total';
+import { allocateAcrossLines } from '../../utils/order-total';
+import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
@@ -23,6 +24,7 @@ import {
   MOVER_HOLDING_STATUSES,
   ORDER_TRANSITIONS,
   RECOVERY_TRANSITIONS,
+  isAppointmentStatus,
 } from './order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
@@ -40,6 +42,7 @@ import { AppError, ConflictError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
+import { newRidePin } from '../rides/ride-pin';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
   hasTaxiPassengerCustody,
@@ -285,6 +288,29 @@ export function assertMmgFulfilmentAllowed(
 function isCancellationTerminalization(sourceStatus: OrderStatus, target: OrderStatus): boolean {
   return target === 'CANCELLED'
     || (target === 'REFUNDED' && !ORDER_TRANSITIONS.REFUNDED.includes(sourceStatus));
+}
+
+/** [E16-B] The door photo the server issued, recorded, to the rider who holds the job. */
+function courierDeliveryProofBound(order: Pick<Order,
+  'riderId' | 'courierProofIssuedUrl' | 'courierProofIssuedRiderId' | 'courierProofPhotoUrl'>): boolean {
+  return order.courierProofPhotoUrl !== null
+    && order.courierProofPhotoUrl === order.courierProofIssuedUrl
+    && order.riderId !== null
+    && order.courierProofIssuedRiderId === order.riderId;
+}
+
+/** [E16] A courier pickup's custody proof is bound on the row: the photo is
+ *  exactly the URL the server issued, it was issued to the rider who holds the
+ *  job, and the rider's location at pickup is recorded. */
+function courierPickupProofBound(order: Pick<Order,
+  'riderId' | 'courierPickupProofIssuedUrl' | 'courierPickupProofIssuedRiderId'
+  | 'courierPickupProofPhotoUrl' | 'courierPickupProofLat' | 'courierPickupProofLng'>): boolean {
+  return order.courierPickupProofPhotoUrl !== null
+    && order.courierPickupProofPhotoUrl === order.courierPickupProofIssuedUrl
+    && order.riderId !== null
+    && order.courierPickupProofIssuedRiderId === order.riderId
+    && order.courierPickupProofLat !== null
+    && order.courierPickupProofLng !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -639,7 +665,7 @@ export class OrderService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
-      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true, selfieCapturedAt: true },
+      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true },
     });
 
     // Strike consequences: repeated failed cash handovers
@@ -652,21 +678,19 @@ export class OrderService {
       throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering requires ID verification. Verify your identity to continue.');
     }
 
-    // Universal signup selfie (master plan §3): every account carries a live
-    // profile photo before transacting — the vendor/mover sees who is ordering.
-    if (!user.selfieCapturedAt) {
-      throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before placing orders — it takes a few seconds in the app.');
-    }
+    // [E27] No profile selfie to place an ordinary order (food, grocery,
+    // retail, services). Owner rule: "Do not require an ordinary customer
+    // profile selfie merely to browse/order." The selfie stays where Swift
+    // puts a stranger in front of the account: booking a taxi (rides.service)
+    // and a mover going online. The strike restriction above and the
+    // high-value checks below are unchanged.
 
-    // Group the cart by vendor — a multi-vendor cart splits into one order each
-    const groups = new Map<string, typeof cart.items>();
-    for (const ci of cart.items) {
-      const list = groups.get(ci.item.vendorId) ?? [];
-      list.push(ci);
-      groups.set(ci.item.vendorId, list);
-    }
+    // Group the cart by vendor — a multi-vendor cart splits into one order each.
+    // [E01] The cart quote groups through the same function, in the same order,
+    // so each quoted vendor row is the order written here.
+    const groups = groupLinesByVendor(cart.items);
 
-    if (input.paymentMethod === 'MOBILE_MONEY' && groups.size !== 1) {
+    if (input.paymentMethod === 'MOBILE_MONEY' && groups.length !== 1) {
       throw new AppError(
         400,
         'MMG_MULTI_VENDOR_UNSUPPORTED',
@@ -710,7 +734,7 @@ export class OrderService {
       }>;
     }> = [];
 
-    for (const [vendorId, items] of groups) {
+    for (const { vendorId, lines: items } of groups) {
       const vendor = items[0]!.item.vendor;
       if (!vendor.isCurrentlyOpen || !vendor.acceptingOrders || vendor.status !== 'ACTIVE') {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
@@ -724,7 +748,7 @@ export class OrderService {
       const vendorSub = await this.prisma.subscription.findFirst({
         where: { vendorId: vendor.id },
         orderBy: { createdAt: 'desc' },
-        select: { status: true, gracePeriodEnd: true },
+        select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true },
       });
       const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' });
       if (!vendorOperability.operable) {
@@ -795,11 +819,14 @@ export class OrderService {
         }
       }
 
+      // [E01] The group's mode comes from the rule the cart quote prices with: a
+      // booking line makes it an APPOINTMENT, anything else takes the customer's
+      // selection (DELIVERY when none).
+      const fulfillment: FulfillmentType = planFulfillment(items, input.fulfillmentSelections?.[vendorId]);
       const appointmentItems = items.filter((ci) => ci.item.fulfillment === 'APPOINTMENT');
-      let fulfillment: FulfillmentType;
       let appointmentSlot: Date | undefined;
 
-      if (appointmentItems.length > 0) {
+      if (fulfillment === 'APPOINTMENT') {
         if (appointmentItems.length !== items.length || items.length !== 1) {
           throw new AppError(400, 'MIXED_FULFILLMENT', 'Book appointments separately from goods');
         }
@@ -811,15 +838,9 @@ export class OrderService {
         // Validates config, day window, alignment, and that it's in the future.
         // The slot is RESERVED at vendor acceptance, not here.
         await this.booking.validateSlot(only.itemId, slot);
-        fulfillment = 'APPOINTMENT';
         appointmentSlot = slot;
-      } else {
-        fulfillment = input.fulfillmentSelections?.[vendorId] ?? 'DELIVERY';
       }
 
-      let distanceKm = 0;
-      let distanceSource: RouteSource | null = null;
-      let deliveryFee = 0;
       if (fulfillment === 'DELIVERY') {
         if (!address) throw new AppError(400, 'NO_ADDRESS', 'Please set a delivery address');
         // §2 checkout gate (availability spec, flag-gated): zero riders online
@@ -845,23 +866,29 @@ export class OrderService {
             );
           }
         }
-        // Real road km when OSRM is configured; deterministic estimate otherwise.
-        const route = await this.maps.routeKm(
-          { lat: vendor.latitude, lng: vendor.longitude },
-          { lat: address.latitude, lng: address.longitude },
-        );
-        // [ALG-18] Canonical BEFORE pricing: the fee and the frozen number are one number.
-        distanceKm = canonicalBillableKm(route.km);
-        distanceSource = route.source;
-        if (distanceKm > vendor.deliveryRadius) {
-          throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
-        }
-        deliveryFee = deliveryFeeFromRates(distanceKm, deliveryRates);
-        // Express mirrors the courier EXPRESS multiplier. The premium is part of
-        // the fee the rider collects in cash — it is THEIR upside. Same helper
-        // the cart quote uses, so the preview and the charge never disagree.
-        if (input.express) deliveryFee = expressDeliveryFee(deliveryFee);
-      } else if (fulfillment === 'APPOINTMENT') {
+      }
+
+      // [E01 · ALG-24] Price the group through the ONE planner the cart quote
+      // uses — the same line prices, the same canonical road km (real road km
+      // when OSRM is configured, a deterministic estimate otherwise), the same
+      // fee schedule and the same express premium (the rider's cash upside).
+      // Eligibility stays here; the planner only prices.
+      const plan = await planVendorGroup({
+        vendor,
+        lines: items,
+        fulfillment,
+        // A DELIVERY group always has an address by now (NO_ADDRESS above).
+        destination: address ? { lat: address.latitude, lng: address.longitude } : null,
+        deliveryRates,
+        express: input.express === true,
+        routeKm: (from, to) => this.maps.routeKm(from, to),
+      });
+      let distanceKm = plan.distanceKm;
+      let distanceSource: RouteSource | null = plan.distanceSource;
+      if (fulfillment === 'DELIVERY' && distanceKm > vendor.deliveryRadius) {
+        throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
+      }
+      if (fulfillment === 'APPOINTMENT') {
         // MOBILE / BOTH services travel to the customer — require their address and
         // enforce the provider's service radius (mirrors the DELIVERY gate above).
         const bcfg = (appointmentItems[0]!.item.bookingConfig ?? {}) as { serviceMode?: string; serviceRadiusKm?: number };
@@ -893,91 +920,74 @@ export class OrderService {
         }
       }
 
-      // Zero-commission model: the customer pays exactly the vendor's price
+      // Zero-commission model: the customer pays exactly the vendor's price.
+      // Each line is priced by the same function as the plan's subtotal.
       const orderItems = items.map((ci) => {
-        const basePrice = Number(ci.item.basePrice);
-        const options = resolveSelectedOptions(ci.item, ci.selectedOptions);
-        const unitPrice = basePrice + optionsUnitPrice(options);
+        const line = priceCartLine(ci);
         return {
           itemId: ci.item.id,
           name: ci.item.name,
           quantity: ci.quantity,
-          basePrice,
-          unitPrice,
-          totalBase: lineTotal(unitPrice, ci.quantity),
+          basePrice: line.basePrice,
+          unitPrice: line.unitPrice,
+          totalBase: line.lineTotal,
           specialInstructions: ci.specialInstructions,
-          options,
+          options: line.options,
           tracksStock: ci.item.stockQuantity !== null,
           bulkUnits: ci.item.bulkUnits ?? null,
         };
       });
-      const subtotal = orderItems.reduce((s, i) => s + i.totalBase, 0);
 
-      if (subtotal < Number(vendor.minOrderAmount)) {
+      // [E09] THIS vendor's subtotal against ITS minimum — the verdict the cart
+      // quote shows per vendor. One short vendor refuses the whole checkout.
+      if (!plan.meetsMinimum) {
         throw new AppError(400, 'MIN_ORDER', `Minimum order at ${vendor.name} is $${Number(vendor.minOrderAmount).toLocaleString()} GYD`);
       }
 
-      plans.push({ vendor, fulfillment, appointmentSlot, distanceKm, distanceSource, deliveryFee, subtotal, orderItems });
+      plans.push({ vendor, fulfillment, appointmentSlot, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, subtotal: plan.subtotal, orderItems });
     }
 
     // [REPORT-012 F-012-01] Presence, not truthiness: an explicit
-    // `tipAmount: 0` from checkout means "NO tip", and must NOT fall through
-    // (`||`) to a positive tip persisted on the cart by another surface/
-    // session — that silently charged a tip the customer just zeroed. Only an
-    // ABSENT client tip inherits the cart's stored value.
-    const tip = input.tipAmount != null ? input.tipAmount : (Number(cart.tipAmount) || 0);
-    // [REPORT-012 F-012-01] "Tip your rider" is delivery money. A basket with
-    // no DELIVERY plan (pickup / appointment-only) has no rider, so no order
-    // carries the tip — and it must not inflate grandTotal either: that figure
-    // feeds the ID gate and customer.totalSpent, and a phantom tip there
-    // corrupts threshold and accounting evidence.
-    const tipPlanIndex = plans.findIndex((p) => p.fulfillment === 'DELIVERY');
-    const effectiveTip = tipPlanIndex >= 0 ? tip : 0;
+    // `tipAmount: 0` from checkout means "NO tip"; only an ABSENT client tip
+    // inherits the cart's stored value (resolveTip — the quote's rule too).
+    const tip = resolveTip(input.tipAmount, cart.tipAmount);
 
-    let discount = 0;
     let promoCodeId: string | null = null;
     let promoVendorId: string | null = null;
     // [M-32] The terms the order is priced under, snapshotted on its redemption.
     let promoTerms: RedeemedPromoTerms | null = null;
     if (input.promoCode) {
+      // Eligibility only (exists, active, window, caps, per-user, store, the
+      // code's own minimum). The discount is priced by priceBasket below.
       const promo = await this.validatePromoCode(
         input.promoCode,
         input.userId,
-        plans.map((p) => ({ vendorId: p.vendor.id, subtotal: p.subtotal, deliveryFee: p.deliveryFee })),
+        plans.map((p) => ({ vendorId: p.vendor.id, subtotal: p.subtotal })),
       );
-      discount = promo.discount;
       promoCodeId = promo.id;
       promoVendorId = promo.vendorId;
       promoTerms = promo.terms;
     }
-    const promoFunder = promoTerms?.funder ?? null;
 
-    // [REPORT-034 S1] A discount can never exceed what the basket it targets is
-    // able to absorb. A FIXED_AMOUNT promo takes its value verbatim (see
-    // validatePromoCode), so a $5,000 code on a $1,200 basket used to subtract
-    // the whole $5,000 here — while each stored order clamped its own total at
-    // zero further down. The result was a response `grandTotal` that disagreed
-    // with the rows it summarised, and a lifetime `totalSpent` that could be
-    // DECREMENTED by placing an order. Swift never owes a customer money: the
-    // floor is zero, and it belongs at the point the discount is decided so
-    // that every consumer below — the per-plan allocation, the stored totals,
-    // the receipt and the spend ledger — reads the same number.
-    //
-    // The capacity mirrors the allocation rule used later: a vendor promo can
-    // only be absorbed by ITS vendor's plan; a platform code by the whole
-    // basket. Tip rides whichever plan carries it.
-    const promoPlanIdxForCap = promoVendorId ? plans.findIndex((p) => p.vendor.id === promoVendorId) : -1;
-    // [M-32] The capacity is what the promo's FUNDER may discount: the goods,
-    // plus the delivery fee only for a platform code (a store's promotion is
-    // not the rider's fee to give away). The tip is never in it — a promised
-    // tip is the mover's, and no sponsor rail exists to fund it. Before, the
-    // tip sat inside the capacity, so a code larger than goods + fee ate the
-    // rider's tip while the tip earning was still minted in full.
-    const discountCapacity = (promoPlanIdxForCap >= 0 ? [promoPlanIdxForCap] : plans.map((_, i) => i)).reduce(
-      (sum, i) => sum + promoCapacity(promoFunder, { subtotal: plans[i]!.subtotal, deliveryFee: plans[i]!.deliveryFee }, promoTerms?.discountType ?? null),
-      0,
-    );
-    discount = Math.min(discount, Math.max(0, discountCapacity));
+    // [E01 · ALG-24] The basket is priced by the ONE function the cart quote
+    // calls (cart-plans priceBasket), so the total shown is the total charged:
+    //   - [REPORT-034 S1 · M-32] the discount is clamped to what its funder may
+    //     absorb — the goods, plus the delivery fee only for a platform code,
+    //     never the tip; a store's code is absorbed by its own plan only. Swift
+    //     never owes a customer money, and every consumer below (allocation,
+    //     stored totals, receipt, spend ledger) reads this one number;
+    //   - [REPORT-012 F-012-01] "tip your rider" is delivery money: it rides
+    //     the first DELIVERY plan, and a basket with none (pickup/appointment
+    //     only) carries no tip — nor does grandTotal, which feeds the ID gate
+    //     and customer.totalSpent;
+    //   - each plan's discount share, tip and total (orderTotal) are the
+    //     numbers the orders below are written with.
+    const priced = priceBasket({
+      plans: plans.map((p) => ({ vendorId: p.vendor.id, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: p.deliveryFee })),
+      promo: promoTerms ? { ...promoTerms, vendorId: promoVendorId } : null,
+      tip,
+    });
+    const discount = priced.discount;
 
     assertCashDiscountSponsored({
       paymentMethod: input.paymentMethod,
@@ -985,7 +995,7 @@ export class OrderService {
       fulfillments: plans.map((p) => p.fulfillment),
     });
 
-    const grandTotal = plans.reduce((s, p) => s + p.subtotal + p.deliveryFee, 0) + effectiveTip - discount;
+    const grandTotal = priced.grandTotal;
 
     // The ID-gate (locked model): at or above the country's USD-equivalent
     // threshold, an L1 account must verify identity first. L2/L3 flow through.
@@ -1113,7 +1123,7 @@ export class OrderService {
         const lockedSub = await tx.subscription.findFirst({
           where: { vendorId: planVendorId },
           orderBy: { createdAt: 'desc' },
-          select: { status: true, gracePeriodEnd: true },
+          select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true },
         });
         const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' });
         if (!lockedOperability.operable) {
@@ -1196,38 +1206,24 @@ export class OrderService {
         ? plans.findIndex((p) => p.vendor.id === promoVendorId)
         : -1;
 
-      // "Tip your rider" is delivery money: it rides the first DELIVERY plan.
-      // A pickup or appointment has no rider — a lingering cart tip must never
-      // be charged there (founder screenshot 2026-07-15: haircut w/ rider tip).
-      const planTipFor = (i: number) => (i === tipPlanIndex ? effectiveTip : 0);
-
-      // Spread the discount across orders so it's never swallowed by a per-order
-      // Math.max(0,…) clamp. A platform code larger than the first vendor's order
-      // used to overcharge — grandTotal disagreed with the cash actually collected.
-      // A vendor code hits only its plan; a platform code fills each plan up to its
-      // own total until the discount is exhausted.
-      const discountAlloc = new Array<number>(plans.length).fill(0);
-      // [M-32] Per component, by funder: goods first, then (platform code
-      // only) the delivery fee; never the tip. The parts are snapshotted on
-      // the order's redemption below, so every discounted dollar names who
-      // funds it.
-      const discountParts = new Array<PromoAllocation | null>(plans.length).fill(null);
-      let remainingDiscount = discount;
-      const discountTargets = promoPlanIndex >= 0 ? [promoPlanIndex] : plans.map((_, i) => i);
-      for (const i of discountTargets) {
-        if (remainingDiscount <= 0) break;
-        const parts = allocatePromo(promoFunder, remainingDiscount, { subtotal: plans[i]!.subtotal, deliveryFee: plans[i]!.deliveryFee }, promoTerms?.discountType ?? null);
-        discountAlloc[i] = parts.total;
-        discountParts[i] = parts;
-        remainingDiscount -= parts.total;
-      }
-
+      // [E01 · ALG-24] Each order is written with ITS plan's numbers from the
+      // basket pricer above — the per-vendor rows the cart quote showed:
+      //   - "tip your rider" rides the first DELIVERY plan; a pickup or
+      //     appointment has no rider, so a lingering cart tip is never charged
+      //     there (founder screenshot 2026-07-15: haircut w/ rider tip);
+      //   - the discount is spread across orders so no per-order zero floor
+      //     swallows it (a platform code larger than the first vendor's order
+      //     used to overcharge); a vendor code hits only its plan;
+      //   - [M-32] per component, by funder: goods first, then (platform code
+      //     only) the delivery fee, never the tip — snapshotted on the order's
+      //     redemption below, so every discounted dollar names who funds it.
       for (const [index, plan] of plans.entries()) {
         const sequence = await nextSequence();
-        const planTip = planTipFor(index);
-        const planDiscount = discountAlloc[index]!;
-        // [ALG-24] The one total — the cart quote computes its total through the same function.
-        const totalAmount = orderTotal({ subtotal: plan.subtotal, deliveryFee: plan.deliveryFee, tip: planTip, discount: planDiscount });
+        const pricedPlan = priced.perPlan[index]!;
+        const planTip = pricedPlan.tip;
+        const planDiscount = pricedPlan.discount;
+        // [ALG-24] The one total (orderTotal inside priceBasket).
+        const totalAmount = pricedPlan.total;
         // DELIVERY and MOBILE appointments go to the customer's address; PICKUP and
         // AT_BUSINESS appointments use the store (distanceKm>0 marks a mobile service).
         const toCustomer = plan.fulfillment === 'DELIVERY' || (plan.fulfillment === 'APPOINTMENT' && plan.distanceKm > 0);
@@ -1300,6 +1296,11 @@ export class OrderService {
             // Takeaway: a collection code the customer shows the vendor at pickup.
             // 6-digit, CSPRNG (not Math.random); handover is vendor-mediated in person.
             pickupCode: plan.fulfillment === 'PICKUP' ? String(randomInt(100000, 1000000)) : null,
+            // [MKT-F057] A customer-held door PIN for every DELIVERY-fulfillment
+            // goods/service order, minted at checkout (taxi parity: the customer
+            // holds, the rider verifies at the door). PICKUP and APPOINTMENT rows
+            // stay null; COURIER orders are created elsewhere and never mint one.
+            ridePin: plan.fulfillment === 'DELIVERY' ? newRidePin() : null,
             // Stamp the redemption on exactly one order (the vendor's plan, or
             // order 0 for a platform code) so per-user usage counting stays correct.
             promoCodeId: index === (promoPlanIndex >= 0 ? promoPlanIndex : 0) ? promoCodeId : null,
@@ -1399,7 +1400,7 @@ export class OrderService {
         // priced under, the funder, and the discount per component. Written
         // on the order that carries the code (a zero-dollar redemption is
         // still a redemption) and on any other order the discount reached.
-        const parts = discountParts[index];
+        const parts = pricedPlan.allocation;
         if (promoCodeId && promoTerms && (parts || index === (promoPlanIndex >= 0 ? promoPlanIndex : 0))) {
           await tx.promoRedemption.create({
             data: {
@@ -1726,6 +1727,15 @@ export class OrderService {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
     }
+    // A BOOKING is confirmed, completed or cancelled — never prepared, marked
+    // ready, handed to a rider or delivered [order-status.ts BOOKING_LAW]. The
+    // kitchen routes refuse it first, but this is the locked seam every caller
+    // passes (ops, agent, admin, an older client), so the same law is enforced
+    // on the fresh row here: a booking that reached PREPARING got "Food Ready!"
+    // and could no longer be completed (complete-appointment requires ACCEPTED).
+    if (source.fulfillment === 'APPOINTMENT' && !isAppointmentStatus(input.target)) {
+      throw new AppError(409, 'NOT_A_KITCHEN_ORDER', `A booking is confirmed and completed, never moved to ${input.target}`);
+    }
     // [REPORT-014 F-014-02] The acting rider must own the LOCKED row — a
     // release/reassignment that committed after the route's ownership
     // pre-read loses here, not after a fabricated DELIVERED terminal.
@@ -1925,6 +1935,39 @@ export class OrderService {
       throw new AppError(409, 'PAYMENT_NOT_CAPTURED', order.orderType === 'COURIER'
         ? 'Record the cash outcome first — a cash courier job completes when the fee is recorded as collected, refused or unpaid; a proof photo never implies money.'
         : 'Record the fare outcome first — a cash ride completes when the fare is recorded as paid, refused or unpaid.');
+    }
+    // [E16] The custody authority's own guard, on the row as it will commit: a
+    // courier parcel enters PICKED_UP only with its pickup proof bound (the
+    // photo the server issued to the rider who holds the job, and that rider's
+    // location). Evaluated after the caller's hook, which is where the courier
+    // pickup-proof step binds it — so the check runs on the locked row, and
+    // every other caller (the generic rider leg, an ops tool, anything added
+    // later) rolls back with nothing written.
+    if (input.target === 'PICKED_UP' && order.orderType === 'COURIER' && !courierPickupProofBound(order)) {
+      throw new AppError(409, 'PICKUP_PROOF_REQUIRED',
+        'Photograph the parcel to confirm pickup — this job needs a pickup photo and your location.');
+    }
+    // [E16-B · S2] THE COURIER DELIVERY-PROOF GATE. A parcel reaches DELIVERED
+    // only with the door photo recorded: either set by THIS transition (the
+    // courier /proof path passes terminalMetadata.courierProofPhotoUrl after
+    // exact-matching it to the URL the server issued at /proof-photo) or
+    // already durably on the row and equal to that issued URL. The bare rider
+    // /delivered and /handover routes pass no proof metadata, so a sender-pays
+    // job whose fee was already collected at pickup — and an MMG-paid job —
+    // rolls back here instead of closing without the proof: no deliveredAt, no
+    // earnings, no released rider. COURIER-only: food/grocery/pharmacy, taxi
+    // and service transitions never enter this branch.
+    // [DS145 D3] Bound to the rider who holds the job, like E16's pickup
+    // proof: a door photo issued to a rider who has since been replaced does
+    // not deliver the parcel for the new one.
+    if (input.target === 'DELIVERED' && order.orderType === 'COURIER') {
+      if (!courierDeliveryProofBound(order)) {
+        throw new AppError(
+          409,
+          'DELIVERY_PROOF_REQUIRED',
+          'This courier job closes only through the photo proof step — capture the door photo first, then confirm the handoff.',
+        );
+      }
     }
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }
@@ -2171,13 +2214,20 @@ export class OrderService {
     // is absence of the store's attestation, not proof the customer's external
     // transfer didn't happen. The platform cannot know, so it says what is
     // true and points at the party who holds the money.
+    // The result is the banner the customer reads first (the tracking screen
+    // shows the server's message before its own fallback). A booking is a
+    // booking and its money is with the PROVIDER — the noun and the party
+    // follow the committed row's fulfillment; the fee and the MMG uncertainty
+    // above are the server's and are unchanged. Food keeps its exact words.
+    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : 'Order';
+    const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
     if (order.paymentMethod === 'MOBILE_MONEY') {
       return {
-        message: 'Order cancelled. If you already sent the MMG payment, the store refunds you directly.',
+        message: `${noun} cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`,
         cancellationFee,
       };
     }
-    return { message: freeCancellation ? 'Order cancelled — no charge' : 'Order cancelled', cancellationFee };
+    return { message: freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`, cancellationFee };
   }
 
   async updateStatus(
@@ -2236,7 +2286,15 @@ export class OrderService {
         // [ALG-03] Shadow: what the prep-time learner WOULD predict, written beside
         // the accept for the nightly grade. Fire-and-forget; never in the way.
         void shadowPredictAtAccept(this.prisma, orderId);
-        await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        // A booking is CONFIRMED, not "being prepared": the provider reserved
+        // the customer's slot inside this transition. Kitchen words on a
+        // haircut were the phone's first sign that a SERVICE booking was riding
+        // the food order spine.
+        if (order.fulfillment === 'APPOINTMENT') {
+          await this.notifications.bookingConfirmed(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        } else {
+          await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        }
         break;
       case 'PREPARING':
         await this.notifications.orderPreparing(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
@@ -2572,11 +2630,15 @@ export class OrderService {
    * codes (vendorId null) discount the whole basket; a VENDOR's code
    * (master plan §4.2) is valid only when that vendor is in the cart and
    * discounts only their subtotal.
+   *
+   * [E01] Eligibility only. The discount itself is priced by cart-plans
+   * `priceBasket` — the function the cart quote uses — from the terms this
+   * returns, so the quote's discount and the charge's are one computation.
    */
   private async validatePromoCode(
     code: string,
     userId: string,
-    plans: Array<{ vendorId: string; subtotal: number; deliveryFee: number }>,
+    plans: Array<{ vendorId: string; subtotal: number }>,
   ) {
     const promo = await this.prisma.promoCode.findUnique({ where: { code: code.toUpperCase() } });
     if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
@@ -2602,32 +2664,25 @@ export class OrderService {
       throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
     }
 
-    // The discount basis: the promo vendor's plan, or the whole basket.
+    // The code's own minimum judges its basis: the promo vendor's plan, or the
+    // whole basket.
     let subtotal: number;
-    let deliveryFeeBasis: number;
     if (promo.vendorId) {
       const plan = plans.find((p) => p.vendorId === promo.vendorId);
       if (!plan) {
         throw new AppError(400, 'PROMO_WRONG_VENDOR', 'This code belongs to a different store — add their items to use it');
       }
       subtotal = plan.subtotal;
-      deliveryFeeBasis = plan.deliveryFee;
     } else {
       subtotal = plans.reduce((s, p) => s + p.subtotal, 0);
-      deliveryFeeBasis = plans.reduce((s, p) => s + p.deliveryFee, 0);
     }
 
     if (promo.minOrderAmount && subtotal < Number(promo.minOrderAmount)) {
       throw new AppError(400, 'MIN_ORDER_PROMO', `Minimum order of $${Number(promo.minOrderAmount).toLocaleString()} GYD required for this promo`);
     }
 
-    // [ALG-24] The one promo switch — the cart quote applies the same function.
-    const discount = promoDiscount(promo, { subtotal, deliveryFee: deliveryFeeBasis });
-
     return {
       id: promo.id,
-      discount,
-      discountType: promo.discountType,
       vendorId: promo.vendorId,
       // [M-32] What the order will be priced under — snapshotted at redemption.
       terms: { termsVersion: promo.termsVersion, discountType: promo.discountType, discountValue: promo.discountValue, maxDiscount: promo.maxDiscount, funder: promo.funder },

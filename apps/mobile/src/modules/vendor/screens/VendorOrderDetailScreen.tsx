@@ -4,6 +4,7 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
+import { rejectReasonsFor } from '../rejectReasons';
 import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
 import { openExternal } from '../../../lib/openExternal';
@@ -569,7 +570,7 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
             was recorded as the default "Rejected by vendor". Same presets,
             one tap, and the reason reaches the customer's cancellation
             record. */}
-        {(['Out of stock', 'Kitchen is too busy', 'Closing soon'] as const).map((why) => (
+        {rejectReasonsFor(order.fulfillment).map((why) => (
           <PillButton
             key={why}
             label={why}

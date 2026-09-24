@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { View, Linking, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
@@ -20,11 +21,12 @@ import { PressableScale } from '../../kit/pressable-scale';
 const FRAME = 260;
 
 /**
- * Mandatory signup selfie (master plan §3) — camera capture ONLY, no gallery.
- * Rendered by RootNavigator for any signed-in account without a selfie, so it
- * covers new registrations, existing accounts, and every role the same way.
- * The photo becomes the user's public profile picture: drivers see who they
- * pick up, customers see who's coming.
+ * Profile selfie (master plan §3) — camera capture ONLY, no gallery.
+ * Rendered by RootNavigator for a signed-in earner account without a selfie,
+ * and [E27] pushed by the taxi screen when a customer's ride request needs
+ * one (customers are not asked merely to browse or order). The photo becomes
+ * the user's public profile picture: drivers see who they pick up, customers
+ * see who's coming.
  */
 export function SelfieCaptureScreen() {
   const cameraRef = useRef<CameraView>(null);
@@ -36,6 +38,11 @@ export function SelfieCaptureScreen() {
   const [error, setError] = useState<string | null>(null);
   const { setUserIfCurrent, logout } = useAuthStore();
   const sessionGeneration = useAuthStore((state) => state.sessionGeneration);
+  // [E27] Pushed from a flow that needs the photo (taxi) rather than shown as
+  // the root gate: "Not now" goes back instead of signing out, and a saved
+  // photo returns the passenger to where they were.
+  const navigation = useNavigation<any>();
+  const stacked = navigation?.canGoBack?.() === true;
 
   // The navigator can keep this same screen instance mounted when account A
   // signs out and account B also needs a selfie. Never carry A's captured
@@ -90,6 +97,7 @@ export function SelfieCaptureScreen() {
       if (!setUserIfCurrent(owner, { ...operationUser, ...updated } as never)) {
         throw new AuthSessionBoundaryError();
       }
+      if (stacked) navigation.goBack();
     } catch (uploadError) {
       if (uploadError instanceof AuthSessionBoundaryError) return;
       setError('Upload failed. Check your connection and try again.');
@@ -127,9 +135,15 @@ export function SelfieCaptureScreen() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top', 'bottom']}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', paddingHorizontal: space.lg, paddingTop: space.md }}>
-        <PressableScale onPress={logout} hitSlop={12}>
-          <T variant="label" tone="muted">Sign out</T>
-        </PressableScale>
+        {stacked ? (
+          <PressableScale onPress={() => navigation.goBack()} hitSlop={12}>
+            <T variant="label" tone="muted">Not now</T>
+          </PressableScale>
+        ) : (
+          <PressableScale onPress={logout} hitSlop={12}>
+            <T variant="label" tone="muted">Sign out</T>
+          </PressableScale>
+        )}
       </View>
 
       <View style={{ flex: 1, justifyContent: 'center', paddingHorizontal: space.lg }}>

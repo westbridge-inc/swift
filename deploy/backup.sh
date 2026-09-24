@@ -38,11 +38,17 @@
 #
 # Reads the bundled Postgres through its private Compose network. No host
 # DATABASE_URL or published database port is needed.
-# Offsite settings come from the environment, then deploy/.env:
+# Offsite SETTINGS come from the environment, then deploy/.env:
 #   BACKUP_BUCKET      bucket for dumps (e.g. swift-backups)
 #   AWS_S3_ENDPOINT    R2/S3 endpoint
-#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 #   BACKUP_PREFIX      key prefix, default "db"
+#   AWS_CLI_IMAGE      pinned image@sha256 that provides the AWS CLI (no snap)
+# The storage KEYS never come from deploy/.env: AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY are read from the environment, from *_FILE, or from
+# $CREDENTIALS_DIRECTORY, where systemd puts them for swift-backup.service via
+# LoadCredentialEncrypted= (deploy/secret-env.sh). The database password never
+# reaches this host process at all: pg_dump runs inside the postgres container
+# and reads POSTGRES_PASSWORD_FILE there.
 
 set -euo pipefail
 
@@ -57,13 +63,54 @@ env_value() {
   [ -f "$HERE/.env" ] || return 0
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
 }
-aws_s3() {
-  if [ -n "${AWS_S3_ENDPOINT:-}" ]; then aws --endpoint-url "$AWS_S3_ENDPOINT" "$@"
-  else aws "$@"; fi
+# [STG-B] The AWS CLI runs INSIDE a pinned container image — there is no host
+# `aws` binary. The snap-packaged CLI starts through setuid snap-confine, which
+# the backup unit's NoNewPrivileges=true forbids (observed: "snap-confine is
+# packaged without necessary permissions"), and weakening the unit's hardening
+# is not on the table. The unit already talks to the docker socket (pg_dump
+# above runs through `docker compose exec`), so the pinned image does the S3
+# work instead. Credentials pass BY NAME (-e NAME): the values flow to the
+# daemon in the container config, never into this process's argv or any log.
+aws_cli_image() {
+  local image="${AWS_CLI_IMAGE:-}"
+  [ -n "$image" ] || { echo "FATAL: AWS_CLI_IMAGE is not set — pin the AWS CLI container image (deploy/.env.deploy.example, OFFSITE BACKUPS)." >&2; return 1; }
+  case "$image" in
+    *PLACEHOLDER*|*'<'*|*'>'*)
+      echo "FATAL: AWS_CLI_IMAGE is still a placeholder — pin a reviewed image@sha256 digest." >&2; return 1; ;;
+  esac
+  # Anchored digest check: only `<image>@sha256:<64 hex chars>` is a pin. A
+  # substring test would let `ubuntu@sha256:` or `aws-cli:2@sha256:zzz`
+  # through to fail later at `docker run` with an unhelpful message.
+  if ! printf '%s\n' "$image" | grep -Eq '@sha256:[0-9a-f]{64}$'; then
+    echo "FATAL: AWS_CLI_IMAGE must pin an image@sha256:<64-hex> digest — a floating tag or malformed digest is not a pin." >&2; return 1
+  fi
+  printf '%s\n' "$image"
 }
-for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_BUCKET AWS_S3_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION BACKUP_HEARTBEAT_URL; do
+# aws_cli MOUNT ARGS... — one pinned-AWS-CLI container run. MOUNT is a docker
+# bind mount; the backup mounts its dump directory read-only, restore mounts
+# its scratch directory read-write. Runs as the caller's uid so any file the
+# container creates is owned by the deploy user.
+aws_cli() {
+  local mount="$1" image
+  shift
+  image="$(aws_cli_image)" || return 1
+  docker run --rm --user "$(id -u):$(id -g)" \
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY ${AWS_REGION:+-e AWS_REGION} \
+    -v "$mount" \
+    "$image" "$@"
+}
+aws_s3() {
+  local mount="$1"
+  shift
+  if [ -n "${AWS_S3_ENDPOINT:-}" ]; then aws_cli "$mount" --endpoint-url "$AWS_S3_ENDPOINT" "$@"
+  else aws_cli "$mount" "$@"; fi
+}
+for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_BUCKET AWS_S3_ENDPOINT AWS_REGION AWS_CLI_IMAGE BACKUP_HEARTBEAT_URL; do
   if [ -z "${!var:-}" ]; then export "$var=$(env_value "$var")"; fi
 done
+# The storage keys: environment, *_FILE or systemd's credentials directory.
+. "$HERE/secret-env.sh"
+load_secret_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || exit 1
 BACKUP_PREFIX="${BACKUP_PREFIX:-db}"
 AWS_REGION="${AWS_REGION:-auto}"
 
@@ -89,8 +136,10 @@ TARGET="$OUT_DIR/swift-$STAMP.dump"
 echo "dumping → $(basename "$TARGET")"
 # Write to a partial name first: a backup job killed mid-write must never leave
 # a truncated file that looks like a good backup.
+# The container holds the password as a file (POSTGRES_PASSWORD_FILE); it is
+# read there, by the exec'd shell, and never crosses to this host.
 "${COMPOSE[@]}" exec -T postgres sh -c \
-  'export PGPASSWORD="$POSTGRES_PASSWORD"; exec pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+  'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
   > "$TARGET.partial"
 mv "$TARGET.partial" "$TARGET"
 chmod 600 "$TARGET"
@@ -110,20 +159,18 @@ echo "verified: pg_restore can read the archive's table of contents"
 # The dump leaves this machine, and we PROVE it arrived before trusting it.
 UPLOADED=0
 if [ -n "${BACKUP_BUCKET:-}" ]; then
-  if ! command -v aws >/dev/null 2>&1; then
-    echo "FATAL: BACKUP_BUCKET is set but the aws CLI is not installed. Offsite backup cannot run." >&2
-    exit 1
-  fi
+  aws_cli_image >/dev/null || exit 1
   KEY="$BACKUP_PREFIX/$(basename "$TARGET")"
+  OUT_ABS="$(cd "$OUT_DIR" && pwd)"
   echo "uploading → s3://$BACKUP_BUCKET/$KEY"
-  if ! aws_s3 s3 cp "$TARGET" "s3://$BACKUP_BUCKET/$KEY" --only-show-errors; then
+  if ! aws_s3 "$OUT_ABS:/data:ro" s3 cp "/data/$(basename "$TARGET")" "s3://$BACKUP_BUCKET/$KEY" --only-show-errors; then
     echo "FATAL: offsite upload failed. The local dump exists but is NOT safe from this machine dying." >&2
     exit 1
   fi
 
   # An upload that "succeeded" but landed truncated is the failure that hurts
   # most, because it looks fine. Compare the byte count at the destination.
-  REMOTE_SIZE=$(aws_s3 s3api head-object \
+  REMOTE_SIZE=$(aws_s3 "$OUT_ABS:/data:ro" s3api head-object \
     --bucket "$BACKUP_BUCKET" --key "$KEY" --query 'ContentLength' --output text 2>/dev/null || echo "")
   if [ "$REMOTE_SIZE" != "$SIZE" ]; then
     echo "FATAL: uploaded object is $REMOTE_SIZE bytes, local dump is $SIZE. Treating this run as FAILED." >&2
@@ -143,7 +190,7 @@ fi
 # backup that actually worked; the staleness check will catch a real outage.
 if command -v docker >/dev/null 2>&1; then
   "${COMPOSE[@]}" exec -T postgres sh -c \
-    'export PGPASSWORD="$POSTGRES_PASSWORD"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q -v ON_ERROR_STOP=1' \
+    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q -v ON_ERROR_STOP=1' \
     <<SQL >/dev/null 2>&1 || echo "note: heartbeat write failed (backup itself is fine)" >&2
 -- id has no database-side default (Prisma mints the cuid), so supply one.
 INSERT INTO platform_config (id, key, value, "updatedAt")

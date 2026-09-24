@@ -10,7 +10,7 @@ import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill } 
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
+import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useSetMoverBillingMethod, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
 import { StandingCard } from '../../../components/StandingCard';
 import {
   AuthSessionBoundaryError,
@@ -24,7 +24,8 @@ import { isStepUpDismissed, serverMessage } from '../../../lib/stepUp';
 import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
-import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
+import { BillingStatusBlock, BillingStopControl } from '../../../components/billing/BillingSurfaces';
+import { resumeBillingMethod } from '../../../lib/billing';
 import { useMoverPreview } from '../../../stores/moverPreview';
 
 export function MoverAccountScreen({ navigation }: any) {
@@ -36,6 +37,7 @@ export function MoverAccountScreen({ navigation }: any) {
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);
   const subQ = useMoverSubscription(kind);
+  const setBilling = useSetMoverBillingMethod(kind);
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
   const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
   const qc = useQueryClient();
@@ -202,6 +204,7 @@ export function MoverAccountScreen({ navigation }: any) {
           <SettingsRow icon="shield" label="Guarantee claims" sub="Cash orders where the customer didn't pay" onPress={() => navigation?.navigate?.('Claims')} />
           <SettingsRow icon="clock" label="Job history" sub="Every completed and cancelled job" onPress={() => navigation?.navigate?.('JobHistory')} />
           <SettingsRow icon="file-text" label="Documents" sub="Licences, insurance and renewals" onPress={() => navigation?.navigate?.('MoverDocuments')} />
+          <SettingsRow icon="truck" label="Change vehicle" sub="A new vehicle is checked before you go online" onPress={() => navigation?.navigate?.('MoverVehicle')} />
           <SettingsRow
             icon="credit-card"
             label="Weekly fee"
@@ -226,6 +229,20 @@ export function MoverAccountScreen({ navigation }: any) {
             paused block. Silent on a healthy account (the row above is the way
             in). */}
         <BillingStatusBlock sub={sub} onPay={() => navigation?.navigate?.('MySwiftNumber')} compact />
+        <BillingStopControl
+          sub={sub}
+          who={kind === 'DRIVER' ? 'driver' : 'rider'}
+          pending={setBilling.isPending}
+          onStop={() => setBilling.mutate({ method: 'NONE' })}
+          onResume={() =>
+            setBilling.mutate({
+              method: resumeBillingMethod(sub),
+              ...(sub?.billingMethod === 'MOBILE_MONEY' && sub?.mmgPayerMsisdn
+                ? { mmgPayerMsisdn: sub.mmgPayerMsisdn }
+                : {}),
+            })
+          }
+        />
 
         {/* The model */}
         <Card style={{ marginTop: space.md }}>

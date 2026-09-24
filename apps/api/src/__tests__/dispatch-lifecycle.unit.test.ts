@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { mmgDispatchBlocked } from '../modules/order/mmg-claim.service';
 
 // Execute production method bodies, not copies of the algorithm. Isolating the
 // class from module wiring makes accidental provider/service boot impossible.
@@ -40,6 +41,9 @@ const context = vm.createContext({
   BASE_RADIUS_KM: 5,
   RECONCILE_STUCK_MINUTES: 3, RECONCILE_COOLDOWN_SECONDS: 600,
   riderStackingCapacity: async () => 1,
+  // [ORDER-SPINE S1-6] dispatchOrder's direct-MMG offer gate — the production
+  // predicate itself, not a copy (these orders are CASH, so it lets them by).
+  mmgDispatchBlocked,
   TERMINAL_ORDER_STATUSES: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'],
 });
 

@@ -121,6 +121,28 @@ export const VEHICLE_TYPES_IN_ORDER: VehicleType[] = Object.values(VEHICLE_CLASS
   .map((v) => v.type);
 
 /**
+ * [Owner decision 2026-09-24 · the launch vehicle list] The heavy freight classes
+ * (canters and box trucks) are NOT offered at launch. They stay in the taxonomy and
+ * the enum, so switching them on later is this one set, but no one can register,
+ * switch to, or go online with one until they are offered. Everything else is
+ * offered: bicycle and motorbike for delivery riders; car, wagon (estate) car and
+ * both buses for drivers. The mobile picker mirrors this set
+ * (apps/mobile/src/lib/vehicleOffer.ts; a test keeps the two equal) and follows
+ * each quote's `offered` flag once the price list has loaded.
+ */
+export const LAUNCH_HIDDEN_VEHICLE_TYPES: ReadonlySet<VehicleType> = new Set<VehicleType>([
+  'CANTER_SHORT', 'CANTER_LONG', 'BOX_TRUCK_SHORT', 'BOX_TRUCK_LONG',
+]);
+
+/** Error code for a vehicle Swift does not take on yet (registration, change, GO). */
+export const VEHICLE_NOT_OFFERED = 'VEHICLE_NOT_OFFERED';
+
+/** Can a mover register, switch to, or operate this vehicle today? */
+export function isVehicleOffered(vehicleType: VehicleType): boolean {
+  return vehicleType in VEHICLE_CLASSES && !LAUNCH_HIDDEN_VEHICLE_TYPES.has(vehicleType);
+}
+
+/**
  * Vehicle types that can carry a parcel of the given size — every vehicle whose
  * max capacity is at least the parcel's size. An unknown/absent size (non-courier
  * orders such as food or rides) is carriable by any vehicle.

@@ -14,17 +14,20 @@ const fresh: RootEntryState = {
   countryCode: null,
   anyPreview: false,
   needsSelfie: false,
+  hasUser: false,
 };
 
 function guyanaOnlyGate(state: RootEntryState) {
-  const { isAuthenticated, wantsAuth, intent, anyPreview, needsSelfie } = state;
+  const { isAuthenticated, wantsAuth, intent, anyPreview, needsSelfie, hasUser } = state;
   const earner = intent === 'mover' || intent === 'vendor' || intent === 'advertiser';
   const needsAuth = earner ? !isAuthenticated && !anyPreview : wantsAuth && !isAuthenticated;
 
   if (wantsAuth && !isAuthenticated) return 'auth';
   if (!intent) return 'role-picker';
   if (needsAuth) return 'auth';
-  if (needsSelfie) return 'selfie';
+  // [E27] customers are not asked for a selfie merely to browse or order;
+  // [MOB-007] a signed-in state with no user holds for everyone
+  if (needsSelfie && (intent !== 'customer' || !hasUser)) return 'selfie';
   return 'main';
 }
 
@@ -66,6 +69,27 @@ describe('rootEntryGate', () => {
     ).toBe('selfie');
   });
 
+  it('[E27] a signed-in customer without a selfie goes straight in: no selfie merely to browse or order', () => {
+    expect(
+      rootEntryGate({ ...fresh, isAuthenticated: true, intent: 'customer', countryCode: 'GY', needsSelfie: true, hasUser: true }),
+    ).toBe('main');
+  });
+
+  it('[E27 / MOB-007] …but a signed-in customer state with NO user still holds, never opening the app', () => {
+    expect(
+      rootEntryGate({ ...fresh, isAuthenticated: true, intent: 'customer', countryCode: 'GY', needsSelfie: true, hasUser: false }),
+    ).toBe('selfie');
+  });
+
+  it.each(['mover', 'vendor', 'advertiser'] as const)(
+    '[E27] the %s still takes the selfie before the app opens',
+    (intent) => {
+      expect(
+        rootEntryGate({ ...fresh, isAuthenticated: true, intent, countryCode: 'GY', needsSelfie: true, hasUser: true }),
+      ).toBe('selfie');
+    },
+  );
+
   it.each(['customer', 'mover', 'vendor', 'advertiser'] as const)(
     'FO-08: preserves the authenticated %s landing',
     (intent) => {
@@ -91,8 +115,10 @@ describe('rootEntryGate', () => {
           for (const countryCode of countries) {
             for (const anyPreview of booleans) {
               for (const needsSelfie of booleans) {
-                const state = { isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie };
-                expect(rootEntryGate(state)).toBe(guyanaOnlyGate(state));
+                for (const hasUser of booleans) {
+                  const state = { isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie, hasUser };
+                  expect(rootEntryGate(state)).toBe(guyanaOnlyGate(state));
+                }
               }
             }
           }
@@ -172,7 +198,7 @@ describe('previewBypassForIntent', () => {
 
     expect(src).toContain('const anyPreview = previewBypassForIntent(intent, { moverPreview, vendorSamplePreview });');
     expect(src).not.toMatch(/moverPreview \|\| vendorSamplePreview/);
-    expect(src).toMatch(/rootEntryGate\(\{ isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie \}\)/);
+    expect(src).toMatch(/rootEntryGate\(\{ isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie, hasUser: !!user \}\)/);
   });
 
   it('is exactly the preview of the intent being opened, across every combination', () => {

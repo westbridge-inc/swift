@@ -9,7 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierReturn, useCourierReturnProof, useRideSos } from '../../../hooks';
+import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof, useRideSos } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../kit/toast';
@@ -114,6 +114,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const riderAct = useRiderAction();
   const courierProof = useCourierProof();
   const courierCollect = useCourierCollect();
+  const courierPickupProof = useCourierPickupProof();
   const courierReturn = useCourierReturn();
   const courierReturnProof = useCourierReturnProof();
   const rate = useRateCustomer();
@@ -165,6 +166,14 @@ export function ActiveJobScreen({ navigation }: any) {
   const canDriverHandback = isDriver && canDriverHandbackRide(liveJob);
   const retainDriverHandbackHost = driverHandbackFlow?.phase === 'submitting' || driverHandbackFlow?.phase === 'dismissing';
   const job: any = liveJob ?? (retainDriverHandbackHost ? driverHandbackFlow?.job : null) ?? null;
+
+  // [MKT-F057] The entered code belongs to THIS stop. When the displayed job
+  // changes — a stacked-leg switch, a leg dropped from the run (the
+  // selectedLegId fallback), or a new job taking over — forget the typed value
+  // so a guess meant for stop A can never burn one of stop B's five attempts.
+  useEffect(() => {
+    setPin('');
+  }, [job?.id]);
 
   const finishDriverHandbackDismissal = useCallback(() => {
     if (!driverHandbackNavigateAfterDismissRef.current) return;
@@ -223,7 +232,7 @@ export function ActiveJobScreen({ navigation }: any) {
         ? { ...pickup, latitudeDelta: 0.02, longitudeDelta: 0.02 }
         : undefined;
 
-  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierReturn.isPending || courierReturnProof.isPending;
+  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierPickupProof.isPending || courierReturn.isPending || courierReturnProof.isPending;
   // Courier deliveries close with a proof-of-delivery photo (D8-02): capture →
   // upload → the handoff transition (which pays the rider). Everything else uses
   // the plain "Mark delivered" action.
@@ -288,9 +297,51 @@ export function ActiveJobScreen({ navigation }: any) {
       active.refetch?.();
     }
   };
+  // [MKT-F057] The server's own words for the door PIN: MISSING_PIN / INVALID_PIN
+  // (with the live countdown) / MAX_ATTEMPTS (support-only reset) surface as a
+  // toast, so the rider reads the tries left. The PIN value itself is never
+  // echoed — the refusal text names the outcome, never the code.
+  const onPinRefused = (err: unknown) => {
+    onHandoverRefused(err);
+    const body = (err as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+    if (body?.code === 'MISSING_PIN' || body?.code === 'INVALID_PIN' || body?.code === 'MAX_ATTEMPTS') {
+      toast.error(body.message ?? "Couldn't verify the delivery code — try again or contact support.");
+    }
+  };
   const markDelivered = () =>
-    isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered', handoverVersion: door.version ?? undefined }, { onError: onHandoverRefused });
+    isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered', pin, handoverVersion: door.version ?? undefined }, { onError: onPinRefused });
   const deliverLabel = isCourier ? 'Capture proof & deliver' : 'Mark delivered';
+  // [E16] Pickup custody proof. PICKED_UP is a physical-custody claim: the
+  // server refuses the bare tap for a courier, so the pickup step captures a
+  // photo and confirms with the rider's location — the same camera flow as the
+  // door proof, but its own mutation and its own words.
+  const captureCourierPickupProof = async () => {
+    try {
+      const owner = preview ? null : requireAuthSessionSnapshot();
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (!perm.granted) {
+        toast.error('Camera access is needed to capture proof of pickup.');
+        return;
+      }
+      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (shot.canceled || !shot.assets?.[0]) return;
+      courierPickupProof.mutate(
+        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        {
+          onSuccess: () => active.refetch?.(),
+          onError: (proofError: any) => {
+            if (!(proofError instanceof AuthSessionBoundaryError)) {
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the pickup proof. Try again.');
+            }
+          },
+        },
+      );
+    } catch (proofError) {
+      if (!(proofError instanceof AuthSessionBoundaryError)) throw proofError;
+    }
+  };
   // MMG direct-pay: the customer already paid the STORE — the rider collects
   // NOTHING at the door; their delivery fee comes from the store in cash.
   const isMmgPaid = door.kind === 'no-cash' && job?.paymentMethod === 'MOBILE_MONEY';
@@ -344,8 +395,19 @@ export function ActiveJobScreen({ navigation }: any) {
     driverAct.mutate(
       input,
       {
-        onError: () => {
+        onError: (e: any) => {
           if (step.pin) haptic.failure();
+          // [E19] The arrival gate refuses a status claim, never the driver:
+          // say why, and when the server offers it, name the passenger escape.
+          if (step.action === 'arrived') {
+            const err = e?.response?.data?.error;
+            toast.show(
+              err?.message ?? "Couldn't confirm arrival — try again or ask the passenger to confirm.",
+              err?.details?.allowPassengerConfirm === true
+                ? "If your GPS isn't working, ask the passenger to tap 'My driver is here'."
+                : undefined,
+            );
+          }
         },
         onSuccess: () => {
           if (step.pin) haptic.success();
@@ -480,6 +542,26 @@ export function ActiveJobScreen({ navigation }: any) {
       // eye lands on the one thing left to do [100x pass §1c].
       style={{ minHeight: 56, ...(opts?.lockedIn ? lockInButtonStyle() : {}) }}
     />
+  );
+
+  // [MKT-F057] The door proof for a goods delivery — the customer holds a
+  // 6-digit code and the rider ENTERS it, exactly like the driver's ride PIN
+  // ceremony. The value never appears on this screen: only the entry boxes.
+  // The server is the authority (MISSING_PIN / INVALID_PIN / MAX_ATTEMPTS come
+  // back as error toasts); a legacy order without a PIN completes as before.
+  const doorPinCeremony = (
+    <View style={{ marginBottom: space.md }}>
+      <View style={{ alignItems: 'center', marginBottom: space.md }}>
+        <Eyebrow>Handover check</Eyebrow>
+        <T variant="body" weight="bold" center style={{ color: dk.text, marginTop: space.xs }}>
+          Ask {custName ?? 'the customer'} for their delivery code
+        </T>
+      </View>
+      <CodeInput value={pin} onChange={setPin} length={RIDE_PIN_LENGTH} error={riderAct.isError} autoFocus={false} />
+      <T variant="caption" center style={{ color: dk.muted, marginTop: space.sm }}>
+        Their code proves you handed the order to the right person.
+      </T>
+    </View>
   );
 
   return (
@@ -745,10 +827,12 @@ export function ActiveJobScreen({ navigation }: any) {
                 ) : null}
                 {senderFeeDue && atSender
                   ? bigButton(`Collected ${courierFee} from the sender`, () => collectFromSender('paid'), { loading: courierCollect.isPending, disabled: busy })
-                  : bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
-                    loading: riderAct.isPending,
-                    disabled: busy,
-                  })}
+                  : isCourier && riderStep(job)!.action === 'picked-up'
+                    ? bigButton('Capture pickup photo & confirm pickup', captureCourierPickupProof, { loading: courierPickupProof.isPending, disabled: busy })
+                    : bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
+                      loading: riderAct.isPending,
+                      disabled: busy,
+                    })}
                 {senderFeeDue && atSender ? (
                   <PillButton
                     label="Sender didn't pay"
@@ -883,6 +967,7 @@ export function ActiveJobScreen({ navigation }: any) {
                       : `Customer already paid via MMG. Collect your ${feeLabel} pay (fee + tip) from the store with the order.`}
                   </T>
                 </View>
+                {doorPinCeremony}
                 {bigButton(deliverLabel, markDelivered, { loading: riderAct.isPending || courierProof.isPending, disabled: busy })}
               </>
             ) : (
@@ -897,7 +982,8 @@ export function ActiveJobScreen({ navigation }: any) {
                     hands over + completes the delivery server-side. No plain
                     "mark delivered" here — the server refuses a cash order that
                     wasn't paid (PAYMENT_NOT_CAPTURED), so it must not be offered. */}
-                {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover' }), { loading: riderAct.isPending, disabled: busy })}
+                {doorPinCeremony}
+                {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover', pin }, { onError: onPinRefused }), { loading: riderAct.isPending, disabled: busy })}
                 {/* [M-29] The door's other outcome — the rail existed on the
                     server (strike + guarantee claim) with no way to reach it. */}
                 <PillButton

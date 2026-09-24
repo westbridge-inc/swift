@@ -1,3 +1,5 @@
+import { LIVE_ORDER_STATUSES } from '../modules/order/order-status';
+
 /**
  * [F-027-07] What one party to an order may see about the other.
  *
@@ -101,6 +103,50 @@ export function redactLiveLocation<T extends { status?: string | null; rider?: u
       party['currentLng'] = null;
       party['lastLocationUpdate'] = null;
     }
+  }
+  return order;
+}
+
+// ---------------------------------------------------------------------------
+// [S1 response-shaping] VENDOR-SIDE ORDER CONTACT
+// ---------------------------------------------------------------------------
+
+/** May a vendor still see the customer's contact details and delivery
+ *  destination on this order? Exactly the LIVE statuses — including PENDING,
+ *  when the store must still be able to call about a substitution — and no
+ *  terminal one. Derived from the custody law's LIVE_ORDER_STATUSES, never
+ *  hand-written, so a status reclassification is followed automatically and a
+ *  NEW status is deliberately classified before it can leak contact detail. */
+export function counterpartyContactVisible(status: string | null | undefined): boolean {
+  return !!status && (LIVE_ORDER_STATUSES as readonly string[]).includes(status);
+}
+
+/** Strip the customer's contact detail and delivery destination from an
+ *  already-fetched vendor-side order once it is terminal: a past order is a
+ *  record, not a licence for floor staff to page through every past customer's
+ *  phone, street address and GPS. Mirrors `redactLiveLocation`. */
+export function redactCustomerContact<T extends { status?: string | null; customer?: unknown; rider?: unknown }>(order: T): T {
+  if (counterpartyContactVisible(order.status)) return order;
+  const customer = order.customer as Record<string, unknown> | null | undefined;
+  if (customer && typeof customer === 'object' && 'phone' in customer) customer['phone'] = null;
+  const rider = order.rider as { user?: Record<string, unknown> | null } | null | undefined;
+  if (rider?.user && typeof rider.user === 'object' && 'phone' in rider.user) rider.user['phone'] = null;
+  const row = order as unknown as Record<string, unknown>;
+  if ('deliveryLat' in row) row['deliveryLat'] = null;
+  if ('deliveryLng' in row) row['deliveryLng'] = null;
+  if ('deliveryAddress' in row) row['deliveryAddress'] = null;
+  return order;
+}
+
+/** Strip the mover's personal phone from an already-fetched counterparty once
+ *  the order is no longer in flight. The same terminality gate as
+ *  `redactLiveLocation`; call the two together on surfaces that return the
+ *  whole row (the courier sender detail). */
+export function redactCounterpartyPhone<T extends { status?: string | null; rider?: unknown; driver?: unknown }>(order: T): T {
+  if (liveLocationVisible(order.status)) return order;
+  for (const key of ['rider', 'driver'] as const) {
+    const party = order[key] as { user?: Record<string, unknown> | null } | null | undefined;
+    if (party?.user && typeof party.user === 'object' && 'phone' in party.user) party.user['phone'] = null;
   }
   return order;
 }

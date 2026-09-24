@@ -480,22 +480,28 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       switch (job.name) {
         case 'process-billing': {
           const result = await billing.runBillingCycle();
+          // [E12] A stopped subscription stays ACTIVE until its paid period
+          // ends, then turns PAUSED (not operable, owing nothing); resuming
+          // restarts it with this week's fee billed like any renewal.
+          const lapse = await billing.lapseStoppedSubscriptions();
           const reminders = await billing.sendUpcomingReminders();
           // §11 stages 6..N: daily reinstatement nudges for the suspended
           // (idempotent per day via the REMINDER event key) + CHURNED terminal
           // past SUSPENSION_MAX_DAYS so dunning — and the daily MMG
           // re-request — never runs forever against a dead account.
           const swept = await billing.sweepSuspended();
+          const billingNotices = await billing.drainPendingNotices();
           // Trial first-payment funnel [san spec 21.4]: day-10 how-to-pay +
           // day-13 exact-amount education, each stage once per trial
           // (BillingEvent unique-key gate) — preloaded wallets make trial→
           // paid conversion seamless.
           const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
           const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, reminders, ...swept, trialEdu: edu }, 'Billing cycle complete');
+          ctx.log.info({ ...result, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
-          const troubled = result.failed + result.errors + result.suspended;
+          // [DS213 F1-1] A stopped plan that fails to pause counts too.
+          const troubled = result.failed + result.errors + result.suspended + lapse.failed;
           const threshold = Number(process.env['BILLING_FAILURE_ALERT_THRESHOLD'] ?? '3');
           if (troubled >= threshold) {
             const { notifyAdmins } = await import('../modules/notification/notification.service');
@@ -506,7 +512,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
                 tenantId: null,
                 title: 'Billing failures spiking',
                 body: `${troubled} subscriptions failed, errored, or suspended this cycle (threshold ${threshold}). Check the billing dashboard before partners start calling.`,
-                data: { kind: 'ops_billing_failures', failed: result.failed, errors: result.errors, suspended: result.suspended },
+                data: { kind: 'ops_billing_failures', failed: result.failed, errors: result.errors, suspended: result.suspended, lapseFailed: lapse.failed },
               }),
             );
           }
@@ -529,6 +535,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // §13 MMG rail: settle in-flight merchant-initiated weekly-fee
           // requests (approved → period advances; declined/expired → dunning).
           const polled = await billing.pollPendingMmgCharges();
+          // The committed mismatch event survives a process crash between its
+          // authority transaction and its admin page. Polling also retries
+          // final churn/nudge notices after the source row leaves SUSPENDED.
+          const billingNotices = await billing.drainPendingNotices();
+          if (billingNotices.attempted > 0) ctx.log.info(billingNotices, 'Billing notices retried from committed events');
           if (polled.settled + polled.failed > 0) {
             ctx.log.info(polled, 'MMG billing poll settled pending charges');
           }
@@ -1127,6 +1138,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
         const result = await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { limit: 200 });
         if (result.processed + result.failed > 0) ctx.log.info(result, '[M-11] checkout outbox sweep');
+        // [ORDER-SPINE S1-6] Direct-MMG claim notices the request could not
+        // finish. Never handed to a queue (a published row is consumed on
+        // acceptance): delivered here, deduplicated per (order, generation,
+        // role), and kept owed — backed off — until every recipient holds it.
+        const { drainMmgClaimNotices } = await import('../modules/order/mmg-claim.service');
+        const { NotificationService: ClaimNoticeNS } = await import('../modules/notification/notification.service');
+        const notices = await drainMmgClaimNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
+        if (notices.owed + notices.failed > 0) ctx.log.warn(notices, '[S1-6] direct-MMG claim notices still owed — retrying with backoff');
+        else if (notices.delivered > 0) ctx.log.info(notices, '[S1-6] direct-MMG claim notices delivered');
         return;
       }
       if (job.name === 'mover-revocation-outbox') {
@@ -1142,8 +1162,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               removeOnFail: 50,
             });
           },
-          async (orderId, delayMs) => {
+          async (orderId, delayMs, replayJobId) => {
             await queues.dispatchQueue.add('dispatch-order', { orderId }, {
+              // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
+              ...(replayJobId ? { jobId: replayJobId } : {}),
               delay: delayMs,
               removeOnComplete: 100,
               removeOnFail: 50,
@@ -1897,8 +1919,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             removeOnFail: 50,
           });
         },
-        async (orderId, delayMs) => {
+        async (orderId, delayMs, replayJobId) => {
           await queues.dispatchQueue.add('dispatch-order', { orderId }, {
+            // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
+            ...(replayJobId ? { jobId: replayJobId } : {}),
             delay: delayMs,
             removeOnComplete: 100,
             removeOnFail: 50,
@@ -1908,7 +1932,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       );
 
       if (job.name === 'dispatch-order') {
-        await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId);
+        // [E36] The job is the replay identity: a redelivery of THIS job
+        // reuses what it already committed instead of repeating it. The id
+        // alone is not enough — a deterministic command id (the not-my-driver
+        // redispatch) can be re-added for a NEW episode once the old job left
+        // BullMQ retention — so the job's creation time is part of it: a
+        // redelivery keeps both, a re-created job does not (DS215 F1).
+        await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id ? `${job.id}@${job.timestamp}` : undefined);
       } else if (job.name === 'offer-timeout') {
         await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId);
       } else if (job.name === 'supply-watch-scan') {

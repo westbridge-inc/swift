@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import NewOrderTakeover from '@/components/NewOrderTakeover';
@@ -8,6 +9,7 @@ import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
   acceptOrder, completePickup, confirmPayment, getItems, getOrder, getOrders,
   markDelivered, markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
@@ -219,6 +221,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const [mmgRef, setMmgRef] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [confirmDelivered, setConfirmDelivered] = useState(false);
+  const [confirmReject, setConfirmReject] = useState(false);
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'order', id) });
@@ -227,8 +230,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const act = useMutation({
     mutationFn: async (kind: string) => {
       setError(null);
-      if (kind === 'accept') return acceptOrder(id, prepTime);
-      if (kind === 'reject') return rejectOrder(id);
+      if (kind === 'accept') return acceptOrder(id, order.data?.fulfillment === 'APPOINTMENT' ? undefined : prepTime);
       if (kind === 'preparing') return markPreparing(id);
       if (kind === 'ready') return markReady(id);
       if (kind === 'delivered') return markDelivered(id);
@@ -245,6 +247,17 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
     },
     onError: (e) => setError((e as Error).message),
     onSettled: refresh,
+  });
+  // [E10] The API requires a reason on every rejection, so reject is its own
+  // mutation keyed on the chosen preset — it never flows through `act` with no
+  // reason. Same three presets the mobile app offers.
+  const reject = useMutation({
+    mutationFn: (why: string) => rejectOrder(id, why),
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => {
+      setConfirmReject(false);
+      refresh();
+    },
   });
 
   // `preparingAt` / `readyAt` / `paymentStatus` are declared on VendorOrder now
@@ -311,6 +324,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
           <p className="mt-0.5 text-sm text-[var(--swift-muted)]">
             {customer} · {timeAgo(o.placedAt)} · {o.fulfillment ?? o.orderType}
           </p>
+          {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? <p className="mt-1 text-sm font-semibold">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p> : null}
         </div>
         <div className="flex items-center gap-2">
           {statusChip(s)}
@@ -380,7 +394,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
       <div className="mt-5 flex flex-wrap items-center gap-2">
         {actions.map((a) => (
           <span key={a.kind} className="flex items-center gap-2">
-            {a.kind === 'accept' && (
+            {a.kind === 'accept' && o.fulfillment !== 'APPOINTMENT' && (
               <select
                 value={prepTime}
                 onChange={(e) => setPrepTime(Number(e.target.value))}
@@ -398,8 +412,13 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
               />
             )}
             <button
-              onClick={() => a.kind === 'delivered' ? setConfirmDelivered(true) : act.mutate(a.kind)}
-              disabled={act.isPending || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
+              onClick={() =>
+                a.kind === 'delivered'
+                  ? setConfirmDelivered(true)
+                  : a.kind === 'reject'
+                    ? setConfirmReject(true)
+                    : act.mutate(a.kind)}
+              disabled={act.isPending || reject.isPending || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
               className={`rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50 ${
                 a.tone === 'danger'
                   ? 'border border-[var(--swift-red)]/30 text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5'
@@ -431,6 +450,31 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
                 className="rounded-lg border border-black/10 px-4 py-2 text-sm font-semibold disabled:opacity-50"
               >
                 Not yet
+              </button>
+            </div>
+          </div>
+        )}
+        {confirmReject && (
+          <div role="dialog" aria-label="Confirm order rejection" className="w-full rounded-xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-4">
+            <p className="text-sm font-semibold text-[var(--swift-red)]">{order.data?.fulfillment === 'APPOINTMENT' ? 'Decline this booking?' : 'Reject this order?'}</p>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">The customer is told right away — pick what happened. This can’t be undone.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {rejectReasonsFor(order.data?.fulfillment).map((why) => (
+                <button
+                  key={why}
+                  onClick={() => reject.mutate(why)}
+                  disabled={reject.isPending}
+                  className="rounded-lg border border-[var(--swift-red)]/30 px-4 py-2 text-sm font-semibold text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5 disabled:opacity-50"
+                >
+                  {why}
+                </button>
+              ))}
+              <button
+                onClick={() => setConfirmReject(false)}
+                disabled={reject.isPending}
+                className="rounded-lg border border-black/10 px-4 py-2 text-sm font-semibold disabled:opacity-50"
+              >
+                Keep it
               </button>
             </div>
           </div>
@@ -561,6 +605,7 @@ export default function OrdersPage() {
                 {[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ')} · {o.items.length}{' '}
                 {o.items.length === 1 ? 'item' : 'items'} · {money(o.totalAmount)} · {timeAgo(o.placedAt)}
               </p>
+              {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? <p className="mt-1 text-sm font-semibold">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p> : null}
               {o.vendor?.name && <p className="mt-0.5 text-xs text-[var(--swift-muted)]">{o.vendor.name}</p>}
             </button>
           ))}

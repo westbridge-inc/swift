@@ -1,6 +1,24 @@
 import { runtimeMode } from './runtime-mode';
 import { firstInvalidTwilioConfig } from './twilio-identity';
 import { assertDisabledCardRailConfig } from './card-rail';
+import { testControlEnabled } from '../modules/ops/test-control';
+import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
+
+/**
+ * [R2 C2] `/test-control/identity` exists only in loadtest and test builds
+ * (TEST_CONTROL_ENABLED=1) and signs an expiring load lease with
+ * TEST_CONTROL_SECRET. The fallback in modules/ops/test-control.ts is a
+ * literal printed in this PUBLIC repository: fine for an isolated `test`
+ * process, fatal for a loadtest deployment anyone can reach, where every
+ * lease would be forgeable. Refuse to start instead.
+ */
+export function assertTestControlConfig(env: Record<string, string | undefined> = process.env): void {
+  if (!testControlEnabled(env) || runtimeMode(env) === 'test') return;
+  const secret = env['TEST_CONTROL_SECRET'];
+  if (!secret || secret.length < 32) {
+    throw new Error('FATAL: TEST_CONTROL_SECRET must be at least 32 characters when TEST_CONTROL_ENABLED=1 in loadtest — otherwise load leases are signed with a value printed in the public repository and anyone can forge one. Refusing to start.');
+  }
+}
 
 /**
  * Fail-closed boot configuration guard. Called before the server accepts
@@ -14,6 +32,8 @@ import { assertDisabledCardRailConfig } from './card-rail';
  * decrypted ID. Neither failure is visible at runtime, so we assert them here.
  */
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
+  // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
+  assertTestControlConfig(env);
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.
@@ -21,6 +41,30 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
 
   if (env['DEV_OTP_BYPASS'] === '1') {
     throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
+  }
+
+  // [ledger E08] The settled posture is hold ON: every order is born held for
+  // ORDER_HOLD_MINUTES (default 5) — the customer's free-cancel window, hidden
+  // from the vendor. But holdWindowMs() and checkoutQueueTiming() read an
+  // UNSET LIFECYCLE_V2 as hold OFF, so a deploy that merely omits the variable
+  // pushes new orders to the vendor instantly while the app still promises a
+  // free-cancel window. Production must choose explicitly: off may be chosen,
+  // never defaulted into.
+  const lifecycleV2 = env['LIFECYCLE_V2'];
+  if (lifecycleV2 !== '1' && lifecycleV2 !== '0') {
+    throw new Error('FATAL: LIFECYCLE_V2 must be exactly 1 or 0 in production — an unset variable silently disables the order hold, so new orders hit the vendor instantly while the app still promises the free-cancel window. Set LIFECYCLE_V2=1 (hold on, the settled posture) or LIFECYCLE_V2=0 (deliberately off). Refusing to start.');
+  }
+  // When the hold is on, a set-but-unparseable window makes holdWindowMs()
+  // return null — the same silent hold-off — so that too refuses, never
+  // silently defaults. [DS214 D1] And the hold may never be SHORTER than the
+  // free-cancel window it protects (FREE_CANCEL_WINDOW_MIN): a shorter hold
+  // puts an order on the vendor board while the customer may still cancel it
+  // free, which is exactly the REPORT-036 defect (order.service.ts holdWindowMs).
+  if (lifecycleV2 === '1' && env['ORDER_HOLD_MINUTES'] !== undefined) {
+    const holdMinutes = Number(env['ORDER_HOLD_MINUTES']);
+    if (!Number.isFinite(holdMinutes) || holdMinutes < FREE_CANCEL_WINDOW_MIN) {
+      throw new Error(`FATAL: ORDER_HOLD_MINUTES must be a number of minutes no shorter than the ${FREE_CANCEL_WINDOW_MIN}-minute free-cancel window when LIFECYCLE_V2=1 — an invalid value silently disables the order hold, and a shorter one shows orders to the vendor while the customer may still cancel free. Set ORDER_HOLD_MINUTES=${FREE_CANCEL_WINDOW_MIN} or unset it. Refusing to start.`);
+    }
   }
 
   // OTP records are only six digits; an unkeyed hash is recoverable offline in
@@ -78,6 +122,9 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   for (const name of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'] as const) {
     if (!env[name]) throw new Error(`FATAL: ${name} is required when MMG_DRIVER=live. Refusing to start.`);
   }
+  if (env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] !== '1') {
+    throw new Error('FATAL: MMG_REFERENCE_ROUNDTRIP_VERIFIED must be exactly 1 after sandbox UAT proves the merchant reference in lookup and history. Refusing to start.');
+  }
   const mmgUrl = env['MMG_API_URL'];
   if (!mmgUrl || !/^https:\/\//i.test(mmgUrl) || /mmgtest|\buat\b|sandbox/i.test(mmgUrl)) {
     throw new Error('FATAL: production MMG requires an explicit non-UAT HTTPS MMG_API_URL. Refusing to start.');
@@ -94,9 +141,9 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (notifier !== 'twilio') {
     throw new Error('FATAL: NOTIFICATION_PROVIDER must be twilio in production. Refusing to start.');
   }
-  const invalidTwilioField = firstInvalidTwilioConfig(env);
-  if (invalidTwilioField) {
-    throw new Error(`FATAL: ${invalidTwilioField} is missing or malformed when NOTIFICATION_PROVIDER=twilio. Refusing to start.`);
+  const invalidTwilioConfig = firstInvalidTwilioConfig(env);
+  if (invalidTwilioConfig) {
+    throw new Error(`FATAL: ${invalidTwilioConfig} when NOTIFICATION_PROVIDER=twilio. Refusing to start.`);
   }
 
   // [NOC-A F1/F2] The SAME trap, one door over, and it was unguarded: push

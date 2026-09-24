@@ -17,6 +17,17 @@
  */
 export const REASON_MIN = 12;
 
+/**
+ * The server's floor, for screens that collect a reason into an input they
+ * already own (the advertiser-facing rejection, the claim rejection, …)
+ * instead of a prompt. One constant, so the floor can never drift apart from
+ * `askReason` — a 3–11 character answer passes a screen's check and 400s at
+ * the gate, which is the second half of this defect.
+ */
+export function reasonTooShort(reason: string): boolean {
+  return reason.trim().length < REASON_MIN;
+}
+
 export interface ReasonPrompt {
   /** What the operator is about to do, in their language: "ban this account". */
   action: string;

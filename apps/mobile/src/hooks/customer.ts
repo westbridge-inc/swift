@@ -4,10 +4,13 @@ import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
 import { recordCheckoutOutcome, stableBodyHash, type CheckoutPrincipal } from '../lib/checkoutAttempt';
 import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
-import { homePlaceholderData, homeQueryKey, isHomeFeed, retainedHomeData } from '../lib/homeReliability';
+import { homePlaceholderData, homeQueryKey, isHomeFeed, marketDepthVerdict, retainedHomeData } from '../lib/homeReliability';
+import { rememberMarketDepth, rememberedMarketDepth, type MarketDepthBody } from '../lib/marketDepthMemory';
 import { isAxiosError } from 'axios';
-import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
+import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput, type CartQuoteChoices } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
+import type { OrderProjection } from '@swift/types';
+import type { PromiseView } from '../lib/promise';
 
 /**
  * Thin React Query wrappers over `customerApi`. Every consumer screen reads data
@@ -34,7 +37,9 @@ export const customerKeys = {
   vendor: (id: string) => ['customer', 'vendor', id] as const,
   orders: ['customer', 'orders'] as const,
   order: (id: string) => ['customer', 'order', id] as const,
-  cart: (lat?: number, lng?: number) => ['customer', 'cart', lat ?? null, lng ?? null] as const,
+  // [E01] The choices the quote is priced for are part of its identity.
+  cart: (lat?: number, lng?: number, choices?: CartQuoteChoices) =>
+    ['customer', 'cart', lat ?? null, lng ?? null, choices ?? null] as const,
   notifications: ['customer', 'notifications'] as const,
 };
 
@@ -91,7 +96,31 @@ export function useSetDefaultAddress() {
   return useAddressMutation((id: string) => unwrap(customerApi.setDefaultAddress(id)));
 }
 
-export function useHome<T = any>(lat?: number, lng?: number) {
+/** Home's live-order card row: the shared projection (`vertical`, `fulfillment`
+ *  — the words) plus the hold, the promise and the vendor the card draws. */
+export type LiveOrderProjection = OrderProjection & {
+  holdExpiresAt: string | null;
+  placedAt: string;
+  scheduledFor?: string | null;
+  promise: PromiseView | null;
+  vendor: { id: string; name: string; logoUrl?: string | null; vendorType?: string | null } | null;
+};
+
+/** The Home feed as the app reads it. Only the live-order card is typed to the
+ *  shared contract here; the rails keep their untyped rows (a recorded
+ *  follow-up, not this lane's). */
+export interface HomeFeed {
+  activeOrder: LiveOrderProjection | null;
+  popularItems: any[];
+  featured: any[];
+  nearby: any[];
+  orderAgain: any[];
+  categories: any[];
+  openVendors: any[];
+  closedVendors: any[];
+}
+
+export function useHome<T = HomeFeed>(lat?: number, lng?: number) {
   const scope = useAuthStore((state) => state.adEventScopeId);
   const [last, setLast] = useState<{ scope: string; data: T } | null>(null);
   const query = useQuery<T>({
@@ -167,13 +196,26 @@ export type MarketItem = {
  * we are avoiding is showing an empty market, not hiding a full one.
  */
 export function useMarketDepth() {
-  return useQuery({
+  return useQuery<MarketDepthBody>({
     queryKey: ['market', 'depth'],
     queryFn: async () => {
       const res = await marketApi.depth();
-      return (res?.data?.data ?? null) as { visible: boolean; items: number; vendors: number } | null;
+      const data = res?.data?.data ?? null;
+      // An incomplete 200 is a failed read, not data: throwing keeps React
+      // Query on the previous verdict instead of replacing it with 'unknown'.
+      if (marketDepthVerdict(data) === 'unknown') {
+        throw new Error('Market depth response is incomplete');
+      }
+      rememberMarketDepth(data);
+      return data as MarketDepthBody;
     },
     staleTime: 5 * 60_000,
+    // [E29] A cold start seeds the query with the last complete verdict, so a
+    // failing first read shows what the device last knew. The seed is stale
+    // on purpose (0): the server is always asked again, and a later complete
+    // 'hidden' verdict replaces the memory and hides the tab.
+    initialData: () => rememberedMarketDepth() ?? undefined,
+    initialDataUpdatedAt: 0,
   });
 }
 
@@ -375,7 +417,7 @@ export function useOrdersInfinite() {
     queryFn: async ({ pageParam }) => {
       const res = await customerApi.getOrders(pageParam as number, { live: false });
       const body = res?.data ?? {};
-      return { items: (body.data ?? []) as any[], meta: body.meta ?? { page: 1, totalPages: 1 } };
+      return { items: (body.data ?? []) as OrderProjection[], meta: body.meta ?? { page: 1, totalPages: 1 } };
     },
     getNextPageParam: (last: { meta: { page: number; totalPages: number } }) =>
       last.meta.page < last.meta.totalPages ? last.meta.page + 1 : undefined,
@@ -407,14 +449,14 @@ export function useLiveOrders() {
       const res = await customerApi.getOrders(1, { live: true, limit: LIVE_ORDERS_LIMIT });
       const body = res?.data ?? {};
       return {
-        items: (body.data ?? []) as any[],
+        items: (body.data ?? []) as OrderProjection[],
         total: typeof body.meta?.total === 'number' ? (body.meta.total as number) : null,
       };
     },
   });
 }
 
-export function useOrder<T = any>(id: string, refetchInterval?: number) {
+export function useOrder<T = OrderProjection>(id: string, refetchInterval?: number) {
   return useQuery<T>({
     queryKey: customerKeys.order(id),
     queryFn: () => unwrap<T>(customerApi.getOrder(id)),
@@ -642,8 +684,17 @@ export function useCheckoutRecovery(): { recovering: boolean; placedOrderIds: st
 
 // --- Cart ---------------------------------------------------------------------
 
-export function useCart<T = any>(lat?: number, lng?: number) {
-  return useQuery<T>({ queryKey: customerKeys.cart(lat, lng), queryFn: () => unwrap<T>(customerApi.getCart(lat, lng)) });
+export function useCart<T = any>(lat?: number, lng?: number, choices?: CartQuoteChoices, enabled = true) {
+  return useQuery<T>({
+    queryKey: customerKeys.cart(lat, lng, choices),
+    queryFn: () => unwrap<T>(customerApi.getCart(lat, lng, choices)),
+    enabled,
+    // [E01] A changed choice (pickup, express, tip) is a new quote. Keep the
+    // last one on screen — flagged `isPlaceholderData` — while the server
+    // prices the new choice, instead of blanking the cart; the screen holds
+    // the order button until the quote for the current choice has arrived.
+    placeholderData: keepPreviousData,
+  });
 }
 
 function invalidateCart(qc: ReturnType<typeof useQueryClient>) {
@@ -708,6 +759,14 @@ export function useSetCartTip() {
   });
 }
 
+export function useRemoveCartPromo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => unwrap(customerApi.removeCartPromo()),
+    onSuccess: () => invalidateCart(qc),
+  });
+}
+
 export function useReorder() {
   const qc = useQueryClient();
   return useMutation({
@@ -753,5 +812,19 @@ export function useDecideSubstitution(orderId: string) {
     mutationFn: ({ lineId, approve }: { lineId: string; approve: boolean }) =>
       customerApi.decideSubstitution(orderId, lineId, approve),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['order', orderId] }),
+  });
+}
+
+/** [ORDER-SPINE S1-6] Tell Swift what happened to a direct-MMG payment. The
+ *  order is refetched whatever the outcome — a timeout can mean it landed. */
+export function useClaimMmgPayment() {
+  const qc = useQueryClient();
+  // [R4 · F-PR1262-SOL-01] The order is part of the claim, never the render's
+  // closure: a screen React Navigation reuses for another order cannot send
+  // order A's confirmation to order B.
+  return useMutation({
+    mutationFn: ({ orderId, paid, reference }: { orderId: string; paid: boolean; reference?: string }) =>
+      customerApi.claimOrderPayment(orderId, { paid, ...(reference ? { reference } : {}) }),
+    onSettled: (_data, _error, { orderId }) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
   });
 }

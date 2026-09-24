@@ -18,7 +18,9 @@ import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
+  useAuthStore,
 } from '../stores/authStore';
+import { accountHoldsRole } from '../lib/roleLanding';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
 import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
@@ -64,13 +66,20 @@ function usePreviewSafeMutation<TData = unknown, TError = unknown, TVars = void,
  *  `myRole` is OWNER / MANAGER / STAFF (drives which tools the UI shows). */
 export function useVendorProfile() {
   const pv = usePreviewDataset();
+  // A customer who tapped "Swift Business" to list a first store holds no
+  // vendor role yet. The server's 403 on their own profile read is then the
+  // confirmation of "no business" that routes them to the setup wizard (the
+  // JOIN flow), not a permission error. The same predicate decides "Join" in
+  // the switcher, so the two screens can never disagree.
+  const outsider = useAuthStore((s) => !accountHoldsRole(s.user as Parameters<typeof accountHoldsRole>[0], 'vendor'));
   const q = useQuery({
-    // [MOB-038] Absence is a 404 and nothing else. This used to run through a
-    // helper that turned EVERY failure into null, and the shell read null as
+    // [MOB-038] Absence is a 404 and nothing else — or a 403 for an account
+    // that holds no vendor role (lib/vendorProfile). This used to run through
+    // a helper that turned EVERY failure into null, and the shell read null as
     // "you have no business" — so an outage offered a working restaurant the
     // setup wizard while its orders were live.
     queryKey: ['vendor', 'profile'],
-    queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile()),
+    queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile(), { outsider }),
     retry: false,
     refetchInterval: 20000,
     enabled: !pv,
@@ -375,6 +384,19 @@ export function useVendorSubscription(enabled = true) {
   };
 }
 
+/** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee, then
+ *  re-read the subscription so the screen's autoRenew state is server truth. */
+export function useSetVendorBillingMethod() {
+  const qc = useQueryClient();
+  // [DS198 D4] Preview-safe like every other vendor write: in the sample
+  // preview, "Stop weekly billing" must never fire a real PUT.
+  return usePreviewSafeMutation({
+    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) =>
+      unwrap(vendorApi.setBillingMethod(method, mmgPayerMsisdn)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'subscription'] }),
+  });
+}
+
 /** "Find a mover again" after dispatch exhausted — clears the cascade's
  *  decline memory server-side and searches again from the tightest radius. */
 export function useRetryDispatch() {
@@ -437,6 +459,9 @@ export function useOrderAction() {
       if (action === 'delivered') return unwrap(vendorApi.delivered(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));
       if (action === 'complete-appointment') return unwrap(vendorApi.completeAppointment(id));
+      // [E10] Never send a bare rejection: the API refuses it, and the customer
+      // must be told why. Every screen collects a preset before it gets here.
+      if (!reason?.trim()) throw new Error('Pick a reason before rejecting.');
       return unwrap(vendorApi.reject(id, reason));
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),

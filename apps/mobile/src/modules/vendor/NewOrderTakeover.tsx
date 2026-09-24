@@ -7,6 +7,7 @@ import { color, motion, radius, space } from '@swift/ui';
 import { T, Money, PillButton } from '../../kit';
 import { haptic } from '../../lib/haptics';
 import { useVendorOrder, useOrderAction } from '../../hooks/vendorops';
+import { rejectReasonsFor } from './rejectReasons';
 
 /**
  * The NEW-ORDER takeover (alerts spec §A1 + design-100× Part 5 moment 2):
@@ -218,7 +219,7 @@ export function NewOrderTakeover({
               in a rush. */}
           {rejecting ? (
             <>
-              {(['Out of stock', 'Kitchen is too busy', 'Closing soon'] as const).map((why) => (
+              {rejectReasonsFor(o?.fulfillment).map((why) => (
                 <PillButton
                   key={why}
                   label={why}
