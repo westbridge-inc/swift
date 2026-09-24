@@ -3,11 +3,13 @@ import React, { useEffect, useState } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
 import { useMutation } from '@tanstack/react-query';
 import { useNavigation } from '@react-navigation/native';
-import { color, space } from '@swift/ui';
+import { color, radius, space } from '@swift/ui';
 import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { flagEmoji } from '../../lib/flags';
 import { phoneExample, phoneLenState, clampPhone } from '../../lib/phone';
+import { formatResendWait, otpCooldownOf } from '../../lib/otpCooldown';
+import { useCountdown } from '../../hooks/useCountdown';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { LabeledInput, PillButton, Screen, T } from '../../kit';
 import { DEFAULT_COUNTRY } from '../../lib/markets';
@@ -41,14 +43,34 @@ export function PhoneEntryScreen() {
     ? `Sign up as ${earnerLabel} — we’ll text a one-time code to verify your number.`
     : 'We’ll text you a one-time code — no passwords here.';
 
+  // A resend inside the number's window is refused with the time left and
+  // whether the code sent moments ago is out. That is not a wrong number: the
+  // field stays clean, the wait counts down, and a code already sent can be
+  // entered on the existing verify step.
+  const [cooldown, setCooldown] = useState<{ phone: string; codeAlreadySent: boolean } | null>(null);
+  const resendWait = useCountdown();
+
   const send = useMutation({
-    mutationFn: () => authApi.sendOtp(fullPhone),
-    onSuccess: () => navigation.navigate('OtpVerification', { phone: fullPhone }),
+    mutationFn: (phone: string) => authApi.sendOtp(phone),
+    // Each attempt is judged afresh: an older window never outlives a newer answer.
+    onMutate: () => setCooldown(null),
+    onSuccess: (_res, phone) => navigation.navigate('OtpVerification', { phone }),
+    onError: (error, phone) => {
+      const refusal = otpCooldownOf(error);
+      if (!refusal) return;
+      setCooldown({ phone, codeAlreadySent: refusal.codeAlreadySent });
+      resendWait.start(refusal.retryAfterSeconds);
+    },
   });
 
-  const err = send.isError
+  const err = send.isError && !otpCooldownOf(send.error)
     ? ((send.error as any)?.response?.data?.error?.message ?? 'Could not send the code. Try again.')
     : undefined;
+  // The window belongs to the number it was reported for; editing the number
+  // leaves it behind.
+  const waiting = cooldown?.phone === fullPhone ? cooldown : null;
+  const locked = !!waiting && resendWait.secondsLeft > 0;
+  const wait = formatResendWait(resendWait.secondsLeft);
 
   return (
     <Screen style={{ backgroundColor: color.surface.base }}>
@@ -102,16 +124,48 @@ export function PhoneEntryScreen() {
             <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
               Swift is currently available in Guyana.
             </T>
+            {waiting && (waiting.codeAlreadySent || locked) ? (
+              // Calm, not an error. No live region: the countdown ticks
+              // every second and must not be re-announced each time.
+              <View
+                testID="auth-resend-wait"
+                accessible
+                style={{
+                  marginTop: space.lg,
+                  padding: space.lg,
+                  gap: space.xs,
+                  borderRadius: radius.lg,
+                  backgroundColor: color.surface.sunken,
+                }}
+              >
+                <T variant="label" weight="semibold">
+                  {waiting.codeAlreadySent ? 'Code already sent' : 'Just a moment'}
+                </T>
+                <T variant="caption" tone="muted">
+                  {waiting.codeAlreadySent
+                    ? `We texted a code to ${fullPhone} moments ago. Enter that code, or request a new one${locked ? ` in ${wait}` : ''}.`
+                    : `A code was just requested for ${fullPhone}. You can request a new one in ${wait}.`}
+                </T>
+              </View>
+            ) : null}
           </View>
 
           <View style={{ flex: 1 }} />
 
           <View style={{ gap: space.md, paddingBottom: space['2xl'] }}>
+            {waiting?.codeAlreadySent ? (
+              <PillButton
+                testID="auth-enter-code"
+                label="Enter Code"
+                onPress={() => navigation.navigate('OtpVerification', { phone: fullPhone, resendInSeconds: resendWait.secondsLeft })}
+              />
+            ) : null}
             <PillButton
               testID="auth-send-code"
-              label="Send Code"
-              onPress={() => send.mutate()}
-              disabled={!valid}
+              label={waiting?.codeAlreadySent ? 'Resend Code' : 'Send Code'}
+              variant={waiting?.codeAlreadySent ? 'outline' : 'primary'}
+              onPress={() => send.mutate(fullPhone)}
+              disabled={!valid || locked}
               loading={send.isPending}
             />
             {intent === 'customer' ? (

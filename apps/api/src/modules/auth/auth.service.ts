@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
-import { generateOtp, checkOtpRateLimit } from '../../utils/otp';
+import { generateOtp, checkOtpRateLimit, markOtpCooldownDelivered, readOtpCooldown } from '../../utils/otp';
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
@@ -87,10 +87,24 @@ export class AuthService {
       throw new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Swift is currently available in Guyana only');
     }
 
-    // Rate limiting
+    // Rate limiting: one code per number per window, claimed atomically.
+    const claimedAt = Date.now();
     const allowed = await checkOtpRateLimit(this.app.redis, phone);
     if (!allowed) {
-      throw new AppError(429, 'RATE_LIMITED', 'Please wait before requesting another OTP');
+      // The refusal says when the next send is allowed and whether the send
+      // holding the window delivered a code, which outlives the window (so
+      // the app can offer code entry instead of a dead end). It reads only
+      // the claim: never a code, never whether an account exists.
+      const { retryAfterSeconds, codeAlreadySent } = await readOtpCooldown(this.app.redis, phone);
+      const wait = `${retryAfterSeconds} second${retryAfterSeconds === 1 ? '' : 's'}`;
+      throw new AppError(
+        429,
+        'RATE_LIMITED',
+        codeAlreadySent
+          ? `We already sent a code to this number. You can request a new one in ${wait}.`
+          : `A code was just requested for this number. You can request a new one in ${wait}.`,
+        { retryAfterSeconds, codeAlreadySent },
+      );
     }
 
     // [STA-1 DL-6] A store reviewer's identifier is a fiction: no SMS can
@@ -99,6 +113,8 @@ export class AuthService {
     const review = await reviewCredentialFor(this.app.prisma, phone);
     if (review) {
       await armReviewCode(this.app.redis, phone, review.id);
+      // Same marker as a delivered SMS, so a refusal is the production one too.
+      await markOtpCooldownDelivered(this.app.redis, phone, claimedAt).catch(() => {});
       return { message: 'OTP sent successfully', expiresIn: 300 };
     }
 
@@ -166,6 +182,11 @@ export class AuthService {
       this.app.log.error({ err, phone: phone.slice(0, 5) + '***' }, '[otp] SMS send failed');
       throw new AppError(502, 'SMS_SEND_FAILED', "We couldn't send your code right now. Please try again in a moment.");
     }
+
+    // Only now is a code on its way. Best effort: the SMS already left, so a
+    // failed mark must not fail the send; a later refusal just stays cautious
+    // (codeAlreadySent false).
+    await markOtpCooldownDelivered(this.app.redis, phone, claimedAt).catch(() => {});
 
     return { message: 'OTP sent successfully', expiresIn: 300 };
   }
