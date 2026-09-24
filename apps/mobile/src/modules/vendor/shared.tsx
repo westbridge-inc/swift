@@ -3,8 +3,7 @@ import React from 'react';
 import { Pressable, TextInput, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, font, fontSize, radius, space } from '@swift/ui';
-import { T, TonePill, PillButton } from '../../kit';
-import { useAuthStore } from '../../stores/authStore';
+import { T, TonePill, PillButton, useLogoutConfirm } from '../../kit';
 import { money } from '../../lib/money';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentSlot } from '../../lib/appointmentTime';
 import { canVendorConfirmDelivered } from './screens/delivery-owner';
@@ -560,6 +559,10 @@ export function HeaderAction({ label, tone = 'brand', onPress }: { label: string
   );
 }
 
+/** What logging out costs a business on this device: its new-order alerts.
+ *  Logout retires the device's push token and closes its socket. */
+const VENDOR_LOGOUT_BODY = 'New-order alerts stop on this device until you log back in. Your store, menu and orders stay with your account.';
+
 /** Tab-root header: the board may replace the product eyebrow with a live store
  *  state; the other tabs retain the quiet Swift Business identity. */
 export function TabHeader({
@@ -568,14 +571,17 @@ export function TabHeader({
   eyebrow = 'SWIFT BUSINESS',
   avatar,
   statusTone = 'brand',
+  logoutBody = VENDOR_LOGOUT_BODY,
 }: {
   title: string;
   onSwitch?: () => void;
   eyebrow?: string;
   avatar?: string;
   statusTone?: 'brand' | 'success' | 'warning' | 'muted';
+  /** The log-out ask's words, for a screen that loses something else. */
+  logoutBody?: string;
 }) {
-  const { logout } = useAuthStore();
+  const { requestLogout, logoutDialog } = useLogoutConfirm({ body: logoutBody });
   const statusColor =
     statusTone === 'success'
       ? color.success
@@ -624,8 +630,9 @@ export function TabHeader({
           </View>
         ) : null}
         {onSwitch ? <HeaderAction label="Switch app" onPress={onSwitch} /> : null}
-        <HeaderAction label="Log out" tone="muted" onPress={logout} />
+        <HeaderAction label="Log out" tone="muted" onPress={requestLogout} />
       </View>
+      {logoutDialog}
     </View>
   );
 }

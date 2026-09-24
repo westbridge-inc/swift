@@ -5,7 +5,8 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { LayoutDashboard, History, FileCheck2, UserRound, LogOut } from 'lucide-react';
 import { Providers } from '@/components/providers';
-import { logout, sessionProbe } from '@/lib/auth';
+import { SignOutButton } from '@/components/sign-out-button';
+import { sessionProbe } from '@/lib/auth';
 
 const NAV = [
   { href: '/portal', label: 'Earnings', icon: LayoutDashboard, exact: true },
@@ -16,7 +17,6 @@ const NAV = [
 
 function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
   return (
     <div className="flex min-h-screen bg-[var(--swift-subtle)]">
       <aside className="fixed inset-y-0 left-0 flex w-60 flex-col border-r border-black/5 bg-white p-4">
@@ -43,16 +43,16 @@ function Shell({ children }: { children: React.ReactNode }) {
             );
           })}
         </nav>
-        <button
-          onClick={() => {
-            // the session lives in a cookie only the server can expire
-            void logout().then(() => router.replace('/login'));
-          }}
+        {/* This browser's session is its own: the app session that takes
+            jobs, and any job on it, is not the one being ended here. */}
+        <SignOutButton
           className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-[var(--swift-muted)] hover:bg-[var(--swift-subtle)] hover:text-[var(--swift-ink)]"
+          body="This signs you out of this browser only, not the Swift app on your phone. Your earnings, history and documents stay with your account."
+          redirectTo="/login"
         >
           <LogOut className="h-4 w-4" />
           Sign out
-        </button>
+        </SignOutButton>
       </aside>
       <main className="ml-60 min-w-0 flex-1 p-6 lg:p-8">{children}</main>
     </div>

@@ -1,39 +1,24 @@
-/** @jsxImportSource react */
-import React from 'react';
-import { View } from 'react-native';
-import { space } from '@swift/ui';
-import { IconChip, PillButton, PopupCard, PopupTitle, T } from '../../kit';
+import { useCallback } from 'react';
+import { useLogoutConfirm, type LogoutConfirm } from '../../kit';
 import { useAuthStore } from '../../stores/authStore';
 import { logoutAndSwitchExperience } from './advertiserExit';
 
-export function AdvertiserExitDialog({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+/** The advertiser's exit is the shared log-out ask in its own words: it names
+ *  where the person lands (the experience picker) and what stays saved. The
+ *  confirm hands over the store's logout(); advertiserExit clears the intent
+ *  before it, so a logged-out user is never routed back into advertiser auth. */
+export function useAdvertiserExitDialog(): LogoutConfirm {
   const setIntent = useAuthStore((state) => state.setIntent);
-  const logout = useAuthStore((state) => state.logout);
-
-  return (
-    <PopupCard visible={visible} onClose={onClose}>
-      <View style={{ alignSelf: 'stretch', alignItems: 'center' }}>
-        <IconChip icon="log-out" size={56} />
-        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          Switch away from advertising?
-        </PopupTitle>
-        <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
-          You&apos;ll log out on this device and return to Swift&apos;s experience picker. Your campaigns, team, and
-          billing history stay saved.
-        </T>
-        <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
-          <PillButton
-            label="Log out and switch experience"
-            icon="log-out"
-            size="md"
-            onPress={() => {
-              onClose();
-              logoutAndSwitchExperience({ setIntent, logout });
-            }}
-          />
-          <PillButton label="Stay in advertising" variant="soft" size="md" onPress={onClose} />
-        </View>
-      </View>
-    </PopupCard>
+  const onLogout = useCallback(
+    (logout: () => void) => logoutAndSwitchExperience({ setIntent, logout }),
+    [setIntent],
   );
+  return useLogoutConfirm({
+    title: 'Switch away from advertising?',
+    body: "You'll log out on this device and return to Swift's experience picker. Your campaigns, team, and billing history stay saved.",
+    confirmLabel: 'Log out and switch experience',
+    confirmIcon: 'log-out',
+    cancelLabel: 'Stay in advertising',
+    onLogout,
+  });
 }

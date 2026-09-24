@@ -75,3 +75,5 @@ export * from './after-dismiss';
 // [E09] The pinned "View cart" pill — one implementation for every browse
 // surface, so a shopper deep in browse can always reach the Cart tab.
 export * from './cart-bar';
+// The one "Log out of Swift?" ask. Every log-out control goes through it.
+export * from './logout-confirm';
