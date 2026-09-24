@@ -18,6 +18,8 @@ const EOCD_SIGNATURE = 0x06054b50; // End of Central Directory
 const CENTRAL_DIR_SIGNATURE = 0x02014b50; // Central directory file header
 const LOCAL_HEADER_SIGNATURE = 0x04034b50; // Local file header
 const LOCAL_HEADER_FIXED_SIZE = 30;
+/** General-purpose flag bit 3: sizes live in a data descriptor after the data. */
+const DATA_DESCRIPTOR_FLAG = 0x0008;
 const METHOD_STORED = 0;
 const METHOD_DEFLATE = 8;
 const EOCD_FIXED_SIZE = 22;
@@ -140,6 +142,23 @@ export function scanXlsxZip(buffer: Buffer, budget: XlsxZipBudget): XlsxZipScan 
     const lh = entry.localOffset;
     if (lh + LOCAL_HEADER_FIXED_SIZE > buffer.length || buffer.readUInt32LE(lh) !== LOCAL_HEADER_SIGNATURE) {
       throw new XlsxZipGuardError('malformed', 'A ZIP entry points outside the archive.');
+    }
+    // [DS205] The local header must agree with the directory. JSZip 3.10.1
+    // (under exceljs) extracts with the DIRECTORY method and sizes and skips
+    // these local fields (zipEntry.readLocalPart), so this pass measures what
+    // JSZip will inflate. An extractor that believed the local header instead
+    // would inflate a different stream than the one measured here, so an
+    // archive whose two headers disagree is refused outright: the guard never
+    // depends on which header an extractor trusts. Real workbooks agree; with
+    // a data descriptor (flag bit 3) the local sizes are legitimately zero, so
+    // only the method is compared then.
+    const localFlags = buffer.readUInt16LE(lh + 6);
+    if (
+      buffer.readUInt16LE(lh + 8) !== entry.method
+      || ((localFlags & DATA_DESCRIPTOR_FLAG) === 0
+        && (buffer.readUInt32LE(lh + 18) !== entry.compressed || buffer.readUInt32LE(lh + 22) !== entry.uncompressed))
+    ) {
+      throw new XlsxZipGuardError('malformed', 'A ZIP entry local header disagrees with its directory entry.');
     }
     const dataStart = lh + LOCAL_HEADER_FIXED_SIZE + buffer.readUInt16LE(lh + 26) + buffer.readUInt16LE(lh + 28);
     const dataEnd = dataStart + entry.compressed;

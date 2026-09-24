@@ -86,6 +86,40 @@ describe('scanXlsxZip — a directory that lies about its sizes', () => {
   });
 });
 
+/** The single central-directory entry of a handZip archive, for patching. */
+const centralOf = (zip: Buffer) => zip.readUInt32LE(zip.length - 22 + 16);
+
+describe('scanXlsxZip — local header and directory must agree (DS205)', () => {
+  it('refuses a directory that says STORED while the local header says deflate (a bomb the stored path would never inflate)', () => {
+    // 12 MB of zeros as a deflate stream; the directory calls the entry
+    // stored, with both sizes equal to the stream length. Measured by the
+    // directory alone this is an honest small stored file.
+    const zip = handZip(Buffer.alloc(12 * 1024 * 1024), 100);
+    const cd = centralOf(zip);
+    const streamLength = zip.readUInt32LE(cd + 20);
+    zip.writeUInt16LE(0, cd + 10); // directory method: stored
+    zip.writeUInt32LE(streamLength, cd + 24); // uncompressed = compressed
+    zip.writeUInt32LE(streamLength, 22); // the local sizes agree too: ONLY the method differs
+    expect(reasonOf(zip)).toBe('malformed');
+  });
+
+  it('refuses a directory whose sizes differ from the local header', () => {
+    const content = Buffer.from('<worksheet/>'.repeat(100));
+    const zip = handZip(content, content.length);
+    const cd = centralOf(zip);
+    zip.writeUInt32LE(zip.readUInt32LE(cd + 24) - 1, cd + 24); // directory claims one byte less
+    expect(reasonOf(zip)).toBe('malformed');
+  });
+
+  it('still accepts a local header that defers its sizes to a data descriptor (flag bit 3)', () => {
+    const content = Buffer.from('<worksheet/>'.repeat(100));
+    const zip = handZip(content, content.length);
+    zip.writeUInt16LE(0x0008, 6); // local flags: data descriptor
+    zip.writeUInt32LE(0, 18); zip.writeUInt32LE(0, 22); // local sizes deferred
+    expect(reasonOf(zip)).toBe('accepted');
+  });
+});
+
 describe('scanXlsxZip', () => {
   it('accepts a real workbook inside budget and reports its true sizes', async () => {
     const buffer = await tinyWorkbook();
