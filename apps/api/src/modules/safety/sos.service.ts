@@ -68,6 +68,11 @@ export interface SosCreateInput {
   lng?: number | null;
   accuracyM?: number | null;
   addressText?: string | null;
+  /** [PRIV2-S1] The raiser's free-text reason. Ops-only safety records hold
+   *  it: the alert this press raises (`triggerNote`), or, for a repeat press,
+   *  its own `sos_retriggers` row. Never the shared order timeline, which the
+   *  other party on the ride reads verbatim. */
+  note?: string | null;
   clientCreatedAt?: Date | null;
   clientIdempotencyKey?: string | null;
   /** Skip the slide-to-cancel grace → straight to ACTIVE. For a caller whose UI
@@ -191,6 +196,9 @@ export class SosService {
         lng: input.lng ?? null,
         accuracyM: input.accuracyM ?? null,
         addressText: input.addressText ?? null,
+        // [PRIV2-S1] The repeat press's own words, on its own immutable row.
+        // The alert keeps the note it was raised with; nothing is overwritten.
+        note: input.note ?? null,
         counterpartyUserId: input.counterpartyUserId ?? null,
         actorRole: input.actorRole,
         clientCreatedAt: input.clientCreatedAt ?? null,
@@ -333,6 +341,7 @@ export class SosService {
           triggerLng: input.lng ?? null,
           triggerAccuracyM: input.accuracyM ?? null,
           triggerAddressText: input.addressText ?? null,
+          triggerNote: input.note ?? null,
           clientCreatedAt: input.clientCreatedAt ?? null,
           clientIdempotencyKey: key,
         },
