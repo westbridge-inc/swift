@@ -1,4 +1,5 @@
 import type { CartQuoteChoices } from '../../services/api';
+import { errorMessage } from '../../lib/apiError';
 
 /**
  * [E01 · E09] The cart screen's half of "the total shown is the total charged".
@@ -36,6 +37,9 @@ export interface CartQuote {
   tipAmount?: number | string | null;
   deliveryFee?: number;
   standardDeliveryFee?: number;
+  /** The stored promo this quote priced (GET /cart `data.promoCode`): the code
+   *  checkout must be sent for the charge to carry the quote's discount. */
+  promoCode?: { code: string; discountType?: string; description?: string } | null;
 }
 
 /** The stores this cart's quote prices — from its own lines, each naming the
@@ -68,16 +72,69 @@ export function cartPricingChoices(state: {
   storeIds: readonly string[];
   bookingsOnly: boolean;
   selectedTip: number | null;
+  promoCode: string | null;
 }): CartQuoteChoices {
   const pickup = !state.bookingsOnly && state.mode === 'PICKUP';
   const noRider = pickup || state.bookingsOnly;
   return {
+    // [E01-B] The applied code rides the ONE choices object to the order body
+    // (the quote prices the cart's stored promo either way). Absent once the
+    // customer removes it.
+    ...(state.promoCode ? { promoCode: state.promoCode } : {}),
     ...(state.express && !pickup ? { express: true as const } : {}),
     ...(pickup && state.storeIds.length > 0
       ? { fulfillmentSelections: Object.fromEntries(state.storeIds.map((id) => [id, 'PICKUP' as const])) }
       : {}),
     ...(noRider ? { tipAmount: 0 } : state.selectedTip != null ? { tipAmount: state.selectedTip } : {}),
   };
+}
+
+/**
+ * [E01-B] The promo refusals checkout can return — the exact codes thrown by
+ * `validatePromoCode` and `assertCashDiscountSponsored` in
+ * apps/api/src/modules/order/order.service.ts (eligibility, window, caps,
+ * per-user use, wrong store, the code's own minimum, and the one rail-dependent
+ * combination: a discounted CASH platform delivery). The cart QUOTE does not
+ * surface these (owner decision); CHECKOUT does, and the screen shows the
+ * message checkout returned — exactly as the web cart does.
+ */
+export const CHECKOUT_PROMO_REFUSAL_CODES = [
+  'INVALID_PROMO',
+  'EXPIRED_PROMO',
+  'USED_PROMO',
+  'PROMO_WRONG_VENDOR',
+  'MIN_ORDER_PROMO',
+  'PROMO_UNAVAILABLE_CASH_DELIVERY',
+] as const;
+
+/** The message a refused checkout shows: the server's own message (every promo
+ *  refusal above reaches the customer verbatim), with the generic fallback only
+ *  when the response carried none. */
+export function checkoutErrorMessage(err: unknown): string {
+  return errorMessage(err, 'Could not place the order. Try again.');
+}
+
+/**
+ * [E01-B] The choices the no-riders pickup retry is QUOTED with — and the order
+ * it places carries the same meaning: every store collects (the same global
+ * toggle as a manual pickup), express is a delivery speed so it is dropped,
+ * there is no rider so no tip, and an applied promo stays applied (pickup
+ * accepts it; only discounted CASH delivery is refused). The retry's confirm
+ * step shows the quote these produced before anything is placed.
+ */
+export function pickupRetryChoices(state: {
+  storeIds: readonly string[];
+  bookingsOnly: boolean;
+  promoCode: string | null;
+}): CartQuoteChoices {
+  return cartPricingChoices({
+    mode: 'PICKUP',
+    express: false,
+    storeIds: state.storeIds,
+    bookingsOnly: state.bookingsOnly,
+    selectedTip: null,
+    promoCode: state.promoCode,
+  });
 }
 
 /** The tip a quote was priced with — what checkout must be sent for the
