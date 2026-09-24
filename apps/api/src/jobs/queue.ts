@@ -1157,8 +1157,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               removeOnFail: 50,
             });
           },
-          async (orderId, delayMs) => {
+          async (orderId, delayMs, replayJobId) => {
             await queues.dispatchQueue.add('dispatch-order', { orderId }, {
+              // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
+              ...(replayJobId ? { jobId: replayJobId } : {}),
               delay: delayMs,
               removeOnComplete: 100,
               removeOnFail: 50,
@@ -1912,8 +1914,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             removeOnFail: 50,
           });
         },
-        async (orderId, delayMs) => {
+        async (orderId, delayMs, replayJobId) => {
           await queues.dispatchQueue.add('dispatch-order', { orderId }, {
+            // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
+            ...(replayJobId ? { jobId: replayJobId } : {}),
             delay: delayMs,
             removeOnComplete: 100,
             removeOnFail: 50,
@@ -1923,7 +1927,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       );
 
       if (job.name === 'dispatch-order') {
-        await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId);
+        // [E36] The job is the replay identity: a redelivery of THIS job
+        // reuses what it already committed instead of repeating it. The id
+        // alone is not enough — a deterministic command id (the not-my-driver
+        // redispatch) can be re-added for a NEW episode once the old job left
+        // BullMQ retention — so the job's creation time is part of it: a
+        // redelivery keeps both, a re-created job does not (DS215 F1).
+        await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id ? `${job.id}@${job.timestamp}` : undefined);
       } else if (job.name === 'offer-timeout') {
         await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId);
       } else if (job.name === 'supply-watch-scan') {
