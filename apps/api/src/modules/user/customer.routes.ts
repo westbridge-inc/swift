@@ -31,6 +31,7 @@ import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { RatingService } from '../rating/rating.service';
+import { scheduleVendorSearchSync } from '../search/search-sync';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
@@ -652,7 +653,7 @@ export async function customerRoutes(app: FastifyInstance) {
     (point, floatRequired) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired),
   );
   const picking = new PickingService(app.prisma, app.io);
-  const ratingService = new RatingService(app.prisma, app.io);
+  const ratingService = new RatingService(app.prisma, app.io, (vendorId) => scheduleVendorSearchSync(app, vendorId));
   const notificationService = new NotificationService(app.prisma, app.io);
   const bookingService = new BookingService(app.prisma, app.io);
 
