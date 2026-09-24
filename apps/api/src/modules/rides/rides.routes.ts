@@ -356,6 +356,39 @@ export async function ridesRoutes(app: FastifyInstance) {
     return { success: true, data: result };
   });
 
+  /** POST /:id/confirm-driver-arrival — the passenger's own eyes override the
+   *  arrival GPS gate [E19]. Ownership and the status CAS are one `updateMany`,
+   *  so the confirm itself IS the override transaction: no new column, no
+   *  migration, and nobody but this ride's customer can start the clock. */
+  app.post<{ Params: { id: string } }>('/:id/confirm-driver-arrival', auth, async (request) => {
+    const now = new Date();
+    const claimed = await app.prisma.order.updateMany({
+      where: {
+        id: request.params.id,
+        customerId: request.user.userId,
+        orderType: 'TAXI',
+        status: 'DRIVER_EN_ROUTE',
+        driverId: { not: null },
+      },
+      data: { status: 'DRIVER_ARRIVED', driverArrivedAt: now },
+    });
+    if (claimed.count === 0) {
+      throw new AppError(409, 'INVALID_STATUS',
+        'The driver has not started this ride, or it is no longer waiting for pickup.');
+    }
+    await app.prisma.orderStatusLog.create({
+      data: {
+        orderId: request.params.id,
+        status: 'DRIVER_ARRIVED',
+        changedBy: request.user.userId,
+        note: 'Driver arrival confirmed by the passenger — GPS gate overridden',
+      },
+    });
+    app.io.to(`order:${request.params.id}`).emit('order:status_changed',
+      { orderId: request.params.id, status: 'DRIVER_ARRIVED' });
+    return { success: true, data: { orderId: request.params.id, status: 'DRIVER_ARRIVED' } };
+  });
+
   /** POST /:id/sos — passenger or driver raises an emergency on an active ride.
    *  The app also dials the local emergency number; this raises a first-class
    *  alert in the ONE SOS engine (safety §4) so ops get paged, the war-room

@@ -336,8 +336,19 @@ export function ActiveJobScreen({ navigation }: any) {
     driverAct.mutate(
       input,
       {
-        onError: () => {
+        onError: (e: any) => {
           if (step.pin) haptic.failure();
+          // [E19] The arrival gate refuses a status claim, never the driver:
+          // say why, and when the server offers it, name the passenger escape.
+          if (step.action === 'arrived') {
+            const err = e?.response?.data?.error;
+            toast.show(
+              err?.message ?? "Couldn't confirm arrival — try again or ask the passenger to confirm.",
+              err?.details?.allowPassengerConfirm === true
+                ? "If your GPS isn't working, ask the passenger to tap 'My driver is here'."
+                : undefined,
+            );
+          }
         },
         onSuccess: () => {
           if (step.pin) haptic.success();

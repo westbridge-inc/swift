@@ -610,6 +610,8 @@ export const rideApi = {
   active: () => api.get('/rides/active'),
   get: (id: string) => api.get(`/rides/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
+  /** [E19] The passenger's own eyes override the driver-arrival GPS gate. */
+  confirmDriverArrival: (id: string) => api.post(`/rides/${id}/confirm-driver-arrival`, {}),
   sos: (id: string, coords?: { lat: number; lng: number }) =>
     api.post(`/rides/${id}/sos`, coords ? { lat: coords.lat, lng: coords.lng } : {}),
 };

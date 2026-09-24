@@ -105,7 +105,14 @@ async function makeRider() {
 }
 
 /** A taxi ride in a given state, always carrying a REAL PIN. */
-async function makeRide(driverId: string, customerId: string, status: 'DRIVER_ASSIGNED' | 'DRIVER_EN_ROUTE' | 'DRIVER_ARRIVED' | 'RIDE_IN_PROGRESS', pin: string, ridePinVerified = false) {
+async function makeRide(
+  driverId: string,
+  customerId: string,
+  status: 'DRIVER_ASSIGNED' | 'DRIVER_EN_ROUTE' | 'DRIVER_ARRIVED' | 'RIDE_IN_PROGRESS',
+  pin: string,
+  ridePinVerified = false,
+  pickup: { lat: number; lng: number } | null = null,
+) {
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `SEC-${nanoid(10)}`,
@@ -113,6 +120,8 @@ async function makeRide(driverId: string, customerId: string, status: 'DRIVER_AS
       customerId,
       driverId,
       status,
+      pickupLat: pickup?.lat ?? null,
+      pickupLng: pickup?.lng ?? null,
       deliveryAddress: 'dropoff',
       deliveryLat: 6.8,
       deliveryLng: -58.15,
@@ -188,7 +197,14 @@ describe('[F-0011] the taxi driver never receives the ride PIN they verify', () 
 
   it('PUT /rides/:id/arrived does not carry the PIN', async () => {
     const driver = await makeDriver();
-    const ride = await makeRide(driver.driverId, customer.userId, 'DRIVER_EN_ROUTE', '222333');
+    // [E19] The arrival gate reads the driver's server-side fix against the
+    // ride's pickup point; give this fixture a truthful fresh fix so the
+    // assertion below keeps exercising the response, not the gate.
+    await app.prisma.driver.update({
+      where: { id: driver.driverId },
+      data: { currentLat: 6.8013, currentLng: -58.1551, lastLocationUpdate: new Date() },
+    });
+    const ride = await makeRide(driver.driverId, customer.userId, 'DRIVER_EN_ROUTE', '222333', false, { lat: 6.8013, lng: -58.1551 });
 
     const res = await put(`/api/v1/driver/rides/${ride.id}/arrived`, {}, driver.token);
     expect(res.statusCode).toBe(200);
