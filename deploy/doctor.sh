@@ -99,7 +99,7 @@ fi
 # ── 4. Databases: migrations are the truth, and the dev DB carries them ─────
 db_query() {
   "${COMPOSE[@]}" exec -T postgres sh -c \
-    'export PGPASSWORD="$POSTGRES_PASSWORD"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "$1"' \
+    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "$1"' \
     sh "$1"
 }
 if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q postgres 2>/dev/null || true)" ]; then

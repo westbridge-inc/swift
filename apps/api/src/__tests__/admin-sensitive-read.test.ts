@@ -173,3 +173,72 @@ describe('[ADM-007] the law itself', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// [S1 response-shaping] `GET /users/:id` used to return the row wholesale:
+// the bcrypt hash, the lockout counters, the last GPS, the mover's KYC
+// document URLs and the vendor owner's operational phone/email. The route is
+// an allow-list now; this test fails on main on the very first assertion.
+// ---------------------------------------------------------------------------
+
+describe('[S1 response-shaping] GET /users/:id discloses no credential or location material', () => {
+  it('returns no password hash, GPS, lockout state, KYC URLs or store contact', async () => {
+    const phone = `+59272${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const subject = await app.prisma.user.create({
+      data: {
+        phone, firstName: 'Subject', lastName: `Redact${RUN}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
+        status: 'ACTIVE', isPhoneVerified: true,
+        passwordHash: 'x',
+        failedLoginAttempts: 3, lockedUntil: new Date(Date.now() + 60_000),
+        lastKnownLat: 6.8, lastKnownLng: -58.15,
+      },
+    });
+    userIds.push(subject.id);
+    try {
+      await app.prisma.rider.create({
+        data: {
+          userId: subject.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE',
+          documentsVerified: true, vehicleColor: 'red',
+          nationalIdUrl: 'kyc/rider-national-id.jpg',
+          driverLicenseUrl: 'kyc/rider-license.jpg',
+          vehicleInsuranceUrl: 'kyc/rider-insurance.jpg',
+        },
+      });
+      const vo = await app.prisma.vendorOwner.create({ data: { userId: subject.id } });
+      await app.prisma.vendor.create({
+        data: {
+          ownerId: vo.id, name: `Redact Store ${RUN}`, slug: `redact-store-${RUN}`,
+          vendorType: 'STORE', phone: '+59277219999', email: 'redact-owner@example.test',
+          addressLine1: '1 Redact Way', city: 'Georgetown', region: 'Demerara-Mahaica',
+          latitude: 6.8, longitude: -58.15,
+          status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+        },
+      });
+
+      const res = await call('GET', `/api/v1/admin/users/${subject.id}`);
+      expect(res.statusCode).toBe(200);
+      const raw = JSON.stringify(res.json());
+      for (const forbidden of [
+        'passwordHash', 'failedLoginAttempts', 'lockedUntil', 'lastKnownLat', 'lastKnownLng',
+        'nationalIdUrl', 'driverLicenseUrl', 'vehicleInsuranceUrl',
+        '+59277219999', 'redact-owner@example.test',
+      ]) {
+        expect(raw, `the payload must not contain ${forbidden}`).not.toContain(forbidden);
+      }
+      // The console still gets the fields it draws from this envelope.
+      const data = res.json().data;
+      expect(data.rider.documentsVerified).toBe(true);
+      expect(data.rider.vehicleColor).toBe('red');
+      expect(data.vendorOwner.vendors[0].name).toBe(`Redact Store ${RUN}`);
+      expect(data.vendorOwner.vendors[0].city).toBe('Georgetown');
+    } finally {
+      // Cascade the child rows now; the global teardown removes the user (and
+      // would cascade these anyway — this keeps a failed assertion tidy).
+      await runWithoutTenant(async () => {
+        await app.prisma.vendor.deleteMany({ where: { owner: { userId: subject.id } } }).catch(() => {});
+        await app.prisma.vendorOwner.deleteMany({ where: { userId: subject.id } }).catch(() => {});
+        await app.prisma.rider.deleteMany({ where: { userId: subject.id } }).catch(() => {});
+      }, 'test-cleanup:admin-sensitive-read');
+    }
+  });
+});

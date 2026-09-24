@@ -67,13 +67,32 @@ export interface SeedPlan {
   configVersion: string;
   /** The digest of the desired data itself, so a plan names exactly which configuration it applies. */
   configDigest: string;
+  /** When this plan was built — printed for the operators, never digested (see seedPlanDigest). */
   createdAt: string;
   target: TargetFingerprint;
   changes: Change[];
   digest: string;
 }
 
-export function seedPlanDigest(body: Omit<SeedPlan, 'digest'>): string { return sha256(canonical(body)); }
+export function seedPlanDigest(body: Omit<SeedPlan, 'digest'>): string {
+  // [DS110 #17] `createdAt` is ceremony display metadata, not plan content.
+  // Nothing persists a seed plan between runs: the ceremony prints the digest
+  // and exits, the operators sign it, and the re-run REBUILDS the plan with a
+  // fresh `now`. Digesting the timestamp made every re-run digest differ from
+  // the signed one, so a production target could never pass its two-approver
+  // check (APPROVAL_INVALID, forever) and the spine could never be applied.
+  // The digest covers what the approvers are actually approving — the plan
+  // version, the configuration and its digest, the target database and the
+  // exact changes — and nothing that varies between two honest runs.
+  const stable: Omit<SeedPlan, 'digest' | 'createdAt'> = {
+    version: body.version,
+    configVersion: body.configVersion,
+    configDigest: body.configDigest,
+    target: body.target,
+    changes: body.changes,
+  };
+  return sha256(canonical(stable));
+}
 
 const equalJson = (a: unknown, b: unknown): boolean => canonical(normalise(a)) === canonical(normalise(b));
 /** Decimal columns come back as Prisma Decimal objects; compare by number/string value. */

@@ -8,6 +8,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestOtp, loginWithOtp, registrationProofFor, wrongCode } from './helpers/otp';
 import { LEGAL_VERSION } from '../modules/legal/legal.routes';
+import { guyanaDayKey } from '../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -42,6 +43,10 @@ beforeAll(async () => {
   for (const phone of otpPhones) {
     await app.redis.del(`otp:${phone}`, `otp_rate:${phone}`, `otp_hr:${phone}`, `otp_attempt:${phone}`);
   }
+  // The per-IP daily SMS budget (utils/sms-budget) counts every send-otp this
+  // suite injects from loopback; reset it so repeated same-day local runs never
+  // accumulate to the cap (same hygiene as helpers/otp.ts and rate-limit.test.ts).
+  await app.redis.del(`otp_ip_day:${guyanaDayKey(new Date())}:127.0.0.1`);
 });
 
 afterAll(async () => {

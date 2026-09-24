@@ -1,6 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import type { LightMyRequestResponse } from 'fastify';
-import { storeSignupOtp } from '../../modules/auth/signup-continuation';
+import {
+  armDevelopmentSignupGeneration,
+  issueSignupContinuation,
+  storeSignupOtp,
+} from '../../modules/auth/signup-continuation';
+import { guyanaDayKey } from '../../utils/guyana-day';
 
 /**
  * Requests a real OTP through the API, then pins a KNOWN code for the same
@@ -15,14 +20,18 @@ export async function requestOtp(app: FastifyInstance, phone: string): Promise<s
   // Reset the per-phone cooldown, the trial-integrity §5 hourly cap, AND the
   // daily SMS-budget counters so repeated test runs stay deterministic (these
   // caps are cost/abuse guardrails, not test gates — each cap is covered by
-  // its own dedicated suite).
-  const day = new Date().toISOString().slice(0, 10);
+  // its own dedicated suite). The loopback per-IP counter is reset too:
+  // app.inject always sources 127.0.0.1, and the helper must not accumulate
+  // against the new per-IP daily budget across a full run.
+  const day = guyanaDayKey(new Date());
   await app.redis.del(
     `otp_rate:${phone}`,
     `otp_hr:${phone}`,
     `otp_attempt:${phone}`,
     `otp_phone_day:${day}:${phone}`,
     `sms_global_day:${day}`,
+    `sms_known_day:${day}`,
+    `otp_ip_day:${day}:127.0.0.1`,
   );
 
   const res = await app.inject({
@@ -64,6 +73,20 @@ export async function registrationProofFor(app: FastifyInstance, phone: string):
     throw new Error(`verify-otp did not issue a registration proof for new phone ${phone}`);
   }
   return proof;
+}
+
+/**
+ * Mint a registration proof WITHOUT the OTP ceremony. Only for a number the
+ * front door refuses: since audit High #2 a foreign number is stopped at
+ * send-otp itself, so it can never walk the ceremony that issues a proof —
+ * this is the one way to grade the register-level launch-market gate on its
+ * own. Never a shortcut for a Guyana number: those must walk the real ceremony.
+ */
+export async function mintedRegistrationProofFor(app: FastifyInstance, phone: string): Promise<string> {
+  const generation = await armDevelopmentSignupGeneration(app.redis, phone);
+  const issued = await issueSignupContinuation(app.redis, phone, generation);
+  if (!issued) throw new Error(`could not mint a registration proof for ${phone}`);
+  return issued.registrationProof;
 }
 
 /** A 6-digit code guaranteed not to equal the real one. */
