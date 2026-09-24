@@ -5,7 +5,7 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import {
-  SeedRefused, applySeedPlan, buildSeedPlan, diffDesired, promoteBootstrapAdmin, seedPlanDigest, signPromotionApproval, signSeedApproval,
+  SeedRefused, applySeedPlan, buildSeedPlan, diffDesired, promoteBootstrapAdmin, seedPlanDigest, signPromotionApproval, signPromotionForTarget, signSeedApproval,
   type DesiredConfig, type SeedPlan,
 } from '../modules/ops/seed-plan';
 import { desiredPlatformConfig, seedPlatformSpine } from '../modules/ops/platform-config';
@@ -236,6 +236,44 @@ describe('[R048-005] the first SUPER_ADMIN is bootstrap-only; a second is break-
     expect(u.roles).toContain('SUPER_ADMIN');
     const audit = await prisma.privilegedChangeAudit.findFirst({ where: { action: 'PROMOTE_SUPER_ADMIN', detail: { path: ['userId'], equals: promoted.userId } } });
     expect((audit!.detail as { mode: string; approvers: string[] })).toMatchObject({ mode: 'break-glass', approvers: ['alice', 'bob'] });
+  });
+});
+
+describe('[ops] the break-glass ceremony: each approver signs their own half', () => {
+  it('signPromotionForTarget is read-only; two halves for THIS target and phone promote; a half for another phone does not', async () => {
+    // A SUPER_ADMIN must exist, or a promotion is bootstrap and needs no ceremony.
+    if ((await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) === 0) {
+      const first = await promoteBootstrapAdmin(prisma, URL_, `+59260096${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`, { actor: 'test' });
+      userIds.push(first.userId);
+    }
+    const phone = `+59260097${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+    const otherPhone = `+59260095${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+    const usersBefore = await prisma.user.count();
+    const auditsBefore = await prisma.privilegedChangeAudit.count();
+
+    const owner = await signPromotionForTarget(prisma, URL_, SECRET, 'owner', phone);
+    const coordinator = await signPromotionForTarget(prisma, URL_, SECRET, 'coordinator', phone);
+    expect(owner).toEqual({ approver: 'owner', signature: expect.stringMatching(/^[0-9a-f]{16,}$/) });
+    // Signing wrote nothing: no account, no audit row.
+    expect(await prisma.user.count()).toBe(usersBefore);
+    expect(await prisma.privilegedChangeAudit.count()).toBe(auditsBefore);
+
+    // Refused before any read of the target: no key, a malformed name, a malformed phone.
+    await expect(signPromotionForTarget(prisma, URL_, undefined, 'owner', phone)).rejects.toMatchObject({ code: 'SECRET_REQUIRED' });
+    await expect(signPromotionForTarget(prisma, URL_, SECRET, 'Owner Name', phone)).rejects.toMatchObject({ code: 'APPROVER_INVALID' });
+    await expect(signPromotionForTarget(prisma, URL_, SECRET, 'owner', '5920400001')).rejects.toMatchObject({ code: 'PHONE_INVALID' });
+
+    // A half signed for another phone is refused, and nothing is promoted.
+    const forOther = await signPromotionForTarget(prisma, URL_, SECRET, 'coordinator', otherPhone);
+    await expect(promoteBootstrapAdmin(prisma, URL_, phone, { secret: SECRET, approvals: [owner, forOther] })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+    expect(await prisma.user.count({ where: { phone } })).toBe(0);
+
+    // The two halves promote, as break-glass, and the audit names both people.
+    const promoted = await promoteBootstrapAdmin(prisma, URL_, phone, { secret: SECRET, approvals: [owner, coordinator], actor: 'coordinator' });
+    userIds.push(promoted.userId);
+    expect(promoted.mode).toBe('break-glass');
+    const audit = await prisma.privilegedChangeAudit.findFirst({ where: { action: 'PROMOTE_SUPER_ADMIN', detail: { path: ['userId'], equals: promoted.userId } } });
+    expect((audit!.detail as { approvers: string[] }).approvers).toEqual(['owner', 'coordinator']);
   });
 });
 

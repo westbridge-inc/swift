@@ -51,6 +51,8 @@ describe('the allowlist', () => {
       'TEST_CONTROL_SECRET', 'METRICS_TOKEN', 'HEALTH_DETAIL_TOKEN',
       'SERVICE_PROVIDER_CURSOR_SECRET', 'VELOCITY_KEY_SECRET', 'ADS_EVENT_SECRET',
       'AGENT_CASH_WEBHOOK_SECRET', 'SWIFT_BOOTSTRAP_PASSWORD', 'GOOGLE_MAPS_API_KEY_BACKEND',
+      // The seed ceremony's approval key: from the store, never the env file.
+      'SEED_PLAN_SECRET',
       'ATTRIB_SALT', 'IDENTITY_SALT', 'SCAN_IP_SALT', 'SENTRY_DSN',
       // [R3 R2-A] URLs that carry a credential: the RLS-bypass login's URL
       // (the most privileged database credential), a Redis URL (may carry a

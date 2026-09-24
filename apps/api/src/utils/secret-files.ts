@@ -58,6 +58,9 @@ export const SECRET_FILE_NAMES = [
   'METRICS_TOKEN',
   'HEALTH_DETAIL_TOKEN',
   'SWIFT_BOOTSTRAP_PASSWORD',
+  // The key both halves of a two-person seed or promotion approval are signed
+  // with (seed-plan.ts). Only the one-off seed ceremony container reads it.
+  'SEED_PLAN_SECRET',
   // Keyed hashes and signatures: the salts and the ads token secret are
   // required in production and generated; the cursor and velocity secrets
   // fall back to the session secret and may be delivered separately.

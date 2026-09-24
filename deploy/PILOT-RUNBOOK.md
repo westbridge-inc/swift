@@ -265,8 +265,43 @@ container.
 The seed prints the plan diff before applying it. On a staging target
 (development posture) it applies directly; a production target needs two
 approvals signed with SEED_PLAN_SECRET and exits 2 with the digest to sign.
-This staging runbook never supplies SEED_PLAN_SECRET, and no command here
-authorizes a production seed.
+This staging runbook never supplies SEED_PLAN_SECRET for a production
+target, and no command here authorizes a production seed.
+
+### 6b. A second SUPER_ADMIN on staging: the two-person break-glass ceremony
+
+Once a SUPER_ADMIN exists, promoting another is a break-glass change that
+needs TWO different people's approvals, each signed over this database's
+identity and the new admin's phone with SEED_PLAN_SECRET
+(seed-plan.ts `promoteBootstrapAdmin`). The key lives only in the encrypted
+store and reaches the one-off seed container only as a file; no step below
+prints it.
+
+1. Once, create the key inside the store (the value is generated on the host
+   and never shown):
+
+       openssl rand -hex 32 | tr -d '\n' | sudo swift-secrets set SEED_PLAN_SECRET
+
+2. Each approver signs their own half — read-only; it prints one line,
+   `{"approver":"…","signature":"…"}`, and seeds nothing:
+
+       cd /opt/swift
+       SEED_ADMIN_PHONE=+5920400001 SEED_SIGN_APPROVER=<their-name> ./deploy/seed-production.sh "$SHA"
+
+   Never sign both halves yourself: the control is two people, not two
+   commands.
+
+3. The operator promotes with both lines:
+
+       SEED_ADMIN_PHONE=+5920400001 \
+       SEED_PROMOTION_APPROVALS='[<first line>,<second line>]' \
+         ./deploy/seed-production.sh "$SHA"
+
+   The promotion re-fingerprints the database and refuses an approval signed
+   for another database or phone, one person twice, or a wrong key. It writes
+   one PROMOTE_SUPER_ADMIN audit row naming both approvers.
+
+4. Pass the new admin to the journeys: `LIVETEST_ADMIN2_PHONE=+5920400001`.
 
 ## 7. Rollback and incident boundary
 
