@@ -408,6 +408,8 @@ model Tenant {
   earnings          Earning[]
   settlements       Settlement[]
   deliveryCashSettlements DeliveryCashSettlement[]
+  mmgRefundObligations    MmgRefundObligation[]
+  mmgRefundSends          MmgRefundSend[]
   payoutRequests    PayoutRequest[]
   payoutSchedules   PayoutSchedule[]
   deletionReceipts  DeletionReceipt[]
@@ -1503,6 +1505,18 @@ model Vendor {
   mmgPayUrlPendingAt DateTime?
   mmgPayUrlApplyAt   DateTime?
 
+  /// [E02 · refund rail 1/8] The store's MMG checkout is paused (cash only)
+  /// while `mmgCheckoutHeldAt` is set: the owner-approved consequence of
+  /// missing the MMG refund deadline too often. Announced, reasoned and
+  /// reversible: why, and who (null = the deadline sweeper). Misses are never
+  /// stored as a counter; they are counted from the obligations whose
+  /// `missedAt` falls after `mmgMissesClearedAt`, which support moves forward
+  /// when it restores the checkout. Nothing reads or writes these yet.
+  mmgCheckoutHeldAt     DateTime?
+  mmgCheckoutHeldReason String?
+  mmgCheckoutHeldById   String?
+  mmgMissesClearedAt    DateTime?
+
   /// The number the store CHOOSES to publish so a customer can call before
   /// ordering ("do you have this in stock", "can you do this today"). Opt-in:
   /// null = no call button. Landline or mobile — a fixed GTT line is what many
@@ -1919,6 +1933,16 @@ model Order {
   mmgAttestedRef           String?   @unique
   mmgAttestedById          String?
   mmgAttestedAt            DateTime?
+  /// [E02 · refund rail 1/8] The amount the store attested it received, written
+  /// with the attestation above (vendor/mmg-attestation.ts). It is the CAP: the
+  /// non-void MMG refund obligations on this order can never add up to more
+  /// (a deferred trigger in 20260925000100_mmg_refund_rail). Null = nothing was
+  /// attested, so nothing is refundable on this rail.
+  mmgAttestedAmount        Decimal?  @db.Decimal(12, 2)
+  /// [E02] What the store owes back by MMG on this order, and the transfers it
+  /// says it sent (order/mmg-refund-law.ts is the one law for both).
+  mmgRefundObligations     MmgRefundObligation[]
+  mmgRefundSends           MmgRefundSend[]
   /// [DOC-1 §31.5 · P31-2] The customer's own claim, from their device: "I paid" with the
   /// reference they entered — a second, independent claim; a dispute after the store's
   /// claim is a mismatch that holds dispatch until a human looks.
@@ -2221,6 +2245,144 @@ enum CustomerMmgClaim {
 enum MmgClaimResolution {
   CUSTOMER_PAID
   CUSTOMER_DID_NOT_PAY
+}
+
+// ==========================================
+// [E02 · refund rail 1/8] THE MMG REFUND RAIL
+// What a store owes a customer back on a paid MMG order, and the transfers it
+// says it sent. Swift records; it never moves the money: the store refunds from
+// its own MMG (spec §3.1:5250). order/mmg-refund-law.ts is the one law.
+// ==========================================
+
+/// [E02] Why the store owes money back. One obligation per cause (`causeKey`).
+/// RETURN is reserved for the returns rail and is not a value yet.
+enum MmgRefundKind {
+  CANCELLATION
+  LINE_REMOVED
+  SUBSTITUTE_REJECTED
+  SUBSTITUTE_CHEAPER
+}
+
+/// [E02] Where an obligation stands. The migration holds `sendId` to exactly
+/// the states that carry a send (SENT, CONFIRMED, DISPUTED, SETTLED).
+enum MmgRefundStatus {
+  OWED
+  SENT
+  CONFIRMED
+  DISPUTED
+  SETTLED
+  VOIDED
+}
+
+/// [E02] The customer's word on a "Refund sent": the money arrived, or it did not.
+enum MmgRefundAnswer {
+  RECEIVED
+  NOT_RECEIVED
+}
+
+/// [E02] Support's finding on a disputed send.
+enum MmgRefundResolution {
+  RECEIVED
+  NOT_RECEIVED
+}
+
+/// [E02 · refund rail 1/8] What the store owes the customer back by MMG, and
+/// why. A paid MMG order becomes CANCELLED or REFUNDED only with a CANCELLATION
+/// obligation committed beside it (§3.1:5252; a deferred trigger refuses
+/// anything else), and the non-void obligations on an order never add up to
+/// more than `Order.mmgAttestedAmount`. Nothing writes this table yet.
+model MmgRefundObligation {
+  id             String          @id @default(cuid())
+  tenantId       String          @default("swift-default")
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  orderId        String
+  order          Order           @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  /// Copied from the order at creation, so the store's and the customer's
+  /// queues read an index instead of a join.
+  vendorId       String
+  customerId     String
+  /// The line a LINE_REMOVED or SUBSTITUTE_* obligation is about; null for a cancellation.
+  orderItemId    String?
+  kind           MmgRefundKind
+  /// One obligation per cause, ever: `order:<id>:cancel`, `line:<id>:close`, and so on.
+  causeKey       String          @unique
+  status         MmgRefundStatus @default(OWED)
+  amount         Decimal         @db.Decimal(12, 2)
+  currencyCode   String          @default("GYD")
+  /// How the amount was reached: the attested remainder, or ALG-25's basis for a line.
+  basis          String
+  reason         String?
+  /// The deadline policy at creation, COPIED: a later policy change never
+  /// moves the deadline of an obligation that already exists.
+  deadlineHours  Int
+  dueAt          DateTime
+  /// Set once, when `dueAt` passed with the obligation still OWED.
+  missedAt       DateTime?
+  /// The send covering it: set exactly while SENT, CONFIRMED, DISPUTED or SETTLED.
+  sendId         String?
+  send           MmgRefundSend?  @relation(fields: [sendId], references: [id], onDelete: Restrict)
+  resolvedAt     DateTime?
+  resolvedById   String?
+  resolutionNote String?
+  /// Who created it; null = the system.
+  createdById    String?
+  /// Advances on every change; a decision names the generation it reviewed.
+  revision       Int             @default(0)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@index([vendorId, status])
+  @@index([customerId, status])
+  @@index([status, dueAt])
+  @@index([vendorId, missedAt])
+  @@index([orderId])
+  @@index([tenantId])
+  @@map("mmg_refund_obligations")
+}
+
+/// [E02 · refund rail 1/8] One MMG transfer the store says it sent back: one
+/// reference, one amount (exactly the owed total it covers), one question to
+/// the customer. The MMG fee is Swift's (owner decision (d)): recorded here and
+/// never taken out of the refund. Nothing writes this table yet.
+model MmgRefundSend {
+  id                   String                @id @default(cuid())
+  tenantId             String                @default("swift-default")
+  tenant               Tenant                @relation(fields: [tenantId], references: [id])
+  orderId              String
+  order                Order                 @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  vendorId             String
+  customerId           String
+  /// The refund's MMG transaction reference, normalised like a payment
+  /// reference and unique across sends: one transfer settles one send.
+  mmgRefundRef         String                @unique
+  amount               Decimal               @db.Decimal(12, 2)
+  /// The MMG fee the store paid to send it. Swift pays it back; it never
+  /// enters the refund arithmetic.
+  feeBorneBySwift      Decimal?              @db.Decimal(12, 2)
+  currencyCode         String                @default("GYD")
+  sentById             String
+  sentAt               DateTime              @default(now())
+  answer               MmgRefundAnswer?
+  answeredAt           DateTime?
+  /// The PAYMENT support ticket the customer's "No" opened.
+  supportTicketId      String?
+  resolution           MmgRefundResolution?
+  resolvedById         String?
+  resolvedAt           DateTime?
+  /// Support's note on the resolution.
+  note                 String?
+  /// The obligations this send covered when it was made: history a later void cannot erase.
+  coveredObligationIds Json
+  revision             Int                   @default(0)
+  obligations          MmgRefundObligation[]
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+
+  @@index([orderId])
+  @@index([customerId, answer])
+  @@index([vendorId, sentAt])
+  @@index([tenantId])
+  @@map("mmg_refund_sends")
 }
 
 /// markedUpPrice/markup* fields are V1 dormant (zero-commission) — kept

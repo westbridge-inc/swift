@@ -433,8 +433,16 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     // 2026-08-29). Earlier tests here "freed" the rider old-style by nulling
     // the pointer while leaving their orders live — phantoms that now make the
     // rider look at-capacity. Terminalize them so "online and free" is true.
+    // [E02] A PAID MMG order can no longer be written CANCELLED without its
+    // refund obligation (the migration's deferred guard), so the paid legs
+    // earlier tests left with this rider close as FAILED; the rest as before.
+    const live = { riderId, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'] as OrderStatus[] } };
     await app.prisma.order.updateMany({
-      where: { riderId, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'] } },
+      where: { ...live, paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CLAIMED', 'CAPTURED'] } },
+      data: { status: 'FAILED', riderId: null },
+    });
+    await app.prisma.order.updateMany({
+      where: live,
       data: { status: 'CANCELLED', riderId: null },
     });
     const session = await app.prisma.session.findFirst({ where: { userId: rider.userId } });
@@ -479,9 +487,11 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(fresh.status).toBe('RIDER_ASSIGNED');
     expect(Number(fresh.totalAmount)).toBe(1500);
-    // Free the rider for later tests (one-live-job pointer).
+    // Free the rider for later tests (one-live-job pointer). [E02] The order is
+    // PAID MMG, which the database no longer lets anyone write CANCELLED without
+    // a refund obligation, so the fixture closes it as FAILED instead.
     await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'CANCELLED', riderId: null } });
+    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
   });
 });
 
@@ -537,8 +547,10 @@ describe('capture and cancellation are serialized — CANCELLED+CAPTURED is unmi
   it('a legacy CAPTURED row on a closed order answers the refusal, never the idempotent success', async () => {
     // Pre-gate history could hold CAPTURED+CANCELLED; the fast path must not
     // return 200 for it (the old order of checks did) [F-006-01 contradiction].
-    const order = await makeMmgOrder('PENDING', { paymentStatus: 'CAPTURED', withRider: false });
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'CANCELLED' } });
+    // [E02] Such rows exist only as history now: the database refuses a status
+    // CHANGE that would mint one (no refund obligation), so the fixture is born
+    // closed, exactly as the history row is.
+    const order = await makeMmgOrder('CANCELLED', { paymentStatus: 'CAPTURED', withRider: false });
     const res = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);
     expect(res.statusCode).toBe(409);
     expect(res.json().error?.code ?? res.json().code).toBe('ORDER_CLOSED');

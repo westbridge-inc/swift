@@ -34,6 +34,9 @@ export const TENANT_TABLES = [
   'stock_movements',
   // [R048-007] money-surface commands: one operator's decided money changes.
   'money_surface_commands',
+  // [E02] MMG refund obligations and the sends that answer them, walled like their order.
+  'mmg_refund_obligations',
+  'mmg_refund_sends',
   'rating_outbox',
   'privileged_approvals',
   'sensitive_read_logs',
@@ -226,6 +229,9 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'payout_schedules', trigger: 'payout_schedules_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'settlements', trigger: 'settlements_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'delivery_cash_settlements', trigger: 'delivery_cash_settlements_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [E02] an MMG refund obligation and a refund send belong to the tenant of their order
+  { table: 'mmg_refund_obligations', trigger: 'mmg_refund_obligations_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  { table: 'mmg_refund_sends', trigger: 'mmg_refund_sends_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [money] two hops: an earning belongs to its mover (rider OR driver), who belongs to a user, who belongs to a tenant
   // [DOC-1 P4-5] a review case inherits through the document to the person; a decision inherits its case
   { table: 'review_case', trigger: 'review_case_tenant_matches_subject', parent: 'users', fk: 'submissionId',
