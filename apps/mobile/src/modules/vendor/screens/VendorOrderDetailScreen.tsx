@@ -557,7 +557,7 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
       <PopupCard visible={confirmReject} onClose={() => setConfirmReject(false)}>
         <IconChip icon="x-circle" size={56} tone="error" />
         <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
-          Reject this order?
+          {order.fulfillment === 'APPOINTMENT' ? 'Decline this booking?' : 'Reject this order?'}
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {order.paymentMethod === 'MOBILE_MONEY'
