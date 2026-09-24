@@ -1142,8 +1142,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               removeOnFail: 50,
             });
           },
-          async (orderId, delayMs) => {
+          async (orderId, delayMs, attempts, searchVersion) => {
             await queues.dispatchQueue.add('dispatch-order', { orderId }, {
+              // [E36] Deterministic jobId: a redelivery that re-runs the
+              // exhaustion tail re-adds the SAME id, which BullMQ collapses
+              // into the still-existing delayed job instead of arming twice.
+              jobId: `redispatch:${orderId}:${searchVersion ?? 'none'}:${attempts}`,
               delay: delayMs,
               removeOnComplete: 100,
               removeOnFail: 50,
@@ -1897,8 +1901,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             removeOnFail: 50,
           });
         },
-        async (orderId, delayMs) => {
+        async (orderId, delayMs, attempts, searchVersion) => {
           await queues.dispatchQueue.add('dispatch-order', { orderId }, {
+            jobId: `redispatch:${orderId}:${searchVersion ?? 'none'}:${attempts}`,
             delay: delayMs,
             removeOnComplete: 100,
             removeOnFail: 50,
@@ -1908,7 +1913,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       );
 
       if (job.name === 'dispatch-order') {
-        await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId);
+        // [E36] The job id is the replay token: a redelivery of THIS job
+        // proves it already committed the exhaustion side effects once.
+        await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id);
       } else if (job.name === 'offer-timeout') {
         await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId);
       } else if (job.name === 'supply-watch-scan') {

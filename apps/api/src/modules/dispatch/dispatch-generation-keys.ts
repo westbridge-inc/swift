@@ -19,6 +19,16 @@ export const dispatchRoundKey = (orderId: string, version?: number | null): stri
 export const dispatchExhaustKey = (orderId: string, version?: number | null): string =>
   `dispatch:exhausts:${orderId}${deliveryGenerationSuffix(version)}`;
 
+/** [E36] Per-job one-shot exhaustion token. A BullMQ redelivery replays the
+ *  SAME job id, so recording which job already committed the attempt-count
+ *  increment lets the exhaustion script reuse that count instead of INCRing
+ *  again. A genuine next cycle is a different BullMQ job, hence a different
+ *  token, so accumulation up to EXHAUST_CAP is preserved. The key lives only
+ *  as long as the terminal window (EXHAUST_TERMINAL_TTL_SECONDS): a replay
+ *  after that window is a legitimate fresh search. */
+export const exhaustJobKey = (orderId: string, version?: number | null, jobToken?: string | null): string =>
+  `dispatch:exhaust-job:${orderId}${deliveryGenerationSuffix(version)}:${jobToken ?? ''}`;
+
 export const dispatchExhaustLockKey = (orderId: string, version?: number | null): string =>
   `dispatch:exhaust-lock:${orderId}${deliveryGenerationSuffix(version)}`;
 

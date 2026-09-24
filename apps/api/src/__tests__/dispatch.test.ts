@@ -1064,6 +1064,114 @@ describe('The offer cascade', () => {
     await app.prisma.rider.update({ where: { id: a.riderId }, data: { isOnline: false } });
   });
 
+  it('[E36] a redelivered exhaustion job burns the attempt counter once and collapses the retry push and re-arm', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false } }); // empty pool
+    const order = await makeDeliveryOrder();
+    const version = order.fulfillmentModeVersion; // 0 — the keys stay unversioned
+    const exhaustsKey = `dispatch:exhausts:${order.id}`;
+
+    // A BullMQ-shaped redispatch double: a deterministic jobId re-add is a
+    // no-op while the first delayed job still exists — exactly the semantics
+    // the production schedulers rely on.
+    const armed: Array<{ jobId?: string; delayMs: number }> = [];
+    const seenJobIds = new Set<string>();
+    const redispatch = async (orderId: string, delayMs: number, attempts?: number, searchVersion?: number) => {
+      const jobId = attempts !== undefined ? `redispatch:${orderId}:${searchVersion ?? 'none'}:${attempts}` : undefined;
+      if (jobId !== undefined) {
+        if (seenJobIds.has(jobId)) return true; // duplicate delayed add collapses
+        seenJobIds.add(jobId);
+      }
+      armed.push({ jobId, delayMs });
+      return true;
+    };
+    const replay = new DispatchService(
+      app.prisma, app.redis, app.io, new HaversineMapsProvider(),
+      async (orderId, riderId, delayMs, attemptId) => {
+        scheduled.push({ orderId, riderId, delayMs, attemptId, scheduledAt: Date.now() });
+      },
+      redispatch,
+    );
+
+    const first = await replay.dispatchOrder(order.id, order.tenantId ?? undefined, 'job-e36-1');
+    expect(first).toMatchObject({ exhausted: true });
+    expect(await app.redis.get(exhaustsKey)).toBe('1');
+    expect(armed).toHaveLength(1);
+
+    // BullMQ redelivers the SAME job after the worker dies (its 30s lock
+    // lapses; the 10s exhaust single-flight is long gone by then). Clear the
+    // single-flight key to model that expiry exactly. The job-scoped token
+    // makes the redelivery reuse the committed count, and the dedupe keys
+    // collapse the push and the re-arm.
+    await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
+    await replay.dispatchOrder(order.id, order.tenantId ?? undefined, 'job-e36-1');
+    expect(await app.redis.get(exhaustsKey)).toBe('1'); // main: '2'
+    expect(armed).toHaveLength(1); // main: two delayed dispatch-order adds
+    expect(await app.prisma.notification.count({
+      where: { userId: customerId, dedupeKey: `dispatch-retrying:${order.id}:${version}:1` },
+    })).toBe(1); // main: zero rows carry this dedupeKey
+
+    // A genuine next cycle is a DIFFERENT job: the counter still accumulates
+    // and the second-cycle push fires under its own key.
+    await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
+    await replay.dispatchOrder(order.id, order.tenantId ?? undefined, 'job-e36-2');
+    expect(await app.redis.get(exhaustsKey)).toBe('2');
+    expect(armed).toHaveLength(2);
+    expect(await app.prisma.notification.count({
+      where: { userId: customerId, dedupeKey: `dispatch-retrying:${order.id}:${version}:2` },
+    })).toBe(1);
+
+    // Durable order state untouched: still unassigned and waiting on the vendor.
+    const final = await app.prisma.order.findUniqueOrThrow({
+      where: { id: order.id }, select: { status: true, riderId: true },
+    });
+    expect(final.riderId).toBeNull();
+    expect(final.status).toBe('ACCEPTED');
+    // Every opened search journal was resolved — no open SEARCHING row remains.
+    expect(await app.prisma.dispatchSearch.count({
+      where: { subjectId: order.id, status: 'SEARCHING' },
+    })).toBe(0);
+
+    await app.redis.del(
+      exhaustsKey,
+      `dispatch:exhaust-job:${order.id}:job-e36-1`,
+      `dispatch:exhaust-job:${order.id}:job-e36-2`,
+      `ops_page:dispatch_exhausted:${order.id}`,
+    );
+  });
+
+  it('[E36] a redelivered offer timeout consumes the pair once: one decay, one declined-set add, one cascade', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    const rider = await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
+    const order = await makeDeliveryOrder();
+
+    const first = await dispatch.dispatchOrder(order.id);
+    expect(first.offered).toBe(rider.riderId);
+    const live = await app.redis.get(`dispatch:offer:${order.id}`);
+    expect(live).not.toBeNull();
+    const attemptId = live!.split(':')[1]; // `<riderId>:<attemptId>` [F-014-04]
+    // The client provably rendered the card, so this timeout is a scored miss.
+    await dispatch.markOfferSeen(order.id, rider.userId, attemptId);
+
+    await dispatch.handleOfferTimeout(order.id, rider.riderId, attemptId);
+    const afterFirst = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(Number(afterFirst.acceptanceRate)).toBeCloseTo(80, 5); // one EMA step
+
+    // A crash redelivers the SAME timeout job. The atomic pair-consume now
+    // reads `removed === false` and returns before any consequence re-runs.
+    await dispatch.handleOfferTimeout(order.id, rider.riderId, attemptId);
+    const afterSecond = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(Number(afterSecond.acceptanceRate)).toBeCloseTo(80, 5); // still one step
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBeNull();
+    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, rider.riderId)).toBe(1);
+
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false } });
+    await app.redis.del(
+      `dispatch:exhausts:${order.id}`,
+      `dispatch:declined:${order.id}`,
+      `ops_page:dispatch_exhausted:${order.id}`,
+    );
+  });
+
   it('widens the radius when the inner ring is empty', async () => {
     const outer = await makeRider({ lat: PICKUP.lat + 0.072 }); // ~8 km — outside 5, inside 10
     const order = await makeDeliveryOrder();

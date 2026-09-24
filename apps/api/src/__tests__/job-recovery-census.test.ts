@@ -72,6 +72,15 @@ describe('[A-08] every job class has an answer about replaying it', () => {
     expect(requeueRefusal(uncertified![0], true)).not.toBeNull();
   });
 
+  it('the pilot-critical E36 classes are certified for replay (a future uncertification is caught)', () => {
+    // Each of these was certified by reading its handler and landing a
+    // red-first replay test that drives the real processor twice: a future
+    // change that silently flips one back to NOT_CERTIFIED fails here.
+    for (const name of ['checkout-outbox', 'dispatch-order', 'offer-timeout', 'release-held-orders']) {
+      expect(JOB_RECOVERY[name as keyof typeof JOB_RECOVERY]?.policy, name).toBe('SAFE_REPLAY');
+    }
+  });
+
   it('money and notification jobs are NOT certified — the certified set is small and deliberate', () => {
     // The whole point is that these are the ones a second run would hurt.
     for (const name of ['process-billing', 'poll-mmg-billing', 'convert-trials', 'booking-reminders']) {
