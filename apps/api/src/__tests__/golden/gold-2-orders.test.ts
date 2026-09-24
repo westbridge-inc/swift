@@ -27,7 +27,7 @@ import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 //   · CARD is refused before anything is written — the key is not consumed
 //   · two different keys racing one cart: exactly one set of orders
 //   · [G3-F2 · it.fails] a same-key replay answers what the first call did
-//   · [E01 · it.fails] the cart quote prices every vendor it will charge
+//   · [E01] the cart quote prices every vendor it will charge (fixed by #1285)
 // The MMG half of CUST-02 (MMG checkout, dispute hold) is proven through the
 // same routes in gold-2-mmg.test.ts.
 // ---------------------------------------------------------------------------
@@ -452,14 +452,14 @@ describe('GOLD-2 · CUST-02 — [G3-F2] a same-key replay is the same answer', (
 });
 
 // ---------------------------------------------------------------------------
-// E01 (S1, UNASSIGNED): the cart quote prices the whole basket off
-// `cart.vendor` — the vendor added LAST (customer.routes.ts:353-359) — while
-// checkout charges one delivery fee per vendor leg (order.service.ts). So the
-// quote a customer reads before paying is not what the children cost. This
-// pins the correct contract: the quote's delivery fee and total equal the
-// sum of what checkout charges. The basket, the quote and the checkout are
-// all taken in beforeAll, so the it.fails can only "pass" on the comparison.
-// Flip to `it(...)` when the multi-vendor quote lands.
+// E01 (S1, fixed by #1285): the cart quote used to price the whole basket off
+// `cart.vendor` — the vendor added LAST — while checkout charges one delivery
+// fee per vendor leg (order.service.ts). So the quote a customer read before
+// paying was not what the children cost. #1285 made the quote and checkout
+// one computation (order/cart-plans.ts); this pins that contract: the quote's
+// delivery fee and total equal the sum of what checkout charges. The basket,
+// the quote and the checkout are all taken in beforeAll, so the assertion is
+// the comparison alone.
 // ---------------------------------------------------------------------------
 describe('GOLD-2 · CUST-02 — [E01] the two-vendor quote equals what checkout charges', () => {
   let quote: { subtotalCustomer: number; deliveryFee: number; totalAmount: number };
@@ -482,7 +482,7 @@ describe('GOLD-2 · CUST-02 — [E01] the two-vendor quote equals what checkout 
     expect(children.map((o) => o.deliveryFee).sort((a, b) => a - b)).toEqual([FEE_A, FEE_B]);
   });
 
-  it.fails('[E01] the quote carries every vendor’s delivery fee and the total checkout will charge', () => {
+  it('[E01] the quote carries every vendor’s delivery fee and the total checkout will charge', () => {
     expect(quote.deliveryFee).toBe(children.reduce((s, o) => s + o.deliveryFee, 0));
     expect(quote.totalAmount).toBe(grandTotal);
   });
