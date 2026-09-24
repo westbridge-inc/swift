@@ -35,6 +35,7 @@ import { telUrl } from '../../../lib/emergencyPolicy';
 import { orderStatusLabel } from '../../../lib/orderStatus';
 import { taxiDoorFor } from '../../../lib/taxiDoors';
 import { TaxiSignedOut } from '../TaxiSignedOut';
+import { signInForTaxi } from '../taxiEntry';
 
 /**
  * The ride's status, in words — from `lib/orderStatus.ts`, the one authority.
@@ -250,7 +251,7 @@ function SearchingCard() {
 export function TaxiScreen(props: any) {
   const isAuthenticated = useAuthStore((st) => st.isAuthenticated);
   const promptLogin = useAuthStore((st) => st.promptLogin);
-  if (!isAuthenticated) return <TaxiSignedOut navigation={props.navigation} onSignIn={promptLogin} />;
+  if (!isAuthenticated) return <TaxiSignedOut navigation={props.navigation} onSignIn={() => signInForTaxi(promptLogin)} />;
   return <TaxiBooking {...props} />;
 }
 

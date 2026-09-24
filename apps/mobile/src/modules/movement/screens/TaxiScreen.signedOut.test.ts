@@ -26,7 +26,9 @@ const gate = () => {
 
 describe('[Q4] the taxi screen checks the session before any ride read', () => {
   it('a visitor with no session gets the sign-in door', () => {
-    expect(gate()).toMatch(/if \(!isAuthenticated\) return <TaxiSignedOut navigation=\{props\.navigation\} onSignIn=\{promptLogin\} \/>;/);
+    // Signing in from the door resumes Taxi (the auth continuation), never a bare
+    // promptLogin that would land the rider on Home [DS256 F1].
+    expect(gate()).toMatch(/if \(!isAuthenticated\) return <TaxiSignedOut navigation=\{props\.navigation\} onSignIn=\{\(\) => signInForTaxi\(promptLogin\)\} \/>;/);
   });
 
   it('the door is decided before the booking screen mounts', () => {
@@ -37,6 +39,14 @@ describe('[Q4] the taxi screen checks the session before any ride read', () => {
   it('no ride hook runs in the gate: a signed-out visitor fires no ride request', () => {
     const g = gate();
     for (const hook of RIDE_HOOKS) expect(g, `${hook} must not run before the session check`).not.toMatch(callOf(hook));
+  });
+
+  it('the door itself reads no ride data: no hooks module, no API client, no query [DS256 F3]', () => {
+    const door = strip(readFileSync(new URL('../TaxiSignedOut.tsx', import.meta.url), 'utf8'));
+    expect(door).not.toMatch(/from '[^']*hooks[^']*'/);
+    expect(door).not.toMatch(/from '[^']*services\/api'/);
+    expect(door).not.toMatch(/@tanstack\/react-query/);
+    for (const hook of RIDE_HOOKS) expect(door).not.toMatch(callOf(hook));
   });
 
   it('every ride hook still lives in the booking screen, unchanged for a signed-in rider', () => {
