@@ -204,6 +204,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /drivers/:id': c('C1', 'mover.read'),
   'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify', E.driver),
   'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass', E.driver),
+  // [High #9 · DS109] Approving a pending vehicle assignment grants this driver the
+  // vehicle subject's documents — a person's access to live work, so C3 (reason owed).
+  'POST /drivers/:id/vehicle-assignment/approve': c('C3', 'driver.assignment.approve', E.driver),
 
   // ── Orders and live ops ─────────────────────────────────────────────────
   'GET /orders': c('C1', 'order.read'),

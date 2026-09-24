@@ -6681,6 +6681,12 @@ model SubjectLink {
   relation  SubjectRelation
   validFrom DateTime        @default(now())
   validTo   DateTime?
+  /// [High #9 · DS109] NULL = a PENDING assignment (created when an account submitted a
+  /// VEHICLE-kind document whose plate matched an existing vehicle subject it does not
+  /// own). Pending links never propagate the subject's vehicle evidence; an admin-approved
+  /// assignment stamps this. The subject's registering account gets its link approved at
+  /// creation (the verified owner of record).
+  approvedAt DateTime?
 
   @@unique([accountId, subjectId, relation, validFrom])
   @@index([subjectId])

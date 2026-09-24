@@ -1620,6 +1620,34 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
+  /**
+   * [High #9 · DS109] The admin-approved vehicle assignment: confirm this driver operates
+   * the vehicle their CURRENT plate names, so that vehicle's documents propagate to them.
+   * Pending links only — a retyped plate never inherits another subject's documents before
+   * this explicit, audited decision.
+   */
+  app.post('/drivers/:id/vehicle-assignment/approve', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    // [ADM-006] C3 owes a reason (validated by the preValidation hook from the body or
+    // the x-swift-reason header); record the SAME stated reason so the audit row can be
+    // reviewed, never a different string than the one the gate validated.
+    const body = reasonSchema.parse(request.body ?? {});
+    const driver = await app.prisma.driver.findFirst({ where: { id, user: { tenantId } } });
+    if (!driver) throw new NotFoundError('Driver', id);
+    const result = await verification.approveVehicleAssignment(driver.userId);
+    await audit(
+      request.user.userId,
+      'APPROVE_DRIVER_VEHICLE_ASSIGNMENT',
+      'Driver',
+      id,
+      { approvedLinks: result.approved, reason: reasonOf(request.body, request.headers) ?? body.reason },
+      request,
+    );
+    return { success: true, data: result };
+  });
+
   // Premium-fleet onboarding: set the top taxi tier a vehicle serves. This is the
   // assignment surface that makes Comfort/XL dispatchable (the #112 gap).
   app.put('/drivers/:id/ride-class', { preHandler: [adminGuard] }, async (request) => {
