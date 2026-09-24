@@ -1490,7 +1490,16 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // Movement R nightly (RAT-H's second leg): the full recompute must
         // land IDENTICAL to the incremental path — reconciliation is the law.
         const { RatingStatsService } = await import('../modules/rating/rating-stats.service');
-        const n = await new RatingStatsService(ctx.prisma).recomputeAll();
+        // [E26] The sweep also HEALS drifted vendor stars, so every vendor it
+        // touches must re-sync its search document. scheduleVendorSearchSync is
+        // the bounded, tenant-correct seam: it enqueues ONE debounced job per
+        // swept vendor (the doc id carries the tenant) and is best-effort by
+        // contract — SearchService.syncAllVendors would reindex + reconcile the
+        // whole shared index and could throw into this recompute job.
+        const n = await new RatingStatsService(
+          ctx.prisma,
+          (vendorId) => scheduleVendorSearchSync({ queues, log: ctx.log }, vendorId),
+        ).recomputeAll();
         ctx.log.info({ subjects: n }, 'ratings: stats recomputed');
         return;
       }
