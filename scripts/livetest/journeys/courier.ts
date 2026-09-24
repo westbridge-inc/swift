@@ -76,9 +76,19 @@ export const COUR_01: Journey<Ctx> = {
     rec.check('collecting twice answers the fact, never a second capture', again.ok && again.json?.data?.collected === true && again.json?.data?.paymentStatus === 'CAPTURED', `→ ${brief(again)} ${JSON.stringify(again.json?.data ?? null)}`);
     const senderView = (await GET(`/courier/order/${main.id}`, C8.token)).json?.data;
     rec.check('the sender sees the fee captured once and the job still in hand', senderView?.paymentStatus === 'CAPTURED' && senderView?.status === 'RIDER_ARRIVED_PICKUP', `status=${senderView?.status} paymentStatus=${senderView?.paymentStatus}`);
-    rec.expect('parcel picked up', await PUT(`/rider/orders/${main.id}/picked-up`, {}, r.session.token), 200);
+    // [E16] Custody needs proof: a photo of the parcel the server issues, then the pickup
+    // confirmed with that exact url and the rider's GPS. The bare tap is refused.
+    rec.deny('a bare pickup tap without the photo (E16)', await PUT(`/rider/orders/${main.id}/picked-up`, {}, r.session.token), [409], ['PICKUP_PROOF_REQUIRED']);
+    rec.deny('a pickup proof the server never issued', await POST(`/courier/order/${main.id}/pickup-proof`, { proofPhotoUrl: '/uploads/courier-proof/forged/pickup.png', gps: PICK }, r.session.token), [400], ['PICKUP_PROOF_NOT_ISSUED']);
+    const pickupPhoto = await upload(`/courier/order/${main.id}/pickup-proof-photo`, r.session.token, { name: 'pickup.png', type: 'image/png', bytes: uniquePng(`${ctx.runId}-pickup`) });
+    rec.expect('pickup photo uploaded (E16)', pickupPhoto, [200, 201]);
+    rec.deny('a pickup confirmation without GPS', await POST(`/courier/order/${main.id}/pickup-proof`, { proofPhotoUrl: pickupPhoto.json?.data?.url }, r.session.token), [400], ['VALIDATION_ERROR']);
+    const picked = await POST(`/courier/order/${main.id}/pickup-proof`, { proofPhotoUrl: pickupPhoto.json?.data?.url, gps: PICK }, r.session.token);
+    rec.expect('parcel picked up with the photo and GPS (E16)', picked, 200, undefined, `status=${picked.json?.data?.status}`);
+    // The bare tap was refused above, so custody can only have come through the proof route.
+    const inHand = (await GET(`/courier/order/${main.id}`, C8.token)).json?.data;
+    rec.check('the sender sees the parcel in the rider’s hands', inHand?.status === 'PICKED_UP', `status=${inHand?.status}`);
     rec.deny('the sender cannot cancel once the rider holds the parcel', await POST(`/courier/order/${main.id}/cancel`, {}, C8.token), [409], ['PARCEL_IN_CUSTODY']);
-    rec.check('pickup photo custody proof (E16)', false, 'no route records a pickup photo: only POST /courier/order/:id/proof-photo at drop-off exists (E16 open)');
     rec.expect('en route to drop-off', await PUT(`/rider/orders/${main.id}/en-route-delivery`, {}, r.session.token), 200);
     const pub = await req('GET', `/courier/track/${main.token}`, {});
     rec.check('public tracking (no sign-in) shows the parcel moving with the rider', pub.ok && !!pub.json?.data?.status && pub.json?.data?.rider?.currentLat != null,
@@ -94,7 +104,7 @@ export const COUR_01: Journey<Ctx> = {
     rec.check('the sender sees DELIVERED', done?.status === 'DELIVERED', `status=${done?.status}`);
     const after = await req('GET', `/courier/track/${main.token}`, {});
     rec.check('public tracking stops showing the rider after delivery', after.ok && after.json?.data?.rider?.currentLat == null, `status=${after.json?.data?.status}`);
-    // Note (E17): return-to-sender after custody is manual support; the in-app refusal (409 PARCEL_IN_CUSTODY) is proven above.
+    // Return-to-sender after custody (E17, #1327) is proven by courier-return.test.ts; it is not one of this journey's ledger cases.
     void FIXTURE_PNG; void waitFor; void codeOf;
   },
 };
