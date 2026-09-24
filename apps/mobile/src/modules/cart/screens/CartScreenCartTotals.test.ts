@@ -149,6 +149,11 @@ describe('an unavailable line recovers on the phone (E07)', () => {
     expect(unavailableBranch).not.toContain('<AddMorph');
   });
 
+  it('a failed background re-quote keeps the cart on screen — only a cart that never loaded is an error (DS222 R1)', () => {
+    expect(src).toContain(') : cart.isError && cart.data === undefined ? (');
+    expect(src).not.toMatch(/\) : cart\.isError \? \(/);
+  });
+
   it('checkout stays blocked while any unavailable line remains', () => {
     expect(src).toMatch(/disabled=\{!quoteSettled \|\| !c\.meetsMinimum \|\| c\.unavailableItemIds\?\.length > 0/);
   });

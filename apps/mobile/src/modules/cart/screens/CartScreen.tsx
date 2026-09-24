@@ -541,7 +541,11 @@ export function CartScreen() {
 
       {cart.isLoading ? (
         <LoadingBlock />
-      ) : cart.isError ? (
+      ) : cart.isError && cart.data === undefined ? (
+        // [E07 · DS222 R1] Only a cart that never loaded is an error screen. A
+        // failed background re-quote (back from the background while offline)
+        // keeps the cart it already has — lines, Remove pills and all — and
+        // the next focus or foreground tries again. (null data = an empty cart.)
         <ErrorState onRetry={() => cart.refetch()} />
       ) : !c || items.length === 0 ? (
         <EmptyState
