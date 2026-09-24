@@ -13,6 +13,7 @@ import {
   APPROVAL_HEADER, APPROVAL_TTL_MS, approvalSubjectOf, fingerprintOf, requiresApproval,
 } from '../modules/admin/admin-approval';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
+import { ACCESS_COOKIE, BROWSER_CLIENT_HEADER, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 
 // ---------------------------------------------------------------------------
 // [ADM-005] A SETTLEMENT WAS ONE PERSON'S SAY-SO.
@@ -368,6 +369,35 @@ describe('[DS110] the stored body is what executes — and only that', () => {
     const byRequester = await call(requester.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`);
     expect(byRequester.statusCode, byRequester.body).toBe(200);
     expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value).toEqual({ rate: 33 });
+  });
+
+  it('the console signs in by cookie: apply replays under that same session', async () => {
+    // [A-01] The admin console holds no Bearer; its session is the HttpOnly
+    // access cookie. `authenticate` turns a gated cookie into the Authorization
+    // header, and that header is what the replay forwards. Without it the
+    // replay would run with no identity.
+    const origin = 'https://admin.swift.test';
+    const saved = process.env['CORS_ORIGIN'];
+    process.env['CORS_ORIGIN'] = origin;
+    resetBrowserOriginsForTests();
+    try {
+      const asked = await writeConfig(requester.token, { rate: 34 });
+      const approvalId = asked.json().error.details.approvalId as string;
+      await decide(approver.token, approvalId, true, 'Checked the rate against the price book');
+
+      const applied = await app.inject({
+        method: 'POST',
+        url: `/api/v1/admin/approvals/${approvalId}/apply`,
+        headers: { [BROWSER_CLIENT_HEADER]: 'admin-web', origin, cookie: `${ACCESS_COOKIE}=${requester.token}`, 'content-type': 'application/json' },
+      });
+      expect(applied.statusCode, applied.body).toBe(200);
+      expect((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe('APPLIED');
+      expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: CONFIG_KEY } })).value).toEqual({ rate: 34 });
+    } finally {
+      if (saved === undefined) delete process.env['CORS_ORIGIN'];
+      else process.env['CORS_ORIGIN'] = saved;
+      resetBrowserOriginsForTests();
+    }
   });
 
   it('apply replays the stored body and executes exactly once', async () => {
