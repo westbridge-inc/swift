@@ -187,6 +187,11 @@ export function approvalRefusalMessage(code: ApprovalRefusal): string {
     case 'request-changed': return 'What you are asking for is not what was approved. Request it again so the change is reviewed.';
     case 'self-approval': return 'You approved this yourself. A money or platform action needs a second person.';
     case 'not-requester': return 'Only the admin who asked for this action can execute it, once a second admin has approved it.';
+    default: {
+      // [DS187] exhaustive by construction: a new refusal without a message is a compile error
+      const unhandled: never = code;
+      return unhandled;
+    }
   }
 }
 
