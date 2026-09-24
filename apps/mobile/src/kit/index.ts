@@ -72,3 +72,6 @@ export * from './calm-radar';
 export * from './trust-halo';
 // [#910's law] modal exits close in their own tick; navigation goes here.
 export * from './after-dismiss';
+// [E09] The pinned "View cart" pill — one implementation for every browse
+// surface, so a shopper deep in browse can always reach the Cart tab.
+export * from './cart-bar';

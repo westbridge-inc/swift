@@ -4,7 +4,7 @@ import { Dimensions, FlatList, Linking, Pressable, ScrollView, Share, TextInput,
 import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { color, elevation, font, fontSize, radius, space, withAlpha } from '@swift/ui';
+import { color, font, fontSize, radius, space, withAlpha } from '@swift/ui';
 import { useAddToCart, useCart, useReportContent, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
 import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
@@ -15,6 +15,8 @@ import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
 import {
   AddMorph,
+  CartBar,
+  useCartBarClearance,
   Chip,
   CircleChip,
   ErrorState,
@@ -226,6 +228,8 @@ export function RestaurantScreen() {
   // FlashList is the on-device follow-up — this bounds the eager mount now.)
   const [renderCap, setRenderCap] = useState(48);
   const cart = useCart<any>();
+  // [E09] While this store's cart bar floats over the menu, the last row must scroll clear of it.
+  const cartClearance = useCartBarClearance({ vendorId });
   const addToCart = useAddToCart();
   const updateCartItem = useUpdateCartItem();
 
@@ -292,7 +296,6 @@ export function RestaurantScreen() {
   const openItem = (item: any) => navigation.navigate('MenuItem', { vendorId, itemId: item.id });
 
   const cartLines: any[] = cart.data?.items ?? [];
-  const cartCount = cartLines.reduce((n, l) => n + (l.quantity ?? 0), 0);
   const lineFor = (itemId: string) => cartLines.find((l) => l.itemId === itemId);
   const guardAuth = (fn: () => void) => (isAuthenticated ? fn() : promptLogin());
 
@@ -311,7 +314,7 @@ export function RestaurantScreen() {
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
       <ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: space['3xl'] }}
+        contentContainerStyle={{ paddingBottom: space['3xl'] + cartClearance }}
         scrollEventThrottle={64}
         onScroll={(e) => {
           const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
@@ -755,45 +758,9 @@ export function RestaurantScreen() {
         </View>
       </ScrollView>
 
-      {/* [Wave 3 vs reference 06] The pinned cart bar belongs to EVERY store
-          type, not only marts — the reference draws it on a restaurant menu.
-          Gated on the cart actually belonging to THIS store (the cart is
-          single-vendor and carries its vendorId), so browsing another
-          storefront never shows another store's basket. Copy per the
-          reference: "View cart" left, "N items · $X" right. */}
-      {cartCount > 0 && cart.data?.vendorId === vendorId ? (
-        <Pressable onPress={() => navigation.navigate('Tabs', { screen: 'Cart' })}>
-          {({ pressed }) => (
-            <View
-              style={{
-                position: 'absolute',
-                left: GUTTER,
-                right: GUTTER,
-                bottom: insets.bottom + space.lg,
-                height: 52,
-                borderRadius: 9999,
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                paddingHorizontal: space.xl,
-                backgroundColor: color.brand[500],
-                opacity: pressed ? 0.9 : 1,
-                ...elevation.floating,
-              }}
-            >
-              <T variant="body" weight="bold" tone="onBrand">
-                View cart
-              </T>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs }}>
-                <T variant="body" weight="bold" tone="onBrand">
-                  {cartCount} item{cartCount === 1 ? '' : 's'} ·
-                </T>
-                <Money amount={Number(cart.data?.subtotalCustomer ?? 0)} tone="onBrand" />
-              </View>
-            </View>
-          )}
-        </Pressable>
-      ) : null}
+      {/* [E09] One pinned cart bar for every surface: the storefront passes its
+          vendorId so the bar only shows for THIS store's basket. */}
+      <CartBar vendorId={vendorId} />
 
       {/* Operating hours (kit 17) */}
       <PopupCard visible={showHours} onClose={() => setShowHours(false)}>
