@@ -153,6 +153,48 @@ describe('Excel import (§3.1)', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('BAD_XLSX');
   });
+
+  it('a zip whose central directory declares a huge uncompressed entry is refused before inflation', async () => {
+    // Build a small, VALID workbook, then rewrite the first central-directory
+    // entry's advertised uncompressed size to 64 MB while the stored bytes
+    // stay tiny — the classic zip-bomb shape. The pre-scan must refuse it
+    // from the central directory alone (on main there is no pre-scan, so the
+    // request either inflates the file or 200s — either way not this 400).
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Catalogue');
+    sheet.addRow(['Product Name', 'Section', 'Unit Cost']);
+    sheet.addRow(['Bomb', 'Groceries', 10]);
+    const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+
+    let eocd = -1;
+    for (let i = buffer.length - 22; i >= 0; i -= 1) {
+      if (buffer.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    }
+    expect(eocd).toBeGreaterThanOrEqual(0);
+    const cdOffset = buffer.readUInt32LE(eocd + 16);
+    expect(buffer.readUInt32LE(cdOffset)).toBe(0x02014b50);
+    buffer.writeUInt32LE(64 * 1024 * 1024, cdOffset + 24); // uncompressed size → 64 MB
+
+    const res = await postFile('/api/v1/vendor/items/import/xlsx', owner.token, 'bomb.xlsx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('BAD_XLSX');
+    // The guard's signature, not the generic exceljs load-failure catch (which
+    // also 400s BAD_XLSX): only the central-directory pre-scan says this.
+    expect(res.json().error.message).toContain('uncompressed bytes');
+  });
+
+  it('an over-compressed-size workbook is refused with a friendly 400, not a raw 413', async () => {
+    // 2 MB is over the route's 1 MB compressed cap but under the app's global
+    // 5 MB multipart limit, so only the per-route cap fires. On main (no cap,
+    // no mapping) this buffer is not a workbook and dies in exceljs as
+    // BAD_XLSX — never XLSX_TOO_LARGE — so this is red on main.
+    const res = await postFile('/api/v1/vendor/items/import/xlsx', owner.token, 'big.xlsx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', Buffer.alloc(2 * 1024 * 1024, 7));
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('XLSX_TOO_LARGE');
+    expect(res.json().error.message).toContain('compressed file');
+  });
 });
 
 describe('Menu PDF parsing (§3.1) — fails closed', () => {

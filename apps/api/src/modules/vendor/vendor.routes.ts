@@ -32,6 +32,7 @@ import { DECLARATION_DOC_TYPE } from '../verification/doc-registry';
 import { validRegistrationRecord } from './vendor-tier';
 import { parseCsvWithHeader } from '../../utils/csv';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
+import { scanXlsxZip, XlsxZipGuardError, XLSX_IMPORT_ZIP_BUDGET } from '../../utils/xlsx-zip-guard';
 import { parseMenuText } from '../../utils/menu-text-parse';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
@@ -266,6 +267,13 @@ const importCsvSchema = z.object({
 });
 
 const MAX_IMPORT_ROWS = 5000;
+// Excel-import guards (audit DS107 High #5): the zip-bomb budget lives in
+// utils/xlsx-zip-guard; these bound the workbook shape once exceljs has parsed
+// it. 1 MB compressed is generous for a catalogue workbook (text compresses
+// ~10:1, and the confirm step already caps 5000 rows).
+const XLSX_MAX_COMPRESSED_BYTES = 1 * 1024 * 1024;
+const MAX_XLSX_COLUMNS = 100;
+const MAX_XLSX_CELL_TEXT = 2000;
 
 /** One CSV row of the import template. Coercions keep messy files importable. */
 const csvRowSchema = z.object({
@@ -2474,10 +2482,36 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  confirm flow as CSV. */
   app.post('/items/import/xlsx', auth, async (request) => {
     await requireVendor(app, request, 'MANAGER');
-    const file = await request.file();
-    if (!file) throw new AppError(400, 'NO_FILE', 'Attach an .xlsx file');
+    // Compressed transport cap: the global multipart limit is 5 MB (KYC/
+    // selfie photos); a catalogue workbook is far smaller, so hold THIS route
+    // to 1 MB on disk. The guard below bounds what it can expand TO. An
+    // over-cap upload is translated into this route's own 400 vocabulary, not
+    // busboy's raw 413.
+    let buffer: Buffer;
+    try {
+      const file = await request.file({ limits: { fileSize: XLSX_MAX_COMPRESSED_BYTES, files: 1 } });
+      if (!file) throw new AppError(400, 'NO_FILE', 'Attach an .xlsx file');
+      buffer = await file.toBuffer();
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      if ((err as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') {
+        throw new AppError(400, 'XLSX_TOO_LARGE', `That workbook is too large: the compressed file must be under ${XLSX_MAX_COMPRESSED_BYTES / (1024 * 1024)} MB.`);
+      }
+      throw err;
+    }
+    // Zip-bomb guard: refuse by the ZIP central directory's ADVERTISED sizes
+    // BEFORE exceljs inflates anything. A tiny .xlsx can legally declare a
+    // multi-GB sharedStrings.xml; exceljs would try to inflate it and OOM the
+    // process before any header validation could refuse it.
+    try {
+      scanXlsxZip(buffer, XLSX_IMPORT_ZIP_BUDGET);
+    } catch (err) {
+      if (err instanceof XlsxZipGuardError) {
+        throw new AppError(400, 'BAD_XLSX', `That workbook is not importable: ${err.message}`);
+      }
+      throw err;
+    }
 
-    const buffer = await file.toBuffer();
     const ExcelJS = (await import('exceljs')).default;
     const workbook = new ExcelJS.Workbook();
     try {
@@ -2489,22 +2523,38 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!sheet || sheet.rowCount < 2) {
       throw new AppError(400, 'EMPTY_CSV', 'No data rows found in the first worksheet');
     }
+    // Post-load shape caps: the central-directory guard bounds what exceljs
+    // can inflate; these bound what the row loop below can build. Keep the
+    // row cap in lock-step with the CSV confirm step's MAX_IMPORT_ROWS.
+    if (sheet.rowCount - 1 > MAX_IMPORT_ROWS) {
+      throw new AppError(400, 'TOO_MANY_ROWS', `Import is limited to ${MAX_IMPORT_ROWS} rows per file (got ${sheet.rowCount - 1})`);
+    }
+    if (sheet.columnCount > MAX_XLSX_COLUMNS) {
+      throw new AppError(400, 'BAD_XLSX', `Import is limited to ${MAX_XLSX_COLUMNS} columns per file (got ${sheet.columnCount})`);
+    }
 
-    const cellText = (v: unknown): string => {
-      if (v === null || v === undefined) return '';
-      if (typeof v === 'object') {
+    const cellText = (v: unknown, where: string): string => {
+      let text: string;
+      if (v === null || v === undefined) {
+        text = '';
+      } else if (typeof v === 'object') {
         const rich = v as { richText?: Array<{ text: string }>; text?: string; result?: unknown };
-        if (rich.richText) return rich.richText.map((t) => t.text).join('');
-        if (rich.text) return rich.text;
-        if (rich.result !== undefined) return String(rich.result);
-        return '';
+        if (rich.richText) text = rich.richText.map((t) => t.text).join('');
+        else if (rich.text) text = rich.text;
+        else if (rich.result !== undefined) text = String(rich.result);
+        else text = '';
+      } else {
+        text = String(v);
       }
-      return String(v);
+      if (text.length > MAX_XLSX_CELL_TEXT) {
+        throw new AppError(400, 'BAD_XLSX', `Cell text at ${where} exceeds ${MAX_XLSX_CELL_TEXT} characters.`);
+      }
+      return text;
     };
 
     const headerRow = sheet.getRow(1);
     const headers: string[] = [];
-    headerRow.eachCell({ includeEmpty: false }, (cell, col) => { headers[col - 1] = cellText(cell.value).trim(); });
+    headerRow.eachCell({ includeEmpty: false }, (cell, col) => { headers[col - 1] = cellText(cell.value, `header column ${col}`).trim(); });
 
     const rows: Record<string, string>[] = [];
     sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
@@ -2513,7 +2563,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       let hasValue = false;
       headers.forEach((h, i) => {
         if (!h) return;
-        const value = cellText(row.getCell(i + 1).value).trim();
+        const value = cellText(row.getCell(i + 1).value, `row ${rowNumber}, column ${i + 1}`).trim();
         record[h] = value;
         if (value) hasValue = true;
       });
