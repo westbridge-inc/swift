@@ -21,7 +21,7 @@ aws_s3() {
 db_psql() {
   local database="$1"; shift
   "${COMPOSE[@]}" exec -T postgres sh -c \
-    'export PGPASSWORD="$POSTGRES_PASSWORD"; db="$1"; shift; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$db" -v ON_ERROR_STOP=1 "$@"' \
+    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; db="$1"; shift; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$db" -v ON_ERROR_STOP=1 "$@"' \
     sh "$database" "$@"
 }
 cleanup() { [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"; }
@@ -36,9 +36,15 @@ command -v docker >/dev/null 2>&1 || die "Docker is required for the private Pos
 command -v pg_restore >/dev/null 2>&1 || die "pg_restore is required to inspect the archive"
 
 if [[ "$SOURCE" == s3://* ]]; then
-  for name in BACKUP_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_S3_ENDPOINT AWS_REGION; do
+  # Settings from the environment, then deploy/.env. The storage KEYS only from
+  # the environment, *_FILE or $CREDENTIALS_DIRECTORY (deploy/secret-env.sh):
+  # run an off-site drill through a transient unit with LoadCredentialEncrypted=,
+  # as the runbook shows.
+  for name in BACKUP_BUCKET AWS_S3_ENDPOINT AWS_REGION; do
     if [ -z "${!name:-}" ]; then export "$name=$(env_value "$name")"; fi
   done
+  . "$HERE/secret-env.sh"
+  load_secret_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || exit 1
   [ -n "${BACKUP_BUCKET:-}" ] || die "BACKUP_BUCKET is required for off-site restore"
   [[ "$SOURCE" == "s3://$BACKUP_BUCKET/"* ]] || die "off-site source must be in BACKUP_BUCKET"
   [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] ||
@@ -63,7 +69,7 @@ db_psql postgres -q -c "CREATE DATABASE \"$SCRATCH\";"
 
 STARTED="$(date +%s)"
 "${COMPOSE[@]}" exec -T postgres sh -c \
-  'export PGPASSWORD="$POSTGRES_PASSWORD"; exec pg_restore -h 127.0.0.1 -U "$POSTGRES_USER" --exit-on-error --no-owner --dbname="$1"' \
+  'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec pg_restore -h 127.0.0.1 -U "$POSTGRES_USER" --exit-on-error --no-owner --dbname="$1"' \
   sh "$SCRATCH" < "$DUMP"
 
 FAILED=0
