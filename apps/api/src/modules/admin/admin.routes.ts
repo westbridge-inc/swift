@@ -38,6 +38,7 @@ import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
 import { revealPickupCode, rotatePickupCode, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
+import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
@@ -1059,6 +1060,32 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, ...paginatedResponse(users, total, { page, limit, skip }) };
   });
 
+  /** [S1 response-shaping] The mover slice `GET /users/:id` needs: identity
+   *  facts for the console's profile links and vehicle facts for the review
+   *  center. KYC document URLs, enforcement state, float and rating internals
+   *  must never ride on this envelope — the dedicated mover detail routes own
+   *  those. An allow-list, so a new Rider/Driver column does not leak here. */
+  const ADMIN_USER_MOVER_SELECT = {
+    id: true,
+    documentsVerified: true,
+    vehicleType: true,
+    vehicleMake: true,
+    vehicleModel: true,
+    vehicleColor: true,
+    licensePlate: true,
+  } as const;
+
+  /** Same story for a user's stores: what the console's profile section draws
+   *  (name + status) and the review center's business facts — never the
+   *  operational `phone`/`email`. */
+  const ADMIN_USER_VENDOR_SELECT = {
+    id: true,
+    name: true,
+    vendorType: true,
+    status: true,
+    city: true,
+  } as const;
+
   app.get('/users/:id', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
@@ -1066,9 +1093,9 @@ export async function adminRoutes(app: FastifyInstance) {
       where: { id },
       include: {
         customer: true,
-        rider: { include: { subscription: true } },
-        driver: { include: { subscription: true } },
-        vendorOwner: { include: { vendors: true } },
+        rider: { select: ADMIN_USER_MOVER_SELECT },
+        driver: { select: ADMIN_USER_MOVER_SELECT },
+        vendorOwner: { select: { vendors: { select: ADMIN_USER_VENDOR_SELECT } } },
         addresses: true,
         // The trust story + the paper trail the operator acts on.
         strikes: { orderBy: { createdAt: 'desc' }, take: 20 },
@@ -1082,7 +1109,10 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!user) throw new NotFoundError('User', id);
 
-    return { success: true, data: user };
+    // [S1 response-shaping] passwordHash / failedLoginAttempts / lockedUntil /
+    // lastKnownLat / lastKnownLng never leave the API on a user object — the
+    // ONE shared deny-list every auth response already uses.
+    return { success: true, data: sanitizeUser(user) };
   });
 
   /** GET /users/:id/risk — one deterministic number from existing signals
