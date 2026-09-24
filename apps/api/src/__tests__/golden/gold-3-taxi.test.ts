@@ -44,8 +44,8 @@ import { recordDispatchQueue } from '../helpers/dispatch-queue';
 //   TAXI-05  a verified browser-cookie session cannot book or queue (#1271);
 //            the mobile bearer keeps booking, whatever client label it sends.
 //
-//   G3-F1    [it.fails] an admin cannot see or settle a DRIVER's guarantee
-//            claim (the admin claim scope requires a rider).
+//   G3-F1    an admin sees and settles a DRIVER's guarantee claim (fixed by
+//            #1293: the admin claim scope now includes the tenant's drivers).
 //
 // Dispatch runs through the suite's acknowledged route→worker double
 // (helpers/dispatch-queue.ts); the queue scan is the worker's own function.
@@ -749,7 +749,9 @@ describe('GOLD-3 · TAXI-04 — cash / no-show outcome → guarantee claim → s
 // approval). This asserts the CORRECT behaviour. Everything the body relies on
 // is proven in beforeAll (the claim exists AUTO_APPROVED; both admin sessions
 // authenticate), so the ONLY thing that can fail first on main is the
-// visibility assertion — the defect.
+// visibility assertion — the defect. #1293 fixed it ("driver claims in the
+// admin queue"): on the combined code the whole settlement passes, so this is
+// a plain `it` now.
 describe('GOLD-3 · TAXI-04 — [G3-F1] an admin settles the driver\'s no-show claim', () => {
   let claimId = '';
   let admin: Actor;
@@ -774,7 +776,7 @@ describe('GOLD-3 · TAXI-04 — [G3-F1] an admin settles the driver\'s no-show c
     }
   });
 
-  it.fails('[G3-F1] the claim is in the admin queue and a two-person payout settles it from the funded reserve, once', async () => {
+  it('[G3-F1] the claim is in the admin queue and a two-person payout settles it from the funded reserve, once', async () => {
     const queue = await adminInject({ method: 'GET', url: '/api/v1/admin/cash-rules/claims?status=AUTO_APPROVED&limit=100', token: admin.token });
     expect((queue.json().data as Array<{ id: string }>).map((c) => c.id)).toContain(claimId);
 
