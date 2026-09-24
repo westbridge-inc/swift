@@ -2295,7 +2295,11 @@ export async function customerRoutes(app: FastifyInstance) {
         vendor: {
           select: {
             id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true,
-            vendorType: true, phone: true, latitude: true, longitude: true,
+            // [S1 response-shaping · High #6] never `phone` — that is the
+            // store's account/OTP line, not a number it chose to publish, and
+            // it was handed to every customer on every order, for good. The
+            // storefront offers `publicPhone`; the order detail names the store.
+            vendorType: true, latitude: true, longitude: true,
           },
         },
         items: {
