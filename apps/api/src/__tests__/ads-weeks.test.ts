@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mondayOf, isMonday, weeksBetween, weekCount } from '../modules/ads/ads-weeks';
+import { mondayOf, isMonday, weeksBetween, weekCount, weekSpan } from '../modules/ads/ads-weeks';
 
 // Ad week math (ads-platform spec §7.1) — unit-tested across month/year
 // boundaries and the Guyana timezone edge. All week columns store the Monday.
@@ -59,5 +59,19 @@ describe('weeksBetween / weekCount', () => {
   it('rejects non-Monday bounds and a backwards range', () => {
     expect(() => weeksBetween(new Date('2026-08-04'), new Date('2026-08-24'))).toThrow(/Monday/);
     expect(() => weeksBetween(new Date('2026-08-24'), new Date('2026-08-03'))).toThrow(/precedes/);
+  });
+});
+
+describe('weekSpan', () => {
+  it('counts Mondays arithmetically and agrees with weekCount', () => {
+    expect(weekSpan(new Date('2026-08-03'), new Date('2026-08-24'))).toBe(4);
+    expect(weekSpan(new Date('2026-08-03'), new Date('2026-08-03'))).toBe(1);
+    expect(weekSpan(new Date('2026-12-28'), new Date('2027-01-11'))).toBe(3);
+    expect(weekSpan(new Date('2026-01-05'), new Date('2031-01-06'))).toBe(262);
+  });
+
+  it('rejects non-Monday bounds and a backwards range like weeksBetween', () => {
+    expect(() => weekSpan(new Date('2026-08-04'), new Date('2026-08-24'))).toThrow(/Monday/);
+    expect(() => weekSpan(new Date('2026-08-24'), new Date('2026-08-03'))).toThrow(/precedes/);
   });
 });

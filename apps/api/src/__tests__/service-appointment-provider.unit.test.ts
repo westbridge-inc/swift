@@ -314,7 +314,7 @@ describe('PUT /vendor/orders/:id/reject — the customer is told a booking was d
   it('RED reproduction — an unattested-MMG booking decline points the refund at the provider', async () => {
     const h = await providerHost([serviceBooking('bk-1', { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' })]);
     const spies = rejectSpies(h.store);
-    await h.call('put /orders/:id/reject', asProvider({ params: { id: 'bk-1' }, body: {} }));
+    await h.call('put /orders/:id/reject', asProvider({ params: { id: 'bk-1' }, body: { reason: 'Fully booked that day' } }));
     const payload = spies.send.mock.calls[0]![0] as Push;
     expect(payload.body).toContain('If you already sent the MMG payment, the provider refunds you directly.');
     expect(payload.body).not.toMatch(/store/i);
@@ -334,12 +334,23 @@ describe('PUT /vendor/orders/:id/reject — the customer is told a booking was d
     });
   });
 
-  it('control — a cash food order declined without a reason keeps the default reason and no MMG sentence', async () => {
+  it('[E10] a decline without a reason is refused before anything changes — the customer is always told why', async () => {
+    // It used to go through with the generic "Rejected by vendor", which told
+    // the customer nothing. Every vendor client now sends a preset.
     const h = await providerHost([foodDelivery('food-1')]);
     const spies = rejectSpies(h.store);
-    await h.call('put /orders/:id/reject', asProvider({ params: { id: 'food-1' }, body: {} }));
+    await expect(h.call('put /orders/:id/reject', asProvider({ params: { id: 'food-1' }, body: {} }))).rejects.toThrow();
+    await expect(h.call('put /orders/:id/reject', asProvider({ params: { id: 'food-1' }, body: { reason: '   ' } }))).rejects.toThrow();
+    expect(spies.transition).not.toHaveBeenCalled();
+    expect(spies.send).not.toHaveBeenCalled();
+  });
+
+  it('control — a cash food order declined with a reason carries it and no MMG sentence', async () => {
+    const h = await providerHost([foodDelivery('food-1')]);
+    const spies = rejectSpies(h.store);
+    await h.call('put /orders/:id/reject', asProvider({ params: { id: 'food-1' }, body: { reason: 'Kitchen is too busy' } }));
     const payload = spies.send.mock.calls[0]![0] as Push;
     expect(payload.title).toBe('Order declined');
-    expect(payload.body).toBe('Your order ORD-FOOD-1 was declined by the store. Rejected by vendor');
+    expect(payload.body).toBe('Your order ORD-FOOD-1 was declined by the store. Kitchen is too busy');
   });
 });

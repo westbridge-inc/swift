@@ -80,7 +80,7 @@ describe('the sell-the-space flow', () => {
     expect(placements.statusCode).toBe(200);
     expect((placements.json().data as Array<{ id: string; weeklyPrice: number }>).find((p) => p.id === placement.id)?.weeklyPrice).toBe(5000);
 
-    // Availability materialises rows.
+    // Availability is a read-only projection.
     const avail = await get(`/api/v1/ads/placements/${placement.id}/availability?city=*&from=2026-08-03&to=2026-08-17`, owner.token);
     expect(avail.statusCode).toBe(200);
     expect((avail.json().data as unknown[]).length).toBe(3); // 3 Mondays
@@ -121,5 +121,53 @@ describe('the sell-the-space flow', () => {
     const placement = await makePlacement();
     const res = await post('/api/v1/ads/campaigns', { advertiserId: adv.id, placementId: placement.id, name: 'Nope', cities: ['*'], startWeek: '2026-08-03', endWeek: '2026-08-03' }, stranger.token);
     expect(res.statusCode).toBe(404); // not a member → advertiser "not found" for them
+  });
+
+  it('refuses an over-104-week availability range with 400 and writes ZERO inventory rows', async () => {
+    // Audit DS107 High #4: from=0000-01-01&to=9999-12-31 used to materialise
+    // ~422k AdInventoryWeek rows (~845k statements). A 5-year span is enough
+    // to prove the bound without actually writing 422k rows in CI; on main it
+    // 200s and materialises ~260 rows instead of this 400.
+    const owner = await makeUser(['CUSTOMER']);
+    await makeAdvertiser(owner.userId, 'APPROVED'); // member, so the authz gate is not what fires
+    const placement = await makePlacement();
+    const before = await app.prisma.adInventoryWeek.count({ where: { placementId: placement.id } });
+
+    const res = await get(`/api/v1/ads/placements/${placement.id}/availability?city=*&from=2026-01-05&to=2031-01-06`, owner.token);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('BAD_RANGE');
+    const after = await app.prisma.adInventoryWeek.count({ where: { placementId: placement.id } });
+    expect(after).toBe(before); // zero rows written by the refused request
+    expect(after).toBe(0);
+  });
+
+  it('a logged-in user who is not an advertiser member cannot query availability', async () => {
+    const stranger = await makeUser(['CUSTOMER']); // no AdvertiserMember row
+    const placement = await makePlacement();
+    const res = await get(`/api/v1/ads/placements/${placement.id}/availability?city=*&from=2026-08-03&to=2026-08-17`, stranger.token);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('ADVERTISER_REQUIRED');
+    expect(await app.prisma.adInventoryWeek.count({ where: { placementId: placement.id } })).toBe(0);
+  });
+
+  it('refuses to draft a campaign spanning more than 104 weeks', async () => {
+    // The same unbounded week×city write engine was reachable through the
+    // reserve/checkout endpoints: drafting a hostile span (then reserving it
+    // as an APPROVED member) would loop ~422k weeks × up to 50 cities. The
+    // draft must be refused at creation, before any campaign row exists.
+    const owner = await makeUser(['CUSTOMER']);
+    const adv = await makeAdvertiser(owner.userId, 'APPROVED');
+    const placement = await makePlacement();
+    const before = await app.prisma.adCampaign.count({ where: { advertiserId: adv.id } });
+
+    const res = await post('/api/v1/ads/campaigns', {
+      advertiserId: adv.id, placementId: placement.id, name: 'Huge span',
+      cities: ['*'], startWeek: '2026-01-05', endWeek: '2031-01-06', // 262 Mondays
+    }, owner.token);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('BAD_RANGE');
+    expect(await app.prisma.adCampaign.count({ where: { advertiserId: adv.id } })).toBe(before); // nothing drafted
   });
 });

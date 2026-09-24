@@ -280,6 +280,60 @@ class SwiftSecretsList(StoreHarness):
         self.assertNotIn(b"hidden", result.stdout + result.stderr)
         self.assertNotIn("decrypt", self.calls())
 
+    def test_list_refuses_a_store_it_cannot_read_instead_of_printing_nothing(self):
+        # [staging 09-24] /etc/credstore.encrypted is 0700 root (the systemd
+        # default): an unprivileged list saw no directory and printed NOTHING,
+        # so pilot-up reported every stored secret as missing.
+        if os.geteuid() == 0:
+            self.skipTest("running as root")
+        parent = self.tmp / "credstore.encrypted"
+        store = parent / "swift"
+        store.mkdir(parents=True)
+        (store / "JWT_SECRET.cred").write_bytes(b"FAKECRED\nJWT_SECRET\n")
+        parent.chmod(0o700)
+        os.chmod(parent, 0o000)
+        try:
+            result = self.run_store("list", SWIFT_SECRETS_STORE_DIR=str(store))
+        finally:
+            os.chmod(parent, 0o700)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(b"sudo swift-secrets list", result.stderr)
+
+    def test_list_with_a_trailing_slash_still_refuses_an_unreadable_parent(self):
+        # [DS204 F1] ${STORE_DIR%/*} on ".../swift/" named the store itself, not
+        # its parent, so a store hidden behind a root-only parent listed as
+        # empty again: the exact lie the refusal above exists to prevent.
+        if os.geteuid() == 0:
+            self.skipTest("running as root")
+        parent = self.tmp / "credstore.encrypted"
+        store = parent / "swift"
+        store.mkdir(parents=True)
+        (store / "JWT_SECRET.cred").write_bytes(b"FAKECRED\nJWT_SECRET\n")
+        os.chmod(parent, 0o000)
+        try:
+            result = self.run_store("list", SWIFT_SECRETS_STORE_DIR=str(store) + "/")
+        finally:
+            os.chmod(parent, 0o700)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(b"sudo swift-secrets list", result.stderr)
+
+    def test_list_refuses_an_existing_store_directory_it_cannot_read(self):
+        # The sibling branch: the parent is readable but the store itself is not.
+        if os.geteuid() == 0:
+            self.skipTest("running as root")
+        self.store.mkdir()
+        (self.store / "JWT_SECRET.cred").write_bytes(b"FAKECRED\nJWT_SECRET\n")
+        os.chmod(self.store, 0o000)
+        try:
+            result = self.run_store("list")
+        finally:
+            os.chmod(self.store, 0o700)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(b"sudo swift-secrets list", result.stderr)
+
     def test_list_on_an_empty_or_missing_store_prints_nothing(self):
         result = self.run_store("list")
         self.assertEqual((result.returncode, result.stdout), (0, b""))
@@ -718,6 +772,8 @@ class PilotUpSecretsPreflight(StoreHarness):
         result = self.run_fragment(self.ENV_OK, self.ALL_WIRED)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("systemctl restart swift-secrets.service", self.calls())
+        # The root-only store is listed through sudo -n, never unprivileged.
+        self.assertRegex(self.calls(), r"(?m)^sudo -n \S*swift-secrets list$")
 
     def test_refuses_a_secret_declared_in_the_env_file(self):
         # [R2 F1] Every spelling Compose's env-file parser loads: bare, empty,
@@ -830,6 +886,8 @@ class DeployShStoreGate(StoreHarness):
         self.listed.write_text("")
         sh_shim(self.bin, "swift-secrets", '[ "$1" = list ] && cat "$LISTED"; exit 0')
         sh_shim(self.bin, "uname", 'echo "${FAKE_UNAME:-Linux}"')
+        # sudo -n CMD ARGS → CMD ARGS, recorded (the store is root-only on a host).
+        sh_shim(self.bin, "sudo", 'echo "sudo $*" >> "$CALL_LOG"; [ "$1" = "-n" ] && shift; exec "$@"')
         source = (DEPLOY / "deploy.sh").read_text()
         begin = source.index("# ── secrets store check (begin)")
         end = source.index("# ── secrets store check (end)")
@@ -852,6 +910,20 @@ class DeployShStoreGate(StoreHarness):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("MASTER_KEK", result.stderr)
         self.assertIn("gen-secrets.sh", result.stderr)
+
+    def test_the_store_is_listed_through_sudo_because_it_is_root_only(self):
+        # [DS204] The unprivileged list saw nothing through the 0700 parent, so
+        # deploy.sh reported every stored secret as missing on a real host.
+        result = self.run_gate("up", self.REQUIRED)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(self.calls(), r"(?m)^sudo -n \S*swift-secrets list$")
+
+    def test_a_failed_list_is_a_refusal_not_an_empty_store(self):
+        sh_shim(self.bin, "swift-secrets", 'echo "swift-secrets: cannot read the store" >&2; exit 1')
+        result = self.run_gate("up", self.REQUIRED)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("sudo -n swift-secrets list", result.stderr)
+        self.assertNotIn("REQUIRED secrets are not in the encrypted store", result.stderr)
 
     def test_macos_refuses_with_an_explanation_instead_of_failing_later(self):
         result = self.run_gate("up", self.REQUIRED, FAKE_UNAME="Darwin")

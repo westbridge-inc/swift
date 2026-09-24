@@ -349,7 +349,10 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
     expect(shown.headers['cache-control']).toContain('no-store');
     expect(Buffer.from(shown.rawPayload).equals(bytes)).toBe(true);
     // The link is bound to its document: the same signature cannot open another.
-    const forged = await app.inject({ method: 'GET', url: url.replace(docId, `${docId.slice(0, -1)}x`) });
+    // (The last character always CHANGES: a cuid ending in 'x' made the
+    // "forged" URL the real one about once in 36 runs.)
+    const forgedId = `${docId.slice(0, -1)}${docId.endsWith('x') ? 'y' : 'x'}`;
+    const forged = await app.inject({ method: 'GET', url: url.replace(docId, forgedId) });
     expect(forged.statusCode).toBe(403);
     expect(await sys(() => app.prisma.auditLog.count({ where: { entityId: docId, action: 'VIEW_VERIFICATION_DOC', userId: rev1.userId } }))).toBe(1);
 
