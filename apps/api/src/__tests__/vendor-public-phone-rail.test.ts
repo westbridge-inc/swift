@@ -9,6 +9,8 @@ import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { homeCacheKey } from '../modules/user/home-cache';
+import { VENDOR_CARD_PUBLIC_FIELDS } from '../utils/vendor-card';
 
 // ---------------------------------------------------------------------------
 // A store publishing a number a customer can call BEFORE ordering.
@@ -236,5 +238,181 @@ describe('the two states where Swift must not advertise a way to reach a store',
 
     const get = await inject('GET', `/api/v1/customer/vendors/${legacy.vendorId}`, undefined, customer.token);
     expect(get.json().data.publicPhone).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [S1 response-shaping · High #6] Discovery used to hand the WHOLE Vendor row
+// to the client — `phone` (the account/OTP line), `email`, `ownerId`, `qrSlug`
+// and the staged MMG fields. The card is an allow-list now; these tests pin
+// the exact wire keys so a new sensitive Vendor column fails by default.
+// ---------------------------------------------------------------------------
+
+describe('discovery publishes the public card, never the account row', () => {
+  it('the anonymous directory and Home rails carry exactly the public card fields', async () => {
+    await app.prisma.vendor.update({
+      where: { id: shop.vendorId },
+      data: { email: 'owner-email@example.test', publicPhone: '+5922251234', cuisineTypes: ['priv1-rail-test'] },
+    });
+    const category = await app.prisma.category.create({ data: { vendorId: shop.vendorId, name: 'Menu', sortOrder: 0 } });
+    await app.prisma.item.create({
+      data: { vendorId: shop.vendorId, categoryId: category.id, name: 'Call-me special', basePrice: 1000, isAvailable: true },
+    });
+    process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.mmg.gy';
+    try {
+      await app.prisma.vendor.update({
+        where: { id: shop.vendorId },
+        data: { mmgPayUrl: 'https://pay.mmg.gy/merchant/call-me-diner' },
+      });
+
+      const cardKeys = [
+        ...VENDOR_CARD_PUBLIC_FIELDS,
+        'distanceKm', 'etaMin', 'deliveryFee', 'isFavorite',
+        'displayRating', 'ratingBucket', 'ratingCount', 'topRated',
+      ].sort();
+
+      const browse = await inject('GET', '/api/v1/customer/vendors?cuisine=priv1-rail-test&limit=50');
+      expect(browse.statusCode).toBe(200);
+      const card = browse.json().data.find((v: any) => v.id === shop.vendorId);
+      expect(card, 'the seeded store should be in browse').toBeTruthy();
+      expect(Object.keys(card).sort()).toEqual(cardKeys);
+      expect(card.phone).toBeUndefined();
+      expect(card.email).toBeUndefined();
+      expect(card.publicPhone).toBe('+5922251234');
+      expect(card.mmgPayUrl).toBe('https://pay.mmg.gy/merchant/call-me-diner');
+      expect(JSON.stringify(browse.json())).not.toContain(shop.accountPhone);
+      expect(JSON.stringify(browse.json())).not.toContain('owner-email@example.test');
+
+      await app.redis.del(homeCacheKey(undefined, undefined, undefined));
+      const home = await inject('GET', '/api/v1/customer/home');
+      expect(home.statusCode).toBe(200);
+      const homeCard = home.json().data.openVendors.find((v: any) => v.id === shop.vendorId);
+      expect(homeCard, 'the seeded store should be on a Home rail').toBeTruthy();
+      expect(Object.keys(homeCard).sort()).toEqual([...cardKeys, 'categories'].sort());
+      expect(homeCard.phone).toBeUndefined();
+      expect(homeCard.email).toBeUndefined();
+      expect(homeCard.publicPhone).toBe('+5922251234');
+      expect(JSON.stringify(home.json())).not.toContain(shop.accountPhone);
+      expect(JSON.stringify(home.json())).not.toContain('owner-email@example.test');
+
+      // The RIGHT party keeps the account contact: the owner's own dashboard
+      // still reads the operational phone and email the store registered.
+      const profile = await inject('GET', '/api/v1/vendor/profile', undefined, owner.token, shop.vendorId);
+      expect(profile.statusCode).toBe(200);
+      const own = profile.json().data.vendors.find((v: any) => v.id === shop.vendorId);
+      expect(own.phone).toBe(shop.accountPhone);
+      expect(own.email).toBe('owner-email@example.test');
+    } finally {
+      delete process.env['MMG_PAY_URL_ALLOWED_HOSTS'];
+      await app.prisma.vendor.update({
+        where: { id: shop.vendorId },
+        data: { email: null, mmgPayUrl: null },
+      });
+    }
+  });
+
+  it('a customer\'s favourites are the same card', async () => {
+    await app.prisma.vendor.update({
+      where: { id: shop.vendorId },
+      data: { publicPhone: '+5922251234' },
+    });
+    await app.prisma.customer.update({
+      where: { userId: customer.userId },
+      data: { favoriteVendors: { connect: { id: shop.vendorId } } },
+    });
+    try {
+      const fav = await inject('GET', '/api/v1/customer/favorites', undefined, customer.token);
+      expect(fav.statusCode).toBe(200);
+      const card = fav.json().data.find((v: any) => v.id === shop.vendorId);
+      expect(card, 'the favourite should be in the list').toBeTruthy();
+      // Favourites carry the card + the distance/eta/fee enrichments +
+      // isFavorite (this surface has no rating spread today).
+      expect(Object.keys(card).sort()).toEqual(
+        [...VENDOR_CARD_PUBLIC_FIELDS, 'distanceKm', 'etaMin', 'deliveryFee', 'isFavorite'].sort(),
+      );
+      expect(card.phone).toBeUndefined();
+      expect(card.email).toBeUndefined();
+      expect(card.publicPhone).toBe('+5922251234');
+      expect(JSON.stringify(fav.json())).not.toContain(shop.accountPhone);
+    } finally {
+      await app.prisma.customer.update({
+        where: { userId: customer.userId },
+        data: { favoriteVendors: { disconnect: { id: shop.vendorId } } },
+      });
+    }
+  });
+
+  it('a feed cached before the deploy is never served: the discovery key is versioned past the leak', async () => {
+    // The guest feed was cached WITH the whole row for up to HOME_CACHE_TTL.
+    // A rolling deploy must not serve that entry for even one minute, so the
+    // key version moved and the old entry is simply never read again. Poison
+    // the previous version's key with a card carrying the account phone and
+    // prove Home does not pick it up. On the old code the two keys are the
+    // same key, and the poisoned card comes straight back.
+    const liveKey = homeCacheKey(undefined, undefined, undefined);
+    const legacyKey = liveKey.replace(/:discovery:v\d+:/, ':discovery:v2:');
+    const poisoned = {
+      vendors: [{
+        id: shop.vendorId, name: 'Call Me Diner', vendorType: 'RESTAURANT',
+        latitude: 6.801, longitude: -58.156, averageRating: 5, totalOrders: 0,
+        isCurrentlyOpen: true, acceptingOrders: true, isFavorite: false,
+        distanceKm: null, etaMin: null, deliveryFee: null,
+        displayRating: null, ratingBucket: 'NEW', ratingCount: 0, topRated: false,
+        categories: [],
+        phone: shop.accountPhone, email: 'owner-email@example.test',
+      }],
+      popularItems: [],
+      categories: [],
+    };
+    await app.redis.del(liveKey);
+    await app.redis.set(legacyKey, JSON.stringify(poisoned), 'EX', 120);
+    try {
+      const home = await inject('GET', '/api/v1/customer/home');
+      expect(home.statusCode).toBe(200);
+      // The route must be reading the key this test reasons about, or a key
+      // mismatch would pass it vacuously: after the request the live key holds
+      // the feed the route just built.
+      expect(await app.redis.get(liveKey), 'Home should have written the live discovery key').not.toBeNull();
+      expect(JSON.stringify(home.json())).not.toContain(shop.accountPhone);
+      expect(JSON.stringify(home.json())).not.toContain('owner-email@example.test');
+      const card = home.json().data.openVendors.find((v: any) => v.id === shop.vendorId);
+      expect(card, 'the seeded store should be on a Home rail').toBeTruthy();
+      expect(card.phone).toBeUndefined();
+    } finally {
+      await app.redis.del(legacyKey, liveKey);
+    }
+  });
+
+  it("a customer's order detail names the store but never its account phone", async () => {
+    // Same class as the card leak, on the one surface every customer keeps:
+    // the order detail selected `vendor.phone` — the account/OTP line — and
+    // returned it on every order, for good. The vendor block is an allow-list.
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `SW-RAIL-${nanoid(8).toUpperCase()}`,
+        orderType: 'FOOD_DELIVERY',
+        vendorId: shop.vendorId,
+        customerId: customer.userId,
+        status: 'PENDING',
+        deliveryAddress: '5 Buyer Street, Georgetown',
+        deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+        deliveryFee: 500, totalAmount: 1500,
+        paymentMethod: 'CASH',
+      },
+    });
+    try {
+      const res = await inject('GET', `/api/v1/customer/orders/${order.id}`, undefined, customer.token);
+      expect(res.statusCode).toBe(200);
+      const vendor = res.json().data.vendor;
+      expect(vendor.name).toBe('Call Me Diner');
+      expect(Object.keys(vendor).sort()).toEqual(
+        ['coverImageUrl', 'id', 'latitude', 'logoUrl', 'longitude', 'name', 'slug', 'vendorType'],
+      );
+      expect(vendor.phone).toBeUndefined();
+      expect(JSON.stringify(res.json())).not.toContain(shop.accountPhone);
+    } finally {
+      await app.prisma.order.delete({ where: { id: order.id } });
+    }
   });
 });

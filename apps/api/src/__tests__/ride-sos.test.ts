@@ -11,6 +11,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { devChannelLog } from '../providers/notifications/channels';
 
 // ---------------------------------------------------------------------------
 // Phase-3 safety (pre-launch audit: no SOS was a rides-vertical blocker). A
@@ -62,11 +63,11 @@ async function makeLiveRide() {
   return { passenger, driverUser, ride };
 }
 
-type Broadcast = { event: string; rooms: string[] };
+type Broadcast = { event: string; rooms: string[]; payload: unknown };
 
 /** Every packet the socket server broadcasts while `fn` runs. io.to(room).emit,
  *  io.emit and a socket's broadcast all go through the namespace adapter's
- *  broadcast(), so this sees every one of them. */
+ *  broadcast(), so this sees every one of them — event, rooms and payload. */
 async function socketBroadcastsDuring<T>(fn: () => Promise<T>): Promise<{ result: T; broadcasts: Broadcast[] }> {
   const spy = vi.spyOn(app.io.sockets.adapter, 'broadcast');
   try {
@@ -74,6 +75,7 @@ async function socketBroadcastsDuring<T>(fn: () => Promise<T>): Promise<{ result
     const broadcasts = spy.mock.calls.map(([packet, opts]) => ({
       event: String((packet as { data?: unknown[] }).data?.[0]),
       rooms: [...((opts as { rooms?: Set<string> }).rooms ?? [])],
+      payload: (packet as { data?: unknown[] }).data?.[1],
     }));
     return { result, broadcasts };
   } finally {
@@ -114,6 +116,8 @@ afterAll(async () => {
   await app.prisma.evidenceBundle.deleteMany({ where: { sosAlertId: { in: alertIds } } });
   await app.prisma.opsAlert.deleteMany({ where: { sosAlertId: { in: alertIds } } });
   await app.prisma.sosAlert.deleteMany({ where: { actorUserId: { in: createdUserIds } } });
+  // Emergency contacts have no FK to the user; device tokens cascade.
+  await app.prisma.emergencyContact.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });
   await app.prisma.driver.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
@@ -356,5 +360,172 @@ describe('[PRIV2-S1] the other person on the ride never learns an SOS was raised
     expect(opsRead.json().data).toMatchObject({ triggerNote: first.note, retriggers: [{ seq: 1, note: second.note, lat: second.lat, lng: second.lng }] });
     const bundle = await app.prisma.evidenceBundle.findUniqueOrThrow({ where: { sosAlertId: alertId }, include: { items: true } });
     expect(bundle.items.find((i) => i.kind === 'SOS_ALERT')?.content).toMatchObject({ triggerNote: first.note, triggerLat: first.lat, triggerLng: first.lng });
+  });
+});
+
+describe('[PRIV2-S2] the note reaches the people who must act, and only them', () => {
+  // #1287 took the note off the timeline the other person on the ride reads —
+  // and left it on NO screen a responder uses (review F2). It now travels to
+  // exactly two ops-only places: the war-room feed the console polls (GET
+  // /safety/sos and /safety/sos/:id) and the war-room socket rooms, which only
+  // ADMIN / SUPER_ADMIN sockets ever join. Deliberately NOT the ops PAGE: its
+  // body is pushed through Expo/APNs/FCM to phones (lock screens, third-party
+  // relays) and repeated in the on-call SMS when nobody acknowledges it. Not
+  // the emergency contacts' SMS. And never anything the other person on the
+  // ride can receive.
+  const warRoomOnly = (b: Broadcast) => b.rooms.length > 0 && b.rooms.every((room) => room === 'ops:war-room' || room.startsWith('ops:war-room:'));
+  const carries = (value: unknown, ...words: string[]) => { const s = JSON.stringify(value) ?? ''; return words.some((w) => s.includes(w)); };
+
+  it('the ops list and detail reads carry the trigger note and every repeat press’s note, in press order, each with its time', async () => {
+    const { passenger, ride } = await makeLiveRide();
+    const admin = await makeUser(['ADMIN']);
+    const presses = [
+      { lat: 6.80611, lng: -58.16042, note: 'PRIV2-E being followed' },
+      { lat: 6.80744, lng: -58.16188, note: 'PRIV2-E he has a knife now' },
+      { lat: 6.80802, lng: -58.16301 }, // the shipped button: a position, no words
+    ];
+    const ids = new Set<string>();
+    for (const body of presses) {
+      const r = await inject(`/api/v1/rides/${ride.id}/sos`, body, passenger.token);
+      expect(r.statusCode).toBe(200);
+      ids.add(r.json().data.sosAlertId as string);
+    }
+    expect([...ids]).toHaveLength(1);
+    const alertId = [...ids][0]!;
+
+    type Read = { id: string; triggerNote: string | null; triggeredAt: string; retriggerCount: number; retriggers: Array<{ seq: number; at: string; note: string | null }> | null };
+    // The console's own query, then the detail read.
+    const list = await get('/api/v1/safety/sos?status=open&limit=200', admin.token);
+    expect(list.statusCode).toBe(200);
+    const detail = await get(`/api/v1/safety/sos/${alertId}`, admin.token);
+    expect(detail.statusCode).toBe(200);
+    const surfaces: Array<[string, Read | undefined]> = [
+      ['the war-room list', (list.json().data as Read[]).find((a) => a.id === alertId)],
+      ['the alert detail', detail.json().data as Read],
+    ];
+    for (const [surface, row] of surfaces) {
+      expect(row, surface).toBeDefined();
+      expect.soft(row!.triggerNote, `${surface}: the trigger note`).toBe(presses[0]!.note);
+      expect.soft(row!.retriggerCount, `${surface}: the repeat count`).toBe(2);
+      const repeats = row!.retriggers ?? [];
+      expect.soft(repeats.map((r) => ({ seq: r.seq, note: r.note })), `${surface}: the repeat notes, in press order`).toEqual([
+        { seq: 1, note: presses[1]!.note },
+        { seq: 2, note: null },
+      ]);
+      // Every press is timed (ISO), and the repeats are timed in press order.
+      for (const t of [row!.triggeredAt, ...repeats.map((r) => r.at)]) expect.soft(new Date(t).toISOString(), `${surface}: timestamp ${t}`).toBe(t);
+      for (let i = 1; i < repeats.length; i += 1) expect.soft(Date.parse(repeats[i]!.at), `${surface}: press ${i + 1} is timed after press ${i}`).toBeGreaterThanOrEqual(Date.parse(repeats[i - 1]!.at));
+    }
+  });
+
+  it('passenger raises it: the words go to the war room and the ops reads — never the page body, a push, the contact’s SMS, or anything the driver can receive', async () => {
+    const { passenger, driverUser, ride } = await makeLiveRide();
+    const admin = await makeUser(['ADMIN']);
+    // Every channel that could carry text is made observable: the admin and
+    // the driver both hold a push token (the dev adapter logs every push), and
+    // the passenger has a verified emergency contact (a real SMS goes out).
+    const tokens = { admin: `sos-admin-${nanoid(8)}`, driver: `sos-driver-${nanoid(8)}` };
+    await app.prisma.deviceToken.createMany({ data: [{ userId: admin.userId, token: tokens.admin, platform: 'ios' }, { userId: driverUser.userId, token: tokens.driver, platform: 'android' }] });
+    const contact = await app.prisma.emergencyContact.create({ data: { userId: passenger.userId, name: 'Sister', phoneE164: `+${phoneBase + 9000 + seq}`, verifiedAt: new Date() } });
+    const first = { lat: 6.80611, lng: -58.16042, note: 'PRIV2-F he is threatening me' };
+    const second = { lat: 6.80744, lng: -58.16188, note: 'PRIV2-F he has a knife now' };
+    const driverBefore = await get('/api/v1/driver/rides/active', driverUser.token);
+    expect(driverBefore.statusCode).toBe(200);
+    const mark = devChannelLog.length;
+
+    const { result, broadcasts } = await socketBroadcastsDuring(async () => ({
+      pressed: await inject(`/api/v1/rides/${ride.id}/sos`, first, passenger.token),
+      again: await inject(`/api/v1/rides/${ride.id}/sos`, second, passenger.token),
+    }));
+    expect(result.pressed.statusCode).toBe(200);
+    expect(result.again.statusCode).toBe(200);
+    const alertId = result.pressed.json().data.sosAlertId as string;
+    expect(result.again.json().data.sosAlertId).toBe(alertId);
+
+    // THE WAR ROOM gets the words: the alert's own note on sos:active, the
+    // repeat press's own note on sos:retrigger — and every packet that carries
+    // a note goes ONLY to the ops rooms (the platform room + the incident's
+    // tenant room). The driver could receive none of it.
+    const active = broadcasts.find((b) => b.event === 'sos:active');
+    const again = broadcasts.find((b) => b.event === 'sos:retrigger');
+    expect(active, 'the sos:active war-room emit').toBeDefined();
+    expect(again, 'the sos:retrigger war-room emit').toBeDefined();
+    expect.soft((active!.payload as { note?: unknown }).note, 'sos:active carries the trigger note').toBe(first.note);
+    expect.soft((again!.payload as { note?: unknown }).note, 'sos:retrigger carries the repeat press’s note').toBe(second.note);
+    const carrying = broadcasts.filter((b) => carries(b.payload, first.note, second.note));
+    expect(carrying.length, 'packets carrying a note (positive control)').toBeGreaterThanOrEqual(2);
+    for (const b of carrying) expect.soft(warRoomOnly(b), `${b.event} carried a note to ${b.rooms.join(', ') || 'everyone'}`).toBe(true);
+    expect.soft(reachingParty(broadcasts, driverUser.userId, ride.id), 'socket broadcasts the driver could receive').toEqual([]);
+
+    // THE PAGE does not. Its body is what gets pushed to the admin's phone and
+    // repeated in the on-call SMS on escalation: the durable OpsAlert row, the
+    // admin's inbox rows and every push the dev adapter saw.
+    const pages = await app.prisma.opsAlert.findMany({ where: { sosAlertId: alertId } });
+    expect(pages.length, 'ops pages (positive control)').toBeGreaterThanOrEqual(1);
+    for (const p of pages) expect.soft(carries({ title: p.title, body: p.body }, first.note, second.note), `ops page ${p.id} body`).toBe(false);
+    const paged = await app.prisma.notification.findMany({ where: { userId: admin.userId } });
+    expect(paged.length, 'the admin’s inbox rows (positive control)').toBeGreaterThanOrEqual(1);
+    for (const n of paged) expect.soft(carries({ title: n.title, body: n.body, data: n.data }, first.note, second.note), `the admin’s inbox row ${n.id}`).toBe(false);
+    const pushes = devChannelLog.slice(mark).filter((e) => e.channel === 'push');
+    expect(pushes.some((e) => e.to === tokens.admin), 'the admin’s phone was pushed (positive control)').toBe(true);
+    expect.soft(pushes.some((e) => e.to === tokens.driver), 'a push to the driver’s phone').toBe(false);
+    for (const e of pushes) expect.soft(carries({ title: e.title, body: e.body, data: e.data }, first.note, second.note), `push to ${e.to}`).toBe(false);
+
+    // THE EMERGENCY CONTACT is told, and is not handed the words.
+    const texts = devChannelLog.slice(mark).filter((e) => e.channel === 'sms' && e.to === contact.phoneE164);
+    expect(texts.length, 'the contact’s SMS (positive control)').toBe(1);
+    for (const t of texts) expect.soft(carries(t.body, first.note, second.note), 'the contact’s SMS').toBe(false);
+
+    // THE DRIVER: nothing, still.
+    const driverAfter = await get('/api/v1/driver/rides/active', driverUser.token);
+    expect.soft(driverAfter.json(), 'the driver’s polled ride view').toEqual(driverBefore.json());
+    expect.soft(carries(driverAfter.json(), first.note, second.note), 'the driver’s polled ride view').toBe(false);
+    expect.soft(await app.prisma.notification.count({ where: { userId: driverUser.userId } }), 'the driver’s notifications').toBe(0);
+
+    // OPS keep it all.
+    const opsRead = await get(`/api/v1/safety/sos/${alertId}`, admin.token);
+    expect(opsRead.statusCode).toBe(200);
+    expect(opsRead.json().data).toMatchObject({ triggerNote: first.note, retriggers: [{ seq: 1, note: second.note }] });
+  });
+
+  it('driver raises it: the same — the words reach the war room and the ops reads, and nothing the passenger can receive', async () => {
+    const { passenger, driverUser, ride } = await makeLiveRide();
+    const admin = await makeUser(['ADMIN']);
+    const passengerToken = `sos-passenger-${nanoid(8)}`;
+    await app.prisma.deviceToken.create({ data: { userId: passenger.userId, token: passengerToken, platform: 'ios' } });
+    const note = 'PRIV2-G the passenger pulled a weapon';
+    const at = { lat: 6.80583, lng: -58.15791 };
+    const passengerViews = async () => {
+      const views = {
+        ride: await get(`/api/v1/rides/${ride.id}`, passenger.token),
+        live: await get('/api/v1/rides/active', passenger.token),
+        order: await get(`/api/v1/customer/orders/${ride.id}`, passenger.token),
+      };
+      for (const r of Object.values(views)) expect(r.statusCode).toBe(200);
+      return views;
+    };
+    await passengerViews();
+    const mark = devChannelLog.length;
+
+    const { result: res, broadcasts } = await socketBroadcastsDuring(() => inject(`/api/v1/rides/${ride.id}/sos`, { ...at, note }, driverUser.token));
+    expect(res.statusCode).toBe(200);
+    const alertId = res.json().data.sosAlertId as string;
+
+    const carrying = broadcasts.filter((b) => carries(b.payload, note));
+    expect(carrying.length, 'packets carrying the note (positive control)').toBeGreaterThanOrEqual(1);
+    for (const b of carrying) expect.soft(warRoomOnly(b), `${b.event} carried the note to ${b.rooms.join(', ') || 'everyone'}`).toBe(true);
+    expect.soft(reachingParty(broadcasts, passenger.userId, ride.id), 'socket broadcasts the passenger could receive').toEqual([]);
+
+    const after = await passengerViews();
+    for (const [surface, r] of Object.entries(after)) expect.soft(r.payload, `the passenger’s ${surface} read`).not.toContain(note);
+    const pushes = devChannelLog.slice(mark).filter((e) => e.channel === 'push');
+    expect.soft(pushes.some((e) => e.to === passengerToken), 'a push to the passenger’s phone').toBe(false);
+    for (const e of pushes) expect.soft(carries({ title: e.title, body: e.body, data: e.data }, note), `push to ${e.to}`).toBe(false);
+    for (const n of await app.prisma.notification.findMany({ where: { userId: admin.userId } })) expect.soft(carries({ title: n.title, body: n.body, data: n.data }, note), `the admin’s inbox row ${n.id}`).toBe(false);
+    expect.soft(await app.prisma.notification.count({ where: { userId: passenger.userId } }), 'the passenger’s notifications').toBe(0);
+
+    const opsRead = await get(`/api/v1/safety/sos/${alertId}`, admin.token);
+    expect(opsRead.statusCode).toBe(200);
+    expect(opsRead.json().data).toMatchObject({ actorRole: 'MOVER', triggerNote: note });
   });
 });
