@@ -24,8 +24,12 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
-import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
-import { APPROVAL_HEADER, approvalRefusalMessage, decideApproval, requiresApproval, resolveApproval } from './admin-approval';
+import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
+import {
+  APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
+  fingerprintOf, queryStringOf, requiresApproval, resolveApproval,
+  type ApprovalSnapshotRow,
+} from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
@@ -714,7 +718,16 @@ export async function adminRoutes(app: FastifyInstance) {
     const header = request.headers[APPROVAL_HEADER];
     const outcome = await resolveApproval(
       app.prisma, authority,
-      { method: request.method, routeUrl, params: (request.params ?? {}) as Record<string, unknown>, body: request.body },
+      {
+        method: request.method,
+        routeUrl,
+        params: (request.params ?? {}) as Record<string, unknown>,
+        body: request.body,
+        // [DS110 rev D5] The query string is part of what executes: store and
+        // fingerprint it, so a route that keys a decision input off query can
+        // never have it silently dropped when the approval is replayed.
+        query: (request.query ?? {}) as Record<string, unknown>,
+      },
       { userId },
       typeof header === 'string' && header ? header : null,
       reasonOf(request.body, request.headers) ?? '',
@@ -5050,6 +5063,10 @@ export async function adminRoutes(app: FastifyInstance) {
     await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
     const minted = mintRenderPath(id, ttlSeconds);
     await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
+    // [DS110-15] A path RELATIVE to the API origin, on purpose. The console
+    // resolves it against its configured API origin and loads it through its
+    // own same-origin proxy; an origin built here from the Host header would
+    // be client-supplied input, and the console discards it anyway.
     return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
   });
 
@@ -5317,6 +5334,70 @@ export async function adminRoutes(app: FastifyInstance) {
     }
     adminApprovalCounter.labels(body.approve ? 'decision_approved' : 'decision_rejected', 'C4').inc();
     return { success: true, data: { id: request.params.id, status: decision.status } };
+  });
+
+  // [DS110-14] AN APPROVED ACTION ACTUALLY HAPPENS.
+  //
+  // Until now an APPROVED row sat in the queue forever: the only code that
+  // turns APPROVED → APPLIED is the approval gate itself, reached when the
+  // requester re-issues the exact request carrying `x-swift-approval` — and no
+  // console, job or cron ever did. This route performs that replay for the
+  // operator: it reconstructs the STORED body (never a body supplied here) and
+  // injects it back through the full request path with the approval header.
+  // The replay therefore passes the capability gate, the reason gate and the
+  // fingerprint check again, and the compare-and-set inside `resolveApproval`
+  // means exactly one apply can hold it — a second apply is refused.
+  app.post<{ Params: { id: string } }>('/approvals/:id/apply', { preHandler: [adminGuard] }, async (request) => {
+    requireTenantId();
+    // `bodySnapshot` enters the generated client with the 20260924140000
+    // migration; the assertion keeps this compiling against both generations.
+    const approval = (await tenantPrisma.privilegedApproval.findUnique({ where: { id: request.params.id } })) as unknown as ApprovalSnapshotRow | null;
+    if (!approval) throw new NotFoundError('Approval', request.params.id);
+    // Separation of duties: the admin who ASKED executes, after a second admin
+    // approved. The approver never executes what they approved, and a third
+    // admin does not act on a request that is not theirs. (Before this route the
+    // requester re-sent their own request with the approval id; this keeps that
+    // shape.)
+    if (approval.requestedBy !== request.user.userId) {
+      throw new ForbiddenError('Only the admin who asked for this action can execute it, once a second admin has approved it.');
+    }
+
+    // [DS110-13] The binding: what executes is what was stored and displayed.
+    // Recompute the fingerprint over the reconstructed subject — if the stored
+    // body and the reviewed fingerprint ever disagree, nothing executes.
+    const subject = approvalSubjectOf(approval);
+    if (!subject || fingerprintOf(subject) !== approval.fingerprint) {
+      throw new ForbiddenError(approvalRefusalMessage('request-changed'));
+    }
+
+    const url = `/api/v1/admin${fillRouteTemplate(subject.routeUrl, subject.params)}`;
+    const query = queryStringOf(subject.query ?? {});
+    const replay = await app.inject({
+      method: subject.method as never,
+      url: query ? `${url}?${query}` : url,
+      headers: {
+        authorization: String(request.headers.authorization ?? ''),
+        'content-type': 'application/json',
+        [ADMIN_REASON_HEADER]: approval.reason,
+        [APPROVAL_HEADER]: approval.id,
+      },
+      payload: subject.body as Record<string, unknown>,
+    });
+
+    if (replay.statusCode >= 200 && replay.statusCode < 300) {
+      const applied = await tenantPrisma.privilegedApproval.findUnique({
+        where: { id: approval.id },
+        select: { status: true, appliedAt: true },
+      });
+      return { success: true, data: { id: approval.id, status: applied?.status ?? 'APPLIED', appliedAt: applied?.appliedAt ?? null } };
+    }
+
+    let error: { code?: string; message?: string } | undefined;
+    try { error = (replay.json() as { error?: { code?: string; message?: string } }).error; } catch { error = undefined; }
+    const message = error?.message || `The approved action failed (HTTP ${replay.statusCode}).`;
+    if (replay.statusCode === 403) throw new ForbiddenError(message);
+    if (replay.statusCode === 409) throw new ConflictError(message);
+    throw new AppError(replay.statusCode >= 400 ? replay.statusCode : 502, error?.code ?? 'APPLY_FAILED', message);
   });
 
   // ─── Audit Logs ────────────────────────────────────────────────────────

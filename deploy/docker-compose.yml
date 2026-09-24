@@ -194,6 +194,25 @@ services:
       RUN_WORKERS: "1"
     volumes:
       - /run/swift-secrets:/run/secrets:ro
+    # The API image's HEALTHCHECK fetches its own HTTP readiness endpoint, but
+    # the worker process (dist/worker.js) serves no HTTP — with the image
+    # default the worker was permanently "unhealthy" while /health said
+    # worker: ok.
+    # This probe checks the SAME signal the API's health and readiness checks
+    # use to decide the worker fleet is alive: the `scheduler:heartbeat` Redis
+    # key the recurring scheduler-heartbeat job writes every 60s
+    # (dist/boot/worker-probe.js).
+    # This service is the only RUN_WORKERS=1 process, so a fresh key IS this
+    # worker alive and consuming. start_period covers boot before the first beat.
+    healthcheck:
+      # `node -e` invokes the probe's exported main() explicitly, so importing
+      # the module (in tests) never exits a process and the probe's exit code
+      # is exactly its verdict.
+      test: ["CMD", "node", "-e", "require('./dist/boot/worker-probe.js').main()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     depends_on:
       migrate:
         condition: service_completed_successfully

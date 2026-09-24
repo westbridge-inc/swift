@@ -259,15 +259,30 @@ console.log('─'.repeat(72));
   } else if (!objectBucket || !endpoint || !keyId) {
     console.log(`  ✗ STORAGE_PROVIDER=${storage} but AWS_S3_BUCKET / endpoint / credentials are incomplete.`);
   } else {
-    const probe = spawnSync('aws', ['s3api', 'get-bucket-versioning', '--bucket', objectBucket, '--endpoint-url', endpoint, '--output', 'json'], {
-      encoding: 'utf8',
-      env: { ...process.env, AWS_ACCESS_KEY_ID: keyId, AWS_SECRET_ACCESS_KEY: fileEnv['AWS_SECRET_ACCESS_KEY'] ?? '', AWS_REGION: fileEnv['AWS_REGION'] ?? 'auto' },
-    });
-    if (probe.error || probe.status !== 0) {
-      console.log(`  ✗ could not ask ${objectBucket} about versioning (${probe.error ? 'aws CLI not installed' : (probe.stderr || '').trim().split('\n')[0]}).`);
+    // [STG-B] There is no host `aws` binary (the snap-packaged CLI cannot run
+    // under the hardened backup unit, and no host CLI is installed instead).
+    // The same pinned container backup.sh/restore.sh use answers here, with
+    // the credentials passed BY NAME (-e NAME) so the values flow to the
+    // daemon in the container config and never enter this process's argv.
+    const awsImage = fileEnv['AWS_CLI_IMAGE'];
+    // Anchored digest check, as in backup.sh/restore.sh: only
+    // `<image>@sha256:<64 hex chars>` is a pin. A substring test would let
+    // `ubuntu@sha256:` or `aws-cli:2@sha256:zzz` through to fail later at
+    // `docker run` with an unhelpful message.
+    if (!awsImage || !/@sha256:[0-9a-f]{64}$/.test(awsImage) || /[<>]/.test(awsImage) || awsImage.includes('PLACEHOLDER')) {
+      console.log(`  ✗ AWS_CLI_IMAGE is not a pinned image@sha256 digest — cannot ask ${objectBucket} about versioning without a host AWS CLI.`);
       console.log('      Versioning is what lets a deleted or overwritten KYC document be recovered. Verify it by hand.');
     } else {
-      printVerdict(bucketVersioningStatus(objectBucket, endpoint, parseBucketVersioning(probe.stdout)));
+      const probe = spawnSync('docker', ['run', '--rm', '-e', 'AWS_ACCESS_KEY_ID', '-e', 'AWS_SECRET_ACCESS_KEY', '-e', 'AWS_REGION', awsImage, 's3api', 'get-bucket-versioning', '--bucket', objectBucket, '--endpoint-url', endpoint, '--output', 'json'], {
+        encoding: 'utf8',
+        env: { ...process.env, AWS_ACCESS_KEY_ID: keyId, AWS_SECRET_ACCESS_KEY: fileEnv['AWS_SECRET_ACCESS_KEY'] ?? '', AWS_REGION: fileEnv['AWS_REGION'] ?? 'auto' },
+      });
+      if (probe.error || probe.status !== 0) {
+        console.log(`  ✗ could not ask ${objectBucket} about versioning (${probe.error ? probe.error.message : (probe.stderr || '').trim().split('\n')[0]}).`);
+        console.log('      Versioning is what lets a deleted or overwritten KYC document be recovered. Verify it by hand.');
+      } else {
+        printVerdict(bucketVersioningStatus(objectBucket, endpoint, parseBucketVersioning(probe.stdout)));
+      }
     }
   }
   printVerdict(kekEscrowStatus(fileEnv));

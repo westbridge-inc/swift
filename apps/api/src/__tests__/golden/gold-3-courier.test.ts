@@ -29,7 +29,7 @@ import { recordDispatchQueue } from '../helpers/dispatch-queue';
 //            only a narrow payload, shows the courier while the parcel moves
 //            and withholds the position once it is delivered. Strangers are
 //            refused; the sender cannot cancel a parcel in custody.
-//   E16      [it.fails] custody must be photo-proven at pickup too.
+//   E16      custody is photo-proven at pickup too (fixed).
 //   COUR-02  a DELIVERY-only mover and a BICYCLE courier are never offered a
 //            LARGE parcel and their board grabs are refused; the eligible
 //            (farther) courier is offered it and takes it.
@@ -144,7 +144,7 @@ function track(token: string) {
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 7)]);
 
-function postPhoto(orderId: string, token: string, content: Buffer = PNG, mime = 'image/png') {
+function postPhoto(orderId: string, token: string, content: Buffer = PNG, mime = 'image/png', route: 'proof-photo' | 'pickup-proof-photo' = 'proof-photo') {
   const boundary = `----gold3${nanoid(8)}`;
   const payload = Buffer.concat([
     Buffer.from(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="door.png"\r\ncontent-type: ${mime}\r\n\r\n`),
@@ -153,7 +153,7 @@ function postPhoto(orderId: string, token: string, content: Buffer = PNG, mime =
   ]);
   return app.inject({
     method: 'POST',
-    url: `/api/v1/courier/order/${orderId}/proof-photo`,
+    url: `/api/v1/courier/order/${orderId}/${route}`,
     payload,
     headers: { 'content-type': `multipart/form-data; boundary=${boundary}`, authorization: `Bearer ${token}` },
   });
@@ -347,8 +347,15 @@ describe('GOLD-3 · COUR-01 — courier "Send": create → offer → collect →
     expect(retap.json().data).toEqual({ orderId, status: 'RIDER_ARRIVED_PICKUP', paymentStatus: 'CAPTURED', collected: true });
     expect(await sys(() => app.prisma.orderStatusLog.count({ where: collectedLog }))).toBe(1);
 
-    // ── Custody. The sender can no longer cancel a parcel the courier holds ──
-    const picked = await call('PUT', `/api/v1/rider/orders/${orderId}/picked-up`, courier.token, {});
+    // ── Custody, proven (E16): the bare tap is refused; the parcel is photographed
+    // at the pickup and confirmed with that server-issued photo and the courier's GPS.
+    // The sender can no longer cancel a parcel the courier holds. ────────────
+    const bareTap = await call('PUT', `/api/v1/rider/orders/${orderId}/picked-up`, courier.token, {});
+    expect(bareTap.statusCode).toBe(409);
+    expect(bareTap.json().error.code).toBe('PICKUP_PROOF_REQUIRED');
+    const pickupPhoto = await postPhoto(orderId, courier.token, PNG, 'image/png', 'pickup-proof-photo');
+    expect(pickupPhoto.statusCode, pickupPhoto.body).toBe(200);
+    const picked = await call('POST', `/api/v1/courier/order/${orderId}/pickup-proof`, courier.token, { proofPhotoUrl: pickupPhoto.json().data.url, gps: PICKUP });
     expect(picked.statusCode, picked.body).toBe(200);
     expect(picked.json().data.status).toBe('PICKED_UP');
     const lateCancel = await call('POST', `/api/v1/courier/order/${orderId}/cancel`, sender.token, { reason: 'changed my mind' });
@@ -438,12 +445,12 @@ describe('GOLD-3 · COUR-01 — courier "Send": create → offer → collect →
   });
 });
 
-// E16 (S1, ledger): the courier journey has NO pickup-photo custody proof —
-// courier.routes.ts carries only the drop-off proof, and PUT picked-up takes
-// custody on a bare tap. This asserts the CORRECT behaviour: custody refused
-// until a server-issued pickup photo exists, and nothing changes. The whole
-// run to the pickup happens in beforeAll, so a broken setup fails the hook and
-// can never satisfy the it.fails: only the custody assertion can.
+// E16 (S1, ledger): the courier journey had NO pickup-photo custody proof —
+// PUT picked-up took custody on a bare tap. #1283 made the courier pickup-proof
+// step the only courier door into PICKED_UP. This asserts it: custody refused
+// until a server-issued pickup photo exists (409 PICKUP_PROOF_REQUIRED), and
+// nothing changes. The whole run to the pickup happens in beforeAll, so the
+// assertion is the custody refusal itself.
 describe('GOLD-3 · COUR-01 — [E16] pickup custody is photo-proven', () => {
   let orderId = '';
   let courierToken = '';
@@ -468,10 +475,10 @@ describe('GOLD-3 · COUR-01 — [E16] pickup custody is photo-proven', () => {
       .toEqual({ status: 'RIDER_ARRIVED_PICKUP', payment: 'CAPTURED', pickedUpAt: null });
   });
 
-  it.fails('[E16] taking custody without a server-issued pickup photo is refused and changes nothing', async () => {
+  it('[E16] taking custody without a server-issued pickup photo is refused and changes nothing', async () => {
     const picked = await call('PUT', `/api/v1/rider/orders/${orderId}/picked-up`, courierToken, {});
-    expect(picked.statusCode).toBeGreaterThanOrEqual(400);
-    expect(picked.statusCode).toBeLessThan(500);
+    expect(picked.statusCode).toBe(409);
+    expect(picked.json().error.code).toBe('PICKUP_PROOF_REQUIRED');
     const order = await orderRow(orderId);
     expect({ status: order.status, pickedUpAt: order.pickedUpAt }).toEqual({ status: 'RIDER_ARRIVED_PICKUP', pickedUpAt: null });
     expect(await logCount(orderId, 'PICKED_UP')).toBe(0);

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
@@ -60,6 +61,7 @@ import {
   TERMINAL_ORDER_STATUSES,
   RIDER_PRE_CUSTODY_STATUSES,
   RIDER_IN_CUSTODY_STATUSES,
+  RIDER_PICKUP_FROM,
 } from '../order/order-status';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -178,7 +180,7 @@ async function getOwnedOrder(app: FastifyInstance, orderId: string, riderId: str
 const STATUS_TRANSITIONS: Record<string, { from: string[]; to: string; note: string }> = {
   'en-route-pickup': { from: ['RIDER_ASSIGNED'], to: 'RIDER_EN_ROUTE_PICKUP', note: 'Rider started the run to pickup' },
   'arrived-pickup':  { from: ['RIDER_EN_ROUTE_PICKUP'], to: 'RIDER_ARRIVED_PICKUP', note: 'Rider reported arriving at pickup' },
-  'picked-up':       { from: ['RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP'], to: 'PICKED_UP', note: 'Rider confirmed collecting the order' },
+  'picked-up':       { from: [...RIDER_PICKUP_FROM], to: 'PICKED_UP', note: 'Rider confirmed collecting the order' },
   'en-route-delivery': { from: ['PICKED_UP'], to: 'EN_ROUTE_DELIVERY', note: 'Rider started the run to the customer' },
   'arrived':         { from: ['EN_ROUTE_DELIVERY'], to: 'ARRIVED', note: 'Rider reported arriving at the customer' },
 };
@@ -463,6 +465,12 @@ export async function riderRoutes(app: FastifyInstance) {
     const rider = await getRider(app, request.user.userId);
 
     const body = updateRiderProfileSchema.parse(request.body);
+    // [VEHICLES] A different vehicle TYPE is a different vehicle: it goes through the one
+    // vehicle-change writer (PUT /partner/vehicle), which retires the old vehicle's papers
+    // and re-verifies. This route edits the details of the vehicle the rider already has.
+    if (body.vehicleType !== undefined && body.vehicleType !== rider.vehicleType) {
+      throw new AppError(409, 'USE_VEHICLE_CHANGE', 'Change your vehicle from the vehicle screen — a new vehicle needs its own documents.');
+    }
     // [High #9 · DS109] Changing the plate re-identifies the vehicle the rider operates.
     // Step-up first (the same proof as a money surface), the old vehicle links close so
     // GO re-checks the EXACT new vehicle, and live supply retires now — a retyped plate
@@ -545,6 +553,11 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/go-online', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
     const locationSessionId = request.authSessionId;
+    // [Launch vehicle list] A vehicle Swift does not take on yet cannot go online; the
+    // mover changes it first (PUT /partner/vehicle).
+    if (!isVehicleOffered(rider.vehicleType)) {
+      throw new AppError(403, VEHICLE_NOT_OFFERED, 'Swift is not taking canters and box trucks yet. Change your vehicle to go online.');
+    }
     if (!locationSessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
     }
@@ -1449,6 +1462,17 @@ export async function riderRoutes(app: FastifyInstance) {
           'INVALID_TRANSITION',
           `Cannot transition from ${order.status} to ${to}. Expected current status: ${from.join(' or ')}.`,
         );
+      }
+
+      // [E16] A courier's PICKED_UP asserts physical custody of someone else's
+      // parcel, so it carries photo + time + location proof. The bare tap is
+      // refused here, before any transaction opens; the courier pickup-proof
+      // step (courier.routes) is the only courier door into PICKED_UP, and the
+      // canonical seam refuses any caller whose row has no bound pickup proof.
+      // Food riders are untouched: the guard is courier-only.
+      if (slug === 'picked-up' && order.orderType === 'COURIER') {
+        throw new AppError(409, 'PICKUP_PROOF_REQUIRED',
+          'Photograph the parcel to confirm pickup — this job needs a pickup photo and your location.');
       }
 
       // EVIDENCE, NOT A GATE [L3 advisory · L4 shadow-first].

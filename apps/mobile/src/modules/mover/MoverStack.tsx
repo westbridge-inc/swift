@@ -19,6 +19,7 @@ import { ClaimsScreen } from './screens/ClaimsScreen';
 import { JobHistoryScreen } from './screens/JobHistoryScreen';
 import { MoverAccountScreen } from './screens/MoverAccountScreen';
 import { MoverDocumentsScreen } from './screens/MoverDocumentsScreen';
+import { MoverVehicleScreen } from './screens/MoverVehicleScreen';
 import { MoverSwiftNumberScreen } from './screens/MoverSwiftNumberScreen';
 import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
 // [B-support] The ticket screen is role-agnostic (generic create+list); the
@@ -117,6 +118,8 @@ export function MoverStack() {
         <Stack.Screen name="JobHistory" component={JobHistoryScreen} />
         <Stack.Screen name="Account" component={MoverAccountScreen} />
         <Stack.Screen name="MoverDocuments" component={MoverDocumentsScreen} />
+        {/* [VEHICLES] Change the vehicle: offline until the new one's papers are approved. */}
+        <Stack.Screen name="MoverVehicle" component={MoverVehicleScreen} />
         <Stack.Screen name="MySwiftNumber" component={MoverSwiftNumberScreen} />
         <Stack.Screen name="Conversation" component={ConversationScreen} />
         <Stack.Screen name="GetHelp" component={GetHelpScreen} />

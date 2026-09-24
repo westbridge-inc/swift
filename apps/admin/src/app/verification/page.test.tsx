@@ -38,6 +38,10 @@ const otherDocument = {
   },
 };
 
+// [DS110-14] Approving is itself a reasoned action: the page asks for one
+// (12+ chars) and the request must carry it.
+const REAL_REASON = 'Insurance policy matches the vehicle and the licence on file';
+
 function verificationHandler(
   mutation: (_request: ApiRequest) => ApiReply | Promise<ApiReply>,
   documents = [baseDocument],
@@ -46,7 +50,18 @@ function verificationHandler(
     // [A-19] Approving now requires the evidence to have been OPENED, so every
     // review flow fetches a signed URL first.
     if (request.method === 'GET' && request.url.pathname.endsWith('/document-url')) {
-      return { body: { success: true, data: { url: 'https://signed.test/doc.jpg' } } };
+      // [DS110-15] the server returns the render PATH, relative to the API origin
+      return {
+        body: {
+          success: true,
+          data: { url: '/api/v1/verification/render/document-target?expires=1&sig=signed' },
+        },
+      };
+    }
+    // [DS110-15] the page verifies the load through the same-origin proxy
+    // before unlocking the decision
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/verification/render/document-target') {
+      return { body: { loaded: true } };
     }
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/verification/queue') {
       expect(request.url.searchParams.get('status')).toBe('PENDING');
@@ -97,6 +112,7 @@ describe('verification mutations', () => {
     const insuranceDocument = { ...baseDocument, docType: 'vehicle_insurance' };
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal('confirm', confirm);
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REAL_REASON));
     const fetchMock = mockApi(
       verificationHandler((request) => {
         if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/verification/document-target/approve') {
@@ -136,6 +152,7 @@ describe('verification mutations', () => {
     );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/verification/document-target/approve`);
     expect(init?.method).toBe('PUT');
+    expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe(REAL_REASON);
     const sent = JSON.parse(String(init?.body));
     expect(sent.insurance).toEqual({
       insurerName: 'Test Insurer',
@@ -193,6 +210,7 @@ describe('verification mutations', () => {
     ['rejection', 'Reject', '/api/v1/admin/verification/document-target/reject'],
   ])('renders a failed %s honestly and keeps the review open', async (_action, buttonName, path) => {
     vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REAL_REASON));
     const fetchMock = mockApi(
       verificationHandler((request) => {
         if (request.method === 'PUT' && request.url.pathname === path) {
@@ -275,6 +293,7 @@ describe('verification mutations', () => {
   it('blocks a contradictory second decision while the first decision is pending', async () => {
     const pending = deferredReply();
     vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REAL_REASON));
     const fetchMock = mockApi(
       verificationHandler((request) => {
         if (
@@ -303,7 +322,13 @@ describe('verification mutations', () => {
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
 
     pending.resolve({ body: { success: true, data: {} } });
-    await waitFor(() => expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(2));
+    // the signed-URL read and its same-origin load check are GETs of their own;
+    // the queue itself must have been read exactly twice (initial + refresh)
+    await waitFor(() =>
+      expect(
+        requestsByMethod(fetchMock, 'GET').filter(([url]) => String(url).includes('/verification/queue')),
+      ).toHaveLength(2),
+    );
   });
 });
 
@@ -440,5 +465,77 @@ describe('[A-19] the expiring-type list cannot drift from the server', () => {
     // the server refuses these without a date; the console must ASK for exactly
     // the same set, or it blocks the wrong documents and lets others through
     expect(clientTypes).toEqual(serverTypes);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [DS110-15] "View document" used to open a RELATIVE URL against the admin
+// origin — an instant 404 — and unlock Approve anyway, because `window.open`
+// cannot report a failed load. The server now returns an absolute render URL,
+// the page verifies it through a same-origin proxy, and the decision unlocks
+// only after an actual HTTP 200.
+// ---------------------------------------------------------------------------
+
+describe('[DS110-15] the document must actually load before Approve unlocks', () => {
+  it('resolves the server’s relative render path and opens it through the admin proxy', async () => {
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
+    const renderPath = '/api/v1/verification/render/document-target?expires=1&sig=signed';
+    mockApi((request) => {
+      if (request.method === 'GET' && request.url.pathname.endsWith('/document-url')) {
+        return { body: { success: true, data: { url: renderPath } } };
+      }
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/verification/render/document-target') {
+        return { body: { loaded: true } };
+      }
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/verification/queue') {
+        return { body: { success: true, data: [baseDocument] } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+
+    await user.click(screen.getByRole('button', { name: /View document/ }));
+    await screen.findByRole('button', { name: 'View document again' });
+
+    // opened on the ADMIN origin through the proxy — never the bare relative
+    // path, which is what 404'd before
+    const expected = new URL(renderPath, window.location.origin).toString();
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(String(open.mock.calls[0]?.[0])).toBe(expected);
+    expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a render failure the proxy reports (410/404) never unlocks the decision', async () => {
+    const alert = vi.fn();
+    vi.stubGlobal('alert', alert);
+    vi.stubGlobal('open', vi.fn());
+    mockApi((request) => {
+      if (request.method === 'GET' && request.url.pathname.endsWith('/document-url')) {
+        return {
+          body: {
+            success: true,
+            data: { url: 'http://admin-api.test/api/v1/verification/render/document-target?expires=1&sig=signed' },
+          },
+        };
+      }
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/verification/render/document-target') {
+        return { status: 410, body: { success: false, error: { code: 'DOCUMENT_PURGED', message: 'gone' } } };
+      }
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/verification/queue') {
+        return { body: { success: true, data: [baseDocument] } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+
+    await user.click(screen.getByRole('button', { name: /View document/ }));
+    await waitFor(() => expect(alert).toHaveBeenCalledTimes(1));
+
+    expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
+    // the button never switched to "view again" — nothing was marked previewed
+    expect(screen.queryByRole('button', { name: 'View document again' })).toBeNull();
   });
 });

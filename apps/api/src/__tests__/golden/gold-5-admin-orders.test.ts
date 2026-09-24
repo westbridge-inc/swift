@@ -40,8 +40,8 @@ import { recordDispatchQueue } from '../helpers/dispatch-queue';
 //             handover reference cannot settle two orders, and every settled
 //             refund reconciles to one obligation, one payment, one status
 //             line and one audit record.
-//   G5-F5     [it.fails] the second admin approves blind: the approvals
-//             queue never shows the amount or the handover reference.
+//   G5-F5     the second admin sees what they approve: the approvals queue
+//             shows the amount and the handover reference (fixed by ADMIN-A).
 //
 // Two-person approvals use two named admins: the requester and a DIFFERENT
 // approver, both halves proved. Dispatch runs through the suite's acknowledged
@@ -614,16 +614,17 @@ describe('GOLD-5 · ADMIN-03 — admin cancel and refund settlement', () => {
 });
 
 // ---------------------------------------------------------------------------
-// G5-F5 — the second admin approves blind
+// G5-F5 — the second admin must not approve blind
 // ---------------------------------------------------------------------------
 //
-// admin-approval.ts resolveApproval stores the ask as action + route + entity
-// id + reason + a SHA-256 fingerprint of the body. GET /admin/approvals lists
-// exactly those rows. The approver is asked to authorise "PUT
-// /orders/:id/refund-settled" on an order id, and is never shown the amount
-// or the handover reference that the fingerprint binds them to (for a
-// settlement file: not a single row or total). The ask is made in beforeAll,
-// so this can only fail on what the approver's queue shows.
+// admin-approval.ts resolveApproval stored the ask as action + route + entity
+// id + reason + a SHA-256 fingerprint of the body, and GET /admin/approvals
+// listed exactly those rows: the approver was asked to authorise "PUT
+// /orders/:id/refund-settled" on an order id, never shown the amount or the
+// handover reference the fingerprint bound them to. ADMIN-A (DS110 #13) stores
+// the ask's canonical { params, body, query } beside the fingerprint and
+// returns it in the queue, so this is a plain `it`. The ask is made in
+// beforeAll, so this can only fail on what the approver's queue shows.
 describe('GOLD-5 · ADMIN-03 — G5-F5', () => {
   let approver: Actor;
   let approvalId = '';
@@ -652,7 +653,7 @@ describe('GOLD-5 · ADMIN-03 — G5-F5', () => {
     expect(entry!.isOwnRequest).toBe(false);
   }, 60_000);
 
-  it.fails('[G5-F5] the approver’s queue shows the amount and the handover reference they are asked to approve', async () => {
+  it('[G5-F5] the approver’s queue shows the amount and the handover reference they are asked to approve', async () => {
     const shown = JSON.stringify(entry);
     expect(shown).toContain(reference);
     expect(shown).toMatch(new RegExp(`\\b${owed}\\b`));

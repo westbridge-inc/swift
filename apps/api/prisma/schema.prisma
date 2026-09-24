@@ -1823,6 +1823,15 @@ model Order {
   // delivery. Cleared implicitly once the order reaches DELIVERED.
   courierProofIssuedUrl     String?
   courierProofIssuedRiderId String?
+  // E16: pickup custody proof. PICKED_UP is a physical-custody claim, so it
+  // carries the same issued-then-exact-matched two-step as delivery proof:
+  // the server-issued URL + the rider it was issued to, the bound photo, and
+  // the rider's location at pickup. Time is pickedUpAt (below).
+  courierPickupProofIssuedUrl     String?
+  courierPickupProofIssuedRiderId String?
+  courierPickupProofPhotoUrl      String?
+  courierPickupProofLat           Float?
+  courierPickupProofLng           Float?
   courierTrackingToken      String?      @unique
 
   taxiPickupAddress  String?
@@ -5711,6 +5720,11 @@ model PrivilegedApproval {
   entityId     String?
   /// SHA-256 over the method, route, params and body that were reviewed
   fingerprint  String
+  /// [DS110-13] Canonical `{ params, body, query }` copy of the request that
+  /// was reviewed. The approver reads THIS, and the apply step replays THIS —
+  /// one stored request, so what executes is always what was displayed. Rows
+  /// raised before this column existed are null and can never be applied.
+  bodySnapshot Json?
   /// PENDING | APPROVED | REJECTED | APPLIED | EXPIRED
   status       String    @default("PENDING")
   requestedBy  String

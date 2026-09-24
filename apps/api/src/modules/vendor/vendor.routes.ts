@@ -1560,7 +1560,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  then rides the preparingAt/readyAt timestamps instead of the status —
    *  without this, a rider accepting within seconds of the vendor (the normal
    *  case) killed the vendor's Start-preparing/Mark-ready buttons with 400s. */
-  const COURIER_ACTIVE: string[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+  const COURIER_ACTIVE: OrderStatus[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
   async function recordPrepProgress(
     order: {
@@ -1576,36 +1576,79 @@ export async function vendorRoutes(app: FastifyInstance) {
     // payment-first law applies to them exactly as it does to the transitions.
     assertMmgFulfilmentAllowed(order, phase === 'PREPARING' ? 'PREPARING' : 'READY_FOR_PICKUP');
     const now = new Date();
-    // Marking READY implies preparing happened — backfill it for the timeline.
-    const data: Record<string, Date> = phase === 'PREPARING'
-      ? { preparingAt: now }
-      : { readyAt: now, ...(order.preparingAt ? {} : { preparingAt: now }) };
-    const updated = await app.prisma.order.update({ where: { id: order.id }, data });
-    await app.prisma.orderStatusLog.create({
-      data: {
-        orderId: order.id,
-        status: order.status,
-        changedBy: userId,
-        note: phase === 'PREPARING' ? 'Vendor started preparing (rider already assigned)' : 'Order ready for pickup (rider already assigned)',
-      },
+    // [E04] The milestone write, the status-log append and the ownership check
+    // share ONE transaction on the order-row lock (the
+    // stageCanonicalOrderTransition / lockPickableOrder pattern), so a
+    // cancellation — or a rider release/handback — that commits after the
+    // route's read is seen on the LOCKED re-read and refuses here with nothing
+    // written, nothing logged and nothing pushed. Pinning riderId refuses the
+    // release-then-regrab path (the stale screen's rider is no longer the
+    // owner); the empty-milestone check keeps two rapid taps from
+    // double-logging and double-pushing.
+    const stale = () => new AppError(
+      409,
+      'HANDOVER_STALE',
+      'This order changed since the screen was loaded — refresh before acting on it.',
+    );
+    const { row, alreadyStamped } = await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      const live = await tx.order.findUniqueOrThrow({
+        where: { id: order.id },
+        omit: HANDOVER_SECRETS_OMIT,
+      });
+      if (!COURIER_ACTIVE.includes(live.status)) throw stale();
+      if (live.riderId !== order.riderId) throw stale();
+      // Payment-first, evaluated on the locked fresh row (the canonical seam's
+      // rule) — a capture/dispute that landed after the route's read is not
+      // stamped over.
+      assertMmgFulfilmentAllowed(live, phase === 'PREPARING' ? 'PREPARING' : 'READY_FOR_PICKUP');
+      const stamped = phase === 'PREPARING' ? live.preparingAt : live.readyAt;
+      if (stamped) return { row: live, alreadyStamped: true as const };
+      // Marking READY implies preparing happened — backfill it for the timeline
+      // (from the fresh row, not the stale pre-read).
+      const next = await tx.order.update({
+        where: { id: order.id },
+        data: phase === 'PREPARING'
+          ? { preparingAt: now }
+          : { readyAt: now, ...(live.preparingAt ? {} : { preparingAt: now }) },
+      });
+      await tx.orderStatusLog.create({
+        data: {
+          orderId: order.id,
+          status: live.status,
+          changedBy: userId,
+          note: phase === 'PREPARING' ? 'Vendor started preparing (rider already assigned)' : 'Order ready for pickup (rider already assigned)',
+        },
+      });
+      return { row: next, alreadyStamped: false as const };
     });
+    if (alreadyStamped) return row;
     const evt = { orderId: order.id, prep: phase, timestamp: new Date().toISOString() };
     app.io.to(`order:${order.id}`).emit('order:prep_update', evt);
     if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:prep_update', evt);
-    // The rider at (or heading to) the store is the one who needs "it's ready".
-    if (phase === 'READY' && order.riderId) {
-      const rider = await app.prisma.rider.findUnique({ where: { id: order.riderId }, select: { userId: true } });
-      if (rider) {
-        await notifications.send({
-          userId: rider.userId,
-          type: 'ORDER_UPDATE',
-          title: 'Order ready for pickup',
-          body: `Order ${order.orderNumber} is packed and waiting at the counter.`,
-          data: { orderId: order.id, kind: 'prep_ready' },
-        });
+    // The rider on the FRESH row is the one who needs "it's ready" — never the
+    // rider the stale screen read. Re-check after commit and push only while
+    // that rider still owns the order, so a cancellation landing right after
+    // this milestone never notifies a freed rider.
+    if (phase === 'READY' && row.riderId) {
+      const stillOwns = await app.prisma.order.findFirst({
+        where: { id: order.id, riderId: row.riderId, status: { in: COURIER_ACTIVE } },
+        select: { id: true },
+      });
+      if (stillOwns) {
+        const rider = await app.prisma.rider.findUnique({ where: { id: row.riderId }, select: { userId: true } });
+        if (rider) {
+          await notifications.send({
+            userId: rider.userId,
+            type: 'ORDER_UPDATE',
+            title: 'Order ready for pickup',
+            body: `Order ${row.orderNumber} is packed and waiting at the counter.`,
+            data: { orderId: order.id, kind: 'prep_ready' },
+          });
+        }
       }
     }
-    return updated;
+    return row;
   }
 
   /** PUT /orders/:id/preparing — Mark order as being prepared */
