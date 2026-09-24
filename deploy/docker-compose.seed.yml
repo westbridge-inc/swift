@@ -36,6 +36,12 @@ services:
       # The first SUPER_ADMIN (E.164). Required by seed-production.sh.
       SEED_ADMIN_PHONE: ${SEED_ADMIN_PHONE:-}
       SEED_ACTOR: ${SEED_ACTOR:-seed-production}
+      # The two-person break-glass ceremony (runbook §6). Empty unless
+      # seed-production.sh runs it: the key arrives as a FILE from the
+      # encrypted store; approvals and the signer's name are not secrets.
+      SEED_PLAN_SECRET_FILE: ${SEED_PLAN_SECRET_FILE:-}
+      SEED_PROMOTION_APPROVALS: ${SEED_PROMOTION_APPROVALS:-}
+      SEED_SIGN_APPROVER: ${SEED_SIGN_APPROVER:-}
     volumes:
       - /run/swift-secrets:/run/secrets:ro
     networks: [private]

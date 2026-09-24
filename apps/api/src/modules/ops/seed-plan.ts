@@ -251,6 +251,25 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
 
 export interface PromoteOptions { secret?: string; approvals?: Approval[]; actor?: string }
 
+/** An approver's name as it is signed and verified: short, lowercase, no spaces. */
+export const APPROVER_NAME = /^[a-z][a-z0-9-]{1,31}$/;
+
+/**
+ * ONE approver's half of a break-glass promotion of `phone` on THIS target —
+ * what each person hands the operator. Read-only: it fingerprints the target
+ * and signs; it writes nothing. promoteBootstrapAdmin later re-fingerprints
+ * the same target and verifies each signature, so an approval made here for
+ * another database or another phone is refused there.
+ */
+export async function signPromotionForTarget(prisma: PrismaClient, databaseUrl: string, secret: string | undefined, approver: string, phone: string): Promise<Approval> {
+  if (!secret) throw new SeedRefused('SECRET_REQUIRED', 'signing an approval needs SEED_PLAN_SECRET');
+  if (!APPROVER_NAME.test(approver)) throw new SeedRefused('APPROVER_INVALID', 'an approver name is 2–32 lowercase letters, digits or hyphens');
+  if (!/^\+[1-9]\d{6,14}$/.test(phone)) throw new SeedRefused('PHONE_INVALID', 'the admin phone must be E.164');
+  const target = await targetFingerprint(prisma, databaseUrl);
+  if (target.environment === 'unknown') throw new SeedRefused('TARGET_UNKNOWN', 'the database declares no deployment identity; bootstrap it first');
+  return signPromotionApproval(secret, approver, target.digest, phone);
+}
+
 export function signPromotionApproval(secret: string, approver: string, targetDigest: string, phone: string): Approval {
   return { approver, signature: hmac(secret, `promote-approve:${approver}:${targetDigest}:${phone}`) };
 }

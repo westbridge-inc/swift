@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { seedPlatformSpine } from './seed-platform';
-import { promoteBootstrapAdmin, type SeedPlan } from '../src/modules/ops/seed-plan';
+import { promoteBootstrapAdmin, signPromotionForTarget, type SeedPlan } from '../src/modules/ops/seed-plan';
 import type { Approval } from '../src/modules/ops/purge-plan';
 
 /**
@@ -53,6 +53,16 @@ async function main(): Promise<void> {
   const approvals = parseApprovals(process.env['SEED_PLAN_APPROVALS'], 'SEED_PLAN_APPROVALS');
   const actor = process.env['SEED_ACTOR'] ?? 'seed-production';
   try {
+    // Sign mode: ONE approver's half of the two-person break-glass promotion of
+    // SEED_ADMIN_PHONE on this database. Read-only — it prints the approval
+    // (a name and a signature, never the key) and seeds nothing.
+    const signer = process.env['SEED_SIGN_APPROVER'];
+    if (signer) {
+      const approval = await signPromotionForTarget(prisma, databaseUrl, secret, signer, process.env['SEED_ADMIN_PHONE'] ?? '');
+      console.warn(`Approval by ${approval.approver} for this database and phone — hand this line to the operator:`);
+      console.log(JSON.stringify(approval));
+      return;
+    }
     console.warn('Seeding PRODUCTION spine (no demo data)…');
     let previewed: SeedPlan | null = null;
     try {

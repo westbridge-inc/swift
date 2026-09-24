@@ -43,6 +43,26 @@ SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
   die "SEED_ADMIN_PHONE must not start with +592600 — that range is the demo-seed/purge classification, never a real admin"
 for tool in git docker; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 
+# The two-person break-glass ceremony (runbook §6): SEED_SIGN_APPROVER signs one
+# approver's half and seeds nothing; SEED_PROMOTION_APPROVALS carries both halves
+# to the promotion. Either needs SEED_PLAN_SECRET from the encrypted store, which
+# reaches the container only as a FILE — its value is never read or printed here.
+SEED_SIGN_APPROVER="${SEED_SIGN_APPROVER:-}"
+SEED_PROMOTION_APPROVALS="${SEED_PROMOTION_APPROVALS:-}"
+SEED_PLAN_SECRET_FILE=""
+if [ -n "$SEED_SIGN_APPROVER" ] || [ -n "$SEED_PROMOTION_APPROVALS" ]; then
+  [ -z "$SEED_SIGN_APPROVER" ] || [[ "$SEED_SIGN_APPROVER" =~ ^[a-z][a-z0-9-]{1,31}$ ]] ||
+    die "SEED_SIGN_APPROVER must be a short lowercase name (a-z, 0-9, -)"
+  STORE_BIN="$(command -v swift-secrets || true)"
+  [ -n "$STORE_BIN" ] || die "swift-secrets is not installed"
+  sudo -n "$STORE_BIN" list | tr ' ' '\n' | grep -qx SEED_PLAN_SECRET ||
+    die "the break-glass ceremony needs SEED_PLAN_SECRET in the encrypted store (sudo swift-secrets set SEED_PLAN_SECRET)"
+  sudo -n systemctl restart swift-secrets.service ||
+    die "swift-secrets.service could not materialize the store"
+  SEED_PLAN_SECRET_FILE=/run/secrets/SEED_PLAN_SECRET
+fi
+export SEED_SIGN_APPROVER SEED_PROMOTION_APPROVALS SEED_PLAN_SECRET_FILE
+
 # The one-off container joins the stack's private network, so the stack's
 # Postgres must be up. This read is also the deployment-identity gate: the
 # seed binds its plan to the identity row, so never seed a database that does
