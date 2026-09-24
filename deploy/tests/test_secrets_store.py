@@ -483,9 +483,9 @@ class GenSecrets(StoreHarness):
         # a bare pass-through name, or a consumer alias. All go; settings stay;
         # wiring lines and comments stay.
         env_file = self.work / ".env"
-        env_file.write_text(
+        env_file.write_bytes((
+            "﻿JWT_SECRET=old-jwt\n"            # [R4 R3-3] a file-leading BOM still declares
             "PILOT_ENV=staging\n"
-            "JWT_SECRET=old-jwt\n"
             "export SMTP_PASS=old-smtp\n"
             "  MMG_MSECRET=old-mmg\n"
             "\texport   AWS_SECRET_ACCESS_KEY=old-aws\n"
@@ -493,25 +493,30 @@ class GenSecrets(StoreHarness):
             "PGPASSWORD=old-pg\n"
             "MEILI_MASTER_KEY=old-meili\n"
             " SYSTEM_DATABASE_URL=postgresql://sys:old-sys@db/x\n"
+            "  MMG_MKEY=old-mkey\n"          # [R4 R3-1] mixed Unicode whitespace
+            "STRIPE_SECRET_KEY: old-stripe\n"         # [R4] a colon separator
+            "exportOTP_HASH_SECRET=old-otp\n"         # [R4 R3-2] mangled export prefix
             "TWILIO_API_KEY_SECRET_FILE=/run/secrets/TWILIO_API_KEY_SECRET\n"
             "# JWT_SECRET=commented-out-example\n"
             "MYJWT_SECRET_NOTE=not-a-secret-name\n"
+            "exportFOO=kept\n"
             "API_HOST=api.example.test\n"
-        )
+        ).encode("utf-8"))
         env_file.chmod(0o600)
         result = self.run_gen(LC_ALL="C", LANG="C")  # the server's default locale, where a locale space class is ASCII-only
         self.assertEqual(result.returncode, 0, result.stderr)
-        text = env_file.read_text()
-        for gone in ("old-jwt", "old-smtp", "old-mmg", "old-aws", "old-pg", "old-meili", "old-sys", "PGPASSWORD", "MEILI_MASTER_KEY", "SYSTEM_DATABASE_URL="):
+        text = env_file.read_bytes().decode("utf-8")
+        for gone in ("old-jwt", "old-smtp", "old-mmg", "old-aws", "old-pg", "old-meili", "old-sys", "old-mkey", "old-stripe", "old-otp",
+                     "PGPASSWORD", "MEILI_MASTER_KEY", "SYSTEM_DATABASE_URL=", "﻿"):
             self.assertNotIn(gone, text)
         self.assertNotRegex(text, r"(?m)^TWILIO_API_KEY_SECRET$")
         for kept in ("PILOT_ENV=staging\n", "API_HOST=api.example.test\n",
                      "TWILIO_API_KEY_SECRET_FILE=/run/secrets/TWILIO_API_KEY_SECRET\n",
-                     "# JWT_SECRET=commented-out-example\n", "MYJWT_SECRET_NOTE=not-a-secret-name\n"):
+                     "# JWT_SECRET=commented-out-example\n", "MYJWT_SECRET_NOTE=not-a-secret-name\n", "exportFOO=kept\n"):
             self.assertIn(kept, text)
         self.assertIn("MASTER_KEK_ESCROW_FINGERPRINT=", text)
-        self.assertIn("removed 8 secret line(s)", result.stdout)
-        for v in ("old-jwt", "old-smtp", "old-mmg", "old-aws", "old-pg", "old-meili", "old-sys"):
+        self.assertIn("removed 11 secret line(s)", result.stdout)
+        for v in ("old-jwt", "old-smtp", "old-mmg", "old-aws", "old-pg", "old-meili", "old-sys", "old-mkey", "old-stripe", "old-otp"):
             self.assertNotIn(v, result.stdout + result.stderr)
 
     def test_missing_mode_fills_only_the_absent_names_and_keeps_master_kek(self):
@@ -683,7 +688,7 @@ class PilotUpSecretsPreflight(StoreHarness):
         self.fragment = source[begin:end]
 
     def run_fragment(self, env_text: str, listed: str, **extra):
-        (self.work / ".env").write_text(env_text)
+        (self.work / ".env").write_bytes(env_text.encode("utf-8"))
         self.listed.write_text(listed)
         shell = 'set -euo pipefail\ndie() { echo "FATAL: $*" >&2; exit 1; }\n' \
                 'env_value() { grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true; }\n' \
@@ -713,29 +718,74 @@ class PilotUpSecretsPreflight(StoreHarness):
                  "SENTRY_DSN=https://abc@host/1", "SWIFT_BOOTSTRAP_PASSWORD=abc", "GOOGLE_MAPS_API_KEY_BACKEND=abc",
                  "PGPASSWORD=abc", "MEILI_MASTER_KEY=abc", "SYSTEM_DATABASE_URL=postgresql://x:abc@h/d",
                  # [R3 R2-B] Compose skips U+00A0 (NBSP) and U+0085 (NEL) before a key.
-                 " TWILIO_API_KEY_SECRET=abc", "\u0085JWT_SECRET=abc", "  export SMTP_PASS=abc",
-                 "\u0085export MMG_MSECRET=abc")
+                 " TWILIO_API_KEY_SECRET=abc", "\u0085JWT_SECRET=abc", "\u0085export MMG_MSECRET=abc",
+                 # [R4 R3-1] ...and every other Unicode White_Space character, mixed at will
+                 # (probed against Docker Compose v2.40.3: each of these loads the key).
+                 "  JWT_SECRET=abc", "  SMTP_PASS=abc", " MMG_MKEY=abc", "　JWT_SECRET=abc",
+                 " AWS_SECRET_ACCESS_KEY=abc", "    JWT_SECRET=abc", "\t\x0b\x0cSTRIPE_SECRET_KEY=abc",
+                 # [R4 R3-3] a UTF-8 BOM at the very start of the file (this case is written as line 1).
+                 "﻿JWT_SECRET=abc",
+                 # [R4] a colon is a separator to Compose (probed: `JWT_SECRET: abc` loads JWT_SECRET),
+                 # trailing NBSP before the separator is trimmed, and `export ` may be followed by NBSP.
+                 "JWT_SECRET: abc", "MMG_MSECRET:abc", "JWT_SECRET =abc", "export  SMTP_PASS=abc",
+                 # [R4 R3-2] `export` glued to the name loads the VALUE under a garbage key — still
+                 # plaintext in the container config — so it is refused as a mangled declaration.
+                 "exportJWT_SECRET=abc", "export SMTP_PASS=abc", "  export SMTP_PASS=abc",
+                 "export MMG_MKEY=abc")
         # The matcher must not depend on the host locale: the server default is
         # C.UTF-8 / C, where a locale space class does not cover those bytes.
         for locale in ("C", "en_US.UTF-8", "POSIX"):
             for line in cases:
                 with self.subTest(line=line, locale=locale):
-                    result = self.run_fragment(self.ENV_OK + line + "\n", self.ALL_WIRED, LC_ALL=locale, LANG=locale)
+                    text = (line + "\n" + self.ENV_OK) if line.startswith("﻿") else (self.ENV_OK + line + "\n")
+                    result = self.run_fragment(text, self.ALL_WIRED, LC_ALL=locale, LANG=locale)
                     self.assertNotEqual(result.returncode, 0, f"{line!r} under LC_ALL={locale}")
-                    name = re.sub(r"^[\s \u0085]*(export[\s \u0085]+)?", "", line).split("=")[0].strip()
+                    name = re.sub(r"^[\s \u0085 -     　 ﻿]*(export[\s \u0085 ]*)?", "", line)
+                    name = re.split(r"[=:\s ]", name)[0]
                     self.assertIn(name, result.stderr)
                     self.assertNotIn("abc", result.stderr)
                     self.assertIn("swift-secrets", result.stderr)
 
     def test_allows_wiring_lines_comments_and_other_names(self):
-        for line in ("JWT_SECRET_FILE=/run/secrets/JWT_SECRET", "# JWT_SECRET=example", "  # export JWT_SECRET=example",
-                     " # JWT_SECRET=example", "MYJWT_SECRET_NOTE=1", "JWT_SECRET_ROTATED_AT=2026-09-23",
-                     "TWILIO_API_KEY_SID=SKabc", "SYSTEM_DATABASE_URL_FILE=/run/secrets/SYSTEM_DATABASE_URL",
-                     "MMG_API_URL=https://api.example.test/x", "OSRM_URL=http://osrm:5000"):
+        # Lines Compose loads under their OWN, non-secret name, lines it ignores,
+        # and lines it refuses outright (fail closed at `compose config`), none
+        # of which declares an allowlisted name. Probed against Docker Compose
+        # v2.40.3: a later-line BOM, an interior ASCII space, an uppercase
+        # EXPORT and an EM SPACE before `=` all fail the whole file; `:` alone
+        # declares the empty key; `exportFOO=` is the key exportFOO.
+        cases = ("JWT_SECRET_FILE=/run/secrets/JWT_SECRET", "# JWT_SECRET=example", "  # export JWT_SECRET=example",
+                 " # JWT_SECRET=example", " # JWT_SECRET=example", "MYJWT_SECRET_NOTE=1",
+                 "JWT_SECRET_ROTATED_AT=2026-09-23", "TWILIO_API_KEY_SID=SKabc",
+                 "SYSTEM_DATABASE_URL_FILE=/run/secrets/SYSTEM_DATABASE_URL",
+                 "MMG_API_URL=https://api.example.test/x", "OSRM_URL=http://osrm:5000",
+                 ":", ": x", "PILOT_ENV_2=staging\n﻿JWT_SECRET=abc", "exportFOO=1", "exportED_JWT_SECRET_NOTE=1",
+                 "EXPORT JWT_SECRET=abc", "JWT SECRET=abc", "JWT_SECRET =abc")
+        for line in cases:
             for locale in ("C", "en_US.UTF-8"):
                 with self.subTest(line=line, locale=locale):
                     result = self.run_fragment(self.ENV_OK + line + "\n", self.ALL_WIRED, LC_ALL=locale, LANG=locale)
                     self.assertEqual(result.returncode, 0, f"{line!r} under LC_ALL={locale}: {result.stderr}")
+
+    def test_the_env_file_has_one_reader_that_works_on_bytes(self):
+        # The helper is the single reader of the env file for both scripts; it
+        # runs in python3 over bytes and never consults the host locale. A
+        # file whose first line carries a BOM but declares no secret passes.
+        source = (DEPLOY / "secret-names.sh").read_text()
+        code = "\n".join(l for l in source.split("\n") if not l.strip().startswith("#"))
+        self.assertIn("python3 -", code)
+        self.assertNotIn("[[:space:]]", code)
+        self.assertNotIn("LC_ALL", code)
+        for locale in ("C", "en_US.UTF-8"):
+            result = self.run_fragment("﻿PILOT_ENV=staging\nAPI_HOST=api.example.test\nBACKUP_BUCKET=b\n", self.ALL_WIRED,
+                                       LC_ALL=locale, LANG=locale)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_first_declared_name_is_reported_and_no_value_ever_is(self):
+        result = self.run_fragment(self.ENV_OK + " MMG_MKEY=first-value\nJWT_SECRET: second-value\n", self.ALL_WIRED)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MMG_MKEY is declared in deploy/.env", result.stderr)
+        self.assertNotIn("first-value", result.stderr + result.stdout)
+        self.assertNotIn("second-value", result.stderr + result.stdout)
 
     def test_refuses_a_wired_secret_that_is_not_in_the_store(self):
         missing_core = self.ALL_WIRED.replace("MASTER_KEK\n", "")

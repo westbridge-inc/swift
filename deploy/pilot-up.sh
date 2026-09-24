@@ -50,13 +50,15 @@ export SWIFT_TAG="$SHA"
 . "$HERE/secret-names.sh"
 SECRET_NAMES="$(secret_allowlist "$ROOT")" ||
   die "could not read the secret allowlist from apps/api/src/utils/secret-files.ts"
-# Every spelling Compose would load counts as a declaration — bare, indented,
-# `export`-prefixed, or a bare NAME passed through from this shell — and so do
-# the aliases the images read (PGPASSWORD, MEILI_MASTER_KEY).
-for name in $SECRET_NAMES $SECRET_CONSUMER_ALIASES; do
-  ! env_file_declares "$HERE/.env" "$name" ||
-    die "$name is declared in deploy/.env; secrets belong in the encrypted store (sudo swift-secrets set $name) and are wired as ${name}_FILE"
-done
+# Every spelling Compose would load counts as a declaration — bare, indented
+# by any Unicode whitespace, after a file-leading BOM, `export`-prefixed, with
+# `=` or `:`, or a bare NAME passed through from this shell — and so do the
+# aliases the images read (PGPASSWORD, MEILI_MASTER_KEY). One reader, one call.
+DECLARED="$(env_file_declared_names "$HERE/.env" $SECRET_NAMES $SECRET_CONSUMER_ALIASES)"
+if [ -n "$DECLARED" ]; then
+  name="${DECLARED%%$'\n'*}"
+  die "$name is declared in deploy/.env; secrets belong in the encrypted store (sudo swift-secrets set $name) and are wired as ${name}_FILE"
+fi
 STORE_BIN="$(command -v swift-secrets || true)"
 [ -n "$STORE_BIN" ] || STORE_BIN="$HERE/swift-secrets"
 [ -x "$STORE_BIN" ] || die "swift-secrets is not installed (install -m 0755 -o root -g root deploy/swift-secrets /usr/local/sbin/swift-secrets)"

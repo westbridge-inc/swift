@@ -272,16 +272,19 @@ describe('scripts — no secret value ever rides in argv', () => {
 
   it('the env-file matcher is shared and normalized the way Compose reads a line (leading space, `export`, bare name)', () => {
     // [R2 F1/F6] One definition, sourced by pilot-up.sh and gen-secrets.sh.
-    // [R3 R2-B] Compose skips U+00A0 and U+0085 before a key; a locale class
-    // may not, so the class is byte-explicit and every grep is pinned to the
-    // C locale — the host's locale never decides what "space" means.
+    // [R4 R3-1..3] The env file is read by ONE model of Compose's parser, in
+    // python3 over bytes (the host locale never decides): a file-leading BOM is
+    // dropped, every Unicode White_Space character before the key is skipped,
+    // `export` needs an ASCII separator, `=` and `:` both separate, a bare
+    // name passes through. No byte enumeration, no locale class, no grep.
     const shared = read('secret-names.sh');
     const code = shared.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
-    expect(code).toContain('\\302\\240');
-    expect(code).toContain('\\302\\205');
-    expect(code).toMatch(/LC_ALL=C grep -qE/);
-    expect(code).toMatch(/LC_ALL=C grep -vE/);
+    expect(code).toMatch(/python3 - /);
+    const bs = String.fromCharCode(92); // a literal backslash, immune to editor escaping
+    for (const escape of ['ufeff', 'u2000', 'u3000']) expect(code, escape).toContain(`${bs}${escape}`);
+    expect(code).toMatch(/isSpace|IS_SPACE7/);
     expect(code).not.toMatch(/\[\[:space:\]\]/);
+    expect(code).not.toMatch(/grep -[a-zA-Z]*E[^\n]*\$(file|1)\b/);
     for (const file of ['pilot-up.sh', 'gen-secrets.sh']) {
       const text = read(file);
       expect(text, file).toMatch(/\. "\$HERE\/secret-names\.sh"/);
