@@ -51,7 +51,7 @@ import { purgeAuditLogs } from '../../lib/audit-immutability';
 //     a decline duns; cash paid while a request is pending pays the next week;
 //     an approval after the account closed banks once and never reopens it
 //     (E13 — fixed by #1280)
-//   · [G2-F1 · it.fails] the weekly fee is billed in GYD
+//   · [G2-F1] the weekly fee is billed in GYD (fixed by G2-F1)
 // ---------------------------------------------------------------------------
 
 // This file's own fixture block (+5920324nnn, 11 characters); user, store and
@@ -688,7 +688,7 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
 });
 
 // ---------------------------------------------------------------------------
-// G2-F1 (NEW, proposed S1): every subscription born through activation carries
+// G2-F1 (S1, fixed by G2-F1): every subscription born through activation carried
 // the owner's COUNTRY code as its currency. subscription.service.ts passes
 // `activation.countryCode` into `create(entity, type, weeklyRate, currencyCode)`
 // (:146, :152, :158 → :179-183) — the same call shape since 444bce77. So a
@@ -700,7 +700,8 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
 // (billing.service.ts:1799), so an ISO answer would be held for manual
 // reconciliation. This pins the correct contract on the rows the system itself
 // writes. The activation, the MMG rail and the weekly bill run in beforeAll,
-// so the it.fails can only "pass" on the currency. Flip to `it(...)` when fixed.
+// so this can only fail on the currency. The activation resolvers now read the
+// CountryConfig currency, and a data migration corrects rows already written.
 // ---------------------------------------------------------------------------
 describe('GOLD-2 · VEND-04 / MONEY-03 — [G2-F1] the weekly fee is billed in Guyana dollars', () => {
   let p: Partner;
@@ -712,7 +713,7 @@ describe('GOLD-2 · VEND-04 / MONEY-03 — [G2-F1] the weekly fee is billed in G
     externalRef = (await mmgRequestPending(p)).request.externalRef!;
   });
 
-  it.fails('[G2-F1] the subscription, its charge and the MMG request are all in GYD', async () => {
+  it('[G2-F1] the subscription, its charge and the MMG request are all in GYD', async () => {
     expect((await subRow(p.subId)).currencyCode).toBe('GYD');
     const attempts = await sys(() => app.prisma.billingEvent.findMany({ where: { subscriptionId: p.subId, type: 'CHARGE_ATTEMPT' }, select: { currencyCode: true } }));
     expect(attempts).toEqual([{ currencyCode: 'GYD' }]);

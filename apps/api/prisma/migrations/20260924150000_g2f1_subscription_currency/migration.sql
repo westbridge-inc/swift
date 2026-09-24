@@ -14,7 +14,7 @@ SET lock_timeout = '10s';
 -- 20260907200000_retire_ai_agent_tables). Drop this schema once the rollback
 -- window closes.
 CREATE SCHEMA IF NOT EXISTS "g2f1_correction";
-COMMENT ON SCHEMA "g2f1_correction" IS 'Temporary rollback evidence for the G2-F1 subscription-currency correction (20260924030000_g2f1_subscription_currency). Drop the schema once the rollback window closes.';
+COMMENT ON SCHEMA "g2f1_correction" IS 'Temporary rollback evidence for the G2-F1 subscription-currency correction (20260924150000_g2f1_subscription_currency). Drop the schema once the rollback window closes.';
 
 CREATE TABLE IF NOT EXISTS "g2f1_correction"."currency_correction_backup" (
     "tableName" TEXT NOT NULL,
@@ -84,3 +84,14 @@ WHERE cc."code" = b."currencyCode"
 --
 --   DROP TABLE "g2f1_correction"."currency_correction_backup";
 --   DROP SCHEMA "g2f1_correction";
+--
+--   -- and the ledger row, so a later `prisma migrate deploy` re-applies it:
+--   DO $$ DECLARE n integer; BEGIN
+--     DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260924150000_g2f1_subscription_currency';
+--     GET DIAGNOSTICS n = ROW_COUNT;
+--     IF n <> 1 THEN RAISE EXCEPTION 'expected exactly one _prisma_migrations row, deleted %', n; END IF;
+--   END $$;
+--
+-- Precondition: roll the application back first; the previous application
+-- creates new subscriptions with the country code again. Run the whole block
+-- in one transaction (BEGIN; ... COMMIT;).
