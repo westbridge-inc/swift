@@ -325,6 +325,17 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
 };
 
 /**
+ * [E16] The rungs a RIDER confirms a pickup from: standing at the pickup, or
+ * handed an order that was already ready. Both doors into PICKED_UP read this
+ * one list — the generic rider leg (`PUT picked-up`) and the courier's
+ * pickup-proof step — so they cannot disagree about where custody may be
+ * claimed, and the courier's pickup photo can be issued only while its pickup
+ * can still be confirmed. Narrower than ORDER_TRANSITIONS.PICKED_UP, which is
+ * the state machine's outer bound for every caller, not the rider's rung.
+ */
+export const RIDER_PICKUP_FROM = ['RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP'] as const satisfies readonly OrderStatus[];
+
+/**
  * THE RELEASE EDGES. Key = the stage an order is returned to, value = the
  * pre-custody states a release may return it from.
  *
