@@ -355,6 +355,19 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   </span>
                 </div>
               )}
+              {/* [MKT-F057] The delivery PIN: the customer holds it, the rider enters it at
+                  the door. Same rule as the pickup code: never the value, only whether it
+                  exists and whether wrong tries have locked the door (support reset). */}
+              {o.handover?.ridePinIssued && !isRide && (
+                <div className="flex justify-between">
+                  <span className="text-[var(--muted)]">Delivery PIN</span>
+                  <span className={o.handover.ridePinLocked ? 'text-[var(--danger)]' : ''}>
+                    {o.handover.ridePinLocked
+                      ? `Locked — ${o.handover.ridePinAttempts} wrong tries (support reset)`
+                      : `Issued to the customer${(o.handover.ridePinAttempts ?? 0) > 0 ? ` · ${o.handover.ridePinAttempts} wrong tries` : ''}`}
+                  </span>
+                </div>
+              )}
               {o.deliveryAddress && !isRide && (
                 <div className="flex justify-between gap-4">
                   <span className="text-[var(--muted)] shrink-0">Address</span>

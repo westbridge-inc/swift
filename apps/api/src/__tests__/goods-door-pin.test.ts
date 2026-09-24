@@ -8,6 +8,10 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
+import { adminRoutes } from '../modules/admin/admin.routes';
+import { authRoutes } from '../modules/auth/auth.routes';
+import { loginWithOtp } from './helpers/otp';
+import { grantStepUp } from './helpers/step-up';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
@@ -263,6 +267,8 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
+  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
 
   await purgeFixtures();
@@ -536,6 +542,79 @@ describe('MKT-F057 — the MMG door verifies the PIN on PUT /delivered', () => {
     const earnings = await app.prisma.earning.findMany({ where: { orderId: fresh.id } });
     expect(earnings).toHaveLength(1);
     expect(earnings[0]!.status).toBe('AVAILABLE');
+  });
+});
+
+describe('MKT-F057 — a locked door has a support reset (decision 5: 5 attempts, then support)', () => {
+  const REASON = 'the rider misread the code five times at the door; the customer is present';
+  const resetUrl = (id: string) => `/api/v1/admin/orders/${id}/handover-secret/reset-delivery-pin`;
+
+  it('five wrong tries lock the order; support sees the lock, resets on the record, and the customer\'s NEW PIN completes the delivery', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, '135790');
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, { outcome: 'paid', gps: DOOR, ridePin: String(200000 + attempt) }, rider.token);
+      expect(res.json().error.code).toBe('INVALID_PIN');
+    }
+    expect((await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, { outcome: 'paid', gps: DOOR, ridePin: '135790' }, rider.token)).json().error.code).toBe('MAX_ATTEMPTS');
+
+    // Support sees THIS lock (the delivery PIN's own budget), never the value.
+    const admin = await loginWithOtp(app, '+5926001000');
+    const adminToken: string = admin.json().data.tokens.accessToken;
+    const detail = await inject('GET', `/api/v1/admin/orders/${order.id}`, undefined, adminToken);
+    expect(detail.statusCode, detail.body).toBe(200);
+    expect(detail.json().data.handover).toMatchObject({ ridePinIssued: true, ridePinAttempts: 5, ridePinLocked: true });
+    expect(detail.payload).not.toContain('135790');
+
+    // The door: step-up first, then a written reason.
+    const noStepUp = await inject('POST', resetUrl(order.id), { reason: REASON }, adminToken);
+    expect(noStepUp.statusCode).toBe(403);
+    expect(noStepUp.json().error.code).toBe('STEP_UP_REQUIRED');
+    await grantStepUp(app, adminToken);
+    expect((await inject('POST', resetUrl(order.id), { reason: 'short' }, adminToken)).statusCode).toBe(400);
+    const reset = await inject('POST', resetUrl(order.id), { reason: REASON }, adminToken);
+    expect(reset.statusCode, reset.body).toBe(200);
+    expect(reset.json().data.rotated).toBe(true);
+    expect(reset.payload).not.toContain('135790');
+
+    // Durable: a new PIN, a clear budget, and the reason on the record.
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { ridePin: true, ridePinAttempts: true, status: true } });
+    expect(after.ridePin).toMatch(/^\d{6}$/);
+    expect(after.ridePin).not.toBe('135790');
+    expect(after).toMatchObject({ ridePinAttempts: 0, status: 'ARRIVED' });
+    const audit = await app.prisma.auditLog.findFirst({ where: { action: 'RESET_DELIVERY_PIN', entityId: order.id } });
+    expect(audit?.changes).toMatchObject({ reason: REASON, attemptsCleared: 5, orderStatus: 'ARRIVED' });
+
+    // The holder reads the new PIN on their own screen; the old one is dead; the new one completes.
+    const mine = await inject('GET', `/api/v1/customer/orders/${order.id}`, undefined, customer.token);
+    expect(mine.json().data.ridePin).toBe(after.ridePin);
+    expect((await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, { outcome: 'paid', gps: DOOR, ridePin: '135790' }, rider.token)).json().error.code).toBe('INVALID_PIN');
+    const paid = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, { outcome: 'paid', gps: DOOR, ridePin: after.ridePin }, rider.token);
+    expect(paid.statusCode, paid.body).toBe(200);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('DELIVERED');
+  });
+
+  it('only support resets, only at the door, only a delivery PIN', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, '864200');
+    expect((await inject('POST', resetUrl(order.id), { reason: REASON })).statusCode).toBe(401);
+    const byCustomer = await inject('POST', resetUrl(order.id), { reason: REASON }, customer.token);
+    expect([401, 403]).toContain(byCustomer.statusCode);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).ridePin).toBe('864200');
+
+    const admin = await loginWithOtp(app, '+5926001000');
+    const adminToken: string = admin.json().data.tokens.accessToken;
+    await grantStepUp(app, adminToken);
+    const delivered = await makeAtDoorOrder(customer.userId, rider.riderId, '112233', { status: 'DELIVERED' });
+    const late = await inject('POST', resetUrl(delivered.id), { reason: REASON }, adminToken);
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error.code).toBe('NOT_AT_THE_DOOR');
+    const pinless = await makeAtDoorOrder(customer.userId, rider.riderId, null as unknown as string);
+    const none = await inject('POST', resetUrl(pinless.id), { reason: REASON }, adminToken);
+    expect(none.statusCode).toBe(404);
+    expect(none.json().error.code).toBe('NO_DELIVERY_PIN');
   });
 });
 
