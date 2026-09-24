@@ -65,6 +65,17 @@ s = json.load(sys.stdin)["services"]
 if "osrm" not in s or any(x.get("ports") for x in s.values()):
     sys.exit("refusing routing configuration with public ports")
 ' || die "routing Compose port isolation failed"
+  # The public API never carries DEV_OTP_BYPASS or TEST_CONTROL_ENABLED, and the
+  # staging-only journeys override (api-journeys + the one-shot runner) never
+  # publishes a port, leaves the private network or gets a Caddy route.
+  "${COMPOSE[@]}" config --format json |
+    python3 "$HERE/verify-journeys-isolation.py" "$HERE/Caddyfile" >/dev/null ||
+    die "public API isolation failed"
+  if [ -f "$HERE/docker-compose.journeys.yml" ]; then
+    "${COMPOSE[@]}" -f "$HERE/docker-compose.journeys.yml" --profile journeys config --format json |
+      python3 "$HERE/verify-journeys-isolation.py" "$HERE/Caddyfile" --require-journeys >/dev/null ||
+      die "journeys override isolation failed"
+  fi
 }
 verify_private_ports
 
