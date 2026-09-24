@@ -31,6 +31,8 @@ let billing: BillingService;
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 const subIds: string[] = [];
+const riderIds: string[] = [];
+const driverIds: string[] = [];
 let seq = 0;
 
 const phoneFor = (offset = 0) => `+5920371${String(seq + offset).padStart(4, '0')}`;
@@ -67,6 +69,24 @@ async function makeBareVendor() {
   });
   vendorIds.push(vendor.id);
   return vendor.id;
+}
+
+/** A mover account (Guyana, the schema default) for the rider/driver resolvers. */
+async function makeBareMover(): Promise<string> {
+  seq += 1;
+  const user = await app.prisma.user.create({
+    data: {
+      phone: phoneFor(),
+      firstName: 'G2F1',
+      lastName: `CurrencyMover${seq}`,
+      roles: ['MOVER', 'CUSTOMER'] as UserRole[],
+      activeRole: 'MOVER',
+      isPhoneVerified: true,
+      selfieCapturedAt: new Date(),
+    },
+  });
+  userIds.push(user.id);
+  return user.id;
 }
 
 /** A trial subscription on the MMG rail, already due — the shape the hourly
@@ -119,6 +139,8 @@ afterAll(async () => {
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+  await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
+  await app.prisma.driver.deleteMany({ where: { id: { in: driverIds } } });
   await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
@@ -137,6 +159,28 @@ describe('G2-F1 — the weekly fee is billed in the country ISO currency, not it
 
     const row = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(row.currencyCode).toBe('GYD');
+  });
+
+  it('[DS191 F2] the rider and driver resolvers stamp GYD too, not only the store one', async () => {
+    const subscriptions = new SubscriptionService(app.prisma);
+    const rider = await app.prisma.rider.create({ data: { userId: await makeBareMover(), riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+    riderIds.push(rider.id);
+    const riderSub = await subscriptions.startTrialForRider(rider.id);
+    subIds.push(riderSub.id);
+    const driver = await app.prisma.driver.create({
+      data: {
+        userId: await makeBareMover(), vehicleType: 'CAR', vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2016,
+        vehicleColor: 'White', licensePlate: `PZZ ${seq}${nanoid(3).toUpperCase()}`,
+        driverLicenseUrl: 'verification/g2f1/licence.enc', vehicleInsuranceUrl: 'verification/g2f1/insurance.enc',
+      },
+    });
+    driverIds.push(driver.id);
+    const driverSub = await subscriptions.startTrialForDriver(driver.id);
+    subIds.push(driverSub.id);
+
+    const rows = await app.prisma.subscription.findMany({ where: { id: { in: [riderSub.id, driverSub.id] } }, select: { id: true, currencyCode: true } });
+    expect(Object.fromEntries(rows.map((r) => [r.id === riderSub.id ? 'rider' : 'driver', r.currencyCode])))
+      .toEqual({ rider: 'GYD', driver: 'GYD' });
   });
 
   it('stamps the weekly CHARGE_ATTEMPT event and the MMG merchant request in GYD', async () => {

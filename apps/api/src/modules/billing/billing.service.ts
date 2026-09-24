@@ -1795,7 +1795,14 @@ export class BillingService {
       || evidence.amountMinor <= 0 || evidence.amountMinor !== expectedMinor) {
       return 'provider amount does not match the durable intent';
     }
-    if (!expectedCurrency || !providerCurrency || providerCurrency !== expectedCurrency) {
+    // [G2-F1] Before the fix a subscription's MMG request carried the COUNTRY
+    // code "GY" as its currency; the data migration corrected the durable
+    // attempt pin to "GYD". A request still in flight across that deploy can
+    // come back with "GY" on its evidence. MMG is a Guyana-only rail, so "GY"
+    // is the same money as "GYD" here — and only that one equivalence: any
+    // other disagreement is still refused.
+    const mmgCurrency = (code: string) => (code === 'GY' ? 'GYD' : code);
+    if (!expectedCurrency || !providerCurrency || mmgCurrency(providerCurrency) !== mmgCurrency(expectedCurrency)) {
       return 'provider currency does not match the durable charge attempt';
     }
     return null;

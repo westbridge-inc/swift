@@ -719,4 +719,32 @@ describe('GOLD-2 · VEND-04 / MONEY-03 — [G2-F1] the weekly fee is billed in G
     expect(attempts).toEqual([{ currencyCode: 'GYD' }]);
     expect((await getMmgProvider().transactionLookup({ transactionId: externalRef })).currencyCode).toBe('GYD');
   });
+
+  it('[G2-F1] a request sent before the fix ("GY" on the wire) and approved after the migration settles once — it is not held', async () => {
+    // [DS191 F1] The deploy window: the request went out as "GY", the data
+    // migration then corrected this subscription's rows to "GYD", and the
+    // payer approves afterwards with the provider still echoing "GY".
+    const legacy = await makePartner('Gus');
+    await chooseMmg(legacy, `${PHONE_PREFIX}806`);
+    await sys(() => app.prisma.subscription.update({ where: { id: legacy.subId }, data: { currencyCode: 'GY' } }));
+    const { period, request } = await mmgRequestPending(legacy);
+    const pinned = await sys(() => app.prisma.billingEvent.findMany({ where: { subscriptionId: legacy.subId, type: 'CHARGE_ATTEMPT' }, select: { currencyCode: true } }));
+    expect(pinned).toEqual([{ currencyCode: 'GY' }]);
+    expect((await getMmgProvider().transactionLookup({ transactionId: request.externalRef! })).currencyCode).toBe('GY');
+    // exactly what 20260924150000_g2f1_subscription_currency does to this subscription's rows
+    await sys(async () => {
+      await app.prisma.subscription.update({ where: { id: legacy.subId }, data: { currencyCode: 'GYD' } });
+      await app.prisma.billingEvent.updateMany({ where: { subscriptionId: legacy.subId, currencyCode: 'GY' }, data: { currencyCode: 'GYD' } });
+      await app.prisma.prepaidBalance.updateMany({ where: { subscriptionId: legacy.subId, currencyCode: 'GY' }, data: { currencyCode: 'GYD' } });
+    });
+
+    sandboxSetTxStatus(request.externalRef!, 'approved');
+    await pollBackoffPasses(request.id);
+    await billing.pollPendingMmgCharges();
+    const [settled] = await mmgPayments(legacy.subId);
+    expect({ id: settled!.id, status: settled!.status }).toEqual({ id: request.id, status: 'CAPTURED' });
+    const advanced = await subRow(legacy.subId);
+    expect({ status: advanced.status, nextBillingDate: advanced.nextBillingDate.getTime() }).toEqual({ status: 'ACTIVE', nextBillingDate: period.getTime() + WEEK });
+    expect(await countEvents(legacy.subId, 'CHARGE_SUCCESS')).toBe(1);
+  });
 });
