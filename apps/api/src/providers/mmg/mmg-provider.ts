@@ -54,6 +54,19 @@ export interface MmgTransaction {
   createdAt?: string;
 }
 
+/**
+ * The published initiate contract accepts Swift's reference in a correlation
+ * header, while the published lookup/history examples expose separate response
+ * fields. Swift does not assume MMG maps between them: sandbox UAT must prove
+ * this exact round-trip before the live factory is enabled.
+ */
+export const MMG_REFERENCE_WIRE_CONTRACT = Object.freeze({
+  outbound: Object.freeze({ carrier: 'header', field: 'x-wss-correlationid' }),
+  lookup: Object.freeze({ carrier: 'json', field: 'metadata[].description' }),
+  history: Object.freeze({ carrier: 'json', field: 'TransactionList[].external_id' }),
+  activationEnv: 'MMG_REFERENCE_ROUNDTRIP_VERIFIED',
+});
+
 export interface MmgBalance {
   currencyCode: string;
   balanceMinor: number;
@@ -92,6 +105,7 @@ export interface MmgMerchantProvider {
  */
 const txStatusOverrides = new Map<string, MmgTxStatus>();
 const historyRows: MmgTransaction[] = [];
+const initiatedRows = new Map<string, Pick<MmgTransaction, 'amountMinor' | 'currencyCode' | 'reference'>>();
 
 /** Test control: force a transaction's lookup status (wins over markers). */
 export function sandboxSetTxStatus(transactionId: string, status: MmgTxStatus): void {
@@ -105,6 +119,7 @@ export function sandboxAddHistory(row: MmgTransaction): void {
 export function sandboxResetMmg(): void {
   txStatusOverrides.clear();
   historyRows.length = 0;
+  initiatedRows.clear();
 }
 
 export class SandboxMmgProvider implements MmgMerchantProvider {
@@ -122,7 +137,13 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
     const outcome = req.reference.toLowerCase().includes('pending') ? 'pending' : 'approved';
     // Encode the requested amount so the stateless lookup can echo provider
     // truth exactly. A synthetic zero must never exercise a settlement bypass.
-    return { status: 'pending', transactionId: `mmgtx_${outcome}_amt${req.amountMinor}_${nanoid(10)}` };
+    const transactionId = `mmgtx_${outcome}_amt${req.amountMinor}_${nanoid(10)}`;
+    initiatedRows.set(transactionId, {
+      amountMinor: req.amountMinor,
+      currencyCode: req.currencyCode,
+      reference: req.reference,
+    });
+    return { status: 'pending', transactionId };
   }
 
   async reverseTransaction(req: { transactionId: string }): Promise<MmgTxResult> {
@@ -140,11 +161,19 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
           : req.transactionId.includes('expired')
             ? 'expired'
             : 'approved');
+    const stored = initiatedRows.get(req.transactionId)
+      ?? historyRows.find((row) => row.transactionId === req.transactionId);
     const encodedAmount = /_amt(\d+)_/.exec(req.transactionId)?.[1];
     const amountMinor = req.transactionId.includes('mismatch') && status === 'approved'
       ? 99_900
-      : Number(encodedAmount ?? 0);
-    return { transactionId: req.transactionId, status, amountMinor, currencyCode: 'GYD' };
+      : Number(stored?.amountMinor ?? encodedAmount ?? 0);
+    return {
+      transactionId: req.transactionId,
+      status,
+      amountMinor,
+      currencyCode: stored?.currencyCode ?? 'GYD',
+      ...(stored?.reference ? { reference: stored.reference } : {}),
+    };
   }
 
   async transactionHistory(): Promise<MmgTransaction[]> {
@@ -303,9 +332,15 @@ export class LiveMmgProvider implements MmgMerchantProvider {
       // 200 → { status: "pending", pendingReason: "approvalrequired",
       //         notificationMethod: "polling", executionId, expiryTime }
       const body: any = await res.json();
+      // A successful response without a usable provider id is still an
+      // affirmative observation. The billing intent must hold it for history
+      // reconciliation, never look up a coerced object or whitespace token.
+      const transactionId = [body?.executionId, body?.objectReference]
+        .find((value: unknown): value is string => typeof value === 'string'
+          && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) ?? '';
       return {
         status: mapMmgStatus(body?.status),
-        transactionId: String(body?.executionId ?? body?.objectReference ?? ''),
+        transactionId,
         ...(body?.pendingReason ? { reason: String(body.pendingReason) } : {}),
       };
     } catch (err) {
@@ -352,10 +387,13 @@ export class LiveMmgProvider implements MmgMerchantProvider {
     if (!res.ok) throw new Error(`MMG lookup failed (HTTP ${res.status})`);
     const body: any = await res.json();
     return {
-      transactionId: String(body?.transactionReference ?? req.transactionId),
+      // Settlement evidence must be exactly what MMG returned on the wire.
+      // Falling back to our request id or the platform currency would turn an
+      // incomplete provider response into apparent proof of payment.
+      transactionId: typeof body?.transactionReference === 'string' ? body.transactionReference : '',
       status: mapMmgStatus(body?.transactionStatus),
       amountMinor: toMinor(body?.amount),
-      currencyCode: String(body?.currency ?? 'GYD'),
+      currencyCode: typeof body?.currency === 'string' ? body.currency : '',
       reference: body?.metadata?.find?.((m: any) => m?.key === 'description')?.value || undefined,
       createdAt: body?.creationDate,
     };
@@ -428,6 +466,12 @@ export function getMmgProvider(): MmgMerchantProvider {
         throw new Error(
           'MMG_DRIVER=live needs MMG_API_KEY, MMG_MERCHANT_ID, MMG_PASSWORD, MMG_MKEY and MMG_MSECRET ' +
             `(missing: ${missing.join(', ')})`,
+        );
+      }
+      if (process.env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] !== '1') {
+        throw new Error(
+          'MMG_DRIVER=live requires MMG_REFERENCE_ROUNDTRIP_VERIFIED=1 after sandbox UAT proves ' +
+          'x-wss-correlationid -> lookup metadata.description and history external_id round-trip',
         );
       }
       if (isProduction() && /mmgtest|\buat\b|sandbox/i.test(cfg.baseUrl)) {

@@ -97,6 +97,9 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   for (const name of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'] as const) {
     if (!env[name]) throw new Error(`FATAL: ${name} is required when MMG_DRIVER=live. Refusing to start.`);
   }
+  if (env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] !== '1') {
+    throw new Error('FATAL: MMG_REFERENCE_ROUNDTRIP_VERIFIED must be exactly 1 after sandbox UAT proves the merchant reference in lookup and history. Refusing to start.');
+  }
   const mmgUrl = env['MMG_API_URL'];
   if (!mmgUrl || !/^https:\/\//i.test(mmgUrl) || /mmgtest|\buat\b|sandbox/i.test(mmgUrl)) {
     throw new Error('FATAL: production MMG requires an explicit non-UAT HTTPS MMG_API_URL. Refusing to start.');
