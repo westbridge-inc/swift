@@ -351,8 +351,14 @@ export class BillingService {
         if (recordedFailure) {
           // [M-04] The event exists but its outcome never landed (a crash of the
           // pre-transactional code): apply it now, in ONE transaction.
+          // [DS219 F2-1R1] ...unless it DID land after this snapshot was read: a
+          // concurrent run that won the same attempt key and failed has already
+          // moved failedAttempts on. Resume only at the level the record
+          // describes, checked under the row lock, so one real failure is never
+          // counted twice (a premature final warning, an early suspension).
           return this.applyFailedCharge(
             sub, Number(recordedFailure.amount ?? 0), recordedFailure.note ?? 'Charge failed (outcome resumed after interruption)', now, periodKey,
+            sub.failedAttempts,
           );
         }
         // [TA-S0-002] A run that reserved this attempt's MMG intent and died
@@ -2673,6 +2679,9 @@ export class BillingService {
     reason: string,
     now: Date,
     periodKey: string,
+    /** The failure level the caller's record describes; when the locked row is
+     *  no longer at it, that outcome already landed and nothing is applied. */
+    expectedFailedAttempts?: number,
   ): Promise<'failed' | 'suspended' | 'skipped'> {
     const result = await this.prisma.$transaction(async (tx) => {
       const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
@@ -2681,6 +2690,7 @@ export class BillingService {
       if (authority.bankInsteadOfAdvance || covered || !['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status)) return null;
       const fresh = await tx.subscription.findUnique({ where: { id: sub.id } });
       if (!fresh) throw new Error(`Locked subscription ${sub.id} disappeared during failure reconciliation`);
+      if (expectedFailedAttempts !== undefined && fresh.failedAttempts !== expectedFailedAttempts) return null;
       const current = { ...sub, ...fresh } as SubWithRelations;
       return { current, outcome: await this.recordFailureInTx(tx, current, amount, reason, now, periodKey) };
     });
