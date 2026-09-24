@@ -187,6 +187,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
+  'PUT /users/:id/unban': c('C3', 'user.ban', E.user),
 
   // ── Vendors ─────────────────────────────────────────────────────────────
   'GET /vendors': c('C0', 'vendor.read'),
