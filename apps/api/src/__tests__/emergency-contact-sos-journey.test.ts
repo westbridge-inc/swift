@@ -36,7 +36,7 @@ let cseq = 0;
 /** A Guyana number exactly as the app composes it: +592 and seven local digits. */
 const contactPhone = () => `+592${String(6_000_000 + Math.floor(Math.random() * 900_000) + (cseq += 1)).padStart(7, '0')}`;
 
-async function makeUser(firstName = 'Mayur') {
+async function makeUser(firstName = 'Asha') {
   seq += 1;
   const user = await app.prisma.user.create({ data: { phone: `+${phoneBase + seq}`, firstName, lastName: `Owner${seq}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date() } });
   createdUserIds.push(user.id);
@@ -133,7 +133,7 @@ describe('add → confirm by code → SOS reaches exactly that contact', () => {
     const toUnproven = devChannelLog.find((e) => e.channel === 'sms' && e.to === unprovenPhone);
     expect(toAnita, 'the verified contact was not texted').toBeTruthy();
     expect(toAnita!.body).toContain('emergency SOS');
-    expect(toAnita!.body).toContain('Mayur');
+    expect(toAnita!.body).toContain('Asha');
     expect(toAnita!.body).toContain('maps.google.com');
     expect(toUnproven).toBeFalsy();
 

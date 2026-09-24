@@ -85,7 +85,7 @@ async function signupCustomer(phone: string): Promise<{ token: string; userId: s
   const registrationProof = verified.json().data.registrationProof;
   const reg = await app.inject({
     method: 'POST', url: '/api/v1/auth/register',
-    payload: { phone, registrationProof, firstName: 'Mayur', lastName: 'Owner', countryCode: 'GY', role: 'CUSTOMER', acceptTerms: true },
+    payload: { phone, registrationProof, firstName: 'Asha', lastName: 'Persaud', countryCode: 'GY', role: 'CUSTOMER', acceptTerms: true },
     headers: { 'content-type': 'application/json' },
   });
   expect(reg.statusCode, reg.body).toBe(201);
@@ -182,7 +182,7 @@ describe('business: a customer with no business lists one, end to end', () => {
       role: 'VENDOR',
       acceptAgreement: true,
       business: {
-        name: 'Mayur’s Mini Mart', vendorType: 'SUPERMARKET', phone: '+5926001234',
+        name: 'Asha’s Mini Mart', vendorType: 'SUPERMARKET', phone: '+5926001234',
         addressLine1: '12 Main Street', city: 'Georgetown', latitude: 6.8013, longitude: -58.1551,
       },
     }, tokens['vendor']!);
