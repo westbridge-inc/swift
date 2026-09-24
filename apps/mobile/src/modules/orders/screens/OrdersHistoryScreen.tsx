@@ -6,6 +6,7 @@ import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
 import { color, radius, space } from '@swift/ui';
 import { useLiveOrders, useOrdersInfinite, useReorder } from '../../../hooks/customer';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useAuthStore } from '../../../stores/authStore';
 import { vendorPhoto } from '../../../lib/images';
 import { formatAppointmentSlot } from '../../../lib/appointmentTime';
@@ -173,6 +174,11 @@ export function OrdersHistoryScreen() {
   const orders = useOrdersInfinite();
   const liveOrders = useLiveOrders();
   const reorder = useReorder();
+  // The pull spinner is the person's own gesture (lib/pullToRefresh). The
+  // focus refetch below runs on EVERY switch to this tab, and a spinner bound
+  // to isRefetching made iOS pull the list down behind a spinner each time —
+  // a reload nobody asked for. A pull refreshes BOTH lists, as before.
+  const pull = usePullToRefresh(() => Promise.all([orders.refetch(), liveOrders.refetch()]));
 
   // Tab screens stay mounted, so without this the list NEVER updates after
   // first load (found live: a delivered order stuck on "Pending" forever).
@@ -506,11 +512,8 @@ export function OrdersHistoryScreen() {
           }
           refreshControl={
             <RefreshControl
-              refreshing={orders.isRefetching || liveOrders.isRefetching}
-              onRefresh={() => {
-                orders.refetch();
-                liveOrders.refetch();
-              }}
+              refreshing={pull.refreshing}
+              onRefresh={() => { void pull.onRefresh(); }}
               tintColor={color.brand[500]}
             />
           }

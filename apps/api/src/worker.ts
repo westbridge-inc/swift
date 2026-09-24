@@ -14,6 +14,9 @@
  * Redis adapter (production), exactly like the in-process topology; the local
  * io instance here is a broadcast-only handle with no HTTP listener.
  */
+// FIRST: secrets delivered as files (NAME_FILE) become NAME in this process
+// before any module below can read process.env. Keep this import on top.
+import './boot/secret-files';
 import Redis from 'ioredis';
 import { PrismaClient } from '@prisma/client';
 import { Server } from 'socket.io';

@@ -11,6 +11,7 @@ import { IdentityService } from '../modules/integrity/identity.service';
 import { normalizeDocNumber } from '../modules/integrity/normalize';
 import { orderingRestriction } from '../modules/cash/cash-rules.service';
 import { OrderService } from '../modules/order/order.service';
+import { guyanaDayKey } from '../utils/guyana-day';
 import { AccountService } from '../modules/user/account.service';
 import { AuthService } from '../modules/auth/auth.service';
 
@@ -23,6 +24,9 @@ let app: FastifyInstance;
 const userIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_002_000_000 + Math.floor(Math.random() * 8_000_000);
+// TEST-NET-3 address reserved for this suite: the per-IP daily budget key
+// must not accumulate against other suites across repeat runs.
+const TEST_IP = '203.0.113.123';
 
 async function makeUser(roles: ('CUSTOMER' | 'VENDOR_OWNER')[] = ['CUSTOMER']) {
   seq += 1;
@@ -72,6 +76,7 @@ afterAll(async () => {
   await app.prisma.faceTemplate.deleteMany({ where: { accountId: { in: userIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await app.redis.del(`otp_ip_day:${guyanaDayKey(new Date())}:${TEST_IP}`);
   await app.close();
 });
 
@@ -199,10 +204,10 @@ describe('§5 — OTP hourly cap (config, honest cooldown)', () => {
     const auth = new AuthService(app);
     for (let i = 0; i < 5; i += 1) {
       await app.redis.del(`otp_rate:${phone}`); // step past the 1/min claim — hourly is under test
-      await auth.sendOtp(phone);
+      await auth.sendOtp(phone, TEST_IP);
     }
     await app.redis.del(`otp_rate:${phone}`);
-    const refusal = await auth.sendOtp(phone).then(() => null, (e: unknown) => e as { code: string; message: string });
+    const refusal = await auth.sendOtp(phone, TEST_IP).then(() => null, (e: unknown) => e as { code: string; message: string });
     expect(refusal).toMatchObject({ code: 'RATE_LIMITED' });
     expect(refusal!.message).toMatch(/Try again in \d+ minute/);
     await app.redis.del(`otp_hr:${phone}`);

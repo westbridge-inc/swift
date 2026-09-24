@@ -27,7 +27,16 @@
  *   suggestions — they exist only to see past a failure, and the verdict above
  *   is always computed without them.
  *
- * Usage:  npx tsx deploy/preflight.ts [path/to/.env]     (default: deploy/.env)
+ * SECRETS ARE NOT IN THE FILE. deploy/.env holds settings; every secret lives
+ * in the encrypted host store and reaches the app as NAME_FILE=/run/secrets/NAME
+ * (apps/api/src/utils/secret-files.ts). This script runs the SAME loader: a
+ * NAME_FILE line in the candidate file is honoured, and `--secrets-dir DIR`
+ * wires DIR/NAME for every allowlisted name present there, exactly as Compose
+ * does. Without it, store-held secrets read as MISSING here — which is true of
+ * the file, and not of the server. On the host, run it as root against
+ * /run/swift-secrets.
+ *
+ * Usage:  npx tsx deploy/preflight.ts [path/to/.env] [--secrets-dir DIR]     (default: deploy/.env)
  */
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -35,11 +44,26 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { assertSafeBootConfig } from '../apps/api/src/utils/boot-config';
+import { SECRET_FILE_NAMES, applySecretFiles, assembleDatabaseUrl } from '../apps/api/src/utils/secret-files';
 import { bucketVersioningStatus, kekEscrowStatus, parseBucketVersioning } from '../apps/api/src/modules/ops/document-durability';
 import { darkFeatureStatus } from '../apps/api/src/modules/ops/dark-features';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const envPath = process.argv[2] ?? path.join(HERE, '.env');
+let envPath = path.join(HERE, '.env');
+let secretsDir: string | null = null;
+for (let i = 2; i < process.argv.length; i += 1) {
+  const arg = process.argv[i] as string;
+  if (arg === '--secrets-dir') {
+    secretsDir = process.argv[i + 1] ?? null;
+    i += 1;
+    if (!secretsDir) {
+      console.error('FATAL: --secrets-dir needs a directory.');
+      process.exit(2);
+    }
+  } else {
+    envPath = arg;
+  }
+}
 
 if (!existsSync(envPath)) {
   console.error(`FATAL: ${envPath} does not exist. Run ./deploy/gen-secrets.sh first.`);
@@ -50,7 +74,7 @@ if (!existsSync(envPath)) {
  *  bare checkout before anything is installed. */
 function readEnvFile(file: string): Record<string, string> {
   const out: Record<string, string> = {};
-  const literalTwilioFields = new Set(['TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_FROM']);
+  const literalTwilioFields = new Set(['TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID']);
   for (const raw of readFileSync(file, 'utf8').split('\n')) {
     const sourceLine = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
     const line = sourceLine.trim();
@@ -64,7 +88,12 @@ function readEnvFile(file: string): Record<string, string> {
     let value = literalTwilioFields.has(key)
       ? sourceLine.slice(sourceLine.indexOf('=') + 1)
       : line.slice(eq + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    // A lone quote is an unterminated quote (the value continues on the next
+    // line), not an empty quoted value. Collapsing it to '' let a broken
+    // TWILIO_MESSAGING_SERVICE_SID="… line read as "unset", so a file the host
+    // would not start on passed preflight on TWILIO_FROM alone. Kept as-is, the
+    // guard refuses it as malformed.
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
       value = value.slice(1, -1);
     } else {
       const hash = value.indexOf(' #');
@@ -107,7 +136,24 @@ const STUBS: Record<string, string> = {
   CONSENT_IP_PEPPER: 'x'.repeat(48),
 };
 
-const fileEnv = readEnvFile(envPath);
+const fileEnv: Record<string, string | undefined> = readEnvFile(envPath);
+// The store, wired the way Compose wires it: DIR/NAME → NAME_FILE for every
+// allowlisted name present in DIR. Then the real loader, with its real
+// refusals — a refusal here is the exact message the server would print.
+if (secretsDir) {
+  for (const name of SECRET_FILE_NAMES) {
+    const candidate = path.join(secretsDir, name);
+    if (fileEnv[`${name}_FILE`] === undefined && existsSync(candidate)) fileEnv[`${name}_FILE`] = candidate;
+  }
+}
+let fromStore: string[] = [];
+try {
+  fromStore = applySecretFiles(fileEnv);
+  assembleDatabaseUrl(fileEnv);
+} catch (error) {
+  console.error(`FATAL (secret files, before any guard): ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
 const production = { ...fileEnv, NODE_ENV: 'production' };
 
 function guardMessage(env: Record<string, string | undefined>): string | null {
@@ -126,7 +172,12 @@ function varsIn(message: string): string[] {
 }
 
 console.log(`\nSwift deployment preflight — ${envPath}`);
-console.log(`Evaluating as NODE_ENV=production against the real boot guard.\n`);
+console.log(`Evaluating as NODE_ENV=production against the real boot guard.`);
+if (secretsDir) {
+  console.log(`Secrets from ${secretsDir}: ${fromStore.length} loaded through the *_FILE loader.\n`);
+} else {
+  console.log('No --secrets-dir: store-held secrets are not in this file and read as MISSING below.\n');
+}
 
 // ── THE WALKTHROUGH ────────────────────────────────────────────────────────
 console.log('PROBLEMS, in the order the boot guard checks them');
@@ -136,6 +187,13 @@ const problems: string[] = [];
 for (let i = 0; i < 40; i += 1) {
   const message = guardMessage(probe);
   if (!message) break;
+  // Stubs only ADD values, so a refusal caused by two variables both being
+  // set (the exactly-one Twilio sender rule) cannot be "seen past". Stop on
+  // the first repeat instead of echoing the same problem 40 times.
+  if (problems.includes(message)) {
+    console.log('    (stubbing changed nothing — this refusal is about values that are SET, not missing — so the walkthrough stops here)');
+    break;
+  }
   problems.push(message);
   const targets = varsIn(message);
   if (targets.length === 0) {
@@ -150,12 +208,17 @@ if (problems.length === 0) console.log('  none — the guard is satisfied by thi
 console.log('');
 
 // ── THE INVENTORY ──────────────────────────────────────────────────────────
-const WATCHED = Object.keys(STUBS).sort();
+// TWILIO_MESSAGING_SERVICE_SID is read by the guard but is deliberately NOT a
+// stub: exactly one sender may be set, so stubbing it beside TWILIO_FROM would
+// only manufacture the both-set refusal. It is inventoried so the operator
+// can see which sender the file carries.
+const WATCHED = [...Object.keys(STUBS), 'TWILIO_MESSAGING_SERVICE_SID'].sort();
 console.log('VARIABLES THE GUARD READS');
 console.log('─'.repeat(72));
 for (const v of WATCHED) {
   const present = fileEnv[v] !== undefined && fileEnv[v] !== '';
-  console.log(`  ${present ? 'PRESENT' : 'MISSING'.padEnd(7)}  ${v}`);
+  const source = fromStore.includes(v) ? 'STORE  ' : present ? 'PRESENT' : 'MISSING';
+  console.log(`  ${source}  ${v}`);
 }
 console.log('');
 
