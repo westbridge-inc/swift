@@ -688,6 +688,116 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GOLD-2 · VEND-04 — E12: the owner stops and resumes the weekly fee self-serve
+// (method NONE on the billing-method route). Stop is idempotent and audit-logged,
+// the rail survives, the paid period still runs out, and a late MMG approval or
+// a resume of a lapsed store can never silently reopen service.
+// ---------------------------------------------------------------------------
+describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing', () => {
+  it('stop sets autoRenew=false keeping the rail, writes exactly one stop event + audit row, and a double-stop adds none', async () => {
+    const p = await makePartner('E12a');
+    await chooseMmg(p, `${PHONE_PREFIX}806`);
+
+    const stop = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
+    expect(stop.statusCode, stop.body).toBe(200);
+    expect(stop.json().data).toEqual({ billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: `${PHONE_PREFIX}806` });
+
+    const row = await subRow(p.subId);
+    expect({
+      autoRenew: row.autoRenew,
+      nextRetryAt: row.nextRetryAt,
+      billingMethod: row.billingMethod,
+      mmgPayerMsisdn: row.mmgPayerMsisdn,
+    }).toEqual({ autoRenew: false, nextRetryAt: null, billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: `${PHONE_PREFIX}806` });
+
+    // The GET exposes autoRenew for the app's stop/resume state.
+    const get = await call('GET', '/api/v1/vendor/subscription', p.owner.token, undefined, { 'x-vendor-id': p.vendorId });
+    expect(get.statusCode).toBe(200);
+    expect(get.json().data.autoRenew).toBe(false);
+
+    const again = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
+    expect(again.statusCode, again.body).toBe(200);
+
+    const stops = (await eventsOf(p.subId)).filter((e) => e.key.startsWith(`stop:${p.subId}:`));
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toMatchObject({ type: 'TIER_CHANGE', amount: null });
+    const note = await sys(() => app.prisma.billingEvent.findFirstOrThrow({
+      where: { subscriptionId: p.subId, idempotencyKey: { startsWith: `stop:${p.subId}:` } },
+    }));
+    expect(note.note).toBe('Weekly billing stopped by the partner');
+    const audit = await sys(() => app.prisma.auditLog.findFirstOrThrow({
+      where: { entityId: p.subId, action: 'BILLING_STOPPED' },
+    }));
+    expect(audit.userId).toBe(p.owner.userId);
+  });
+
+  it('only the owner may stop — a manager, a customer and another store’s owner cannot touch this subscription', async () => {
+    const p = await makePartner('E12b');
+    const q = await makePartner('E12c');
+    const manager = await makeUser('E12mgr', ['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
+    await sys(() => app.prisma.vendorStaff.create({
+      data: { vendorId: p.vendorId, userId: manager.userId, role: 'MANAGER', invitedBy: p.owner.userId },
+    }));
+
+    const managerStop = await call('PUT', '/api/v1/vendor/subscription/billing-method', manager.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
+    expect(managerStop.statusCode).toBe(403);
+    expect(managerStop.json().error.code).toBe('STAFF_FORBIDDEN');
+
+    const customerStop = await call('PUT', '/api/v1/vendor/subscription/billing-method', outsider.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
+    expect(customerStop.statusCode).toBe(403);
+
+    // Another store's owner resolves THEIR OWN store — this subscription is
+    // unreachable by the route's shape (no subscription id in the URL).
+    const theirs = await call('PUT', '/api/v1/vendor/subscription/billing-method', q.owner.token, { method: 'NONE' }, { 'x-vendor-id': q.vendorId });
+    expect(theirs.statusCode, theirs.body).toBe(200);
+    expect((await subRow(p.subId)).autoRenew).toBe(true);
+    expect((await subRow(q.subId)).autoRenew).toBe(false);
+  });
+
+  it('resume re-arms billing and the next cycle bills the week off the prepaid balance', async () => {
+    const p = await makePartner('E12d');
+    await trialEnds(p); // ACTIVE and immediately due — the stopped week must not bill
+    await sys(() => app.prisma.prepaidBalance.create({
+      data: { subscriptionId: p.subId, balance: RATE_CARD_SMALL_VENDOR, currencyCode: 'GY' },
+    }));
+
+    const stop = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
+    expect(stop.statusCode, stop.body).toBe(200);
+    await billing.runBillingCycle();
+    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(0);
+
+    const resume = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'CASH' }, { 'x-vendor-id': p.vendorId });
+    expect(resume.statusCode, resume.body).toBe(200);
+    expect((await subRow(p.subId)).autoRenew).toBe(true);
+
+    await billing.runBillingCycle();
+    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
+    expect((await subRow(p.subId)).status).toBe('ACTIVE');
+    expect(await wallet(p.subId)).toBe(0);
+  });
+
+  it('a stopped store lapses CANCELLED at its period end, and resume is refused with 409', async () => {
+    const p = await makePartner('E12e');
+    const stop = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
+    expect(stop.statusCode, stop.body).toBe(200);
+    await sys(() => app.prisma.subscription.update({
+      where: { id: p.subId },
+      data: { currentPeriodEnd: new Date(Date.now() - 60_000) },
+    }));
+
+    await billing.lapseStoppedSubscriptions(); // may also sweep another file's stopped row; the row-state assertions below are the proof
+    const lapsed = await subRow(p.subId);
+    expect({ status: lapsed.status, autoRenew: lapsed.autoRenew, nextRetryAt: lapsed.nextRetryAt })
+      .toEqual({ status: 'CANCELLED', autoRenew: false, nextRetryAt: null });
+
+    const resume = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'CASH' }, { 'x-vendor-id': p.vendorId });
+    expect(resume.statusCode).toBe(409);
+    expect(resume.json().error.code).toBe('SUBSCRIPTION_CLOSED');
+    expect((await subRow(p.subId)).autoRenew).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // G2-F1 (NEW, proposed S1): every subscription born through activation carries
 // the owner's COUNTRY code as its currency. subscription.service.ts passes
 // `activation.countryCode` into `create(entity, type, weeklyRate, currencyCode)`

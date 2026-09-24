@@ -242,6 +242,36 @@ export class BillingService {
   }
 
   /**
+   * [E12] The lapse sweep for a stopped subscription. A partner who stopped
+   * weekly billing stays ACTIVE exactly until the period they already paid
+   * for ends — `runBillingCycle` never selects `autoRenew: false`, and nothing
+   * else lapses them, so without this an ACTIVE stopped row would keep
+   * operating for free forever. At period end it takes the wind-down's
+   * terminal shape (`status: 'CANCELLED', autoRenew: false, nextRetryAt:
+   * null`) — CANCELLED is not an OPERABLE_STATUSES member, so the partner
+   * stops receiving work exactly like any other cancelled subscription.
+   * Resuming a cancelled subscription is refused (409) by `setBillingRail`;
+   * the partner must renew instead. Runs in the process-billing job.
+   */
+  async lapseStoppedSubscriptions(now = new Date()): Promise<number> {
+    const lapsed = await this.prisma.subscription.updateMany({
+      where: {
+        status: 'ACTIVE',
+        autoRenew: false,
+        currentPeriodEnd: { lte: now },
+      },
+      data: {
+        status: 'CANCELLED',
+        autoRenew: false,
+        nextRetryAt: null,
+        isInGracePeriod: false,
+        gracePeriodEnd: null,
+      },
+    });
+    return lapsed.count;
+  }
+
+  /**
    * Bill one subscription. Idempotent: the CHARGE_ATTEMPT event's unique key
    * (subscription + period + retry level) makes a second concurrent or
    * repeated run a no-op at the database level.
@@ -2079,6 +2109,12 @@ export class BillingService {
    * §13 rail selection — one place flips how a subscription pays. CASH is the
    * prepaid path; MOBILE_MONEY needs the payer's MMG account. CARD enrollment
    * is unavailable through this boundary, including unchecked runtime callers.
+   *
+   * [E12] This is also the RESUME action: it arms auto-renew in the same
+   * transaction as the rail write, so a partner who stopped weekly billing
+   * resumes on the rail they pick. A subscription already lapsed/cancelled
+   * (period end) or closed (churned) is refused with 409 — resuming must not
+   * silently reopen service without payment; the partner renews instead.
    */
   async setBillingRail(subscriptionId: string, method: 'CASH' | 'MOBILE_MONEY', mmgPayerMsisdn?: string) {
     if (method !== 'CASH' && method !== 'MOBILE_MONEY') {
@@ -2087,12 +2123,34 @@ export class BillingService {
     if (method === 'MOBILE_MONEY' && !mmgPayerMsisdn?.trim()) {
       throw new AppError(400, 'MSISDN_REQUIRED', 'Your MMG account number is required to pay the weekly fee via MMG.');
     }
-    const updated = await this.prisma.subscription.update({
-      where: { id: subscriptionId },
-      data: {
-        billingMethod: method,
-        mmgPayerMsisdn: method === 'MOBILE_MONEY' ? mmgPayerMsisdn!.trim() : null,
-      },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ status: SubscriptionStatus }>>`
+        SELECT "status" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE
+      `;
+      const fresh = rows[0];
+      if (!fresh) throw new NotFoundError('Subscription', subscriptionId);
+      if (fresh.status === 'CANCELLED' || fresh.status === 'CHURNED') {
+        throw new AppError(
+          409,
+          'SUBSCRIPTION_CLOSED',
+          fresh.status === 'CHURNED'
+            ? 'Your subscription is closed after non-payment. Pay your weekly fee to rejoin, then set your billing method again.'
+            : 'This subscription has ended. Contact Swift to renew before resuming weekly billing.',
+        );
+      }
+      // Resume the retry clock for a subscription that is behind or suspended:
+      // the cycle's PAST_DUE/SUSPENDED arm selects on nextRetryAt, which the
+      // stop cleared. Arming now lets the next run attempt the owed week.
+      const behind = fresh.status === 'PAST_DUE' || fresh.status === 'SUSPENDED';
+      return tx.subscription.update({
+        where: { id: subscriptionId },
+        data: {
+          billingMethod: method,
+          mmgPayerMsisdn: method === 'MOBILE_MONEY' ? mmgPayerMsisdn!.trim() : null,
+          autoRenew: true,
+          ...(behind ? { nextRetryAt: new Date() } : {}),
+        },
+      });
     });
     await this.prisma.billingEvent.create({
       data: {
@@ -2123,6 +2181,58 @@ export class BillingService {
       }
     }
     return updated;
+  }
+
+  /**
+   * [E12] A partner's self-serve "stop weekly billing" (method NONE). One
+   * transaction with the subscription row locked FOR UPDATE — the same locking
+   * shape as `lockSubscriptionMoneyAuthority` — so a concurrent resume or
+   * cycle cannot interleave. Sets `autoRenew=false` and `nextRetryAt=null`
+   * only: the rail (`billingMethod` / `mmgPayerMsisdn`) stays so a resume
+   * knows where to come back, and status/balance/debt are untouched (an owed
+   * week is still owed; nothing is reinstated or cleared). Writes ONE
+   * TIER_CHANGE note event — the `setBillingRail` precedent — keyed by the
+   * locked row's pre-stop `updatedAt`, so a double-stop is a no-op rather than
+   * a second event, while a later stop after a resume gets its own key. A
+   * partner action this consequential also writes an audit row naming the
+   * actor, matching the billing module's top-up precedent.
+   */
+  async stopBilling(subscriptionId: string, actorUserId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ id: string; autoRenew: boolean; currencyCode: string; updatedAt: Date }>>`
+        SELECT "id", "autoRenew", "currencyCode", "updatedAt" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE
+      `;
+      const fresh = rows[0];
+      if (!fresh) throw new NotFoundError('Subscription', subscriptionId);
+      if (!fresh.autoRenew) {
+        // Idempotent double-stop: already stopped — change nothing, write no
+        // second event, add no second audit row.
+        return tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
+      }
+      await tx.subscription.update({
+        where: { id: subscriptionId },
+        data: { autoRenew: false, nextRetryAt: null },
+      });
+      await tx.billingEvent.create({
+        data: {
+          subscriptionId,
+          type: 'TIER_CHANGE',
+          currencyCode: fresh.currencyCode,
+          idempotencyKey: `stop:${subscriptionId}:${fresh.updatedAt.toISOString()}`,
+          note: 'Weekly billing stopped by the partner',
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          userId: actorUserId,
+          action: 'BILLING_STOPPED',
+          entity: 'Subscription',
+          entityId: subscriptionId,
+          changes: { autoRenew: false, nextRetryAt: null },
+        },
+      });
+      return tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
+    });
   }
 
   /**

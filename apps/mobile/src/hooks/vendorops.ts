@@ -384,6 +384,17 @@ export function useVendorSubscription(enabled = true) {
   };
 }
 
+/** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee, then
+ *  re-read the subscription so the screen's autoRenew state is server truth. */
+export function useSetVendorBillingMethod() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) =>
+      unwrap(vendorApi.setBillingMethod(method, mmgPayerMsisdn)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'subscription'] }),
+  });
+}
+
 /** "Find a mover again" after dispatch exhausted — clears the cascade's
  *  decline memory server-side and searches again from the tightest radius. */
 export function useRetryDispatch() {

@@ -3,11 +3,20 @@ import React from 'react';
 import { Platform, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, motion, radius, space, withAlpha } from '@swift/ui';
-import { Card, ErrorState, InfoRow, LinkText, LoadingBlock, PillButton, T } from '../../kit';
+import { Card, ErrorState, IconChip, InfoRow, LinkText, LoadingBlock, PillButton, PopupCard, PopupTitle, T } from '../../kit';
 import { money } from '../../lib/money';
 import { copyText } from '../../lib/clipboard';
 import { feeSurfaceFor } from '../../lib/feeSurface';
-import { daysUntil, isBehind, isBlocked, shortDate, walletLine, weeklyFeeGyd, weeksCovered } from '../../lib/billing';
+import {
+  daysUntil,
+  isBehind,
+  isBillingStopped,
+  isBlocked,
+  shortDate,
+  walletLine,
+  weeklyFeeGyd,
+  weeksCovered,
+} from '../../lib/billing';
 
 // ---------------------------------------------------------------------------
 // Billing surfaces (TOLLGATE D) — the payer-facing half of the SAN + agent-cash
@@ -508,4 +517,109 @@ export function BillingStatusBlock({
   // Healthy account, nothing banked — say nothing here. The dedicated "My Swift
   // Number" row (account surfaces) is the way in; nothing needs paying now.
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// E12 — STOP / RESUME WEEKLY BILLING
+//
+// The partner's self-serve door out of the recurring fee. "Stop weekly
+// billing" sits behind a confirm that names the exact consequence: the plan
+// stays active until the period end the server sent, and after that the store
+// / driver / rider stops receiving work. While stopped the surface says so and
+// offers Resume. Everything here reads server truth (`autoRenew`,
+// `currentPeriodEnd`); a CANCELLED (lapsed) or CHURNED (closed) account hides
+// the control — neither door would be honest, and the server refuses both.
+// ---------------------------------------------------------------------------
+
+export function BillingStopControl({
+  sub,
+  who,
+  onStop,
+  onResume,
+  pending,
+}: {
+  sub: any;
+  who: 'store' | 'driver' | 'rider';
+  onStop: () => void;
+  onResume: () => void;
+  pending?: boolean;
+}) {
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  if (!sub) return null;
+  const status = String(sub.status ?? '').toUpperCase();
+  if (status === 'CANCELLED' || status === 'CHURNED') return null;
+  const stopped = isBillingStopped(sub);
+  const blocked = isBlocked(sub);
+  const periodEnd = shortDate(sub?.currentPeriodEnd);
+  const untilLine = blocked
+    ? 'No more weekly fees will be charged.'
+    : periodEnd
+      ? `You keep working until ${periodEnd}. No more weekly fees will be charged.`
+      : 'The week you paid for still runs out. No more weekly fees will be charged.';
+  const confirmBody = blocked
+    ? `Your ${who} is already paused. Stopping means no more weekly fees will be charged — what you owe still stands until you pay it. You can resume billing anytime.`
+    : `Your ${who} keeps working until ${periodEnd ?? 'the end of the current period'}. After that, the ${who} stops receiving work and no more weekly fees are charged. You can resume billing anytime.`;
+
+  return (
+    <>
+      {stopped ? (
+        <View
+          style={{
+            marginTop: space.md,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: space.sm,
+            borderRadius: radius.lg,
+            borderWidth: 1,
+            borderColor: withAlpha(color.brand[500], 0.25),
+            backgroundColor: color.surface.base,
+            padding: space.lg,
+          }}
+        >
+          <Feather name="pause-circle" size={18} color={color.brand[500]} />
+          <View style={{ flex: 1 }}>
+            <T variant="label" weight="semibold">
+              Weekly billing stopped
+            </T>
+            <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+              {untilLine}
+            </T>
+          </View>
+          <PillButton label="Resume" size="md" variant="soft" loading={pending} onPress={onResume} />
+        </View>
+      ) : (
+        <PillButton
+          label="Stop weekly billing"
+          variant="outline"
+          size="md"
+          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          onPress={() => setConfirmOpen(true)}
+        />
+      )}
+      <PopupCard visible={confirmOpen} onClose={() => setConfirmOpen(false)}>
+        <IconChip icon="pause-circle" size={56} tone="brand" />
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
+          Stop weekly billing?
+        </PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          {confirmBody}
+        </T>
+        <PillButton
+          label="Stop billing"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={pending}
+          onPress={() => {
+            setConfirmOpen(false);
+            onStop();
+          }}
+        />
+        <PillButton
+          label="Keep billing"
+          variant="soft"
+          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          onPress={() => setConfirmOpen(false)}
+        />
+      </PopupCard>
+    </>
+  );
 }

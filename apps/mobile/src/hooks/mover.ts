@@ -615,6 +615,20 @@ export function useMoverSubscription(kind: MoverKind | null) {
   };
 }
 
+/** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the mover's weekly fee,
+ *  then re-read the subscription so the screen's autoRenew state is server
+ *  truth. Preview is read-only: the mutation is a no-op there. */
+export function useSetMoverBillingMethod(kind: MoverKind | null) {
+  const pv = usePreview();
+  const qc = useQueryClient();
+  const m = useMutation({
+    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) =>
+      unwrap<any>(svc(kind as MoverKind).setBillingMethod(method, mmgPayerMsisdn)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['mover', 'subscription', kind] }),
+  });
+  return pv ? PV.previewMutation() : m;
+}
+
 /** Post-trip DRIVER_TO_CUSTOMER rating (409 when already rated — treat as done). */
 export function useRateCustomer() {
   const pv = usePreview();

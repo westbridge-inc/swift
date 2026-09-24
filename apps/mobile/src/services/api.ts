@@ -875,6 +875,9 @@ export const riderApi = {
   history: (params?: { page?: number; limit?: number }) => api.get('/rider/orders', { params }),
   stats: () => api.get('/rider/stats'),
   subscription: () => api.get('/rider/subscription'),
+  /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
+    api.put('/rider/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
     api.post('/rider/vehicle-photo', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -931,6 +934,9 @@ export const driverApi = {
   rateCustomer: (id: string, score: number, comment?: string) =>
     api.post(`/driver/rides/${id}/rate-customer`, { score, ...(comment ? { comment } : {}) }),
   subscription: () => api.get('/driver/subscription'),
+  /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
+    api.put('/driver/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
     api.post('/driver/vehicle-photo', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -999,6 +1005,9 @@ export const vendorApi = {
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),
   items: () => api.get('/vendor/items'),
   subscription: () => api.get('/vendor/subscription'),
+  /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
+    api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
   // Menu management
   categories: () => api.get('/vendor/categories'),
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),

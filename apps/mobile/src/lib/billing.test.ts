@@ -11,6 +11,8 @@ import {
   hoursUntil,
   daysUntil,
   sanQrPayload,
+  isBillingStopped,
+  resumeBillingMethod,
 } from './billing';
 
 describe('billingPhase', () => {
@@ -54,6 +56,24 @@ describe('isBlocked / isBehind', () => {
     expect(isBehind({ status: 'PAST_DUE' })).toBe(true);
     expect(isBehind({ status: 'ACTIVE' })).toBe(false);
     expect(isBehind({ status: 'SUSPENDED' })).toBe(false);
+  });
+});
+
+describe('isBillingStopped / resumeBillingMethod [E12]', () => {
+  it('reads the server autoRenew flag and never invents a stop', () => {
+    expect(isBillingStopped({ autoRenew: false, status: 'ACTIVE' })).toBe(true);
+    expect(isBillingStopped({ autoRenew: true, status: 'ACTIVE' })).toBe(false);
+    expect(isBillingStopped({ status: 'ACTIVE' })).toBe(false);
+    expect(isBillingStopped(null)).toBe(false);
+    expect(isBillingStopped(undefined)).toBe(false);
+  });
+
+  it('resumes on the rail billing was stopped on; a legacy card falls back to cash', () => {
+    expect(resumeBillingMethod({ billingMethod: 'MOBILE_MONEY' })).toBe('MOBILE_MONEY');
+    expect(resumeBillingMethod({ billingMethod: 'CASH' })).toBe('CASH');
+    expect(resumeBillingMethod({ billingMethod: 'CARD' })).toBe('CASH');
+    expect(resumeBillingMethod({})).toBe('CASH');
+    expect(resumeBillingMethod(null)).toBe('CASH');
   });
 });
 

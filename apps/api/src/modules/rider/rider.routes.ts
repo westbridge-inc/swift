@@ -2019,16 +2019,21 @@ export async function riderRoutes(app: FastifyInstance) {
 
   /** PUT /subscription/billing-method — §13 rail selection: pay the weekly fee
    *  from the prepaid balance (CASH) or by approving an MMG request on my
-   *  phone (MOBILE_MONEY + my MMG account number). */
+   *  phone (MOBILE_MONEY + my MMG account number), and [E12] the rider's
+   *  self-serve stop/resume: `NONE` stops weekly billing (the paid period
+   *  still runs out, then I stop receiving work); CASH or MOBILE_MONEY
+   *  resumes it on that rail. */
   app.put('/subscription/billing-method', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
     const body = z.object({
-      method: z.enum(['CASH', 'MOBILE_MONEY']),
+      method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
     const sub = await app.prisma.subscription.findFirst({ where: { riderId: rider.id } });
     if (!sub) throw new NotFoundError('Subscription');
-    const updated = await billing.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
+    const updated = body.method === 'NONE'
+      ? await billing.stopBilling(sub.id, request.user.userId)
+      : await billing.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
     return { success: true, data: { billingMethod: updated.billingMethod, mmgPayerMsisdn: updated.mmgPayerMsisdn } };
   });
 

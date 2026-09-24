@@ -480,6 +480,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       switch (job.name) {
         case 'process-billing': {
           const result = await billing.runBillingCycle();
+          // [E12] A stopped subscription stays ACTIVE until its paid period
+          // ends, then lapses CANCELLED so it cannot keep operating free.
+          const lapsed = await billing.lapseStoppedSubscriptions();
           const reminders = await billing.sendUpcomingReminders();
           // §11 stages 6..N: daily reinstatement nudges for the suspended
           // (idempotent per day via the REMINDER event key) + CHURNED terminal
@@ -493,7 +496,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // paid conversion seamless.
           const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
           const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
+          ctx.log.info({ ...result, lapsed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
           const troubled = result.failed + result.errors + result.suspended;

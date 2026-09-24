@@ -67,6 +67,21 @@ export function isBehind(sub: any): boolean {
   return p === 'grace' || p === 'past_due';
 }
 
+/** [E12] The partner stopped weekly billing (`autoRenew: false`). The paid
+ *  period still runs out; after that the account stops receiving work until
+ *  billing is resumed or the account is renewed. Server truth only — a missing
+ *  row or flag is never invented into a stopped account. */
+export function isBillingStopped(sub: any): boolean {
+  return !!sub && sub.autoRenew === false;
+}
+
+/** [E12] The rail a resume returns to: the one billing was stopped on. A
+ *  legacy CARD subscription has no self-serve card enrollment, so it resumes
+ *  on the prepaid CASH path — the only rails the boundary accepts. */
+export function resumeBillingMethod(sub: any): 'CASH' | 'MOBILE_MONEY' {
+  return sub?.billingMethod === 'MOBILE_MONEY' ? 'MOBILE_MONEY' : 'CASH';
+}
+
 /** Whole weeks a parked wallet balance covers at the weekly fee. Floors — we
  *  never over-promise coverage. 0 when the fee is unknown or nothing's banked. */
 export function weeksCovered(balanceGyd?: number | null, weeklyGyd?: number | null): number {
