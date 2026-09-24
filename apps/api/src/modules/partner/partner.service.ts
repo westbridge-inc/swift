@@ -436,20 +436,19 @@ export class PartnerService {
         if (vehicle) keptSubjects.add(await rootSubjectId(tx, vehicle.subjectId));
       }
       const papers = await tx.verificationDocument.findMany({
-        where: {
-          userId, role: 'MOVER', docType: { in: [...VEHICLE_DOC_TYPES] },
-          // A row a legacy writer inserted before the state trigger carries only its legacy
-          // status (hopDocState matches a NULL state as any `from`): the same rule retires it.
-          OR: [{ state: { in: ['COMMITTED', ...AWAITING_REVIEW] } }, { state: null, status: { in: ['APPROVED', 'PENDING'] } }],
-        },
-        select: { id: true, state: true, status: true, subjectId: true, legalHoldId: true },
+        // Every row has a state: the state-machine migration (20260906090000) backfilled
+        // all rows BEFORE its trigger existed, the INSERT trigger derives a state for any
+        // new row, and an UPDATE can never null it. (A NULL-state row would also be frozen:
+        // the trigger refuses every NULL→X transition.)
+        where: { userId, role: 'MOVER', docType: { in: [...VEHICLE_DOC_TYPES] }, state: { in: ['COMMITTED', ...AWAITING_REVIEW] } },
+        select: { id: true, state: true, subjectId: true, legalHoldId: true },
       });
       const toRetire: Array<{ id: string; committed: boolean }> = [];
       for (const paper of papers) {
         // A paper under a legal hold is frozen: its state and its case belong to the hold.
         if (paper.legalHoldId) continue;
         if (paper.subjectId && keptSubjects.has(await rootSubjectId(tx, paper.subjectId))) continue;
-        toRetire.push({ id: paper.id, committed: paper.state === 'COMMITTED' || (paper.state === null && paper.status === 'APPROVED') });
+        toRetire.push({ id: paper.id, committed: paper.state === 'COMMITTED' });
       }
       // Lock order: a review case BEFORE its document — the order the reviewer paths take
       // (claim / release / escalate lock the case, then hop the document) — so a change
