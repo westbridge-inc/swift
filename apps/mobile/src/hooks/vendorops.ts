@@ -446,6 +446,9 @@ export function useOrderAction() {
       if (action === 'delivered') return unwrap(vendorApi.delivered(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));
       if (action === 'complete-appointment') return unwrap(vendorApi.completeAppointment(id));
+      // [E10] Never send a bare rejection: the API refuses it, and the customer
+      // must be told why. Every screen collects a preset before it gets here.
+      if (!reason?.trim()) throw new Error('Pick a reason before rejecting.');
       return unwrap(vendorApi.reject(id, reason));
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),

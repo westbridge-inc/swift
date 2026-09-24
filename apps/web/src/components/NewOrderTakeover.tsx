@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { acceptOrder, money, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
+import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 
 /**
@@ -36,6 +37,10 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   const [seen, setSeen] = useState<Set<string> | null>(null); // null until first poll
   const [queue, setQueue] = useState<VendorOrder[]>([]);
   const [prepTime, setPrepTime] = useState(20);
+  // [E10] The API requires a reason on every rejection. The mobile takeover
+  // collects one of the same three presets; a non-empty default keeps Reject
+  // a single tap while still satisfying the contract.
+  const [rejectReason, setRejectReason] = useState('Out of stock');
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
   const titleRef = useRef<string | null>(null);
@@ -89,7 +94,12 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     onError: (e) => setError((e as Error).message),
   });
   const reject = useMutation({
-    mutationFn: (id: string) => rejectOrder(id),
+    // The chosen preset, or the first one that fits this order when the
+    // choice was made for a different kind (a booking after a food order).
+    mutationFn: (id: string) => {
+      const reasons = rejectReasonsFor(queue.find((o) => o.id === id)?.fulfillment);
+      return rejectOrder(id, reasons.includes(rejectReason) ? rejectReason : reasons[0]!);
+    },
     onSuccess: (_r, id) => done(id),
     onError: (e) => setError((e as Error).message),
   });
@@ -138,6 +148,16 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
           >
             Accept
           </button>
+          <select
+            value={rejectReasonsFor(current.fulfillment).includes(rejectReason) ? rejectReason : rejectReasonsFor(current.fulfillment)[0]}
+            onChange={(e) => setRejectReason(e.target.value)}
+            aria-label="Reject reason"
+            className="rounded-lg border border-black/10 px-2 py-3 text-sm"
+          >
+            {rejectReasonsFor(current.fulfillment).map((why) => (
+              <option key={why} value={why}>{why}</option>
+            ))}
+          </select>
           <button
             onClick={() => reject.mutate(current.id)}
             disabled={accept.isPending || reject.isPending}

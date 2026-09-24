@@ -1012,7 +1012,8 @@ export const vendorApi = {
     api.put(`/vendor/orders/${id}/fulfillment-mode`, { mode }),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
-  reject: (id: string, reason?: string) => api.put(`/vendor/orders/${id}/reject`, reason ? { reason } : {}),
+  // [E10] The API refuses a rejection without a reason; every caller passes one.
+  reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),
   items: () => api.get('/vendor/items'),
   subscription: () => api.get('/vendor/subscription'),
