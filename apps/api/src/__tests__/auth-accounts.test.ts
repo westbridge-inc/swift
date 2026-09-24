@@ -9,7 +9,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { requestOtp, loginWithOtp, registrationProofFor } from './helpers/otp';
+import { requestOtp, loginWithOtp, registrationProofFor, mintedRegistrationProofFor } from './helpers/otp';
 import { nanoid } from 'nanoid';
 import { syntheticLocationOwner } from './helpers/online-mover';
 
@@ -172,8 +172,17 @@ describe('Signup — OTP mandatory, role + country aware', () => {
     expect(res.json().error.code).toBe('REGISTRATION_PROOF_REQUIRED');
   });
 
-  it('rejects signup for a market outside the Guyana launch', async () => {
-    const registrationProof = await registrationProofFor(app, WAITLIST_PHONE);
+  it('rejects signup for a market outside the Guyana launch — at the front door, and again at register', async () => {
+    // Audit High #2: the GY-only rule (#1259) now runs FIRST in send-otp, so a
+    // foreign number never spends a budget counter, never triggers an SMS and
+    // can never complete the OTP ceremony that issues a registration proof.
+    const front = await inject('POST', '/api/v1/auth/send-otp', { phone: WAITLIST_PHONE });
+    expect(front.statusCode).toBe(400);
+    expect(front.json().error.code).toBe('COUNTRY_NOT_ACTIVE');
+
+    // Defence in depth: register refuses the same number with the same code
+    // even when handed a proof minted directly — the only way one can exist.
+    const registrationProof = await mintedRegistrationProofFor(app, WAITLIST_PHONE);
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone: WAITLIST_PHONE, // UK prefix — derives no Caribbean market
       registrationProof,

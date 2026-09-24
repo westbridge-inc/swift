@@ -43,9 +43,10 @@ import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutabi
 //            code from another address, and the throttle survives a restart;
 //            sends are throttled per caller across instances while another
 //            caller is not, and the per-phone cooldown holds across callers.
-//   G5-F2    [it.fails] an anonymous caller that invents a new
-//            "Authorization: Bearer …" per request gets a fresh limiter bucket
-//            each time and is never throttled (utils/rate-limit-key.ts).
+//   G5-F2    an anonymous caller that invents a new "Authorization:
+//            Bearer …" per request no longer gets a fresh limiter bucket each
+//            time (fixed by #1294: utils/rate-limit-key.ts keys only a VERIFIED
+//            token by its userId; anything else shares the resolved-IP bucket).
 //   G5-F3    [it.fails] app.ts promises the production limiter "must fail
 //            OPEN, never … crash a request if Redis blips"; with its store
 //            unreachable every request answers 500 instead.
@@ -248,7 +249,7 @@ function assertProductionLimiterBinding() {
     "const rateLimitRedis = isProduction() ? new Redis(process.env['REDIS_URL'] || 'redis://localhost:6379', { connectionName: 'swift-rate-limit', maxRetriesPerRequest: 1, enableOfflineQueue: false, }) : undefined;",
   );
   expect(between('await app.register(rateLimit, {', '});')).toBe(
-    `await app.register(rateLimit, { ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: '${RL_NAMESPACE}' } : {}), keyGenerator: rateLimitKey, max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10), timeWindow: '1 minute', });`,
+    `await app.register(rateLimit, { ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: '${RL_NAMESPACE}' } : {}), keyGenerator: rateLimitKey((token) => app.jwt.verify(token)), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10), timeWindow: '1 minute', });`,
   );
 }
 
@@ -477,7 +478,7 @@ describe('GOLD-5 · PLAT-03 — OTP and rate-limit abuse', () => {
     await server.register(rateLimit, {
       redis: store,
       nameSpace: RL_NAMESPACE,
-      keyGenerator: rateLimitKey,
+      keyGenerator: rateLimitKey((token) => server.jwt.verify(token)),
       max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
       timeWindow: '1 minute',
     });
@@ -589,16 +590,19 @@ describe('GOLD-5 · PLAT-03 — OTP and rate-limit abuse', () => {
 });
 
 // ---------------------------------------------------------------------------
-// G5-F2 — an invented bearer token buys a fresh limiter bucket
+// G5-F2 — an invented bearer token no longer buys a fresh limiter bucket
 // ---------------------------------------------------------------------------
 //
-// utils/rate-limit-key.ts keys every request that carries "Authorization:
-// Bearer <anything longer than 4 chars>" by a hash of that string, before any
-// verification. send-otp and verify-otp need no session, so an anonymous
-// caller that invents a new bearer per request gets a new bucket per request:
-// the 5-per-minute OTP ceilings (and the global one) never apply. The phone's
-// own cooldowns still hold, which is why each request names a new number.
-// The five setup sends run in beforeAll, so this can only fail on the sixth.
+// Before #1294, utils/rate-limit-key.ts keyed every request that carried
+// "Authorization: Bearer <anything longer than 4 chars>" by a hash of that
+// string, before any verification. send-otp and verify-otp need no session,
+// so an anonymous caller that invented a new bearer per request got a new
+// bucket per request and the 5-per-minute OTP ceilings never applied. #1294
+// keys only a VERIFIED token (by its userId); an invented one fails
+// verification and shares the caller's resolved-IP bucket, so the sixth send
+// is refused. The phone's own cooldowns still hold, which is why each request
+// names a new number. The five setup sends run in beforeAll, so the assertion
+// is the sixth send itself.
 describe('GOLD-5 · PLAT-03 — G5-F2', () => {
   let server: FastifyInstance;
   let store: Redis;
@@ -613,7 +617,7 @@ describe('GOLD-5 · PLAT-03 — G5-F2', () => {
     registerEmptyJsonBodyParser(server);
     store = new Redis(process.env['REDIS_URL'] as string, { connectionName: 'gold5-rl-f2', maxRetriesPerRequest: 1, enableOfflineQueue: false });
     if (store.status !== 'ready') await new Promise<void>((resolve) => store.once('ready', () => resolve()));
-    await server.register(rateLimit, { redis: store, nameSpace: RL_NAMESPACE, keyGenerator: rateLimitKey, max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10), timeWindow: '1 minute' });
+    await server.register(rateLimit, { redis: store, nameSpace: RL_NAMESPACE, keyGenerator: rateLimitKey((token) => server.jwt.verify(token)), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10), timeWindow: '1 minute' });
     await server.register(prismaPlugin);
     await server.register(redisPlugin);
     await server.register(authPlugin);
@@ -635,7 +639,7 @@ describe('GOLD-5 · PLAT-03 — G5-F2', () => {
     if (keys.length > 0) await app.redis.del(...keys);
   });
 
-  it.fails('[G5-F2] a caller inventing a new bearer per request is still held to the 5-per-minute send ceiling', async () => {
+  it('[G5-F2] a caller inventing a new bearer per request is still held to the 5-per-minute send ceiling', async () => {
     const sixth = await server.inject({ method: 'POST', url: '/api/v1/auth/send-otp', payload: { phone: sixthPhone }, remoteAddress: caller, headers: { 'content-type': 'application/json', ...invented() } });
     expect(sixth.statusCode).toBe(429);
     expect(devChannelLog.filter((e) => e.channel === 'sms' && e.to === sixthPhone)).toHaveLength(0);
@@ -665,7 +669,7 @@ describe('GOLD-5 · PLAT-03 — G5-F3', () => {
     registerErrorHandler(server);
     store = new Redis(process.env['REDIS_URL'] as string, { connectionName: 'gold5-rl-f3', maxRetriesPerRequest: 1, enableOfflineQueue: false });
     if (store.status !== 'ready') await new Promise<void>((resolve) => store.once('ready', () => resolve()));
-    await server.register(rateLimit, { redis: store, nameSpace: namespace, keyGenerator: rateLimitKey, max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10), timeWindow: '1 minute' });
+    await server.register(rateLimit, { redis: store, nameSpace: namespace, keyGenerator: rateLimitKey((token) => server.jwt.verify(token)), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10), timeWindow: '1 minute' });
     server.get('/ping', async () => ({ ok: true }));
     await server.ready();
     const healthy = await server.inject({ method: 'GET', url: '/ping', remoteAddress: '10.35.4.1' });
