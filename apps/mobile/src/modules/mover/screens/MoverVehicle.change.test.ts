@@ -38,12 +38,12 @@ describe('a saved vehicle can be changed', () => {
   });
 
   it('change mode calls the change route (not "Save vehicle" again), without re-asking the agreement', () => {
-    expect(ONBOARDING).toContain("changeVehicle.mutate({ vehicleType: vt, vehicle }, { onSuccess: onDone });");
+    expect(ONBOARDING).toContain("changeVehicle.mutate({ vehicleType: vt, vehicle }, { onSuccess: (r) => onDone(r?.changed !== false) });");
     expect(ONBOARDING).toContain("const needsAgreement = mode === 'join';");
     expect(ONBOARDING).toMatch(/\{needsAgreement \? \(\s*<Pressable\s+accessibilityRole="checkbox"/);
     expect(ONBOARDING).toMatch(/disabled=\{!gate\.ok \|\| !valid \|\| \(needsAgreement && !agree\) \|\| sameAsSaved\}/);
     // Join keeps its agreement: /become still sends acceptAgreement.
-    expect(ONBOARDING).toContain("become.mutate({ role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree }, { onSuccess: onDone });");
+    expect(ONBOARDING).toContain("become.mutate({ role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree }, { onSuccess: () => onDone(true) });");
   });
 
   it('the server’s own words explain a refused change; a dismissed step-up says nothing', () => {

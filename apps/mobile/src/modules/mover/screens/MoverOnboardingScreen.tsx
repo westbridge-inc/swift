@@ -101,7 +101,8 @@ export function VehicleSetup({
 }: {
   vt: VehicleKind;
   setVt: (v: VehicleKind) => void;
-  onDone: () => void;
+  /** `changed` is false when the server found this was already the saved vehicle. */
+  onDone: (changed?: boolean) => void;
   mode?: 'join' | 'change';
   current?: VehicleKind | null;
   guard?: MutationGuard;
@@ -150,10 +151,10 @@ export function VehicleSetup({
     if (!vehicleOffered(vt, pricing.data)) return; // the picker lists only offered vehicles; restated for the same reason
     const vehicle = needsDetails ? { make, model, year: Number(year) || 0, color: colr, licensePlate: plate } : undefined;
     if (mode === 'change') {
-      changeVehicle.mutate({ vehicleType: vt, vehicle }, { onSuccess: onDone });
+      changeVehicle.mutate({ vehicleType: vt, vehicle }, { onSuccess: (r) => onDone(r?.changed !== false) });
       return;
     }
-    become.mutate({ role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree }, { onSuccess: onDone });
+    become.mutate({ role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree }, { onSuccess: () => onDone(true) });
   };
 
   return (

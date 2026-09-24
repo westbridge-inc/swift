@@ -35,7 +35,11 @@ export function MoverVehicleScreen({ navigation }: any) {
           vt={vt}
           setVt={setVt}
           guard={stepUp.withStepUp}
-          onDone={() => {
+          onDone={(changed) => {
+            if (!changed) {
+              toast.show('No change', 'That is already your vehicle.');
+              return;
+            }
             toast.success('Vehicle changed', 'Add its documents — you can go online once they’re approved.');
             navigation?.navigate?.('MoverDocuments');
           }}

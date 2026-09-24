@@ -335,13 +335,21 @@ export class PartnerService {
       const currentProfile = (current === 'DRIVER' ? driver : rider)!;
       const previousVehicleType = currentProfile.vehicleType;
       const next = input.vehicle;
+      // The vehicle's details after the change. A rider naming the SAME vehicle without
+      // details keeps the ones it has (the payload omitted them, it did not ask to clear
+      // them — clearing would drop a plate and retire its papers). A different vehicle
+      // starts from what was sent, or from nothing: a bicycle keeps no canter's plate.
+      const keepDetails = target === 'RIDER' && current === 'RIDER' && input.vehicleType === previousVehicleType && !next;
+      const details = keepDetails
+        ? { make: currentProfile.vehicleMake, model: currentProfile.vehicleModel, year: currentProfile.vehicleYear, color: currentProfile.vehicleColor, licensePlate: currentProfile.licensePlate }
+        : { make: next?.make ?? null, model: next?.model ?? null, year: next?.year ?? null, color: next?.color ?? null, licensePlate: next?.licensePlate ?? null };
       const unchanged = target === current
         && input.vehicleType === previousVehicleType
-        && samePlate(next?.licensePlate, currentProfile.licensePlate)
-        && sameText(next?.make, currentProfile.vehicleMake)
-        && sameText(next?.model, currentProfile.vehicleModel)
-        && (next?.year ?? null) === (currentProfile.vehicleYear ?? null)
-        && sameText(next?.color, currentProfile.vehicleColor);
+        && samePlate(details.licensePlate, currentProfile.licensePlate)
+        && sameText(details.make, currentProfile.vehicleMake)
+        && sameText(details.model, currentProfile.vehicleModel)
+        && (details.year ?? null) === (currentProfile.vehicleYear ?? null)
+        && sameText(details.color, currentProfile.vehicleColor);
       if (unchanged) {
         return {
           result: { kind: current, id: currentProfile.id, vehicleType: previousVehicleType, previousVehicleType, changed: false, retiredDocuments: 0, withdrawnDocuments: 0, retiredRiderId: null, retiredDriverId: null },
@@ -389,8 +397,8 @@ export class PartnerService {
           data: {
             vehicleType: input.vehicleType,
             // The details describe THIS vehicle or nothing: a bicycle keeps no plate of the canter it replaced.
-            vehicleMake: next?.make ?? null, vehicleModel: next?.model ?? null, vehicleYear: next?.year ?? null,
-            vehicleColor: next?.color ?? null, licensePlate: next?.licensePlate ?? null,
+            vehicleMake: details.make, vehicleModel: details.model, vehicleYear: details.year,
+            vehicleColor: details.color, licensePlate: details.licensePlate,
             ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null,
           },
         });
@@ -406,7 +414,7 @@ export class PartnerService {
 
       // A plate change (or a move to the other kind of work) closes the open vehicle
       // assignments: the new plate starts from its own documents (SAFE-A).
-      const newPlate = target === 'DRIVER' ? next!.licensePlate : next?.licensePlate ?? null;
+      const newPlate = details.licensePlate;
       if (target !== current || !samePlate(newPlate, currentProfile.licensePlate)) {
         await tx.subjectLink.updateMany({
           where: { accountId: userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
@@ -428,14 +436,32 @@ export class PartnerService {
         if (vehicle) keptSubjects.add(await rootSubjectId(tx, vehicle.subjectId));
       }
       const papers = await tx.verificationDocument.findMany({
-        where: { userId, role: 'MOVER', docType: { in: [...VEHICLE_DOC_TYPES] }, state: { in: ['COMMITTED', ...AWAITING_REVIEW] } },
-        select: { id: true, state: true, subjectId: true },
+        where: {
+          userId, role: 'MOVER', docType: { in: [...VEHICLE_DOC_TYPES] },
+          // A row a legacy writer inserted before the state trigger carries only its legacy
+          // status (hopDocState matches a NULL state as any `from`): the same rule retires it.
+          OR: [{ state: { in: ['COMMITTED', ...AWAITING_REVIEW] } }, { state: null, status: { in: ['APPROVED', 'PENDING'] } }],
+        },
+        select: { id: true, state: true, status: true, subjectId: true, legalHoldId: true },
       });
+      const toRetire: Array<{ id: string; committed: boolean }> = [];
+      for (const paper of papers) {
+        // A paper under a legal hold is frozen: its state and its case belong to the hold.
+        if (paper.legalHoldId) continue;
+        if (paper.subjectId && keptSubjects.has(await rootSubjectId(tx, paper.subjectId))) continue;
+        toRetire.push({ id: paper.id, committed: paper.state === 'COMMITTED' || (paper.state === null && paper.status === 'APPROVED') });
+      }
+      // Lock order: a review case BEFORE its document — the order the reviewer paths take
+      // (claim / release / escalate lock the case, then hop the document) — so a change
+      // racing a reviewer's claim waits for it instead of deadlocking.
+      const awaitingIds = toRetire.filter((p) => !p.committed).map((p) => p.id);
+      if (awaitingIds.length > 0) {
+        await tx.$queryRaw`SELECT "id" FROM "review_case" WHERE "submissionId" = ANY(${awaitingIds}) FOR UPDATE`;
+      }
       const superseded: string[] = [];
       const withdrawn: string[] = [];
-      for (const paper of papers) {
-        if (paper.subjectId && keptSubjects.has(await rootSubjectId(tx, paper.subjectId))) continue;
-        if (paper.state === 'COMMITTED') {
+      for (const paper of toRetire) {
+        if (paper.committed) {
           if (await hopDocState(tx, { id: paper.id, userId }, 'COMMITTED', 'SUPERSEDED', { reviewNote: 'SUPERSEDED: the mover changed vehicle' })) superseded.push(paper.id);
         } else if (await hopDocState(tx, { id: paper.id, userId }, [...AWAITING_REVIEW], 'EXPIRED', { status: 'EXPIRED', reviewNote: 'WITHDRAWN: the mover changed vehicle' })) {
           withdrawn.push(paper.id);

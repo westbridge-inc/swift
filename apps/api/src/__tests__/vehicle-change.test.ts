@@ -109,6 +109,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await system(async () => {
+    await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
+    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
     const docs = await app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true } });
     await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
@@ -214,6 +216,33 @@ describe('PUT /partner/vehicle: the owner\'s case, a canter rider in onboarding 
     const again = await change(u.token, { vehicleType: 'MOTORCYCLE' });
     expect(again.statusCode).toBe(200);
     expect(again.json().data).toMatchObject({ changed: false, retiredDocuments: 0, withdrawnDocuments: 0 });
+  });
+
+  it('a paper under a legal hold is frozen: the change leaves it exactly as it was, and retires the rest', async () => {
+    const u = await legacyHeavyRider('CANTER_SHORT');
+    const held = await approved(u.userId, 'vehicle_insurance');
+    const free = await approved(u.userId, 'vehicle_registration');
+    const hold = await system(() => app.prisma.docLegalHold.create({ data: {
+      subjectUserId: u.userId, reason: 'vehicle-change test hold', ownerId: 'vehicle-change-test', placedBy: 'vehicle-change-test', reviewBy: new Date(Date.now() + 30 * DAY),
+    } }));
+    await system(() => app.prisma.verificationDocument.update({ where: { id: held.id }, data: { legalHoldId: hold.id } }));
+    const res = await change(u.token, { vehicleType: 'MOTORCYCLE' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ changed: true, retiredDocuments: 1 });
+    expect((await docState(held.id)).state).toBe('COMMITTED');
+    expect((await docState(free.id)).state).toBe('SUPERSEDED');
+  });
+
+  it('a rider naming the vehicle it already has, without details, keeps its plate — nothing moves', async () => {
+    const u = await makeUser();
+    expect((await become(u.token, { vehicleType: 'MOTORCYCLE' })).statusCode).toBe(201);
+    const plate = `VC${NUM}G`;
+    await grantStepUp(app, u.token);
+    expect((await send('PUT', '/api/v1/rider/profile', u.token, { licensePlate: plate, vehicleMake: 'Honda' })).statusCode).toBe(200);
+    const res = await change(u.token, { vehicleType: 'MOTORCYCLE' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ changed: false, retiredDocuments: 0 });
+    expect(await system(() => app.prisma.rider.findUniqueOrThrow({ where: { userId: u.userId }, select: { licensePlate: true, vehicleMake: true } }))).toEqual({ licensePlate: plate, vehicleMake: 'Honda' });
   });
 
   it('a heavy vehicle is not a valid target, and a driver vehicle needs its details — nothing changes', async () => {
