@@ -1233,10 +1233,14 @@ export class VerificationService {
     if (!user) throw new NotFoundError('User', userId);
 
     const checklist = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
-    const documents = await this.prisma.verificationDocument.findMany({
+    // A SUPERSEDED submission is no longer evidence (its record followed it): a renewal
+    // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
+    // its legacy APPROVED status (a supersession does not rewrite history), so it is left
+    // out here, or the checklist would show an approval GO no longer counts.
+    const documents = (await this.prisma.verificationDocument.findMany({
       where: { userId, docType: { in: [...checklist, IDENTITY_DOC_TYPE] } },
       orderBy: { createdAt: 'desc' },
-    });
+    })).filter((d) => d.state !== 'SUPERSEDED');
 
     const approved = new Set(
       documents
