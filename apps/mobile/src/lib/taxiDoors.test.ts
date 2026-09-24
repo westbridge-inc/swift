@@ -40,6 +40,12 @@ describe('the taxi screen wires the selfie door to a reachable screen', () => {
     expect(stack).toMatch(/<Stack\.Screen name="Selfie" component=\{SelfieCaptureScreen\} \/>/);
   });
 
+  it('the ID screen opens the photo door when the ID check needs the profile selfie (face match)', () => {
+    const idv = src('modules/account/screens/IdentityVerificationScreen.tsx');
+    expect(idv).toMatch(/code === 'SELFIE_REQUIRED'/);
+    expect(idv).toMatch(/navigate\?\.\('Selfie'\)/);
+  });
+
   it('a pushed selfie screen goes back instead of signing out', () => {
     const selfie = src('screens/auth/SelfieCaptureScreen.tsx');
     expect(selfie).toMatch(/canGoBack/);
