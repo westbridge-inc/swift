@@ -40,7 +40,7 @@ export function summaryMarkdown(meta: RunMeta, results: JourneyResult[]): string
   for (const r of results) {
     lines.push(`## ${r.journeyId} — ${r.status}`);
     if (r.reason) lines.push(`Reason: ${r.reason}`);
-    for (const s of r.steps) lines.push(`- ${s.ok ? 'ok  ' : 'FAIL'} ${s.name} — ${s.detail}`);
+    for (const s of r.steps) lines.push(`- ${s.ok ? 'ok  ' : s.cleanup ? 'warn' : 'FAIL'} ${s.name} — ${s.detail}`);
     for (const s of r.skippedCases) lines.push(`- SKIP ${s.case} — ${s.reason}`);
     lines.push('');
   }

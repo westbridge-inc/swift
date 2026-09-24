@@ -15,12 +15,14 @@
 //   A case this target cannot run for any other reason (no second admin, a
 //   clock-driven job, a dark feature flag, a provider secret the runner must
 //   not hold) is a 'target' skip, and it makes the journey SKIP.
+//   Cleanup steps (`rec.cleanup`) are recorded and shown, but a failed cleanup
+//   never fails the journey — the product assertions decide the status.
 
 import type { Res } from './client.js';
 
 export type Status = 'PASS' | 'FAIL' | 'SKIP';
 
-export interface Step { name: string; ok: boolean; detail: string }
+export interface Step { name: string; ok: boolean; detail: string; cleanup?: boolean }
 export interface SkippedCase { case: string; reason: string; gate: 'device' | 'target' }
 
 export interface TargetInfo { deploymentId: string; environment: string; buildSha: string }
@@ -87,6 +89,12 @@ export class Recorder {
   /** Assert a condition on state read back from the API. */
   check(name: string, ok: boolean, detail: string): boolean {
     return this.step(name, ok, detail);
+  }
+
+  /** A cleanup step: recorded and shown like any other, but a failed cleanup
+   *  never fails the journey (see `finalize`). */
+  cleanup(name: string, ok: boolean, detail: string): void {
+    this.steps.push({ name: `cleanup: ${name}`, ok, detail, cleanup: true });
   }
 
   /** Assert or stop. */
@@ -174,7 +182,7 @@ function finalize<C>(j: Journey<C>, rec: Recorder, startedAt: string, target: Ta
   const finishedAt = new Date().toISOString();
   // A copy: finalize may run more than once (progress line, then the report).
   const steps = [...rec.steps];
-  const failed = steps.filter((s) => !s.ok);
+  const failed = steps.filter((s) => !s.ok && !s.cleanup);
   let status: Status;
   let reason: string | undefined;
   if (failed.length > 0) {
