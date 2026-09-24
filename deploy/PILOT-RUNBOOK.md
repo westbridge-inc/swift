@@ -24,12 +24,13 @@ key path:
 The provisioner checks free disk, creates or reuses the deploy account and
 key, applies key-only SSH and UFW rules for TCP 22/80/443, enables security
 updates and time sync, installs Docker Engine/Compose, PostgreSQL client tools
-and AWS CLI, and creates swap only when needed. It checks active and saved UFW
-rules, including IPv6 and rate-limited permits, and refuses extra permitted
-ports for operator review. Docker membership grants root-equivalent host
-access: grant the deploy
-account to trusted operators only. Retain the root session, establish a fresh
-SSH login as swift-deploy with its key, and check there:
+and creates swap only when needed (there is no host AWS CLI: the backup and
+restore scripts run it inside a pinned container image). It checks active and
+saved UFW rules, including IPv6 and rate-limited permits, and refuses extra
+permitted ports for operator review. Docker membership grants root-equivalent
+host access: grant the deploy account to trusted operators only. Retain the
+root session, establish a fresh SSH login as swift-deploy with its key, and
+check there:
 
     id
     docker compose version
@@ -209,6 +210,13 @@ object length, and records a heartbeat. A successful object-length check is
 still not a restore proof. Alert on a failed unit and a stale backup
 heartbeat; prove the external heartbeat destination receives a signal.
 
+The off-site upload and its byte-count verification run the AWS CLI inside a
+pinned container image, because the Ubuntu snap-packaged CLI cannot start
+under the unit's NoNewPrivileges=true hardening (and that hardening is never
+weakened). Pin the reviewed image digest as AWS_CLI_IMAGE in deploy/.env
+(see .env.deploy.example); backup.sh refuses to run while it is unset or still
+a placeholder.
+
 ## 5. Restore drill, with no live overwrite
 
 Take a fresh backup through the unit (it holds the storage keys) and copy the
@@ -222,21 +230,45 @@ scratch database through a transient unit that receives the same two keys:
     SCRATCH_DB="swift_restore_$(date -u +%Y%m%d%H%M%S)"
     sudo systemd-run --pipe --wait --collect --uid=swift-deploy --gid=swift-deploy \
       -p SupplementaryGroups=docker -p WorkingDirectory=/opt/swift \
+      -p "UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE" \
       -p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
       -p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred \
       /opt/swift/deploy/restore.sh "$OFFSITE_OBJECT" "$SCRATCH_DB"
 
 The restore script accepts only a new lowercase scratch database name,
 refuses an existing or live database, and fails on archive or row-count
-errors. Record the actual elapsed time and inspect constraints and policies
-in the scratch database. Restore an encrypted document from the separate
-document bucket and verify it can be decrypted with the off-host MASTER_KEK
-escrow copy; the database dump alone cannot prove this. Keep the scratch
-database until the drill evidence is reviewed. A controlled cleanup then
-uses a separately reviewed SQL DROP DATABASE command against that scratch
-name only.
+errors. The UnsetEnvironment property mirrors swift-backup.service: the two
+`*_FILE` names deploy/.env wires for the containers would otherwise shadow the
+credential directory systemd provides, exactly the trap the backup unit hit.
+Record the actual elapsed time and inspect constraints and policies in the
+scratch database. Restore an encrypted document from the separate document
+bucket and verify it can be decrypted with the off-host MASTER_KEK escrow
+copy; the database dump alone cannot prove this. Keep the scratch database
+until the drill evidence is reviewed. A controlled cleanup then uses a
+separately reviewed SQL DROP DATABASE command against that scratch name only.
 
-## 6. Rollback and incident boundary
+## 6. Seed the platform spine (first SUPER_ADMIN)
+
+The runtime image carries dist/ but no src/ or tsx, so the production spine
+seed cannot run inside it. deploy/seed-production.sh builds the Dockerfile's
+`build` stage and runs prisma/seed-production.ts in a one-off container that
+loads the secret files (dist/boot/secret-files.js) and then spawns the seed in
+the same process; DATABASE_URL is assembled in memory and never printed. It
+refuses to run without the exact deployed full SHA, a deployment_identity row
+in the database, and SEED_ADMIN_PHONE in the environment, and it removes its
+container.
+
+    cd /opt/swift
+    SHA='<full-40-character-main-commit-pilot-up-deployed>'
+    SEED_ADMIN_PHONE='+592…' ./deploy/seed-production.sh "$SHA"
+
+The seed prints the plan diff before applying it. On a staging target
+(development posture) it applies directly; a production target needs two
+approvals signed with SEED_PLAN_SECRET and exits 2 with the digest to sign.
+This staging runbook never supplies SEED_PLAN_SECRET, and no command here
+authorizes a production seed.
+
+## 7. Rollback and incident boundary
 
 Record the previous serving full SHA before each update. On a failed cutover,
 pilot-up.sh leaves the old API/worker stopped if migration was reached. Inspect
