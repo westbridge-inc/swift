@@ -46,12 +46,12 @@ before drawing any conclusion.
 BASE_URL=http://localhost:3000 k6 run tools/load/smoke.js
 
 # 2. Sustained swarm (staging). Read-only without tokens; add them for the money path:
-BASE_URL=https://staging-api.swift.gy \
+BASE_URL=https://api-staging.swiftgy.com \
   ORDER_TOKENS="<tokenA>,<tokenB>" ORDER_VENDOR_ID=<vid> ORDER_ITEM_ID=<item> \
   k6 run tools/load/swarm.js
 
 # 3. Breakpoint (staging) — read-only, pushes until the SLO breaks
-BASE_URL=https://staging-api.swift.gy k6 run tools/load/breakpoint.js
+BASE_URL=https://api-staging.swiftgy.com k6 run tools/load/breakpoint.js
 ```
 
 ### Running the API for a load test

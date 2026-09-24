@@ -36,7 +36,7 @@ export const API_URL = resolveApiOrigin({
  *  is typeof-guarded: unlike API_URL's, this line actually evaluates in the
  *  node test env, where the RN global does not exist.) */
 // eslint-disable-next-line no-undef
-export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swift.gy');
+export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swiftgy.com');
 
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,
@@ -721,6 +721,17 @@ export const courierApi = {
     body: { outcome: 'paid' | 'refused'; gps: { lat: number; lng: number } },
     session?: AuthSessionSnapshot,
   ) => api.post(`/courier/order/${id}/collect`, body, capturedAuthConfig(session)),
+  // E16: pickup custody proof — upload the captured pickup photo, then confirm
+  // pickup with the returned URL + GPS. The server refuses the bare pickup tap.
+  uploadPickupProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/courier/order/${id}/pickup-proof-photo`, form, capturedAuthConfig(session, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })),
+  pickupProof: (
+    id: string,
+    body: { proofPhotoUrl: string; gps: { lat: number; lng: number } },
+    session?: AuthSessionSnapshot,
+  ) => api.post(`/courier/order/${id}/pickup-proof`, body, capturedAuthConfig(session)),
 };
 
 // Services (mounted at /api/v1/services)

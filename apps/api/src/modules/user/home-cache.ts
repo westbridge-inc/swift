@@ -48,7 +48,11 @@ export function homeCacheKey(userId: string | undefined, lat: number | undefined
   const geo = `${lat ?? 'x'}:${lng ?? 'x'}`;
   // A key version isolates old full-feed writers/readers during rolling deploys.
   // Keep home:<userId>: as the prefix so all existing invalidators still match.
-  return userId ? `home:${userId}:discovery:v2:${geo}` : tenantCacheKey(`home:guest:discovery:v2:${geo}`);
+  // v3 [S1 response-shaping · High #6]: v2 entries were written with the WHOLE
+  // Vendor row on every card (account phone, email, owner id, ...). Moving the
+  // version means a feed cached before the deploy is never read again — it
+  // simply expires — instead of serving the leak for another HOME_CACHE_TTL.
+  return userId ? `home:${userId}:discovery:v3:${geo}` : tenantCacheKey(`home:guest:discovery:v3:${geo}`);
 }
 
 // Validate the discovery fields consumed by Home before treating a hit as data.

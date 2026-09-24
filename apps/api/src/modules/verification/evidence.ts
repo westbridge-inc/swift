@@ -6,7 +6,8 @@
  *    retired by the retention purge (`purgedAt` null, retention clock not elapsed);
  *  - an image purged under its bucket's policy (`imagePurgedAt`, E2E-DOC-5) changes nothing;
  *  - the account's own records count, and so do the records of every VEHICLE subject the
- *    account holds an OPEN link to (a fleet's insurance serves every assigned driver).
+ *    account holds an OPEN, APPROVED link to (a fleet's insurance serves every assigned
+ *    driver) — [High #9 · DS109] a PENDING link (retyped plate) propagates nothing.
  * Used by the verification service (predicate, validity bound, live-operation gate) and
  * by the service-provider projection — one rule, one implementation.
  */
@@ -29,7 +30,7 @@ export interface EvidenceRow {
 export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], now: Date): Promise<EvidenceRow[]> {
   if (checklist.length === 0) return [];
   const vehicles = await db.subjectLink.findMany({
-    where: { accountId: userId, validTo: null, subject: { kind: 'VEHICLE' } },
+    where: { accountId: userId, validTo: null, approvedAt: { not: null }, subject: { kind: 'VEHICLE' } },
     select: { subjectId: true },
   });
   const vehicleIds = vehicles.map((v) => v.subjectId);
@@ -72,7 +73,7 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
 export async function anyChecklistEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[]): Promise<boolean> {
   if (checklist.length === 0) return false;
   const vehicles = await db.subjectLink.findMany({
-    where: { accountId: userId, validTo: null, subject: { kind: 'VEHICLE' } },
+    where: { accountId: userId, validTo: null, approvedAt: { not: null }, subject: { kind: 'VEHICLE' } },
     select: { subjectId: true },
   });
   const vehicleIds = vehicles.map((v) => v.subjectId);

@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, radius, space } from '@swift/ui';
 import { useDiscoveryCategories, useMarketItems, useAddToCart, type MarketItem } from '../../../hooks/customer';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { itemPhoto } from '../../../lib/images';
@@ -92,6 +93,10 @@ export function MarketScreen() {
 
   const rail = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
   const feed = useMarketItems({ category });
+  // The pull spinner is the person's gesture, never a background refetch over
+  // items already on screen — the same stale-while-revalidate rule as Home
+  // (lib/pullToRefresh). The first-load skeleton below stays on isLoading.
+  const pull = usePullToRefresh(feed.refetch);
   const addToCart = useAddToCart();
 
   // RETAIL only: this tab is goods. A food category chip here would filter the
@@ -221,8 +226,8 @@ export function MarketScreen() {
           }
           refreshControl={
             <RefreshControl
-              refreshing={feed.isRefetching && !feed.isFetchingNextPage}
-              onRefresh={() => feed.refetch()}
+              refreshing={pull.refreshing}
+              onRefresh={() => { void pull.onRefresh(); }}
               tintColor={color.brand[500]}
             />
           }
