@@ -295,7 +295,7 @@ export const RIDE_04: Journey<Ctx> = {
       rec.check('the customer sees DELIVERED', (await customerOrder(C6.session, g3!.orderId))?.status === 'DELIVERED', '');
     }
     for (const id of riders(ctx)) await freeRider(ctx, id);
-    rec.skipCase('door PIN', 'a delivery PIN exists only on the MMG completion path (PUT /rider/orders/:id/delivered ridePin); an MMG order needs a vendor pay link, which needs an SMS step-up this target cannot deliver');
+    rec.skipCase('MMG completion PIN', 'the door PIN on the MMG completion path (PUT /rider/orders/:id/delivered ridePin) needs an MMG order, which needs a vendor pay link and an SMS step-up this target cannot deliver; the CASH door PIN is proven above (missing, wrong, right)');
     rec.deviceCase('photo proof and two-phone custody', 'a physical camera photo and the two-phone PIN exchange are the device gate');
     void req; void sleep; void codeOf; void pick; void waitFor; void FIXTURE_PNG;
   },
