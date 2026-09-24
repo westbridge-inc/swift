@@ -500,7 +500,7 @@ export function SearchScreen() {
               <FlatList
                 data={results}
                 keyExtractor={(v) => v.id}
-                contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] }}
+                contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space.lg, paddingBottom: space['3xl'] + cartClearance }}
                 ItemSeparatorComponent={Divider}
                 ListHeaderComponent={
                   // [Wave 3 vs reference 10] "4 places · sorted by recommended"
@@ -551,7 +551,7 @@ export function SearchScreen() {
           />
         </>
       ) : (
-        <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space['2xl'], paddingBottom: space['3xl'] }}>
+        <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingTop: space['2xl'], paddingBottom: space['3xl'] + cartClearance }}>
           {recentSearches.length > 0 ? (
             <>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>

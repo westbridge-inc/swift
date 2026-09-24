@@ -210,7 +210,7 @@ describe('[E09] a signed-out shopper has no basket to reach', () => {
 });
 
 describe('the bar reads the cart through the shared hook', () => {
-  it('uses useCart and never issues its own cart request', () => {
+  it('reads the cart through useCart (the storefront no-quote key), never a direct API call', () => {
     const src = readFileSync(new URL('./cart-bar.tsx', import.meta.url), 'utf8');
     expect(src).toMatch(/useCart</);
     expect(src).not.toMatch(/getCart/);

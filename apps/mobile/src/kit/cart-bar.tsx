@@ -49,9 +49,11 @@ export function useCartBarClearance({ vendorId }: { vendorId?: string } = {}): n
  * into the kit [E09] so a shopper deep in browse (Search, CategoryFeed,
  * Nearby, Recommended) can always reach the Cart tab without backing out.
  *
- * It reads the cart through the SAME `useCart` hook every other cart surface
- * uses — the query lives under one key, so mounting the bar never issues a
- * second request — and only for a signed-in shopper. When `vendorId` is passed (the storefront), the bar shows
+ * It reads the cart through the shared `useCart` hook, under the storefront's
+ * no-quote key (React Query dedupes it with the storefront's own read; the
+ * Cart tab keys its read by the delivery quote, so after the Cart tab the bar
+ * makes one light read of its own), and only for a signed-in shopper. When
+ * `vendorId` is passed (the storefront), the bar shows
  * only for THAT store's basket: the cart is single-vendor and carries its
  * vendorId, so browsing another storefront never surfaces another store's
  * items.

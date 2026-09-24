@@ -16,6 +16,7 @@ import { Scrim } from '../../../kit/scrim';
 import {
   AddMorph,
   CartBar,
+  useCartBarClearance,
   Chip,
   CircleChip,
   ErrorState,
@@ -227,6 +228,8 @@ export function RestaurantScreen() {
   // FlashList is the on-device follow-up — this bounds the eager mount now.)
   const [renderCap, setRenderCap] = useState(48);
   const cart = useCart<any>();
+  // [E09] While this store's cart bar floats over the menu, the last row must scroll clear of it.
+  const cartClearance = useCartBarClearance({ vendorId });
   const addToCart = useAddToCart();
   const updateCartItem = useUpdateCartItem();
 
@@ -311,7 +314,7 @@ export function RestaurantScreen() {
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
       <ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: space['3xl'] }}
+        contentContainerStyle={{ paddingBottom: space['3xl'] + cartClearance }}
         scrollEventThrottle={64}
         onScroll={(e) => {
           const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;

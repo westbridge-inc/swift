@@ -69,7 +69,7 @@ export function CategoryFeedScreen() {
             body="Check back soon."
           />
           {siblings.length > 0 ? (
-            <View style={{ alignItems: 'center', paddingBottom: space['3xl'] }}>
+            <View style={{ alignItems: 'center', paddingBottom: space['3xl'] + cartClearance }}>
               <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
                 Open now instead
               </T>

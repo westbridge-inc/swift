@@ -26,13 +26,20 @@ const SCREENS: Array<{ name: string; path: string; jsx: string }> = [
 ];
 
 describe('[E09] every browse list leaves room for the floating bar', () => {
-  // The storefront keeps its own layout; every other browse surface adds the
-  // bar's clearance to its bottom padding so the last row scrolls clear of it.
-  for (const { name, path } of SCREENS.filter((x) => x.name !== 'RestaurantScreen')) {
-    it(`${name} adds the cart-bar clearance to its list's bottom padding`, () => {
+  // Every surface that mounts the bar adds its clearance to EVERY bottom
+  // padding, so no list (search results, browse results, idle suggestions,
+  // an empty-category fallback, the storefront menu) ends under the bar.
+  for (const { name, path } of SCREENS) {
+    it(`${name} adds the cart-bar clearance to every bottom padding`, () => {
       const src = read(path);
-      expect(src).toMatch(/const cartClearance = useCartBarClearance\(\);/);
+      const hook = name === 'RestaurantScreen'
+        ? /const cartClearance = useCartBarClearance\(\{ vendorId \}\);/
+        : /const cartClearance = useCartBarClearance\(\);/;
+      expect(src).toMatch(hook);
       expect(src).toMatch(/paddingBottom: space\['3xl'\] \+ cartClearance/);
+      // No bottom padding on this screen may skip the clearance.
+      const unpadded = src.match(/paddingBottom: space\['3xl'\](?! \+ cartClearance)/g) ?? [];
+      expect(unpadded, `${name} has a bottom padding without the cart clearance`).toHaveLength(0);
     });
   }
 });
