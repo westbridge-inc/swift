@@ -4000,6 +4000,8 @@ model SosRetrigger {
   lng                Float?
   accuracyM          Float?
   addressText        String?
+  /// [PRIV2-S1] What this repeat press said, if anything. Ops-only, like SosAlert.triggerNote.
+  note               String?
   counterpartyUserId String?
   actorRole          String
   clientCreatedAt    DateTime?
@@ -4360,6 +4362,14 @@ model SosAlert {
   triggerLng           Float?
   triggerAccuracyM     Float?
   triggerAddressText   String? // reverse-geocoded, for the on-screen 911 script
+  /// [PRIV2-S1] What the person wrote when they raised this alert (the in-ride
+  /// POST /rides/:id/sos `note`). Ops-only: the ops SOS reads (GET /safety/sos
+  /// and /safety/sos/:id) return it and the evidence bundle snapshots it. It
+  /// must never be copied onto the order timeline — both people on a ride read
+  /// order_status_logs verbatim, so a note like "he's threatening me" would
+  /// reach the person it is about. A repeat press keeps this note and records
+  /// its own on its sos_retriggers row.
+  triggerNote          String?
   clientCreatedAt      DateTime? // device clock — offline reconciliation
   clientIdempotencyKey String? // one alert per trigger PER ACTOR, even on retry — see @@unique below
   /// [F-027-17] How many times this person asked for help again while this

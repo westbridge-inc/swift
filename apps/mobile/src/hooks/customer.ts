@@ -6,7 +6,7 @@ import { recordCheckoutOutcome, stableBodyHash, type CheckoutPrincipal } from '.
 import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
 import { homePlaceholderData, homeQueryKey, isHomeFeed, retainedHomeData } from '../lib/homeReliability';
 import { isAxiosError } from 'axios';
-import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput } from '../services/api';
+import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput, type CartQuoteChoices } from '../services/api';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 import type { OrderProjection } from '@swift/types';
 import type { PromiseView } from '../lib/promise';
@@ -36,7 +36,9 @@ export const customerKeys = {
   vendor: (id: string) => ['customer', 'vendor', id] as const,
   orders: ['customer', 'orders'] as const,
   order: (id: string) => ['customer', 'order', id] as const,
-  cart: (lat?: number, lng?: number) => ['customer', 'cart', lat ?? null, lng ?? null] as const,
+  // [E01] The choices the quote is priced for are part of its identity.
+  cart: (lat?: number, lng?: number, choices?: CartQuoteChoices) =>
+    ['customer', 'cart', lat ?? null, lng ?? null, choices ?? null] as const,
   notifications: ['customer', 'notifications'] as const,
 };
 
@@ -668,8 +670,16 @@ export function useCheckoutRecovery(): { recovering: boolean; placedOrderIds: st
 
 // --- Cart ---------------------------------------------------------------------
 
-export function useCart<T = any>(lat?: number, lng?: number) {
-  return useQuery<T>({ queryKey: customerKeys.cart(lat, lng), queryFn: () => unwrap<T>(customerApi.getCart(lat, lng)) });
+export function useCart<T = any>(lat?: number, lng?: number, choices?: CartQuoteChoices) {
+  return useQuery<T>({
+    queryKey: customerKeys.cart(lat, lng, choices),
+    queryFn: () => unwrap<T>(customerApi.getCart(lat, lng, choices)),
+    // [E01] A changed choice (pickup, express, tip) is a new quote. Keep the
+    // last one on screen — flagged `isPlaceholderData` — while the server
+    // prices the new choice, instead of blanking the cart; the screen holds
+    // the order button until the quote for the current choice has arrived.
+    placeholderData: keepPreviousData,
+  });
 }
 
 function invalidateCart(qc: ReturnType<typeof useQueryClient>) {
