@@ -116,9 +116,9 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (notifier !== 'twilio') {
     throw new Error('FATAL: NOTIFICATION_PROVIDER must be twilio in production. Refusing to start.');
   }
-  const invalidTwilioField = firstInvalidTwilioConfig(env);
-  if (invalidTwilioField) {
-    throw new Error(`FATAL: ${invalidTwilioField} is missing or malformed when NOTIFICATION_PROVIDER=twilio. Refusing to start.`);
+  const invalidTwilioConfig = firstInvalidTwilioConfig(env);
+  if (invalidTwilioConfig) {
+    throw new Error(`FATAL: ${invalidTwilioConfig} when NOTIFICATION_PROVIDER=twilio. Refusing to start.`);
   }
 
   // [NOC-A F1/F2] The SAME trap, one door over, and it was unguarded: push
