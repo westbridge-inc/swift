@@ -45,6 +45,11 @@ export const SECRET_FILE_NAMES = [
   'MMG_PASSWORD',
   'MMG_MKEY',
   'MMG_MSECRET',
+  // MMG hosted checkout: the private key that opens MMG replies (a
+  // multi-line PEM — a file is its natural carrier) and the secret key sealed
+  // inside every request token.
+  'MMG_CHECKOUT_PRIVATE_KEY',
+  'MMG_CHECKOUT_SECRET_KEY',
   // Card rails.
   'PAYMENT_GATEWAY_KEY',
   'PAYMENT_GATEWAY_SECRET',
