@@ -1,12 +1,24 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
+import { useQuery } from '@tanstack/react-query';
 import { Star, Clock, Plus, X, Minus } from 'lucide-react';
 import { getVendor, addToCart, getItemSlots, savePendingAppointment, money, type VendorDetail, type MenuItem } from '@/lib/customer';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay, formatAppointmentSlot } from '@/lib/appointmentTime';
+import { useCustomerSession } from '@/components/customer-session';
+import { PRESS } from '@/components/customer-shell';
+import { DataUnavailable } from '@/components/data-unavailable';
+import { signInPath } from '@/lib/customer-routes';
+
+/** The store, reopened at one item: `?item=` from Home's popular rail, the
+ *  Market, or a guest coming back from signing in to add it. */
+function requestedItemId(): string | null {
+  if (typeof window === 'undefined') return null;
+  return new URLSearchParams(window.location.search).get('item');
+}
 
 function nextDays(n: number) {
   const out: { key: string; label: string }[] = [];
@@ -29,8 +41,12 @@ function itemPrice(item: MenuItem, sel: Record<string, string>) {
 
 export default function VendorPage() {
   const { id } = useParams<{ id: string }>();
-  const [v, setV] = useState<VendorDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
+  const session = useCustomerSession();
+  // [Q7b] Cached per store, so going back to it is instant; refreshed in the
+  // background. A menu is the same for everyone who opens it.
+  const store = useQuery<VendorDetail>({ queryKey: ['customer', 'vendor', id], queryFn: () => getVendor(id) });
+  const v = store.data ?? null;
   const [modal, setModal] = useState<MenuItem | null>(null);
   const [sel, setSel] = useState<Record<string, string>>({});
   const [qty, setQty] = useState(1);
@@ -43,17 +59,41 @@ export default function VendorPage() {
   const [slots, setSlots] = useState<string[] | null>(null);
   const [slot, setSlot] = useState<string | null>(null);
 
-  useEffect(() => { getVendor(id).then(setV).catch((e) => setError(e.message)); }, [id]);
   useEffect(() => {
     if (!book) return;
     setSlots(null); setSlot(null);
     getItemSlots(book.id, bday).then((r) => setSlots(r.slots ?? [])).catch(() => setSlots([]));
   }, [book, bday]);
 
+  // Open the item the link asked for, once the menu is here — once per visit.
+  const openedRequested = useRef(false);
+  useEffect(() => {
+    if (!v || openedRequested.current) return;
+    openedRequested.current = true;
+    const wanted = requestedItemId();
+    const item = wanted ? v.categories.flatMap((category) => category.items).find((candidate) => candidate.id === wanted) : undefined;
+    if (item) openItem(item);
+    // openItem reads only the item it is given.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [v]);
+
+  /**
+   * [Q7b] A guest browses freely and signs in to order — the phone app's rule
+   * (its cart lives on the account). Signing in brings them straight back to
+   * this item. An expired access cookie is renewed first, so a returning
+   * customer is never sent to sign in again for nothing.
+   */
+  async function signedInToOrder(item: MenuItem): Promise<boolean> {
+    if (await session.ensureSignedIn()) return true;
+    router.push(signInPath(`/order/vendor/${encodeURIComponent(id)}?item=${encodeURIComponent(item.id)}`));
+    return false;
+  }
+
   async function confirmBook() {
     if (!book || !v || !slot) return;
     setBusy(true);
     try {
+      if (!(await signedInToOrder(book))) return;
       await addToCart({ vendorId: v.id, itemId: book.id, quantity: 1 });
       savePendingAppointment({ itemId: book.id, slotStart: slot, label: `${book.name} — ${formatAppointmentSlot(slot)}` });
       setAdded((n) => n + 1); setBook(null); setToast('Booking added to your cart');
@@ -80,6 +120,7 @@ export default function VendorPage() {
     }
     setBusy(true);
     try {
+      if (!(await signedInToOrder(modal))) return;
       await addToCart({ vendorId: v.id, itemId: modal.id, quantity: qty, selectedOptions: sel });
       setAdded((n) => n + qty); setModal(null); setToast('Added to your cart');
       setTimeout(() => setToast(null), 2500);
@@ -87,8 +128,18 @@ export default function VendorPage() {
     finally { setBusy(false); }
   }
 
-  if (error) return <p className="rounded-2xl border border-dashed border-black/10 p-10 text-center text-[var(--swift-muted)]">Couldn’t load this store — {error}</p>;
-  if (!v) return <div className="h-64 animate-pulse rounded-2xl bg-[var(--swift-subtle)]" />;
+  if (!v && store.isError) return <DataUnavailable what="this store" error={store.error} onRetry={() => void store.refetch()} />;
+  if (!v) {
+    return (
+      <div aria-busy="true" aria-label="Loading this store" className="space-y-4">
+        <div className="h-44 animate-pulse rounded-2xl bg-[var(--swift-subtle)] motion-reduce:animate-none md:h-56" />
+        <div className="h-8 w-1/2 animate-pulse rounded-xl bg-[var(--swift-subtle)] motion-reduce:animate-none" />
+        <div className="grid gap-3 sm:grid-cols-2">
+          {Array.from({ length: 4 }).map((_, index) => <div key={index} className="h-24 animate-pulse rounded-2xl bg-[var(--swift-subtle)] motion-reduce:animate-none" />)}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 pb-24">
@@ -112,7 +163,7 @@ export default function VendorPage() {
           <div className="grid gap-3 sm:grid-cols-2">
             {cat.items.map((it) => (
               <button key={it.id} onClick={() => openItem(it)} disabled={!it.isAvailable}
-                className={`flex items-center gap-3 rounded-2xl border border-black/5 bg-white p-3 text-left transition-shadow ${it.isAvailable ? 'hover:shadow-md' : 'opacity-50'}`}>
+                className={`flex items-center gap-3 rounded-2xl border border-black/5 bg-white p-3 text-left transition-shadow ${it.isAvailable ? `hover:shadow-md ${PRESS}` : 'opacity-50'}`}>
                 <div className="min-w-0 flex-1">
                   <p className="font-bold">{it.name}</p>
                   {it.description && <p className="line-clamp-2 text-sm text-[var(--swift-muted)]">{it.description}</p>}
@@ -128,15 +179,17 @@ export default function VendorPage() {
         </section>
       ))}
 
+      {/* Above the app's dock on phones (--swift-dock), above the home bar
+          from md up. */}
       {added > 0 && (
-        <Link href="/cart" className="fixed inset-x-0 bottom-4 z-30 mx-auto flex w-[92%] max-w-md items-center justify-between rounded-full bg-[var(--swift-red)] px-5 py-3.5 font-bold text-white shadow-lg">
+        <Link href="/cart" className={`fixed inset-x-0 bottom-[calc(var(--swift-dock,0px)_+_1rem)] z-30 mx-auto flex w-[92%] max-w-md items-center justify-between rounded-full bg-[var(--swift-red)] px-5 py-3.5 font-bold text-white shadow-lg ${PRESS}`}>
           <span>View cart</span><span>{added} item{added > 1 ? 's' : ''}</span>
         </Link>
       )}
 
       {modal && (
         <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4" onClick={() => setModal(null)}>
-          <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white p-5 sm:rounded-3xl" onClick={(e) => e.stopPropagation()}>
+          <div role="dialog" aria-modal="true" aria-label={modal.name} className="max-h-[85vh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-3xl bg-white p-5 pb-[calc(1.25rem_+_env(safe-area-inset-bottom))] sm:rounded-3xl sm:pb-5" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between">
               <h3 className="text-xl font-extrabold">{modal.name}</h3>
               <button onClick={() => setModal(null)} className="grid h-8 w-8 place-items-center rounded-full hover:bg-[var(--swift-subtle)]"><X className="h-5 w-5" /></button>
@@ -164,8 +217,8 @@ export default function VendorPage() {
                 <span className="w-5 text-center font-bold">{qty}</span>
                 <button onClick={() => setQty((q) => q + 1)} className="grid h-8 w-8 place-items-center rounded-full hover:bg-[var(--swift-subtle)]"><Plus className="h-4 w-4" /></button>
               </div>
-              <button onClick={confirmAdd} disabled={busy} className="flex-1 rounded-full bg-[var(--swift-red)] py-3 font-bold text-white disabled:opacity-60">
-                {busy ? 'Adding…' : `Add · ${money(itemPrice(modal, sel) * qty)}`}
+              <button onClick={confirmAdd} disabled={busy} className={`flex-1 rounded-full bg-[var(--swift-red)] py-3 font-bold text-white disabled:opacity-60 ${PRESS}`}>
+                {busy ? 'Adding…' : `${session.status === 'guest' ? 'Sign in to add' : 'Add'} · ${money(itemPrice(modal, sel) * qty)}`}
               </button>
             </div>
           </div>
@@ -174,7 +227,7 @@ export default function VendorPage() {
 
       {book && (
         <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4" onClick={() => setBook(null)}>
-          <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white p-5 sm:rounded-3xl" onClick={(e) => e.stopPropagation()}>
+          <div role="dialog" aria-modal="true" aria-label={`Book ${book.name}`} className="max-h-[85vh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-3xl bg-white p-5 pb-[calc(1.25rem_+_env(safe-area-inset-bottom))] sm:rounded-3xl sm:pb-5" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between">
               <h3 className="text-xl font-extrabold">Book {book.name}</h3>
               <button onClick={() => setBook(null)} className="grid h-8 w-8 place-items-center rounded-full hover:bg-[var(--swift-subtle)]"><X className="h-5 w-5" /></button>
@@ -192,12 +245,12 @@ export default function VendorPage() {
               : <div className="mt-2 grid grid-cols-3 gap-2">
                   {slots.map((s) => <button key={s} onClick={() => setSlot(s)} className={`rounded-xl border py-2 text-sm font-semibold ${slot === s ? 'border-[var(--swift-red)] bg-[var(--swift-red-50)]' : 'border-black/10'}`}>{formatAppointmentClock(s)}</button>)}
                 </div>}
-            <button onClick={confirmBook} disabled={busy || !slot} className="mt-5 w-full rounded-full bg-[var(--swift-red)] py-3 font-bold text-white disabled:opacity-50">{busy ? 'Booking…' : slot ? 'Add booking to cart' : 'Choose a time'}</button>
+            <button onClick={confirmBook} disabled={busy || !slot} className={`mt-5 w-full rounded-full bg-[var(--swift-red)] py-3 font-bold text-white disabled:opacity-50 ${PRESS}`}>{busy ? 'Booking…' : !slot ? 'Choose a time' : session.status === 'guest' ? 'Sign in to book' : 'Add booking to cart'}</button>
           </div>
         </div>
       )}
 
-      {toast && <div className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-full bg-[var(--swift-ink)] px-4 py-2.5 text-sm font-semibold text-white shadow-lg">{toast}</div>}
+      {toast && <div role="status" className="fixed bottom-[calc(var(--swift-dock,0px)_+_5.5rem)] left-1/2 z-50 -translate-x-1/2 rounded-full bg-[var(--swift-ink)] px-4 py-2.5 text-sm font-semibold text-white shadow-lg">{toast}</div>}
     </div>
   );
 }

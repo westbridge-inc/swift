@@ -113,9 +113,11 @@ export function InstallPrompt({ enabled }: { enabled: boolean }) {
     <>
       {/* Room to scroll the last of the page clear of the card. */}
       <div aria-hidden="true" className="h-20" />
+      {/* [Q7b] Above the customer app's dock on phones: `--swift-dock` is its
+          height with the home bar; outside the shell only the home bar counts. */}
       <aside
         aria-label="Install Swift"
-        className="fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(1rem_+_env(safe-area-inset-bottom))]"
+        className="fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(1rem_+_var(--swift-dock,env(safe-area-inset-bottom)))]"
       >
         <div className="mx-auto flex max-w-md items-center gap-3 rounded-2xl border border-black/5 bg-white p-3 shadow-[var(--swift-elevation-floating)]">
           <Image src="/icons/icon-192.png" alt="" width={40} height={40} unoptimized className="h-10 w-10 shrink-0 rounded-xl" />

@@ -2,10 +2,11 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import TaxiPage from './app/(app)/taxi/page';
-import OrderHome from './app/(app)/order/page';
+import CustomerHomePage from './app/(app)/page';
 import ExplorePage from './app/(app)/explore/page';
-import HomePage from './app/(marketing)/page';
+import WelcomePage from './app/(marketing)/welcome/page';
 import FaqPage from './app/(marketing)/faq/page';
 import HowItWorksPage from './app/(marketing)/how-it-works/page';
 import { SiteFooter } from './components/site';
@@ -57,15 +58,27 @@ describe('web taxi pilot restriction', () => {
   });
 
   it('marks both customer taxi entry tiles as mobile-only', () => {
-    for (const page of ['order', 'explore']) {
-      const code = readFileSync(join(process.cwd(), `src/app/(app)/${page}/page.tsx`), 'utf8');
+    // [Q7b] The customer home's tiles moved with it: the home is `/` and its
+    // service grid lives in components/customer-home.tsx.
+    for (const file of ['src/components/customer-home.tsx', 'src/app/(app)/explore/page.tsx']) {
+      const code = readFileSync(join(process.cwd(), file), 'utf8');
       expect(code).toMatch(/href: '\/taxi'.*Swift mobile app/);
     }
   });
 
+  // The customer home reads its stores through React Query, which the app
+  // shell provides; here it gets its own client.
+  function CustomerHome() {
+    return (
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <CustomerHomePage />
+      </QueryClientProvider>
+    );
+  }
+
   it.each([
-    ['customer home', OrderHome], ['explore', ExplorePage],
-    ['home', HomePage], ['FAQ', FaqPage], ['how it works', HowItWorksPage], ['footer', SiteFooter],
+    ['customer home', CustomerHome], ['explore', ExplorePage],
+    ['welcome', WelcomePage], ['FAQ', FaqPage], ['how it works', HowItWorksPage], ['footer', SiteFooter],
   ] as const)('%s states that taxi rides require the mobile app', (_name, Page) => {
     render(<Page />);
     expect(screen.getAllByText(/taxi rides.*Swift mobile app/i).length).toBeGreaterThan(0);

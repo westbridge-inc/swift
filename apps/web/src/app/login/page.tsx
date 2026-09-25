@@ -8,7 +8,14 @@ import { verifyCustomerLogin } from '@/lib/customer';
 import { SwiftLogo } from '@/components/swift-logo';
 import styles from '../auth-flow.module.css';
 
-const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie'];
+const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie', '/market'];
+
+/** [Q7b] The customer app's Home is `/` itself — the one customer address a
+ *  prefix cannot name, since every path starts with a slash. */
+function isCustomerReturn(next: string): boolean {
+  const path = next.split(/[?#]/)[0] ?? '';
+  return path === '/' || CUSTOMER_ROUTES.some((route) => path.startsWith(route));
+}
 
 function LoginInner() {
   const router = useRouter();
@@ -18,7 +25,7 @@ function LoginInner() {
   // open redirect to a phishing site.
   const rawNext = params.get('next') ?? '';
   const next = /^\/(?!\/)/.test(rawNext) && !rawNext.includes('..') && !rawNext.includes('\\') ? rawNext : '';
-  const isCustomer = CUSTOMER_ROUTES.some((r) => next.startsWith(r));
+  const isCustomer = isCustomerReturn(next);
 
   const [step, setStep] = useState<'phone' | 'code'>('phone');
   const [phone, setPhone] = useState('+592');
@@ -43,7 +50,7 @@ function LoginInner() {
     try {
       if (isCustomer) {
         await verifyCustomerLogin(phone.trim(), code.trim());
-        router.replace(next || '/order');
+        router.replace(next || '/');
       } else {
         const { home } = await verifyPartnerLogin(phone.trim(), code.trim());
         router.replace(home);

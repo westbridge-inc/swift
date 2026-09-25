@@ -29,7 +29,7 @@ export default function ExplorePage() {
       <section className="rounded-3xl bg-[var(--swift-red)] p-8 text-white md:p-12">
         <h1 className="text-3xl font-extrabold md:text-4xl">Explore Swift</h1>
         <p className="mt-2 max-w-xl text-white/90">One app for your city — food, groceries, shops, rides, courier and services. Order from stores on the web. Taxi rides require the Swift mobile app.</p>
-        <Link href="/order" className="mt-5 inline-block rounded-full bg-white px-5 py-2.5 font-bold text-[var(--swift-red)]">Start an order</Link>
+        <Link href="/" className="mt-5 inline-block rounded-full bg-white px-5 py-2.5 font-bold text-[var(--swift-red)]">Start an order</Link>
       </section>
 
       <section>

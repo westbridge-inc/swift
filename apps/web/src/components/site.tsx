@@ -28,7 +28,7 @@ export function SiteNav() {
         </nav>
         <div className="flex items-center gap-4">
           <Link
-            href="/login?next=/order"
+            href="/login?next=/"
             className="text-sm font-semibold text-[var(--swift-muted)] transition-colors hover:text-[var(--swift-ink)]"
           >
             Sign in

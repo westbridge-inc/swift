@@ -1,17 +1,28 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import {
   UtensilsCrossed, ShoppingBasket, Store, Car, Package, Wrench,
   BadgePercent, ShieldCheck, Banknote, Search, ClipboardCheck, MapPinned,
 } from 'lucide-react';
 import { Section } from '@/components/site';
-import { launch, showAppStoreBadges } from '@/site.config';
+import { launch, showAppStoreBadges, SITE_ORIGIN } from '@/site.config';
 
 /**
  * [SITE-1.1 Part 2] Every claim on this page reads from the launch config.
  * A visitor is told exactly where Swift works and what they can do today —
  * no region-wide claim, no store badge for an app that does not exist, and no
  * call-to-action that leads somewhere unfinished.
+ *
+ * [Q7b] This was the page at `/`. swiftgy.com now opens straight into
+ * ordering, like an app, and this introduction lives here — linked from the
+ * app's menu, listed in the sitemap, and canonical at its own address so it
+ * can carry campaigns and search on its own.
  */
+export const metadata: Metadata = {
+  title: 'Why Swift',
+  description: `Food, groceries, shops, parcels, rides and trades in ${launch.markets[0]} — where the people serving you keep 100% of what they earn.`,
+  alternates: { canonical: `${SITE_ORIGIN}/welcome` },
+};
 
 const VERTICALS = [
   { icon: UtensilsCrossed, label: 'Food', blurb: 'Restaurants, delivered hot', key: 'food' as const },
@@ -58,7 +69,7 @@ const PROMISES = [
   },
 ];
 
-export default function HomePage() {
+export default function WelcomePage() {
   const canOrderOnWeb = launch.webOrdering === 'live';
 
   return (
@@ -81,7 +92,7 @@ export default function HomePage() {
                 dressed as live ones. */}
             {canOrderOnWeb ? (
               <Link
-                href="/order"
+                href="/"
                 className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
               >
                 Order on the web

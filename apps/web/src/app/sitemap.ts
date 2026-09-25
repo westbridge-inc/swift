@@ -9,9 +9,13 @@ import { SITE_ORIGIN } from '@/site.config';
  *
  * Store pages are excluded on purpose — they are generated from live vendor
  * data and belong in a separate feed once the catalogue is stable.
+ *
+ * [Q7b] `/` is the ordering Home now (public, server-rendered, canonical), so
+ * it stays first; the introduction it used to be is listed at /welcome.
  */
 const PAGES = [
-  { path: '/', priority: 1.0, changeFrequency: 'weekly' as const },
+  { path: '/', priority: 1.0, changeFrequency: 'daily' as const },
+  { path: '/welcome', priority: 0.9, changeFrequency: 'monthly' as const },
   { path: '/how-it-works', priority: 0.8, changeFrequency: 'monthly' as const },
   { path: '/vendors', priority: 0.9, changeFrequency: 'monthly' as const },
   { path: '/drivers', priority: 0.9, changeFrequency: 'monthly' as const },

@@ -133,13 +133,40 @@ export interface Cart {
   meetsMinimum?: boolean;
   minimumOrderAmount?: number;
   paymentCapabilities?: {
+    /** Changes when the vendor set or the validated MMG destination changes. */
+    scope?: string;
     cash?: { available: boolean; fundsFlow: 'DIRECT_AT_HANDOVER' };
     mmg?: { available: boolean; provider?: 'MMG'; fundsFlow?: 'DIRECT_TO_VENDOR'; unavailableReason?: string | null };
   };
 }
 
 // ── Browse ────────────────────────────────────────────────────────────────
-export async function getHome() { return (await apiFetch('/api/v1/customer/home')).data; }
+/** One card on Home's "Popular on Swift" rail — an item, opened at its store. */
+export interface PopularItem {
+  id: string; name: string; imageUrl: string | null; price: number;
+  vendorId: string; vendorName: string; vendorType: string | null; etaMin: number | null;
+}
+/** The live order Home shows at the top (guests have none). */
+export interface HomeActiveOrder {
+  id: string; orderNumber: string; status: string; orderType?: string;
+  vendor?: { id: string; name: string } | null;
+}
+export interface HomeFeed {
+  activeOrder: HomeActiveOrder | null;
+  popularItems: PopularItem[];
+  featured: Vendor[];
+  nearby: Vendor[];
+  orderAgain: Vendor[];
+  categories: Array<{ id: string; name: string; imageUrl: string | null }>;
+  openVendors: Vendor[];
+  closedVendors: Vendor[];
+}
+/** The same feed the phone app's Home reads. A position (the delivery address,
+ *  or where the browser is) sorts stores by distance and fills "Near you". */
+export async function getHome(near?: { lat: number; lng: number }): Promise<HomeFeed> {
+  const qs = near ? `?lat=${near.lat}&lng=${near.lng}` : '';
+  return (await apiFetch(`/api/v1/customer/home${qs}`, undefined, { redirectOnExpired: false })).data as HomeFeed;
+}
 export async function getVendors(type?: string): Promise<Vendor[]> {
   const qs = type ? `?type=${encodeURIComponent(type)}` : '';
   return (await apiFetch(`/api/v1/customer/vendors${qs}`)).data as Vendor[];
@@ -169,6 +196,42 @@ export async function getPublicStorefront(slug: string): Promise<StorefrontDetai
 }
 export async function searchVendors(q: string): Promise<Vendor[]> {
   return (await apiFetch(`/api/v1/customer/vendors?search=${encodeURIComponent(q)}`)).data as Vendor[];
+}
+
+// ── Market (goods across stores — the phone app's Market tab) ──────────────
+/** The server's launch-depth verdict; the tab shows only when it says so. */
+export interface MarketDepth { visible: boolean; items: number; vendors: number }
+/** An item listed outside its store (the API's one ItemHit shape). */
+export interface MarketItem {
+  id: string; name: string; basePrice: number; imageUrl: string | null;
+  vendorId: string; vendorName: string; categoryName: string | null; isNew: boolean;
+}
+export interface MarketCategory { slug: string; name: string; vertical: string }
+
+/** Public reads with no session attached: nothing on them is personal, and a
+ *  stale cookie must never turn browsing into a sign-in redirect. */
+async function publicGet<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, { cache: 'no-store' });
+  const json = await response.json().catch(() => ({}));
+  if (!response.ok || json?.success === false) {
+    throw new Error(json?.error?.message || `Request failed (${response.status})`);
+  }
+  return json.data as T;
+}
+
+export function getMarketDepth(): Promise<MarketDepth> {
+  return publicGet<MarketDepth>('/api/v1/market/depth');
+}
+export function getMarketItems(params: { category?: string; cursor?: string }): Promise<{ items: MarketItem[]; nextCursor: string | null }> {
+  const qs = new URLSearchParams({ sort: 'popular' });
+  if (params.category) qs.set('category', params.category);
+  if (params.cursor) qs.set('cursor', params.cursor);
+  return publicGet(`/api/v1/market/items?${qs}`);
+}
+/** The goods categories the Market chips offer — only ones with a live store. */
+export async function getMarketCategories(): Promise<MarketCategory[]> {
+  const rail = await publicGet<{ enabled?: boolean; categories?: MarketCategory[] }>('/api/v1/discovery/categories?vertical=RETAIL');
+  return (rail.categories ?? []).filter((category) => category.vertical === 'RETAIL');
 }
 
 // ── Cart ──────────────────────────────────────────────────────────────────
