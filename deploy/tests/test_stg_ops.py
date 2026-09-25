@@ -1,4 +1,5 @@
-"""Regression contracts for the STG-OPS deploy fixes (STG-A/B/C/D + seed).
+"""Regression contracts for the STG-OPS deploy fixes (STG-A/B/C/D + seed),
+and the optional staging website (Q11: apps/web behind WEB_HOST).
 
 Offline and service-free: reads deploy files as text and runs the real bash
 scripts against shims for docker/git/curl/sudo, exactly like the other deploy
@@ -7,6 +8,7 @@ test files. Nothing here needs root, a network, Docker or systemd.
     python3 -m unittest discover -s deploy/tests -v
 """
 
+import json
 import os
 import re
 import shutil
@@ -153,6 +155,10 @@ with open(os.environ["CALL_LOG"], "a") as log:
 if stdin:
     with open(os.environ["STDIN_LOG"], "ab") as f:
         f.write(b"<<" + stdin + b">>\n")
+site = os.environ.get("FAKE_SITE_URL")
+if site and any(a.rstrip("/") == site for a in argv):
+    print(os.environ.get("FAKE_SITE_CODE", "200"))
+    sys.exit(0)
 if any(a.endswith("/api/v1/customer/home") for a in argv):
     print("200")
     sys.exit(0)
@@ -435,6 +441,479 @@ class SeedBreakGlassCeremony(SeedProductionScript):
         self.assertNotIn("${NODE_ENV:-", override)
         self.assertIn("SEED_FX_GYD_PER_USD: ${SEED_FX_GYD_PER_USD:-}", override)
         self.assertNotIn("SEED_PLAN_SECRET=", (DEPLOY / "seed-production.sh").read_text())
+
+
+
+# ===========================================================================
+# [Q11] The staging website (apps/web), optional behind WEB_HOST. A stack
+# without WEB_HOST is exactly the API stack: the web service is profile-gated,
+# the Caddyfile serves no website host, and pilot-up.sh runs nothing new.
+# ===========================================================================
+
+API_HOST = "api-staging.example.com"
+WEB_HOST = "staging.example.com"
+WEB_DOCKERFILE = DEPLOY.parent / "apps" / "web" / "Dockerfile"
+
+
+def caddy_render(text: str, env: dict) -> str:
+    """Caddy's parse-time substitution: {$NAME} is the variable's value, and an
+    unset or empty one expands to nothing (probed against caddy:2.10)."""
+    def value(match):
+        name, _, default = match.group(1).partition(":")
+        return env.get(name, default)
+    return re.sub(r"\{\$([A-Za-z_][A-Za-z0-9_]*(?::[^}]*)?)\}", value, text)
+
+
+def top_level_blocks(rendered: str):
+    """[addresses, body lines] for every top-level block of a rendered Caddyfile."""
+    blocks, depth = [], 0
+    for raw in rendered.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if depth == 0:
+            if not line.endswith("{"):
+                raise AssertionError(f"unexpected top-level line: {line!r}")
+            blocks.append([line[:-1].split(), []])
+            depth = 1
+            continue
+        depth += line.count("{") - line.count("}")
+        if depth > 0:
+            blocks[-1][1].append(line)
+    return blocks
+
+
+def dockerfile_stages(path: Path) -> dict:
+    """Stage name -> its instructions, from `FROM ... AS name` to the next FROM."""
+    stages = {}
+    for chunk in re.split(r"(?m)^(?=FROM )", path.read_text()):
+        head = re.match(r"FROM \S+ AS (\S+)", chunk)
+        if head:
+            stages[head.group(1)] = chunk
+    return stages
+
+
+class Q11WebsiteCompose(unittest.TestCase):
+    def web(self) -> str:
+        return service_block(DEPLOY / "docker-compose.yml", "web")
+
+    def test_the_website_is_profile_gated_private_and_portless(self):
+        web = self.web()
+        self.assertIn('profiles: ["web"]', web)
+        self.assertNotRegex(web, r"(?m)^    (ports|expose|network_mode|privileged|extra_hosts):")
+        self.assertIn("networks: [private]", web)
+
+    def test_the_website_depends_on_nothing_and_reads_no_settings_file_or_secret(self):
+        web = self.web()
+        self.assertNotRegex(web, r"(?m)^    (depends_on|env_file|volumes|secrets):")
+        self.assertNotIn("/run/secrets", web)
+        self.assertNotIn("_FILE:", web)
+
+    def test_the_image_is_built_for_this_stacks_public_api_on_the_staging_channel(self):
+        web = self.web()
+        self.assertIn("dockerfile: apps/web/Dockerfile", web)
+        self.assertIn("image: swift-web:${SWIFT_TAG:-local}", web)
+        self.assertIn("NEXT_PUBLIC_API_URL: https://${API_HOST:-localhost}", web)
+        self.assertIn("SWIFT_WEB_CHANNEL: staging", web)
+        # Unfilled company details stay refused unless the operator says otherwise.
+        self.assertIn("NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}", web)
+
+    def test_the_website_has_a_memory_ceiling_that_v8_collects_below(self):
+        web = self.web()
+        limit = re.search(r"(?m)^    mem_limit: (\d+)m$", web)
+        heap = re.search(r"--max-old-space-size=(\d+)", web)
+        self.assertIsNotNone(limit, "the web service needs a mem_limit")
+        self.assertIsNotNone(heap, "the web service must cap the V8 heap under its mem_limit")
+        self.assertLess(int(heap.group(1)), int(limit.group(1)))
+
+    def test_caddy_gets_web_host_with_an_empty_default_and_never_waits_on_the_website(self):
+        caddy = service_block(DEPLOY / "docker-compose.yml", "caddy")
+        self.assertIn("WEB_HOST: ${WEB_HOST:-}", caddy)
+        self.assertNotRegex(caddy, r"(?m)^      web:")
+
+
+@unittest.skipUnless(shutil.which("docker"), "Docker CLI not installed")
+class Q11WebsiteRenderedByCompose(unittest.TestCase):
+    """The real file, rendered by `docker compose config` (client-side; no daemon)."""
+
+    def render(self, *profile):
+        with tempfile.TemporaryDirectory() as tmp:
+            here = Path(tmp) / "deploy"
+            here.mkdir()
+            shutil.copy(DEPLOY / "docker-compose.yml", here / "docker-compose.yml")
+            (here / ".env").write_text(
+                "NODE_ENV=development\nPILOT_ENV=staging\nAPI_HOST=api-staging.example.invalid\n"
+                "WEB_HOST=staging.example.invalid\nWEB_ALLOW_SITE_TOKENS=1\n"
+            )
+            result = subprocess.run(
+                ["docker", "compose", "--project-directory", str(here), "-f", str(here / "docker-compose.yml"),
+                 *profile, "config", "--format", "json"],
+                text=True, capture_output=True, timeout=60,
+            )
+            if result.returncode != 0 and "unknown" in result.stderr.lower():
+                self.skipTest(f"docker compose cannot render here: {result.stderr.strip()[:120]}")
+            self.assertEqual(result.returncode, 0, result.stderr[:400])
+            return json.loads(result.stdout)
+
+    def test_without_the_profile_the_stack_has_no_website(self):
+        self.assertNotIn("web", self.render()["services"])
+
+    def test_with_the_profile_the_website_is_private_and_built_for_this_api(self):
+        model = self.render("--profile", "web")
+        web = model["services"]["web"]
+        self.assertNotIn("ports", web)
+        self.assertEqual(list((web.get("networks") or {}).keys()), ["private"])
+        self.assertEqual(sorted((web.get("environment") or {}).keys()), ["NODE_OPTIONS"])
+        self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_API_URL"], "https://api-staging.example.invalid")
+        self.assertEqual(web["build"]["args"]["SWIFT_WEB_CHANNEL"], "staging")
+        self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_ALLOW_SITE_TOKENS"], "1")
+        self.assertEqual(model["services"]["caddy"]["environment"]["WEB_HOST"], "staging.example.invalid")
+        # pilot-up's isolation check passes with the website in the model.
+        check = subprocess.run(
+            ["python3", str(DEPLOY / "verify-journeys-isolation.py"), str(DEPLOY / "Caddyfile")],
+            input=json.dumps(model), text=True, capture_output=True, timeout=10,
+        )
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+
+class Q11WebsiteCaddyfile(unittest.TestCase):
+    TEXT = (DEPLOY / "Caddyfile").read_text()
+
+    def blocks(self, **env):
+        return top_level_blocks(caddy_render(self.TEXT, env))
+
+    def test_an_unset_or_empty_web_host_leaves_exactly_the_api_site(self):
+        # A separate `{$WEB_HOST} { ... }` block loses its only address when the
+        # variable is empty; Caddy then reads it as a misplaced global-options
+        # block and refuses the WHOLE file, the API site included.
+        for env in ({"API_HOST": API_HOST}, {"API_HOST": API_HOST, "WEB_HOST": ""}):
+            with self.subTest(env=env):
+                blocks = self.blocks(**env)
+                self.assertEqual([addresses for addresses, _ in blocks], [[API_HOST]])
+                body = "\n".join(blocks[0][1])
+                self.assertIn("respond @metrics 403", body)
+                self.assertIn("reverse_proxy api:3000", body)
+
+    def test_a_set_web_host_joins_the_api_site_and_reaches_the_website(self):
+        blocks = self.blocks(API_HOST=API_HOST, WEB_HOST=WEB_HOST)
+        self.assertEqual([addresses for addresses, _ in blocks], [[API_HOST, WEB_HOST]])
+        self.assertIn("reverse_proxy web:3000", "\n".join(blocks[0][1]))
+
+    def test_routes_key_on_the_api_host_and_the_api_keeps_its_guard(self):
+        # Matching on WEB_HOST would become an argument-less host matcher when it
+        # is unset; the API host is always set, so the split keys on it.
+        code = [line.split("#", 1)[0].strip() for line in self.TEXT.splitlines()]
+        self.assertEqual([line for line in code if "$WEB_HOST" in line], ["{$API_HOST} {$WEB_HOST} {"])
+        body = "\n".join(self.blocks(API_HOST=API_HOST, WEB_HOST=WEB_HOST)[0][1])
+        self.assertRegex(
+            body,
+            re.escape(f"@api host {API_HOST}") + r"\nhandle @api \{\n@metrics path /metrics\nrespond @metrics 403\n"
+            r"reverse_proxy api:3000\n\}\nhandle \{\nreverse_proxy web:3000\n\}",
+        )
+
+    def test_the_website_keeps_its_own_security_headers(self):
+        # next.config.ts sets them; the proxy neither duplicates nor overrides any.
+        self.assertNotRegex(self.TEXT, r"(?m)^\s*header\b")
+
+
+def caddy_image_present() -> bool:
+    if not shutil.which("docker"):
+        return False
+    probe = subprocess.run(["docker", "image", "inspect", "caddy:2.10"], capture_output=True, timeout=30)
+    return probe.returncode == 0
+
+
+@unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
+class Q11WebsiteCaddyfileRenderedByCaddy(unittest.TestCase):
+    """The real Caddyfile through the stack's pinned Caddy (no network, no pull)."""
+
+    def caddy(self, command, env):
+        args = ["docker", "run", "--rm", "--network", "none"]
+        for name, value in env.items():
+            args += ["-e", f"{name}={value}"]
+        args += ["-v", f"{DEPLOY / 'Caddyfile'}:/etc/caddy/Caddyfile:ro", "caddy:2.10",
+                 "caddy", command, "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+        result = subprocess.run(args, text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr[-600:])
+        return result.stdout
+
+    def served_hosts(self, env):
+        self.caddy("validate", env)
+        config = json.loads(self.caddy("adapt", env))
+        routes = config["apps"]["http"]["servers"]["srv0"]["routes"]
+        return [m["host"] for route in routes for m in route.get("match", []) if "host" in m], json.dumps(config)
+
+    def test_unset_and_empty_web_host_validate_and_serve_only_the_api(self):
+        for env in ({"API_HOST": API_HOST}, {"API_HOST": API_HOST, "WEB_HOST": ""}):
+            with self.subTest(env=env):
+                hosts, config = self.served_hosts(env)
+                self.assertEqual(hosts, [[API_HOST]])
+                self.assertIn('"dial": "api:3000"', config)
+
+    def test_a_set_web_host_validates_and_is_served_beside_the_api(self):
+        hosts, config = self.served_hosts({"API_HOST": API_HOST, "WEB_HOST": WEB_HOST})
+        self.assertEqual(hosts, [[API_HOST, WEB_HOST]])
+        self.assertIn('"dial": "web:3000"', config)
+        self.assertIn('"dial": "api:3000"', config)
+
+
+class Q11WebsiteDockerfile(unittest.TestCase):
+    def setUp(self):
+        self.stages = dockerfile_stages(WEB_DOCKERFILE)
+        self.runtime = self.stages["runtime"]
+        self.build = self.stages["build"]
+
+    def test_the_final_stage_is_the_runtime_and_runs_as_non_root(self):
+        self.assertEqual(list(self.stages)[-1], "runtime")
+        self.assertRegex(self.runtime, r"(?m)^USER node$")
+        after_user = self.runtime[self.runtime.index("USER node") + len("USER node"):]
+        self.assertNotRegex(after_user, r"(?m)^USER ")
+        self.assertIn("CMD ", after_user)
+
+    def test_the_api_origin_and_channel_are_build_args_of_the_building_stage(self):
+        build_step = self.build.index("RUN pnpm run build")
+        for arg in ("NEXT_PUBLIC_API_URL", "SWIFT_WEB_CHANNEL", "NEXT_PUBLIC_ALLOW_SITE_TOKENS"):
+            declared = re.search(rf"(?m)^ARG {arg}$", self.build)
+            self.assertIsNotNone(declared, f"{arg} must be a build ARG with no baked-in default")
+            self.assertLess(declared.start(), build_step, arg)
+        self.assertIn("ENV SWIFT_WEB_IMAGE_BUILD=1", self.build)
+        # A public variable in the runtime would claim a setting the bundle cannot change.
+        self.assertNotIn("NEXT_PUBLIC_", self.runtime)
+
+    def test_it_installs_the_workspace_like_the_api_image(self):
+        deps = self.stages["deps"]
+        self.assertIn("COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./", deps)
+        self.assertIn("COPY apps/web/package.json apps/web/", deps)
+        self.assertIn("COPY packages/ packages/", deps)
+        self.assertIn("pnpm install --frozen-lockfile", deps)
+        self.assertIn("--mount=type=cache,id=pnpm,target=/pnpm/store", deps)
+        self.assertNotIn("apps/mobile/package.json", WEB_DOCKERFILE.read_text())
+
+    def test_it_runs_the_standalone_server_and_probes_it(self):
+        self.assertIn("COPY --from=build --chown=node:node /app/apps/web/.next/standalone ./", self.runtime)
+        self.assertIn("/app/apps/web/.next/static ./apps/web/.next/static", self.runtime)
+        self.assertIn("/app/apps/web/public ./apps/web/public", self.runtime)
+        self.assertIn("ENV HOSTNAME=0.0.0.0 PORT=3000", self.runtime)
+        self.assertRegex(self.runtime, r"(?m)^HEALTHCHECK .*\\\n.*/robots\.txt")
+        self.assertIn('CMD ["node", "server.js"]', self.runtime)
+
+
+FAKE_PILOT_DOCKER = r"""#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+line = " ".join(argv)
+with open(os.environ["CALL_LOG"], "a") as log:
+    log.write("docker " + line + "\n")
+if os.environ.get("FAIL_ON") and os.environ["FAIL_ON"] in line:
+    sys.exit(1)
+if argv[:1] == ["network"]:
+    if "-f" in argv:
+        print("bridge")
+    sys.exit(0)
+if argv[:1] == ["inspect"]:
+    fmt, target = argv[2], argv[3]
+    if "ExitCode" in fmt:
+        print("exited 0")
+    elif "Health" in fmt:
+        print(os.environ.get("WEB_HEALTH", "healthy") if target == "web-id" else "healthy")
+    else:
+        print("running")
+    sys.exit(0)
+if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
+    if any(a.endswith("docker-compose.routing.yml") for a in argv):
+        print(json.dumps({"services": {"osrm": {}}}))
+    else:
+        services = {name: {} for name in ("postgres", "redis", "meilisearch", "migrate", "api", "worker")}
+        services["caddy"] = {"ports": [{"published": "80", "target": 80, "protocol": "tcp"},
+                                       {"published": "443", "target": 443, "protocol": "tcp"}]}
+        if "--profile" in argv and argv[argv.index("--profile") + 1] == "web":
+            services["web"] = {}
+        print(json.dumps({"services": services}))
+    sys.exit(0)
+if argv[:1] == ["compose"] and "ps" in argv and "-q" in argv:
+    print(argv[-1] + "-id")
+sys.exit(0)
+"""
+
+
+class Q11PilotUpWebsite(unittest.TestCase):
+    """The real pilot-up.sh, end to end, against shims for docker, git, curl,
+    sudo, systemctl, the secret store and sleep. Nothing is deployed."""
+
+    SHA = "c" * 40
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="swift-pilot-web-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.here = self.tmp / "repo" / "deploy"
+        (self.here / "routing-data" / "osrm").mkdir(parents=True)
+        (self.here / "routing-data" / "osrm" / "guyana-latest.osrm").write_text("")
+        for name in ("pilot-up.sh", "secret-names.sh", "wait-for-migration.sh", "verify-journeys-isolation.py",
+                     "Caddyfile", "docker-compose.yml", "docker-compose.routing.yml"):
+            shutil.copy(DEPLOY / name, self.here / name)
+        utils = self.tmp / "repo" / "apps" / "api" / "src" / "utils"
+        utils.mkdir(parents=True)
+        shutil.copy(DEPLOY.parent / "apps" / "api" / "src" / "utils" / "secret-files.ts", utils / "secret-files.ts")
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.log = self.tmp / "calls"
+        self.log.write_text("")
+        docker = self.bin / "docker"
+        docker.write_text(FAKE_PILOT_DOCKER)
+        docker.chmod(0o755)
+        sh_shim(self.bin, "git", 'echo "git $*" >> "$CALL_LOG"\n[ "$*" = "rev-parse HEAD" ] && echo "$GIT_HEAD"\nexit 0')
+        sh_shim(self.bin, "curl", 'echo "curl $*" >> "$CALL_LOG"\ncase "$*" in *"https://$SITE/"*) [ -z "$SITE_DOWN" ] || exit 7;; esac\nexit 0')
+        sh_shim(self.bin, "id", 'if [ "$1" = "-u" ]; then echo 1000; else exec /usr/bin/id "$@"; fi')
+        sh_shim(self.bin, "sudo", '[ "$1" = -n ] && shift\nexec "$@"')
+        sh_shim(self.bin, "swift-secrets", '[ "$1" = list ] && printf "%s\\n" $STORE_NAMES\nexit 0')
+        sh_shim(self.bin, "systemctl", 'echo "systemctl $*" >> "$CALL_LOG"\nexit 0')
+        sh_shim(self.bin, "sleep", "exit 0")
+        compose = (DEPLOY / "docker-compose.yml").read_text()
+        self.store = " ".join(sorted(set(re.findall(r"_FILE: /run/secrets/([A-Z][A-Z0-9_]*)", compose))
+                                     | {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}))
+
+    def run_pilot(self, web_host=None, **extra):
+        settings = (f"PILOT_ENV=staging\nAPI_HOST={API_HOST}\nMAPS_PROVIDER=osrm\nOSRM_URL=http://osrm:5000\n"
+                    "BACKUP_BUCKET=test-backups\nNODE_ENV=development\nCORS_ORIGIN=https://staging.example.com\n")
+        if web_host is not None:
+            settings += f"WEB_HOST={web_host}\n"
+        (self.here / ".env").write_text(settings)
+        env = os.environ.copy()
+        env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA,
+                    "STORE_NAMES": self.store, "SITE": web_host or ""})
+        env.update(extra)
+        result = subprocess.run(["bash", str(self.here / "pilot-up.sh"), self.SHA],
+                                env=env, text=True, capture_output=True, timeout=120, stdin=subprocess.DEVNULL)
+        return result, self.log.read_text().splitlines()
+
+    @staticmethod
+    def first(calls, fragment):
+        return next(i for i, call in enumerate(calls) if fragment in call)
+
+    def test_without_web_host_nothing_about_the_website_runs(self):
+        for web_host in (None, ""):
+            with self.subTest(web_host=web_host):
+                self.log.write_text("")
+                result, calls = self.run_pilot(web_host)
+                self.assertEqual(result.returncode, 0, result.stderr[-800:])
+                self.assertIn(f"STAGING READY at exact SHA {self.SHA}", result.stdout)
+                self.assertNotIn("WEBSITE", result.stdout)
+                self.assertFalse([c for c in calls if "--profile web" in c or c.endswith(" web")], calls)
+                self.assertTrue(any(c.endswith(" build api") for c in calls))
+                self.assertTrue(any(c.endswith("/ready") for c in calls if c.startswith("curl ")))
+
+    def test_with_web_host_the_site_builds_before_anything_stops_and_starts_after_the_api_is_ready(self):
+        result, calls = self.run_pilot(WEB_HOST)
+        self.assertEqual(result.returncode, 0, result.stderr[-800:])
+        # Every compose call sees the website, so the port and isolation checks cover it.
+        compose = [c for c in calls if c.startswith("docker compose") and "docker-compose.routing.yml" not in c]
+        self.assertTrue(compose)
+        self.assertEqual([c for c in compose if "--profile web" not in c], [])
+        built = self.first(calls, " build web")
+        self.assertLess(self.first(calls, " build api"), built)
+        self.assertLess(built, self.first(calls, " stop api worker"))
+        api_ready = self.first(calls, f"https://{API_HOST}/ready")
+        started = self.first(calls, "up -d --no-deps --force-recreate web")
+        self.assertLess(api_ready, started)
+        site_probe = self.first(calls, f"--resolve {WEB_HOST}:443:127.0.0.1")
+        self.assertLess(started, site_probe)
+        self.assertIn(f"https://{WEB_HOST}/", calls[site_probe])
+        self.assertIn(f"WEBSITE READY at https://{WEB_HOST} (exact SHA {self.SHA})", result.stdout)
+        self.assertIn(f"STAGING READY at exact SHA {self.SHA}", result.stdout)
+
+    def test_a_malformed_web_host_is_refused_before_anything_changes(self):
+        for bad in ("https://staging.example.com", "staging.example.com/", "staging.example.com:443",
+                    "localhost", "staging", "-staging.example.com", "staging example.com"):
+            with self.subTest(web_host=bad):
+                self.log.write_text("")
+                result, calls = self.run_pilot(bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("WEB_HOST", result.stderr)
+                self.assertEqual(calls, [], "nothing may run before the settings are accepted")
+
+    def test_web_host_must_not_be_the_api_host(self):
+        for same in (API_HOST, API_HOST.upper()):
+            with self.subTest(web_host=same):
+                self.log.write_text("")
+                result, calls = self.run_pilot(same)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("WEB_HOST must differ from API_HOST", result.stderr)
+                self.assertEqual(calls, [])
+
+    def test_a_site_that_does_not_build_leaves_the_running_stack_untouched(self):
+        result, calls = self.run_pilot(WEB_HOST, FAIL_ON="build web")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse([c for c in calls if " stop " in c or " up " in c], calls)
+
+    def test_a_site_that_never_answers_fails_the_deploy_and_says_the_api_is_serving(self):
+        for failure in ({"SITE_DOWN": "1"}, {"WEB_HEALTH": "unhealthy"}):
+            with self.subTest(failure=failure):
+                self.log.write_text("")
+                result, calls = self.run_pilot(WEB_HOST, **failure)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"https://{WEB_HOST}", result.stderr)
+                self.assertIn(f"the API is serving {self.SHA}", result.stderr)
+                self.assertNotIn("STAGING READY", result.stdout)
+                self.assertTrue(any(c.endswith("up -d --no-deps --force-recreate api worker") for c in calls))
+
+
+class Q11DoctorWebsite(unittest.TestCase):
+    SITE_URL = "https://site.example"
+
+    def setUp(self):
+        StgCDoctorHealthDetail.setUp(self)
+        # Hermetic: the doctor's Dependabot section calls a real `gh` when one
+        # is installed; unreadable alerts are only a WARN, never the verdict.
+        sh_shim(self.bin, "gh", "exit 1")
+
+    def run_doctor(self, mode, script=DEPLOY / "doctor.sh", **extra):
+        env = os.environ.copy()
+        env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "STDIN_LOG": str(self.stdin_log),
+                    "CURL_MODE": mode, "API_URL": "http://health.example"})
+        env.update(extra)
+        # The fake curl reads stdin to its end: give it one that ends, whatever
+        # the test runner's own stdin is.
+        return subprocess.run(["bash", str(script)], env=env, text=True, capture_output=True, timeout=30,
+                              stdin=subprocess.DEVNULL)
+
+    def test_without_a_website_the_doctor_checks_none(self):
+        result = self.run_doctor("healthy-hidden")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("website", result.stdout)
+
+    def test_a_website_that_answers_is_ok(self):
+        result = self.run_doctor("healthy-hidden", WEB_URL=self.SITE_URL, FAKE_SITE_URL=self.SITE_URL)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"ok    website {self.SITE_URL} → 200", result.stdout)
+
+    def test_a_website_that_is_down_or_erroring_fails_the_doctor(self):
+        for code in ("502", "500", "000"):
+            with self.subTest(code=code):
+                result = self.run_doctor("healthy-hidden", WEB_URL=self.SITE_URL, FAKE_SITE_URL=self.SITE_URL,
+                                         FAKE_SITE_CODE=code)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertRegex(result.stdout, r"FAIL  website")
+
+    def test_the_website_address_comes_from_web_host_in_deploy_env(self):
+        here = self.tmp / "deploy"
+        here.mkdir()
+        shutil.copy(DEPLOY / "doctor.sh", here / "doctor.sh")
+        (here / ".env").write_text("WEB_HOST=site.example\n")
+        result = self.run_doctor("healthy-hidden", script=here / "doctor.sh", FAKE_SITE_URL=self.SITE_URL)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"ok    website {self.SITE_URL} → 200", result.stdout)
+
+
+class Q11WebsiteDocs(unittest.TestCase):
+    def test_the_runbook_says_how_to_serve_and_verify_the_website(self):
+        runbook = (DEPLOY / "PILOT-RUNBOOK.md").read_text()
+        start = runbook.index("Serving the website on staging")
+        end = runbook.find("\n## ", start)
+        section = runbook[start:end if end != -1 else len(runbook)]
+        for needle in ("A record", "DNS only", "WEB_HOST=staging.swiftgy.com", "CORS_ORIGIN",
+                       "APP_PUBLIC_URL", "WEB_ALLOW_SITE_TOKENS", "./deploy/pilot-up.sh",
+                       '--resolve "$WEB_HOST:443:127.0.0.1"', "X-Robots-Tag"):
+            self.assertIn(needle, section)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@
 # Usage:
 #   ./deploy/doctor.sh                # local dev machine
 #   API_URL=https://api.example ./deploy/doctor.sh   # against a server
+#   WEB_URL=https://site.example ./deploy/doctor.sh  # also check a website
 
 set -uo pipefail
 
@@ -115,6 +116,23 @@ case "$CANARY" in
   5*)  bad "canary /customer/home → $CANARY — investigate schema/client skew and migration status" ;;
   *)   warn "canary /customer/home → $CANARY (auth/config, not skew)" ;;
 esac
+
+# ── 2b. The website, from the outside (only when there is one) ──────────────
+# [Q11] WEB_HOST in deploy/.env turns the staging website on (pilot-up.sh);
+# WEB_URL overrides it, like API_URL. Unset means no website: nothing to check.
+if [ -z "${WEB_URL:-}" ] && [ -f "$HERE/.env" ]; then
+  WEB_HOST="$(grep -E '^WEB_HOST=' "$HERE/.env" | head -1 | cut -d= -f2- || true)"
+  [ -z "$WEB_HOST" ] || WEB_URL="https://$WEB_HOST"
+fi
+if [ -n "${WEB_URL:-}" ]; then
+  # On no response curl still writes 000 for %{http_code}; it just exits nonzero.
+  SITE=$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$WEB_URL/" 2>/dev/null || true)
+  case "${SITE:-000}" in
+    2*|3*) ok "website $WEB_URL → $SITE" ;;
+    000)   bad "website unreachable at $WEB_URL — WEB_HOST is set, so it should answer (DNS, certificate, or the web container)" ;;
+    *)     bad "website $WEB_URL/ → $SITE" ;;
+  esac
+fi
 
 # ── 3. Containers: up, and allowed to come back ─────────────────────────────
 # macOS ships no `timeout`; a missing binary must never masquerade as a wedged

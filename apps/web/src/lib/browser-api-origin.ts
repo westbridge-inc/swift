@@ -15,7 +15,9 @@ import { SITE_DOMAIN } from '../site.domain';
  *   exact absolute https origin (no path, query, credentials or fragment), and
  *   requires it to be the canonical release origin — `https://api.<site
  *   domain>`, derived from the one file that owns the company's domain rather
- *   than a second hardcoded hostname;
+ *   than a second hardcoded hostname; [Q11] a build that also declares the
+ *   staging channel requires the staging origin, `https://api-staging.<site
+ *   domain>`, instead, and nothing else;
  * - the CSP's connect-src names that one origin, never a scheme wildcard.
  *
  * The Codex candidate this integrates pinned the release origin to a literal
@@ -25,8 +27,40 @@ import { SITE_DOMAIN } from '../site.domain';
  */
 export const DEVELOPMENT_BROWSER_API_ORIGIN = 'http://localhost:3000';
 export const RELEASE_BROWSER_API_ORIGIN = `https://api.${SITE_DOMAIN}` as const;
+/**
+ * [Q11] The staging API, which the self-hosted staging site calls
+ * (apps/web/Dockerfile, served by deploy/docker-compose.yml). Derived from the
+ * same domain file, and the host the mobile staging builds use (eas.json).
+ */
+export const STAGING_BROWSER_API_ORIGIN = `https://api-staging.${SITE_DOMAIN}` as const;
 
 export type BrowserApiMode = 'development' | 'production';
+
+/**
+ * [Q11] Which API a production build is FOR. SWIFT_WEB_CHANNEL unset (or
+ * empty) is the public site, so Vercel and CI, which never set it, build
+ * exactly what they did; `staging` is the one other value. A staging build
+ * takes BOTH keys, the channel and the staging origin: a mis-set origin alone
+ * is refused as it always was, so the public site can never be pointed at the
+ * staging API by one wrong variable, nor the staging site at production.
+ */
+export type ReleaseChannel = 'production' | 'staging';
+
+const RELEASE_CHANNEL_ORIGIN: Record<ReleaseChannel, string> = {
+  production: RELEASE_BROWSER_API_ORIGIN,
+  staging: STAGING_BROWSER_API_ORIGIN,
+};
+
+export function resolveReleaseChannel(value: string | undefined): ReleaseChannel {
+  if (value === undefined || value === '' || value === 'production') return 'production';
+  if (value === 'staging') return 'staging';
+  throw new Error(`SWIFT_WEB_CHANNEL must be production or staging (got ${JSON.stringify(value)})`);
+}
+
+/** Read at build time by next.config only; nothing in the browser consults it. */
+export function resolveConfiguredReleaseChannel(): ReleaseChannel {
+  return resolveReleaseChannel(process.env['SWIFT_WEB_CHANNEL']);
+}
 
 // Next's compiler requires this exact dot-form lookup for static replacement.
 // The ambient member makes that syntax type-safe under noPropertyAccessFromIndexSignature.
@@ -67,26 +101,31 @@ function assertOriginOnly(value: string): void {
 export function resolveBrowserApiOrigin(
   mode: BrowserApiMode,
   configuredOrigin: string | undefined,
+  channel: ReleaseChannel = 'production',
 ): string {
   if (mode === 'development' && configuredOrigin === undefined) {
     return DEVELOPMENT_BROWSER_API_ORIGIN;
   }
+  const expected = mode === 'production'
+    ? RELEASE_CHANNEL_ORIGIN[channel]
+    : DEVELOPMENT_BROWSER_API_ORIGIN;
   if (configuredOrigin === undefined) {
-    throw new Error(`NEXT_PUBLIC_API_URL is required for a production web build (expected ${RELEASE_BROWSER_API_ORIGIN})`);
+    throw new Error(`NEXT_PUBLIC_API_URL is required for a production web build (expected ${expected})`);
   }
   assertOriginOnly(configuredOrigin);
-  const expected = mode === 'production'
-    ? RELEASE_BROWSER_API_ORIGIN
-    : DEVELOPMENT_BROWSER_API_ORIGIN;
   if (configuredOrigin !== expected) {
-    throw new Error(`NEXT_PUBLIC_API_URL must be exactly ${expected} in ${mode}`);
+    throw new Error(`NEXT_PUBLIC_API_URL must be exactly ${expected} in ${mode === 'production' ? channel : mode}`);
   }
   return expected;
 }
 
-export function buildBrowserContentSecurityPolicy(mode: BrowserApiMode): string {
+export function buildBrowserContentSecurityPolicy(
+  mode: BrowserApiMode,
+  channel: ReleaseChannel = 'production',
+): string {
+  const releaseOrigin = RELEASE_CHANNEL_ORIGIN[channel];
   const connectSources = mode === 'production'
-    ? ["'self'", RELEASE_BROWSER_API_ORIGIN, RELEASE_BROWSER_API_ORIGIN.replace('https://', 'wss://')]
+    ? ["'self'", releaseOrigin, releaseOrigin.replace('https://', 'wss://')]
     : ["'self'", DEVELOPMENT_BROWSER_API_ORIGIN, 'ws://localhost:3000', 'ws://localhost:3002'];
   // [W-42] The legal pages inject document HTML. Nothing a script can reach
   // survives the legal grammar (src/legal/legal-html.ts), and the CSP shrinks
@@ -111,8 +150,11 @@ export function buildBrowserContentSecurityPolicy(mode: BrowserApiMode): string 
   ].join('; ');
 }
 
-export function resolveConfiguredBrowserApiOrigin(mode: BrowserApiMode): string {
-  return resolveBrowserApiOrigin(mode, CONFIGURED_BROWSER_API_ORIGIN);
+export function resolveConfiguredBrowserApiOrigin(
+  mode: BrowserApiMode,
+  channel: ReleaseChannel = 'production',
+): string {
+  return resolveBrowserApiOrigin(mode, CONFIGURED_BROWSER_API_ORIGIN, channel);
 }
 
 // next.config validates the mode and injects the exact value into every client
