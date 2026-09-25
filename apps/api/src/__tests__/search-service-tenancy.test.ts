@@ -49,7 +49,8 @@ class FakeClient implements SearchClientLike {
 }
 
 const prisma = new PrismaClient();
-const RUN = nanoid(6).toLowerCase();
+// No '_' in these ids: a tenant id ending in '_' cannot become a search document id (search-scope.ts isIdPart).
+const RUN = nanoid(6).toLowerCase().replace(/_/g, 'x');
 const TENANT_A = `tenant-ss-a-${RUN}`;
 const TENANT_B = `tenant-ss-b-${RUN}`;
 const TENANT_DEAD = `tenant-ss-dead-${RUN}`;
