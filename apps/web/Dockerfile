@@ -54,6 +54,11 @@ COPY apps/web apps/web
 # modules it imports are compiled; src/image-build-context.test.ts fails when
 # the site imports something from outside apps/web that is not copied here.
 COPY apps/mobile/src/kit apps/mobile/src/kit
+# The customer pages reuse two pure phone-app modules by path (#1351): the
+# home feed's reliability rules and the cart's payment rules. Neither imports
+# anything but @swift/types (packages/, copied above), so exactly these files.
+COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.ts
+COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 

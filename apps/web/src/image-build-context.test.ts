@@ -58,9 +58,11 @@ describe('[Q11] the image build context carries what the site imports', () => {
 
   it('copies every module the site imports from outside apps/web into the build stage', () => {
     const copied = copiedIntoTheImage();
-    const missing = importsOutsideTheSite().filter(
-      (target) => !copied.some((source) => target === source || target.startsWith(`${source}/`)),
-    );
+    // A COPY names a directory or one file; an import names a module without
+    // its extension, so a file COPY covers the module it holds.
+    const covers = (source: string, target: string): boolean =>
+      target === source || target.startsWith(`${source}/`) || target === source.replace(/\.(tsx?|jsx?|mjs|cjs)$/, '');
+    const missing = importsOutsideTheSite().filter((target) => !copied.some((source) => covers(source, target)));
     expect(missing, 'add a COPY for each to apps/web/Dockerfile').toEqual([]);
   });
 });
