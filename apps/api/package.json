@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "prisma db push --skip-generate && tsx watch src/server.ts",
     "dev:nosync": "tsx watch src/server.ts",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "start:worker": "node dist/worker.js",
     "worker": "tsx watch src/worker.ts",
