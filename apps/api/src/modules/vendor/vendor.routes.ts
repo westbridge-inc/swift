@@ -58,6 +58,8 @@ import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
+import { assertStorePinInMarket } from './store-pin';
+import { lockStorePin, recordStorePinMove } from './store-pin-move';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -92,7 +94,13 @@ const updateVendorProfileSchema = z.object({
   // down. Shape is enforced by publicPhoneForWrite, not here, so the write
   // and read boundaries cannot drift apart on what a valid number is.
   publicPhone: z.string().trim().max(32).nullable().optional(),
-});
+})
+  // [Q8] A store pin is one point. Half of one would move the store along a
+  // single axis to a spot nobody chose, so the two travel together or not at all.
+  .refine((body) => (body.latitude === undefined) === (body.longitude === undefined), {
+    message: 'Send latitude and longitude together',
+    path: ['longitude'],
+  });
 
 const acceptOrderSchema = z.object({
   estimatedPrepTime: z.number().int().min(1).max(480).optional(),
@@ -1151,6 +1159,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const access = await requireVendor(app, request, 'MANAGER');
     const { vendorId } = access;
     const body = updateVendorProfileSchema.parse(request.body);
+    // [Q8] A moved pin is held to the same market rule as a new store, before anything is written.
+    const pin = body.latitude !== undefined && body.longitude !== undefined ? { latitude: body.latitude, longitude: body.longitude } : null;
+    if (pin) assertStorePinInMarket(pin.latitude, pin.longitude);
     const mmgPayUrl = body.mmgPayUrl === undefined
       ? undefined
       : mmgPayUrlForWrite(body.mmgPayUrl);
@@ -1169,32 +1180,44 @@ export async function vendorRoutes(app: FastifyInstance) {
       ? undefined
       : publicPhoneForWrite(body.publicPhone);
 
-    const vendor = await app.prisma.vendor.update({
-      where: { id: vendorId },
-      data: {
-        ...(body.name !== undefined && { name: body.name }),
-        ...(body.description !== undefined && { description: body.description }),
-        ...(body.phone !== undefined && { phone: body.phone }),
-        ...(body.email !== undefined && { email: body.email }),
-        ...(body.addressLine1 !== undefined && { addressLine1: body.addressLine1 }),
-        ...(body.addressLine2 !== undefined && { addressLine2: body.addressLine2 }),
-        ...(body.city !== undefined && { city: body.city }),
-        ...(body.region !== undefined && { region: body.region }),
-        ...(body.latitude !== undefined && { latitude: body.latitude }),
-        ...(body.longitude !== undefined && { longitude: body.longitude }),
-        ...(body.logoUrl !== undefined && { logoUrl: body.logoUrl }),
-        ...(body.coverImageUrl !== undefined && { coverImageUrl: body.coverImageUrl }),
-        ...(body.cuisineTypes !== undefined && { cuisineTypes: body.cuisineTypes }),
-        ...(body.tags !== undefined && { tags: body.tags }),
-        ...(body.deliveryRadius !== undefined && { deliveryRadius: body.deliveryRadius }),
-        ...(body.minOrderAmount !== undefined && { minOrderAmount: body.minOrderAmount }),
-        ...(body.estimatedPrepTime !== undefined && { estimatedPrepTime: body.estimatedPrepTime }),
-        ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
-        ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
-        ...(publicPhone !== undefined && { publicPhone }),
-      },
-      include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
+    // [DS269 F1] A pin move commits with its record: the row is locked, the pin
+    // it replaces is read, and the audit row (and the owner notice, when the
+    // mover is not the owner) lands in this same transaction.
+    const { vendor, pinNoticeId } = await app.prisma.$transaction(async (tx) => {
+      const before = pin ? await lockStorePin(tx, vendorId) : null;
+      const updated = await tx.vendor.update({
+        where: { id: vendorId },
+        data: {
+          ...(body.name !== undefined && { name: body.name }),
+          ...(body.description !== undefined && { description: body.description }),
+          ...(body.phone !== undefined && { phone: body.phone }),
+          ...(body.email !== undefined && { email: body.email }),
+          ...(body.addressLine1 !== undefined && { addressLine1: body.addressLine1 }),
+          ...(body.addressLine2 !== undefined && { addressLine2: body.addressLine2 }),
+          ...(body.city !== undefined && { city: body.city }),
+          ...(body.region !== undefined && { region: body.region }),
+          ...(body.latitude !== undefined && { latitude: body.latitude }),
+          ...(body.longitude !== undefined && { longitude: body.longitude }),
+          ...(body.logoUrl !== undefined && { logoUrl: body.logoUrl }),
+          ...(body.coverImageUrl !== undefined && { coverImageUrl: body.coverImageUrl }),
+          ...(body.cuisineTypes !== undefined && { cuisineTypes: body.cuisineTypes }),
+          ...(body.tags !== undefined && { tags: body.tags }),
+          ...(body.deliveryRadius !== undefined && { deliveryRadius: body.deliveryRadius }),
+          ...(body.minOrderAmount !== undefined && { minOrderAmount: body.minOrderAmount }),
+          ...(body.estimatedPrepTime !== undefined && { estimatedPrepTime: body.estimatedPrepTime }),
+          ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
+          ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
+          ...(publicPhone !== undefined && { publicPhone }),
+        },
+        include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
+      });
+      const noticeId = pin && before
+        ? await recordStorePinMove(tx, { vendorId, before, to: pin, actorUserId: request.user.userId, actorRole: access.role })
+        : null;
+      return { vendor: updated, pinNoticeId: noticeId };
     });
+    // The notice committed with the move; fanning it out afterwards cannot undo either.
+    if (pinNoticeId) await notifications.publishPersisted(pinNoticeId);
 
     if (mmgPayUrl === null) {
       await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'VENDOR', entityId: vendorId, userId: request.user.userId });

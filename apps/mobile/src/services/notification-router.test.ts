@@ -382,6 +382,7 @@ const CENSUS: Case[] = [
   { k: 'mmg_link_change_staged', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'the OLD contact point — the owner, on every device — sees the pending link and can cancel it' },
   { k: 'mmg_link_change_applied', d: { actor: 'DRIVER' }, to: { screen: 'Account' }, why: 'the cool-off passed; the new link is live where it is managed' },
   { k: 'mmg_link_change_cancelled', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'the owner cancelled; other devices were signed out' },
+  { k: 'store_pin_moved', d: { vendorId: 'v1', audience: 'business' }, to: { screen: 'Account' }, why: 'the store OWNER — [Q8 · DS269 F1] a manager moved the map pin riders and customers are sent to; Account holds the Store location card that shows it and moves it back' },
   { k: 'incident_new', d: { caseId: 'c1', caseNumber: 'INC-1' }, to: null, why: 'admins' },
   { k: 'incident_sla_breach', d: { caseId: 'c1' }, to: null, why: 'admins' },
   { k: 'incident_weekly_digest', to: null, why: 'admins' },
