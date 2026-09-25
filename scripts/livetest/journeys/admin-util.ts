@@ -11,11 +11,21 @@ import type { Ctx } from './context.js';
 
 export interface TwoPerson { first: Res; approvalId?: string; decide?: Res; final?: Res; done: boolean }
 
+export interface TwoPersonOpts {
+  /**
+   * A target that refuses the ASK outright (not the held 202 flow) is not a
+   * failed step — it is a case the journey cannot run here. With this flag the
+   * first response is recorded by nobody: the caller refutes it as a SKIP with
+   * the exact reason (`rec.skipCase`) instead of a failed expectation.
+   */
+  leaveFirstToCaller?: boolean;
+}
+
 /**
  * `finalStatuses`: what the re-sent request may answer once approved (default success);
  * a duplicate settlement, for instance, is expected to be refused at that point.
  */
-export async function twoPerson(rec: Recorder, ctx: Ctx, what: string, method: string, path: string, body: unknown, finalStatuses: number[] = [200, 201]): Promise<TwoPerson> {
+export async function twoPerson(rec: Recorder, ctx: Ctx, what: string, method: string, path: string, body: unknown, finalStatuses: number[] = [200, 201], opts: TwoPersonOpts = {}): Promise<TwoPerson> {
   const reason = `journey runner ${ctx.runId}: ${what}`.slice(0, 480);
   const call = (token: string, m: string, p: string, b: unknown, extra: Record<string, string> = {}) =>
     req(m, p, { token, body: b ?? {}, headers: { 'x-swift-reason': reason, ...extra } });
@@ -23,7 +33,9 @@ export async function twoPerson(rec: Recorder, ctx: Ctx, what: string, method: s
   const first = await call(ctx.admin.token, method, path, body);
   const approvalId = first.json?.error?.details?.approvalId as string | undefined;
   if (!(first.status === 202 && first.json?.error?.code === 'APPROVAL_REQUIRED' && approvalId)) {
-    rec.expect(`${what}: held for a second admin (202 APPROVAL_REQUIRED)`, first, 202, ['APPROVAL_REQUIRED']);
+    if (!opts.leaveFirstToCaller) {
+      rec.expect(`${what}: held for a second admin (202 APPROVAL_REQUIRED)`, first, 202, ['APPROVAL_REQUIRED']);
+    }
     return { first, done: false };
   }
   rec.step(`${what}: held for a second admin`, true, `202 APPROVAL_REQUIRED, approval ${approvalId}`);
