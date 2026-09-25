@@ -125,6 +125,9 @@ export interface CheckoutOutboxOrder {
   fulfillment: FulfillmentType;
   appointmentSlot: Date | null;
   placedAt: Date;
+  /** Set when the order is born held (LIFECYCLE_V2) — the store is not told
+   *  until the release, so there is no alert yet to escalate [Q12]. */
+  holdExpiresAt: Date | null;
 }
 
 /**
@@ -147,7 +150,14 @@ export async function persistCheckoutOutboxInTransaction(
       ? appointmentAutoCancelDelayMs(order.placedAt, order.appointmentSlot, input.timing.vendorResponseSlaMinutes)
       : input.timing.autoCancelDelayMs;
     const effects: Array<{ kind: CheckoutOutboxKind; queue: CheckoutOutboxQueue; payload: Prisma.InputJsonValue; delayMs: number }> = [
-      { kind: 'vendor-alert-escalate', queue: 'notification', payload: { orderId: order.id, level: 0 }, delayMs: input.timing.alertDelayMs },
+      // [Q12] A HELD order gets no ladder here: the store hears nothing until
+      // the release, and the release sweep arms the ladder at that moment.
+      // Armed here too, its first rung could only stop (the five-minute hold
+      // outlives it) or, under a shorter hold, run a second ladder beside the
+      // release's one — two "still waiting" SMS for one order.
+      ...(order.holdExpiresAt == null
+        ? [{ kind: 'vendor-alert-escalate' as const, queue: 'notification' as const, payload: { orderId: order.id, level: 0 }, delayMs: input.timing.alertDelayMs }]
+        : []),
       { kind: 'auto-cancel', queue: 'order', payload: { orderId: order.id }, delayMs: autoCancelDelayMs },
     ];
     for (const e of effects) {

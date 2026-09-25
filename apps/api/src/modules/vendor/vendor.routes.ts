@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import type { FulfillmentMode, Prisma } from '@prisma/client';
-import { OrderService, assertMmgFulfilmentAllowed, notHeldFilter, holdWindowMs, isTerminalOrderStatus } from '../order/order.service';
+import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus } from '../order/order.service';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
@@ -583,8 +583,9 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
   if (!order || !order.vendorId || !vendorIds.includes(order.vendorId)) {
     throw new NotFoundError('Order', orderId);
   }
-  // LIFECYCLE_V2: a held order is invisible to the vendor even by direct id.
-  if (order.holdExpiresAt && order.holdExpiresAt > new Date()) {
+  // LIFECYCLE_V2: a held order is invisible to the vendor even by direct id —
+  // and so, once its dead window lapses, is one cancelled inside it [Q12].
+  if ((order.holdExpiresAt && order.holdExpiresAt > new Date()) || cancelledWhileHeld(order)) {
     throw new NotFoundError('Order', orderId);
   }
   return order;
@@ -1139,7 +1140,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const now = new Date();
     const [caps, usage, registration, declaration, registrationDoc] = await Promise.all([
       vendorTierCapsFor(new CountryConfigService(app.prisma), user.countryCode),
-      tierUsage(app.prisma, vendorId, now),
+      tierUsage(app.prisma, vendorId, now, { storeView: true }),
       validRegistrationRecord(app.prisma, userId, now),
       app.prisma.verificationDocument.findFirst({ where: { userId, docType: DECLARATION_DOC_TYPE }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true, expiresAt: true } }),
       app.prisma.verificationDocument.findFirst({ where: { userId, docType: { in: [...REGISTRATION_DOC_TYPES] } }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true } }),
@@ -1465,9 +1466,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     const pagination = parsePagination(query);
     const { status, orderType, from, to, search } = vendorOrdersQuerySchema.parse(request.query);
 
-    // LIFECYCLE_V2: a held order does not exist for the vendor yet. Lives in
-    // AND[] so the search block's own OR can't clobber it.
-    const where: Record<string, unknown> = { vendorId: ordersScope(access, requested), AND: [notHeldFilter()] };
+    // LIFECYCLE_V2: a held order does not exist for the vendor yet, and one
+    // cancelled inside its hold never will [Q12]. Lives in AND[] so the search
+    // block's own OR can't clobber it.
+    const where: Record<string, unknown> = { vendorId: ordersScope(access, requested), AND: [vendorVisibleFilter(app.prisma)] };
     if (status) where['status'] = status;
     if (orderType) where['orderType'] = orderType;
     if (from) where['placedAt'] = { ...(where['placedAt'] as object || {}), gte: from };

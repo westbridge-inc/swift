@@ -129,6 +129,19 @@ export class BookingService {
     }
   }
 
+  /** [Q12] Checkout's fail-fast twin of the partial unique: a slot another
+   *  booking already holds is refused when the customer asks for it — the same
+   *  subtraction the picker makes — instead of a request the provider can
+   *  never confirm waiting up to a day for its auto-decline. Two open requests
+   *  for a FREE slot still both wait for the provider; acceptance decides. */
+  async assertSlotFree(itemId: string, slotStart: Date): Promise<void> {
+    const held = await this.prisma.booking.findFirst({
+      where: { itemId, slotStart, status: { not: 'CANCELLED' } },
+      select: { id: true },
+    });
+    if (held) throw new AppError(409, 'SLOT_TAKEN', 'That slot was just taken — pick another time');
+  }
+
   /** Cancelling frees the slot (the partial unique ignores CANCELLED rows). */
   async cancelBooking(bookingId: string, customerId: string) {
     const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
@@ -191,6 +204,13 @@ export class BookingService {
         });
         if (freed.count !== 1) {
           throw new AppError(409, 'BOOKING_MOVED', 'This booking just changed — reload and try again');
+        }
+        // [Q12] The ORDER carries the time every surface shows: the customer
+        // order screen and home card, the provider board and detail, admin.
+        // Moving only the booking left all of them on the old time while the
+        // provider calendar and the reminder moved: two answers to "when".
+        if (booking.orderId) {
+          await tx.order.update({ where: { id: booking.orderId }, data: { appointmentSlot: newSlotStart } });
         }
         return created;
       });

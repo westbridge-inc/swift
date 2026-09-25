@@ -355,6 +355,38 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   return true;
 }
 
+/**
+ * LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed become
+ * visible to the vendor + dispatchable. No-op while every order is unheld
+ * (flag off ⇒ nothing ever matches). Exported so tests drive the worker's own
+ * job — the release AND the ladder it arms — never a copy of it [Q12].
+ */
+export async function releaseHeldOrdersJob(
+  ctx: JobContext,
+  queues: Pick<SwiftQueues, 'dispatchQueue' | 'notificationQueue'>,
+): Promise<string[]> {
+  const { OrderService } = await import('../modules/order/order.service');
+  const orders = new OrderService(ctx.prisma, ctx.io);
+  const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
+    await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+  });
+  if (released.length > 0) {
+    // A RELEASED order is the vendor's first sight of it — it deserves
+    // the same escalation ladder a fresh checkout gets (re-alert, then
+    // SMS). Previously only checkout enqueued this; a held order the
+    // vendor slept through escalated nowhere.
+    for (const orderId of released) {
+      await queues.notificationQueue.add('vendor-alert-escalate', { orderId, level: 0 }, {
+        delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
+        removeOnComplete: 100,
+        removeOnFail: 50,
+      });
+    }
+    ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
+  }
+  return released;
+}
+
 /** Delivery-window auto-completion. COMPLETED and its immutable status log
  * share the canonical row-lock transaction; retries after a committed attempt
  * are a clean no-op, while an injected pre-commit failure leaves DELIVERED for
@@ -1904,28 +1936,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
 
       if (job.name === 'release-held-orders') {
-        // LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed
-        // become visible to the vendor + dispatchable. No-op while every order
-        // is unheld (flag off ⇒ nothing ever matches).
-        const { OrderService } = await import('../modules/order/order.service');
-        const orders = new OrderService(ctx.prisma, ctx.io);
-        const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
-          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-        });
-        if (released.length > 0) {
-          // A RELEASED order is the vendor's first sight of it — it deserves
-          // the same escalation ladder a fresh checkout gets (re-alert, then
-          // SMS). Previously only checkout enqueued this; a held order the
-          // vendor slept through escalated nowhere.
-          for (const orderId of released) {
-            await queues.notificationQueue.add('vendor-alert-escalate', { orderId, level: 0 }, {
-              delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
-              removeOnComplete: 100,
-              removeOnFail: 50,
-            });
-          }
-          ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
-        }
+        await releaseHeldOrdersJob(ctx, queues);
         return;
       }
 
