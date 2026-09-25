@@ -25,6 +25,8 @@ import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../s
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
+import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
+import type { StorePin } from '../../../lib/storePin';
 import { vendorApi } from '../../../services/api';
 import { useVerificationStatus } from '../../../hooks/verification';
 import {
@@ -205,6 +207,9 @@ export function VendorAccountScreen() {
           />
         ) : null}
 
+        {/* A guest's sample store has no pin to move: the save needs a real account. */}
+        {isManager && !guestSample && store ? <StoreLocationCard store={store} /> : null}
+
         {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} /> : null}
 
         {isManager ? <StoreQrCard /> : null}
@@ -291,6 +296,59 @@ export function VendorAccountScreen() {
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       {stepUp.sheet}
     </Screen>
+  );
+}
+
+/**
+ * [Q8] Where the store is on the map: the pin riders and customers are sent to.
+ * There was no way to change it after sign-up, when it had been the phone's
+ * position. The same picker as List-your-business moves it, saved through
+ * PUT /vendor/profile: manager and up, like the rest of the store's details,
+ * and the server holds a moved pin to the same market rule as a new store.
+ */
+function StoreLocationCard({ store }: { store: any }) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const movePin = useMutation({
+    mutationFn: (pin: StorePin) => vendorApi.updateProfile({ latitude: pin.latitude, longitude: pin.longitude }),
+    onMutate: () => setError(null),
+    onSuccess: () => {
+      setOpen(false);
+      toast.success('Store pin moved', 'Riders and customers will come to the new spot.');
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    // The server's own words: an out-of-market pin says what to do about it.
+    onError: (e: unknown) => setError(serverMessage(e, 'The pin could not be saved. Try again.')),
+  });
+  const current = Number.isFinite(store.latitude) && Number.isFinite(store.longitude)
+    ? { latitude: store.latitude as number, longitude: store.longitude as number }
+    : null;
+  const where = [store.addressLine1, store.city].filter(Boolean).join(', ');
+  return (
+    <>
+      <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
+        <SettingsRow
+          icon="map-pin"
+          label="Store location"
+          sub={where ? `${where} · move the pin` : 'Move the pin riders and customers are sent to'}
+          onPress={() => {
+            setError(null);
+            setOpen(true);
+          }}
+        />
+      </Card>
+      <StoreLocationPicker
+        visible={open}
+        current={current}
+        address={{ line: store.addressLine1 ?? '', city: store.city ?? '' }}
+        device={null}
+        saving={movePin.isPending}
+        error={error}
+        onClose={() => setOpen(false)}
+        onConfirm={(pin) => movePin.mutate(pin)}
+      />
+    </>
   );
 }
 

@@ -59,7 +59,7 @@ export default function SignupPage() {
       const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!r.user?.vendorOwner;
       const isMover = roles.some((x) => ['MOVER', 'RIDER', 'DRIVER'].includes(x));
       const customerReturnPath = role === 'CUSTOMER' ? safeReturnPath() : '';
-      router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/order'));
+      router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/'));
       return;
     }
     setStep('name');
@@ -82,7 +82,7 @@ export default function SignupPage() {
     if (role === 'CUSTOMER') {
       // [E27] No profile selfie merely to browse or order: a new customer goes
       // where they were headed (else to ordering), not to the camera.
-      router.replace(safeReturnPath() || '/order');
+      router.replace(safeReturnPath() || '/');
     }
     else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
   });
@@ -125,7 +125,7 @@ export default function SignupPage() {
               </button>
             ))}
             <p className={styles.inlineText}>Already on Swift? <Link
-              href="/login?next=/order"
+              href="/login?next=/"
               onClick={(event) => {
                 const next = safeReturnPath();
                 if (!next) return;

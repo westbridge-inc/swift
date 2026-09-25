@@ -84,7 +84,8 @@ describe('[E27] a new customer is not sent to the camera', () => {
 
   it('lands on ordering, not /selfie', async () => {
     window.history.replaceState(null, '', '/signup');
-    expect(await registerCustomer()).toBe('/order');
+    // [Q7b] Ordering is the site's home now.
+    expect(await registerCustomer()).toBe('/');
   });
 
   it('keeps a safe return path, still without the selfie detour', async () => {

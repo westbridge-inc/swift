@@ -31,7 +31,8 @@ import {
 import { DialCodeChip } from '../../../kit/dial-code-chip';
 import { DEFAULT_COUNTRY } from '../../../lib/markets';
 import { clampPhone, phoneExample } from '../../../lib/phone';
-import { EMERGENCY_CONTACT_CTA, emergencyContactForm } from '../../../lib/emergencyContactForm';
+import { EMERGENCY_CONTACT_CTA, OWN_NUMBER_ROW, emergencyContactForm, isOwnContact } from '../../../lib/emergencyContactForm';
+import { useAuthStore } from '../../../stores/authStore';
 
 /**
  * The people an SOS actually reaches.
@@ -56,6 +57,8 @@ export function EmergencyContactsScreen() {
   const verify = useVerifyEmergencyContact();
   const resend = useResendEmergencyContactCode();
   const remove = useRemoveEmergencyContact();
+  // [Q9] The signed-in account's own number is never an emergency contact.
+  const myPhone = useAuthStore((s) => s.user?.phone ?? null);
 
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState('');
@@ -86,6 +89,7 @@ export function EmergencyContactsScreen() {
     countryCode: DEFAULT_COUNTRY.code,
     nameTouched,
     phoneTouched,
+    ownPhone: myPhone,
   });
 
   const resetAdd = () => {
@@ -155,6 +159,11 @@ export function EmergencyContactsScreen() {
             }
             renderItem={({ item: c }) => {
               const verified = c.verifiedAt != null;
+              // [Q9] A row holding the account's own number (saved before the
+              // server refused it) is never alerted, confirmed or not — so it
+              // never reads as confirmed and offers no code to enter or resend.
+              const ownNumber = isOwnContact(c, myPhone);
+              const alerted = verified && !ownNumber;
               return (
                 <Card style={{ gap: space.md, padding: space.md }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
@@ -185,20 +194,20 @@ export function EmergencyContactsScreen() {
                       gap: space.sm,
                       padding: space.sm,
                       borderRadius: radius.sm,
-                      backgroundColor: verified ? color.soft.success : color.soft.warning,
+                      backgroundColor: alerted ? color.soft.success : color.soft.warning,
                     }}
                   >
                     <Feather
-                      name={verified ? 'check-circle' : 'alert-triangle'}
+                      name={alerted ? 'check-circle' : 'alert-triangle'}
                       size={14}
-                      color={verified ? color.success : color.warning}
+                      color={alerted ? color.success : color.warning}
                     />
                     <T variant="caption" weight="medium" style={{ flex: 1 }}>
-                      {verified ? 'Confirmed — will be alerted' : 'Not confirmed — will NOT be alerted'}
+                      {ownNumber ? OWN_NUMBER_ROW : verified ? 'Confirmed — will be alerted' : 'Not confirmed — will NOT be alerted'}
                     </T>
                   </View>
 
-                  {verified ? null : (
+                  {verified || ownNumber ? null : (
                     <View style={{ flexDirection: 'row', gap: space.sm }}>
                       <View style={{ flex: 1 }}>
                         <PillButton
@@ -279,8 +288,9 @@ export function EmergencyContactsScreen() {
             onChangeText={setRelationship}
           />
           {/* The server's own words for a refused save (too many contacts, the
-              number's SMS budget, a send failure) — under the form, not under
-              a field they are not about. */}
+              number's SMS budget, a send failure, the account's own number
+              when this phone could not tell) — under the form, not under a
+              field they are not about. */}
           {addError ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
               <DecorativeIcon>

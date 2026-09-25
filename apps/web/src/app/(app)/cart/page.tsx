@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Trash2, MapPin } from 'lucide-react';
@@ -28,6 +28,14 @@ import {
 } from '@/lib/customer';
 import { MONEY_UNKNOWN, parseAmount, sumAmounts } from '@/lib/money';
 import { ApiRequestError } from '@/lib/auth';
+import {
+  cartPaymentOptions,
+  checkoutPaymentMethod,
+  normalizeCartPaymentCapabilities,
+  reconcileCartPaymentSelection,
+  selectCartPaymentMethod,
+  type CartPaymentSelection,
+} from '@/lib/app-rules';
 import styles from './cart.module.css';
 
 const TIPS = [0, 200, 500, 1000];
@@ -39,6 +47,9 @@ export default function CartPage() {
   const [addrId, setAddrId] = useState<string | null>(null);
   const [addressError, setAddressError] = useState<string | null>(null);
   const [tip, setTip] = useState(0); // SWIFT-071: no pre-selected tip — the rider tip is opt-in
+  // [Q7b] Cash, or the business's own MMG when the server says THIS cart can
+  // take it — the phone app's rules, imported. Cash until chosen otherwise.
+  const [paySelection, setPaySelection] = useState<CartPaymentSelection>({ method: 'CASH', scope: '' });
   const [cartSafety, setCartSafety] = useState<'checking' | 'safe' | 'blocked'>('checking');
   const [cartSafetyMessage, setCartSafetyMessage] = useState('Swift is checking this saved cart against the live store menu.');
   const [busy, setBusy] = useState(false);
@@ -173,6 +184,12 @@ export default function CartPage() {
   const knownOutOfRange = Number.isFinite(knownDeliveryDistance)
     && Number.isFinite(knownDeliveryRadius)
     && knownDeliveryDistance > knownDeliveryRadius;
+  const paymentCapabilities = useMemo(
+    () => normalizeCartPaymentCapabilities(cart?.paymentCapabilities),
+    [cart?.paymentCapabilities],
+  );
+  const effectivePaySelection = reconcileCartPaymentSelection(paySelection, paymentCapabilities);
+  const payByMmg = effectivePaySelection.method === 'MMG';
 
   function resetCheckoutReplay() {
     checkoutAttempt.current = null;
@@ -185,6 +202,14 @@ export default function CartPage() {
     checkoutAttempt.current = pending;
     setError('A checkout attempt still has an unresolved server outcome. Check Orders or retry the same order before changing this cart.');
     return true;
+  }
+
+  /** A different way to pay is a different order request: like the tip, it
+   *  starts a fresh checkout attempt, and never under an unresolved one. */
+  function choosePayment(method: CartPaymentSelection['method']) {
+    if (checkoutBusy.current || cartMutationLockedByCheckout()) return;
+    resetCheckoutReplay();
+    setPaySelection(selectCartPaymentMethod(method, paymentCapabilities));
   }
 
   async function mutateCart(work: () => Promise<unknown>) {
@@ -301,8 +326,19 @@ export default function CartPage() {
         setError(`Swift refreshed this saved cart to ${refreshedTotal}. Review the live lines and server quote, then place the order again.`);
         return;
       }
+      // [Q7b] The method is read against the LIVE cart's capability. A choice
+      // of MMG that the refreshed cart can no longer take is never quietly
+      // turned into cash: the customer is told, and places the order again.
+      const liveCapabilities = normalizeCartPaymentCapabilities(liveCart.paymentCapabilities);
+      const paymentMethod = checkoutPaymentMethod(effectivePaySelection, liveCapabilities);
+      if (payByMmg && paymentMethod !== 'MOBILE_MONEY') {
+        setPaySelection(selectCartPaymentMethod('CASH', liveCapabilities));
+        setError('MMG is no longer available for this order, so Swift switched it to cash. Review the payment, then place the order again.');
+        window.requestAnimationFrame(() => errorMessage.current?.focus());
+        return;
+      }
       const body = {
-        paymentMethod: 'CASH' as const,
+        paymentMethod,
         tipAmount: tip,
         ...(liveCart.promoCode?.code ? { promoCode: liveCart.promoCode.code } : {}),
       };
@@ -369,6 +405,11 @@ export default function CartPage() {
         // replay one attempt than to create a new potentially duplicate order.
       }
       if (definiteRejection && cartReconciled) resetCheckoutReplay();
+      // The server refused the MMG destination at checkout: this cart goes
+      // back to cash for its current scope, as in the phone app.
+      if (e instanceof ApiRequestError && e.code?.startsWith('MMG_')) {
+        setPaySelection(selectCartPaymentMethod('CASH', paymentCapabilities));
+      }
       if (message.includes('No delivery riders') || message.includes('NO_RIDERS')) setNoRiders(true);
       else setError(message);
       window.requestAnimationFrame(() => (errorMessage.current ?? checkoutRail.current)?.focus());
@@ -404,12 +445,12 @@ export default function CartPage() {
   if (!cart.items?.length) return (
     <section className={styles.emptyState}>
       <h1 className={styles.stateTitle}>Your cart is empty</h1>
-      <Link href="/order" className={styles.emptyLink}>Browse Swift</Link>
+      <Link href="/" className={styles.emptyLink}>Browse Swift</Link>
     </section>
   );
 
   return (
-    <main className={styles.page}>
+    <div className={styles.page}>
       <section className={styles.itemsColumn} aria-labelledby="cart-title">
         <h1 id="cart-title" className={styles.title}>Your cart</h1>
         {cart.items.map((l) => (
@@ -537,10 +578,31 @@ export default function CartPage() {
 
         <section className={styles.panel} aria-labelledby="payment-title">
           <h2 id="payment-title" className={styles.panelTitle}>Payment</h2>
-          <div className={styles.cashPanel}>
-            <p className={styles.cashTitle}>Cash at the door</p>
-            <p className={styles.cashCopy}>Pay the rider directly when this delivery arrives. Swift never holds your order money.</p>
-          </div>
+          {paymentCapabilities.mmg.available ? (
+            <div role="radiogroup" aria-labelledby="payment-title" className={styles.payOptions}>
+              {cartPaymentOptions(paymentCapabilities, { appointmentOnly: false, pickup: false }).map((option) => (
+                <label key={option.key} className={styles.payOption}>
+                  <input
+                    type="radio"
+                    name="payment-method"
+                    value={option.key}
+                    checked={effectivePaySelection.method === option.key}
+                    disabled={busy || cartSafety !== 'safe'}
+                    onChange={() => choosePayment(option.key)}
+                  />
+                  <span className={styles.payOptionCopy}>
+                    <span className={styles.cashTitle}>{option.title}</span>
+                    <span className={styles.cashCopy}>{option.sub}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          ) : (
+            <div className={styles.cashPanel}>
+              <p className={styles.cashTitle}>Cash at the door</p>
+              <p className={styles.cashCopy}>Pay the rider directly when this delivery arrives. Swift never holds your order money.</p>
+            </div>
+          )}
         </section>
 
         {cartSafety === 'safe' ? <section className={styles.panel} aria-label="Order total">
@@ -563,15 +625,15 @@ export default function CartPage() {
           {noRiders ? (
             <div className={styles.noRiders}>
               <p className={styles.noRidersCopy}>No delivery riders are online right now.</p>
-              <button type="button" onClick={() => void placeOrder()} disabled={busy || moneyUnreadable} className={`${styles.button} ${styles.buttonPrimary}`}>Try cash delivery again</button>
+              <button type="button" onClick={() => void placeOrder()} disabled={busy || moneyUnreadable} className={`${styles.button} ${styles.buttonPrimary}`}>{payByMmg ? 'Try delivery again' : 'Try cash delivery again'}</button>
             </div>
           ) : (
             <button type="button" onClick={() => void placeOrder()} disabled={busy || !addrId || !meetsMinimum || moneyUnreadable} className={`${styles.button} ${styles.buttonPrimary} ${styles.checkoutButton}`}>
-              {busy ? 'Placing…' : !addrId ? 'Add a delivery address to order' : !meetsMinimum ? `Add ${money(minimumShortfall)} to reach the minimum` : hasDestinationQuote ? `Place cash order · ${money(total)}` : 'Get delivery quote'}
+              {busy ? 'Placing…' : !addrId ? 'Add a delivery address to order' : !meetsMinimum ? `Add ${money(minimumShortfall)} to reach the minimum` : hasDestinationQuote ? (payByMmg ? `Place order · ${money(total)} · pay by MMG` : `Place cash order · ${money(total)}`) : 'Get delivery quote'}
             </button>
           )}
         </section> : null}
       </aside>
-    </main>
+    </div>
   );
 }

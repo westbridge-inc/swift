@@ -181,6 +181,11 @@ const fx = vi.hoisted(() => {
     },
     switchRole: vi.fn(),
     toastError: vi.fn(),
+    /** [Q8] PUT /vendor/profile, as the store-location card calls it. */
+    updateProfile: vi.fn(async () => ({ data: { data: {} } })),
+    /** The options and result of the latest useMutation call, so a test can run its real handlers. */
+    lastMutation: null as null | { mutationFn?: (variables: unknown) => unknown; onSuccess?: () => void; onError?: (error: unknown) => void },
+    lastMutationResult: null as null | { mutate: ReturnType<typeof vi.fn> },
   };
 });
 
@@ -203,7 +208,12 @@ vi.mock('zustand', async () => {
 });
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => fx.queryClient,
-  useMutation: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false, isError: false, isSuccess: false }),
+  useMutation: (options: NonNullable<typeof fx.lastMutation>) => {
+    const result = { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false, isError: false, isSuccess: false };
+    fx.lastMutation = options;
+    fx.lastMutationResult = result;
+    return result;
+  },
   useQuery: (options: { queryKey: readonly unknown[]; enabled?: boolean }) => {
     if (options.enabled !== false && options.queryKey[0] === 'vendor' && options.queryKey[1] === 'profile') {
       const { data, error } = fx.profile;
@@ -240,6 +250,8 @@ vi.mock('../../../kit/toast', () => ({ toast: { error: fx.toastError, info: vi.f
 vi.mock('../../../components/SwiftLogo', () => ({ SwiftMark: 'SwiftMark' }));
 vi.mock('../../../components/MmgPayLinkCard', () => ({ MmgPayLinkCard: 'MmgPayLinkCard' }));
 vi.mock('../../../components/PublicCallNumberCard', () => ({ PublicCallNumberCard: 'PublicCallNumberCard' }));
+// [Q8] The store map: react-native-maps and expo-location are native. Its props are the contract.
+vi.mock('../../../components/StoreLocationPicker', () => ({ StoreLocationPicker: 'StoreLocationPicker' }));
 vi.mock('../../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: 'DocumentChecklist' }));
 vi.mock('../../../hooks/useStepUp', () => ({
   useStepUp: () => ({ withStepUp: (fn: unknown) => fn, sheet: null, active: false }),
@@ -252,7 +264,7 @@ vi.mock('../../../services/api', () => ({
   customerApi: { switchRole: fx.switchRole },
   revokeAuthSession: vi.fn(async () => undefined),
   riderApi: {},
-  vendorApi: {},
+  vendorApi: { updateProfile: fx.updateProfile },
   vendorDiscoveryApi: {},
 }));
 vi.mock('../../../services/socket', () => ({ connectSocket: vi.fn(), disconnectSocket: vi.fn(), getSocket: vi.fn(() => null) }));
@@ -529,5 +541,79 @@ describe('a signed-in account keeps the server-authorized switch', () => {
     expect(useAuthStore.getState().intent).toBe('vendor');
     account.render();
     expect(only(account.output, RoleSwitcherSheet).props.visible).toBe(true);
+  });
+});
+
+// [Q8] Owner report: "they can't just use the location they're registering from
+// for the store, come on now." The store's pin was the phone's position at
+// sign-up, and nothing in the app could change it afterwards. The Account tab
+// now moves it with the same map as sign-up, saved through PUT /vendor/profile.
+describe('[Q8] the Account tab moves the store pin', () => {
+  const pinnedStore = { ...liveStore, addressLine1: '12 Regent Street', city: 'Georgetown', latitude: 6.8046, longitude: -58.1553 };
+  const moved = { latitude: 6.8102, longitude: -58.1623, address: '14 Regent St, Georgetown' };
+
+  /** The Account tab's store-location card, rendered, with its map opened from the row. */
+  async function openStoreMap() {
+    await signIn('owner-a', ['CUSTOMER', 'VENDOR_OWNER']);
+    fx.profile = { data: ownerOf(pinnedStore), error: null };
+    const account = fx.mount(VendorAccountScreen, {});
+    const cards = named(account.output, 'StoreLocationCard');
+    expect(cards, 'the Account tab carries the store-location card').toHaveLength(1);
+    const card = fx.mount(cards[0]!.type as (props: unknown) => unknown, cards[0]!.props);
+    const row = rows(card).find((r) => r.props.label === 'Store location');
+    expect(row?.props.sub).toBe('12 Regent Street, Georgetown · move the pin');
+    expect(only(card.output, 'StoreLocationPicker').props.visible).toBe(false);
+    row!.props.onPress();
+    card.render();
+    return card;
+  }
+
+  it('opens the map on the store’s own pin, never on the phone', async () => {
+    const card = await openStoreMap();
+
+    expect(only(card.output, 'StoreLocationPicker').props).toMatchObject({
+      visible: true,
+      current: { latitude: 6.8046, longitude: -58.1553 },
+      address: { line: '12 Regent Street', city: 'Georgetown' },
+      device: null,
+      error: null,
+    });
+  });
+
+  it('a confirmed pin is saved through PUT /vendor/profile as exactly its latitude and longitude', async () => {
+    const card = await openStoreMap();
+
+    only(card.output, 'StoreLocationPicker').props.onConfirm(moved);
+    expect(fx.lastMutationResult?.mutate).toHaveBeenCalledExactlyOnceWith(moved);
+    await fx.lastMutation?.mutationFn?.(moved);
+
+    expect(fx.updateProfile).toHaveBeenCalledExactlyOnceWith({ latitude: 6.8102, longitude: -58.1623 });
+  });
+
+  it('a saved pin closes the map and re-reads the store', async () => {
+    const card = await openStoreMap();
+
+    fx.lastMutation?.onSuccess?.();
+    card.render();
+
+    expect(only(card.output, 'StoreLocationPicker').props.visible).toBe(false);
+    expect(fx.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['vendor', 'profile'] });
+  });
+
+  it('a pin the server refuses keeps the map open with the server’s own words', async () => {
+    const card = await openStoreMap();
+    const refusal = 'That pin is outside Guyana, where Swift works today. Move it to the entrance of your store.';
+
+    fx.lastMutation?.onError?.({ response: { data: { error: { code: 'STORE_PIN_OUT_OF_MARKET', message: refusal } } } });
+    card.render();
+
+    expect(only(card.output, 'StoreLocationPicker').props).toMatchObject({ visible: true, error: refusal });
+  });
+
+  it('control: a guest in the sample dashboard has no pin to move', () => {
+    openSampleDashboardAsGuest();
+    const account = fx.mount(VendorAccountScreen, {});
+
+    expect(named(account.output, 'StoreLocationCard')).toHaveLength(0);
   });
 });

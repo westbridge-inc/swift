@@ -32,6 +32,43 @@ textarea {
   outline-offset: var(--swift-space-xs);
 }
 
+/* ── The customer app shell [Q7b] ──────────────────────────────────────────
+   What makes the ordering site behave like the phone app rather than a web
+   page: no grey flash where a finger lands (press feedback is drawn by the
+   controls themselves), a short fade as each page arrives, and — installed on
+   a home screen, where there is no browser to reload — a page that does not
+   rubber-band away from its own header. Everything that moves stops moving
+   for people who asked for less motion. */
+
+.swift-app {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.swift-route-in {
+  animation: swift-route-in 160ms ease-out;
+}
+
+@keyframes swift-route-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .swift-route-in {
+    animation: none;
+  }
+}
+
+@media (display-mode: standalone) {
+  html:has(.swift-app) {
+    overscroll-behavior-y: none;
+  }
+}
+
 /* ── Legal documents ───────────────────────────────────────────────────────
    The DGP-1 text arrives as plain semantic HTML (h2 / p / ul / li / b / a)
    with no classes of its own, so the typography is set here once. Measure is
