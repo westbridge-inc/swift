@@ -7,6 +7,8 @@ import {
   DEVELOPMENT_BROWSER_API_ORIGIN,
   RELEASE_BROWSER_API_ORIGIN,
   resolveBrowserApiOrigin,
+  resolveReleaseChannel,
+  STAGING_BROWSER_API_ORIGIN,
 } from './browser-api-origin';
 
 // ---------------------------------------------------------------------------
@@ -111,5 +113,72 @@ describe('buildBrowserContentSecurityPolicy', () => {
     const connect = buildBrowserContentSecurityPolicy('development').split('; ').find((d) => d.startsWith('connect-src '))!;
     expect(connect).toContain(DEVELOPMENT_BROWSER_API_ORIGIN);
     expect(connect).not.toContain(RELEASE_BROWSER_API_ORIGIN);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [Q11] The staging release channel. The self-hosted staging site
+// (apps/web/Dockerfile, served by deploy/docker-compose.yml) is a production
+// build of this code that calls the staging API. Building it takes BOTH keys,
+// the channel and the staging origin, so neither a mis-set origin nor a
+// mis-set channel alone can point the public site at staging, or the staging
+// site at production.
+// ---------------------------------------------------------------------------
+
+const connectOf = (csp: string) => csp.split('; ').find((d) => d.startsWith('connect-src '))!;
+
+describe('[Q11] the staging release channel', () => {
+  it('reads unset, empty and production as the public site, staging as staging, and refuses anything else', () => {
+    expect(resolveReleaseChannel(undefined)).toBe('production');
+    expect(resolveReleaseChannel('')).toBe('production');
+    expect(resolveReleaseChannel('production')).toBe('production');
+    expect(resolveReleaseChannel('staging')).toBe('staging');
+    for (const wrong of ['prod', 'Staging', 'stage', ' staging', 'staging ', 'development', 'preview']) {
+      expect(() => resolveReleaseChannel(wrong), wrong).toThrow(/SWIFT_WEB_CHANNEL/);
+    }
+  });
+
+  it('the staging origin is derived from the one domain file, like the release origin', () => {
+    expect(STAGING_BROWSER_API_ORIGIN).toBe(`https://api-staging.${SITE_DOMAIN}`);
+    expect(source('src/lib/browser-api-origin.ts')).not.toMatch(/https:\/\/api-staging\.[a-z]+\.[a-z]+/);
+  });
+
+  it('a staging build accepts exactly the staging origin, and refuses the release origin with the rest', () => {
+    expect(resolveBrowserApiOrigin('production', STAGING_BROWSER_API_ORIGIN, 'staging')).toBe(STAGING_BROWSER_API_ORIGIN);
+    for (const wrong of [
+      RELEASE_BROWSER_API_ORIGIN,
+      DEVELOPMENT_BROWSER_API_ORIGIN,
+      `${STAGING_BROWSER_API_ORIGIN}/`,
+      `${STAGING_BROWSER_API_ORIGIN}/v1`,
+      `${STAGING_BROWSER_API_ORIGIN}:443`,
+      STAGING_BROWSER_API_ORIGIN.replace('https://', 'http://'),
+      'https://api-staging.example.com',
+      '',
+    ]) {
+      expect(() => resolveBrowserApiOrigin('production', wrong, 'staging'), wrong).toThrow();
+    }
+    expect(() => resolveBrowserApiOrigin('production', undefined, 'staging')).toThrow(/required for a production web build/);
+  });
+
+  it('the public site can never be built against staging: the origin alone is refused', () => {
+    expect(() => resolveBrowserApiOrigin('production', STAGING_BROWSER_API_ORIGIN)).toThrow(/must be exactly/);
+    expect(() => resolveBrowserApiOrigin('production', STAGING_BROWSER_API_ORIGIN, 'production')).toThrow(/must be exactly/);
+  });
+
+  it('development ignores the channel: localhost only', () => {
+    expect(resolveBrowserApiOrigin('development', undefined, 'staging')).toBe(DEVELOPMENT_BROWSER_API_ORIGIN);
+    expect(() => resolveBrowserApiOrigin('development', STAGING_BROWSER_API_ORIGIN, 'staging')).toThrow(/must be exactly/);
+  });
+
+  it('a staging CSP connects to the staging API (https and wss) and nothing else; the rest is the production policy', () => {
+    const staging = buildBrowserContentSecurityPolicy('production', 'staging');
+    const production = buildBrowserContentSecurityPolicy('production');
+    expect(connectOf(staging)).toBe(
+      `connect-src 'self' ${STAGING_BROWSER_API_ORIGIN} ${STAGING_BROWSER_API_ORIGIN.replace('https://', 'wss://')}`,
+    );
+    expect(connectOf(staging)).not.toContain(RELEASE_BROWSER_API_ORIGIN);
+    expect(connectOf(production)).not.toContain(STAGING_BROWSER_API_ORIGIN);
+    const withoutConnect = (csp: string) => csp.split('; ').filter((d) => !d.startsWith('connect-src '));
+    expect(withoutConnect(staging)).toEqual(withoutConnect(production));
   });
 });

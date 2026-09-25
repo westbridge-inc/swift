@@ -7,7 +7,8 @@
 # intentionally gated by .github/workflows/deploy-api.yml.
 #
 # Services: postgres (PostGIS), redis, meilisearch, the API, and a dedicated
-# BullMQ worker (so N API replicas never process a job N times).
+# BullMQ worker (so N API replicas never process a job N times); optionally
+# the website (profile "web", turned on by WEB_HOST).
 #
 # SECRETS are never container environment VALUES: Docker persists those in the
 # container config on disk and `docker inspect` prints them. Every secret is a
@@ -225,6 +226,9 @@ services:
     restart: unless-stopped
     environment:
       API_HOST: ${API_HOST:-localhost}
+      # [Q11] The website's DNS name. Empty (the default) serves no website:
+      # the Caddyfile adds it to the API's site only when it is set.
+      WEB_HOST: ${WEB_HOST:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - swift-caddy-data:/data
@@ -235,6 +239,39 @@ services:
     depends_on:
       api:
         condition: service_started
+    networks: [private]
+
+  # [Q11] The website (apps/web), OPTIONAL. The `web` profile keeps it out of
+  # every plain `up`, and pilot-up.sh turns the profile on only when deploy/.env
+  # sets WEB_HOST, so a stack without WEB_HOST is exactly the API stack. The
+  # site is stateless and only a CLIENT of the public API (the browser calls
+  # https://API_HOST): it reads no secret and not deploy/.env, mounts nothing,
+  # needs no migration and waits on no service. Caddy reaches it on the
+  # private network; it publishes no port.
+  web:
+    profiles: ["web"]
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      # NEXT_PUBLIC_* is inlined into the browser bundle at BUILD time, so the
+      # API the site calls is fixed per image: this stack's own public API, on
+      # the staging channel (apps/web/src/lib/browser-api-origin.ts refuses any
+      # other pairing, so the build fails unless API_HOST is the staging API).
+      args:
+        NEXT_PUBLIC_API_URL: https://${API_HOST:-localhost}
+        SWIFT_WEB_CHANNEL: staging
+        # Empty keeps apps/web/src/site.config.ts refusing to build while a
+        # company detail is still a {{TOKEN}}; WEB_ALLOW_SITE_TOKENS=1 in
+        # deploy/.env lets the staging site build with them (PILOT-RUNBOOK.md).
+        NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}
+    image: swift-web:${SWIFT_TAG:-local}
+    restart: unless-stopped
+    environment:
+      # V8 collects well below the container's ceiling, so a leak restarts the
+      # site instead of pressing on the database's memory.
+      NODE_OPTIONS: --max-old-space-size=384
+    mem_limit: 640m
+    # No host port: Caddy is the only public entrance.
     networks: [private]
 
 volumes:
