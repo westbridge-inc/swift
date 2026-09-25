@@ -19,7 +19,7 @@ import { scheduleVendorSearchSync } from '../search/search-sync';
 import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { CashRulesService } from '../cash/cash-rules.service';
-import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
+import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
@@ -2557,6 +2557,19 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = settleOrderRefundSchema.parse(request.body);
     const existing = await tenantPrisma.order.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('Order', id);
+    // [E02 · DS272 F2] This route settles a CASH handover. A paid MMG order's
+    // refund is the store's own MMG transfer, which only the MMG refund rail
+    // records (obligation, "Refund sent", the customer's answer). The database
+    // refuses the REFUNDED write anyway (no CANCELLATION refund obligation),
+    // but only at COMMIT, as a 500: refuse it here, before the transaction.
+    if (existing.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(existing.paymentStatus)) {
+      orderRefundCounter.labels('refused_mmg').inc();
+      throw new AppError(
+        409,
+        'MMG_REFUND_RAIL_REQUIRED',
+        'MMG refunds are settled through the refund rail: the store sends the refund from its own MMG and the customer confirms it. This route settles cash handovers only.',
+      );
+    }
     if (existing.refundOwedAt === null || existing.refundSettledAt !== null) {
       orderRefundCounter.labels('refused_not_due').inc();
       throw new AppError(
@@ -2587,7 +2600,12 @@ export async function adminRoutes(app: FastifyInstance) {
     // `E.order` fields, so the legacy row that hand-typed them is retired.
     const updated = await tenantPrisma.$transaction(async (tx) => {
       const settled = await tx.order.updateMany({
-        where: { id, refundOwedAt: { not: null }, refundSettledAt: null },
+        // [E02 · DS274 A3] The paid-MMG refusal above is re-stated in the CAS,
+        // so the database, not only the pre-check, holds it under a race.
+        where: {
+          id, refundOwedAt: { not: null }, refundSettledAt: null,
+          NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
+        },
         data: {
           status: 'REFUNDED',
           refundRef: reference,

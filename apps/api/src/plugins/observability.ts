@@ -993,7 +993,7 @@ export const mmgAttestationCounter = new client.Counter({
  *  outstanding cash-refund liability, by tender, which the register asks for. */
 export const orderRefundCounter = new client.Counter({
   name: 'swift_order_refund_total',
-  help: 'Cash-order refund lifecycle (owed, settled, refused_not_due, refused_duplicate)',
+  help: 'Cash-order refund lifecycle (owed, settled, refused_not_due, refused_duplicate, refused_mmg)',
   labelNames: ['event'] as const,
   registers: [registry],
 });

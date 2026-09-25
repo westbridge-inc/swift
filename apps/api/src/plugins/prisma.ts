@@ -130,6 +130,10 @@ const TENANT_QUERY_EXTENSIONS = {
   // [R048-007] A money-surface command carries the authority to change an
   // operator's money. It is tenant-owned like the surface it acts on.
   moneySurfaceCommand: scoped,
+  // [E02] What a store owes a customer back by MMG, and the transfers it says
+  // it sent: one operator's customers and money, walled like their order.
+  mmgRefundObligation: scoped,
+  mmgRefundSend: scoped,
   ratingOutbox: scoped,
   privilegedApproval: scoped,
   sensitiveReadLog: scoped,

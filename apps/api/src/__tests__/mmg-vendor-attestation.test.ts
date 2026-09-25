@@ -239,6 +239,23 @@ describe('[W-25] the attestation carries evidence', () => {
     expect(changes['basis']).toBe('VENDOR_ATTESTED');
   });
 
+  it('[E02] stores the attested amount on the order: the cap every MMG refund obligation is held to', async () => {
+    const order = await makeOrder('PENDING');
+    const reference = `CAP${nanoid(10).toUpperCase().replace(/[^A-Z0-9]/g, 'X')}`;
+    expect((await attest(order.id, reference)).statusCode).toBe(200);
+
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.mmgAttestedAmount?.toFixed(2)).toBe('2300.00');
+    // The same figure the audit row names — one attestation, one amount.
+    const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entityId: order.id, action: 'ATTEST_MMG_PAYMENT' } });
+    expect((audit.changes as Record<string, unknown>)['amount']).toBe(after.totalAmount.toString());
+
+    // A refused attestation writes no amount.
+    const refused = await makeOrder('FAILED');
+    expect((await attest(refused.id, `NOP${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'X')}`)).statusCode).toBe(409);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: refused.id } })).mmgAttestedAmount).toBeNull();
+  });
+
   it('one payment settles ONE order: the same reference cannot mark a second order paid', async () => {
     const reference = `DUP${nanoid(10).toUpperCase().replace(/[^A-Z0-9]/g, 'X')}`;
     const first = await makeOrder('PENDING');
