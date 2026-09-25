@@ -122,8 +122,9 @@ beforeAll(async () => {
     await app.prisma.tenant.deleteMany({ where: { slug: { startsWith: 'svis-tenant-' } } });
   }
 
-  const alive = `svis-tenant-${nanoid(8).toLowerCase()}`;
-  const dead = `svis-tenant-${nanoid(8).toLowerCase()}`;
+  // No '_' in these ids: a tenant id ending in '_' cannot become a search document id (search-scope.ts isIdPart).
+  const alive = `svis-tenant-${nanoid(8).toLowerCase().replace(/_/g, 'x')}`;
+  const dead = `svis-tenant-${nanoid(8).toLowerCase().replace(/_/g, 'x')}`;
   await app.prisma.tenant.create({ data: { id: alive, name: 'Svis Alive', slug: alive } });
   await app.prisma.tenant.create({ data: { id: dead, name: 'Svis Dead', slug: dead, isActive: false } });
   createdTenantIds.push(alive, dead);
