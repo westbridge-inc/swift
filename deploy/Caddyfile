@@ -1,8 +1,24 @@
 # API_HOST is a single staging DNS name set in deploy/.env. A hostname site
 # address enables Caddy's automatic certificate issuance and renewal.
-{$API_HOST} {
+#
+# [Q11] WEB_HOST (optional, deploy/.env) is the website's DNS name, and it
+# shares this site on purpose. Caddy substitutes {$NAME} before it parses, and
+# an unset or empty WEB_HOST expands to nothing: here that leaves API_HOST as
+# the only address. A separate `{$WEB_HOST} { ... }` block would lose its only
+# address instead, be read as a misplaced global-options block, and fail the
+# WHOLE file, the API site included. Requests are split on the API host, which
+# is always set; every other host on this site is the website, and with
+# WEB_HOST unset there is no other host. The website sends its own security
+# headers (apps/web/next.config.ts); none are added or overridden here.
+{$API_HOST} {$WEB_HOST} {
     encode zstd gzip
-    @metrics path /metrics
-    respond @metrics 403
-    reverse_proxy api:3000
+    @api host {$API_HOST}
+    handle @api {
+        @metrics path /metrics
+        respond @metrics 403
+        reverse_proxy api:3000
+    }
+    handle {
+        reverse_proxy web:3000
+    }
 }

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Single-host STAGING cutover. Invoke with an approved full origin/main SHA.
-# This script intentionally stops the old API/worker before migration.
+# This script intentionally stops the old API/worker before migration. When
+# deploy/.env sets WEB_HOST it also builds and serves the website (apps/web)
+# for the same SHA; without WEB_HOST it does nothing more.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -22,6 +24,17 @@ API_HOST="$(env_value API_HOST)"
 [[ "$API_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
   die "API_HOST must be a DNS hostname for staging HTTPS"
 [ "$API_HOST" != localhost ] || die "API_HOST cannot be localhost"
+# [Q11] The website is optional: a DNS name in WEB_HOST turns it on, and every
+# Compose call below then includes its profile (so the port and isolation
+# checks cover it too). Without WEB_HOST nothing below changes.
+WEB_HOST="$(env_value WEB_HOST)"
+if [ -n "$WEB_HOST" ]; then
+  [[ "$WEB_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
+    die "WEB_HOST must be a DNS hostname for staging HTTPS, or empty for no website"
+  [ "$(printf '%s' "$WEB_HOST" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$API_HOST" | tr '[:upper:]' '[:lower:]')" ] ||
+    die "WEB_HOST must differ from API_HOST"
+  COMPOSE+=(--profile web)
+fi
 [ "$(env_value MAPS_PROVIDER)" = osrm ] || die "pilot requires MAPS_PROVIDER=osrm"
 [ "$(env_value OSRM_URL)" = http://osrm:5000 ] || die "OSRM_URL must use the private routing service"
 # Secrets are not in this file (the encrypted store holds them; checked below
@@ -125,6 +138,11 @@ verify_private_ports
 "${COMPOSE[@]}" pull postgres redis meilisearch caddy
 "${ROUTING[@]}" pull osrm
 "${COMPOSE[@]}" build api
+# [Q11] The website's image for the same exact commit, built before anything
+# is stopped: a site that does not build leaves the running stack untouched.
+if [ -n "$WEB_HOST" ]; then
+  "${COMPOSE[@]}" build web
+fi
 "${COMPOSE[@]}" up -d --wait postgres redis meilisearch
 "${ROUTING[@]}" up -d --wait osrm
 
@@ -141,6 +159,7 @@ wait_for_migration "$MIGRATE_ID" || die "migration did not complete successfully
 
 "${COMPOSE[@]}" up -d --no-deps --force-recreate api worker
 "${COMPOSE[@]}" up -d --no-deps --force-recreate caddy
+API_READY=0
 for _ in $(seq 1 90); do
   API_ID="$("${COMPOSE[@]}" ps -q api)"
   WORKER_ID="$("${COMPOSE[@]}" ps -q worker)"
@@ -148,9 +167,32 @@ for _ in $(seq 1 90); do
      [ "$(docker inspect -f '{{.State.Health.Status}}' "$API_ID")" = healthy ] &&
      [ "$(docker inspect -f '{{.State.Status}}' "$WORKER_ID")" = running ] &&
      curl -fsS --resolve "$API_HOST:443:127.0.0.1" --connect-timeout 5 --max-time 8 "https://$API_HOST/ready" >/dev/null 2>&1; then
-    echo "STAGING READY at exact SHA $SHA"
-    exit 0
+    API_READY=1
+    break
   fi
   sleep 2
 done
-die "API/worker/HTTPS readiness did not become healthy; inspect Compose logs"
+[ "$API_READY" = 1 ] || die "API/worker/HTTPS readiness did not become healthy; inspect Compose logs"
+
+# [Q11] The website starts once the API it calls is ready. It is stateless and
+# only a client of that API, so it needs no migration and is simply replaced.
+# Ready means its own probe is healthy AND Caddy serves its home page over
+# HTTPS on this host (the certificate for WEB_HOST included).
+if [ -n "$WEB_HOST" ]; then
+  "${COMPOSE[@]}" up -d --no-deps --force-recreate web
+  WEB_READY=0
+  for _ in $(seq 1 90); do
+    WEB_ID="$("${COMPOSE[@]}" ps -q web)"
+    if [ -n "$WEB_ID" ] &&
+       [ "$(docker inspect -f '{{.State.Health.Status}}' "$WEB_ID")" = healthy ] &&
+       curl -fsS --resolve "$WEB_HOST:443:127.0.0.1" --connect-timeout 5 --max-time 8 "https://$WEB_HOST/" >/dev/null 2>&1; then
+      WEB_READY=1
+      break
+    fi
+    sleep 2
+  done
+  [ "$WEB_READY" = 1 ] ||
+    die "the website did not become ready at https://$WEB_HOST (the API is serving $SHA); inspect: docker compose -f deploy/docker-compose.yml --profile web logs --tail=100 web caddy"
+  echo "WEBSITE READY at https://$WEB_HOST (exact SHA $SHA)"
+fi
+echo "STAGING READY at exact SHA $SHA"

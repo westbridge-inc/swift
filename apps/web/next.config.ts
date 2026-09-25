@@ -5,6 +5,7 @@ import {
   type BrowserApiMode,
   buildBrowserContentSecurityPolicy,
   resolveConfiguredBrowserApiOrigin,
+  resolveConfiguredReleaseChannel,
 } from './src/lib/browser-api-origin';
 
 // The public face of Swift — marketing + (coming) customer web + operator
@@ -20,11 +21,29 @@ export default function createNextConfig(phase: string): NextConfig {
   // development. `next build`, `next start` and `next export` do not.
   const linting = process.argv.includes('lint');
   const browserApiMode: BrowserApiMode = phase === PHASE_DEVELOPMENT_SERVER || linting ? 'development' : 'production';
-  const browserApiOrigin = resolveConfiguredBrowserApiOrigin(browserApiMode);
-  const csp = buildBrowserContentSecurityPolicy(browserApiMode);
+  // [Q11] Which API a release build is for: the public API unless the build
+  // declares the staging channel (the self-hosted staging image does).
+  const releaseChannel = resolveConfiguredReleaseChannel();
+  const browserApiOrigin = resolveConfiguredBrowserApiOrigin(browserApiMode, releaseChannel);
+  const csp = buildBrowserContentSecurityPolicy(browserApiMode, releaseChannel);
+
+  // [Q11] apps/web/Dockerfile sets SWIFT_WEB_IMAGE_BUILD=1, and nothing else
+  // does: Vercel and CI get exactly the config they had. The image runs Next's
+  // standalone server. Its build context carries this app and the shared
+  // packages but not the other apps' dependencies, which the site's type graph
+  // reaches (lib/design-tokens -> the mobile kit's pictograms -> react-native-svg;
+  // scripts/sync-legal -> the API's Fastify routes), so the type check and lint
+  // stay where they already run on the full workspace: CI's lint, type-check
+  // and Web Build jobs, which every main commit passed, and deploy/pilot-up.sh
+  // builds only main commits.
+  const imageBuild = process.env['SWIFT_WEB_IMAGE_BUILD'] === '1';
+  const imageBuildConfig: Pick<NextConfig, 'output' | 'typescript' | 'eslint'> = imageBuild
+    ? { output: 'standalone', typescript: { ignoreBuildErrors: true }, eslint: { ignoreDuringBuilds: true } }
+    : {};
 
   return {
     poweredByHeader: false,
+    ...imageBuildConfig,
     // @swift/types ships TypeScript source; Next must transpile it (the admin
     // console declares the same). The site reads the market zone from it.
     transpilePackages: ['@swift/types'],
@@ -143,6 +162,11 @@ export default function createNextConfig(phase: string): NextConfig {
               key: 'Permissions-Policy',
               value: 'geolocation=(self), microphone=(), camera=(self)',
             },
+            // [Q11] The staging site is a full copy of the public one on another
+            // host, backed by test data: no search engine may index it in the
+            // public site's place. A staging-channel build only; the public
+            // build never sends this.
+            ...(releaseChannel === 'staging' ? [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] : []),
           ],
         },
       ];

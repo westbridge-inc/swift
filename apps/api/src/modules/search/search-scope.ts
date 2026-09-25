@@ -29,11 +29,15 @@ export const VENDOR_INDEX = `vendors_${SEARCH_INDEX_VERSION}`;
 export const ITEM_INDEX = `items_${SEARCH_INDEX_VERSION}`;
 
 /** Meilisearch primary keys allow [A-Za-z0-9_-]; tenant ids and cuids do too.
- *  A part may hold a single underscore but never the double one, so the id
- *  parses back unambiguously. */
+ *  A part may hold a single underscore INSIDE it but never the double one, and
+ *  never at either end: tenant "t_" + entity "x" and tenant "t" + entity "_x"
+ *  would both be written "t___x" and read back as the second, so a sync would
+ *  take its own stale document for another tenant's and keep it. With both
+ *  rules the id parses back unambiguously. */
 const DOC_ID_SEP = '__';
 const ID_PART = /^[A-Za-z0-9_-]+$/;
-const isIdPart = (v: string): boolean => ID_PART.test(v) && !v.includes(DOC_ID_SEP);
+const isIdPart = (v: string): boolean =>
+  ID_PART.test(v) && !v.includes(DOC_ID_SEP) && !v.startsWith('_') && !v.endsWith('_');
 export function docId(tenantId: string, entityId: string): string {
   if (!isIdPart(tenantId) || !isIdPart(entityId)) {
     throw new Error(`[R048-003] cannot build a document id from tenant "${tenantId}" and entity "${entityId}"`);
