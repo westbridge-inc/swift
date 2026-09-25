@@ -16,7 +16,7 @@
     "review:status": "tsx scripts/review-provision.ts status",
     "review:rotate": "tsx scripts/review-provision.ts rotate",
     "review:expire": "tsx scripts/review-provision.ts expire",
-    "type-check": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+    "type-check": "node --max-old-space-size=6144 node_modules/typescript/bin/tsc --noEmit && node --max-old-space-size=6144 node_modules/typescript/bin/tsc -p tsconfig.scripts.json",
     "lint": "eslint 'src/**/*.{ts,tsx}' 'scripts/**/*.ts'",
     "clean": "rm -rf dist",
     "test": "vitest run",
