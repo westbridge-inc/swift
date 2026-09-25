@@ -1447,10 +1447,12 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/ack — explicit acknowledgement without accept/reject. */
   app.put<{ Params: IdParam }>('/orders/:id/ack', auth, async (request) => {
-    // Alert-delivery ack (§A4): the store ACTED on this order's alert.
+    await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    // Alert-delivery ack (§A4): the store ACTED on this order's alert. [Q10]
+    // Only AFTER the ownership check: it used to run first, so any signed-in
+    // account naming an order id stamped that store receipt, then got a 404.
     const { acknowledgeAlert } = await import('../notification/notification.service');
     await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', request.params.id).catch(() => {});
-    await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await ackVendorAlert(app, request.user.userId, request.params.id);
     return { success: true, data: { acknowledged: true } };
   });
@@ -1530,10 +1532,11 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/accept — Accept an incoming order */
   app.put<{ Params: IdParam }>('/orders/:id/accept', auth, async (request) => {
-    // Alert-delivery ack (§A4): the store ACTED on this order's alert.
-    const { acknowledgeAlert } = await import('../notification/notification.service');
-    await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', request.params.id).catch(() => {});
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
+    // every recipient. [Q10] After the ownership check, never before it.
+    const { acknowledgeAlert } = await import('../notification/notification.service');
+    await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', order.id).catch(() => {});
     await assertVendorCanOperate(order.vendorId!);
     if (order.status !== 'PENDING') {
       throw new AppError(400, 'INVALID_STATUS', `Cannot accept order in ${order.status} status`);
@@ -1669,11 +1672,15 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (stillOwns) {
         const rider = await app.prisma.rider.findUnique({ where: { id: row.riderId }, select: { userId: true } });
         if (rider) {
+          // [Q10] The RIDER copy: tagged earner, so the shopping inbox of a
+          // rider who also orders never lists it, and the tap-router opens
+          // the rider live job (ActiveJob) rather than the customer screen.
           await notifications.send({
             userId: rider.userId,
             type: 'ORDER_UPDATE',
             title: 'Order ready for pickup',
             body: `Order ${row.orderNumber} is packed and waiting at the counter.`,
+            audience: 'earner',
             data: { orderId: order.id, kind: 'prep_ready' },
           });
         }
@@ -2218,10 +2225,11 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/reject — Vendor cancels / rejects an order */
   app.put<{ Params: IdParam }>('/orders/:id/reject', auth, async (request) => {
-    // Alert-delivery ack (§A4): the store ACTED on this order's alert.
-    const { acknowledgeAlert } = await import('../notification/notification.service');
-    await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', request.params.id).catch(() => {});
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
+    // every recipient. [Q10] After the ownership check, never before it.
+    const { acknowledgeAlert } = await import('../notification/notification.service');
+    await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', order.id).catch(() => {});
     const rejectableStatuses = ['PENDING', 'ACCEPTED', 'PREPARING'];
     if (!rejectableStatuses.includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot reject order in ${order.status} status`);

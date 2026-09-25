@@ -8,6 +8,7 @@
 import { isProduction } from '../../utils/runtime-mode';
 import { firstInvalidTwilioConfig, isTwilioMessageSid } from '../../utils/twilio-identity';
 import { SmtpEmailProvider } from './smtp-email';
+import { pushOptionsFor, type AlertClass } from './alert-class';
 
 export interface SmsProvider {
   sendSms(to: string, body: string): Promise<{ ref: string }>;
@@ -24,14 +25,56 @@ const pushProviderTimeoutMs = () => {
   return Number.isFinite(configured) && configured > 0 ? configured : 8_000;
 };
 
+/** How urgently ONE push travels [Q10 loud alerts 1/4]. Chosen per alert
+ *  class (alert-class.ts, pushOptionsFor) and passed through every layer to
+ *  the adapter, which maps it onto its own wire fields. */
+export interface PushOptions {
+  /** The class these options came from: recorded, never sent. */
+  alertClass: AlertClass;
+  /** high = delivered at once, even to a dozing Android; normal = the
+   *  platform may hold it for its next batch. */
+  priority: 'high' | 'normal';
+  /** 'default' plays the device notification sound; absent = silent. */
+  sound?: 'default';
+  /** Ceiling, in seconds, on how long an undelivered push may be held. */
+  ttlSeconds?: number;
+  /** Epoch ms after which the push means nothing (an offer expired, a
+   *  response window closed). It is never sent at or after this moment, its
+   *  ttl never reaches past it, and it is never retried past it. */
+  deadlineMs?: number;
+}
+
+/** The options a push gets when a caller passes none: the standard class. */
+const STANDARD_PUSH: PushOptions = pushOptionsFor(undefined);
+
+/** A push needs at least one whole second of life left to be worth sending. */
+const MIN_PUSH_LIFE_SECONDS = 1;
+
+/**
+ * The window a push may still be delivered in, measured at `now`: the ttl to
+ * ask for (absent = the provider default), or null once its deadline leaves
+ * no whole second. Rounded DOWN, so a provider holding the push for the full
+ * ttl still lets it die before the deadline, never after.
+ */
+export function pushWindow(options: PushOptions, now: number): { ttl?: number } | null {
+  if (options.deadlineMs === undefined) {
+    return options.ttlSeconds === undefined ? {} : { ttl: options.ttlSeconds };
+  }
+  const left = Math.floor((options.deadlineMs - now) / 1000);
+  if (left < MIN_PUSH_LIFE_SECONDS) return null;
+  return { ttl: options.ttlSeconds === undefined ? left : Math.min(options.ttlSeconds, left) };
+}
+
 export interface PushProvider {
   /** `invalidTokens` = tokens the provider says are dead (app uninstalled) —
-   *  the caller deactivates them so we stop pushing at ghosts. */
+   *  the caller deactivates them so we stop pushing at ghosts. `options`
+   *  carries the alert class delivery; omitted = the standard class. */
   sendPush(
     deviceTokens: string[],
     title: string,
     body: string,
     data?: Record<string, unknown>,
+    options?: PushOptions,
   ): Promise<{ sent: number; invalidTokens?: string[] }>;
 }
 
@@ -51,6 +94,8 @@ export interface DevChannelEntry {
   title?: string;
   body: string;
   data?: Record<string, unknown>;
+  /** Push only: the delivery options the push was sent with. */
+  options?: PushOptions;
   at: Date;
 }
 
@@ -71,9 +116,12 @@ class DevSms implements SmsProvider {
 }
 
 class DevPush implements PushProvider {
-  async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>) {
+  async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options: PushOptions = STANDARD_PUSH) {
+    // The log is what WOULD have been sent: a push whose deadline has passed
+    // is dropped here exactly as the Expo adapter drops it.
+    if (!pushWindow(options, Date.now())) return { sent: 0 };
     for (const token of deviceTokens) {
-      devChannelLog.push({ channel: 'push', to: token, title, body, data, at: new Date() });
+      devChannelLog.push({ channel: 'push', to: token, title, body, data, options: { ...options }, at: new Date() });
     }
     return { sent: deviceTokens.length };
   }
@@ -174,6 +222,35 @@ class TwilioSmsProvider implements SmsProvider {
 }
 
 /**
+ * One Expo push message. The field names are Expo's documented push API
+ * (docs.expo.dev/push-notifications/sending-notifications): `priority` is
+ * default | normal | high, `sound` is iOS-only (default plays the device
+ * sound, omitted plays none), `ttl` is seconds. Expo also documents
+ * `channelId` (Android) and `interruptionLevel` (iOS); neither is sent. The
+ * installed builds only create the default channel, and time-sensitive needs
+ * an entitlement they do not have, so both wait for the new build (loud
+ * alerts 3/4).
+ */
+function expoMessage(
+  to: string,
+  title: string,
+  body: string,
+  data: Record<string, unknown> | undefined,
+  options: PushOptions,
+  window: { ttl?: number },
+) {
+  return {
+    to,
+    title,
+    body,
+    data,
+    priority: options.priority,
+    ...(options.sound ? { sound: options.sound } : {}),
+    ...(window.ttl !== undefined ? { ttl: window.ttl } : {}),
+  };
+}
+
+/**
  * Expo Push adapter — one API for both stores (Expo relays to APNs/FCM using
  * the push credentials attached to the EAS build; the server itself needs NO
  * key). Dependency-free like the Twilio adapter: chunked POSTs to exp.host
@@ -184,11 +261,15 @@ export class ExpoPushProvider implements PushProvider {
   private static CHUNK = 100; // Expo's documented max messages per request
   private url = process.env['EXPO_PUSH_URL'] ?? 'https://exp.host/--/api/v2/push/send';
 
-  async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>) {
+  async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options: PushOptions = STANDARD_PUSH) {
     let sent = 0;
     const invalidTokens: string[] = [];
 
     for (let i = 0; i < deviceTokens.length; i += ExpoPushProvider.CHUNK) {
+      // Measured per request: a later chunk asks for less time, and nothing
+      // leaves once the deadline has no whole second left.
+      const window = pushWindow(options, Date.now());
+      if (!window) break;
       const chunk = deviceTokens.slice(i, i + ExpoPushProvider.CHUNK);
       const controller = new AbortController();
       const timeoutMs = pushProviderTimeoutMs();
@@ -199,7 +280,7 @@ export class ExpoPushProvider implements PushProvider {
         res = await fetch(this.url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify(chunk.map((to) => ({ to, title, body, data, sound: 'default' }))),
+          body: JSON.stringify(chunk.map((to) => expoMessage(to, title, body, data, options, window))),
           signal: controller.signal,
         });
       } catch (error) {
@@ -273,15 +354,19 @@ export function withPushRetry(inner: PushProvider, delays: number[] = PUSH_RETRY
     /** The wrapped provider — lets composition tests assert WHICH provider
      *  config selected without unwrapping behavior. */
     inner,
-    async sendPush(deviceTokens, title, body, data) {
+    async sendPush(deviceTokens, title, body, data, options) {
       let lastErr: unknown;
       for (let attempt = 0; attempt <= delays.length; attempt += 1) {
         try {
-          return await inner.sendPush(deviceTokens, title, body, data);
+          return await inner.sendPush(deviceTokens, title, body, data, options);
         } catch (err) {
           lastErr = err;
           const delay = delays[attempt];
           if (delay == null) break;
+          // [Q10] A push with a deadline (a live offer, a response window) is
+          // never retried past it: a retry that would wake with no whole
+          // second left reaches nobody who can still act on it.
+          if (options && !pushWindow(options, Date.now() + delay)) break;
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }

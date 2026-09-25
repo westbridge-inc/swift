@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
+import { pushOptionsFor } from '../../providers/notifications/alert-class';
 import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter } from '../../plugins/observability';
@@ -61,10 +62,17 @@ interface NotificationPayload {
 }
 
 /**
- * Vendor-alert escalation step. The unread alert row is the state:
- * read = acknowledged = stop. Level 0 re-alerts (socket + push); level 1
+ * Vendor-alert escalation step. Level 0 re-alerts (socket + push); level 1
  * falls back to SMS so the phone makes noise even with the app dead.
  * Exported standalone so the queue worker and tests drive the same code.
+ *
+ * [Q10] Two things stop it, each read at the moment of sending:
+ *  - the ORDER is no longer waiting for the store. Anyone on the team
+ *    accepting or declining it, the customer cancelling, or the auto-cancel
+ *    all end the wait, and only the order row knows. The owner inbox row used
+ *    to be the only signal, so a staff accept or a customer cancel still
+ *    sent "still waiting" pushes and then an SMS to the owner;
+ *  - the alert was acknowledged (its unread row is the banner state).
  */
 export async function escalateVendorAlert(
   prisma: PrismaClient,
@@ -73,6 +81,9 @@ export async function escalateVendorAlert(
   orderId: string,
   level: number,
 ): Promise<'stopped' | 'realerted' | 'sms_sent'> {
+  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true } });
+  if (order?.status !== 'PENDING') return 'stopped'; // handled, cancelled or gone: nobody is waiting
+
   const alert = await prisma.notification.findFirst({
     where: {
       isRead: false,
@@ -85,13 +96,14 @@ export async function escalateVendorAlert(
   });
   if (!alert) return 'stopped'; // acknowledged (or never existed) — done
 
-  const data = alert.data as { orderNumber?: string } | null;
+  const data = alert.data as { orderNumber?: unknown; respondBy?: unknown } | null;
+  const orderNumber = typeof data?.orderNumber === 'string' ? data.orderNumber : undefined;
 
   if (level === 0) {
     io.to(`user:${alert.userId}`).emit('vendor:order_alert', {
       notificationId: alert.id,
       orderId,
-      orderNumber: data?.orderNumber,
+      orderNumber,
       persistent: true,
       reAlert: true,
     });
@@ -100,8 +112,20 @@ export async function escalateVendorAlert(
       select: { token: true },
     });
     if (tokens.length > 0) {
+      // [Q10] The payload the tap-router needs to open THIS order on the
+      // store order desk (VendorOrderDetail). It used to carry only the
+      // orderId, which the router sends to the customer Delivery screen that
+      // the vendor app never mounts. respondBy rides along so the push dies
+      // with the response window, like the first alert.
+      const payload: Record<string, unknown> = {
+        kind: 'vendor_order_alert',
+        orderId,
+        ...(orderNumber ? { orderNumber } : {}),
+        audience: 'business',
+        ...(typeof data?.respondBy === 'string' ? { respondBy: data.respondBy } : {}),
+      };
       await channels.push
-        .sendPush(tokens.map((t) => t.token), 'Order still waiting!', alert.body, { orderId })
+        .sendPush(tokens.map((t) => t.token), 'Order still waiting!', alert.body, payload, pushOptionsFor(payload))
         .then((r) => deactivateDeadTokens(prisma, r.invalidTokens))
         .catch(() => {});
     }
@@ -109,7 +133,7 @@ export async function escalateVendorAlert(
   }
 
   await channels.sms
-    .sendSms(alert.user.phone, `Swift: order ${data?.orderNumber ?? ''} is still waiting for your response. Open your dashboard now.`)
+    .sendSms(alert.user.phone, `Swift: order ${orderNumber ?? ''} is still waiting for your response. Open your dashboard now.`)
     .catch((err) => {
       // SWIFT-100: the last rung of the escalation ladder. A silent failure here
       // means the vendor was never reached and no one knows — log + count it.
@@ -401,9 +425,10 @@ export class NotificationService {
         if (tokens.length > 0) {
           // Channel failures must never break the request path — but after the
           // provider-level retries (withPushRetry) a final failure is LOGGED,
-          // never swallowed silently [SWIFT-UG-NOTIF-01].
+          // never swallowed silently [SWIFT-UG-NOTIF-01]. [Q10] The payload's
+          // kind picks how urgently it travels (alert-class.ts).
           await this.channels.push
-            .sendPush(tokens.map((t) => t.token), notification.title, notification.body, data)
+            .sendPush(tokens.map((t) => t.token), notification.title, notification.body, data, pushOptionsFor(data))
             .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
             .catch((err) => {
               log().warn(
@@ -569,8 +594,12 @@ export class NotificationService {
    * full-screen banner until it is acknowledged (accept/reject/ack), and the
    * escalation job re-alerts then falls back to SMS while it stays unread.
    * NOT optional for vendors — prefs are ignored on this path by design.
+   *
+   * [Q10] `respondBy` is the moment the order auto-cancels (vendorRespondBy):
+   * it rides in the payload so the push rings until then and never after,
+   * and the store copy is tagged audience business, like the re-alert.
    */
-  async newOrderForVendor(vendorOwnerId: string, orderNumber: string, itemCount: number, total: number, orderId: string): Promise<string> {
+  async newOrderForVendor(vendorOwnerId: string, orderNumber: string, itemCount: number, total: number, orderId: string, respondBy?: Date | null): Promise<string> {
     // Alert-delivery tracking (alerts spec §A4) — a row per money-critical
     // alert; the vendor's accept/reject/ack stamps acknowledgedAt. Tracking
     // must never fail the alert itself.
@@ -582,7 +611,11 @@ export class NotificationService {
       type: 'ORDER_UPDATE',
       title: 'New Order!',
       body: `Order ${orderNumber} — ${itemCount} item(s), $${total.toLocaleString()} GYD`,
-      data: { orderId, orderNumber, status: 'PENDING', kind: 'vendor_order_alert' },
+      audience: 'business',
+      data: {
+        orderId, orderNumber, status: 'PENDING', kind: 'vendor_order_alert',
+        ...(respondBy ? { respondBy: respondBy.toISOString() } : {}),
+      },
     });
 
     // Dedicated persistent-alert event for the vendor dashboard banner + ring

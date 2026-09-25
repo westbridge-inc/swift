@@ -35,6 +35,7 @@ import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kit
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
 import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction } from './checkout-outbox';
+import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
 import { shapeCheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
@@ -1517,6 +1518,8 @@ export class OrderService {
             order.items.length,
             Number(order.totalAmount),
             order.id,
+            // [Q10] The same cut-off the auto-cancel row above was armed with.
+            vendorRespondBy(order, { slaMinutes: queueTiming.vendorResponseSlaMinutes, holdMs: holdWindowMs() ?? 0 }),
           );
         }
         if (order.vendorId) {
@@ -2343,6 +2346,9 @@ export class OrderService {
     });
 
     const released: string[] = [];
+    // [Q10] Read once per sweep: the response SLA the released orders' alert
+    // pushes ring until (vendorRespondBy, the auto-cancel cut-off).
+    const slaMinutes = due.length > 0 ? await vendorResponseSlaMinutes(this.prisma) : 0;
     for (const { id } of due) {
       const res = await this.prisma.order.updateMany({
         where: { id, status: { in: ['PENDING', 'READY_FOR_PICKUP'] }, holdExpiresAt: { lte: new Date() } },
@@ -2383,6 +2389,7 @@ export class OrderService {
               order.items.length,
               Number(order.totalAmount),
               order.id,
+              vendorRespondBy(order, { slaMinutes, holdMs: holdWindowMs() ?? 0 }),
             );
           }
         } catch (err) {
