@@ -1,6 +1,5 @@
 declare const styles: {
   readonly alert: string;
-  readonly backLink: string;
   readonly breakdown: string;
   readonly cancelButton: string;
   readonly cancelConfirm: string;

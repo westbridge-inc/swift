@@ -1,11 +1,9 @@
 'use client';
 
-import Link from 'next/link';
 import { OpenSwiftApp } from '@/components/open-swift-app';
 import { useParams } from 'next/navigation';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
-  ArrowLeft,
   Banknote,
   CircleX,
   Clock3,
@@ -464,11 +462,7 @@ export default function OrderDetailPage() {
 
   return (
     <div className={styles.page}>
-      <Link href="/orders" className={styles.backLink}>
-        <ArrowLeft size={18} aria-hidden="true" />
-        All orders
-      </Link>
-
+      {/* [Q7b] The way back is the app's own back button, in the top bar. */}
       <section className={styles.hero} aria-labelledby="order-status-heading">
         <div className={styles.heroIcon} aria-hidden="true">
           {stopped ? <CircleX size={28} /> : completed ? <PackageCheck size={28} /> : order.rider ? <Truck size={28} /> : <Clock3 size={28} />}

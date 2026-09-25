@@ -5,17 +5,6 @@
   color: var(--swift-ink);
 }
 
-.backLink {
-  width: fit-content;
-  min-height: var(--swift-touch);
-  display: inline-flex;
-  align-items: center;
-  gap: var(--swift-space-sm);
-  color: var(--swift-muted);
-  text-decoration: none;
-  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
-}
-
 .hero,
 .holdCard,
 .progressCard,

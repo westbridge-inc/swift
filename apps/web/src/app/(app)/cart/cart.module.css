@@ -276,6 +276,43 @@
   color: var(--swift-red);
 }
 
+/* [Q7b] Cash, or the business's own MMG — offered only when the server says
+   this cart can take it. The chosen way reads like the cash panel. */
+.payOptions {
+  display: grid;
+  gap: var(--swift-space-sm);
+}
+
+.payOption {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--swift-space-sm);
+  padding: var(--swift-space-md);
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-card);
+  cursor: pointer;
+}
+
+.payOption:has(input:checked) {
+  border-color: var(--swift-red);
+  background: var(--swift-red-50);
+}
+
+.payOption:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.payOption input {
+  margin-block-start: var(--swift-space-xs);
+  accent-color: var(--swift-red);
+}
+
+.payOptionCopy {
+  display: grid;
+}
+
 .cashCopy {
   margin-block-start: var(--swift-space-xs);
 }

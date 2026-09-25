@@ -369,3 +369,55 @@ describe('[W-01] the account-change guards survive the move off tokens', () => {
     expect(auth.getSelectedStore()).toBeNull();
   });
 });
+
+describe('[Q7b] a returning customer is restored, and the app shell hears every change', () => {
+  const trail = (fetchMock: ReturnType<typeof mockApi>) =>
+    fetchMock.mock.calls.map(([url, init]) => `${(init?.method ?? 'GET').toUpperCase()} ${new URL(String(url)).pathname}`);
+
+  it('restoreSession spends the thirty-day refresh cookie once, then asks the server who this is', async () => {
+    const auth = await loadAuth();
+    const fetchMock = mockApi(({ url }) => (url.pathname === '/api/v1/auth/refresh'
+      ? { body: { success: true, data: { session: 'cookie' } } }
+      : signedInAs('c1')));
+    expect(await auth.restoreSession()).toMatchObject({ ok: true, user: { id: 'c1' } });
+    expect(trail(fetchMock)).toEqual(['POST /api/v1/auth/refresh', 'GET /api/v1/auth/me']);
+    expect(auth.getSessionPrincipal()).toBe('c1');
+  });
+
+  it('a refused refresh is "not signed in", and nothing more is asked', async () => {
+    const auth = await loadAuth();
+    const fetchMock = mockApi(() => ({ status: 401, body: { success: false } }));
+    expect(await auth.restoreSession()).toEqual({ ok: false });
+    expect(trail(fetchMock)).toEqual(['POST /api/v1/auth/refresh']);
+  });
+
+  it('the probe itself never spends a refresh: guests must not use up the per-address refresh limit on every page', async () => {
+    const auth = await loadAuth();
+    const fetchMock = mockApi(() => ({ status: 401, body: { success: false } }));
+    expect(await auth.sessionProbe()).toEqual({ ok: false });
+    expect(trail(fetchMock)).toEqual(['GET /api/v1/auth/me']);
+  });
+
+  it('tells subscribers when a session starts, changes or ends — only then — and stops when they leave', async () => {
+    const auth = await loadAuth();
+    const heard = vi.fn();
+    const stop = auth.subscribeSession(heard);
+    auth.adoptSession('c1');
+    expect(heard).toHaveBeenCalledTimes(1);
+    auth.clearSession();
+    expect(heard).toHaveBeenCalledTimes(2);
+    mockApi(() => signedInAs('c2'));
+    await auth.sessionProbe();
+    expect(heard).toHaveBeenCalledTimes(3);
+    await auth.sessionProbe();
+    expect(heard).toHaveBeenCalledTimes(3);
+    mockApi(() => ({ status: 401, body: { success: false } }));
+    await auth.sessionProbe();
+    expect(heard).toHaveBeenCalledTimes(4);
+    await auth.sessionProbe();
+    expect(heard).toHaveBeenCalledTimes(4);
+    stop();
+    auth.adoptSession('c3');
+    expect(heard).toHaveBeenCalledTimes(4);
+  });
+});
