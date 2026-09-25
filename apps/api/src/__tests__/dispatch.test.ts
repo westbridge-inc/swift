@@ -29,6 +29,7 @@ import { AuthService } from '../modules/auth/auth.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { devChannelLog } from '../providers/notifications/channels';
 
 // [R048-001] this suite quiets the WHOLE rider pool between cases (an unscoped Rider.updateMany) so no leftover rider takes a dispatch — a stated, reviewable capability.
 grantSuiteCapability('unscoped-mutation');
@@ -1023,35 +1024,58 @@ describe('The offer cascade', () => {
     await app.redis.del(`dispatch:exhausts:${order.id}`, `ops_page:dispatch_exhausted:${order.id}`);
   });
 
-  it('ALERTS_LOUD: an offer lands a push-backed notification with expiry; flag off is silent (alerts spec A2)', async () => {
-    const quiet = await makeRider({ lat: PICKUP.lat + 0.0045, acceptance: 100 });
-    const loud = await makeRider({ lat: PICKUP.lat + 0.02, acceptance: 100 }); // farther: not offered while quiet is online
+  // [Q10 loud alerts 1/4] This case used to pin the OPPOSITE: with no flag an
+  // offer notified nobody, and only ALERTS_LOUD=1 (set by no environment)
+  // produced the push. So a mover with the phone in a pocket never heard an
+  // offer. The new truth: every offer pushes, high priority, dying with the
+  // offer; OFFER_PUSH=0 is the kill switch.
+  it('every offer lands a high-priority push that dies with the offer; OFFER_PUSH=0 is the kill switch (alerts spec A2)', async () => {
+    const pushed = await makeRider({ lat: PICKUP.lat + 0.0045, acceptance: 100 });
+    const killed = await makeRider({ lat: PICKUP.lat + 0.02, acceptance: 100 }); // farther: not offered while pushed is online
+    const device = `ExponentPushToken[q10d${nanoid(12)}]`;
+    await app.prisma.deviceToken.create({ data: { userId: pushed.userId, token: device, platform: 'android' } });
     try {
-      const orderQuiet = await makeDeliveryOrder();
-      delete process.env['ALERTS_LOUD'];
-      await dispatch.dispatchOrder(orderQuiet.id);
-      expect(await app.prisma.notification.count({ where: { userId: quiet.userId } })).toBe(0);
-
-      // Park quiet; with the flag ON the offer goes to loud and must notify.
-      await app.prisma.rider.update({ where: { id: quiet.riderId }, data: { isOnline: false } });
-      process.env['ALERTS_LOUD'] = '1';
-      const orderLoud = await makeDeliveryOrder();
-      await dispatch.dispatchOrder(orderLoud.id);
+      // No flag at all: the offer is pushed.
+      delete process.env['OFFER_PUSH'];
+      const order = await makeDeliveryOrder();
+      const before = Date.now();
+      await dispatch.dispatchOrder(order.id);
       const note = await app.prisma.notification.findFirst({
-        where: { userId: loud.userId },
+        where: { userId: pushed.userId },
         orderBy: { createdAt: 'desc' },
       });
       expect(note).toBeTruthy();
       expect(note!.title).toContain('Order available nearby');
-      const data = note!.data as { kind: string; orderId: string; expiresAt: string };
+      const data = note!.data as { kind: string; orderId: string; expiresAt: string; audience: string };
       expect(data.kind).toBe('dispatch_offer');
-      expect(data.orderId).toBe(orderLoud.id);
-      expect(new Date(data.expiresAt).getTime()).toBeGreaterThan(Date.now());
+      expect(data.orderId).toBe(order.id);
+      expect(data.audience).toBe('earner');
+      const expiresAt = new Date(data.expiresAt).getTime();
+      expect(expiresAt).toBeGreaterThan(Date.now());
+      expect(expiresAt).toBeLessThanOrEqual(before + 20_000 + 1_000);
+      // ...and it left for the phone as a ring_offer: high priority, the
+      // device sound, and the offer's own deadline (the adapter turns that
+      // into a ttl of the seconds left and never retries past it).
+      const pushes = devChannelLog.filter((e) => e.channel === 'push' && e.to === device);
+      expect(pushes.map((p) => ({ title: p.title, options: p.options }))).toEqual([{
+        title: note!.title,
+        options: { alertClass: 'ring_offer', priority: 'high', sound: 'default', deadlineMs: expiresAt },
+      }]);
+
+      // Kill switch: park the first rider; with OFFER_PUSH=0 the next offer is
+      // still made (socket + Redis), but nobody is pushed.
+      await app.prisma.rider.update({ where: { id: pushed.riderId }, data: { isOnline: false } });
+      process.env['OFFER_PUSH'] = '0';
+      const quietOrder = await makeDeliveryOrder();
+      await dispatch.dispatchOrder(quietOrder.id);
+      expect((await app.redis.get(`dispatch:offer:${quietOrder.id}`))!.split(':')[0]).toBe(killed.riderId);
+      expect(await app.prisma.notification.count({ where: { userId: killed.userId } })).toBe(0);
     } finally {
-      delete process.env['ALERTS_LOUD'];
+      delete process.env['OFFER_PUSH'];
+      await app.prisma.deviceToken.deleteMany({ where: { token: device } });
       // Park this test's riders so later field-geometry tests stay clean.
       await app.prisma.rider.updateMany({
-        where: { id: { in: [quiet.riderId, loud.riderId] } },
+        where: { id: { in: [pushed.riderId, killed.riderId] } },
         data: { isOnline: false },
       });
     }

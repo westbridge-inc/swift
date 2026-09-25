@@ -72,6 +72,13 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // renders. The generic orderId branch below would have dropped them on the
   // CUSTOMER Delivery screen — a dead end with the clock running.
   if (kind === 'dispatch_offer') return { screen: 'Main' };
+  // [Q10] "Order ready for pickup" goes to the RIDER who holds the job, never
+  // to the customer (the API sends it only from the kitchen's Mark-ready to
+  // the assigned rider, tagged audience earner). Its orderId sent it down the
+  // generic branch to Delivery, the CUSTOMER screen MoverStack never mounts,
+  // so the tap opened nothing. ActiveJob is the rider's live job; it takes no
+  // params because it resolves the active job itself.
+  if (kind === 'prep_ready') return { screen: 'ActiveJob' };
   // A store told "a cancelled order may hold an MMG payment" runs a business:
   // their Main is the vendor dashboard, not a customer tracking screen.
   if (kind === 'mmg_unattested_cancellation') return { screen: 'Main' };
@@ -197,7 +204,7 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   if (audience === 'business' && orderId) return { screen: 'VendorOrderDetail', params: { orderId } };
 
   // Orders: any payload carrying an orderId lands on that order's tracking
-  // screen — covers status updates, prep_ready, substitutions, pickup READY.
+  // screen — covers status updates, substitutions, pickup READY.
   if (orderId) return { screen: 'Delivery', params: { orderId } };
 
   return null; // unknown → the app opens normally

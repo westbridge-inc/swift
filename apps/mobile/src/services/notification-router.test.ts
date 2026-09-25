@@ -37,7 +37,9 @@ describe('destinationFor — the tap table', () => {
   });
 
   it('anything carrying an orderId lands on that order’s tracking screen', () => {
-    expect(destinationFor({ kind: 'prep_ready', orderId: 'abc' })).toEqual({ screen: 'Delivery', params: { orderId: 'abc' } });
+    // [Q10] This used prep_ready as its example, but prep_ready goes to the
+    // RIDER, never the customer: it has its own branch now (ActiveJob).
+    expect(destinationFor({ kind: 'substitution_pending', orderId: 'abc' })).toEqual({ screen: 'Delivery', params: { orderId: 'abc' } });
     expect(destinationFor({ orderId: 'xyz' })).toEqual({ screen: 'Delivery', params: { orderId: 'xyz' } });
   });
 
@@ -107,9 +109,18 @@ describe('a push never lands on a route its recipient cannot reach [S0]', () => 
 
   it('a CUSTOMER push with an orderId still goes to Delivery (guards the guard)', () => {
     // The catch-all is right for the case it was written for; these branches
-    // must not have broken it.
-    expect(destinationFor({ kind: 'prep_ready', orderId: 'o1' }))
+    // must not have broken it. (It used prep_ready, which is a RIDER push.)
+    expect(destinationFor({ kind: 'substitution_pending', orderId: 'o1' }))
       .toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+  });
+
+  it('the rider told the bag is ready lands on their live job, not the customer screen [Q10]', () => {
+    // prep_ready is sent to the ASSIGNED RIDER when the kitchen marks the
+    // order ready. Its orderId sent it to Delivery, which MoverStack never
+    // mounts: the rider tapped "Order ready for pickup" and nothing opened.
+    expect(destinationFor({ kind: 'prep_ready', orderId: 'o1', audience: 'earner' })).toEqual({ screen: 'ActiveJob' });
+    // Untagged rows from before the API tagged it route the same way.
+    expect(destinationFor({ kind: 'prep_ready', orderId: 'o1' })).toEqual({ screen: 'ActiveJob' });
   });
 });
 
@@ -189,6 +200,16 @@ describe('store pushes land on the store’s order desk, never the customer scre
     expect(destinationFor({ kind: 'mmg_unattested_cancellation', orderId: 'o3', audience: 'business' }))
       .toEqual({ screen: 'Main' });
   });
+
+  it('the "still waiting" re-alert opens the same order: exactly the payload escalateVendorAlert sends [Q10]', () => {
+    // The re-alert push is not an inbox row, so the census below cannot see
+    // its shape. It used to carry only the orderId, which the generic branch
+    // sends to the CUSTOMER Delivery screen the vendor app never mounts.
+    expect(destinationFor({ orderId: 'o1' })).toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+    expect(destinationFor({
+      kind: 'vendor_order_alert', orderId: 'o1', orderNumber: 'SW-1001', audience: 'business', respondBy: '2026-09-24T20:10:00.000Z',
+    })).toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o1', orderNumber: 'SW-1001' } });
+  });
 });
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -224,7 +245,6 @@ const CENSUS: Case[] = [
   // ── Orders: the customer's own journey. Delivery IS their tracking screen.
   { k: 'substitution_pending', d: { ...O, lineId: 'l1' }, to: DELIVERY('o1'), why: 'customer — approve a substitution' },
   { k: 'line_refunded', d: { ...O, lineId: 'l1' }, to: DELIVERY('o1'), why: 'customer — a line was refunded' },
-  { k: 'prep_ready', d: O, to: DELIVERY('o1'), why: 'customer — order ready' },
   { k: 'mmg_payment_confirmed', d: { ...O, audience: 'customer', claimRevision: 1 }, to: DELIVERY('o1'), why: 'customer — the STORE reported the MMG payment arrived: a claim, never a capture; the order screen is where they can say they did not pay [S1-6]' },
   { k: 'mmg_claim_disputed', d: { ...O, audience: 'customer', claimRevision: 2 }, to: DELIVERY('o1'), why: 'customer — their word and the store\'s disagree and the order is held; the claim card is on their order screen. The store\'s copy is tagged audience:business and lands on its order desk by the audience rule [S1-6]' },
   { k: 'mmg_claim_resolved', d: { ...O, audience: 'customer', claimRevision: 3 }, to: DELIVERY('o1'), why: 'customer — an operator decided the payment disagreement; same audience split as mmg_claim_disputed [S1-6]' },
@@ -235,7 +255,7 @@ const CENSUS: Case[] = [
   { k: 'converted_to_pickup', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — the order became a pickup [audience rule]' },
   { k: 'dispatch_exhausted', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — no mover found' },
   { k: 'mover_session_revocation', d: { ...O, audience: 'customer', status: 'PICKED_UP', action: 'REOPEN' }, to: DELIVERY('o1'), why: 'customer — their mover lost custody' },
-  { k: 'vendor_order_alert', d: { ...O, orderNumber: 'SW-1', status: 'PENDING' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1', orderNumber: 'SW-1' } }, why: 'store — THE new-order alert [fixed here]' },
+  { k: 'vendor_order_alert', d: { ...O, orderNumber: 'SW-1', status: 'PENDING', audience: 'business', respondBy: '2026-09-24T20:10:00.000Z' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1', orderNumber: 'SW-1' } }, why: 'store — THE new-order alert [fixed here]. [Q10] It carries the auto-cancel deadline its push rings until, and the business audience' },
   { k: 'mmg_unattested_cancellation', d: { ...O, audience: 'business' }, to: { screen: 'Main' }, why: 'store — a cancelled order may still hold an MMG payment; their Main is the dashboard' },
   // `d` must mirror what the API actually SENDS. The drift check compares only
   // `kind` strings, so a payload that grows a field goes unnoticed here and the
@@ -267,7 +287,8 @@ const CENSUS: Case[] = [
   { k: 'ride_queue_matched', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — a driver took their queued ride' },
   { k: 'ride_queue_expired', d: { audience: 'customer', rideClass: 'STANDARD' }, to: { screen: 'Taxi' }, why: 'customer — queue timed out, request again' },
   { k: 'ride_released_no_drivers', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — ride released' },
-  { k: 'dispatch_offer', d: { ...O, audience: 'earner', offerAttemptId: 'a1' }, to: { screen: 'Main' }, why: 'earner — the live offer card is on their Main' },
+  { k: 'dispatch_offer', d: { ...O, audience: 'earner', offerAttemptId: 'a1', expiresAt: '2026-09-24T20:00:20.000Z' }, to: { screen: 'Main' }, why: 'earner — the live offer card is on their Main' },
+  { k: 'prep_ready', d: { ...O, audience: 'earner' }, to: { screen: 'ActiveJob' }, why: 'RIDER — the kitchen marked the bag ready; ActiveJob is their live job, which MoverStack mounts [Q10]. It sat in the customer group aimed at Delivery, which MoverStack never mounts, so the tap opened nothing' },
 
   // ── Bookings + service jobs [the S0 this pass closed].
   { k: 'booking_requested', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — a customer asked them to quote; the first rung of the ladder, and the one that used to send nothing at all' },
@@ -455,6 +476,7 @@ describe('every destination is a route the app actually registers', () => {
     guardian_driver_confirm: 'the driver is asked to confirm the trip status',
     dispatch_offer: 'the earner has an offer with a running clock',
     claim_over_gate: 'the rider is owed a delivery guarantee',
+    prep_ready: 'the rider is told the bag is packed at the counter',
   };
 
   it('a push aimed at a MOVER lands on a screen MoverStack mounts', () => {

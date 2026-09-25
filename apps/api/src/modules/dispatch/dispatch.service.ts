@@ -1576,7 +1576,7 @@ export class DispatchService {
         } catch (err) {
           // [F-014-10] A socket-layer throw must not strand the installed
           // pair half-published: evidence + timeout below still run, the
-          // flag-gated push still fires, and the mover can recover the card
+          // offer push still fires, and the mover can recover the card
           // via /offers/current.
           log().warn({ err, orderId, moverId: top.riderId }, 'dispatch: offer socket emit failed — evidence/timeout continue');
         }
@@ -1620,13 +1620,20 @@ export class DispatchService {
           })
           .catch(() => {});
 
-        // Loud alerts (alerts spec §A2/§A3, flag-gated): the socket only reaches a
+        // Loud alerts (alerts spec §A2/§A3): the socket only reaches a
         // FOREGROUNDED app — a mover with the phone in their pocket would sleep
-        // through a 30s offer. notifications.send fans out to Expo push (and the
+        // through a 20s offer. notifications.send fans out to Expo push (and the
         // notification row survives the offer). Never let alert plumbing fail the
         // offer itself. expiresAt rides along so a late-opening client can drop
-        // stale offers instead of showing ghosts.
-        if (process.env['ALERTS_LOUD'] === '1') {
+        // stale offers instead of showing ghosts, and so the push itself (class
+        // ring_offer: high priority) expires with the offer and is never
+        // retried past it.
+        //
+        // [Q10] ON for every pool: taxi drivers, riders and couriers. This sat
+        // behind ALERTS_LOUD=1, which no environment set, so movers got NO push
+        // for any offer. OFFER_PUSH=0 is the emergency kill switch, back to
+        // socket-only offers.
+        if (process.env['OFFER_PUSH'] !== '0') {
           const pushDeadline = await this.liveOfferDeadline(orderId, top.riderId, attemptId, pool, publicationDeadline);
           if (pushDeadline === null || Date.now() >= pushDeadline) return {};
           const isTaxi = pool === 'DRIVER';

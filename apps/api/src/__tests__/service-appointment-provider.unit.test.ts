@@ -7,6 +7,7 @@ import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import {
+  HOUR,
   MINUTE,
   courierParcel,
   foodDelivery,
@@ -77,7 +78,12 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
     expect(h.store.rows[0]!['releasedToVendorAt']).toBeInstanceOf(Date);
     expect(h.io.emits).toEqual([{ room: 'vendor:vendor-svc', event: 'order:new', payload: { orderId: 'bk-held', vendorId: 'vendor-svc', orderNumber: 'ORD-BK-HELD' } }]);
     expect(h.vendorAlert).toHaveBeenCalledTimes(1);
-    expect(h.vendorAlert).toHaveBeenCalledWith('user-provider', 'ORD-BK-HELD', 1, 2000, 'bk-held');
+    expect(h.vendorAlert).toHaveBeenCalledWith('user-provider', 'ORD-BK-HELD', 1, 2000, 'bk-held', expect.any(Date));
+    // [Q10] ...carrying the booking's own response deadline, which its alert
+    // push rings until: the auto-cancel cut-off, slot-relative for a booking
+    // (the earlier of placement + 24 h and slot - 60 min; here the 24 h cap).
+    const placedAt = (h.store.rows[0]!['placedAt'] as Date).getTime();
+    expect((h.vendorAlert.mock.calls[0]![5] as Date).getTime()).toBe(placedAt + 24 * HOUR);
     expect(h.enqueueDispatch).not.toHaveBeenCalled();
   });
 

@@ -20,7 +20,7 @@ const noop = () => {};
 class AppError extends Error {
   constructor(public statusCode: number, public code: string, message: string) { super(message); }
 }
-const testProcess = { env: { DISPATCH_TRIGGER: 'ON_ACCEPT', ALERTS_LOUD: '' } };
+const testProcess = { env: { DISPATCH_TRIGGER: 'ON_ACCEPT', OFFER_PUSH: '' } };
 const context = vm.createContext({
   exports: {}, Date, Number, Set, Promise, Math,
   NotificationService: class {}, getMapsProvider: () => ({}),
@@ -132,7 +132,7 @@ function barrier() {
 function setup() {
   context['Date'] = Date;
   testProcess.env.DISPATCH_TRIGGER = 'ON_ACCEPT';
-  testProcess.env.ALERTS_LOUD = '';
+  testProcess.env.OFFER_PUSH = '';
   context['randomUUID'] = () => 'unit-attempt';
   context['customerTrustSummaries'] = async () => new Map();
   const order = { id: 'order-unit', orderNumber: 'UNIT', customerId: 'customer-unit', tenantId: 'tenant-unit', orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: 0, status: 'READY_FOR_PICKUP', riderId: null as string | null, driverId: null as string | null, foodAgeHeldAt: null, holdExpiresAt: null as Date | null, vendor: null };
@@ -519,7 +519,6 @@ describe('R6 publication and durable recovery regressions', () => {
 
   it.each(['accepted', 'declined', 'expired'])('fences the old notification/timeout tail after an emitted card is %s', async terminal => {
     const h = publishingHarness(), entered = barrier(), resume = barrier();
-    testProcess.env.ALERTS_LOUD = '1';
     h.subject.prisma.alertDelivery.create = async () => { entered.open(); await resume.promise; };
     const publishing = h.subject.dispatchOrder(h.order.id); await entered.promise;
     const attempt = h.emitted[0].offerAttemptId;
@@ -565,7 +564,6 @@ describe('R6 publication and durable recovery regressions', () => {
 
   it('keeps an already armed offer during a slow push and never extends its expiry', async () => {
     const h = publishingHarness(), entered = barrier(), resume = barrier();
-    testProcess.env.ALERTS_LOUD = '1';
     h.subject.notifications.send = async (notice: any) => { h.notices.push(notice); entered.open(); await resume.promise; };
     const start = Date.now(), publishing = h.subject.dispatchOrder(h.order.id); await entered.promise;
     const attempt = h.emitted[0].offerAttemptId;
@@ -580,7 +578,6 @@ describe('R6 publication and durable recovery regressions', () => {
 
   it('fences notification publication if the offer changes during journal evidence', async () => {
     const h = publishingHarness(), entered = barrier(), resume = barrier();
-    testProcess.env.ALERTS_LOUD = '1';
     const update = h.subject.prisma.dispatchSearch.updateMany;
     h.subject.prisma.dispatchSearch.updateMany = async (args: any) => {
       if (args.data.candidatesTried) { entered.open(); await resume.promise; }
@@ -1185,5 +1182,40 @@ describe('R11 truthful dispatch responses', () => {
   ])('vendor retry result %j reports searching=%s exhausted=%s', async (result, searching, exhausted) => {
     const response = await dispatchResponse('vendor', {}, { retryDispatch: async () => result });
     expect(response.data).toEqual({ orderId: 'order-unit', searching, exhausted });
+  });
+});
+
+// [Q10 loud alerts 1/4] The offer push sat behind ALERTS_LOUD=1, which no
+// environment set: taxi drivers, riders and couriers got NO push for any
+// offer, so a phone in a pocket slept through a 20 s clock. It is on for
+// every pool now, carrying the offer's deadline; OFFER_PUSH=0 turns it off.
+describe('[Q10] every offer is pushed by default, in every pool', () => {
+  const pools = [
+    { mover: 'delivery rider', orderType: 'FOOD_DELIVERY', status: 'READY_FOR_PICKUP', title: '\u{1F6F5} Order available nearby' },
+    { mover: 'courier', orderType: 'COURIER', status: 'READY_FOR_PICKUP', title: '\u{1F6F5} Order available nearby' },
+    { mover: 'taxi driver', orderType: 'TAXI', status: 'PENDING', title: '\u{1F695} Someone nearby needs a pickup' },
+  ];
+
+  it.each(pools)('the $mover is pushed with no flag set, the offer deadline riding along', async ({ orderType, status, title }) => {
+    const h = publishingHarness(); h.order.orderType = orderType; h.order.status = status;
+    const start = Date.now();
+    expect(await h.subject.dispatchOrder(h.order.id)).toEqual({ offered: 'rider' });
+    expect(h.emitted).toHaveLength(1);
+    expect(h.notices).toHaveLength(1);
+    expect(h.notices[0]).toMatchObject({
+      userId: 'user', title, audience: 'earner',
+      data: { kind: 'dispatch_offer', orderId: 'order-unit', offerAttemptId: h.emitted[0].offerAttemptId },
+    });
+    const expiresAt = new Date(h.notices[0].data.expiresAt).getTime();
+    expect(expiresAt).toBeGreaterThanOrEqual(start + 20_000);
+    expect(expiresAt).toBeLessThanOrEqual(Date.now() + 20_000);
+  });
+
+  it.each(pools)('OFFER_PUSH=0 silences the $mover push, and the offer itself still goes out', async ({ orderType, status }) => {
+    const h = publishingHarness(); h.order.orderType = orderType; h.order.status = status;
+    testProcess.env.OFFER_PUSH = '0';
+    expect(await h.subject.dispatchOrder(h.order.id)).toEqual({ offered: 'rider' });
+    expect(h.emitted).toHaveLength(1);
+    expect(h.notices).toHaveLength(0);
   });
 });
