@@ -34,6 +34,29 @@ export interface RouteEstimate {
   minutes: number | null;
 }
 
+/** [TAXI multi-stop] One leg of a routed itinerary: one point to the next. */
+export interface RouteLeg {
+  /** Driving distance of the leg in km, unrounded. */
+  km: number;
+  /** Real driving minutes when the engine knows them; null = the caller's speed model. */
+  minutes: number | null;
+}
+
+/** [TAXI multi-stop] A whole itinerary routed at once: the pickup, each stop in
+ *  order, then the final destination. */
+export interface RouteLegsEstimate {
+  /** legs[i] runs from points[i] to points[i + 1]. */
+  legs: RouteLeg[];
+  /** The whole route in km, unrounded: the one number a fare rounds. */
+  km: number;
+  /** The whole route in driving minutes; null = the caller's speed model. */
+  minutes: number | null;
+  source: RouteSource;
+  /** A configured routing engine failed and these are the deterministic
+   *  estimates instead. Money that needs the real road refuses them. */
+  degraded: boolean;
+}
+
 export interface MapsProvider {
   /** Estimated riding minutes from origin to each destination, same order. */
   etaMinutes(origin: LatLng, destinations: LatLng[]): Promise<number[]>;
@@ -45,6 +68,12 @@ export interface MapsProvider {
   etaMinutesFrom(origins: LatLng[], dest: LatLng): Promise<number[]>;
   /** Point-to-point driving route — feeds fares, courier fees, delivery fees. */
   routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate>;
+  /** [TAXI multi-stop] The driving route through every point in order, asked
+   *  for in ONE call: legs[i] runs from points[i] to points[i + 1]. Never
+   *  throws. A configured engine that fails answers the deterministic
+   *  estimate marked `degraded`, so a fare that needs the real road can
+   *  refuse it rather than price a guess. */
+  routeLegs(points: LatLng[]): Promise<RouteLegsEstimate>;
   /** [ALG-16] Snap a recorded trace to the road graph — once, at completion,
    *  for money purposes; never per ping. A provider that cannot match returns
    *  the trace's own path length and says so (`matched: false`). */
@@ -88,6 +117,17 @@ export class HaversineMapsProvider implements MapsProvider {
   async routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate> {
     // Exactly the historical estimate — callers keep their own speed models.
     return { km: estimateDrivingDistance(origin.lat, origin.lng, dest.lat, dest.lng), minutes: null, source: 'haversine' };
+  }
+
+  async routeLegs(points: LatLng[]): Promise<RouteLegsEstimate> {
+    // Each leg exactly as routeKm estimates it; the whole route is their sum.
+    const legs: RouteLeg[] = [];
+    for (let i = 1; i < points.length; i++) {
+      const from = points[i - 1]!;
+      const to = points[i]!;
+      legs.push({ km: estimateDrivingDistance(from.lat, from.lng, to.lat, to.lng), minutes: null });
+    }
+    return { legs, km: legs.reduce((sum, leg) => sum + leg.km, 0), minutes: null, source: 'haversine', degraded: false };
   }
 
   async matchTrace(points: TracePoint[]): Promise<MatchedRoute> {
@@ -154,6 +194,12 @@ export class GoogleMapsProvider implements MapsProvider {
    *  self-hosted engine for real-road routing. */
   async routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate> {
     return this.fallback.routeKm(origin, dest);
+  }
+
+  /** Same rule as routeKm: the deterministic estimate, which is the engine
+   *  here and never a degraded answer. */
+  async routeLegs(points: LatLng[]): Promise<RouteLegsEstimate> {
+    return this.fallback.routeLegs(points);
   }
 
   async matchTrace(points: TracePoint[]): Promise<MatchedRoute> {
@@ -228,8 +274,14 @@ interface OsrmTableResponse {
 
 interface OsrmRouteResponse {
   code?: string;
-  routes?: Array<{ distance?: number; duration?: number }>;
+  /** Metres and seconds; `legs` has one entry per consecutive pair of waypoints. */
+  routes?: Array<{ distance?: number; duration?: number; legs?: Array<{ distance?: number; duration?: number }> }>;
 }
+
+/** A distance OSRM may have priced: a finite, non-negative number of metres. */
+const isMetres = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+/** Seconds to minutes, or null when OSRM gave no usable duration. */
+const osrmMinutes = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v / 60 : null);
 
 interface OsrmMatchResponse {
   code?: string;
@@ -336,6 +388,48 @@ export class OsrmMapsProvider implements MapsProvider {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** [TAXI multi-stop] The whole itinerary through the OSRM `route` service in
+   *  ONE call (pickup;stop1..stopN;destination): its legs and its total. Any
+   *  failure, an answer without one finite leg per pair of points, or a whole
+   *  route of 0 m (every point snapped to one node: nothing was routed) gives
+   *  the deterministic estimate marked `degraded` (counted, like every other
+   *  OSRM fallback) — the fare engine refuses it rather than price a guess.
+   *  One leg of 0 m is kept: two points across one road snap to one node. */
+  async routeLegs(points: LatLng[]): Promise<RouteLegsEstimate> {
+    if (points.length < 2) return this.fallback.routeLegs(points);
+    const coords = points.map((p) => `${p.lng},${p.lat}`).join(';');
+    const url = `${this.baseUrl.replace(/\/$/, '')}/route/v1/driving/${coords}?overview=false`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OSRM_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) return await this.degradedLegs(points);
+      const data = (await res.json()) as OsrmRouteResponse;
+      const route = data.code === 'Ok' ? data.routes?.[0] : undefined;
+      const legs = route?.legs;
+      if (!route || !isMetres(route.distance) || route.distance === 0 || !legs || legs.length !== points.length - 1 || !legs.every((leg) => isMetres(leg.distance))) {
+        return await this.degradedLegs(points);
+      }
+      recordOsrm('route', 'ok');
+      return {
+        legs: legs.map((leg) => ({ km: (leg.distance as number) / 1000, minutes: osrmMinutes(leg.duration) })),
+        km: route.distance / 1000,
+        minutes: osrmMinutes(route.duration),
+        source: 'osrm',
+        degraded: false,
+      };
+    } catch {
+      return await this.degradedLegs(points);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async degradedLegs(points: LatLng[]): Promise<RouteLegsEstimate> {
+    return this.degraded('route', { ...(await this.fallback.routeLegs(points)), degraded: true });
   }
 
   /** [ALG-16] Map matching via the OSRM `match` service. Timestamps order the

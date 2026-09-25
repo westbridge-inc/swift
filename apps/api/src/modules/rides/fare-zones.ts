@@ -64,18 +64,26 @@ export interface ResolvedZones {
   killed: boolean;
 }
 
-/** Both ends of a trip, resolved inside ONE market with the precedence law;
- *  the legacy first-match pick is shadowed and disagreements counted. */
-export async function resolveFareZones(prisma: PrismaClient, market: ZoneMarket, pickup: GeoPoint, dropoff: GeoPoint): Promise<ResolvedZones> {
+export interface ResolvedZonePath {
+  /** One pick per point, in the order the points were given. */
+  picks: ZonePick[];
+  killed: boolean;
+}
+
+/** Every point of a trip (the pickup, [TAXI multi-stop] each stop in order,
+ *  the destination), resolved from ONE read of ONE market with the
+ *  precedence law; the legacy first-match pick is shadowed and disagreements
+ *  counted (the first point as from, the last as to, any between as stop). */
+export async function resolveFareZonePath(prisma: PrismaClient, market: ZoneMarket, points: readonly GeoPoint[]): Promise<ResolvedZonePath> {
   if (fareZoneTableKilled()) {
     fareZoneCounter.labels('killed').inc();
-    return { from: { zone: null, ambiguous: false, contenders: 0 }, to: { zone: null, ambiguous: false, contenders: 0 }, killed: true };
+    return { picks: points.map(() => ({ zone: null, ambiguous: false, contenders: 0 })), killed: true };
   }
   const rows = await prisma.zone.findMany({
     where: { isActive: true, tenantId: market.tenantId, countryCode: market.countryCode },
     select: { id: true, name: true, boundary: true, priority: true, version: true },
   });
-  const resolve = (point: GeoPoint, end: 'from' | 'to'): ZonePick => {
+  const resolve = (point: GeoPoint, end: 'from' | 'to' | 'stop'): ZonePick => {
     const containing = rows.filter((z) => pointInPolygon(point, z.boundary));
     const pick = pickZone(containing);
     if (pick.ambiguous) fareZoneCounter.labels('ambiguous').inc();
@@ -86,7 +94,51 @@ export async function resolveFareZones(prisma: PrismaClient, market: ZoneMarket,
     if ((legacy?.id ?? null) !== (pick.zone?.id ?? null)) fareZoneCounter.labels(`shadow_diff_${end}`).inc();
     return pick;
   };
-  return { from: resolve(pickup, 'from'), to: resolve(dropoff, 'to'), killed: false };
+  const last = points.length - 1;
+  return { picks: points.map((point, i) => resolve(point, i === 0 ? 'from' : i === last ? 'to' : 'stop')), killed: false };
+}
+
+/** Both ends of a trip: the two-point path. */
+export async function resolveFareZones(prisma: PrismaClient, market: ZoneMarket, pickup: GeoPoint, dropoff: GeoPoint): Promise<ResolvedZones> {
+  const { picks, killed } = await resolveFareZonePath(prisma, market, [pickup, dropoff]);
+  return { from: picks[0]!, to: picks[1]!, killed };
+}
+
+/** [TAXI multi-stop] A pair of points of a route that the zone table prices:
+ *  indexes into the points, and the two zones. */
+export interface ZonePricedPair {
+  from: number;
+  to: number;
+  fromZoneId: string;
+  toZoneId: string;
+}
+
+/** [TAXI multi-stop] Every pair of a route the zone table would price: each
+ *  leg in order (pickup to stop 1 through the last stop to the destination),
+ *  then the direct pickup to destination pair. A route with stops is priced
+ *  by the formula over the whole road, so v1 refuses one the table prices
+ *  anywhere, rather than let a stop move a trip off (or onto) a fixed fare.
+ *  One zone read and one fare read. With the table killed nothing resolves,
+ *  so nothing is priced by it: the answer is empty, exactly as today. */
+export async function zonePricedPairs(prisma: PrismaClient, market: ZoneMarket, points: readonly GeoPoint[]): Promise<ZonePricedPair[]> {
+  const { picks } = await resolveFareZonePath(prisma, market, points);
+  const last = points.length - 1;
+  const pairs: Array<[number, number]> = [];
+  for (let i = 1; i <= last; i++) pairs.push([i - 1, i]);
+  if (last > 1) pairs.push([0, last]);
+  const zoned: ZonePricedPair[] = [];
+  for (const [from, to] of pairs) {
+    const fromZone = picks[from]?.zone;
+    const toZone = picks[to]?.zone;
+    if (fromZone && toZone) zoned.push({ from, to, fromZoneId: fromZone.id, toZoneId: toZone.id });
+  }
+  if (zoned.length === 0) return [];
+  const fares = await prisma.zoneFare.findMany({
+    where: { OR: zoned.map((p) => ({ fromZoneId: p.fromZoneId, toZoneId: p.toZoneId })) },
+    select: { fromZoneId: true, toZoneId: true },
+  });
+  const priced = new Set(fares.map((f) => JSON.stringify([f.fromZoneId, f.toZoneId])));
+  return zoned.filter((p) => priced.has(JSON.stringify([p.fromZoneId, p.toZoneId])));
 }
 
 /** [M-34] The write-time law: an ACTIVE zone may not overlap another active

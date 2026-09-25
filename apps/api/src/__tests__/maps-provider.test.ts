@@ -185,3 +185,102 @@ describe('routeKm — point-to-point routing for fares/fees', () => {
     expect(f).not.toHaveBeenCalled();
   });
 });
+
+describe('routeLegs — [TAXI multi-stop] a whole itinerary, in one call', () => {
+  const haversine = new HaversineMapsProvider();
+  const STOP_1 = { lat: 6.8143, lng: -58.1443 };
+  const STOP_2 = { lat: 6.825, lng: -58.15 };
+  const FINAL = { lat: 6.82, lng: -58.16 };
+  const POINTS = [ORIGIN, STOP_1, STOP_2, FINAL];
+  const okRoute = {
+    code: 'Ok',
+    routes: [{ distance: 7400, duration: 1110, legs: [{ distance: 2000, duration: 300 }, { distance: 1500, duration: 270 }, { distance: 3900, duration: 540 }] }],
+  };
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('haversine: each leg exactly as routeKm estimates it, the route their sum, never degraded', async () => {
+    const r = await haversine.routeLegs(POINTS);
+    const each = await Promise.all([[ORIGIN, STOP_1], [STOP_1, STOP_2], [STOP_2, FINAL]].map(([a, b]) => haversine.routeKm(a!, b!)));
+    expect(r.legs).toEqual(each.map((e) => ({ km: e.km, minutes: null })));
+    expect(r.km).toBe(each[0]!.km + each[1]!.km + each[2]!.km);
+    expect({ minutes: r.minutes, source: r.source, degraded: r.degraded }).toEqual({ minutes: null, source: 'haversine', degraded: false });
+  });
+
+  it('haversine: a two-point route is routeKm to the last digit', async () => {
+    const r = await haversine.routeLegs([ORIGIN, FINAL]);
+    expect(r.km).toBe((await haversine.routeKm(ORIGIN, FINAL)).km);
+    expect(r.legs).toHaveLength(1);
+  });
+
+  it('haversine: fewer than two points has no legs', async () => {
+    expect(await haversine.routeLegs([ORIGIN])).toEqual({ legs: [], km: 0, minutes: null, source: 'haversine', degraded: false });
+  });
+
+  it('OSRM: ONE /route call through every point in order (lng,lat), legs and totals in km/min', async () => {
+    const f = mockFetch(200, okRoute);
+    vi.stubGlobal('fetch', f);
+    const r = await new OsrmMapsProvider('http://osrm.test/').routeLegs(POINTS);
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(String((f.mock.calls[0] as unknown as [string])[0])).toBe(
+      'http://osrm.test/route/v1/driving/-58.1551,6.8013;-58.1443,6.8143;-58.15,6.825;-58.16,6.82?overview=false',
+    );
+    expect(r).toEqual({
+      legs: [{ km: 2, minutes: 5 }, { km: 1.5, minutes: 4.5 }, { km: 3.9, minutes: 9 }],
+      km: 7.4,
+      minutes: 18.5,
+      source: 'osrm',
+      degraded: false,
+    });
+  });
+
+  it('OSRM: one leg of 0 m is a real leg (two points across one road snap to one node) — kept, not degraded', async () => {
+    const route = { distance: 5900, duration: 840, legs: [{ distance: 2000, duration: 300 }, { distance: 0, duration: 0 }, { distance: 3900, duration: 540 }] };
+    vi.stubGlobal('fetch', mockFetch(200, { code: 'Ok', routes: [route] }));
+    const r = await new OsrmMapsProvider('http://osrm.test').routeLegs(POINTS);
+    expect(r).toMatchObject({ km: 5.9, degraded: false, source: 'osrm' });
+    expect(r.legs[1]).toEqual({ km: 0, minutes: 0 });
+  });
+
+  it('OSRM: a leg without a duration keeps its distance and says so', async () => {
+    const route = { ...okRoute.routes[0]!, legs: [{ distance: 2000 }, { distance: 1500, duration: 270 }, { distance: 3900, duration: 540 }] };
+    vi.stubGlobal('fetch', mockFetch(200, { code: 'Ok', routes: [route] }));
+    const r = await new OsrmMapsProvider('http://osrm.test').routeLegs(POINTS);
+    expect(r.legs[0]).toEqual({ km: 2, minutes: null });
+    expect(r.degraded).toBe(false);
+  });
+
+  const failures: Array<[string, () => unknown]> = [
+    ['the request throws', () => vi.fn(async () => { throw new Error('ECONNREFUSED'); })],
+    ['a non-OK HTTP status', () => mockFetch(500, {})],
+    ['a code that is not Ok', () => mockFetch(200, { code: 'NoRoute', routes: [] })],
+    ['no route', () => mockFetch(200, { code: 'Ok', routes: [] })],
+    ['a route without a distance', () => mockFetch(200, { code: 'Ok', routes: [{ ...okRoute.routes[0], distance: undefined }] })],
+    ['a route without legs', () => mockFetch(200, { code: 'Ok', routes: [{ distance: 7400, duration: 1110 }] })],
+    ['one leg fewer than the points need', () => mockFetch(200, { code: 'Ok', routes: [{ ...okRoute.routes[0], legs: okRoute.routes[0]!.legs.slice(1) }] })],
+    ['a leg without a distance', () => mockFetch(200, { code: 'Ok', routes: [{ ...okRoute.routes[0], legs: [{ duration: 300 }, ...okRoute.routes[0]!.legs.slice(1)] }] })],
+    ['a negative distance', () => mockFetch(200, { code: 'Ok', routes: [{ ...okRoute.routes[0], distance: -1 }] })],
+    ['a whole route of 0 m: every point snapped to one node, nothing routed', () => mockFetch(200, {
+      code: 'Ok',
+      routes: [{ distance: 0, duration: 0, legs: [{ distance: 0, duration: 0 }, { distance: 0, duration: 0 }, { distance: 0, duration: 0 }] }],
+    })],
+  ];
+  it.each(failures)('OSRM: %s → the deterministic estimate, marked degraded', async (_label, stub) => {
+    vi.stubGlobal('fetch', stub());
+    const r = await new OsrmMapsProvider('http://osrm.test').routeLegs(POINTS);
+    expect(r).toEqual({ ...(await haversine.routeLegs(POINTS)), degraded: true });
+  });
+
+  it('OSRM: fewer than two points asks nothing', async () => {
+    const f = vi.fn();
+    vi.stubGlobal('fetch', f);
+    expect((await new OsrmMapsProvider('http://osrm.test').routeLegs([ORIGIN])).legs).toEqual([]);
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('Google: the deterministic estimate, never degraded, never a paid call', async () => {
+    const f = vi.fn();
+    vi.stubGlobal('fetch', f);
+    expect(await new GoogleMapsProvider('key').routeLegs(POINTS)).toEqual(await haversine.routeLegs(POINTS));
+    expect(f).not.toHaveBeenCalled();
+  });
+});
