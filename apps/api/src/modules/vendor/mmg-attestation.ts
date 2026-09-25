@@ -133,9 +133,12 @@ export async function recordVendorAttestation(
   });
   if (clash) return { ok: false, reason: 'REFERENCE_ALREADY_USED' };
 
+  // [E02 · refund rail 1/8] The amount lands on the row beside the reference,
+  // in the same write: it is the cap every MMG refund obligation on this order
+  // is held to (a deferred trigger refuses anything over it).
   await tx.order.update({
     where: { id: input.orderId },
-    data: { mmgAttestedRef: input.reference, mmgAttestedById: input.actorId, mmgAttestedAt: now },
+    data: { mmgAttestedRef: input.reference, mmgAttestedById: input.actorId, mmgAttestedAt: now, mmgAttestedAmount: input.amount },
   });
   // The evidence a reconciliation, a dispute or an audit reads back. It names
   // the money and the destination, because "received" without an amount and a

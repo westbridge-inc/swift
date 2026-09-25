@@ -57,6 +57,13 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   // handed back. Same unit as the order total the obligation is taken from.
   { model: 'Order', field: 'refundOwedAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'refundPaidAmount', unit: 'MAJOR_WHOLE' },
+  // [E02] The MMG refund rail: what the store attested it received (the cap),
+  // what it owes back, what it says it sent, and the MMG fee Swift pays back.
+  // Same unit as the order total every one of them is taken from.
+  { model: 'Order', field: 'mmgAttestedAmount', unit: 'MAJOR_WHOLE' },
+  { model: 'MmgRefundObligation', field: 'amount', unit: 'MAJOR_WHOLE' },
+  { model: 'MmgRefundSend', field: 'amount', unit: 'MAJOR_WHOLE' },
+  { model: 'MmgRefundSend', field: 'feeBorneBySwift', unit: 'MAJOR_WHOLE' },
   // [W-26] What each side ATTESTED changed hands. Same unit as the amount
   // above by construction: the ledger refuses any figure that is not it.
   { model: 'DeliveryCashSettlement', field: 'riderAttestedAmount', unit: 'MAJOR_WHOLE' },
