@@ -138,8 +138,11 @@ describe('the stack this suite models', () => {
 });
 
 describe('an inbox row opens exactly where its push opens [E28]', () => {
+  // [Q10] The order-update example was prep_ready, which the API sends to the
+  // RIDER (it opens their live job now). A customer order update is the
+  // status push orderAccepted sends: orderId, orderNumber, status, no kind.
   it.each([
-    ['an order update', { kind: 'prep_ready', orderId: 'o1' }, 'Delivery'],
+    ['an order update', { orderId: 'o1', orderNumber: 'SW-1', status: 'ACCEPTED' }, 'Delivery'],
     ['a ride update', { kind: 'ride_queue_matched', orderId: 'o2', audience: 'customer' }, 'Taxi'],
     ['a service-job update', { kind: 'booking_confirmed', jobId: 'j1' }, 'ServiceJobs'],
   ])('%s row is a button that navigates through the push table', (_label, data, screen) => {
@@ -152,7 +155,7 @@ describe('an inbox row opens exactly where its push opens [E28]', () => {
   });
 
   it('an order row carries the order it is about', () => {
-    pressTheRow(renderRow(row({ kind: 'prep_ready', orderId: 'o1' })));
+    pressTheRow(renderRow(row({ orderId: 'o1', orderNumber: 'SW-1', status: 'ACCEPTED' })));
     expect(mocks.safeNavigate).toHaveBeenCalledExactlyOnceWith('Delivery', { orderId: 'o1' });
   });
 });
@@ -166,9 +169,11 @@ describe('a row with nowhere to go is not a button [E28]', () => {
   });
 
   it('a store alert that reached the shopping inbox is not a button that opens nothing', () => {
-    // vendor_order_alert is sent without an audience, so the inbox filter
-    // lists it for someone who both runs a store and shops. It resolves to the
-    // store's order desk, a screen CustomerStack does not mount.
+    // vendor_order_alert rows sent before [Q10] carry no audience, so the
+    // inbox filter lists them for someone who both runs a store and shops.
+    // It resolves to the store's order desk, a screen CustomerStack does not
+    // mount. (New rows are tagged business, which the filter drops, as the
+    // store copy of a moved appointment below is.)
     const data = { kind: 'vendor_order_alert', orderId: 'o9' };
     expect(destinationFor(data)).toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o9' } });
     expect(buttonsIn(renderRow(row(data)))).toEqual([]);

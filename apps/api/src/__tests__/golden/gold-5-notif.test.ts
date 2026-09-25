@@ -393,13 +393,20 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     o2 = await placeOrder(customer, store);
 
     // The alert: one inbox row (the ladder's state), one push, one delivery receipt.
+    // [Q10] It carries the response deadline its push rings until — the same
+    // cut-off the store's board clock drains toward — and the business audience.
+    const board = await call('GET', `/api/v1/vendor/orders/${o2.orderId}`, owner.token);
+    expect(board.statusCode, board.body).toBe(200);
+    const respondBy = board.json().data.respondBy as string;
+    expect(Date.parse(respondBy)).toBeGreaterThan(Date.now());
+    const alertData = { orderId: o2.orderId, orderNumber: o2.orderNumber, status: 'PENDING', kind: 'vendor_order_alert', respondBy, audience: 'business' };
     const alert = await alertRow(o2.orderId);
     expect({ title: alert.title, isRead: alert.isRead, data: alert.data }).toEqual({
       title: 'New Order!', isRead: false,
-      data: { orderId: o2.orderId, orderNumber: o2.orderNumber, status: 'PENDING', kind: 'vendor_order_alert' },
+      data: alertData,
     });
     expect(pushesTo(vendorDevice).map((p) => ({ title: p.title, data: p.data }))).toEqual([
-      { title: 'New Order!', data: { orderId: o2.orderId, orderNumber: o2.orderNumber, status: 'PENDING', kind: 'vendor_order_alert' } },
+      { title: 'New Order!', data: alertData },
     ]);
     const tracked = await receipt(o2.orderId);
     expect({ recipient: tracked.recipientId, ack: tracked.acknowledgedAt }).toEqual({ recipient: owner.userId, ack: null });
@@ -434,9 +441,14 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     expect(outcome).toBe('realerted');
     expect(attempts).toBe(2);
     expect(Date.now() - started).toBeGreaterThanOrEqual(PUSH_RETRY_DELAYS_MS[0]! - 50);
+    // [Q10] The re-alert used to carry only { orderId }, which the tap-router
+    // opens on the CUSTOMER Delivery screen; it now names the store alert.
     expect(pushesTo(vendorDevice).map((p) => ({ title: p.title, body: p.body, data: p.data }))).toEqual([
-      { title: 'New Order!', body: alert.body, data: { orderId: o2.orderId, orderNumber: o2.orderNumber, status: 'PENDING', kind: 'vendor_order_alert' } },
-      { title: 'Order still waiting!', body: alert.body, data: { orderId: o2.orderId } },
+      { title: 'New Order!', body: alert.body, data: alertData },
+      {
+        title: 'Order still waiting!', body: alert.body,
+        data: { kind: 'vendor_order_alert', orderId: o2.orderId, orderNumber: o2.orderNumber, audience: 'business', respondBy },
+      },
     ]);
     expect(smsTo(owner.phone)).toHaveLength(0);
     // …and the worker armed rung 1, one minute on.
@@ -460,6 +472,8 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     expect((await alertRow(o2.orderId)).isRead).toBe(false);
     const stillPending = await call('GET', '/api/v1/vendor/alerts/pending', owner.token);
     expect((stillPending.json().data as unknown[])).toHaveLength(1);
+    // [Q10] …and the refused acks stamped nothing (G5-F1, fixed).
+    expect((await receipt(o2.orderId)).acknowledgedAt).toBeNull();
 
     const before = Date.now();
     const ack = await call('PUT', `/api/v1/vendor/orders/${o2.orderId}/ack`, owner.token, {});
@@ -470,8 +484,10 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     const ackedAfter = Date.now();
     expect(acked.readAt!.getTime()).toBeGreaterThanOrEqual(before - 5);
     expect(acked.readAt!.getTime()).toBeLessThanOrEqual(ackedAfter + 5);
-    // (The delivery receipt is not asserted here: the stranger's refused ack
-    // above already stamped it — that is G5-F1, pinned below.)
+    // The store's OWN ack is what stamps the delivery receipt.
+    const stamped = (await receipt(o2.orderId)).acknowledgedAt!;
+    expect(stamped.getTime()).toBeGreaterThanOrEqual(before - 5);
+    expect(stamped.getTime()).toBeLessThanOrEqual(ackedAfter + 5);
     expect((await call('GET', '/api/v1/vendor/alerts/pending', owner.token)).json().data).toEqual([]);
 
     // Every later rung is a no-op: nothing more reaches the store.
@@ -518,16 +534,18 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// G5-F1 — a refused ack still stamps the store's alert-delivery receipt
+// G5-F1 — a refused ack stamped the store's alert-delivery receipt (FIXED)
 // ---------------------------------------------------------------------------
 //
-// vendor.routes.ts `PUT /orders/:id/ack` (and accept / reject) call
+// vendor.routes.ts `PUT /orders/:id/ack` (and accept / reject) called
 // acknowledgeAlert(prisma, 'VENDOR_ORDER', orderId) BEFORE resolveOwnedOrder,
-// with no recipient: any signed-in account that names an order id stamps
-// acknowledgedAt on that store's delivery receipt, and only then is refused.
+// with no recipient: any signed-in account that named an order id stamped
+// acknowledgedAt on that store's delivery receipt, and only then was refused.
 // The receipt is the alert-latency record the admin alerts view reads. This
 // asserts the correct behaviour; the setup runs in beforeAll, so the only
-// assertion that can fail is the receipt check.
+// assertion that can fail is the receipt check. [Q10 loud alerts 1/4] moved
+// the ack after the ownership check on all three routes, so this is no longer
+// an expected failure (`it.fails` would now report the passing check as red).
 describe('GOLD-5 · NOTIF-02 — G5-F1', () => {
   let orderId = '';
   let refusedStatus = 0;
@@ -547,7 +565,7 @@ describe('GOLD-5 · NOTIF-02 — G5-F1', () => {
     expect(refusedStatus).toBe(404);
   });
 
-  it.fails('[G5-F1] a stranger’s refused ack leaves the store’s alert-delivery receipt unacknowledged', async () => {
+  it('[G5-F1] a stranger’s refused ack leaves the store’s alert-delivery receipt unacknowledged', async () => {
     const tracked = await sys(() => app.prisma.alertDelivery.findFirstOrThrow({ where: { kind: 'VENDOR_ORDER', subjectId: orderId } }));
     expect(tracked.acknowledgedAt).toBeNull();
   });

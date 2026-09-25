@@ -4,6 +4,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type Redis from 'ioredis';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../providers/notifications/channels';
+import { pushOptionsFor } from '../providers/notifications/alert-class';
 import { closeOnlineSession } from './rider/online-hours';
 import { EvidenceService } from './safety/evidence.service';
 import { persistMoverCustodyLossIncidentInTransaction } from './safety/incident.service';
@@ -397,6 +398,7 @@ async function emitDurableNotifications(
       notification.title,
       notification.body,
       { ...rawData, notificationId: notification.id },
+      pushOptionsFor(rawData),
     );
     if (result.invalidTokens?.length) {
       await runtime.prisma.deviceToken.updateMany({

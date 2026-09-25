@@ -553,6 +553,10 @@ describe('vendor prep signal with rider assigned', () => {
       where: { userId: rider.userId, title: 'Order ready for pickup' },
     });
     expect(note).not.toBeNull();
+    // [Q10] ...as an EARNER push: the tag keeps it out of a shopping inbox, and
+    // the tap-router opens the rider's live job for this kind (the mobile
+    // census, notification-router.test.ts), not the customer order screen.
+    expect(note!.data).toEqual({ orderId: order.id, kind: 'prep_ready', audience: 'earner' });
 
     // Double-tap is idempotent, not an error.
     const again = await inject('PUT', `/api/v1/vendor/orders/${order.id}/ready`, {}, vendor.token);
