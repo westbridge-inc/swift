@@ -57,6 +57,9 @@ const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> 
   // mover offer push. The offer push now has its own kill switch.
   { name: 'ALERTS_LOUD', whenUnset: '0', what: 'how soon the store new-order ladder re-alerts and falls back to SMS' },
   { name: 'OFFER_PUSH', whenUnset: '1', what: 'whether every mover offer is also pushed (0 = kill switch)' },
+  // Only exactly '1' turns it on (providers/mmg/mmg-checkout.ts); the boot
+  // guard refuses any other non-zero spelling.
+  { name: 'MMG_CHECKOUT_ENABLED', whenUnset: '0', what: 'whether partners may pay the weekly fee on the MMG hosted checkout page' },
 ];
 
 /**

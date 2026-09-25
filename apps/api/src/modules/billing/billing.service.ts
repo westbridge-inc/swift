@@ -16,6 +16,7 @@ import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billi
 import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor, weeklyFeeAmount } from './subscription-fee';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice, type BillingNoticeLeaseGuard } from './billing-notice-delivery';
+import { AGENT_PAY_WAY, FEE_RESTORE_LINE, feePayWays } from './fee-notice-copy';
 import { cardRailKilled } from '../../utils/card-rail';
 
 // ---------------------------------------------------------------------------
@@ -2545,7 +2546,7 @@ export class BillingService {
         data: { kind: 'billing_final_warning', subscriptionId: sub.id, suspendsAt: nextRetryAt.toISOString() },
       }).catch(() => {});
       await this
-        .smsPayer(sub, `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. Open the app to pay now.`)
+        .smsPayer(sub, `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. ${feePayWays(sub)}.`)
         .catch(() => {});
       await notifyAdmins(this.prisma, this.notifications, {
         tenantId: await tenantOfUser(this.prisma, sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId ?? null),
@@ -2559,7 +2560,7 @@ export class BillingService {
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription payment failed',
-      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). Top up or update your card to stay active.`,
+      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). ${feePayWays(sub)} to stay active.`,
       audience: this.payerAudience(sub),
       data: { kind: 'billing_failed', subscriptionId: sub.id },
     }).catch(() => {});
@@ -2734,20 +2735,23 @@ export class BillingService {
     });
   }
 
-  /** Post-commit suspension side effects (push + SMS). */
+  /** Post-commit suspension side effects (push + SMS). The ways to pay are
+   *  the real ones (fee-notice-copy.ts): the app has no pay button, and an
+   *  agent payment is not recorded instantly. */
   private async suspendAccessNotices(sub: SubWithRelations) {
+    const ways = feePayWays(sub);
     await this.notifications.send({
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription suspended',
-      body: 'Your subscription is unpaid and your access is suspended. Top up or pay to be reinstated instantly.',
+      body: `Your subscription is unpaid and your access is suspended. ${ways}. ${FEE_RESTORE_LINE}`,
       audience: this.payerAudience(sub),
       data: { kind: 'billing_suspended', subscriptionId: sub.id },
     });
     // §11 stage 5→6: the suspension notice also lands as SMS with the way
     // back in — the payer may have lost the app or muted push entirely.
     await this
-      .smsPayer(sub, 'Swift: your account is suspended for non-payment. Pay your weekly fee in the app (or top up your balance) and access is restored instantly.')
+      .smsPayer(sub, `Swift: your account is suspended for non-payment. ${ways}. ${FEE_RESTORE_LINE}`)
       .catch(() => {});
   }
 
@@ -2883,7 +2887,8 @@ export class BillingService {
               noticeVersion: 1, target: 'payer', userId: this.payerUserId(sub), audience: this.payerAudience(sub),
               title: 'Subscription closed',
               body: 'Your subscription was closed after 30 days unpaid. You can rejoin anytime — pay your weekly fee and your access is restored.',
-              sms: 'Swift: your subscription was closed after 30 days unpaid. Rejoin anytime — pay in the app and access is restored instantly.',
+              // Never the MMG request here: a CHURNED account is no longer retried.
+              sms: `Swift: your subscription was closed after 30 days unpaid. You can rejoin anytime. ${AGENT_PAY_WAY}. ${FEE_RESTORE_LINE}`,
               data: { kind: 'billing_churned', subscriptionId: sub.id },
             };
             await tx.billingEvent.create({
@@ -2904,17 +2909,14 @@ export class BillingService {
           // transaction and is handled as an idempotent loser below.
           const dayKey = now.toISOString().slice(0, 10);
           const noticeKey = `nudge:${sub.id}:${dayKey}`;
-          const rail =
-            sub.billingMethod === 'MOBILE_MONEY'
-              ? 'Approve the MMG request on your phone (or tap Pay in the app)'
-              : sub.billingMethod === 'CARD'
-                ? 'Update your card or tap Pay in the app'
-                : 'Top up your prepaid balance in the app';
+          // A SUSPENDED account is still retried daily, so the MMG request is
+          // real where the rail sends one (fee-notice-copy.ts).
+          const ways = feePayWays(sub);
           const notice: BillingNotice = {
             noticeVersion: 1, target: 'payer', userId: this.payerUserId(sub), audience: this.payerAudience(sub),
             title: 'Suspended — pay to restore access',
-            body: `Your weekly fee of $${weeklyFeeAmount(sub).toLocaleString()} ${sub.currencyCode} is unpaid. ${rail} and your access is restored instantly.`,
-            sms: `Swift: your account is still suspended. ${rail} — access is restored the moment you pay.`,
+            body: `Your weekly fee of $${weeklyFeeAmount(sub).toLocaleString()} ${sub.currencyCode} is unpaid. ${ways}. ${FEE_RESTORE_LINE}`,
+            sms: `Swift: your account is still suspended. ${ways}. ${FEE_RESTORE_LINE}`,
             data: { kind: 'billing_suspended_nudge', subscriptionId: sub.id },
           };
           await tx.billingEvent.create({
