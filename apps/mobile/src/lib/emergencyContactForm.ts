@@ -19,6 +19,29 @@ export const EMERGENCY_CONTACT_CTA = 'Send code';
 export const NAME_HINT = 'Enter their name.';
 export const NAME_MIN_LENGTH = 2;
 
+// [Q9] An emergency contact is someone else. The API refuses the account's
+// own number (EMERGENCY_CONTACT_IS_YOU) and never alerts a row that holds it;
+// the form says so before the tap, in the server's own words, and the list
+// marks a row saved before that rule.
+export const OWN_NUMBER_HINT = 'An emergency contact must be someone else. Enter their number, not yours.';
+export const OWN_NUMBER_ROW = 'This is your own number — it won’t be alerted. Add someone else.';
+
+/** The same number, however it is written: digits only on both sides. */
+export function isOwnNumber(contactPhone: string, ownPhone: string | null | undefined): boolean {
+  const own = (ownPhone ?? '').replace(/\D/g, '');
+  return own.length > 0 && own === contactPhone.replace(/\D/g, '');
+}
+
+/** A listed contact holding the account's own number: flagged by the server
+ *  (compared with the phone the account holds now), or matched here against
+ *  the signed-in phone for a server that does not send the flag yet. */
+export function isOwnContact(
+  contact: { phoneE164: string; isOwnNumber?: boolean },
+  ownPhone: string | null | undefined,
+): boolean {
+  return contact.isOwnNumber === true || isOwnNumber(contact.phoneE164, ownPhone);
+}
+
 export interface EmergencyContactFormInput {
   name: string;
   /** Local digits as typed, without the calling code. */
@@ -28,6 +51,8 @@ export interface EmergencyContactFormInput {
   /** Hints appear once a field has been left, never while it is first typed. */
   nameTouched: boolean;
   phoneTouched: boolean;
+  /** The signed-in account's phone; its own number is never a contact. */
+  ownPhone?: string | null;
 }
 
 export interface EmergencyContactFormState {
@@ -51,10 +76,16 @@ export function emergencyContactForm(input: EmergencyContactFormInput): Emergenc
   const nameOk = input.name.trim().length >= NAME_MIN_LENGTH;
   const phoneE164 = emergencyContactPhoneE164(input.dialCode, input.digits);
   const phoneOk = phoneLenState(input.dialCode, input.digits) === 'ok' && CONTACT_E164.test(phoneE164);
+  // The account's own number is said at once, not on blur: matching it means
+  // the number is complete, not half-typed, and the button it disables must
+  // never sit greyed out with no reason under it.
+  const ownNumber = isOwnNumber(phoneE164, input.ownPhone);
   return {
-    canSubmit: nameOk && phoneOk,
+    canSubmit: nameOk && phoneOk && !ownNumber,
     phoneE164,
     ...(input.nameTouched && !nameOk ? { nameHint: NAME_HINT } : {}),
-    ...(input.phoneTouched && !phoneOk ? { phoneHint: phoneHintFor(input.countryCode) } : {}),
+    ...(ownNumber
+      ? { phoneHint: OWN_NUMBER_HINT }
+      : input.phoneTouched && !phoneOk ? { phoneHint: phoneHintFor(input.countryCode) } : {}),
   };
 }
