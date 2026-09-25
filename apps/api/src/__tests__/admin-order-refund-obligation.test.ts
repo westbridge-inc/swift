@@ -46,7 +46,11 @@ async function makeCustomer() {
   return user;
 }
 
-async function makeCashOrder(opts?: { payment?: 'CASH' | 'MOBILE_MONEY'; total?: number }) {
+async function makeCashOrder(opts?: {
+  payment?: 'CASH' | 'MOBILE_MONEY'; total?: number;
+  /** A row born in this state, as history holds it (see the E02 case below). */
+  born?: { status: 'CANCELLED'; paymentStatus: 'CLAIMED' | 'CAPTURED'; refundOwedAmount: number };
+}) {
   const customer = await makeCustomer();
   return app.prisma.order.create({
     data: {
@@ -56,6 +60,7 @@ async function makeCashOrder(opts?: { payment?: 'CASH' | 'MOBILE_MONEY'; total?:
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
       deliveryFee: 300, totalAmount: opts?.total ?? 1300,
       paymentMethod: opts?.payment ?? 'CASH',
+      ...(opts?.born ? { ...opts.born, cancelledAt: new Date(), refundOwedAt: new Date() } : {}),
     },
   });
 }
@@ -209,6 +214,23 @@ describe('[A-14] only reconciled evidence closes the obligation', () => {
     const order = await owedOrder();
     expect((await settle(order.id, { reference: '   ', amount: 1300 })).json().error.code).toBe('REFUND_REF_REQUIRED');
     expect((await settle(order.id, { reference: '!!', amount: 1300 })).json().error.code).toBe('REFUND_REF_INVALID');
+  });
+
+  it.each(['CLAIMED', 'CAPTURED'] as const)('[E02 · DS272 F2] a %s MMG order is never settled here: 409 MMG_REFUND_RAIL_REQUIRED, and the order is untouched', async (paymentStatus) => {
+    // Legacy only: an MMG order the store was paid for, cancelled with an A-14
+    // obligation before cancel refused MMG. Born in that state, because the
+    // database no longer lets anything move a paid MMG order to CANCELLED
+    // without a refund obligation. Settling it here used to reach the
+    // REFUNDED write, which the database refuses at COMMIT: a 500.
+    const order = await makeCashOrder({ payment: 'MOBILE_MONEY', born: { status: 'CANCELLED', paymentStatus, refundOwedAmount: 1300 } });
+    const res = await settle(order.id, { reference: refFor('MMG'), amount: 1300 });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('MMG_REFUND_RAIL_REQUIRED');
+
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ status: fresh.status, paymentStatus: fresh.paymentStatus, ref: fresh.refundRef, settledAt: fresh.refundSettledAt })
+      .toEqual({ status: 'CANCELLED', paymentStatus, ref: null, settledAt: null });
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'REFUNDED' } })).toBe(0);
   });
 
   it('an order that owes nothing cannot be settled', async () => {

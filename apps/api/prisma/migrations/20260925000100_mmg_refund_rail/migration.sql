@@ -229,6 +229,11 @@ ALTER TABLE "mmg_refund_obligations" ADD CONSTRAINT "chk_mmg_refund_obligations_
   CHECK (("sendId" IS NOT NULL) = ("status" IN ('SENT', 'CONFIRMED', 'DISPUTED', 'SETTLED')));
 
 -- BACKFILL (see the header): the cap every existing paid MMG order already has.
+-- It REQUIRES a role that bypasses row security: a superuser, a BYPASSRLS role,
+-- or a member of swift_bypass_rls. "orders" is FORCE ROW LEVEL SECURITY, and a
+-- migration binds no app.current_tenant, so under any other role the policy
+-- hides every row and this UPDATE silently changes nothing. Every environment
+-- migrates as the database superuser today (DS272 F3).
 WITH attested AS (
   SELECT DISTINCT ON (a."entityId") a."entityId" AS "orderId", a."changes"->>'amount' AS "amount"
     FROM "audit_logs" a

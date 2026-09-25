@@ -36,6 +36,13 @@ import { log } from '../../utils/logger';
 // attested it received, and a paid MMG order never becomes CANCELLED or
 // REFUNDED without a CANCELLATION obligation. The MMG fee a send records is
 // Swift's to pay back (owner decision (d)) and never enters this arithmetic.
+//
+// LOCK ORDER, for every writer that applies this law (DS272 F5): lock the
+// ORDER row first (`SELECT … FROM "orders" … FOR UPDATE`), then read and write
+// its obligations and sends. The cap trigger locks that same order row at
+// COMMIT. A writer that already holds it re-enters its own lock, but one that
+// took obligation rows first can deadlock against a writer that went the
+// other way round.
 // ---------------------------------------------------------------------------
 
 // ─── The states ─────────────────────────────────────────────────────────────

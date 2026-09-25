@@ -12,7 +12,7 @@ import { classesAtOrAbove } from '../rides/fare.service';
 import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
 import { algoConfig } from '../algo/algo-config';
-import { foodAgeLimitMinutes, foodAge, retireTooOldOrder, rescueIncentiveGyd, grantRescueIncentive, incentiveKey } from './rescue';
+import { foodAgeLimitMinutes, foodAge, retireTooOldOrder, rescueIncentiveGyd, grantRescueIncentive, incentiveKey, isCapturedMmg } from './rescue';
 import { recordDecision } from '../algo/decisions';
 import { TERMINAL_ORDER_STATUSES, DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
@@ -2842,10 +2842,20 @@ export class DispatchService {
         } else {
           // The wait limit is up — release the ride, honestly and exactly once
           // (conditional update: a driver matched in the same instant wins).
+          // [E02 · DS272 F1] A ride paid by MMG (legacy only: rides are born
+          // CASH) is never released here. The database refuses a paid MMG
+          // order becoming CANCELLED without its refund obligation, and that
+          // refusal at COMMIT would fail this run. As in the food-age cutoff
+          // (rescue.ts), the guard lives in the CAS: the ride stays for an
+          // operator, who is paged below.
           const released = await this.prisma.order.updateMany({
-            where: { id: order.id, status: 'PENDING', driverId: null },
+            where: {
+              id: order.id, status: 'PENDING', driverId: null,
+              NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
+            },
             data: { status: 'CANCELLED', cancelledAt: new Date(), cancellationReason: 'NO_DRIVERS_AVAILABLE' },
           });
+          if (released.count === 0) await this.pageHeldPaidMmgRide(order);
           if (released.count > 0) {
             await this.prisma.orderStatusLog
               .create({ data: { orderId: order.id, status: 'CANCELLED', changedBy: 'system', note: `Released after ${TAXI_WAIT_LIMIT_MIN} min — no drivers available` } })
@@ -2921,6 +2931,29 @@ export class DispatchService {
       }),
     ).catch(() => {});
     return true;
+  }
+
+  /** [E02 · DS272 F1] The slow lane's release matched nothing. Usually a
+   *  driver took the ride in the same instant; if instead the ride is paid by
+   *  MMG (legacy only), it was deliberately left PENDING, and a person is told
+   *  once, since nothing automatic will ever move it. */
+  private async pageHeldPaidMmgRide(order: { id: string; orderNumber: string; tenantId: string }): Promise<void> {
+    const held = await this.prisma.order.findUnique({
+      where: { id: order.id },
+      select: { status: true, driverId: true, paymentMethod: true, paymentStatus: true },
+    });
+    if (!held || held.status !== 'PENDING' || held.driverId !== null || !isCapturedMmg(held)) return;
+    log().warn({ orderId: order.id, paymentStatus: held.paymentStatus }, 'dispatch: a paid-MMG ride passed the wait limit and was NOT released; an operator decides it');
+    const { opsPageOnce } = await import('../../jobs/queue');
+    await opsPageOnce({ redis: this.redis }, `ride_release_held_mmg:${order.id}`, EXHAUST_TERMINAL_TTL_SECONDS, () =>
+      notifyAdmins(this.prisma, this.notifications, {
+        title: 'Ride not released: paid by MMG',
+        body: `Ride ${order.orderNumber} waited ${TAXI_WAIT_LIMIT_MIN} min with no driver, but it is recorded as paid by MMG (${held.paymentStatus}). It was not released, because cancelling a paid MMG order needs a refund obligation. Decide it by hand.`,
+        // The ride's own exhausted kind: the tap lands on the order, as the exhausted page does.
+        data: { kind: 'ops_dispatch_exhausted', orderId: order.id },
+        tenantId: order.tenantId,
+      }),
+    ).catch(() => {});
   }
 
   // -------------------------------------------------------------------------
