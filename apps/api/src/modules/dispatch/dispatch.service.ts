@@ -2936,7 +2936,8 @@ export class DispatchService {
   /** [E02 · DS272 F1] The slow lane's release matched nothing. Usually a
    *  driver took the ride in the same instant; if instead the ride is paid by
    *  MMG (legacy only), it was deliberately left PENDING, and a person is told
-   *  once, since nothing automatic will ever move it. */
+   *  once, since nothing automatic moves it: reconcileStuckDispatch excludes
+   *  it by the same predicate (DS274 A1), so no job re-drives it. */
   private async pageHeldPaidMmgRide(order: { id: string; orderNumber: string; tenantId: string }): Promise<void> {
     const held = await this.prisma.order.findUnique({
       where: { id: order.id },
@@ -3070,8 +3071,15 @@ export async function reconcileStuckDispatch(
             riderDispatchReadinessFilter(),
           ],
         },
-        // Taxi: waiting on a driver.
-        { orderType: 'TAXI', driverId: null, status: 'PENDING', AND: [dispatchHoldExpiredFilter()] },
+        // Taxi: waiting on a driver. [E02 · DS274 A1] A ride paid by MMG
+        // (legacy only: rides are born CASH) that the slow lane held for a
+        // person is not stuck either; re-driving it would re-offer drivers a
+        // ride past its wait limit, hold it again, and loop every cooldown.
+        // The same predicate as the release CAS in the slow lane.
+        {
+          orderType: 'TAXI', driverId: null, status: 'PENDING', AND: [dispatchHoldExpiredFilter()],
+          NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
+        },
       ],
   };
   // One bounded page per invocation, with Redis-persisted progress. A fixed

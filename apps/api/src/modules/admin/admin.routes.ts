@@ -2600,7 +2600,12 @@ export async function adminRoutes(app: FastifyInstance) {
     // `E.order` fields, so the legacy row that hand-typed them is retired.
     const updated = await tenantPrisma.$transaction(async (tx) => {
       const settled = await tx.order.updateMany({
-        where: { id, refundOwedAt: { not: null }, refundSettledAt: null },
+        // [E02 · DS274 A3] The paid-MMG refusal above is re-stated in the CAS,
+        // so the database, not only the pre-check, holds it under a race.
+        where: {
+          id, refundOwedAt: { not: null }, refundSettledAt: null,
+          NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
+        },
         data: {
           status: 'REFUNDED',
           refundRef: reference,
