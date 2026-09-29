@@ -32,13 +32,13 @@ import { SITE_DOMAIN, SITE_ORIGIN } from './site.domain';
 
 export const site = {
   /** Exact D&B spelling. Appears on /about, /contact and every footer. */
-  legalEntityName: '{{LEGAL_ENTITY_NAME}}',
+  legalEntityName: 'Westbridge Inc.',
 
   /** Exact D&B address, one line. Apple matches this against the D&B record. */
-  address: '{{COMPANY_ADDRESS}}',
+  address: 'Lot 165 New Trafalgar Building Waterloo Street Georgetown Guyana',
 
   /** The number the founder actually answers. Apple may call it. */
-  phone: '{{COMPANY_PHONE}}',
+  phone: '+592 7163534',
 
   /** Support inbox. Already live on the domain's mail — do not change. */
   supportEmail: 'support@swiftgy.com',

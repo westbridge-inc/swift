@@ -282,10 +282,13 @@ export function desiredPlatformConfig(): DesiredConfig {
         },
       },
     ],
-    // [B5] Rider stacking capacity, founder-gated at 2 (2026-08-29): created
-    // once; a later change is an admin decision, never a re-seed.
+    // [B5] Rider stacking capacity, founder-gated: 2 (2026-08-29), raised to 3
+    // by the owner on 2026-09-24 ("the riders can take plenty orders", then
+    // "2 b"). 3 is the ceiling concurrency-policy.ts clamps to. Created once on
+    // a fresh install; an existing install changes by a higher-version row,
+    // never a re-seed.
     algoConfig: [
-      { tenantId: 'swift-default', key: 'stacking.riderCapacity', value: 2, founderGated: true, updatedBy: 'seed:founder-directive-2026-08-29' },
+      { tenantId: 'swift-default', key: 'stacking.riderCapacity', value: 3, founderGated: true, updatedBy: 'seed:founder-directive-2026-09-24' },
     ],
     zoneFares: [
       { fromZoneId: 'georgetown-central', toZoneId: 'georgetown-south', fare: 2000 },
