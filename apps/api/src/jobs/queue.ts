@@ -183,18 +183,6 @@ export function createQueues(
   }
 }
 
-export async function enqueueVendorAlertFollowup(
-  queues: Pick<SwiftQueues, 'notificationQueue'>,
-  orderId: string,
-): Promise<void> {
-  await queues.notificationQueue.add('vendor-alert-escalate', { orderId, level: 1 }, {
-    // §A1: SMS at +75s total when loud (30+45); default stays 60+60.
-    delay: process.env['ALERTS_LOUD'] === '1' ? 45_000 : 60_000,
-    removeOnComplete: 100,
-    removeOnFail: 50,
-  });
-}
-
 /** Weekly vendor settlement snapshot [SWIFT-AUD-D6-05 / D7-01].
  *  Exported so tests can drive it directly; the settlement worker delegates
  *  here. BullMQ single-delivery keeps the schedule from double-firing across
@@ -1101,20 +1089,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     { connection, concurrency: 1 },
   );
 
-  // NOTIFICATIONS: vendor-alert escalation — re-alert, then SMS
+  // NOTIFICATIONS: the store new-order ladder [Q10 loud alerts 2/4] — ring
+  // twice, text the store, tell the operators; every rung decides at send
+  // time (store-alert-ladder.ts), and the first one schedules the rest.
   const notificationWorker = buildWorker(
     QUEUE_NAMES.NOTIFICATION,
     async (job: Job) => {
       if (job.name !== 'vendor-alert-escalate') return;
-      const { escalateVendorAlert } = await import('../modules/notification/notification.service');
+      const { runLadderJob } = await import('../modules/notification/store-alert-ladder');
       const { getChannels } = await import('../providers/notifications/channels');
-
-      const { orderId, level = 0 } = job.data;
-      const outcome = await escalateVendorAlert(ctx.prisma, ctx.io, getChannels(), orderId, level);
-
-      if (outcome === 'realerted') {
-        await enqueueVendorAlertFollowup(queues, orderId);
-      }
+      await runLadderJob(
+        { prisma: ctx.prisma, io: ctx.io, redis: ctx.redis, channels: getChannels(), queue: queues.notificationQueue },
+        job.data,
+      );
     },
     { connection, concurrency: 5 },
   );
@@ -1914,15 +1901,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         });
         if (released.length > 0) {
           // A RELEASED order is the vendor's first sight of it — it deserves
-          // the same escalation ladder a fresh checkout gets (re-alert, then
-          // SMS). Previously only checkout enqueued this; a held order the
-          // vendor slept through escalated nowhere.
+          // the same escalation ladder a fresh checkout gets. Previously only
+          // checkout enqueued this; a held order the vendor slept through
+          // escalated nowhere. [Q10 loud alerts 2/4] The ladder starts HERE
+          // for a held order, never inside its free-cancel window (owner,
+          // 09-24): its rungs are measured from this release.
+          const { armStoreAlertLadder } = await import('../modules/notification/store-alert-ladder');
           for (const orderId of released) {
-            await queues.notificationQueue.add('vendor-alert-escalate', { orderId, level: 0 }, {
-              delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
-              removeOnComplete: 100,
-              removeOnFail: 50,
-            });
+            await armStoreAlertLadder(queues.notificationQueue, orderId);
           }
           ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
         }

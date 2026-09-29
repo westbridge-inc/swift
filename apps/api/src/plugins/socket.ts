@@ -621,13 +621,17 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       socket.to(`chat:${parsed.data.roomId}`).emit('chat:stop-typing', { userId });
     });
 
-    // Vendor order feed — only if the authenticated user owns the vendor
+    // Vendor order feed — only if the authenticated user owns the vendor or
+    // is on its team. [Q10 loud alerts 2/4] Staff used to be refused here, so
+    // the new-order takeover (order:new) never opened on a staff phone even
+    // with the app in hand. Membership is read at join time; removing a
+    // member (DELETE /vendor/staff/:id) takes their sockets out of the room.
     socket.on('vendor:subscribe', async (raw: unknown) => {
       const parsed = vendorEvent.safeParse(raw);
       if (!parsed.success) return;
       try {
         const vendor = await app.prisma.vendor.findFirst({
-          where: { id: parsed.data.vendorId, owner: { userId } },
+          where: { id: parsed.data.vendorId, OR: [{ owner: { userId } }, { staff: { some: { userId } } }] },
           select: { id: true },
         });
         if (vendor) {

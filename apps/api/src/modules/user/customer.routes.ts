@@ -247,6 +247,12 @@ const notificationPrefsSchema = z.object({
 const deviceTokenSchema = z.object({
   token: z.string().min(8).max(512),
   platform: z.enum(['ios', 'android']),
+  /** [Q10 loud alerts 2/4] The alert features the installed app supports
+   *  (DeviceToken.alertsVersion). Every build released so far sends none:
+   *  absent = 0. A malformed value also reads 0 rather than refusing the
+   *  registration, because a refused registration is a phone that silently
+   *  gets no pushes at all, and 0 is exactly what every build can show. */
+  alertsVersion: z.number().int().min(0).max(1000).optional().catch(undefined),
 });
 
 const switchRoleSchema = z.object({
@@ -3098,13 +3104,16 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** POST /notifications/devices — register this device for push. Upsert on
    *  the token: re-registering reassigns it to the CURRENT user (one phone,
-   *  new login) and reactivates it. */
+   *  new login) and reactivates it. [Q10 loud alerts 2/4] It also records
+   *  what the installed app can show (alertsVersion, absent = 0), rewritten
+   *  on every registration: a phone moved back to an older build reports
+   *  less, and is sent only what that build can show. */
   app.post('/notifications/devices', async (request: AuthRequest) => {
-    const { token, platform } = deviceTokenSchema.parse(request.body);
+    const { token, platform, alertsVersion = 0 } = deviceTokenSchema.parse(request.body);
     await app.prisma.deviceToken.upsert({
       where: { token },
-      create: { userId: request.user.userId, token, platform, isActive: true },
-      update: { userId: request.user.userId, platform, isActive: true },
+      create: { userId: request.user.userId, token, platform, isActive: true, alertsVersion },
+      update: { userId: request.user.userId, platform, isActive: true, alertsVersion },
     });
     return { success: true, data: { message: 'Device registered' } };
   });

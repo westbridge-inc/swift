@@ -14,8 +14,14 @@
 //   quiet       rating reminders, ad reports, nudges     normal · silent · 24 h
 //
 // Deliberately NOT here yet (they need a new app build, loud alerts 3/4):
-// Android channels, bundled ring sounds and the iOS interruption level. Old
-// builds only have the "default" channel, so no channel id is ever sent.
+// bundled ring sounds and the iOS interruption level.
+//
+// [Q10 loud alerts 2/4] Android channels are named per class (ALERT_CHANNEL)
+// but sent ONLY to a device whose app says it created them: DeviceToken
+// .alertsVersion >= CHANNELS_ALERTS_VERSION (pushOptionsForDevice). Every
+// build installed today has only the "default" channel, and Android never
+// shows a push that names a channel the app did not create, so those devices
+// keep getting exactly the message they get now.
 //
 // A CENSUS, NOT A GUESS. Every kind the API sends is listed below under the
 // class it was given, and alert-class-census.test.ts scans apps/api/src and
@@ -84,7 +90,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'support_ticket', 'sos_active', 'sos_marked_safe', 'guardian_deescalation',
     'guardian_checkin_undelivered', 'incident_duplicate_intake', 'legal_hold_partial',
     'safety_escrow_review', 'not_my_driver_discrepancy', 'ops_alert_escalated', 'ops_alert_drill',
-    'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old',
+    'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old', 'ops_order_unanswered',
     'ops_taxi_driver_dropped', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
     'ops_pool_saturation', 'ops_backup_stale', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
@@ -142,7 +148,8 @@ function deadlineOf(value: unknown): number | undefined {
 
 /** The delivery options for one push, read from the payload it carries.
  *  The deadline is absolute: the provider turns it into a ttl at the moment
- *  it sends, so a retry two seconds later asks for two seconds less. */
+ *  it sends, so a retry two seconds later asks for two seconds less. These
+ *  are the options EVERY installed app can show: no Android channel. */
 export function pushOptionsFor(data: Record<string, unknown> | null | undefined): PushOptions {
   const alertClass = alertClassOf(data?.['kind']);
   const policy = POLICY[alertClass];
@@ -154,4 +161,30 @@ export function pushOptionsFor(data: Record<string, unknown> | null | undefined)
     ...(policy.ttlSeconds !== undefined ? { ttlSeconds: policy.ttlSeconds } : {}),
     ...(deadlineMs !== undefined ? { deadlineMs } : {}),
   };
+}
+
+/** [Q10 loud alerts 2/4] The DeviceToken.alertsVersion of the first app build
+ *  that creates the per-class Android channels below (loud alerts 3/4). A
+ *  device reporting less is sent no channel at all. */
+export const CHANNELS_ALERTS_VERSION = 1;
+
+/** The Android channel each class posts to, on a device whose app created it.
+ *  Versioned because Android never lets an app change a channel's sound or
+ *  importance once created: a change ships as a new _v2 id. standard has no
+ *  channel of its own; it stays on the device default, as it is today. */
+export const ALERT_CHANNEL: Readonly<Record<AlertClass, string | undefined>> = {
+  ring_order: 'swift_orders_v1',
+  ring_offer: 'swift_offers_v1',
+  job_update: 'swift_jobs_v1',
+  standard: undefined,
+  quiet: 'swift_quiet_v1',
+};
+
+/** The delivery options for one push to ONE device: pushOptionsFor, plus the
+ *  class channel when that device's app reported it has the channels. An app
+ *  that reported nothing (alertsVersion 0) gets exactly pushOptionsFor. */
+export function pushOptionsForDevice(data: Record<string, unknown> | null | undefined, alertsVersion: number): PushOptions {
+  const options = pushOptionsFor(data);
+  const channelId = ALERT_CHANNEL[options.alertClass];
+  return channelId && alertsVersion >= CHANNELS_ALERTS_VERSION ? { ...options, channelId } : options;
 }

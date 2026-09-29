@@ -3,6 +3,7 @@ import { Prisma, type PrismaClient, type FulfillmentType } from '@prisma/client'
 import type { Queue } from 'bullmq';
 import type { FastifyBaseLogger } from 'fastify';
 import { appointmentAutoCancelDelayMs, vendorResponseSlaMinutes } from './response-sla';
+import { FIRST_RUNG_DELAY_MS } from '../notification/store-alert-ladder';
 
 /**
  * [M-11] The checkout command's durable tail and result.
@@ -111,7 +112,10 @@ export async function checkoutQueueTiming(prisma: PrismaClient): Promise<Checkou
   const holdMin = process.env['LIFECYCLE_V2'] === '1' ? Number(process.env['ORDER_HOLD_MINUTES'] ?? 5) : 0;
   const slaMin = await vendorResponseSlaMinutes(prisma);
   return {
-    alertDelayMs: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
+    // [Q10 loud alerts 2/4] The ladder's first rung (store-alert-ladder.ts).
+    // A HELD order's job finds it still held and stops; its ladder is armed
+    // again at release, so nothing rings inside the free-cancel window.
+    alertDelayMs: FIRST_RUNG_DELAY_MS,
     autoCancelDelayMs: (holdMin + slaMin) * 60_000,
     vendorResponseSlaMinutes: slaMin,
   };

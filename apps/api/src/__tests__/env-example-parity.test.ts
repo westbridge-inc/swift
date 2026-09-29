@@ -54,8 +54,9 @@ const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> 
   { name: 'PREVIEW_MODE', whenUnset: '0', what: 'whether never-live vendors may draft listings' },
   // [Q10] ALERTS_LOUD was described as ops paging; the code only ever used it
   // for the store alert ladder timing and, until loud alerts 1/4, to gate the
-  // mover offer push. The offer push now has its own kill switch.
-  { name: 'ALERTS_LOUD', whenUnset: '0', what: 'how soon the store new-order ladder re-alerts and falls back to SMS' },
+  // mover offer push. The offer push now has its own kill switch, and since
+  // loud alerts 2/4 the ladder runs one fixed schedule (store-alert-ladder.ts
+  // LADDER): nothing reads ALERTS_LOUD any more, so it is no longer listed.
   { name: 'OFFER_PUSH', whenUnset: '1', what: 'whether every mover offer is also pushed (0 = kill switch)' },
   // Only exactly '1' turns it on (providers/mmg/mmg-checkout.ts); the boot
   // guard refuses any other non-zero spelling.

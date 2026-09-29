@@ -63,7 +63,6 @@ export default defineConfig({
       DISPATCH_EXHAUSTION: '',
       DELIVERY_BLOCK_ON_NONE: '',
       CONSENT_REQUIRED: '',
-      ALERTS_LOUD: '',
       // A kill switch rather than a dormant flag: pinned empty (offers are
       // pushed, as in CI) so a dev .env that engaged it cannot silence the
       // suites that assert the offer push.

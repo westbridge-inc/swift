@@ -8,6 +8,7 @@ import {
   type PushProvider,
 } from '../providers/notifications/channels';
 import { ALERT_CLASS_KINDS, pushOptionsFor } from '../providers/notifications/alert-class';
+import { pushToDevices } from '../providers/notifications/device-push';
 
 // ---------------------------------------------------------------------------
 // [Q10 loud alerts 1/4] What actually leaves for Expo, per alert class.
@@ -220,5 +221,59 @@ describe('the dev adapter logs what would have been sent', () => {
     const data = { kind: 'dispatch_offer', orderId: 'o1', expiresAt: iso(-1) };
     expect(await getPushProvider().sendPush(['a'], 'T', 'B', data, pushOptionsFor(data))).toEqual({ sent: 0 });
     expect(devChannelLog).toEqual([]);
+  });
+});
+
+describe('[Q10 loud alerts 2/4] one push to stored devices: the channel reaches only the builds that have it', () => {
+  const data = { kind: 'vendor_order_alert', orderId: 'o1', orderNumber: 'SW-1', audience: 'business', respondBy: iso(600_000) };
+
+  it('today\'s builds get the message they always got; the channel build gets its class channel, in its own request', async () => {
+    atT0();
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const res = await pushToDevices(new ExpoPushProvider(), [
+      { token: 'ExponentPushToken[old-a]', alertsVersion: 0 },
+      { token: 'ExponentPushToken[new-b]', alertsVersion: 1 },
+      { token: 'ExponentPushToken[old-c]', alertsVersion: 0 },
+    ], 'T', 'B', data);
+    expect(res).toEqual({ sent: 3, invalidTokens: [], withdrawn: false });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const base = { title: 'T', body: 'B', data, priority: 'high', sound: 'default', ttl: 600 };
+    expect(messagesOf(fetchMock, 0)).toEqual([
+      { to: 'ExponentPushToken[old-a]', ...base },
+      { to: 'ExponentPushToken[old-c]', ...base },
+    ]);
+    expect(messagesOf(fetchMock, 1)).toEqual([{ to: 'ExponentPushToken[new-b]', ...base, channelId: 'swift_orders_v1' }]);
+  });
+
+  it('asks stillWanted before each request, and stops once the push no longer means anything', async () => {
+    atT0();
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    let asked = 0;
+    const res = await pushToDevices(new ExpoPushProvider(), [
+      { token: 'ExponentPushToken[old-a]', alertsVersion: 0 },
+      { token: 'ExponentPushToken[new-b]', alertsVersion: 1 },
+    ], 'T', 'B', data, { stillWanted: async () => { asked += 1; return asked === 1; } });
+    expect(res).toEqual({ sent: 1, invalidTokens: [], withdrawn: true });
+    expect(asked).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(messagesOf(fetchMock, 0).map((m) => m['to'])).toEqual(['ExponentPushToken[old-a]']);
+  });
+
+  it('a provider failure in one group does not cost the other its push, and is still thrown', async () => {
+    const seen: string[][] = [];
+    const flaky: PushProvider = {
+      async sendPush(tokens) {
+        seen.push(tokens);
+        if (tokens.includes('ExponentPushToken[old-a]')) throw new Error('relay 503');
+        return { sent: tokens.length };
+      },
+    };
+    await expect(pushToDevices(flaky, [
+      { token: 'ExponentPushToken[old-a]', alertsVersion: 0 },
+      { token: 'ExponentPushToken[new-b]', alertsVersion: 1 },
+    ], 'T', 'B', data)).rejects.toThrow('relay 503');
+    expect(seen).toEqual([['ExponentPushToken[old-a]'], ['ExponentPushToken[new-b]']]);
   });
 });

@@ -42,6 +42,10 @@ export interface PushOptions {
    *  response window closed). It is never sent at or after this moment, its
    *  ttl never reaches past it, and it is never retried past it. */
   deadlineMs?: number;
+  /** [Q10 loud alerts 2/4] The Android channel to post to. Set only for a
+   *  device whose app reported it created the channel (pushOptionsForDevice):
+   *  Android drops a push that names a channel the app never made. */
+  channelId?: string;
 }
 
 /** The options a push gets when a caller passes none: the standard class. */
@@ -225,11 +229,12 @@ class TwilioSmsProvider implements SmsProvider {
  * One Expo push message. The field names are Expo's documented push API
  * (docs.expo.dev/push-notifications/sending-notifications): `priority` is
  * default | normal | high, `sound` is iOS-only (default plays the device
- * sound, omitted plays none), `ttl` is seconds. Expo also documents
- * `channelId` (Android) and `interruptionLevel` (iOS); neither is sent. The
- * installed builds only create the default channel, and time-sensitive needs
- * an entitlement they do not have, so both wait for the new build (loud
- * alerts 3/4).
+ * sound, omitted plays none), `ttl` is seconds, `channelId` is the Android
+ * channel. `channelId` is present only when the options carry one, which
+ * pushOptionsForDevice allows only for a device whose app created the
+ * channel [Q10 loud alerts 2/4]. `interruptionLevel` (iOS) is never sent:
+ * time-sensitive needs an entitlement no installed build has (loud alerts
+ * 3/4).
  */
 function expoMessage(
   to: string,
@@ -247,6 +252,7 @@ function expoMessage(
     priority: options.priority,
     ...(options.sound ? { sound: options.sound } : {}),
     ...(window.ttl !== undefined ? { ttl: window.ttl } : {}),
+    ...(options.channelId ? { channelId: options.channelId } : {}),
   };
 }
 

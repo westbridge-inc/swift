@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
-import { pushOptionsFor } from '../../providers/notifications/alert-class';
+import { PUSH_DEVICE_SELECT, pushToDevices } from '../../providers/notifications/device-push';
 import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter } from '../../plugins/observability';
+import { storeAlertRecipients } from './store-alert-recipients';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
 interface NotificationPrefs {
@@ -18,7 +19,7 @@ const DEFAULT_PREFS: NotificationPrefs = { push: true, sms: true, email: false }
 
 /** Providers report dead tokens (app uninstalled) — flip them off so future
  *  sends stop paying for ghosts. Best-effort by design. */
-async function deactivateDeadTokens(prisma: PrismaClient, invalidTokens?: string[]): Promise<void> {
+export async function deactivateDeadTokens(prisma: PrismaClient, invalidTokens?: string[]): Promise<void> {
   if (!invalidTokens?.length) return;
   await prisma.deviceToken
     .updateMany({ where: { token: { in: invalidTokens } }, data: { isActive: false } })
@@ -59,88 +60,6 @@ interface NotificationPayload {
    *  collide. Key discipline: derive from the FACT being announced
    *  (`'liveness-prompt:' + deadlineISO`), never from Date.now(). */
   dedupeKey?: string;
-}
-
-/**
- * Vendor-alert escalation step. Level 0 re-alerts (socket + push); level 1
- * falls back to SMS so the phone makes noise even with the app dead.
- * Exported standalone so the queue worker and tests drive the same code.
- *
- * [Q10] Two things stop it, each read at the moment of sending:
- *  - the ORDER is no longer waiting for the store. Anyone on the team
- *    accepting or declining it, the customer cancelling, or the auto-cancel
- *    all end the wait, and only the order row knows. The owner inbox row used
- *    to be the only signal, so a staff accept or a customer cancel still
- *    sent "still waiting" pushes and then an SMS to the owner;
- *  - the alert was acknowledged (its unread row is the banner state).
- */
-export async function escalateVendorAlert(
-  prisma: PrismaClient,
-  io: Server,
-  channels: NotificationChannels,
-  orderId: string,
-  level: number,
-): Promise<'stopped' | 'realerted' | 'sms_sent'> {
-  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true } });
-  if (order?.status !== 'PENDING') return 'stopped'; // handled, cancelled or gone: nobody is waiting
-
-  const alert = await prisma.notification.findFirst({
-    where: {
-      isRead: false,
-      AND: [
-        { data: { path: ['kind'], equals: 'vendor_order_alert' } },
-        { data: { path: ['orderId'], equals: orderId } },
-      ],
-    },
-    include: { user: { select: { id: true, phone: true } } },
-  });
-  if (!alert) return 'stopped'; // acknowledged (or never existed) — done
-
-  const data = alert.data as { orderNumber?: unknown; respondBy?: unknown } | null;
-  const orderNumber = typeof data?.orderNumber === 'string' ? data.orderNumber : undefined;
-
-  if (level === 0) {
-    io.to(`user:${alert.userId}`).emit('vendor:order_alert', {
-      notificationId: alert.id,
-      orderId,
-      orderNumber,
-      persistent: true,
-      reAlert: true,
-    });
-    const tokens = await prisma.deviceToken.findMany({
-      where: { userId: alert.userId, isActive: true },
-      select: { token: true },
-    });
-    if (tokens.length > 0) {
-      // [Q10] The payload the tap-router needs to open THIS order on the
-      // store order desk (VendorOrderDetail). It used to carry only the
-      // orderId, which the router sends to the customer Delivery screen that
-      // the vendor app never mounts. respondBy rides along so the push dies
-      // with the response window, like the first alert.
-      const payload: Record<string, unknown> = {
-        kind: 'vendor_order_alert',
-        orderId,
-        ...(orderNumber ? { orderNumber } : {}),
-        audience: 'business',
-        ...(typeof data?.respondBy === 'string' ? { respondBy: data.respondBy } : {}),
-      };
-      await channels.push
-        .sendPush(tokens.map((t) => t.token), 'Order still waiting!', alert.body, payload, pushOptionsFor(payload))
-        .then((r) => deactivateDeadTokens(prisma, r.invalidTokens))
-        .catch(() => {});
-    }
-    return 'realerted';
-  }
-
-  await channels.sms
-    .sendSms(alert.user.phone, `Swift: order ${orderNumber ?? ''} is still waiting for your response. Open your dashboard now.`)
-    .catch((err) => {
-      // SWIFT-100: the last rung of the escalation ladder. A silent failure here
-      // means the vendor was never reached and no one knows — log + count it.
-      log().warn({ err, orderId }, 'escalation SMS (last resort) failed — vendor not reached');
-      notificationFailuresCounter.inc({ channel: 'sms', stage: 'escalation' });
-    });
-  return 'sms_sent';
 }
 
 /** Ops trigger for review queues: PENDING work is invisible until someone is
@@ -418,17 +337,17 @@ export class NotificationService {
       const prefs = { ...DEFAULT_PREFS, ...((user?.notificationPrefs as Partial<NotificationPrefs> | null) ?? {}) };
 
       if (prefs.push) {
-        const tokens = await this.prisma.deviceToken.findMany({
+        const devices = await this.prisma.deviceToken.findMany({
           where: { userId: notification.userId, isActive: true },
-          select: { token: true },
+          select: PUSH_DEVICE_SELECT,
         });
-        if (tokens.length > 0) {
+        if (devices.length > 0) {
           // Channel failures must never break the request path — but after the
           // provider-level retries (withPushRetry) a final failure is LOGGED,
           // never swallowed silently [SWIFT-UG-NOTIF-01]. [Q10] The payload's
-          // kind picks how urgently it travels (alert-class.ts).
-          await this.channels.push
-            .sendPush(tokens.map((t) => t.token), notification.title, notification.body, data, pushOptionsFor(data))
+          // kind picks how urgently it travels (alert-class.ts), and each
+          // device gets only the channel its installed app has (device-push.ts).
+          await pushToDevices(this.channels.push, devices, notification.title, notification.body, data)
             .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
             .catch((err) => {
               log().warn(
@@ -449,7 +368,9 @@ export class NotificationService {
     return true;
   }
 
-  /** Direct SMS through the interface (OTPs, vendor-alert fallbacks). */
+  /** Direct SMS through the interface (OTPs and other direct texts). The
+   *  store ladder's text never comes through here: it is sent only by its
+   *  own rung, inside its own budget (store-alert-ladder.ts). */
   async sms(to: string, body: string): Promise<void> {
     // SWIFT-100: fail-soft, but never silent — a dropped OTP/fallback SMS is
     // otherwise invisible. Log the error (never the number or body — rule 4) + count it.
@@ -589,15 +510,18 @@ export class NotificationService {
   }
 
   /**
-   * THE vendor order alert: a persistent, unmissable event.
-   * The unread notification row IS the alert state — the dashboard shows a
-   * full-screen banner until it is acknowledged (accept/reject/ack), and the
-   * escalation job re-alerts then falls back to SMS while it stays unread.
-   * NOT optional for vendors — prefs are ignored on this path by design.
+   * THE vendor order alert, to ONE person at the store: a persistent,
+   * unmissable event. The unread notification row IS their alert state — the
+   * dashboard shows a banner until it is acknowledged (accept/reject/ack) —
+   * and while the order waits and nobody on the team has seen it, the ladder
+   * (store-alert-ladder.ts) rings again, texts the store, then tells the
+   * operators. Its push honours the recipient's push preference, like every
+   * send (no client offers that switch yet); the ladder's rungs do not read it.
    *
    * [Q10] `respondBy` is the moment the order auto-cancels (vendorRespondBy):
    * it rides in the payload so the push rings until then and never after,
    * and the store copy is tagged audience business, like the re-alert.
+   * [Q10 loud alerts 2/4] newOrderForStore sends this to the whole team.
    */
   async newOrderForVendor(vendorOwnerId: string, orderNumber: string, itemCount: number, total: number, orderId: string, respondBy?: Date | null): Promise<string> {
     // Alert-delivery tracking (alerts spec §A4) — a row per money-critical
@@ -628,6 +552,27 @@ export class NotificationService {
     });
 
     return notificationId;
+  }
+
+  /**
+   * [Q10 loud alerts 2/4] THE new-order alert for a whole store: its owner
+   * and every active member of its team (storeAlertRecipients) each get the
+   * alert newOrderForVendor sends one person, with their own inbox row and
+   * delivery receipt. Until this only the owner was told, so a kitchen run by
+   * its staff heard nothing. Sent in parallel: checkout waits for it. Returns
+   * each recipient's notification id ('' where a persist failed, as send).
+   */
+  async newOrderForStore(order: {
+    vendorId: string;
+    orderId: string;
+    orderNumber: string;
+    itemCount: number;
+    total: number;
+    respondBy?: Date | null;
+  }): Promise<string[]> {
+    const recipients = await storeAlertRecipients(this.prisma, order.vendorId);
+    return Promise.all(recipients.map((userId) =>
+      this.newOrderForVendor(userId, order.orderNumber, order.itemCount, order.total, order.orderId, order.respondBy)));
   }
 
   async newDeliveryForRider(riderId: string, orderNumber: string, vendorName: string, deliveryFee: number, orderId: string): Promise<void> {

@@ -319,13 +319,20 @@ model MoverRevocationOutbox {
 }
 
 model DeviceToken {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token     String   @unique
-  platform  String
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token         String   @unique
+  platform      String
+  isActive      Boolean  @default(true)
+  /// [Q10 loud alerts 2/4] The alert features the app installed on this
+  /// device supports, reported when it registers the token (absent = 0).
+  /// 0 = the builds in people's hands today, which create only the "default"
+  /// Android channel: a push naming any other channel is never shown there.
+  /// 1 = the build that creates the versioned alert channels (loud alerts
+  /// 3/4), so its pushes carry the channel of their alert class.
+  alertsVersion Int      @default(0)
+  createdAt     DateTime @default(now())
 
   @@map("device_tokens")
 }

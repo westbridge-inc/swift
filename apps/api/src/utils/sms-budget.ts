@@ -130,6 +130,37 @@ export async function checkOtpDailyBudget(
   return { allowed: true, refund };
 }
 
+// ---------------------------------------------------------------------------
+// [Q10 loud alerts 2/4] The store new-order ladder texts the store at +90 s,
+// and that text has its OWN budget, sharing no counter with the OTP budget
+// above. The store phone is often the owner's own number (Vendor.phone is the
+// contact given at onboarding, and it is usually the line they sign in with),
+// so one shared counter would let a lunch rush of unanswered orders spend the
+// texts the owner needs to log in, and a partner struggling to log in would
+// silence their own order alerts. Separate keys and a separate cap: neither
+// can spend the other. Only the ladder's SMS rung calls this.
+// ---------------------------------------------------------------------------
+
+/** Redis key prefix of the per-phone daily count of store-alert texts. */
+export const STORE_ALERT_SMS_DAILY_PREFIX = 'store_alert_sms_day:';
+const DEFAULT_STORE_ALERT_SMS_DAILY_CAP = 20;
+
+/**
+ * Per-phone daily cap on the ladder's texts to a store (20 by default,
+ * STORE_ALERT_SMS_DAILY_CAP), counted per Guyana day like the OTP caps.
+ * Atomic INCR per attempt; the refund undoes this call's increment when the
+ * text was not sent after all (provider failure, or the order was answered
+ * in the meantime).
+ */
+export async function checkStoreAlertSmsBudget(redis: Redis, phone: string): Promise<SmsBudgetResult> {
+  const cap = intEnv('STORE_ALERT_SMS_DAILY_CAP', DEFAULT_STORE_ALERT_SMS_DAILY_CAP);
+  const key = `${STORE_ALERT_SMS_DAILY_PREFIX}${dayStamp()}:${phone}`;
+  const count = await redis.incr(key);
+  if (count === 1) await redis.expire(key, DAY_TTL);
+  if (count > cap) return deny('phone_daily');
+  return { allowed: true, refund: () => refundSpend(redis, [key]) };
+}
+
 async function refundSpend(redis: Redis, keys: string[]): Promise<void> {
   for (const key of keys) {
     // DECR only while positive — a refund must never dig a negative hole

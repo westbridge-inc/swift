@@ -486,11 +486,15 @@ async function requireVendor(
   return access;
 }
 
-/** Acknowledge the persistent order alert — read = acknowledged = silence. */
-async function ackVendorAlert(app: FastifyInstance, userId: string, orderId: string) {
+/** Acknowledge the persistent order alert — read = acknowledged = silence.
+ *  [Q10 loud alerts 2/4] The whole team gets the alert now, so once the order
+ *  is ANSWERED (accept, reject) `forWholeTeam` clears it for everyone who got
+ *  it: nobody is still waiting on it. The explicit ack clears only the
+ *  caller's own. Callers have already proven the order is their store's. */
+async function ackVendorAlert(app: FastifyInstance, userId: string, orderId: string, forWholeTeam = false) {
   await app.prisma.notification.updateMany({
     where: {
-      userId,
+      ...(forWholeTeam ? {} : { userId }),
       isRead: false,
       AND: [
         { data: { path: ['kind'], equals: 'vendor_order_alert' } },
@@ -790,6 +794,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('StaffMember', request.params.id);
 
     await app.prisma.vendorStaff.delete({ where: { id: request.params.id } });
+    // [Q10 loud alerts 2/4] Their live order feed ends with their access: a
+    // socket that joined the store room while they were on the team would
+    // otherwise keep hearing new orders until it reconnected. (Pushes and
+    // ladder rungs read the team at send time, so those stop by themselves.)
+    app.io.in(`user:${existing.userId}`).socketsLeave(`vendor:${vendorId}`);
     return { success: true, data: { deleted: true } };
   });
 
@@ -1457,6 +1466,21 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: { acknowledged: true } };
   });
 
+  /** POST /orders/:id/alert-seen — [Q10 loud alerts 2/4] this order's
+   *  new-order alert was SEEN on the caller's device (the app showed the
+   *  takeover, or they opened the push). It ends the ladder for THIS order:
+   *  no more rings, no text, no operator page. Seen is not answered: the
+   *  order still waits for accept or reject, and still auto-cancels.
+   *  Ownership FIRST (the PR 1 bug class): an order of another store, or one
+   *  still held, is a 404 before anything is written. Idempotent: the first
+   *  sighting is the one kept. */
+  app.post<{ Params: IdParam }>('/orders/:id/alert-seen', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const { markStoreAlertSeen } = await import('../notification/store-alert-ladder');
+    await markStoreAlertSeen(app.prisma, order.id, request.user.userId);
+    return { success: true, data: { seen: true } };
+  });
+
   /** GET /orders — Paginated, filterable order list */
   app.get('/orders', auth, async (request) => {
     const requested = selectedVendorId(request);
@@ -1575,7 +1599,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       },
     });
     if (appointmentItemId) await bookingService.nudgeForItem(appointmentItemId).catch(() => {});
-    await ackVendorAlert(app, request.user.userId, order.id); // accepting acknowledges the alert
+    await ackVendorAlert(app, request.user.userId, order.id, true); // accepting answers it, for the whole team
 
     // acceptance of a DELIVERY order starts the dispatch cascade (PICKUP and
     // APPOINTMENT orders never dispatch). FUL-005: this is the ON_ACCEPT trigger
@@ -2253,6 +2277,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       releaseStaleMoverPointer: true,
       invalidStatus: () => new AppError(400, 'INVALID_STATUS', 'This order can no longer be rejected'),
     });
+    // [Q10 loud alerts 2/4] Answered: clear the alert for the whole team.
+    await ackVendorAlert(app, request.user.userId, order.id, true);
     const updated = await app.prisma.order.findUniqueOrThrow({
       where: { id: order.id },
       include: { customer: { select: { id: true, firstName: true } } },

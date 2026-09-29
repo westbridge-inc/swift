@@ -10,8 +10,10 @@ import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { NotificationService, escalateVendorAlert } from '../modules/notification/notification.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { runLadderRung } from '../modules/notification/store-alert-ladder';
 import { getChannels, devChannelLog } from '../providers/notifications/channels';
+import { STORE_ALERT_SMS_DAILY_PREFIX } from '../utils/sms-budget';
 
 // ---------------------------------------------------------------------------
 // [Q10 loud alerts 1/4] THE STORE NEW-ORDER LADDER, fixed where it lied.
@@ -37,6 +39,8 @@ const PHONE_PREFIX = '+5920417';
 let app: FastifyInstance;
 let notifications: NotificationService;
 const ioStub = { to: () => ({ emit: () => {} }), emit: () => {} } as unknown as Server;
+// [Q10 loud alerts 2/4] The rungs run in the store ladder now, one rung per call.
+const ladder = () => ({ prisma: app.prisma, io: ioStub, redis: app.redis, channels: getChannels() });
 
 type Actor = { userId: string; phone: string; token: string };
 let owner: Actor;
@@ -120,6 +124,18 @@ function call(method: 'GET' | 'POST' | 'PUT', url: string, token: string, payloa
   });
 }
 
+/** [Q10 loud alerts 2/4] The ladder's texts are counted per store phone per
+ *  Guyana day (STORE_ALERT_SMS_DAILY_CAP): clear this file's counts, so a rerun
+ *  on the same day is never refused by an earlier run's texts. */
+async function purgeStoreAlertSmsCounts() {
+  let cursor = '0';
+  do {
+    const [next, keys] = await app.redis.scan(cursor, 'MATCH', `${STORE_ALERT_SMS_DAILY_PREFIX}*:${PHONE_PREFIX}*`, 'COUNT', 1000);
+    cursor = next;
+    if (keys.length > 0) await app.redis.del(...keys);
+  } while (cursor !== '0');
+}
+
 async function purgeFixtures() {
   const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
   const ids = users.map((u) => u.id);
@@ -154,6 +170,7 @@ beforeAll(async () => {
   await app.ready();
   notifications = new NotificationService(app.prisma, ioStub);
   await purgeFixtures();
+  await purgeStoreAlertSmsCounts();
 
   owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
   staff = await makeUser(['CUSTOMER'], 'CUSTOMER');
@@ -168,6 +185,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await purgeFixtures();
+  await purgeStoreAlertSmsCounts();
   await app.close();
 });
 
@@ -176,13 +194,16 @@ describe('[Q10] the ladder stops once nobody is waiting, whoever ended the wait'
     const o = await pendingOrderWithAlert();
     const accepted = await call('PUT', `/api/v1/vendor/orders/${o.orderId}/accept`, staff.token);
     expect(accepted.statusCode, accepted.body).toBe(200);
-    // The old stop signal never fired: the owner never touched the alert.
-    expect((await ownerAlertRow(o.orderId)).isRead).toBe(false);
+    // The owner never touched the alert. [Q10 loud alerts 2/4] Answering it
+    // now clears it for the whole team, so the owner's banner went too; the
+    // ladder would stop on the order status alone (store-alert-ladder.test.ts
+    // proves each stop signal on its own).
+    expect((await ownerAlertRow(o.orderId)).isRead).toBe(true);
 
     const pushes = pushesTo(ownerDevice).length;
     const texts = smsTo(owner.phone).length;
-    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 0)).toBe('stopped');
-    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 1)).toBe('stopped');
+    expect(await runLadderRung(ladder(), o.orderId, 'ring1')).toBe('stopped');
+    expect(await runLadderRung(ladder(), o.orderId, 'sms')).toBe('stopped');
     expect(pushesTo(ownerDevice)).toHaveLength(pushes);
     expect(smsTo(owner.phone)).toHaveLength(texts);
   });
@@ -196,17 +217,17 @@ describe('[Q10] the ladder stops once nobody is waiting, whoever ended the wait'
 
     const pushes = pushesTo(ownerDevice).length;
     const texts = smsTo(owner.phone).length;
-    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 0)).toBe('stopped');
-    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 1)).toBe('stopped');
+    expect(await runLadderRung(ladder(), o.orderId, 'ring1')).toBe('stopped');
+    expect(await runLadderRung(ladder(), o.orderId, 'sms')).toBe('stopped');
     expect(pushesTo(ownerDevice)).toHaveLength(pushes);
     expect(smsTo(owner.phone)).toHaveLength(texts);
   });
 
   it('an order still waiting keeps escalating: re-alert, then the SMS fallback', async () => {
     const o = await pendingOrderWithAlert();
-    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 0)).toBe('realerted');
+    expect(await runLadderRung(ladder(), o.orderId, 'ring1')).toBe('realerted');
     const texts = smsTo(owner.phone).length;
-    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 1)).toBe('sms_sent');
+    expect(await runLadderRung(ladder(), o.orderId, 'sms')).toBe('sms_sent');
     expect(smsTo(owner.phone).map((s) => s.body).slice(texts)).toEqual([
       `Swift: order ${o.orderNumber} is still waiting for your response. Open your dashboard now.`,
     ]);
@@ -224,7 +245,7 @@ describe('[Q10] the "still waiting" push opens the order on the store desk', () 
       options: { alertClass: 'ring_order', priority: 'high', sound: 'default', deadlineMs: o.respondBy.getTime() },
     });
 
-    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 0)).toBe('realerted');
+    expect(await runLadderRung(ladder(), o.orderId, 'ring1')).toBe('realerted');
     const again = pushesTo(ownerDevice).at(-1)!;
     // The mobile census pins that exactly this payload opens VendorOrderDetail
     // for this order (notification-router.test.ts). It used to be { orderId }.

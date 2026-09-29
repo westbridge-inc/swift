@@ -1509,19 +1509,21 @@ export class OrderService {
           .to(`vendor:${order.vendorId}`)
           .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
       }
+      if (!held && order.vendorId) {
+        // [Q10 loud alerts 2/4] The whole store hears it: the owner and every
+        // active member of its team (it used to be the owner alone).
+        await this.notifications.newOrderForStore({
+          vendorId: order.vendorId,
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          itemCount: order.items.length,
+          total: Number(order.totalAmount),
+          // [Q10] The same cut-off the auto-cancel row above was armed with.
+          respondBy: vendorRespondBy(order, { slaMinutes: queueTiming.vendorResponseSlaMinutes, holdMs: holdWindowMs() ?? 0 }),
+        });
+      }
       const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
       if (vendorOwner) {
-        if (!held) {
-          await this.notifications.newOrderForVendor(
-            vendorOwner.userId,
-            order.orderNumber,
-            order.items.length,
-            Number(order.totalAmount),
-            order.id,
-            // [Q10] The same cut-off the auto-cancel row above was armed with.
-            vendorRespondBy(order, { slaMinutes: queueTiming.vendorResponseSlaMinutes, holdMs: holdWindowMs() ?? 0 }),
-          );
-        }
         if (order.vendorId) {
           for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
             await this.notifications.lowStock(vendorOwner.userId, ev);
@@ -2381,17 +2383,15 @@ export class OrderService {
           .to(`vendor:${order.vendorId}`)
           .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
         try {
-          const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor.ownerId } });
-          if (vendorOwner) {
-            await this.notifications.newOrderForVendor(
-              vendorOwner.userId,
-              order.orderNumber,
-              order.items.length,
-              Number(order.totalAmount),
-              order.id,
-              vendorRespondBy(order, { slaMinutes, holdMs: holdWindowMs() ?? 0 }),
-            );
-          }
+          // [Q10 loud alerts 2/4] The whole store hears it, owner and team.
+          await this.notifications.newOrderForStore({
+            vendorId: order.vendorId,
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            itemCount: order.items.length,
+            total: Number(order.totalAmount),
+            respondBy: vendorRespondBy(order, { slaMinutes, holdMs: holdWindowMs() ?? 0 }),
+          });
         } catch (err) {
           log().error({ err, orderId: id }, 'hold-release: vendor notification failed — board still shows the order');
         }

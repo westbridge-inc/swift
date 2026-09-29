@@ -4,7 +4,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type Redis from 'ioredis';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../providers/notifications/channels';
-import { pushOptionsFor } from '../providers/notifications/alert-class';
+import { PUSH_DEVICE_SELECT, pushToDevices, type PushDevice } from '../providers/notifications/device-push';
 import { closeOnlineSession } from './rider/online-hours';
 import { EvidenceService } from './safety/evidence.service';
 import { persistMoverCustodyLossIncidentInTransaction } from './safety/incident.service';
@@ -372,35 +372,37 @@ async function emitDurableNotifications(
     }),
     runtime.prisma.deviceToken.findMany({
       where: { userId: { in: userIds }, isActive: true },
-      select: { userId: true, token: true },
+      select: { userId: true, ...PUSH_DEVICE_SELECT },
     }),
   ]);
   const pushEnabled = new Map(users.map((user) => {
     const prefs = user.notificationPrefs as { push?: boolean } | null;
     return [user.id, prefs?.push !== false] as const;
   }));
-  const tokensByUser = new Map<string, string[]>();
+  const devicesByUser = new Map<string, PushDevice[]>();
   for (const token of tokens) {
-    const current = tokensByUser.get(token.userId) ?? [];
-    current.push(token.token);
-    tokensByUser.set(token.userId, current);
+    const current = devicesByUser.get(token.userId) ?? [];
+    current.push({ token: token.token, alertsVersion: token.alertsVersion });
+    devicesByUser.set(token.userId, current);
   }
   const push = runtime.channels?.push ?? getChannels().push;
   await Promise.all(notifications.map(async (notification) => {
     if (!pushEnabled.get(notification.userId)) return;
-    const deviceTokens = tokensByUser.get(notification.userId) ?? [];
-    if (deviceTokens.length === 0) return;
+    const devices = devicesByUser.get(notification.userId) ?? [];
+    if (devices.length === 0) return;
     const rawData = notification.data && typeof notification.data === 'object' && !Array.isArray(notification.data)
       ? notification.data as Record<string, unknown>
       : {};
-    const result = await push.sendPush(
-      deviceTokens,
+    // [Q10 loud alerts 2/4] Through the device fan-out: each device gets only
+    // the channel its installed app has. A provider failure still throws.
+    const result = await pushToDevices(
+      push,
+      devices,
       notification.title,
       notification.body,
       { ...rawData, notificationId: notification.id },
-      pushOptionsFor(rawData),
     );
-    if (result.invalidTokens?.length) {
+    if (result.invalidTokens.length > 0) {
       await runtime.prisma.deviceToken.updateMany({
         where: { token: { in: result.invalidTokens } },
         data: { isActive: false },
