@@ -54,9 +54,9 @@ import { recordDispatchQueue } from '../helpers/dispatch-queue';
 //
 // NOT asserted here (reported with probes, no contract yet): G3-F4 the taxi
 // assignment notice is the delivery copy ("Rider On The Way!", RIDER_ASSIGNED),
-// and a direct accept sends "Driver Found!" beside it; G3-F5 a driver's pre-pickup cancel
-// re-offers the ride to that same driver; G3-F6 a fare-collected retry under a
-// NEW idempotency key re-sends "Ride Complete". E19 (no arrival location gate)
+// and a direct accept sends "Driver Found!" beside it; G3-F6 a fare-collected retry under a
+// NEW idempotency key re-sends "Ride Complete". (G3-F5, a pre-pickup cancel re-offering
+// the ride to that same driver, is fixed and asserted in TAXI-02.) E19 (no arrival location gate)
 // has no agreed contract — the arrival assertions here hold either way.
 // ---------------------------------------------------------------------------
 
@@ -531,9 +531,11 @@ describe('GOLD-3 · TAXI-02 — accept → en-route → arrived', () => {
     const trail = await logs(ride.id);
     expect(trail.map((l) => [l.status, l.note])).toContainEqual(['PENDING', 'Driver cancelled: vehicle broke down']);
     expect(await sys(() => app.prisma.notification.count({ where: { userId: customer.userId, title: 'Finding you another driver' } }))).toBe(1);
-    // The ride went straight back to dispatch.
+    // The ride went straight back to dispatch — and to the NEXT driver: the one
+    // who just gave it up is excluded from its re-dispatch [DISPATCH 1/3 · B2,
+    // formerly probe G3-F5], even though Fola is still the closest.
     expect(jobs.slice(jobsBefore)[0]).toMatchObject({ name: 'dispatch-order', data: { orderId: ride.id } });
-    expect(await app.redis.get(offerKey(ride.id))).not.toBeNull();
+    expect((await app.redis.get(offerKey(ride.id)))!.split(':')[0]).toBe(second.driverId);
 
     // Another driver takes the ride.
     const take = await call('POST', `/api/v1/driver/rides/${ride.id}/accept`, second.token, {});
@@ -543,7 +545,9 @@ describe('GOLD-3 · TAXI-02 — accept → en-route → arrived', () => {
     expect(await app.redis.get(offerKey(ride.id))).toBeNull();
     const stale = await call('POST', '/api/v1/driver/offers/accept', first.token, { orderId: ride.id });
     expect(stale.statusCode).toBe(409);
-    expect(stale.json().error.code).toBe('OFFER_EXPIRED');
+    // [DISPATCH 1/3] The refusal says why: another driver holds this ride now.
+    expect(stale.json().error.code).toBe('OFFER_TAKEN');
+    expect(stale.json().error.message).toBe('Another driver took this ride.');
     // The passenger's live card shows the NEW driver, with the NEW pin to share.
     const active = await call('GET', '/api/v1/rides/active', customer.token);
     expect(active.json().data).toMatchObject({ id: ride.id, ridePin: released.ridePin, driver: { licensePlate: second.plate } });

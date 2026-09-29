@@ -248,6 +248,9 @@ describe('a block stops contact, in both directions (STORE-002)', () => {
     // A NEW room is refused outright, so a blocked party never gets an open
     // room they can sit and watch. This needs Dave actually ON the order as a
     // rider — a room whose only participant is the caller proves nothing.
+    // Carol's first trip ends before she books the next one: a customer holds
+    // one live taxi at a time (orders_one_live_taxi_per_customer_key).
+    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'COMPLETED' } });
     const order2 = await mkSharedOrder(carol.id);
     await app.prisma.order.update({ where: { id: order2.id }, data: { riderId: daveRider.id } });
     const newRoom = await post('/api/v1/chat/rooms', carol.token, { orderId: order2.id });

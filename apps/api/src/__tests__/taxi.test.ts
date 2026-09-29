@@ -1310,9 +1310,11 @@ describe('Available-rides board — freshness window [SWIFT-064]', () => {
 
   it('shows a fresh request but hides a stale one (past the demand window)', async () => {
     const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    // The abandoned request is somebody else: one customer holds one live taxi.
+    const abandoner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver(); // online + available, in CENTRAL
     const fresh = await taxiRequest(cust.userId, 1);   // 1 min ago — live
-    const stale = await taxiRequest(cust.userId, 60);  // 60 min ago — abandoned
+    const stale = await taxiRequest(abandoner.userId, 60);  // 60 min ago — abandoned
 
     const res = await inject('GET', '/api/v1/driver/rides/available', undefined, driver.token);
     expect(res.statusCode).toBe(200);

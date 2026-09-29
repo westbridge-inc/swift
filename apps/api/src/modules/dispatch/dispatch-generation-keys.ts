@@ -12,6 +12,14 @@ import { createHash } from 'node:crypto';
 export const deliveryGenerationSuffix = (version?: number | null): string =>
   version != null && Number.isSafeInteger(version) && version > 0 ? `:fv${version}` : '';
 
+/** The live offer PAIR. Forward: an order has at most one live card, valued
+ *  `<moverId>:<attemptId>`. Reverse: a mover holds at most one live card,
+ *  valued `<orderId>:<attemptId>`. Not generation-suffixed: the attempt id
+ *  inside the value carries the generation. dispatch.service writes them;
+ *  offer-withdrawal.ts removes the pair of an order that has closed. */
+export const dispatchOfferKey = (orderId: string): string => `dispatch:offer:${orderId}`;
+export const dispatchMoverOfferKey = (moverId: string): string => `dispatch:mover-offer:${moverId}`;
+
 export const dispatchDeclinedKey = (orderId: string, version?: number | null): string =>
   `dispatch:declined:${orderId}${deliveryGenerationSuffix(version)}`;
 
