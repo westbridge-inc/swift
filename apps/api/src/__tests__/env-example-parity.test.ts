@@ -60,6 +60,8 @@ const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> 
   // Only exactly '1' turns it on (providers/mmg/mmg-checkout.ts); the boot
   // guard refuses any other non-zero spelling.
   { name: 'MMG_CHECKOUT_ENABLED', whenUnset: '0', what: 'whether partners may pay the weekly fee on the MMG hosted checkout page' },
+  // [PT-1] Unset reads as OFF (utils/card-rail.ts cardRailV2Enabled), and production refuses 1 until a real v2 provider exists.
+  { name: 'CARD_RAIL_V2', whenUnset: '0', what: 'whether partners can add a card and pay the weekly fee by card (card rail v2)' },
 ];
 
 /**

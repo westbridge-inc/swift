@@ -106,6 +106,22 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: PAYMENT_PROVIDER must be stripe, powertranz or disabled in production; sandbox/unset can record fake captured revenue. Refusing to start.');
   }
   assertDisabledCardRailConfig(env);
+  // [PT-1 · C10] Card rail v2. The card simulator is a test page with no real
+  // money: production refuses to start while it is even named — whatever the
+  // flag says. And this build has no production-capable v2 provider (the
+  // first real one is written from its provider's own documentation), so
+  // production refuses to switch the rail on rather than fail at a partner's
+  // first tap. The flag is 1 or 0 (or unset = 0), never a guess.
+  if (env['CARD_RAIL_PROVIDER'] === 'simulator') {
+    throw new Error('FATAL: CARD_RAIL_PROVIDER=simulator in production — the card simulator is a test page with no real money. Refusing to start.');
+  }
+  const cardRailV2 = env['CARD_RAIL_V2'];
+  if (cardRailV2 !== undefined && cardRailV2 !== '' && cardRailV2 !== '0' && cardRailV2 !== '1') {
+    throw new Error('FATAL: CARD_RAIL_V2 must be 1 or 0 in production. Refusing to start.');
+  }
+  if (cardRailV2 === '1') {
+    throw new Error('FATAL: CARD_RAIL_V2=1 in production, but this build has no production card rail v2 provider (only the simulator, which production refuses). Refusing to start.');
+  }
   if (paymentProvider === 'stripe' && !env['STRIPE_SECRET_KEY']?.startsWith('sk_live_')) {
     throw new Error('FATAL: PAYMENT_PROVIDER=stripe requires a live STRIPE_SECRET_KEY in production. Refusing to start.');
   }

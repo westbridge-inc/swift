@@ -120,6 +120,8 @@ export const TENANT_TABLES = [
   'tenant_billing_currency',
   // [M-08] The prepaid top-up as one persisted command.
   'topup_commands', 'trial_grants', 'trip_share_tokens',
+  // [PT-1] Card rail v2: enrolled cards, hosted sessions and their evidence.
+  'payment_instruments', 'card_sessions', 'card_observations',
   // [M-34] Fare zones are one operator's, in one market.
   'zones',
   // [STORE-002] Who a person refuses contact with.
@@ -262,6 +264,15 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
     parentTenantSql: `SELECT COALESCE((SELECT u."tenantId" FROM users u JOIN riders r ON r."userId" = u.id WHERE r.id = NEW."riderId"), (SELECT u."tenantId" FROM users u JOIN drivers d ON d."userId" = u.id WHERE d.id = NEW."driverId"), (SELECT o."tenantId" FROM orders o WHERE o.id = NEW."orderId"))` },
   // [TAXI multi-stop] one hop: a stop inherits the tenant of its ride (the delivery_cash_settlements shape)
   { table: 'taxi_trip_stops', trigger: 'taxi_trip_stops_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [PT-1 card rail v2] one hop through the payer, the transactions/payouts shape: an enrolled
+  // card and a hosted session belong to the person who pays the fee
+  { table: 'payment_instruments', trigger: 'payment_instruments_tenant_matches_user', parent: 'users', fk: 'userId' },
+  { table: 'card_sessions', trigger: 'card_sessions_tenant_matches_user', parent: 'users', fk: 'userId' },
+  // [PT-1] an observation inherits its session; an off-session charge has no session, so it
+  // inherits the instrument it charged. An observation with neither is refused.
+  { table: 'card_observations', trigger: 'card_observations_tenant_matches_owner', parent: 'card_sessions', fk: 'sessionId',
+    watch: ['sessionId', 'instrumentId'],
+    parentTenantSql: `SELECT COALESCE((SELECT s."tenantId" FROM card_sessions s WHERE s.id = NEW."sessionId"), (SELECT i."tenantId" FROM payment_instruments i WHERE i.id = NEW."instrumentId"))` },
 ];
 export function tenantLineageDdl(): string[] {
   return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch }) => [

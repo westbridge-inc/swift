@@ -477,11 +477,17 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       const { SubscriptionService } = await import('../modules/subscription/subscription.service');
       const { NotificationService } = await import('../modules/notification/notification.service');
       const { getPaymentProvider } = await import('../providers/payment/payment-provider');
+      const { getCardRailProvider } = await import('../providers/card/card-rail-factory');
 
+      // [PT-1] Card rail v2's provider is resolved lazily — only v2 work asks —
+      // on this worker's own Redis, where the simulator keeps its state.
+      const cardRail = () => getCardRailProvider({ redis: ctx.redis });
       const billing = new BillingService(
         ctx.prisma,
         new NotificationService(ctx.prisma, ctx.io),
         getPaymentProvider(),
+        undefined,
+        cardRail,
       );
       const subscriptions = new SubscriptionService(ctx.prisma);
 
@@ -584,9 +590,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // settled, declined, re-sent under the same key, or expired — the
           // kill switch stops new instructions, never this.
           const cards = await billing.reconcileUnknownCardCharges();
-          if (cards.settled + cards.declined + cards.reissued + cards.expired + cards.stillUnknown > 0) {
+          if (cards.settled + cards.declined + cards.reissued + cards.expired + cards.stillUnknown + cards.actionRequired > 0) {
             ctx.log.warn(cards, '[M-01] unknown card charge intents reconciled');
           }
+          // [PT-1] Card rail v2 sessions: an unused page past its window closes,
+          // and a Pay now that may have moved money is asked again. Neither the
+          // flag nor the kill switch stops this — what exists always drains [C7].
+          const { CardRailService } = await import('../modules/billing/card-rail.service');
+          const cardSessions = await new CardRailService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), billing, cardRail).sweepSessions();
+          if (cardSessions.checked > 0) ctx.log.info(cardSessions, '[PT-1] card sessions swept');
           // [M-18] The historical double credits: one provider transaction
           // credited by more than one channel before the identity existed.
           // Reported and paged for human reconciliation, never reversed here.

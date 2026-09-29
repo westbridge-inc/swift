@@ -17,7 +17,14 @@ import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor, weeklyFeeAmount } from './subscription-fee';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice, type BillingNoticeLeaseGuard } from './billing-notice-delivery';
 import { AGENT_PAY_WAY, FEE_RESTORE_LINE, feePayWays } from './fee-notice-copy';
-import { cardRailKilled } from '../../utils/card-rail';
+import { cardRailKilled, cardRailV2Enabled } from '../../utils/card-rail';
+import {
+  assertNever, bindingOf, chargeMatchesIntent, describeBinding, sameBinding,
+  type CardChargeOutcome, type CardRailBinding, type CardRailProvider, type CardRailSource, type ChargedAmount,
+} from '../../providers/card/card-provider';
+import { toProviderMinor } from '../../utils/currency-amount';
+import { openVaultToken } from './card-vault';
+import { observedStatus, recordCardObservation } from './card-observations';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -41,7 +48,31 @@ type ChargeAttemptResult = (
   | { ok: false; unknown: true; clientKey: string; failureRaw?: string; intentId: string }
   | { ok: false; deferred: true; reopenPaymentId?: string }
   | { ok: false; dispatchRevoked: true; intentId: string }
+  /** [PT-1 · C4] The bank wants the cardholder present (3-D Secure). Not a
+   *  decline: no strike, no second instruction for this attempt, a notice.
+   *  `recorded` = the intent already carries this outcome from an earlier run. */
+  | { ok: false; requiresAction: true; intentId: string; recorded?: boolean }
 ) & { rail?: 'MOBILE_MONEY' | 'CARD' };
+
+/** [PT-1] What one v2 provider answer about an instrument charge means to billing. */
+type InstrumentVerdict =
+  | { status: 'succeeded'; providerRef: string }
+  | { status: 'failed'; reason: string; providerRef?: string }
+  | { status: 'requires_action'; reason: string }
+  | { status: 'pending' }
+  | { status: 'unknown'; reason: string; absent: boolean }
+  /** The provider reported a different amount or currency: held for a person. */
+  | { status: 'held' };
+
+/** [PT-1] A v2 retrieval, in the shape the card reconciler already reads
+ *  (the legacy lookup's four statuses) plus the two v2 adds. */
+type InstrumentLookup =
+  | { status: 'succeeded'; providerRef: string }
+  | { status: 'failed'; reason: string; providerRef?: string }
+  | { status: 'requires_action'; reason: string }
+  | { status: 'not_found' }
+  | { status: 'unknown'; reason: string }
+  | { status: 'held' };
 const RETRY_HOURS = 24;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -62,6 +93,22 @@ const jitter = (sec: number) => Math.round(sec * (0.8 + Math.random() * 0.4));
 const PRESERVED_NO_DUNNING = 'PRESERVED_NO_DUNNING';
 const MMG_APPROVAL_HOLD = 'MMG_APPROVAL_MISMATCH';
 const MMG_HISTORY_HOLD = 'MMG_HISTORY_APPROVAL_UNVERIFIED';
+/** [PT-1] A hosted Pay-now payment's clientKey: `cardpay:<card session id>`.
+ *  The session sweep owns these rows; the weekly-intent reconciler skips them. */
+export const CARD_PAY_NOW_KEY_PREFIX = 'cardpay:';
+/** [PT-1] Why an instrument charge did not happen — shown to the partner in
+ *  the ordinary failure notice ("<reason>. We will retry tomorrow…", then the
+ *  real ways to pay from fee-notice-copy.ts). A fact, never a door: the app
+ *  has no card screen until card rail v2 ships one. */
+const NO_CARD_REASON = 'There is no card on file for the weekly fee';
+const EXPIRED_CARD_REASON = 'The card on file for the weekly fee has expired';
+
+/** [PT-1] A card is usable through the last day of its expiry month (UTC). */
+export function cardExpiredAt(card: { expMonth: number; expYear: number }, now: Date): boolean {
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth() + 1;
+  return card.expYear < year || (card.expYear === year && card.expMonth < month);
+}
 
 type MmgApprovalEvidence = Pick<MmgTransaction, 'transactionId' | 'status'>
   & Partial<Pick<MmgTransaction, 'amountMinor' | 'currencyCode' | 'reference' | 'createdAt'>>
@@ -181,6 +228,7 @@ export function isUsableTopUpKey(key: unknown): key is string {
 
 export class BillingService {
   private countryConfig: CountryConfigService;
+  private cardRailProvider: CardRailProvider | null | undefined;
 
   constructor(
     private prisma: PrismaClient,
@@ -188,6 +236,11 @@ export class BillingService {
     private payments: PaymentProvider,
     /** [M-04] Test seam only — see BillingObserver. Production passes nothing. */
     private readonly observer: BillingObserver = {},
+    /** [PT-1] Card rail v2: where this process gets its v2 provider. Resolved
+     *  only when v2 work needs it. A process that does not wire it never
+     *  charges an instrument (the charge defers to the billing worker, which
+     *  does) and never falls back to the legacy token. */
+    private readonly cardRail?: CardRailSource,
   ) {
     this.countryConfig = new CountryConfigService(prisma);
   }
@@ -442,6 +495,14 @@ export class BillingService {
 
     if ('dispatchRevoked' in charged) return 'skipped';
 
+    if ('requiresAction' in charged) {
+      // [PT-1 · C4] Off-session 3-D Secure is not a decline: no CHARGE_FAILED,
+      // no failed attempt, no second instruction for this attempt — the
+      // partner is told, and a hosted Pay now (their bank present) pays it.
+      await this.holdForCardAction(sub, charged.intentId, amount, now, charged.recorded === true);
+      return 'pending';
+    }
+
     if ('deferred' in charged) {
       // SWIFT-004: a prior MMG request for this period is still live at MMG (or
       // MMG is unreachable). Don't create a second request/row — re-attach the
@@ -679,6 +740,369 @@ export class BillingService {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // [PT-1] Card rail v2 — the weekly fee on an enrolled card
+  // -------------------------------------------------------------------------
+
+  /** This process's v2 provider, or null when none is wired (or it cannot be
+   *  built). Null never falls back to anything: v2 work simply defers. */
+  private resolveCardRail(): CardRailProvider | null {
+    if (this.cardRailProvider !== undefined) return this.cardRailProvider;
+    if (!this.cardRail) return (this.cardRailProvider = null);
+    try {
+      this.cardRailProvider = this.cardRail();
+    } catch (err) {
+      log().error({ err }, '[PT-1] card rail v2 provider unavailable — instrument charges defer, nothing is charged');
+      this.cardRailProvider = null;
+    }
+    return this.cardRailProvider;
+  }
+
+  /**
+   * [PT-1] The weekly fee on the subscription's ACTIVE instrument. Every law of
+   * the legacy card path holds here too: the kill switch stops NEW
+   * instructions only; one durable intent per attempt, reserved and authorized
+   * BEFORE the provider is asked; an existing intent is retrieved by its key
+   * before anything could be re-sent; UNKNOWN is never a decline. Added:
+   *  - only an ACTIVE instrument is charged; one past its expiry month is
+   *    retired as EXPIRED and never sent;
+   *  - [C2] the instrument's binding must be the configured provider's own —
+   *    a mismatch sends nothing, dunns nobody and pages a person;
+   *  - a capture reporting a different amount or currency is HELD, never booked;
+   *  - [C4] requires_action is not a decline.
+   */
+  private async attemptInstrumentCharge(sub: SubWithRelations, amount: number, now: Date): Promise<ChargeAttemptResult> {
+    if (cardRailKilled()) return { ok: false, deferred: true };
+    const key = this.cardReference(sub);
+    const live = await this.prisma.subscriptionPayment.findUnique({ where: { clientKey: key } });
+    if (live) return this.resumeCardIntent(sub, live, key, now);
+
+    const cardRail = this.resolveCardRail();
+    if (!cardRail) return { ok: false, deferred: true };
+    const instrument = await this.prisma.paymentInstrument.findFirst({ where: { subscriptionId: sub.id, status: 'ACTIVE' } });
+    if (!instrument) return { ok: false, reason: NO_CARD_REASON };
+    if (cardExpiredAt(instrument, now)) {
+      await this.prisma.paymentInstrument.updateMany({ where: { id: instrument.id, status: 'ACTIVE' }, data: { status: 'EXPIRED', expiredAt: now } });
+      return { ok: false, reason: EXPIRED_CARD_REASON };
+    }
+    const binding = bindingOf(instrument);
+    if (!sameBinding(binding, cardRail.binding)) {
+      await this.alertCardBindingMismatch(sub, instrument, cardRail.binding);
+      return { ok: false, deferred: true };
+    }
+    // Opened before anything is reserved: a vault that cannot open leaves no intent behind.
+    const vaultToken = await openVaultToken(instrument);
+    const intended: ChargedAmount = { amountMinor: toProviderMinor(amount, sub.currencyCode, 'card.v2.weekly'), currencyCode: sub.currencyCode };
+    const reserved = await this.reserveInstrumentIntent(sub, amount, key, instrument.id, now);
+    if (!reserved) return { ok: false, deferred: true }; // a concurrent run holds this attempt
+    if (!await this.authorizeProviderEffect(sub, reserved.id, 'CARD', now)) {
+      return { ok: false, dispatchRevoked: true, intentId: reserved.id, rail: 'CARD' };
+    }
+
+    const result = await cardRail.chargeInstrument({ binding, vaultToken, idempotencyKey: key, ...intended });
+    await this.observer.afterProviderReturned?.({ status: result.status, providerRef: result.providerRef ?? '' });
+    const verdict = await this.judgeInstrumentAnswer(sub, instrument, reserved.id, 'CHARGE', result, intended, now);
+    switch (verdict.status) {
+      case 'succeeded': return { ok: true, ref: verdict.providerRef, settlePaymentId: reserved.id, rail: 'CARD' };
+      case 'failed': return { ok: false, reason: verdict.reason, failureCode: mapCardFailure(verdict.reason), intentId: reserved.id, failureRaw: verdict.reason };
+      case 'requires_action': return { ok: false, requiresAction: true, intentId: reserved.id };
+      case 'pending': return { ok: false, unknown: true, clientKey: key, intentId: reserved.id, failureRaw: 'Pending at the card provider' };
+      case 'unknown': return { ok: false, unknown: true, clientKey: key, intentId: reserved.id, failureRaw: verdict.reason };
+      case 'held': return { ok: false, deferred: true };
+      default: return assertNever(verdict, 'instrument charge verdict');
+    }
+  }
+
+  /** An intent already exists for this attempt: its truth is retrieved, and
+   *  no second instruction is ever sent under the same key. */
+  private async resumeCardIntent(sub: SubWithRelations, live: SubscriptionPayment, key: string, now: Date): Promise<ChargeAttemptResult> {
+    if (live.status === 'CAPTURED') return { ok: true, ref: live.externalRef ?? key, settlePaymentId: live.id };
+    if (live.status === 'UNKNOWN') {
+      if (live.failureCode === 'AMOUNT_MISMATCH') return { ok: false, deferred: true }; // held for a person
+      const found = live.instrumentId
+        ? await this.lookupInstrumentCharge(sub, live, now)
+        : await this.payments.lookupCharge({ idempotencyKey: key, providerRef: live.externalRef ?? undefined });
+      if (found.status === 'succeeded') return { ok: true, ref: found.providerRef ?? key, settlePaymentId: live.id };
+      if (found.status === 'failed') {
+        return { ok: false, reason: found.reason ?? 'Card declined', failureCode: mapCardFailure(found.reason), intentId: live.id, ...(found.reason ? { failureRaw: found.reason } : {}) };
+      }
+      if (found.status === 'requires_action') return { ok: false, requiresAction: true, intentId: live.id };
+      return { ok: false, deferred: true }; // unknown, not found or held: the reconciler owns it
+    }
+    // A proven terminal for this exact key: this attempt is over. One that
+    // ended asking for the cardholder keeps saying so — without a second
+    // instruction and without a strike.
+    if (live.failureCode === 'REQUIRES_ACTION') return { ok: false, requiresAction: true, intentId: live.id, recorded: true };
+    return { ok: false, deferred: true };
+  }
+
+  /** [C2] The truth of a v2 intent, asked of the provider its instrument is
+   *  bound to. A configuration naming another provider asks nobody. */
+  private async lookupInstrumentCharge(sub: SubWithRelations, row: SubscriptionPayment, now: Date): Promise<InstrumentLookup> {
+    const cardRail = this.resolveCardRail();
+    if (!cardRail) return { status: 'unknown', reason: 'No card rail v2 provider is wired in this process' };
+    const instrument = row.instrumentId ? await this.prisma.paymentInstrument.findUnique({ where: { id: row.instrumentId } }) : null;
+    if (!instrument || !row.clientKey) return { status: 'unknown', reason: 'The intent names no instrument that exists' };
+    const binding = bindingOf(instrument);
+    if (!sameBinding(binding, cardRail.binding)) {
+      await this.alertCardBindingMismatch(sub, instrument, cardRail.binding);
+      return { status: 'unknown', reason: `Bound to ${describeBinding(binding)}, not the configured provider` };
+    }
+    // The currency the attempt was issued in (its pinned event), as the charge path sent it.
+    const attempt = await this.prisma.billingEvent.findUnique({
+      where: { idempotencyKey: `charge:${row.clientKey.slice('card:'.length)}` },
+      select: { currencyCode: true },
+    });
+    const currencyCode = attempt?.currencyCode ?? sub.currencyCode;
+    const intended: ChargedAmount = { amountMinor: toProviderMinor(Number(row.amount), currencyCode, 'card.v2.retrieve'), currencyCode };
+    const answer = await cardRail.retrieve({ binding, idempotencyKey: row.clientKey, ...(row.externalRef ? { providerRef: row.externalRef } : {}) });
+    const verdict = await this.judgeInstrumentAnswer(sub, instrument, row.id, 'RETRIEVE', answer, intended, now);
+    switch (verdict.status) {
+      case 'succeeded': return { status: 'succeeded', providerRef: verdict.providerRef };
+      case 'failed': return { status: 'failed', reason: verdict.reason, ...(verdict.providerRef ? { providerRef: verdict.providerRef } : {}) };
+      case 'requires_action': return { status: 'requires_action', reason: verdict.reason };
+      case 'pending': return { status: 'unknown', reason: 'Pending at the card provider' };
+      case 'unknown': return verdict.absent ? { status: 'not_found' } : { status: 'unknown', reason: verdict.reason };
+      case 'held': return { status: 'held' };
+      default: return assertNever(verdict, 'instrument lookup verdict');
+    }
+  }
+
+  /** One provider answer about an instrument charge: recorded as evidence
+   *  (best effort — the payment row carries the outcome either way), checked
+   *  against what the intent asked for, and reduced to what billing acts on. */
+  private async judgeInstrumentAnswer(
+    sub: SubWithRelations,
+    instrument: { id: string; provider: string; environment: string },
+    paymentId: string,
+    source: 'CHARGE' | 'RETRIEVE',
+    answer: CardChargeOutcome,
+    intended: ChargedAmount,
+    now: Date,
+  ): Promise<InstrumentVerdict> {
+    const disagrees = (answer.status === 'succeeded' || answer.status === 'pending') && !chargeMatchesIntent(answer, intended);
+    await recordCardObservation(this.prisma, {
+      source,
+      instrumentId: instrument.id,
+      paymentId,
+      subscriptionId: sub.id,
+      provider: instrument.provider,
+      environment: instrument.environment,
+      rawSha256: answer.rawSha256,
+      parsedStatus: observedStatus(answer.status),
+      verdict: disagrees ? 'REJECTED_MISMATCH' : 'ACCEPTED',
+    }).catch((err) => log().warn({ err, paymentId }, '[PT-1] card observation not recorded — the payment row still carries the outcome'));
+    switch (answer.status) {
+      case 'succeeded':
+      case 'pending':
+        if (!chargeMatchesIntent(answer, intended)) {
+          await this.holdCardAmountMismatch(sub, paymentId, answer, intended, now);
+          return { status: 'held' };
+        }
+        return answer.status === 'succeeded' ? { status: 'succeeded', providerRef: answer.providerRef } : { status: 'pending' };
+      case 'failed': return { status: 'failed', reason: answer.reason, ...(answer.providerRef ? { providerRef: answer.providerRef } : {}) };
+      case 'requires_action': return { status: 'requires_action', reason: answer.reason };
+      case 'unknown': return { status: 'unknown', reason: answer.reason, absent: answer.absent === true };
+      default: return assertNever(answer, 'card charge outcome');
+    }
+  }
+
+  private async reserveInstrumentIntent(sub: SubWithRelations, amount: number, reference: string, instrumentId: string, now: Date): Promise<{ id: string } | null> {
+    try {
+      return await this.prisma.subscriptionPayment.create({
+        data: {
+          subscriptionId: sub.id,
+          amount,
+          status: 'UNKNOWN',
+          paymentMethod: 'CARD',
+          clientKey: reference,
+          instrumentId,
+          failureRaw: { providerEffect: 'NOT_SENT', providerRail: 'CARD' },
+          expiresAt: new Date(now.getTime() + MMG_REQUEST_TTL_MS),
+          periodStart: sub.nextBillingDate,
+          periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
+        },
+        select: { id: true },
+      });
+    } catch (error) {
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') return null;
+      throw error;
+    }
+  }
+
+  /**
+   * [PT-1 · C4] Off-session 3-D Secure. The intent ends FAILED with
+   * failureCode REQUIRES_ACTION and the PRESERVED_NO_DUNNING marker, so no
+   * path counts it as a strike and its key never sends a second instruction.
+   * The retry clock moves a day so the cycle does not re-enter the attempt
+   * every hour, and the partner is told — once per attempt — in words that
+   * name only the ways to pay that exist today (fee-notice-copy.ts); the
+   * hosted Pay now (card screens: PT-2/PT-3) pays the week with them present.
+   */
+  private async holdForCardAction(sub: SubWithRelations, paymentId: string, amount: number, now: Date, recorded: boolean): Promise<void> {
+    const notify = await this.prisma.$transaction(async (tx) => {
+      const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
+      await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${paymentId} FOR UPDATE`;
+      const payment = await tx.subscriptionPayment.findUnique({ where: { id: paymentId } });
+      if (!payment || payment.subscriptionId !== sub.id || payment.paymentMethod !== 'CARD') return false;
+      let first = false;
+      if (!recorded && payment.status === 'UNKNOWN') {
+        const existing = payment.failureRaw && typeof payment.failureRaw === 'object' && !Array.isArray(payment.failureRaw)
+          ? payment.failureRaw : {};
+        const moved = await tx.subscriptionPayment.updateMany({
+          where: { id: paymentId, status: 'UNKNOWN' },
+          data: {
+            status: 'FAILED',
+            failureCode: 'REQUIRES_ACTION' satisfies NormalizedFailure,
+            failureRaw: {
+              ...existing,
+              providerOutcome: 'REQUIRES_ACTION',
+              subscriptionOutcome: PRESERVED_NO_DUNNING,
+              recoveryDisposition: 'PARTNER_CONFIRMS_CARD',
+              observedAt: now.toISOString(),
+            },
+          },
+        });
+        first = moved.count === 1;
+      }
+      if (!authority.bankInsteadOfAdvance && ['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status)) {
+        await tx.subscription.update({ where: { id: sub.id }, data: { nextRetryAt: new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000) } });
+      }
+      return first && !authority.suppressNotice;
+    });
+    if (!notify) return;
+    // Only what is true about paying (fee-notice-copy.ts): the confirmation
+    // door arrives with the card screens; until then, the doors that exist.
+    await this.notifications.send({
+      userId: this.payerUserId(sub),
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Card payment not completed',
+      body: `Your bank asked to confirm this week's card payment of $${amount.toLocaleString()} ${sub.currencyCode}, which cannot be done automatically, so it did not go through. You were not charged, and this does not count against you. ${feePayWays(sub)}. ${FEE_RESTORE_LINE}`,
+      audience: this.payerAudience(sub),
+      data: { kind: 'billing_card_action_required', subscriptionId: sub.id },
+      dedupeKey: `card-action:${paymentId}`,
+    }).catch(() => {});
+  }
+
+  /** The provider reports a different amount or currency than the intent
+   *  asked for. Nothing is booked, nobody is dunned, nothing is re-sent: the
+   *  intent stays UNKNOWN under a named hold carrying both figures, and a
+   *  person is paged once. */
+  private async holdCardAmountMismatch(
+    sub: SubWithRelations,
+    paymentId: string,
+    reported: ChargedAmount & { status: 'succeeded' | 'pending'; providerRef?: string },
+    intended: ChargedAmount,
+    now: Date,
+  ): Promise<void> {
+    const held = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${paymentId} FOR UPDATE`;
+      const payment = await tx.subscriptionPayment.findUnique({ where: { id: paymentId } });
+      if (!payment || payment.status !== 'UNKNOWN' || payment.failureCode === 'AMOUNT_MISMATCH') return false;
+      const existing = payment.failureRaw && typeof payment.failureRaw === 'object' && !Array.isArray(payment.failureRaw)
+        ? payment.failureRaw : {};
+      await tx.subscriptionPayment.update({
+        where: { id: paymentId },
+        data: {
+          failureCode: 'AMOUNT_MISMATCH' satisfies NormalizedFailure,
+          failureRaw: {
+            ...existing,
+            providerOutcome: reported.status === 'succeeded' ? 'CAPTURED' : 'PENDING',
+            recoveryDisposition: 'MANUAL_RECONCILIATION',
+            reported: { amountMinor: reported.amountMinor, currencyCode: reported.currencyCode, providerRef: reported.providerRef ?? null },
+            intended: { amountMinor: intended.amountMinor, currencyCode: intended.currencyCode },
+            heldAt: now.toISOString(),
+          },
+        },
+      });
+      return true;
+    });
+    if (!held) return;
+    log().error({ subscriptionId: sub.id, paymentId, reported: { amountMinor: reported.amountMinor, currencyCode: reported.currencyCode }, intended }, '[PT-1] card provider reported a different amount or currency — held, nothing booked');
+    await notifyAdmins(this.prisma, this.notifications, {
+      tenantId: await tenantOfSubscription(this.prisma, sub.id),
+      title: '💳 Card charge held — the amount does not match',
+      body: `The card provider reports ${reported.amountMinor} ${reported.currencyCode} (minor units) for payment ${paymentId}, but Swift asked for ${intended.amountMinor} ${intended.currencyCode}. Nothing was booked and the partner was not penalised. Reconcile against the provider before any further action.`,
+      data: { kind: 'billing_invariants', alert: 'card-charge-amount-mismatch', subscriptionId: sub.id, paymentId },
+      dedupeKey: `card-amount-mismatch:${paymentId}`,
+    }).catch(() => {});
+  }
+
+  /** [C2] A token is only ever sent to the provider, environment and account
+   *  that minted it. A configuration naming another sends nothing, dunns
+   *  nobody, and pages a person once per mismatch. */
+  private async alertCardBindingMismatch(
+    sub: SubWithRelations,
+    instrument: { id: string; provider: string; environment: string; providerAccount: string },
+    configured: CardRailBinding,
+  ): Promise<void> {
+    const bound = bindingOf(instrument);
+    log().error({ subscriptionId: sub.id, instrumentId: instrument.id, bound: describeBinding(bound), configured: describeBinding(configured) }, '[PT-1 C2] card instrument bound to another provider setup — refused, nothing charged');
+    await notifyAdmins(this.prisma, this.notifications, {
+      tenantId: await tenantOfSubscription(this.prisma, sub.id),
+      title: '💳 Card charge refused — the card belongs to another provider setup',
+      body: `The saved card for subscription ${sub.id} was issued by ${describeBinding(bound)}, but this server is set up for ${describeBinding(configured)}. Nothing was charged and the partner was not penalised. Restore the configuration, or ask the partner to add their card again.`,
+      data: { kind: 'billing_invariants', alert: 'card-instrument-binding-mismatch', subscriptionId: sub.id, instrumentId: instrument.id },
+      dedupeKey: `card-binding:${instrument.id}:${describeBinding(configured)}`,
+    }).catch(() => {});
+  }
+
+  // -------------------------------------------------------------------------
+  // [PT-1] Hosted Pay now — what it costs, and how its capture is booked
+  // -------------------------------------------------------------------------
+
+  /**
+   * [PT-1] The server's price for a hosted Pay now: the weekly fee for the
+   * period that starts at nextBillingDate, priced exactly as the weekly cycle
+   * prices it. When a week is owed, that is the owed week; when nothing is
+   * due, it is the next week, paid ahead. A client never names the amount.
+   */
+  async quoteCardPayNow(subscriptionId: string, now = new Date()): Promise<{ amount: number; currencyCode: string; periodStart: Date; due: boolean }> {
+    const sub = await this.prisma.subscription.findUnique({ where: { id: subscriptionId } });
+    if (!sub) throw new NotFoundError('Subscription', subscriptionId);
+    if (sub.feeWaived) throw new AppError(409, 'NOTHING_TO_PAY', 'This week is waived — there is nothing to pay.');
+    const priced = await this.priceEligibleFor(sub, await this.loadUsdPricing());
+    const amount = Number(priced.amount);
+    if (!(amount > 0)) throw new AppError(409, 'NOTHING_TO_PAY', 'There is no weekly fee to pay.');
+    const due = sub.nextBillingDate.getTime() <= now.getTime() || ['PAST_DUE', 'SUSPENDED', 'CHURNED'].includes(sub.status);
+    return { amount, currencyCode: sub.currencyCode, periodStart: sub.nextBillingDate, due };
+  }
+
+  /**
+   * [PT-1] Book a verified hosted Pay-now capture — ONCE — through
+   * applySuccessfulCharge, the path every rail uses: under the payer ->
+   * subscription -> payment locks it advances the paid week and reinstates a
+   * billing suspension, or, when that week is already covered or the
+   * subscription may not advance, banks the money to the wallet. The payment
+   * row's compare-and-set and the success / bank event keys make a repeat a
+   * no-op. Returns what durably happened.
+   */
+  async settleHostedCardPayment(input: { subscriptionId: string; paymentId: string; providerRef: string; now?: Date }): Promise<'advanced' | 'banked' | 'held' | 'not_settled'> {
+    const now = input.now ?? new Date();
+    const [sub, payment] = await Promise.all([
+      this.prisma.subscription.findUnique({
+        where: { id: input.subscriptionId },
+        include: {
+          rider: { select: { userId: true } },
+          driver: { select: { userId: true } },
+          vendor: { select: { id: true, owner: { select: { userId: true } } } },
+        },
+      }),
+      this.prisma.subscriptionPayment.findUnique({ where: { id: input.paymentId } }),
+    ]);
+    if (!sub || !payment || payment.subscriptionId !== sub.id || payment.paymentMethod !== 'CARD') return 'not_settled';
+    const periodKey = payment.periodStart.toISOString().slice(0, 10);
+    await this.applySuccessfulCharge(sub as SubWithRelations, Number(payment.amount), input.providerRef, now, periodKey, payment.id);
+    const [after, banked] = await Promise.all([
+      this.prisma.subscriptionPayment.findUnique({ where: { id: payment.id } }),
+      this.prisma.billingEvent.findUnique({ where: { idempotencyKey: `bank:${payment.id}` }, select: { id: true } }),
+    ]);
+    if (banked) return 'banked';
+    if (after?.status === 'CAPTURED' && after.externalRef === input.providerRef) return 'advanced';
+    if (after?.failureCode === 'WALLET_CURRENCY_MISMATCH') return 'held';
+    return 'not_settled';
+  }
+
   private amountFor(sub: Subscription): Prisma.Decimal | number {
     return weeklyFeeFor(sub);
   }
@@ -715,8 +1139,8 @@ export class BillingService {
    *  dunning; never received → waits until TTL without automatically reissuing
    *  an old instruction; still unknown → waits, and its age is published.
    *  The kill switch never stops this. */
-  async reconcileUnknownCardCharges(now = new Date()): Promise<{ settled: number; declined: number; reissued: number; expired: number; stillUnknown: number; oldestMinutes: number }> {
-    const out = { settled: 0, declined: 0, reissued: 0, expired: 0, stillUnknown: 0, oldestMinutes: 0 };
+  async reconcileUnknownCardCharges(now = new Date()): Promise<{ settled: number; declined: number; reissued: number; expired: number; stillUnknown: number; actionRequired: number; oldestMinutes: number }> {
+    const out = { settled: 0, declined: 0, reissued: 0, expired: 0, stillUnknown: 0, actionRequired: 0, oldestMinutes: 0 };
     const rows = await this.prisma.subscriptionPayment.findMany({
       where: { paymentMethod: 'CARD', status: 'UNKNOWN' },
       // Durable least-recently-polled order rotates an indefinitely unknown
@@ -746,11 +1170,27 @@ export class BillingService {
         },
       });
       if (!sub || !row.clientKey) { out.stillUnknown += 1; continue; }
+      // [PT-1] A hosted Pay-now payment settles through its card session (the
+      // session sweep asks the provider), and a charge held because the
+      // provider reported a different amount waits for a person.
+      if (row.clientKey.startsWith(CARD_PAY_NOW_KEY_PREFIX)) continue;
+      if (row.failureCode === 'AMOUNT_MISMATCH') { out.stillUnknown += 1; continue; }
       const periodKey = row.periodStart.toISOString().slice(0, 10);
       const amount = Number(row.amount);
       const ttlAt = row.expiresAt ?? new Date(row.createdAt.getTime() + MMG_REQUEST_TTL_MS);
 
-      const found = await this.payments.lookupCharge({ idempotencyKey: row.clientKey, providerRef: row.externalRef ?? undefined });
+      // [PT-1 · C2] A v2 intent is retrieved from the provider, environment and
+      // account its instrument is bound to — never from whatever is configured
+      // for new charges. A legacy intent keeps its legacy lookup.
+      const found = row.instrumentId
+        ? await this.lookupInstrumentCharge(sub as SubWithRelations, row, now)
+        : await this.payments.lookupCharge({ idempotencyKey: row.clientKey, providerRef: row.externalRef ?? undefined });
+      if (found.status === 'requires_action') {
+        await this.holdForCardAction(sub as SubWithRelations, row.id, amount, now, false);
+        out.actionRequired += 1;
+        continue;
+      }
+      if (found.status === 'held') { out.stillUnknown += 1; continue; }
       if (found.status === 'succeeded') {
         // The processor took the money and we had no local payment: repair it
         // exactly once, then tell a person it happened.
@@ -926,6 +1366,14 @@ export class BillingService {
     }
     if (balanceRow && Number(balanceRow.balance) >= amount) {
       return { ok: true, ref: 'prepaid', spendPrepaid: amount };
+    }
+
+    // [PT-1] Card rail v2: the weekly card charge uses the subscription's
+    // ACTIVE instrument, through the provider recorded ON it. The legacy
+    // bare token on the subscription is never read on this path — not even
+    // as a fallback (card-rail-census.test.ts holds that).
+    if (sub.billingMethod === 'CARD' && cardRailV2Enabled()) {
+      return this.attemptInstrumentCharge(sub, amount, now);
     }
 
     if (sub.billingMethod === 'CARD' && sub.paymentToken) {

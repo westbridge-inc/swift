@@ -674,3 +674,34 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
       .toThrow(/non-UAT MMG_CHECKOUT_URL/);
   });
 });
+
+// [PT-1 · C10] Card rail v2 in production. The card simulator is a test page
+// with no real money, and this build has no production-capable v2 provider:
+// production refuses both, loudly, at boot — never at a partner's first tap.
+describe('[PT-1] card rail v2 cannot be switched on in production yet, and the simulator never', () => {
+  it('refuses the card simulator in production, whatever the flag says', () => {
+    for (const flag of [undefined, '0', '1']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_V2: flag }), String(flag))
+        .toThrow(/CARD_RAIL_PROVIDER=simulator/);
+    }
+  });
+
+  it('refuses CARD_RAIL_V2=1 in production: no production v2 provider exists in this build', () => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: '1' })).toThrow(/FATAL: CARD_RAIL_V2=1/);
+  });
+
+  it('the flag is 1 or 0 (or unset), never a guess', () => {
+    for (const value of ['true', 'on', 'yes', '01', ' 1']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: value }), value).toThrow(/CARD_RAIL_V2 must be 1 or 0/);
+    }
+  });
+
+  it('OFF — 0 or unset — boots exactly as before', () => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: undefined })).not.toThrow();
+  });
+
+  it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
+  });
+});
