@@ -247,7 +247,7 @@ export const TAXI_03: Journey<Ctx> = {
 
 export const TAXI_04: Journey<Ctx> = {
   id: 'TAXI-04',
-  estimateSeconds: 150,
+  estimateSeconds: 180,
   title: 'Cash outcome / no-show claim',
   cases: 'paid/no-show outcome; missing-GPS denial; admin claim settlement',
   async run(rec, ctx) {
@@ -293,10 +293,63 @@ export const TAXI_04: Journey<Ctx> = {
           settled = settle.done;
         }
         if (settled) {
+          // [P31-1] A claim is paid from the funded GY loss-protection reserve
+          // or not at all. The journey reads the line, provisions exactly the
+          // shortfall the payout will draw (repeated runs never grow it), pays,
+          // then asserts the line is back where it found it and both ledger
+          // entries are on the statement.
+          const payout = Number(row.amount);
+          const line = await GET('/admin/cash-rules/rlp/reserve?country=GY', ctx.admin.token);
+          if (!rec.expect('the GY loss-protection reserve is readable', line, 200, undefined, `balance=${line.json?.data?.balance}`)) return;
+          const before = Number(line.json?.data?.balance);
+          const topUp = Math.max(0, Math.round((payout - before) * 100) / 100);
+          let provisionedId: string | null = null;
+          if (topUp > 0) {
+            // The product rule stays observable: with the line unfunded the
+            // SAME payout is refused, and that refused attempt spends its
+            // approval (a burnt approval is the safe direction), so the real
+            // payout below asks again.
+            const dry = await twoPerson(rec, ctx, 'try to pay the synthetic claim from the unfunded reserve (refused)', 'PUT', `/admin/cash-rules/claims/${row.id}/paid`,
+              { reference: `SYN-T04-DRY-${ctx.runId}`.slice(0, 40), amount: row.amount }, [409]);
+            if (dry.final) {
+              rec.deny('a payout over an unfunded reserve is refused (RLP_RESERVE_UNFUNDED)', dry.final, [409], ['RLP_RESERVE_UNFUNDED'], `balance=${before} payout=${payout}`);
+            }
+            const prov = await twoPerson(rec, ctx, 'provision the GY reserve for the synthetic claim payout', 'POST', '/admin/cash-rules/rlp/reserve/adjust',
+              { countryCode: 'GY', amount: topUp, note: `livetest TAXI-04 fixture: provision the synthetic claim's payout (${ctx.runId})` }, [200, 201], { leaveFirstToCaller: true });
+            // The adjust route is C4 money (admin-authority.ts): held for a second
+            // admin. Should that policy ever change, a first answer of 200/201 is
+            // the entry itself, never a refusal.
+            const appliedAtOnce = !prov.approvalId && (prov.first.status === 200 || prov.first.status === 201);
+            if (!prov.done && !appliedAtOnce) {
+              // Held but never applied: twoPerson already recorded the target's
+              // refusal (e.g. no second admin). Refused at the ask: the journey
+              // cannot provision here, and must say so — never pass it over.
+              if (!prov.approvalId) {
+                rec.skipCase('provision the GY reserve for the synthetic claim payout', `the adjust route refused the ask: ${brief(prov.first)}`);
+              }
+              return;
+            }
+            provisionedId = (appliedAtOnce ? prov.first : prov.final)?.json?.data?.id ?? null;
+          } else {
+            rec.skipCase('a payout over an unfunded reserve is refused', `the GY reserve already holds ${before} against the ${payout} payout, so the unfunded refusal cannot be shown here`);
+          }
           const paid = await twoPerson(rec, ctx, 'mark the synthetic claim paid', 'PUT', `/admin/cash-rules/claims/${row.id}/paid`, { reference: `SYN-T04-${ctx.runId}`.slice(0, 40), amount: row.amount });
           if (paid.done) {
             const after = await GET('/admin/cash-rules/claims?status=PAID', ctx.admin.token);
             rec.check('the claim reads PAID', JSON.stringify(after.json?.data ?? []).includes(row.id), '');
+            const stmt = await GET('/admin/cash-rules/rlp/reserve?country=GY', ctx.admin.token);
+            const balanceAfter = Number(stmt.json?.data?.balance);
+            const entries: any[] = stmt.json?.data?.entries ?? [];
+            // The exact ledger arithmetic, whatever the line held before: it moved
+            // by the provision minus the payout (from 0 on a fresh target, so
+            // back to 0; a partly funded line ends at 0 too; a fully funded one
+            // falls by exactly the payout).
+            rec.check('the reserve moved by exactly the provision minus the payout', Math.abs(balanceAfter - (before + topUp - payout)) < 0.005,
+              `balance=${balanceAfter} (was ${before}; provisioned ${topUp}, payout ${payout})`);
+            if (topUp > 0) {
+              rec.check('the provision entry is on the reserve statement', entries.some((e) => e.id === provisionedId && e.kind === 'ADJUSTMENT'), `entry=${provisionedId}`);
+            }
+            rec.check('the payout entry is on the reserve statement', entries.some((e) => e.kind === 'PAYOUT' && e.claimId === row.id), '');
           }
         }
       }
