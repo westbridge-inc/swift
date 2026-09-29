@@ -193,6 +193,9 @@ export const NON_PROCESSOR_HOSTS: Readonly<Record<string, string>> = {
   'play.google.com': 'link rendered to users; no server call',
   'wa.me': 'link rendered to users; no server call',
   'maps.google.com': 'map link inside SOS messages to emergency contacts; no server call',
+  // The MMG checkout SANDBOX's placeholder page (providers/mmg/mmg-checkout.ts). A .invalid name never
+  // resolves (RFC 2606): nothing is sent anywhere; the live page is MMG's own, under mmgtest.net / mmg.gy.
+  'mmg-checkout.sandbox.invalid': 'sandbox placeholder page; a .invalid name never resolves, no server call',
 };
 
 export function processorByRef(ref: string | undefined | null): ProcessorEntry | null {
