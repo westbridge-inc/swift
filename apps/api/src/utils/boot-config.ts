@@ -3,6 +3,7 @@ import { firstInvalidTwilioConfig } from './twilio-identity';
 import { assertDisabledCardRailConfig } from './card-rail';
 import { testControlEnabled } from '../modules/ops/test-control';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
+import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 
 /**
  * [R2 C2] `/test-control/identity` exists only in loadtest and test builds
@@ -34,6 +35,11 @@ export function assertTestControlConfig(env: Record<string, string | undefined> 
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
   // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
   assertTestControlConfig(env);
+  // MMG hosted checkout, in EVERY mode (staging runs development mode against
+  // MMG UAT): MMG_CHECKOUT_ENABLED is exactly 0 or 1, and once on, the live
+  // driver needs its whole configuration — keys parsed, the request proven to
+  // fit the key. Production also refuses the sandbox and a UAT page.
+  assertMmgCheckoutConfig(env);
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.

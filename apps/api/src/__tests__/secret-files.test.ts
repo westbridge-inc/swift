@@ -44,6 +44,9 @@ describe('the allowlist', () => {
       'JWT_SECRET', 'OTP_HASH_SECRET', 'MASTER_KEK', 'STORAGE_SIGNING_SECRET', 'MEILISEARCH_KEY',
       'TWILIO_API_KEY_SECRET', 'SMTP_PASS',
       'MMG_API_KEY', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET',
+      // The MMG hosted checkout: the reply-opening private key and the secret
+      // key sealed inside every request token.
+      'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_SECRET_KEY',
       'PAYMENT_GATEWAY_KEY', 'PAYMENT_GATEWAY_SECRET',
       'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
       // [R2 C1] Every other secret the API reads; each could otherwise only
@@ -63,7 +66,13 @@ describe('the allowlist', () => {
     }
     // Identifiers, hostnames and switches are configuration, not secrets: a
     // *_FILE for them would be a file-read primitive with no purpose.
-    for (const never of ['NODE_ENV', 'LOG_LEVEL', 'API_HOST', 'TWILIO_ACCOUNT_SID', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID', 'MMG_MERCHANT_ID', 'KYC_PROVIDER']) {
+    for (const never of [
+      'NODE_ENV', 'LOG_LEVEL', 'API_HOST', 'TWILIO_ACCOUNT_SID', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID', 'MMG_MERCHANT_ID', 'KYC_PROVIDER',
+      // The checkout identifiers ride in the page URL a partner opens, and the
+      // public key opens nothing.
+      'MMG_CHECKOUT_ENABLED', 'MMG_CHECKOUT_MERCHANT_ID', 'MMG_CHECKOUT_CLIENT_ID', 'MMG_CHECKOUT_MERCHANT_NAME',
+      'MMG_CHECKOUT_RETURN_ORIGIN', 'MMG_CHECKOUT_PUBLIC_KEY',
+    ]) {
       expect(SECRET_FILE_NAMES).not.toContain(never);
     }
     // [R2 C3] AI identity providers are forbidden by the no-AI rule; no store
@@ -92,6 +101,7 @@ describe('the allowlist census — no secret the API reads can fall back to the 
   const NON_SECRET: Record<string, string> = {
     DEV_OTP_BYPASS: 'a development switch (0/1), refused in production by the boot guard',
     MASTER_KEK_ESCROW_FINGERPRINT: 'the sha256 of the key bytes, recorded beside the key on purpose so a stale escrow is caught',
+    MMG_CHECKOUT_PUBLIC_KEY: 'the RSA public key MMG checkout requests are encrypted TO: public by definition, it opens nothing (the private half is the secret file MMG_CHECKOUT_PRIVATE_KEY, and the boot guard refuses a private key here)',
     NOT_MY_DRIVER_AUTHORITY_KILL: 'a kill switch for a dispatch rule',
     SOCKET_AUTH_RECHECK_MS: 'a timing for the socket re-authentication sweep',
     SOCKET_AUTH_RECHECK_TIMEOUT_MS: 'a timing for the socket re-authentication sweep',
@@ -142,6 +152,7 @@ describe('the allowlist census — no secret the API reads can fall back to the 
     PHOTON_URL: 'private-network geocoder, no authentication',
     NOMINATIM_URL: 'private-network reverse geocoder, no authentication',
     MMG_API_URL: 'provider API base; credentials travel as MMG_API_KEY / MMG_PASSWORD / MMG_MKEY / MMG_MSECRET',
+    MMG_CHECKOUT_URL: 'the MMG hosted-checkout page a partner is sent to; the secret key travels encrypted inside the request token, never in the address',
     POWERTRANZ_API_URL: 'provider API base; credentials travel as PAYMENT_GATEWAY_KEY / PAYMENT_GATEWAY_SECRET',
     STRIPE_API_URL: 'provider API base; the credential is STRIPE_SECRET_KEY',
     DIDIT_API_URL: 'provider API base of a forbidden provider (#1276 removes the reader); never a credential',

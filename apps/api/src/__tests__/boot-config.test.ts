@@ -1,6 +1,7 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { spawnSync } from 'node:child_process';
+import { generateKeyPair, type KeyObject } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -622,5 +623,54 @@ describe('[R13 on current main] cash-only production boot keeps the MMG referenc
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MMG hosted checkout (providers/mmg/mmg-checkout.ts). The guard runs in EVERY
+// mode — staging runs development mode against MMG UAT — so a half-configured
+// checkout never starts anywhere, and production never runs the sandbox or a
+// UAT page. Off (unset, or exactly 0) changes nothing.
+// ---------------------------------------------------------------------------
+describe('MMG hosted checkout — the boot guard, in every mode', () => {
+  let pair: { publicKey: KeyObject; privateKey: KeyObject };
+  beforeAll(async () => {
+    pair = await new Promise((resolve, reject) => {
+      generateKeyPair('rsa', { modulusLength: 4096 }, (err, publicKey, privateKey) => (err ? reject(err) : resolve({ publicKey, privateKey })));
+    });
+  }, 60_000);
+  const checkoutOn = (): Record<string, string> => ({
+    MMG_CHECKOUT_ENABLED: '1',
+    MMG_CHECKOUT_URL: 'https://checkout.example.test/mmg-pg/web/payments',
+    MMG_CHECKOUT_MERCHANT_ID: '0000000001',
+    MMG_CHECKOUT_CLIENT_ID: 'client-test',
+    MMG_CHECKOUT_MERCHANT_NAME: 'Swift Test',
+    MMG_CHECKOUT_RETURN_ORIGIN: 'https://pay.example.test',
+    MMG_CHECKOUT_SECRET_KEY: 'not-a-secret',
+    MMG_CHECKOUT_PUBLIC_KEY: pair.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+    MMG_CHECKOUT_PRIVATE_KEY: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+  });
+
+  it('off — unset or exactly 0 — changes nothing', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
+  });
+
+  it('a misspelled switch refuses to start, in production and outside it', () => {
+    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: 'true' })).toThrow(/MMG_CHECKOUT_ENABLED must be exactly 0 or 1/);
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_ENABLED: 'yes' })).toThrow(/MMG_CHECKOUT_ENABLED must be exactly 0 or 1/);
+  });
+
+  it('enabled on the live driver without its configuration refuses to start — development (staging) included', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_DRIVER: 'live', MMG_CHECKOUT_ENABLED: '1' }))
+      .toThrow(/MMG_CHECKOUT_MERCHANT_ID is required/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '1' })).toThrow(/MMG_CHECKOUT_URL must be set explicitly in production/);
+  });
+
+  it('production boots with a complete checkout configuration, and never with the UAT page', () => {
+    expect(() => assertSafeBootConfig({ ...good, ...checkoutOn() })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_URL: 'https://mmgpg.mmgtest.net/mmg-pg/web/payments' }))
+      .toThrow(/non-UAT MMG_CHECKOUT_URL/);
   });
 });
