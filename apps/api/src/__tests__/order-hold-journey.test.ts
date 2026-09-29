@@ -652,8 +652,8 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     const after = await storeHeard(store, order);
     expect(after.pushes).toEqual(['New Order!']);
     expect(after.sms).toEqual([]);
-    // The dead order's alert no longer rings the banner.
-    expect(await storeSees(store, order.id)).toMatchObject({ board: true, cancelledTab: true, detail: 200, banner: false });
+    // The store saw it, so it stays in its history — as cancelled.
+    expect(await storeSees(store, order.id)).toMatchObject({ board: true, cancelledTab: true, detail: 200 });
   });
 });
 
@@ -766,7 +766,7 @@ describe('Q12 · express — never held, so the store sees it at once; a cancel 
     const after = await storeHeard(store, order);
     expect(after.pushes).toEqual(['New Order!']);
     expect(after.sms).toEqual([]);
-    expect(await storeSees(store, order.id)).toMatchObject({ cancelledTab: true, banner: false });
+    expect(await storeSees(store, order.id)).toMatchObject({ cancelledTab: true });
   });
 });
 

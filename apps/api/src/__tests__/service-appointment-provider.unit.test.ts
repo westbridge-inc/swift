@@ -60,14 +60,27 @@ afterEach(() => {
 describe('OrderService.releaseDueHeldOrders — a released booking goes to its provider', () => {
   function releaseHarness(rows: Row[]) {
     const store = orderStore(rows);
+    // [Q12] The release CAS and the store's counters commit in one transaction;
+    // the counters are recorded so a release can be seen counting exactly once.
+    const counted: Array<{ model: string; where: unknown; data: unknown }> = [];
+    const counter = (model: string) => ({
+      updateMany: async (args: { where: unknown; data: unknown }) => { counted.push({ model, ...args }); return { count: 1 }; },
+    });
+    const self: { prisma?: ReturnType<typeof prismaDouble> } = {};
     const prisma = prismaDouble(store, {
       vendorOwner: { findUnique: async (args: { where: { id: string } }) => (args.where.id === 'owner-svc' ? { id: 'owner-svc', userId: 'user-provider' } : null) },
+      $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(self.prisma),
+      vendor: counter('vendor'),
+      item: counter('item'),
+      // A booking sells no tracked stock: the release finds no SALE rows.
+      stockMovement: { findMany: async () => [] },
     });
+    self.prisma = prisma;
     const io = recordingIo();
     const svc = new OrderService(prisma, io);
     const vendorAlert = vi.spyOn(NotificationService.prototype, 'newOrderForVendor').mockResolvedValue('notification-1');
     const enqueueDispatch = vi.fn(async (_orderId: string) => {});
-    return { store, io, svc, vendorAlert, enqueueDispatch };
+    return { store, io, svc, vendorAlert, enqueueDispatch, counted };
   }
 
   it('the selected SERVICE business is told on its own room and by the persistent alert; no rider cascade starts', async () => {
@@ -85,6 +98,11 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
     const placedAt = (h.store.rows[0]!['placedAt'] as Date).getTime();
     expect((h.vendorAlert.mock.calls[0]![5] as Date).getTime()).toBe(placedAt + 24 * HOUR);
     expect(h.enqueueDispatch).not.toHaveBeenCalled();
+    // [Q12] The provider's counters count the booking at its release, once.
+    expect(h.counted).toEqual([
+      { model: 'vendor', where: { id: 'vendor-svc' }, data: { totalOrders: { increment: 1 } } },
+      { model: 'item', where: { id: { in: ['item-haircut'] } }, data: { totalOrdered: { increment: 1 } } },
+    ]);
   });
 
   it('a booking still inside its hold is not released and nobody is told', async () => {
@@ -103,6 +121,7 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
     expect(h.enqueueDispatch).toHaveBeenCalledWith('parcel-1');
     expect(h.io.emits).toEqual([]);
     expect(h.vendorAlert).not.toHaveBeenCalled();
+    expect(h.counted).toEqual([]); // no store, no store counters
   });
 });
 
