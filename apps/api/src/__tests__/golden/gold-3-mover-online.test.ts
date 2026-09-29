@@ -449,9 +449,10 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
       sys(() => app.prisma.alertDelivery.findFirstOrThrow({ where: { kind: 'MOVER_OFFER', subjectId: orderId } })),
     ]);
     expect({ status: order.status, rider: order.riderId }).toEqual({ status: 'RIDER_ASSIGNED', rider: mover.riderId });
-    // The seeded founder directive stacks two legs per rider, so one live leg
-    // still leaves room: the winner stays available for a second leg.
-    expect(await riderStackingCapacity(app.prisma)).toBe(2);
+    // The seeded founder directive stacks up to three legs per rider (raised
+    // from two on 2026-09-24), so one live leg still leaves room: the winner
+    // stays available for another leg.
+    expect(await riderStackingCapacity(app.prisma)).toBe(3);
     expect({ pointer: won.currentOrderId, available: won.isAvailable }).toEqual({ pointer: orderId, available: true });
     expect({ pointer: left.currentOrderId, available: left.isAvailable }).toEqual({ pointer: null, available: true });
     expect(assigned).toBe(1);
