@@ -56,7 +56,7 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
     const ticket = ++revision.current;
     searchRequest.current = ticket;
     setSuggestions([]);
-    if (text.trim().length < 3) return;
+    if (text.trim().length < 3) { setSearching(false); return; }
     setSearching(true); setNotice(null);
     try {
       const results = await pinLookup(placesAutocomplete(`${text.trim().slice(0, 110)}, Guyana`, { lat: STORE_MAP_START.latitude, lng: STORE_MAP_START.longitude }));
@@ -210,7 +210,7 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
       </div>
       <p role="status" aria-live="polite" aria-atomic="true" className={styles['srOnly']}>{announcement}</p>
       {!inMarket && <p role="alert" className={styles['error']}>{STORE_PIN_OUTSIDE}</p>}
-      {!mapReady && !mapFailed && <p role="status" className={styles['copy']}>Loading map…</p>}
+      {!mapReady && !mapFailed && <p className={styles['copy']}>Loading map…</p>}
       {mapFailed && <><p role="alert" className={styles['error']}>The map couldn’t load. Retry to check your store’s entrance before confirming.</p><button type="button" className={styles['button']} onClick={() => { setMapFailed(false); setLoadedTiles(new Set()); setTileAttempt(tileAttempt + 1); }}>Retry map</button></>}
       {basis === 'market' && !storePinMoved(point) && <p className={styles['copy']}>Move the map to your store</p>}
       <button type="button" className={`${styles['button']} ${styles['confirm']}`} disabled={!confirmable} onClick={() => { if (confirmable) onConfirm({ ...point, address: line }); }}>Confirm store location</button>

@@ -308,4 +308,18 @@ describe('Q8 website store pin', () => {
     expect(disabled('Find address')).toBe(false);
     expect(screen.getByRole('button', { name: /12 Regent Street.*Georgetown/ })).toBeTruthy();
   });
+
+  it('recovers the search button after Enter on a short query cancels a pending search', async () => {
+    let resolve!: (_value: typeof DOOR[]) => void;
+    fx.search.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    const user = await business();
+    await user.click(screen.getByRole('button', { name: 'Place your store on the map' }));
+    const input = screen.getByLabelText('Search for your store’s address');
+    fireEvent.change(input, { target: { value: '12' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await act(async () => resolve([DOOR]));
+    fireEvent.change(input, { target: { value: 'New address' } });
+    expect(disabled('Find address')).toBe(false);
+    expect(screen.queryByRole('button', { name: /12 Regent Street.*Georgetown/ })).toBeNull();
+  });
 });
