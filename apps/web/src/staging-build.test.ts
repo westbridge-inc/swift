@@ -53,16 +53,22 @@ describe('[Q11] the staging website build', () => {
     });
   });
 
-  it('keeps staging entirely noindex and the public MMG return private', async () => {
+  it('asks crawlers not to index the whole staging copy; the public site limits that header to QR scan and MMG return links', async () => {
     expect(headerOf(await siteWideHeaders(await productionConfig(STAGING)), 'X-Robots-Tag')).toBe('noindex, nofollow');
     const publicRules = await (await productionConfig(PUBLIC_SITE)).headers!();
-    const privateReturn = publicRules.find((rule) => rule.source === '/pay/mmg/:outcome');
-    expect(privateReturn?.headers).toEqual([
-      { key: 'X-Robots-Tag', value: 'noindex' },
-      { key: 'Cache-Control', value: 'no-store' },
-      { key: 'Referrer-Policy', value: 'no-referrer' },
-    ]);
-    expect(publicRules.filter((rule) => rule !== privateReturn).flatMap((rule) => rule.headers).map((header) => header.key)).not.toContain('X-Robots-Tag');
+    // [AX303 F3] Public content stays indexable; /s/ needs a
+    // response noindex because its external resolver returns a redirect.
+    // Payment returns independently suppress indexing, caching and referrers.
+    expect(publicRules.filter((rule) => rule.headers.some((header) => header.key === 'X-Robots-Tag')))
+      .toEqual(expect.arrayContaining([
+        { source: '/s/:path*', headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] },
+        { source: '/pay/mmg/:outcome', headers: [
+          { key: 'X-Robots-Tag', value: 'noindex' },
+          { key: 'Cache-Control', value: 'no-store' },
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+        ] },
+      ]));
+    expect(publicRules.filter((rule) => rule.headers.some((header) => header.key === 'X-Robots-Tag'))).toHaveLength(2);
   });
 
   it('keeps every security header the public site sends, unchanged but for the API it connects to', async () => {
@@ -93,12 +99,11 @@ describe('[Q11] the staging website build', () => {
     }
   });
 
-  it('public builds keep their release config and suppress private MMG request logs', async () => {
+  it('Vercel and CI (no channel, no image switch) get exactly the config they had', async () => {
     const config = await productionConfig(PUBLIC_SITE);
     expect(Object.keys(config).sort()).toEqual(
       ['env', 'headers', 'logging', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages'].sort(),
     );
-    expect(config.logging).toEqual({ incomingRequests: { ignore: [/^\/pay\/mmg\//] } });
     expect(config.env).toEqual({ NEXT_PUBLIC_API_URL: RELEASE_BROWSER_API_ORIGIN });
     expect(headerOf(await siteWideHeaders(config), 'Content-Security-Policy')).toBe(
       buildBrowserContentSecurityPolicy('production'),
