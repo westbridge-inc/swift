@@ -166,7 +166,7 @@ describe('payScreenState — the four bands', () => {
   const NOW = new Date(2026, 7, 12, 12, 0, 0); // Wed 12 Aug 2026, local noon
   const iso = (d: number, h = 12) => new Date(2026, 7, d, h, 0, 0).toISOString();
 
-  it('covered: a big zero is the reward for paying, and the fee ahead is stated once', () => {
+  it('covered: nothing due states the next bill without claiming payment', () => {
     const s = payScreenState(
       { status: 'ACTIVE', weeklyFeeGyd: 10_000, amountDueGyd: 0, currentPeriodEnd: iso(15) },
       NOW,
@@ -175,7 +175,8 @@ describe('payScreenState — the four bands', () => {
     expect(s.tone).toBe('covered');
     expect(s.eyebrow).toBe('NOTHING DUE NOW');
     expect(s.amountGyd).toBe(0);
-    expect(s.covers).toBe('Paid through 15 Aug');
+    expect(s.covers).toBe('Next bill: 15 Aug');
+    expect(s.covers).not.toMatch(/paid/i);
     expect(s.title).toBe('You are covered');
     // The fee ahead appears in the band, NOT as a second hero number.
     expect(s.body).toContain('$10,000');

@@ -3,6 +3,7 @@ import { RideClass } from '@prisma/client';
 import { z } from 'zod';
 import { FareService } from './fare.service';
 import { assertRideGates, assertL2, createRideRequest } from './rides.service';
+import { planTaxiStops, taxiMaxStops } from './taxi-stops-flag';
 import { getSupplySnapshot, queueStatusFor, presenceNear, RIDE_QUEUE_TTL_MIN } from './queue.service';
 import { OrderService } from '../order/order.service';
 import { SosService } from '../safety/sos.service';
@@ -28,6 +29,10 @@ const pointSchema = z.object({
 const estimateSchema = z.object({
   pickup: pointSchema,
   dropoff: pointSchema,
+  // [TAXI multi-stop] The intermediate stops, in the order the passenger chose.
+  // Judged by planTaxiStops: the switch, the count, each stop, then where the
+  // whole route lies.
+  stops: z.array(z.unknown()).nullish(),
 });
 
 const requestRideSchema = z.object({
@@ -126,15 +131,27 @@ export async function ridesRoutes(app: FastifyInstance) {
     return { success: true, data: { id: watch.id, expiresAt: watch.expiresAt } };
   });
 
+  /** POST /estimate — [TAXI multi-stop] with `stops`, the whole route priced as
+   *  one trip, plus maxStops, stopCount and its legs. Without stops (absent,
+   *  null or an empty list), exactly the estimate of today, byte for byte,
+   *  whatever TAXI_MAX_STOPS says: the app learns whether it may offer stops
+   *  from its own capability read, never from this answer. [AX290 R2] */
   app.post('/estimate', auth, async (request) => {
     const body = estimateSchema.parse(request.body);
+    // Refused while TAXI_MAX_STOPS is 0, else validated and numbered here,
+    // before anything is read or priced.
+    const stops = planTaxiStops(body);
     const user = await app.prisma.user.findUniqueOrThrow({
       where: { id: request.user.userId },
       select: { countryCode: true, tenantId: true },
     });
-    // [M-34] Zone pricing is the requester's tenant's, in the requester's country.
-    const estimate = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, user.tenantId);
-    return { success: true, data: estimate };
+    if (stops.length === 0) {
+      // [M-34] Zone pricing is the requester's tenant's, in the requester's country.
+      const estimate = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, user.tenantId);
+      return { success: true, data: estimate };
+    }
+    const estimate = await fareService.estimateItineraryTiers(body.pickup, stops, body.dropoff, user.countryCode, user.tenantId);
+    return { success: true, data: { ...estimate, maxStops: taxiMaxStops(), stopCount: stops.length } };
   });
 
   /** POST /request — create the ride at the quoted fare and start dispatch.

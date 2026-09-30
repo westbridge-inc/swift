@@ -6,10 +6,13 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { T } from '../kit';
 import { offlineBannerBodyHeight, OFFLINE_BANNER_MIN_BODY_HEIGHT } from '../lib/connectivity';
+import { queryClient } from '../lib/queryClient';
+import { watchSlowQueries } from '../lib/slowQueries';
 
 // H (pre-launch audit): the app assumed connectivity on networks that don't
 // have it. This wires React Query's onlineManager to real device connectivity
-// (so queries/mutations pause + resume instead of hammering a dead network)
+// (so reads pause + resume instead of hammering a dead network; writes fail
+// once and are never queued for reconnect)
 // and shows a persistent banner so a failure reads as "you're offline", not a
 // mystery spinner.
 //
@@ -156,17 +159,20 @@ function useOfflineStatus(): boolean {
 export function ConnectivityBoundary({ children }: { children: ReactNode }) {
   const insets = useSafeAreaInsets();
   const offline = useOfflineStatus();
+  const [slow, setSlow] = useState(false);
+  useEffect(() => watchSlowQueries(queryClient, setSlow), []);
+  const showBanner = offline || slow;
   const [bannerBodyHeight, setBannerBodyHeight] = useState(OFFLINE_BANNER_MIN_BODY_HEIGHT);
 
   return (
     <View style={{ flex: 1 }}>
-      <View style={{ flex: 1, paddingTop: offline ? bannerBodyHeight : 0 }}>{children}</View>
-      {offline ? (
+      <View style={{ flex: 1, paddingTop: showBanner ? bannerBodyHeight : 0 }}>{children}</View>
+      {showBanner ? (
         <View
           pointerEvents="none"
           accessible
           accessibilityRole="alert"
-          accessibilityLiveRegion="assertive"
+          accessibilityLiveRegion={offline ? 'assertive' : 'polite'}
           onLayout={(event) => {
             const next = offlineBannerBodyHeight(event.nativeEvent.layout.height, insets.top);
             setBannerBodyHeight((current) => (current === next ? current : next));
@@ -188,9 +194,9 @@ export function ConnectivityBoundary({ children }: { children: ReactNode }) {
             elevation: 9999,
           }}
         >
-          <MaterialCommunityIcons name="wifi-off" size={14} color={color.white} />
+          <MaterialCommunityIcons name={offline ? 'wifi-off' : 'wifi-strength-1'} size={14} color={color.white} />
           <T variant="caption" weight="semibold" style={{ color: color.white, flexShrink: 1 }}>
-            No connection — we’ll retry when you’re back online
+            {offline ? "You're offline. Some things may not load until you're back online." : 'Slow connection — still trying'}
           </T>
         </View>
       ) : null}

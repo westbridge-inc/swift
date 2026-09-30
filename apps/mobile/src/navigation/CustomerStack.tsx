@@ -82,7 +82,13 @@ function HomeTabs() {
   const marketVisible = marketTabVisible(depth.data);
   return (
     <Tab.Navigator
+      detachInactiveScreens
       screenOptions={({ route }) => ({
+        // First visit is lazy; visited routes retain their state and queries.
+        // Freeze offscreen rendering without eagerly mounting every tab.
+        lazy: true,
+        freezeOnBlur: true,
+        animation: 'none',
         headerShown: false,
         tabBarActiveTintColor: color.brand[500],
         tabBarInactiveTintColor: color.text.muted,
@@ -122,12 +128,14 @@ function HomeTabs() {
         ),
       })}
     >
-      <Tab.Screen name="Home" component={HomeScreen} />
+      {/* Home has a live hold countdown; Cart has quote/recovery effects.
+          Keep their lifecycle renders active. Neither is unmounted on blur. */}
+      <Tab.Screen name="Home" component={HomeScreen} options={{ freezeOnBlur: false }} />
       {/* Server depth must positively confirm Market before its route mounts.
           React Query retains a known-visible verdict during refetch errors,
           and the last complete verdict seeds a cold start from device memory. */}
       {marketVisible ? <Tab.Screen name="Market" component={MarketScreen} /> : null}
-      <Tab.Screen name="Cart" component={CartScreen} />
+      <Tab.Screen name="Cart" component={CartScreen} options={{ freezeOnBlur: false }} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>
   );

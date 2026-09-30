@@ -95,8 +95,17 @@ async function resolveAndGo(dest: LinkDestination): Promise<void> {
 
 let navReady = false;
 
+export function isWeeklyFeeReturn(url: string): boolean {
+  try { const parsed = new URL(url); return parsed.protocol === 'swift:' && parsed.hostname === 'pay' && parsed.pathname === '/mmg/return'; } catch { return false; }
+}
+
 function handleUrl(url: string | null): void {
   if (!url) return;
+  if (isWeeklyFeeReturn(url)) {
+    // A return only opens the authenticated statement. Discard all parameters.
+    if (!safeNavigate('WeeklyFee') && !navReady) pendingUrl = 'swift://pay/mmg/return';
+    return;
+  }
   const dest = destinationForUrl(url);
   if (!dest) return; // not ours — the app opens normally
   resolveAndGo(dest).catch(() => {
@@ -136,7 +145,11 @@ export function installDeepLinkHandler(): () => void {
     try { handleUrl(url); } catch { /* never crash on a link */ }
   });
   Linking.getInitialURL()
-    .then((url) => { if (url) { pendingUrl = url; } })
+    .then((url) => {
+      if (!url) return;
+      if (isWeeklyFeeReturn(url)) handleUrl('swift://pay/mmg/return');
+      else pendingUrl = url;
+    })
     .catch(() => undefined);
   return () => {
     installed = false;

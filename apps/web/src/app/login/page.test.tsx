@@ -60,6 +60,11 @@ describe('[Q7b] signing in from the customer app', () => {
     expect(mocked.verifyPartnerLogin).not.toHaveBeenCalled();
   });
 
+  it('returns partner sign-in to the neutral fee chooser', async () => {
+    expect(await signIn('next=%2Fweekly-fee')).toBe('/weekly-fee');
+    expect(mocked.verifyPartnerLogin).toHaveBeenCalled();
+  });
+
   it('a partner page is still a partner sign-in', async () => {
     expect(await signIn(`next=${encodeURIComponent('/dashboard/orders')}`)).toBe('/dashboard');
     expect(mocked.verifyPartnerLogin).toHaveBeenCalled();

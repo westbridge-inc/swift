@@ -82,7 +82,7 @@ export default function DriversPage() {
                   </li>
                   <li>
                     <b className="font-semibold text-[var(--swift-ink)]">Your weekly fee.</b> The one
-                    charge, paid by card or cash at an MMG agent. That is the whole commercial
+                    charge. View your amount and payment status on the Weekly fee page. That is the whole commercial
                     relationship.
                   </li>
                 </ul>

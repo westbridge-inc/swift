@@ -27,6 +27,18 @@ describe('new-order takeover', () => {
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
   });
 
+  it('[Q12] an order the next poll shows cancelled leaves the takeover — no chime for an order that no longer exists', async () => {
+    const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder())]} />);
+    await screen.findByText(/NEW ORDER/);
+
+    // The customer cancelled (express, or after the free-cancel hold): the
+    // board's next poll carries the order as CANCELLED.
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder({ status: 'CANCELLED' }))]} />);
+    await waitFor(() => expect(screen.queryByText(/NEW ORDER/)).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull();
+  });
+
   it('renders an em-dash rather than a made-up $0 when no total arrived', async () => {
     const raw = wireVendorOrder() as Record<string, unknown>;
     delete raw['totalAmount'];
