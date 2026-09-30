@@ -260,6 +260,14 @@ export async function createRideRequest(
         },
       },
     });
+  }).catch((error: unknown) => {
+    // [DISPATCH 1/3] orders_one_live_taxi_per_customer_key: the database itself
+    // refuses a second live taxi for one customer. The lock and check above make
+    // this a belt (a live ride under another tenant is the one shape they miss);
+    // it answers exactly as the check does, never with a raw constraint error.
+    const e = error as { code?: unknown; meta?: { target?: unknown } } | null;
+    if (e?.code === 'P2002' && String(e.meta?.target ?? '').includes('customerId')) throw rideInProgress();
+    throw error;
   });
 
   // The customer re-entered the funnel and got a ride — any pending "notify me

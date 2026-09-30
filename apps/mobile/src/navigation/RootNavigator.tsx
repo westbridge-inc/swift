@@ -9,6 +9,7 @@ import { useCustomerCountry } from '../hooks/useCustomerCountry';
 import { registerIfGranted } from '../services/push';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
+import { QrOutcomeScreen } from '../screens/QrOutcomeScreen';
 import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
 import { MoverStack } from '../modules/mover/MoverStack';
@@ -67,7 +68,10 @@ export function RootNavigator() {
   // [qr spec Part 6]: same queue-and-flush contract as the tap-router.
   React.useEffect(() => {
     ensureFirstLaunchClaim();
-    return installDeepLinkHandler();
+    const uninstall = installDeepLinkHandler();
+    // Also covers an effect reinstall after the container became ready.
+    if (navigationRef.isReady()) flushPendingDeepLink();
+    return uninstall;
   }, []);
 
   // Earners (mover/vendor) and advertisers must be signed in before their
@@ -153,6 +157,15 @@ export function RootNavigator() {
         ) : (
           <Stack.Screen name="Main" component={Main} />
         )}
+        {/* A scanned store is public, regardless of the selected role or
+            first-open gate. Explicit nested navigation opens its menu while
+            keeping the visitor's existing role and auth state intact. */}
+        <Stack.Screen
+          name="Storefront"
+          component={CustomerStack}
+          navigationKey={wantsAuth && !isAuthenticated ? 'store-auth' : 'store-browse'}
+        />
+        <Stack.Screen name="QrOutcome" component={QrOutcomeScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

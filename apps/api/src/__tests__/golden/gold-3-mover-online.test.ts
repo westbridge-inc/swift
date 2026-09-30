@@ -435,8 +435,12 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
     expect(theft.statusCode).toBe(409);
     expect(theft.json().error.code).toBe('OFFER_EXPIRED');
 
+    // The card names its attempt, as the app sends it: only an accept that names
+    // one is acknowledged against a generated card [AX358].
+    const offerAttemptId = card.json().data.offer.offerAttemptId as string;
+    expect(offerAttemptId).toBe(live!.split(':')[1]);
     const acceptedFrom = Date.now();
-    const accept = await call('POST', '/api/v1/rider/offers/accept', mover.device.token, { orderId });
+    const accept = await call('POST', '/api/v1/rider/offers/accept', mover.device.token, { orderId, offerAttemptId });
     const acceptedBy = Date.now();
     expect(accept.statusCode, accept.body).toBe(200);
     expect(accept.json().data.status).toBe('RIDER_ASSIGNED');
@@ -461,10 +465,12 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
     expect(alert.acknowledgedAt!.getTime()).toBeLessThanOrEqual(acceptedBy);
     expect(await app.redis.get(offerKey(orderId))).toBeNull();
 
-    // A double tap on the consumed card changes nothing.
+    // A double tap on the consumed card changes nothing — and, being the
+    // winner's own tap, it is answered with the job they already hold, not a
+    // refusal that reads as losing it [DISPATCH 1/3 · B3].
     const again = await call('POST', '/api/v1/rider/offers/accept', mover.device.token, { orderId });
-    expect(again.statusCode).toBe(409);
-    expect(again.json().error.code).toBe('OFFER_EXPIRED');
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json().data).toMatchObject({ orderId, status: 'RIDER_ASSIGNED' });
     expect(await sys(() => app.prisma.orderStatusLog.count({ where: { orderId, status: 'RIDER_ASSIGNED' } }))).toBe(1);
   });
 });

@@ -197,8 +197,12 @@ describe('Guardian sweep — session lifecycle [§5]', () => {
   it('closes the session when the ride completes — and the close reason says why', async () => {
     const passenger = await makeUser(['CUSTOMER']);
     const { driver } = await makeDriver();
+    // Two live rides at once need two drivers and two passengers: one driver
+    // holds one live ride, one customer one live taxi (the single-winner indexes).
+    const otherPassenger = await makeUser(['CUSTOMER']);
+    const { driver: otherDriver } = await makeDriver();
     const done = await makeRide({ driverId: driver.id, customerId: passenger.id });
-    const gone = await makeRide({ driverId: driver.id, customerId: passenger.id });
+    const gone = await makeRide({ driverId: otherDriver.id, customerId: otherPassenger.id });
     await sweep(new Date());
 
     await prisma.order.update({ where: { id: done.id }, data: { status: 'COMPLETED' } });
