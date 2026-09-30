@@ -39,6 +39,8 @@ Below, `{family}` means one of `vendor`, `rider` or `driver`. The same routes an
 | `x-vendor-id` | vendor routes | the selected store's id |
 | `Idempotency-Key` | `POST …/mmg-checkout` only | 8–128 characters from `[A-Za-z0-9_-]`, new per tap |
 
+**The web signs in with its existing session.** Every partner route accepts either `Authorization: Bearer …` or, from the web, the browser session. For the browser session, send the HttpOnly `swift_at` cookie with `credentials: 'include'`, plus `x-swift-client: web`, from an allowed origin (`CORS_ORIGIN`). The header and origin gate is the CSRF defence. This is the same `app.authenticate` every other partner route uses.
+
 **`x-client-platform`.** The server has a per-platform switch for the MMG checkout. A missing or unknown value counts as "unknown": the checkout is then offered only if it is switched on for every platform.
 
 **`Idempotency-Key`.** Generate one key when the partner taps Pay. Reuse it for any retry of that same tap, for example after a network failure.
@@ -159,7 +161,10 @@ type CheckoutStatus = {
 - After the browser closes, poll every 3 s for 1 minute, then every 15 s for 10 minutes, then stop.
 - Stop early at `CONFIRMED`, `NOT_PAID` or `HELD`.
 - `EXPIRED` is not final for money, because a late MMG confirmation is still credited. Refresh it quietly when the screen gains focus.
-- A push notification of kind `billing_mmg_checkout` (data `{ subscriptionId, ref, status }`) arrives when a checkout reaches `CONFIRMED`, `NOT_PAID` or `HELD`. Route it to the weekly-fee screen.
+- A push notification of kind `billing_mmg_checkout` arrives when a checkout reaches `CONFIRMED`, `NOT_PAID` or `HELD`. Its data is `{ subscriptionId, ref, status, vendorId? }`.
+  - Route it to the weekly-fee screen.
+  - `vendorId` is present only when a store pays. Select that store (`x-vendor-id`) before opening the screen.
+  - If the owner can no longer open that store (`403` or `404`), open the fee screen of the store currently selected.
 
 ### What each state means, and the words the app may use
 
@@ -180,10 +185,14 @@ After payment, MMG sends the partner's browser to the return address registered 
 
 What MMG attaches is not yet confirmed (`CHECKOUT-CONTRACT.md` U3): it may be a query parameter or a form POST, and the name is unknown. The page therefore forwards everything and interprets nothing.
 
-1. **Accept both GET and POST.** Take every query parameter (GET) or form field (POST) exactly as received: at most 16 entries, each value at most 4096 characters.
+1. **Accept both GET and POST.** Take every query parameter (GET) or form field (POST) exactly as received:
+   - a key that appears more than once is forwarded as an array of its values, in order;
+   - at most 16 values in total, each at most 4096 characters.
+
+   The page never decides the state itself. Only the API's answer, or an API error, decides it. A duplicate key is not a reason for `UNKNOWN`: dropping a genuine reply would leave a real payment for manual reconciliation.
 2. **Call the API server-to-server,** never from the browser:
    - `POST /api/v1/billing/mmg-checkout/return`
-   - body `{ outcome: string, params: Record<string, string> }`
+   - body `{ outcome: string, params: Record<string, string | string[]> }`
    - answer `{ success: true, data: { state: 'CONFIRMED' | 'CONFIRMING' | 'NOT_PAID' | 'UNKNOWN' } }`
 
    The answer carries no amount, name or `ref`: anyone who holds the link would see the page.
@@ -199,7 +208,13 @@ What MMG attaches is not yet confirmed (`CHECKOUT-CONTRACT.md` U3): it may be a 
    Any error from `/return` (`400`, `413`, `429` or `5xx`) renders `UNKNOWN`. The app shows the truth from its own polling.
 4. **Show two links on every state:**
    - "Back to the Swift app" → `swift://pay/mmg/return`, with no parameters. On a phone this closes the in-app browser.
-   - "Continue on the web" → the web dashboard's weekly-fee page.
+   - "Continue on the web" → one neutral web route that picks the page from the signed-in session:
+     - a store owner → the dashboard's weekly-fee page;
+     - a mover → the portal's weekly-fee page;
+     - someone who is both → a chooser;
+     - signed out → sign in, then the same choice.
+
+     The return page cannot tell who paid: its answer names no one. A cookie set when the checkout started would not survive MMG's cross-site redirect (SameSite), least of all a form POST.
 5. **Headers and privacy:** send `X-Robots-Tag: noindex`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. Never log, render or forward the received values anywhere except `/return`. Keep the query out of analytics.
 
 `POST /api/v1/billing/mmg-checkout/notify` is for MMG's servers, if MMG calls one (U3). It accepts JSON or a form of up to 16 KB and always answers `200 { success: true }`. The app and the web never call it.
@@ -217,7 +232,14 @@ The server writes the fee notices. They never offer an agent, cash, a Swift Numb
 - **Configuration:** `MMG_CHECKOUT_*` (`providers/mmg/CHECKOUT-CONTRACT.md`). With the configuration absent or `MMG_CHECKOUT_ENABLED=0`, `MMG_CHECKOUT` is `off` everywhere.
 - **The per-platform switch:** the platform-config key `billing.feeCheckout.platforms`, value `{ "ios": true, "android": true, "web": true }`. A missing row, or a missing platform in it, counts as on (owner ruling "3 b": the iPhone button is on). Setting a platform to `false` hides the MMG checkout there within a minute, with no deploy.
 
-## 9. Not in this contract yet
+## 9. Answers to the UI lane (2026-09-29)
+
+1. **Duplicate return keys:** they do not stay `UNKNOWN`. Forward them as an array, and the API tries every value (section 6, step 1).
+2. **A push for a multi-store owner:** its data carries `vendorId` when a store pays. Select that store, then open its fee screen (section 5).
+3. **A mover's web return:** the return page links to one neutral route that picks the dashboard or the portal from the signed-in session (section 6, step 4).
+4. **The web session cookie:** yes. Every partner route takes a Bearer token, or the `swift_at` cookie with `x-swift-client: web` from an allowed origin (section 2).
+
+## 10. Not in this contract yet
 
 - Card payments: `CARD` stays `off` until PT-4.
 - The admin checkouts list, the HELD review queue and reversals (PR 6).
