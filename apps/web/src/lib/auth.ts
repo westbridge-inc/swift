@@ -180,7 +180,13 @@ async function probeSession(): Promise<SessionAnswer> {
   try {
     const res = await fetch(`${API_URL}/api/v1/auth/me`, { credentials: 'include', cache: 'no-store', headers: { ...clientHeaders } });
     if (obsolete()) return { ok: false };
-    if (!res.ok) { lastSettledProbe = probeId; return forget(); }
+    if (!res.ok) {
+      lastSettledProbe = probeId;
+      const answer = forget();
+      // Only an explicit 401 proves signed-out cookies. Server failures and
+      // rate limits cannot release retained drafts after a resume.
+      return res.status === 401 ? { ...answer, signedOut: true } : answer;
+    }
     const json = await res.json().catch(() => null);
     if (obsolete()) return { ok: false };
     lastSettledProbe = probeId;
@@ -207,7 +213,7 @@ async function probeSession(): Promise<SessionAnswer> {
   }
 }
 
-type SessionAnswer = { ok: boolean; user?: Record<string, unknown> };
+type SessionAnswer = { ok: boolean; user?: Record<string, unknown>; signedOut?: true };
 let verification: { epoch: number; promise: Promise<SessionAnswer> } | undefined;
 
 /** Force server proof; concurrent callers in this epoch share one request.
@@ -379,7 +385,9 @@ export async function apiFetch(
       if (!snapshotIsCurrent(requestSession)) {
         throw new ApiRequestError('The signed-in account changed while this request was running. Try again.', 409, 'SESSION_CHANGED');
       }
-      clearSession();
+      // A delayed guest request may finish while an OTP journey is open.
+      // Null -> null is no account change; explicit logout still clears it.
+      if (sessionPrincipal !== null) clearSession();
       if (policy.redirectOnExpired !== false && window.location.pathname !== '/login') {
         const returnPath = `${window.location.pathname}${window.location.search}`;
         window.location.href = `/login?next=${encodeURIComponent(returnPath)}`;

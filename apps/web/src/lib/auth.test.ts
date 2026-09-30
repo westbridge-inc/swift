@@ -211,7 +211,7 @@ describe('[W-01] every request carries the client name and the cookies; a 401 re
 });
 
 describe('[W-01] the gate is the server’s word, not a token’s presence', () => {
-  it('sessionProbe is ok only when the server names a user; a 401 and a network failure are both "not signed in"', async () => {
+  it('sessionProbe is ok only when the server names a user; only a 401 proves signed out', async () => {
     const auth = await loadAuth();
     mockApi(() => signedInAs('u1'));
     expect(await auth.sessionProbe()).toMatchObject({ ok: true, user: { id: 'u1' } });
@@ -219,7 +219,7 @@ describe('[W-01] the gate is the server’s word, not a token’s presence', () 
 
     const auth2 = await loadAuth();
     mockApi(() => ({ status: 401, body: { success: false } }));
-    expect(await auth2.sessionProbe()).toEqual({ ok: false });
+    expect(await auth2.sessionProbe()).toEqual({ ok: false, signedOut: true });
 
     const auth3 = await loadAuth();
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
@@ -426,7 +426,7 @@ describe('[Q7b] a returning customer is restored, and the app shell hears every 
   it('the probe itself never spends a refresh: guests must not use up the per-address refresh limit on every page', async () => {
     const auth = await loadAuth();
     const fetchMock = mockApi(() => ({ status: 401, body: { success: false } }));
-    expect(await auth.sessionProbe()).toEqual({ ok: false });
+    expect(await auth.sessionProbe()).toEqual({ ok: false, signedOut: true });
     expect(trail(fetchMock)).toEqual(['GET /api/v1/auth/me']);
   });
 

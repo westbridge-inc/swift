@@ -74,8 +74,10 @@ export function Providers({ children, preserveShell = false }: { children: React
     let cancelled = false;
     const verify = () => {
       lastResume.current = Date.now();
-      void verifySessionNow({ fresh: true }).then(() => {
-        if (cancelled) return;
+      void verifySessionNow({ fresh: true }).then((answer) => {
+        // Keep the mounted draft hidden after inconclusive proof. A later
+        // focus, pageshow, visibility or online event can request fresh proof.
+        if (cancelled || (!answer.ok && !answer.signedOut)) return;
         // A newer resume owns its own proof; an older result cannot unmask it.
         setProof((current) => current === proof ? { ...current, ready: true } : current);
       });

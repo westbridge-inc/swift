@@ -304,6 +304,14 @@ describe('AX329 F1: two browser tabs sharing cookie identity', () => {
     view.rerender(<Providers><PrivatePage /></Providers>);
     expect(screen.queryByText('Fresh server response')).toBeNull();
     await act(async () => failProof(new Error('Offline')));
+    expect(screen.queryByText('Fresh server response')).toBeNull();
+    expect(screen.getByRole('status').textContent).toBe('Checking your account…');
+    previous.setQueryData(['private'], 'Private A');
+    expect(screen.queryByText('Private A')).toBeNull();
+    // Offline proof keeps the page masked; a later conclusive resume may
+    // mount it with the replacement client, never the one a rollback holds.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15_000);
+    await act(async () => window.dispatchEvent(new Event('online')));
     await screen.findByText('Fresh server response');
     expect(current).not.toBe(previous);
     previous.setQueryData(['private'], 'Private A');
