@@ -1,11 +1,11 @@
-import { Bone } from './customer-skeletons';
+import { Bone, LoadingRegion } from './customer-skeletons';
 import { VendorCardSkeleton, VendorGridSkeleton } from './order-ui';
 
 export const RAIL = 'mt-3 -mx-4 flex snap-x snap-mandatory gap-3 overflow-x-auto px-4 pb-2 [overscroll-behavior-x:contain] [scrollbar-width:none]';
 
 export function HomeSkeleton() {
   return (
-    <div aria-busy="true" aria-label="Loading home feed" className="space-y-8">
+    <LoadingRegion label="Loading home feed" className="space-y-8">
       <section><Bone className="h-11 w-44" /><ul className={RAIL}>
         {[1, 2, 3, 4].map((i) => <li key={i} className="w-40 shrink-0 snap-start sm:w-44"><div className="overflow-hidden rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)]"><Bone className="h-28 rounded-none" /><div className="p-2.5"><Bone className="h-5 w-3/4" /><Bone className="h-5 w-20" /><Bone className="mt-0.5 h-4 w-24" /></div></div></li>)}
       </ul></section>
@@ -13,7 +13,7 @@ export function HomeSkeleton() {
         {[1, 2, 3].map((i) => <li key={i} className="w-60 shrink-0 snap-start"><VendorCardSkeleton /></li>)}
       </ul></section>
       <section><h2 className="text-xl font-extrabold">Open now</h2><div className="mt-4"><VendorGridSkeleton /></div></section>
-    </div>
+    </LoadingRegion>
   );
 }
 

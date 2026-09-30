@@ -5,7 +5,7 @@ export function Bone({ className = '' }: { className?: string }) {
 }
 
 export function LoadingRegion({ label, className = '', children }: { label: string; className?: string; children: ReactNode }) {
-  return <div aria-busy="true" aria-label={label} className={className}>{children}</div>;
+  return <><div aria-busy="true" aria-label={label} className={className}>{children}</div><span role="status" aria-live="polite" className="sr-only">{label}…</span></>;
 }
 
 export function MenuSkeleton() {

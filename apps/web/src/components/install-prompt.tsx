@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import Image from 'next/image';
 import { Share, X } from 'lucide-react';
 
@@ -53,6 +53,23 @@ export function InstallPrompt({ enabled }: { enabled: boolean }) {
   const [available, setAvailable] = useState(false);
   const installEvent = useRef<BeforeInstallPromptEvent | null>(null);
   const spent = useRef(false);
+  const card = useRef<HTMLElement | null>(null);
+  const [clearance, setClearance] = useState(0);
+
+  useLayoutEffect(() => {
+    const element = card.current;
+    if (!enabled || offer === 'none' || !element) return;
+    // Include wrapped Safari steps and the padding above the dock/home bar.
+    const measure = () => setClearance(element.getBoundingClientRect().height);
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(element, { box: 'border-box' });
+    window.addEventListener('resize', measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [enabled, offer]);
 
   useEffect(() => {
     let interactions = 0;
@@ -114,7 +131,9 @@ export function InstallPrompt({ enabled }: { enabled: boolean }) {
   };
 
   return (
-    <aside aria-label="Install Swift" className="fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(1rem_+_var(--swift-dock,env(safe-area-inset-bottom)))]">
+    <>
+    <div aria-hidden="true" data-install-clearance style={{ height: clearance }} />
+    <aside ref={card} aria-label="Install Swift" className="fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(1rem_+_var(--swift-dock,env(safe-area-inset-bottom)))]">
       <div className="mx-auto max-w-md rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] p-3 shadow-[var(--swift-elevation-floating)]">
         <div className="flex items-center gap-3">
           <Image src="/icons/icon-192.png" alt="" width={44} height={44} unoptimized className="h-11 w-11 shrink-0 rounded-xl" />
@@ -134,5 +153,6 @@ export function InstallPrompt({ enabled }: { enabled: boolean }) {
         )}
       </div>
     </aside>
+    </>
   );
 }

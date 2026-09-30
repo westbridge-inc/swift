@@ -30,7 +30,7 @@ export default function SearchPage() {
         <Search className="h-5 w-5 text-[var(--swift-muted)]" />
         <input autoFocus value={q} onChange={(e) => onChange(e.target.value)} aria-label="Search stores" placeholder="Search stores, cuisines…" className="w-full outline-none" />
       </div>
-      {busy && <VendorGridSkeleton />}
+      {busy && <VendorGridSkeleton label="Searching" />}
       {!busy && results !== null && (results.length === 0 ? <EmptyNote>No stores match “{q}”.</EmptyNote>
         : <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">{results.map((v) => <VendorCard key={v.id} v={v} />)}</div>)}
     </div>

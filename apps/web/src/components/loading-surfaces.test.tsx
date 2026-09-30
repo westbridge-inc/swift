@@ -116,12 +116,13 @@ it('search shows store-shaped placeholders during debounce and ignores a late an
   vi.spyOn(api, 'searchVendors').mockReturnValue(response.promise);
   mount(<SearchPage />);
   fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Lunch' } });
-  expect(screen.getByLabelText('Loading stores').querySelector('[data-store-part="copy"]')).toBeTruthy();
+  expect(screen.getByLabelText('Searching').querySelector('[data-store-part="copy"]')).toBeTruthy();
+  expect(screen.getByRole('status').textContent).toBe('Searching…');
   await new Promise((resolve) => setTimeout(resolve, 320));
   expect(api.searchVendors).toHaveBeenCalledWith('Lunch');
   fireEvent.change(screen.getByRole('textbox'), { target: { value: '' } });
   await response.finish([vendor]);
-  expect(screen.queryByLabelText('Loading stores')).toBeNull();
+  expect(screen.queryByLabelText('Searching')).toBeNull();
   expect(screen.queryByText('Local store')).toBeNull();
 });
 

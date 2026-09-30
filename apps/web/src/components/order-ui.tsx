@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { Star, Clock } from 'lucide-react';
-import { Bone } from './customer-skeletons';
+import { Bone, LoadingRegion } from './customer-skeletons';
 import type { Vendor } from '@/lib/customer';
 
 export function VendorCard({ v }: { v: Vendor }) {
@@ -25,11 +25,11 @@ export function VendorCard({ v }: { v: Vendor }) {
   );
 }
 
-export function VendorGridSkeleton({ n = 8 }: { n?: number }) {
+export function VendorGridSkeleton({ n = 8, label = 'Loading stores' }: { n?: number; label?: string }) {
   return (
-    <div aria-busy="true" aria-label="Loading stores" className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+    <LoadingRegion label={label} className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
       {Array.from({ length: n }).map((_, i) => <VendorCardSkeleton key={i} />)}
-    </div>
+    </LoadingRegion>
   );
 }
 

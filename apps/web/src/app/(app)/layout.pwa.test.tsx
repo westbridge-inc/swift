@@ -1,6 +1,8 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AppLayout from './layout';
+import CartPage from './cart/page';
+import * as api from '@/lib/customer';
 
 const state = vi.hoisted(() => ({ pathname: '/', principal: null as string | null, replace: vi.fn(), sessionProbe: vi.fn() }));
 vi.mock('next/navigation', () => ({ usePathname: () => state.pathname, useRouter: () => ({ replace: state.replace, push: vi.fn(), back: vi.fn() }) }));
@@ -89,13 +91,41 @@ describe('[PWA-1] the customer shell, installed', () => {
     const shell = container.querySelector('.swift-app')?.className ?? '';
     expect(shell).toContain('[--swift-dock:calc(3.5rem_+_env(safe-area-inset-bottom))]');
     expect(shell).toContain('md:[--swift-dock:env(safe-area-inset-bottom)]');
+    const clearance = container.querySelector('[data-install-clearance]');
+    expect(clearance?.parentElement).toBe(container.querySelector('.swift-app'));
+    expect(container.querySelector('main')!.compareDocumentPosition(clearance!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('never lays the card over the cart', async () => {
-    state.pathname = '/cart';
-    render(<AppLayout><p>Cart page</p></AppLayout>);
-    await screen.findByText('Cart page');
+  it.each(['/cart', '/orders/order-1'])('suppresses an engaged, available offer on %s', async (pathname) => {
+    state.pathname = pathname;
+    const view = render(<AppLayout><button>Review order</button></AppLayout>);
+    await screen.findByText('Review order');
+    fireEvent.click(screen.getByText('Review order'));
+    fireEvent.click(screen.getByText('Review order'));
     act(() => { window.dispatchEvent(installEvent()); });
     expect(card()).toBeNull();
+    // Same engagement and offer: Home is the positive control for suppression.
+    state.pathname = '/';
+    view.rerender(<AppLayout><button>Home page</button></AppLayout>);
+    expect(card()).not.toBeNull();
+  });
+
+  it('preserves a mounted cart and its typed delivery address through disconnect and reconnect', async () => {
+    state.pathname = '/cart';
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    const reload = vi.spyOn(window.location, 'reload').mockImplementation(() => undefined);
+    vi.spyOn(api, 'getCart').mockResolvedValue({ items: [{ id: 'l1', itemId: 'i1', name: 'Lunch box', quantity: 1, customerPrice: 500, isAvailable: true }], vendor: { id: 'v1', name: 'Local store' }, subtotalCustomer: 500 } as api.Cart);
+    vi.spyOn(api, 'getAddresses').mockResolvedValue([]);
+    render(<AppLayout><CartPage /></AppLayout>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Add a delivery address' }));
+    const address = screen.getByRole('textbox', { name: 'Search the delivery destination' }) as HTMLInputElement;
+    fireEvent.change(address, { target: { value: 'Test destination, Georgetown' } });
+    act(() => { window.dispatchEvent(new Event('offline')); });
+    expect(screen.getByText('You’re offline.')).toBeTruthy();
+    act(() => { window.dispatchEvent(new Event('online')); });
+    expect(reload).not.toHaveBeenCalled();
+    expect(screen.queryByText('You’re offline.')).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Search the delivery destination' })).toBe(address);
+    expect(address.value).toBe('Test destination, Georgetown');
   });
 });

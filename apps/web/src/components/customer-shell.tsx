@@ -4,6 +4,7 @@ import { useEffect, useRef, type ComponentType } from 'react';
 import Link from 'next/link';
 import { ChevronLeft, CircleUser, House, Menu, Search, ShoppingBag, Store, User, X } from 'lucide-react';
 import { SwiftLogo } from '@/components/swift-logo';
+import { LoadingRegion } from '@/components/customer-skeletons';
 import type { SessionStatus } from '@/components/customer-session';
 import { signInPath, signUpPath, type CustomerTab, type SignInDoor as SignInDoorCopy } from '@/lib/customer-routes';
 
@@ -285,10 +286,10 @@ export function SignInDoor({ door, returnPath }: { door: SignInDoorCopy; returnP
  *  shape of a page, inside the chrome — never a blank screen. */
 export function ContentSkeleton() {
   return (
-    <div aria-busy="true" aria-label="Opening this page" className="space-y-4">
+    <LoadingRegion label="Opening this page" className="space-y-4">
       <div className="h-8 w-2/3 max-w-sm animate-pulse rounded-xl bg-[var(--swift-subtle)] motion-reduce:animate-none" />
       <div className="h-28 animate-pulse rounded-2xl bg-[var(--swift-subtle)] motion-reduce:animate-none" />
       <div className="h-28 animate-pulse rounded-2xl bg-[var(--swift-subtle)] motion-reduce:animate-none" />
-    </div>
+    </LoadingRegion>
   );
 }

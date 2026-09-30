@@ -11,9 +11,9 @@ import { SwiftLogo } from '@/components/swift-logo';
  *
  * It has to work from its HTML alone: offline, the stylesheet and scripts it
  * links may not be in any cache. So it is styled inline from the token
- * variables the root layout sets on <html>, and "Try again" is a plain form submitting to
- * the current address — served in place of /orders/123, it reloads
- * /orders/123, with no JavaScript needed.
+ * variables the root layout sets on <html>. The inline retry handler reloads
+ * the complete current address, including its query and hash, without needing
+ * a JavaScript bundle. With scripting disabled, use the browser's reload.
  *
  * Changing this page? Bump VERSION in public/sw.js, or phones keep the old copy.
  */
@@ -67,7 +67,8 @@ export default function OfflinePage() {
         <WifiOff aria-hidden="true" size={28} color="var(--swift-muted)" />
         <h1 style={heading}>You’re offline.</h1>
         <p style={{ margin: 0, color: 'var(--swift-muted)' }}>Reconnect to keep ordering. Your cart is kept on your account.</p>
-        <form action="" method="get"><button type="submit" style={retry}>Try again</button></form>
+        <button id="offline-retry" type="button" style={retry}>Try again</button>
+        <noscript>Use your browser’s reload button to try this page again.</noscript>
         <script dangerouslySetInnerHTML={{ __html: OFFLINE_RECONNECT }} />
       </div>
     </main>

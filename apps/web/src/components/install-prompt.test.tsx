@@ -219,6 +219,37 @@ describe('[PWA-1] never inside the installed app', () => {
 });
 
 describe('[PWA-1] Safari on iPhone and iPad', () => {
+  it('reserves the rendered card height, follows wrapped steps, and releases clearance when hidden', () => {
+    device(IPHONE_SAFARI);
+    let height = 248;
+    let resized = () => {};
+    const disconnect = vi.fn();
+    const observe = vi.fn();
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: () => void) { resized = callback; }
+      observe = observe;
+      disconnect = disconnect;
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ height }) as DOMRect);
+    const view = render(<InstallPrompt enabled />);
+    const clearance = () => view.container.querySelector<HTMLElement>('[data-install-clearance]');
+    expect(card()!.querySelectorAll('li')).toHaveLength(3);
+    expect(observe).toHaveBeenCalledWith(card(), { box: 'border-box' });
+    expect(clearance()?.style.height).toBe('248px');
+    expect(clearance()?.getAttribute('aria-hidden')).toBe('true');
+    height = 336;
+    act(() => { resized(); });
+    expect(clearance()?.style.height).toBe('336px');
+    view.rerender(<InstallPrompt enabled={false} />);
+    expect(clearance()).toBeNull();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    view.rerender(<InstallPrompt enabled />);
+    expect(clearance()?.style.height).toBe('336px');
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(clearance()).toBeNull();
+    expect(disconnect).toHaveBeenCalledTimes(2);
+  });
+
   it('gets the Share → Add to Home Screen hint exactly once', () => {
     device(IPHONE_SAFARI);
     const view = render(<InstallPrompt enabled />);

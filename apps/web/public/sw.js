@@ -29,7 +29,7 @@
  * reloads — and its activation deletes the previous version's caches.
  */
 
-const VERSION = 'v2';
+const VERSION = 'v3';
 const CACHE_PREFIX = 'swift-';
 const OFFLINE_CACHE = `${CACHE_PREFIX}offline-${VERSION}`;
 const STATIC_CACHE = `${CACHE_PREFIX}static-${VERSION}`;
