@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { classifyScan } from './qr-codes';
 import { QrService } from './qr.service';
 import { runAsSystem } from '../../plugins/tenant-context';
-import { enqueueScanEvent, hashScanIp, hashUa, parseUserAgent } from './scan-log';
+import { recordScanEvent, hashScanIp, hashUa, parseUserAgent } from './scan-log';
 import {
   ATTRIB_MAX_OPEN_PER_FP,
   ATTRIB_TTL_MINUTES,
@@ -76,7 +76,7 @@ export class AttributionService {
       // is how Android taps (which write no candidate row) stay countable.
       const now0 = new Date();
       const { osFamily, deviceClass } = parseUserAgent(request.ua);
-      enqueueScanEvent({
+      recordScanEvent(() => ({
         tenantId: dest.tenantId,
         qrCodeId: dest.qrCodeId,
         occurredAt: now0,
@@ -86,7 +86,7 @@ export class AttributionService {
         deviceClass,
         uaHash: request.ua ? hashUa(request.ua) : null,
         ipHash: request.ip ? hashScanIp(request.ip, now0) : null,
-      });
+      }));
 
       if (!request.isIos) return { created: false, destinationPath: dest.path };
 

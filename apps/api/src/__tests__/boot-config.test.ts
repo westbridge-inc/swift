@@ -43,6 +43,8 @@ const good: Record<string, string | undefined> = {
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
   MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
+  SCAN_IP_SALT: 'synthetic-scan-boot-salt',
+  ATTRIB_SALT: 'synthetic-attribution-boot-salt',
 };
 
 const cardOff = {
@@ -68,7 +70,7 @@ const paddedTwilioIdentities = ([
 function runPreflight(candidate: Record<string, string | undefined>) {
   const directory = mkdtempSync(join(tmpdir(), 'swift-twilio-preflight-'));
   try {
-    const candidatePath = join(directory, 'candidate.env');
+    const candidatePath = join(directory, 'candidate.txt');
     writeFileSync(candidatePath, Object.entries(candidate)
       .filter((entry): entry is [string, string] => entry[1] !== undefined)
       .map(([name, value]) => `${name}=${value}`).join('\n'));
