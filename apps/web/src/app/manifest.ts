@@ -37,6 +37,11 @@ export default function manifest(): MetadataRoute.Manifest {
     orientation: 'portrait',
     background_color: appChrome.background,
     theme_color: appChrome.theme,
+    shortcuts: [
+      { name: 'Search', url: '/order/search', icons: [{ src: '/icons/icon-192.png', sizes: '192x192' }] },
+      { name: 'Orders', url: '/orders', icons: [{ src: '/icons/icon-192.png', sizes: '192x192' }] },
+      { name: 'Cart', url: '/cart', icons: [{ src: '/icons/icon-192.png', sizes: '192x192' }] },
+    ],
     icons: [
       { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
       { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },

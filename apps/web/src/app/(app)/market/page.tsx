@@ -9,7 +9,8 @@ import { getMarketCategories, getMarketDepth, getMarketItems, money, type Market
 import { marketTabVisible } from '@/lib/app-rules';
 import { PRESS } from '@/components/customer-shell';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { EmptyNote, VendorGridSkeleton } from '@/components/order-ui';
+import { MarketSkeleton, MarketGridSkeleton, CategorySkeleton } from '@/components/customer-skeletons';
+import { EmptyNote } from '@/components/order-ui';
 
 /**
  * [Q7b] MARKET — the phone app's Market tab on the web: goods (clothes,
@@ -34,7 +35,7 @@ function MarketInner() {
     enabled: open,
   });
 
-  if (depth.isPending) return <VendorGridSkeleton />;
+  if (depth.isPending) return <MarketSkeleton />;
   if (depth.isError && !depth.data) return <DataUnavailable what="the market" error={depth.error} onRetry={() => void depth.refetch()} />;
   if (!open) {
     return (
@@ -54,8 +55,8 @@ function MarketInner() {
         <h1 className="text-2xl font-extrabold">Market</h1>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">Goods from every store — clothes, tools, household things.</p>
       </div>
-      {chips.length > 1 ? (
-        <nav aria-label="Market categories" className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 [overscroll-behavior-x:contain] [scrollbar-width:none]">
+      {categories.isPending ? <CategorySkeleton /> : (
+        <nav aria-label="Market categories" className="h-12 -mx-4 flex gap-2 overflow-x-auto px-4 pb-1 [overscroll-behavior-x:contain] [scrollbar-width:none]">
           {chips.map((chip) => (
             <Link
               key={chip.slug || 'all'}
@@ -68,12 +69,12 @@ function MarketInner() {
             </Link>
           ))}
         </nav>
-      ) : null}
+      )}
 
       {feed.isError && items.length === 0 ? (
         <DataUnavailable what="the market" error={feed.error} onRetry={() => void feed.refetch()} />
       ) : feed.isPending ? (
-        <VendorGridSkeleton />
+        <MarketGridSkeleton />
       ) : items.length === 0 ? (
         <EmptyNote>{category ? 'No store has listed anything here yet. Try another category.' : 'The market is still filling up.'}</EmptyNote>
       ) : (
@@ -86,7 +87,7 @@ function MarketInner() {
                   className={`block overflow-hidden rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] ${PRESS}`}
                 >
                   <span className="relative block h-36 bg-[var(--swift-subtle)]">
-                    {item.imageUrl ? <Image src={item.imageUrl} alt="" fill unoptimized className="object-cover" /> : null}
+                    {item.imageUrl ? <Image src={item.imageUrl} alt="" fill unoptimized sizes="(min-width: 1024px) 264px, (min-width: 640px) 30vw, 46vw" loading="lazy" className="object-cover" /> : null}
                     {item.isNew ? <span className="absolute left-2 top-2 rounded-full bg-[var(--swift-ink)] px-2 py-0.5 text-[length:var(--swift-type-micro)] font-bold text-[var(--swift-white)]">NEW</span> : null}
                   </span>
                   <span className="block p-3">
@@ -115,5 +116,5 @@ function MarketInner() {
 }
 
 export default function MarketPage() {
-  return <Suspense fallback={<VendorGridSkeleton />}><MarketInner /></Suspense>;
+  return <Suspense fallback={<MarketSkeleton />}><MarketInner /></Suspense>;
 }

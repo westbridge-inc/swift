@@ -2,6 +2,7 @@
 
 html {
   scroll-behavior: smooth;
+  overflow-x: clip;
 }
 
 body {
@@ -42,6 +43,8 @@ textarea {
 
 .swift-app {
   -webkit-tap-highlight-color: transparent;
+  overflow-x: clip;
+  min-width: 0;
 }
 
 .swift-route-in {
@@ -50,7 +53,7 @@ textarea {
 
 @keyframes swift-route-in {
   from {
-    opacity: 0;
+    opacity: 0.65;
   }
   to {
     opacity: 1;
@@ -126,4 +129,30 @@ textarea {
 
 .legal-prose a:hover {
   color: var(--swift-red-600);
+}
+
+/* Reserve card geometry while data and images arrive. */
+.swift-menu-heading { min-height: 7.75rem; }
+.swift-menu-item { min-height: 7.5rem; }
+.swift-order-row { min-height: 6rem; gap: 1rem; }
+.swift-bone { animation: swift-bone 1.6s ease-in-out infinite alternate; }
+@keyframes swift-bone { to { opacity: 0.5; } }
+
+.swift-app :where(a, button, input, select, textarea, label[for]) {
+  touch-action: manipulation;
+}
+.swift-app :where(a, button, select, input:not([type=radio]):not([type=checkbox])) {
+  min-height: 44px;
+  min-width: 44px;
+}
+.swift-app label:has(input) {
+  min-height: 44px;
+  touch-action: manipulation;
+}
+.swift-app :where(a, button):active {
+  filter: brightness(0.92);
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .swift-bone { animation: none; }
 }

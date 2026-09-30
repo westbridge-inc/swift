@@ -1,0 +1,25 @@
+.picker { display: grid; gap: var(--swift-space-md); }
+.picker h2 { margin: 0; font-size: var(--swift-type-heading); }
+.picker p { margin: 0; }
+.copy { color: var(--swift-muted); font-size: var(--swift-type-caption); }
+.search { display: grid; gap: var(--swift-space-xs); }
+.search input { width: 100%; min-height: var(--swift-touch); border: 1px solid var(--swift-border-strong); border-radius: var(--swift-radius-md); padding: var(--swift-space-sm); }
+.button { min-height: var(--swift-touch); padding: var(--swift-space-sm); border: 1px solid var(--swift-border-strong); border-radius: var(--swift-radius-md); background: var(--swift-card); color: var(--swift-ink); cursor: pointer; }
+.button:disabled { opacity: .5; cursor: not-allowed; }
+.button:focus-visible, .map:focus-visible, .search input:focus-visible { outline: 3px solid var(--swift-red); outline-offset: 3px; }
+.results { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--swift-space-xs); }
+.results button { width: 100%; text-align: start; }
+.map { height: 320px; width: 100%; position: relative; overflow: hidden; border: 1px solid var(--swift-border-strong); border-radius: var(--swift-radius-md); background: var(--swift-canvas); cursor: grab; touch-action: none; user-select: none; }
+.map:active { cursor: grabbing; }
+.tile { position: absolute; width: 256px; height: 256px; max-width: none; pointer-events: none; }
+/* Lucide's marker tip is at y=22 in a 24-unit square: at 36px, the
+   final 3px are padding. Anchor the tip itself to the selected coordinate. */
+.pin { position: absolute; left: 50%; top: 50%; width: 36px; height: 36px; transform: translate(-50%, calc(-100% + 3px)); color: var(--swift-red); filter: drop-shadow(0 1px 2px #fff); pointer-events: none; }
+.attribution { font-size: 11px; text-align: end; }
+.attribution a { text-decoration: underline; }
+.controls { display: flex; gap: var(--swift-space-sm); }
+.controls button { flex: 1; }
+.readout { display: grid; gap: var(--swift-space-xs); padding: var(--swift-space-sm); border-radius: var(--swift-radius-md); background: var(--swift-canvas); font-size: var(--swift-type-caption); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.error { color: var(--swift-error); font-size: var(--swift-type-caption); }
+.confirm { background: var(--swift-red); border-color: var(--swift-red); color: var(--swift-white); }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
