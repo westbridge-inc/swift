@@ -41,6 +41,9 @@ async function purgeFixtures() {
     where: { OR: [{ customerId: { in: ids } }, { rider: { userId: { in: ids } } }] },
     select: { id: true },
   });
+  // [ALG-01] Riders tied at one spot make the fairness band record decisions
+  // about these orders; they outlive the orders unless they go with them.
+  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: orders.map((o) => o.id) } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orders.map((o) => o.id) } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });

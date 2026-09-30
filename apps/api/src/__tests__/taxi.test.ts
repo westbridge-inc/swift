@@ -53,6 +53,9 @@ async function purgeFixtures() {
     select: { id: true },
   });
   const orderIds = orders.map((o) => o.id);
+  // [ALG-01] Drivers tied at one spot make the fairness band record decisions
+  // about these rides; they outlive the rides unless they go with them.
+  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: orderIds } } });
   await app.prisma.rating.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
