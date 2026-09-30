@@ -104,6 +104,13 @@ export default function createNextConfig(phase: string): NextConfig {
     async headers() {
       return [
         {
+          // [AX303 F3] The QR resolver records scans on GET. robots.txt keeps
+          // compliant crawlers away; this response header also marks the
+          // proxied redirect noindex. Next applies headers before rewrites.
+          source: '/s/:path*',
+          headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }],
+        },
+        {
           // [AC-11] Apple fetches this via its CDN and requires application/json
           // with no redirect. The route handler already returns JSON; this pins
           // the content type at the edge and keeps the file out of any cache

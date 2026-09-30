@@ -4,6 +4,7 @@ import { AppError } from '../utils/errors';
 import {
   MAX_TAXI_INTERMEDIATE_STOPS,
   MIN_TAXI_STOP_GAP_METERS,
+  assertTaxiRouteInMarket,
   normalizeTaxiStops,
   type TaxiStopInput,
 } from '../modules/rides/taxi-itinerary';
@@ -205,5 +206,30 @@ describe('taxi itinerary: STOP_TOO_CLOSE — consecutive points at least 50 m ap
   it('reports the measured gap, rounded to the metre', () => {
     const err = refusal(() => normalizeTaxiStops({ pickup, dropoff, stops: [{ ...north(pickup, 12.4), address: 'Right here' }], maxStops: ON }));
     expect(err.details?.['distanceMeters']).toBe(12);
+  });
+});
+
+describe('taxi itinerary: every point of a route with stops lies where Swift works [2/8, DS282 F3]', () => {
+  const abroad = { lat: 10.6596, lng: -61.5089 }; // Port of Spain
+
+  it('passes a route inside the launch market', () => {
+    expect(() => assertTaxiRouteInMarket({ pickup, stops: [stopA, stopB], dropoff })).not.toThrow();
+  });
+
+  it('names the FIRST point outside it, in route order: pickup, stops, destination', () => {
+    const place = (route: Parameters<typeof assertTaxiRouteInMarket>[0]) => refusal(() => assertTaxiRouteInMarket(route)).details?.['place'];
+    expect(place({ pickup: abroad, stops: [abroad], dropoff: abroad })).toBe('PICKUP');
+    expect(place({ pickup, stops: [stopA, abroad, abroad], dropoff: abroad })).toBe('STOP_2');
+    expect(place({ pickup, stops: [stopA], dropoff: abroad })).toBe('DESTINATION');
+    const err = refusal(() => assertTaxiRouteInMarket({ pickup, stops: [abroad], dropoff }));
+    expect([err.statusCode, err.code, err.message]).toEqual([400, 'STOP_OUT_OF_MARKET', 'Stop 1 is outside Guyana, where Swift works today. Choose a place in Guyana.']);
+  });
+
+  it('a point that is not a number lies in no market', () => {
+    expect(refusal(() => assertTaxiRouteInMarket({ pickup, stops: [{ lat: Number.NaN, lng: -58.16 }], dropoff })).code).toBe('STOP_OUT_OF_MARKET');
+  });
+
+  it('judges nothing on a ride without stops', () => {
+    expect(() => assertTaxiRouteInMarket({ pickup: abroad, stops: [], dropoff: abroad })).not.toThrow();
   });
 });

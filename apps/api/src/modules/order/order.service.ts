@@ -15,6 +15,7 @@ import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
+import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
 import {
@@ -34,7 +35,7 @@ import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from '.
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
-import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction } from './checkout-outbox';
+import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
 import { shapeCheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
@@ -335,14 +336,77 @@ export function holdWindowMs(): number | null {
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
 }
 
-/** Prisma WHERE fragment: only orders a vendor/mover is allowed to see. */
-export function notHeldFilter() {
-  return { OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] };
-}
+// The store-visibility rule lives in a leaf the socket door can import too
+// [Q12]; re-exported so every existing importer is untouched.
+export { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter };
+
+/** [Q12] Optional observation seam for deterministic race certification of
+ *  the hold release (the mmgClaimLockObserver pattern). `beforeRelease` runs
+ *  once the sweep holds the order as due, before its release CAS;
+ *  `afterRelease` runs after that CAS committed, before the store is alerted.
+ *  Production never sets it and it never changes a decision. */
+export const holdReleaseObserver: {
+  beforeRelease?: (ctx: { orderId: string }) => Promise<void>;
+  afterRelease?: (ctx: { orderId: string }) => Promise<void>;
+} = {};
 
 /** A held order = pre-release: hidden, undispatched, freely cancellable. */
 export function isHeld(order: { holdExpiresAt: Date | null }, now = new Date()): boolean {
   return order.holdExpiresAt != null && order.holdExpiresAt > now;
+}
+
+/** [Q12] The store's own counters (vendor.totalOrders, item.totalOrdered)
+ *  count an order the moment the store can see it — at checkout for an order
+ *  that is never held, inside the release CAS for a held one — so each order
+ *  counts exactly once, and one cancelled inside its hold never counts. */
+async function countOrderForStore(tx: Prisma.TransactionClient, vendorId: string, itemIds: string[]): Promise<void> {
+  await tx.vendor.updateMany({ where: { id: vendorId }, data: { totalOrders: { increment: 1 } } });
+  await tx.item.updateMany({ where: { id: { in: itemIds } }, data: { totalOrdered: { increment: 1 } } });
+}
+
+/** [Q12 · AX289 F1] THE release of a held order to its store, inside the
+ *  caller's transaction: the hold is cleared, releasedToVendorAt stamped and
+ *  the store's counters count the order. One compare-and-set on
+ *  releasedToVendorAt IS NULL over an expired hold, shared by the release
+ *  sweep and by the store's first action on an order whose hold lapsed before
+ *  the sweep reached it — whichever commits second matches nothing, so the
+ *  order counts exactly once whoever wins. `statusIn` is the sweep's own
+ *  guard (a cancel that landed first leaves nothing to release). Returns the
+ *  released order's store facts, or null when there was nothing to release. */
+async function releaseHoldInTransaction(
+  tx: Prisma.TransactionClient,
+  orderId: string,
+  opts: { now?: Date; statusIn?: OrderStatus[] } = {},
+): Promise<{ vendorId: string | null; tenantId: string } | null> {
+  const now = opts.now ?? new Date();
+  const res = await tx.order.updateMany({
+    where: {
+      id: orderId,
+      releasedToVendorAt: null,
+      holdExpiresAt: { not: null, lte: now },
+      ...(opts.statusIn ? { status: { in: opts.statusIn } } : {}),
+    },
+    data: { holdExpiresAt: null, releasedToVendorAt: now },
+  });
+  if (res.count === 0) return null;
+  const released = await tx.order.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { vendorId: true, tenantId: true, items: { select: { itemId: true } } },
+  });
+  if (released.vendorId) await countOrderForStore(tx, released.vendorId, released.items.map((i) => i.itemId));
+  return { vendorId: released.vendorId, tenantId: released.tenantId };
+}
+
+/** [Q12 · AX289 F1] The store's first action (accept, reject) on an order
+ *  whose hold lapsed before the release sweep reached it: the board shows the
+ *  order from its holdExpiresAt on, and the action moves it out of PENDING —
+ *  out of the sweep's reach — so the action releases it itself, in its own
+ *  transaction, exactly as the sweep would have (hold cleared, release
+ *  stamped, the store's counters counted). A no-op for an order that was
+ *  never held or is already released. The store is acting on the order, so
+ *  no alert and no ladder. */
+export async function releaseLapsedHoldInTransaction(tx: Prisma.TransactionClient, orderId: string): Promise<boolean> {
+  return (await releaseHoldInTransaction(tx, orderId)) !== null;
 }
 
 const RIDER_ASSIGNMENT_SNAPSHOT_SELECT = {
@@ -838,8 +902,10 @@ export class OrderService {
           throw new AppError(400, 'SLOT_REQUIRED', `Pick a time slot for ${only.item.name}`);
         }
         // Validates config, day window, alignment, and that it's in the future.
-        // The slot is RESERVED at vendor acceptance, not here.
+        // The slot is RESERVED at vendor acceptance, not here — but one another
+        // customer already holds is refused now, never left pending [Q12].
         await this.booking.validateSlot(only.itemId, slot);
+        await this.booking.assertSlotFree(only.itemId, slot);
         appointmentSlot = slot;
       }
 
@@ -1349,14 +1415,10 @@ export class OrderService {
           include: { items: true, vendor: { select: { id: true, name: true, ownerId: true } } },
         });
 
-        await tx.vendor.update({
-          where: { id: plan.vendor.id },
-          data: { totalOrders: { increment: 1 } },
-        });
-        await tx.item.updateMany({
-          where: { id: { in: plan.orderItems.map((oi) => oi.itemId) } },
-          data: { totalOrdered: { increment: 1 } },
-        });
+        // A held order is counted at its release, never here [Q12].
+        if (order.holdExpiresAt == null) {
+          await countOrderForStore(tx, plan.vendor.id, plan.orderItems.map((oi) => oi.itemId));
+        }
 
         // Inventory (§4.2): conditional decrement — the WHERE guard makes
         // overselling impossible under concurrency; the losing checkout's
@@ -1481,6 +1543,7 @@ export class OrderService {
           fulfillment: o.fulfillment,
           appointmentSlot: o.appointmentSlot,
           placedAt: o.placedAt,
+          holdExpiresAt: o.holdExpiresAt,
         })),
         timing: queueTiming,
         now,
@@ -1500,8 +1563,10 @@ export class OrderService {
     // event goes to that vendor's room only — a global emit would fan out to
     // every connected client and leak order metadata platform-wide.
     // A HELD order tells the vendor NOTHING here — the release worker does
-    // that when the customer's cancel window closes. Low-stock alerts still
-    // go out now: inventory already moved regardless of the hold.
+    // that when the customer's cancel window closes. That includes its
+    // low-stock notices [Q12]: the stock moved now, but a "down to 2" push is
+    // the store learning of an order it cannot see; the release publishes them,
+    // and an in-window cancel (which restocks) never does.
     for (const order of orders) {
       const held = isHeld(order);
       if (!held) {
@@ -1523,8 +1588,10 @@ export class OrderService {
           );
         }
         if (order.vendorId) {
-          for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
-            await this.notifications.lowStock(vendorOwner.userId, ev);
+          if (!held) {
+            for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
+              await this.notifications.lowStock(vendorOwner.userId, ev);
+            }
           }
           stockEventsByVendor.delete(order.vendorId);
         }
@@ -2333,7 +2400,9 @@ export class OrderService {
    * is the race protection — a customer cancel that landed a millisecond
    * earlier flips the status, the CAS matches nothing, and we skip. Clearing
    * holdExpiresAt IS the release; a crash after the CAS is recovered by the
-   * vendor board (order now visible) and the dispatch reconcile job.
+   * vendor board (order now visible), the dispatch reconcile job and the
+   * vendor alert ladder, which the release wrote as an outbox row in its own
+   * transaction [Q12 · AX289 F5].
    *
    * Courier orders (born READY_FOR_PICKUP, no vendor) start their offer
    * cascade here instead of at creation.
@@ -2349,14 +2418,23 @@ export class OrderService {
     // [Q10] Read once per sweep: the response SLA the released orders' alert
     // pushes ring until (vendorRespondBy, the auto-cancel cut-off).
     const slaMinutes = due.length > 0 ? await vendorResponseSlaMinutes(this.prisma) : 0;
+    const alertDelayMs = vendorAlertLadderDelayMs();
     for (const { id } of due) {
-      const res = await this.prisma.order.updateMany({
-        where: { id, status: { in: ['PENDING', 'READY_FOR_PICKUP'] }, holdExpiresAt: { lte: new Date() } },
-        data: { holdExpiresAt: null, releasedToVendorAt: new Date() },
+      await holdReleaseObserver.beforeRelease?.({ orderId: id });
+      // The release CAS, the store's counters and the store's alert ladder
+      // commit together [Q12]: the order counts the moment the store can see
+      // it, exactly once — and its ladder is a durable outbox row from that
+      // same moment [AX289 F5], published after the commit by the drainer,
+      // never an enqueue a crash between here and the queue could lose.
+      const releasedNow = await this.prisma.$transaction(async (tx) => {
+        const store = await releaseHoldInTransaction(tx, id, { statusIn: ['PENDING', 'READY_FOR_PICKUP'] });
+        if (!store) return false; // cancelled or raced — idempotent skip
+        if (store.vendorId) await persistReleaseAlertLadderInTransaction(tx, { orderId: id, tenantId: store.tenantId, alertDelayMs });
+        return true;
       });
-      if (res.count === 0) continue; // cancelled or raced — idempotent skip
+      if (!releasedNow) continue;
+      await holdReleaseObserver.afterRelease?.({ orderId: id });
 
-      released.push(id);
       const order = await this.prisma.order.findUnique({
         where: { id },
         include: {
@@ -2365,6 +2443,13 @@ export class OrderService {
         },
       });
       if (!order) continue;
+      // [Q12] The release committed, then a cancel landed before this read:
+      // the order is dead. Alerting now would announce an order that is
+      // already cancelled — "New Order!" and a ringing takeover AFTER the
+      // store was told it died. The cancel took the ordinary post-window
+      // rules; the store gets no alert, no ladder and no dispatch.
+      if (order.status !== (order.orderType === 'COURIER' ? 'READY_FOR_PICKUP' : 'PENDING')) continue;
+      released.push(id);
 
       // No vendor to notify on a courier job — release = start the cascade.
       if (order.orderType === 'COURIER') {
@@ -2391,6 +2476,10 @@ export class OrderService {
               order.id,
               vendorRespondBy(order, { slaMinutes, holdMs: holdWindowMs() ?? 0 }),
             );
+            // [Q12] The low-stock notices checkout held back for this order.
+            for (const ev of await this.lowStockEarnedBy(id)) {
+              await this.notifications.lowStock(vendorOwner.userId, ev);
+            }
           }
         } catch (err) {
           log().error({ err, orderId: id }, 'hold-release: vendor notification failed — board still shows the order');
@@ -2399,6 +2488,41 @@ export class OrderService {
     }
 
     return { released };
+  }
+
+  /**
+   * [Q12] The low-stock notices a HELD order's sale earned, for its release.
+   * Checkout computes the crossing in memory and publishes it only for an
+   * order the store can already see; for a held one it is re-read here from
+   * the stock ledger (the SALE rows record each sale's delta and the balance
+   * it left) with checkout's own crossing rule — and sent only while it is
+   * still true of the shelf, so a restock in the meantime sends nothing.
+   */
+  private async lowStockEarnedBy(orderId: string): Promise<Array<{ itemId: string; name: string; remaining: number; kind: 'low' | 'out' }>> {
+    const sales = await this.prisma.stockMovement.findMany({
+      where: { orderId, reason: 'SALE' },
+      select: { itemId: true, delta: true, balanceAfter: true },
+      orderBy: { occurredAt: 'asc' },
+    });
+    const events: Array<{ itemId: string; name: string; remaining: number; kind: 'low' | 'out' }> = [];
+    for (const sale of sales) {
+      const item = await this.prisma.item.findUnique({
+        where: { id: sale.itemId },
+        select: { name: true, stockQuantity: true, lowStockThreshold: true },
+      });
+      if (!item || item.stockQuantity == null) continue;
+      if (sale.balanceAfter <= 0) {
+        if (item.stockQuantity <= 0) events.push({ itemId: sale.itemId, name: item.name, remaining: 0, kind: 'out' });
+      } else if (
+        item.lowStockThreshold !== null
+        && sale.balanceAfter <= item.lowStockThreshold
+        && sale.balanceAfter - sale.delta > item.lowStockThreshold
+        && item.stockQuantity <= item.lowStockThreshold
+      ) {
+        events.push({ itemId: sale.itemId, name: item.name, remaining: item.stockQuantity, kind: 'low' });
+      }
+    }
+    return events;
   }
 
   async createEarnings(
