@@ -16,6 +16,6 @@ DROP TABLE mover_fee_authorities;
 DROP FUNCTION mover_fee_preserve_source_owner();
 DROP FUNCTION mover_fee_validate_authority();
 DROP FUNCTION mover_fee_preserve_authority();
-DROP INDEX users_id_tenantId_key;
+DROP INDEX "users_id_tenantId_key";
 DROP TYPE "MoverFeeAuthorityState";
 COMMIT;

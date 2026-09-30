@@ -94,6 +94,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });

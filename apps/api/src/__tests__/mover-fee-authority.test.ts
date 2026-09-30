@@ -18,11 +18,14 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { lockMoverFeeAuthority, resolveMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
 import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { platformStats } from '../modules/admin/platform-stats';
+import { runFxChangeNotices } from '../modules/billing/fx-notices';
 
 const DAY = 86_400_000;
 const run = nanoid(7);
 const ids: string[] = [];
 const tenantIds: string[] = [];
+const rateIds: string[] = [];
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'test-mover-fee-authority');
 let app: FastifyInstance;
 let billing: BillingService;
@@ -56,10 +59,10 @@ async function dual(tenantId = 'swift-default') {
   });
 }
 
-async function legacy(kind: 'empty' | 'paid' | 'pending' | 'funded' | 'restricted' = 'paid', tenantId = 'swift-default') {
+async function legacy(kind: 'empty' | 'paid' | 'pending' | 'funded' | 'restricted' = 'paid', tenantId = 'swift-default', ageDays = 1) {
   const who = await dual(tenantId);
   return sys(async () => {
-    const start = new Date(Date.now() - DAY);
+    const start = new Date(Date.now() - ageDays * DAY);
     const end = new Date(start.getTime() + 7 * DAY);
     const base = { currencyCode: 'GYD', currentPeriodStart: start, currentPeriodEnd: end, nextBillingDate: end,
       status: kind === 'empty' ? 'TRIAL' as const : 'ACTIVE' as const,
@@ -68,7 +71,7 @@ async function legacy(kind: 'empty' | 'paid' | 'pending' | 'funded' | 'restricte
     const driver = await app.prisma.subscription.create({ data: { ...base, driverId: who.driverId, type: 'TAXI_DRIVER', weeklyRate: 9000 } });
     if (kind !== 'empty') for (const sub of [rider, driver]) {
       await app.prisma.subscriptionPayment.create({ data: { subscriptionId: sub.id, amount: Number(sub.weeklyRate), paymentMethod: 'CASH', status: 'CAPTURED', paidAt: start, periodStart: start, periodEnd: end } });
-      await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: Number(sub.weeklyRate), currencyCode: 'GYD', idempotencyKey: `legacy-proof:${sub.id}`, note: 'Synthetic historical paid period' } });
+      await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: Number(sub.weeklyRate), currencyCode: 'GYD', idempotencyKey: `success:${sub.id}:${start.toISOString().slice(0, 10)}`, note: 'Synthetic historical paid period' } });
     }
     if (kind === 'pending') await app.prisma.subscriptionPayment.create({ data: { subscriptionId: rider.id, amount: 6000, paymentMethod: 'MOBILE_MONEY', status: 'PENDING', periodStart: end, periodEnd: new Date(end.getTime() + 7 * DAY) } });
     if (kind === 'funded') await app.prisma.prepaidBalance.create({ data: { subscriptionId: rider.id, balance: 1000, currencyCode: 'GYD' } });
@@ -116,6 +119,8 @@ afterAll(async () => {
     await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: ids } } });
     await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: ids } }] }, 'test-mover-fee-authority-cleanup');
     await app.prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } });
+    await app.prisma.billingEvent.deleteMany({ where: { fxRateId: { in: rateIds } } });
+    await app.prisma.fxRate.deleteMany({ where: { id: { in: rateIds } } });
   });
   await app.close();
 });
@@ -182,6 +187,79 @@ describe('one mover fee across actual role surfaces', () => {
 });
 
 describe('bounded finance decision with original money retained', () => {
+  it('the real application database role sees only its tenant authority and cannot smuggle a foreign source', async () => {
+    const tenant = await sys(() => app.prisma.tenant.create({ data: { name: 'Fee SQL tenant', slug: `fee-sql-${run}`, kind: 'REVIEW' } }));
+    tenantIds.push(tenant.id);
+    const a = await legacy('empty');
+    const b = await legacy('empty', tenant.id);
+    const visible = (tenantId: string) => sys(() => app.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL ROLE swift_app');
+      await tx.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
+      const authorities = await tx.$queryRaw<Array<{ userId: string }>>`SELECT "userId" FROM mover_fee_authorities WHERE "userId" IN (${a.userId}, ${b.userId})`;
+      const members = await tx.$queryRaw<Array<{ userId: string }>>`SELECT "userId" FROM mover_fee_subscriptions WHERE "userId" IN (${a.userId}, ${b.userId})`;
+      return { authorities, members };
+    }));
+    expect(await visible(a.tenantId)).toEqual({ authorities: [{ userId: a.userId }], members: [{ userId: a.userId }, { userId: a.userId }] });
+    expect(await visible(b.tenantId)).toEqual({ authorities: [{ userId: b.userId }], members: [{ userId: b.userId }, { userId: b.userId }] });
+    expect(await visible('')).toEqual({ authorities: [], members: [] });
+    await expect(sys(() => app.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL ROLE swift_app');
+      await tx.$executeRaw`SELECT set_config('app.current_tenant', ${a.tenantId}, true)`;
+      await tx.$executeRaw`UPDATE mover_fee_authorities SET "tenantId"=${b.tenantId} WHERE "userId"=${a.userId}`;
+    }))).rejects.toThrow();
+    const foreign = await dual();
+    const foreignSource = await sys(() => app.prisma.subscription.create({ data: { riderId: foreign.riderId, type: 'DELIVERY_RIDER', weeklyRate: 6000,
+      currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + DAY), nextBillingDate: new Date(Date.now() + DAY) } }));
+    await expect(sys(() => app.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL ROLE swift_app');
+      await tx.$executeRaw`SELECT set_config('app.current_tenant', ${a.tenantId}, true)`;
+      await tx.$executeRaw`INSERT INTO mover_fee_subscriptions ("subscriptionId", "userId", "tenantId") VALUES (${foreignSource.id}, ${a.userId}, ${a.tenantId})`;
+    }))).rejects.toThrow(/same-payer|exact authority/);
+    expect((await sys(() => resolveMoverFeeAuthority(app.prisma, a)))?.sourceSubscriptionIds).toEqual(a.authority.sourceSubscriptionIds);
+  });
+
+  it('a clean legacy pair converts, pays once at 8,000 and resumes both roles without inventing an alias stop', async () => {
+    const retained = await legacy('empty', 'swift-default', 9);
+    await sys(() => app.prisma.user.delete({ where: { id: retained.userId } }));
+    const f = await legacy('empty', 'swift-default', 9);
+    await sys(async () => {
+      await subscriptions.startTrialForDriver(f.driverId);
+      await subscriptions.convertExpiredTrials();
+      expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: retained.rider.id } })).status).toBe('TRIAL');
+      await billing.recordTopUp(f.driver.id, 20_000, finance.userId, 'test-canonical-credit', `fee-convert-${run}-${f.driver.id}`);
+      expect(await billing.billSubscription(await ready(f.driver))).toBe('succeeded');
+      const captures = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds }, status: 'CAPTURED' } });
+      expect(captures).toHaveLength(1);
+      expect(Number(captures[0]!.amount)).toBe(8000);
+      expect(captures[0]!.subscriptionId).toBe(f.driver.id);
+      expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: f.driver.id } })).balance)).toBe(12000);
+      const stats = await platformStats(app.prisma, { tenantId: f.tenantId, today: new Date(), subscriptionScope: { id: { in: f.authority.sourceSubscriptionIds } } });
+      expect(stats.activeSubscriptions).toHaveLength(1);
+      expect(stats.activeSubscriptions[0]).toMatchObject({ id: f.driver.id, type: 'TAXI_DRIVER' });
+    });
+    expect((await call(f.token, 'PUT', 'driver/subscription/billing-method', { method: 'NONE' })).statusCode).toBe(200);
+    expect((await call(f.token, 'PUT', 'rider/subscription/billing-method', { method: 'CASH' })).statusCode).toBe(200);
+    expect((await sys(() => app.prisma.subscription.findUniqueOrThrow({ where: { id: f.rider.id } }))).autoRenew).toBe(true);
+    for (const role of ['rider', 'driver']) expect((await call(f.token, 'POST', `${role}/go-online`, { latitude: 6.8, longitude: -58.15 })).statusCode).toBe(200);
+  });
+
+  it('neutral FX disclosure uses the activated taxi tariff on an original delivery subscription', async () => {
+    const f = await dual();
+    await sys(async () => {
+      const original = await subscriptions.startTrialForRider(f.riderId);
+      await subscriptions.startTrialForDriver(f.driverId);
+      await app.prisma.billingEvent.create({ data: { subscriptionId: original.id, type: 'CHARGE_SUCCESS', amount: 6000, currencyCode: 'GYD', idempotencyKey: `fx-history:${run}:${original.id}` } });
+      const rate = await app.prisma.fxRate.create({ data: { quote: 'GYD', rate: 250, source: 'FOUNDER_MANUAL', setByUserId: finance.userId, effectiveFrom: new Date(Date.now() - DAY) } });
+      rateIds.push(rate.id);
+      const result = await runFxChangeNotices(app.prisma, app.io, new Date(), { subscriptionIds: [original.id], rateIds: [rate.id],
+        tenant: { usdPricingEnabled: true, settlementCurrency: 'GYD', roundingIncrement: 100 }, book: new Map([['RIDER|DELIVERY_RIDER', 25], ['DRIVER|TAXI_DRIVER', 40]]) });
+      expect(result.notified).toBe(1);
+      const notice = await app.prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: `fxnotice:${original.id}:${rate.id}` } });
+      expect(Number(notice.amountUsd)).toBe(40);
+      expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: original.id } })).type).toBe('DELIVERY_RIDER');
+    });
+  });
+
   it('clean identical trials consolidate with immutable membership and one canonical worker', async () => {
     const f = await legacy('empty');
     expect(f.authority.state).toBe('ACTIVE');
@@ -191,23 +269,30 @@ describe('bounded finance decision with original money retained', () => {
     expect(await sys(async () => billing.billSubscription(await ready(f.rider)))).toBe('skipped');
   });
 
-  it('paid history resolves through two admins, preserves amounts and periods, and rejects replay', async () => {
+  it.each(['taxi-source', 'delivery-source'] as const)('paid history resolves through two admins onto %s, preserves amounts and periods, and rejects replay', async (choice) => {
     const f = await legacy('paid');
+    const canonical = choice === 'taxi-source' ? f.driver : f.rider;
+    const alias = choice === 'taxi-source' ? f.rider : f.driver;
     const before = await sys(() => app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds } }, orderBy: { id: 'asc' } }));
-    const action = await approvedDecision(f);
+    const action = await approvedDecision(f, { ...decisionBody(f), canonicalSubscriptionId: canonical.id });
     const response = await action.apply();
     expect(response.statusCode, response.body).toBe(200);
     expect(response.json().data).toMatchObject({ state: 'ACTIVE', revision: f.authority.revision + 1 });
     expect((await action.apply()).statusCode).toBe(403);
     await sys(async () => {
       expect((await resolveMoverFeeAuthority(app.prisma, f))?.state).toBe('ACTIVE');
+      expect(await billing.billSubscription(await ready(alias))).toBe('skipped');
+      expect(await app.prisma.billingEvent.count({ where: { subscriptionId: alias.id, type: 'CHARGE_ATTEMPT' } })).toBe(0);
+      expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: canonical.id } })).weeklyRate)).toBe(8000);
+      expect((await resolveMoverFeeAuthority(app.prisma, f))?.canonicalSubscriptionId).toBe(canonical.id);
       expect(await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds } }, orderBy: { id: 'asc' } })).toEqual(before);
       const original = await app.prisma.subscription.findUniqueOrThrow({ where: { id: f.rider.id } });
       expect(original.currentPeriodEnd).toEqual(f.rider.currentPeriodEnd);
       expect(original.type).toBe('DELIVERY_RIDER');
       const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entity: 'MoverFeeAuthority', entityId: f.userId, action: 'MOVER_FEE_RESOLVED' } });
       expect(audit.userId).toBe(finance.userId);
-      expect(audit.changes).toMatchObject({ approvalId: action.approvalId, aliasEvidence: { [f.rider.id]: expect.stringMatching(/^[a-f0-9]{64}$/) } });
+      expect(audit.changes).toMatchObject({ approvalId: action.approvalId, futureRate: { before: Number(canonical.weeklyRate), after: 8000 }, aliasEvidence: { [alias.id]: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        sourceEvidence: { [f.rider.id]: expect.stringMatching(/^[a-f0-9]{64}$/), [f.driver.id]: expect.stringMatching(/^[a-f0-9]{64}$/) } });
       await expect(app.prisma.auditLog.update({ where: { id: audit.id }, data: { action: 'changed' } })).rejects.toThrow();
     });
   });
@@ -219,6 +304,29 @@ describe('bounded finance decision with original money retained', () => {
     expect(response.statusCode, response.body).toBe(409);
     expect(response.json().error.code).toBe('MOVER_FEE_FINANCE_ACTION_REQUIRED');
     expect((await sys(() => resolveMoverFeeAuthority(app.prisma, f)))?.state).toBe('FINANCE_HOLD');
+  });
+
+  it('a capture without exact paid-period success evidence cannot retire an old obligation', async () => {
+    const f = await legacy('paid');
+    await sys(() => app.prisma.billingEvent.deleteMany({ where: { subscriptionId: f.rider.id, type: 'CHARGE_SUCCESS' } }));
+    const action = await approvedDecision(f);
+    const response = await action.apply();
+    expect(response.statusCode, response.body).toBe(409);
+    expect(response.json().error.details.reason).toBe('PAID_PERIOD_PROOF_REQUIRED');
+    expect((await sys(() => resolveMoverFeeAuthority(app.prisma, f)))?.state).toBe('FINANCE_HOLD');
+  });
+
+  it('refuses a previously approved decision after the independent approver loses finance authority', async () => {
+    const f = await legacy('paid');
+    const action = await approvedDecision(f);
+    await sys(() => app.prisma.admin.update({ where: { userId: approver.userId }, data: { permissions: ['support.*'] } }));
+    try {
+      const response = await action.apply();
+      expect(response.statusCode, response.body).toBe(403);
+      expect(response.json().error.code).toBe('MOVER_FEE_APPROVAL_REQUIRED');
+    } finally {
+      await sys(() => app.prisma.admin.update({ where: { userId: approver.userId }, data: { permissions: ['*'] } }));
+    }
   });
 
   it('a later real alias top-up preserves its source, re-holds and stops a waiting canonical bill', async () => {

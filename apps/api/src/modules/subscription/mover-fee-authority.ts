@@ -4,6 +4,7 @@ import { AppError } from '../../utils/errors';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { moverSourceFinancialFingerprint, paidMoverResolutionBlocker } from './mover-fee-history';
 import { capabilitiesOf, holdsCapability } from '../admin/admin-authority';
+import { partnerRateFor, subscriptionTiersIn } from '../country/country-config.service';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -40,7 +41,7 @@ export async function subscriptionPayer(db: Db, subscriptionId: string): Promise
   });
   if (!sub || [sub.riderId, sub.driverId, sub.vendorId].filter(Boolean).length !== 1) throw ownershipError();
   const user = sub.rider?.user ?? sub.driver?.user ?? sub.vendor?.owner.user;
-  if (!user || (sub.vendor && sub.vendor.tenantId !== user.tenantId)) throw ownershipError();
+  if (!user) throw ownershipError();
   return { userId: user.id, tenantId: user.tenantId, kind: sub.vendorId ? 'VENDOR' : 'MOVER' };
 }
 
@@ -272,6 +273,23 @@ export async function lockFeeCollectionAuthority(tx: Prisma.TransactionClient, s
   return { allowed: ready && !!mover && mover.state === 'ACTIVE' && mover.canonicalSubscriptionId === subscriptionId, mover };
 }
 
+/** Read-only counterpart for forecasts and price disclosures. Callers that
+ * create money effects still need the locked decision above. */
+export async function readFeeCollectionAuthority(db: Db, subscriptionId: string): Promise<{ allowed: boolean; canonical: boolean; mover: MoverFeeResolution | null }> {
+  try {
+    const payer = await subscriptionPayer(db, subscriptionId);
+    if (payer.kind === 'VENDOR') return { allowed: true, canonical: true, mover: null };
+    const mover = await resolveMoverFeeAuthority(db, payer);
+    const canonical = !!mover && mover.canonicalSubscriptionId === subscriptionId;
+    return { allowed: canonical && mover?.state === 'ACTIVE', canonical, mover };
+  } catch (error) {
+    // Retention may leave an original financial source after its payer is
+    // purged. It has no new tariff or collection authority; keep its history.
+    if (error instanceof AppError && error.code === 'MOVER_FEE_OWNERSHIP_INVALID') return { allowed: false, canonical: false, mover: null };
+    throw error;
+  }
+}
+
 /** Authenticated readers use one canonical view while retaining each original
  * financial source for review. No classification or SAN assignment happens here. */
 export async function readMoverFeeSubscription(db: Db, payer: { userId: string; tenantId: string }) {
@@ -395,11 +413,25 @@ export async function resolveMoverFeeHold(
   const empty = compatibleEmptyTrials(sources) && !await hasFinancialHistory(tx, sources);
   const blocker = empty ? null : await paidMoverResolutionBlocker(tx, sources, canonical);
   if (blocker) throw new AppError(409, 'MOVER_FEE_FINANCE_ACTION_REQUIRED', 'These sources still need an existing finance reconciliation or money command.', { reason: blocker });
+  const tariff = await moverFeeTariffSubject(tx, authority);
+  const tiers = await subscriptionTiersIn(tx, tariff.countryCode);
+  const target = partnerRateFor(tiers, tariff.subject);
+  const previousRate = Number(canonical.weeklyRate);
+  if (previousRate !== target.rate) {
+    await tx.subscription.update({ where: { id: canonical.id }, data: { weeklyRate: target.rate } });
+    const sequence = await tx.billingEvent.count({ where: { subscriptionId: canonical.id, type: 'TIER_CHANGE' } }) + 1;
+    await tx.billingEvent.create({ data: { subscriptionId: canonical.id, type: 'TIER_CHANGE', amount: target.rate, currencyCode: canonical.currencyCode,
+      idempotencyKey: `tier:${canonical.id}:${sequence}:${previousRate}->${target.rate}`,
+      note: `Finance authority resolution changes the future weekly rate from ${previousRate} to ${target.rate}; issued charges and paid periods retained.` } });
+  }
   const aliasEvidence: Record<string, string> = {};
-  for (const source of sources.filter((s) => s.id !== canonical.id)) {
-    aliasEvidence[source.id] = await moverSourceFinancialFingerprint(tx, source);
+  const sourceEvidence: Record<string, string> = {};
+  for (const source of sources) {
+    sourceEvidence[source.id] = await moverSourceFinancialFingerprint(tx, source);
+    if (source.id !== canonical.id) aliasEvidence[source.id] = sourceEvidence[source.id]!;
   }
   return persistDecision(tx, { ...authority, canonicalSubscriptionId: canonical.id, state: 'ACTIVE', holdReason: null },
     'MOVER_FEE_RESOLVED', input.actorUserId,
-    { aliasEvidence, previousRevision: authority.revision, approvalId: input.approvalId, disposition: empty ? 'EMPTY_COMPATIBLE' : 'PAID_HISTORY_RETAINED' });
+    { aliasEvidence, sourceEvidence, previousRevision: authority.revision, approvalId: input.approvalId,
+      futureRate: { before: previousRate, after: target.rate }, disposition: empty ? 'EMPTY_COMPATIBLE' : 'PAID_HISTORY_RETAINED' });
 }

@@ -363,15 +363,22 @@ export class SubscriptionService {
   async convertExpiredTrials(now = new Date()): Promise<number> {
     const rows = await this.prisma.subscription.findMany({ where: { status: 'TRIAL', trialEndDate: { lte: now } }, select: { id: true } });
     let count = 0;
-    for (const row of rows) count += await this.prisma.$transaction(async (tx) => {
-      if (!(await lockFeeCollectionAuthority(tx, row.id)).allowed) return 0;
-      const { sub } = await lockBillingAuthority(tx, row.id);
-      if (sub.status !== 'TRIAL' || !sub.trialEndDate || sub.trialEndDate > now) return 0;
-      // Preserve the original obligation and time already paused before conversion.
-      await tx.subscription.update({ where: { id: row.id }, data: { status: 'ACTIVE', isTrialActive: false } });
-      await currentDunningClock(tx, row.id, now);
-      return 1;
-    });
+    for (const row of rows) {
+      try {
+        count += await this.prisma.$transaction(async (tx) => {
+          if (!(await lockFeeCollectionAuthority(tx, row.id)).allowed) return 0;
+          const { sub } = await lockBillingAuthority(tx, row.id);
+          if (sub.status !== 'TRIAL' || !sub.trialEndDate || sub.trialEndDate > now) return 0;
+          // Preserve the original obligation and time already paused before conversion.
+          await tx.subscription.update({ where: { id: row.id }, data: { status: 'ACTIVE', isTrialActive: false } });
+          await currentDunningClock(tx, row.id, now);
+          return 1;
+        });
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'MOVER_FEE_OWNERSHIP_INVALID') throw error;
+        log().warn({ subscriptionId: row.id }, 'trial conversion held: original financial source has no valid payer');
+      }
+    }
     return count;
   }
 }
