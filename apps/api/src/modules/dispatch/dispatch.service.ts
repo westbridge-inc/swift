@@ -826,10 +826,16 @@ export class DispatchService {
    *  timeout reads the acknowledgment as proof the card reached the mover, so a
    *  stale action (its attempt lapsed, a successor offered since) consumes
    *  nothing and stamps nothing: never the successor, which may not have
-   *  reached the screen yet, and never the lapsed card's own history. */
-  private async consumeActedOffer(orderId: string, moverId: string, moverUserId: string, attemptId?: string): Promise<boolean> {
+   *  reached the screen yet, and never the lapsed card's own history.
+   *  [AX358] `countsForMover` is false for an action that named NO attempt
+   *  (older app builds) when the card it consumed is a generated attempt: it
+   *  may have been meant for an earlier card of the same order, so it still
+   *  releases the live card but stamps nothing against it. */
+  private async consumeActedOffer(
+    orderId: string, moverId: string, moverUserId: string, attemptId: string | undefined, countsForMover: boolean,
+  ): Promise<boolean> {
     const consumed = await this.removeOfferIfOwned(orderId, moverId, attemptId);
-    if (consumed) {
+    if (consumed && countsForMover) {
       const { acknowledgeAlert } = await import('../notification/notification.service');
       await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId, attemptId ?? null).catch(() => {});
     }
@@ -2262,7 +2268,14 @@ export class DispatchService {
         if (parsed.id === mover.id) resolvedAttemptId = parsed.attemptId;
       }
     }
-    const removed = await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId);
+    // [AX358] Only an action that names its attempt is evidence about the
+    // mover (or a legacy action on a legacy bare card, where neither side has
+    // one). A decline that names none may be a delayed one for an earlier card
+    // of this order: it still releases the live card and the cascade moves on,
+    // but a generated card it never identified is neither acknowledged nor
+    // charged.
+    const countsForMover = !!offerAttemptId || !resolvedAttemptId;
+    const removed = await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId, countsForMover);
     if (!removed) {
       throw new AppError(409, 'OFFER_EXPIRED', 'This offer is no longer yours to decline');
     }
@@ -2285,7 +2298,11 @@ export class DispatchService {
       : undefined;
     await this.redis.sadd(declinedKey(orderId, offerVersion), mover.id);
     await this.redis.expire(declinedKey(orderId, offerVersion), 3600);
-    await this.recordOfferOutcome(mover.id, false, pool);
+    if (countsForMover) {
+      await this.recordOfferOutcome(mover.id, false, pool);
+    } else {
+      log().info({ orderId, moverId: mover.id, pool, attemptId: resolvedAttemptId }, 'dispatch: a decline naming no attempt released a generated card — acceptance rate spared');
+    }
     // [ALG-01] An explicit decline is not an expiry: logged apart, counted by nobody as a gate.
     await this.redis.zadd(offerOutcomeKey(mover.id, 'declines'), Date.now(), `${orderId}:${resolvedAttemptId ?? ''}`).catch(() => {});
     await this.redis.expire(offerOutcomeKey(mover.id, 'declines'), OFFER_LOG_TTL_S).catch(() => {});
@@ -2353,6 +2370,9 @@ export class DispatchService {
       if (!parsed || parsed.id !== mover.id) return this.explainLostOffer(orderId, mover.id, pool);
       resolvedAttemptId = parsed.attemptId;
     }
+    // [AX358] As in declineOffer: an accept that names no attempt may still
+    // take the live card, but it acknowledges no generated attempt.
+    const countsForMover = !!offerAttemptId || !resolvedAttemptId;
 
     // [REPORT-012 F-012-02] Prove the rail BEFORE consuming the exclusive
     // offer. A positive fare on a non-CASH order used to ride into claimOrder,
@@ -2381,7 +2401,7 @@ export class DispatchService {
       && rail != null
       && offeredVersion !== rail.fulfillmentModeVersion
     ) {
-      await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId);
+      await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId, countsForMover);
       await this.dispatchOrder(orderId).catch(() => {});
       throw new AppError(409, 'OFFER_EXPIRED', 'Delivery ownership changed; refresh for the current offer');
     }
@@ -2392,7 +2412,7 @@ export class DispatchService {
     // next mover. If the DB claim loses, advance the cascade below.
     // [F-014-04] With a client-echoed attempt id this binds to the exact card
     // generation; wildcard is still mover-safe (own offer only).
-    const consumed = await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId);
+    const consumed = await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId, countsForMover);
     if (!consumed) {
       return this.explainLostOffer(orderId, mover.id, pool);
     }

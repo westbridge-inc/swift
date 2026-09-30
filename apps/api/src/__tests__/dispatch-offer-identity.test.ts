@@ -652,22 +652,24 @@ describe('only the attempt an action consumed is acknowledged [AX323 RR2-1]', ()
   const rateOf = async (riderId: string) =>
     Number((await app.prisma.rider.findUniqueOrThrow({ where: { id: riderId }, select: { acceptanceRate: true } })).acceptanceRate);
 
-  /** A1 lapses unseen (and is spared); a vendor retry offers A2 for the SAME
-   *  order to the SAME mover, and A2 never reaches their screen. */
-  async function lapsedThenReoffered() {
+  /** A1 lapses (unseen and spared, or displayed and charged once: 100 -> 80);
+   *  a vendor retry offers A2 for the SAME order to the SAME mover, and A2
+   *  never reaches their screen. */
+  async function lapsedThenReoffered(opts: { a1Displayed?: boolean } = {}) {
     await parkAllRiders();
     const mover = await makeRider();
     const order = await makeOrder();
     const lastJob = () => scheduled.filter((j) => j.orderId === order.id).at(-1)!;
     expect((await dispatch.dispatchOrder(order.id)).offered).toBe(mover.riderId);
     const a1 = lastJob().attemptId!;
+    if (opts.a1Displayed) await dispatch.markOfferSeen(order.id, mover.userId, a1);
     await dispatch.handleOfferTimeout(order.id, mover.riderId, a1);
     expect((await dispatch.retryDispatch(order.id)).offered).toBe(mover.riderId);
     const a2 = lastJob().attemptId!;
     expect(a2).not.toBe(a1);
-    expect(await evidenceOf(order.id, a1)).toEqual({ seenAt: null, acknowledgedAt: null });
+    expect(await evidenceOf(order.id, a1)).toEqual({ seenAt: opts.a1Displayed ? expect.any(Date) : null, acknowledgedAt: null });
     expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
-    expect(await rateOf(mover.riderId)).toBe(100);
+    expect(await rateOf(mover.riderId)).toBe(opts.a1Displayed ? 80 : 100);
     return { mover, order, a1, a2 };
   }
 
@@ -709,13 +711,38 @@ describe('only the attempt an action consumed is acknowledged [AX323 RR2-1]', ()
     expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
   });
 
-  it('a current accept that echoes no attempt acknowledges the live attempt it consumed, and only that one', async () => {
+  it('a current accept naming its attempt acknowledges exactly that attempt, never the lapsed one before it', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    const claimed = await dispatch.acceptOffer(order.id, mover.userId, undefined, a2);
+
+    expect(claimed.riderId).toBe(mover.riderId);
+    expect((await evidenceOf(order.id, a2)).acknowledgedAt).toBeInstanceOf(Date);
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+  });
+
+  // [AX358] An action that names NO attempt (an older app build) never counts
+  // against a generated card: it may be a delayed one meant for an earlier card
+  // of the same order. It still releases or takes the live card.
+  it('[AX358] a decline naming no attempt releases the unseen successor but never charges it: 100 -> 80, never 64', async () => {
+    const { mover, order, a2 } = await lapsedThenReoffered({ a1Displayed: true });
+
+    await dispatch.declineOffer(order.id, mover.userId);
+
+    expect(await rateOf(mover.riderId)).toBe(80);
+    expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
+    // Operationally the card is still released: the cascade moved on.
+    expect(await app.redis.get(offerKey(order.id))).not.toBe(`${mover.riderId}:${a2}`);
+    expect(await app.redis.get(moverOfferKey(mover.riderId))).toBeNull();
+  });
+
+  it('[AX358] an accept naming no attempt still takes the live card, but acknowledges no generated attempt', async () => {
     const { mover, order, a1, a2 } = await lapsedThenReoffered();
 
     const claimed = await dispatch.acceptOffer(order.id, mover.userId);
 
     expect(claimed.riderId).toBe(mover.riderId);
-    expect((await evidenceOf(order.id, a2)).acknowledgedAt).toBeInstanceOf(Date);
+    expect((await evidenceOf(order.id, a2)).acknowledgedAt).toBeNull();
     expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
   });
 

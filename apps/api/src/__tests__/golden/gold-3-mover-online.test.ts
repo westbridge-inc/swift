@@ -435,8 +435,12 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
     expect(theft.statusCode).toBe(409);
     expect(theft.json().error.code).toBe('OFFER_EXPIRED');
 
+    // The card names its attempt, as the app sends it: only an accept that names
+    // one is acknowledged against a generated card [AX358].
+    const offerAttemptId = card.json().data.offer.offerAttemptId as string;
+    expect(offerAttemptId).toBe(live!.split(':')[1]);
     const acceptedFrom = Date.now();
-    const accept = await call('POST', '/api/v1/rider/offers/accept', mover.device.token, { orderId });
+    const accept = await call('POST', '/api/v1/rider/offers/accept', mover.device.token, { orderId, offerAttemptId });
     const acceptedBy = Date.now();
     expect(accept.statusCode, accept.body).toBe(200);
     expect(accept.json().data.status).toBe('RIDER_ASSIGNED');

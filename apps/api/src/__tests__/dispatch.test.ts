@@ -895,8 +895,9 @@ describe('The offer cascade', () => {
     expect(timeout.delayMs).toBeLessThanOrEqual(20_000);
     expect(timeout.scheduledAt + timeout.delayMs).toBeGreaterThanOrEqual(startedAt + 20_000);
 
-    // 2) A declines -> B is offered; A's acceptance EMA dropped
-    await dispatch.declineOffer(order.id, a.userId);
+    // 2) A declines -> B is offered; A's acceptance EMA dropped. The app names
+    //    the card's attempt; a decline that names none is never charged [AX358].
+    await dispatch.declineOffer(order.id, a.userId, timeout.attemptId);
     const offerNow = await app.redis.get(`dispatch:offer:${order.id}`);
     expect(offerNow!.split(':')[0]).toBe(b.riderId); // value is `<mover>:<attemptId>` [F-014-04]
     const aAfter = await app.prisma.rider.findUniqueOrThrow({ where: { id: a.riderId } });
