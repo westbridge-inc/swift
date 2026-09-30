@@ -1,10 +1,10 @@
 # MMG weekly-fee checkout: the API contract
 
-This is the contract the phone app and the web build against. The API side ships in two PRs of the MMG checkout series:
-- **PR 2:** the checkout intent, verification with MMG, and crediting.
-- **PR 3:** the routes below and `payActions`.
+This is the contract the phone app and the web build against. The API side shipped in two PRs of the MMG checkout series:
+- **PR 2:** the checkout intent, verification with MMG, and crediting (`mmg-checkout.service.ts`).
+- **PR 3:** the routes below and `payActions` (`mmg-checkout.routes.ts`).
 
-Until PR 3 is merged, these routes do not exist and `payActions` is absent from the subscription payload. Treat an absent `payActions` as "no way to pay in the app".
+A payload from an API older than PR 3 has no `payActions`. Treat an absent `payActions` as "no way to pay in the app".
 
 The wire format to MMG is in `providers/mmg/CHECKOUT-CONTRACT.md`. It never reaches a client.
 
@@ -223,7 +223,11 @@ What MMG attaches is not yet confirmed (`CHECKOUT-CONTRACT.md` U3): it may be a 
 
 `POST /api/v1/billing/mmg-checkout/notify` is for MMG's servers, if MMG calls one (U3). It accepts JSON or a form of up to 16 KB and always answers `200 { success: true }`. The app and the web never call it.
 
-Both public routes are rate-limited and size-capped. Neither credits anything by itself: they only prompt the server to check with MMG.
+Both public routes are rate-limited per source address and size-capped: `/return` takes 120 calls a minute and a body of up to 96 KB (the 16 values of 4096 characters the page forwards, as JSON); `/notify` takes 60 a minute and 16 KB. Over the limit is `429`, over the cap is `413`, and a `/return` body that is not `{ outcome, params }` within those bounds is `400`. Neither credits anything by itself: they only prompt the server to check with MMG. With `MMG_CHECKOUT_ENABLED` off, both answer neutrally (`UNKNOWN`, `200`) and write nothing down.
+
+**MMG's result code.** MMG sends the outcome, success or failure, to the same Response URL, so the `…/pay/mmg/success` path is not a success. The API reads the reply's documented `ResultCode`:
+- `0` (successful), `1`, `2`, `6` (not registered, failed, cancelled) and `7` (timed out): the reply is written down and MMG's own lookup decides. A checkout is `CONFIRMED` only when the lookup confirms it, and `NOT_PAID` only when MMG's own record for that checkout says the payment did not complete (section 5).
+- `3`, `4`, `5` (invalid secret key, merchant id mismatch, token decryption failed): MMG could not accept Swift's request. The reply is written down, operators are alerted, the checkout is left exactly as it was, and the page answers `UNKNOWN`. Nothing is ever credited on these.
 
 ## 7. Notices (push, SMS, inbox)
 

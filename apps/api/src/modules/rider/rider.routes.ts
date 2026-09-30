@@ -44,6 +44,7 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -2101,6 +2102,16 @@ export async function riderRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /subscription — Current subscription with payment history. */
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the rider starts and
+  // follows a checkout for their own subscription.
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
+    subscriptionFor: async (request) => {
+      const found = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, include: { subscription: true } });
+      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
+      return found!.subscription;
+    },
+  });
+
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const found = await app.prisma.rider.findUnique({
       where: { userId: request.user.userId },
@@ -2139,6 +2150,8 @@ export async function riderRoutes(app: FastifyInstance) {
         // wallet balance, amount due, channel-honest activation copy.
         ...(await sanDisplay(app.prisma, sub)),
         ...(await payInfo(app.prisma, sub)),
+        // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+        ...(await mmgCheckout.feePayload(sub, request.headers, now)),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)

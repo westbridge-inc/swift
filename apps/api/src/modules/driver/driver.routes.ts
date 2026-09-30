@@ -28,6 +28,7 @@ import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handove
 import { CashRulesService } from '../cash/cash-rules.service';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
@@ -1673,6 +1674,16 @@ export async function driverRoutes(app: FastifyInstance) {
 
   // ─── Subscription ──────────────────────────────────────────────────────
 
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the driver starts and
+  // follows a checkout for their own subscription.
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
+    subscriptionFor: async (request) => {
+      const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, include: { subscription: true } });
+      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+      return found!.subscription;
+    },
+  });
+
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await app.prisma.driver.findUnique({
       where: { userId: request.user.userId },
@@ -1689,8 +1700,12 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!sub) return { success: true, data: null };
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
-    // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
-    return { success: true, data: { ...sub, ...(await sanDisplay(app.prisma, sub)), ...(await payInfo(app.prisma, sub)) } };
+    // "My Swift Number" + Pay-screen block [san spec 2.4/6.1], then
+    // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+    return {
+      success: true,
+      data: { ...sub, ...(await sanDisplay(app.prisma, sub)), ...(await payInfo(app.prisma, sub)), ...(await mmgCheckout.feePayload(sub, request.headers)) },
+    };
   });
 
   /** PUT /subscription/billing-method — §13 rail selection (CASH prepaid vs
