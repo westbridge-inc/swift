@@ -124,7 +124,7 @@ describe('guest item Add survives sign-in on the scanned store', () => {
     state.slots = { ...state.slots, isError: false };
     view.rerender(<MenuItemScreen />);
     expect(state.mutate).toHaveBeenCalledOnce();
-    expect(state.params.addAfterSignIn).toBeUndefined();
+    expect(state.params['addAfterSignIn']).toBeUndefined();
   });
 
 });
