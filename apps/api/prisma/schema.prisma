@@ -3023,12 +3023,19 @@ model MmgAgentPayment {
   /// RECEIVED | MATCHED | UNMATCHED | RECONCILED | RESOLVED | REFUND_FLAGGED
   status         String
   /// SAN_MALFORMED | SAN_CHECKSUM_FAILED | SAN_UNKNOWN | ACCOUNT_CLOSED | TOMBSTONED | BAD_CURRENCY | AMOUNT_OUT_OF_RANGE
+  /// | UNFINISHED ([MMG-RECV] stranded RECEIVED, and the repair pass could not finish it: a person must)
   failureCode    String?
   raw            Json
   resolvedBy     String?
   resolvedAt     DateTime?
   note           String?
-  createdAt      DateTime  @default(now())
+  /// [MMG-RECV] Stamped by the INSERT itself on the database clock (UTC),
+  /// never by an app server clock: the age that tells an observation stranded
+  /// RECEIVED from one still inside its first delivery.
+  createdAt      DateTime  @default(dbgenerated("timezone('UTC'::text, clock_timestamp())"))
+  /// [MMG-RECV] When the repair pass last tried, and failed, to finish this
+  /// observation while it stayed RECEIVED (database clock). Null: never.
+  finishAttemptAt DateTime?
 
   @@unique([channel, externalId])
   @@index([status, createdAt])

@@ -1,11 +1,13 @@
 import type { OnAudit } from '../../lib/audit-writer';
-import { Prisma, type PrismaClient } from '@prisma/client';
+import { Prisma, type MmgAgentPayment, type PrismaClient } from '@prisma/client';
 import type { BillingService } from './billing.service';
 import { resolveSan } from './san.service';
 import { validateSanShape } from './san';
 import { captureMmgPayer } from '../integrity/capture-hooks';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
-import { agentCashDuplicateCreditsCounter, agentCashDuplicateCreditsGauge, agentCashProviderIdConflictsCounter } from '../../plugins/observability';
+import { agentCashDuplicateCreditsCounter, agentCashDuplicateCreditsGauge, agentCashProviderIdConflictsCounter, agentCashStrandedGauge } from '../../plugins/observability';
+import { bindTenantTransaction } from '../../plugins/prisma';
+import { getTenantId, runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { weeklyFeeAmount } from './subscription-fee';
 
@@ -21,6 +23,72 @@ export const AGENT_CASH_LIMITS = {
   minPaymentGyd: 500,
   maxSinglePaymentGyd: 500_000,
 };
+
+// [MMG-RECV] STRANDED RECEIVED. An observation is saved RECEIVED first and
+// judged after. When the delivery that saved it dies in between (a restart, a
+// dropped connection, a credit that threw), it stays RECEIVED; every
+// redelivery used to answer `duplicate` (the webhook tells MMG to stop, and a
+// re-keyed receipt reads as done), and nothing looked at RECEIVED again: money
+// on disk, never credited. Now:
+//   1. a redelivery of an observation stranded RECEIVED finishes it, through
+//      the same steps 2 to 5; one still inside its first delivery is left to it;
+//   2. the repair pass of poll-mmg-billing finishes the rest, each in its own
+//      tenant, and writes a system audit row with the credit;
+//   3. FENCED: every verdict is a compare-and-set on RECEIVED (the credit
+//      transaction claims the row first; suspense and reconciliation are
+//      conditional), so of two finishers one decides and the other writes
+//      nothing and is answered `duplicate`;
+//   4. the DATABASE clock only: the age that makes an observation stranded is
+//      stamped by the INSERT itself (the createdAt default), and a failed
+//      attempt is stamped inside its own guarded statement;
+//   5. FAIR: never tried first, then the least recently tried; one whose
+//      attempt just failed waits out a backoff, and one that keeps failing
+//      goes to the suspense queue for a person after the give-up age.
+// A settlement-file row is not finished here: its own import resumes it,
+// under the publication hold [G5-F6].
+
+/** [MMG-RECV] Still RECEIVED this long after it was saved (database clock),
+ *  an observation is stranded. Far above any live delivery, whose credit
+ *  transaction times out within seconds. */
+export const STRANDED_AFTER_MS = 2 * 60_000;
+/** A stranded observation whose finish just failed is left alone this long. */
+export const STRANDED_RETRY_BACKOFF_MS = 5 * 60_000;
+/** Stranded this long, one that fails again goes to the suspense queue
+ *  (UNMATCHED, UNFINISHED) for a person, and the operators are paged. */
+export const STRANDED_GIVE_UP_AFTER_MS = 60 * 60_000;
+const FINISHABLE_CHANNELS: readonly string[] = ['MMG_AGENT_WEBHOOK', 'MANUAL_ADMIN'];
+
+/** [MMG-RECV] The database clock, for READS only (which observations look
+ *  stranded): a sampled time can only make one look younger, never older.
+ *  Every lease WRITE reads the clock inside its own statement. */
+async function databaseNow(db: Pick<PrismaClient, '$queryRaw'>): Promise<Date> {
+  const [row] = await db.$queryRaw<Array<{ now: Date }>>`SELECT now() AS now`;
+  return row!.now;
+}
+/** The database clock as the UTC wall time the timestamp(3) columns hold. */
+const DB_NOW = Prisma.sql`timezone('UTC'::text, clock_timestamp())`;
+/** A verdict another finisher already wrote: this finisher lost the race. */
+const LOST_RACE = new Set(['NOT_RECEIVED', 'PAYMENT_NOT_RECEIVED']);
+
+/** [MMG-RECV · ADM-002] The repair pass is the actor when it credits a
+ *  stranded observation: a system audit row (no user) joins the credit
+ *  transaction and names the payment and, for a manual entry, the admin who
+ *  keyed it (that admin's own audit row rolled back with the credit that
+ *  failed). */
+function strandedFinishAudit(p: { channel: string; raw: unknown }): OnAudit {
+  const enteredBy = (p.raw as { enteredBy?: unknown } | null)?.enteredBy;
+  return async (tx, facts) => {
+    await tx.auditLog.create({
+      data: {
+        userId: null,
+        action: 'AGENT_PAYMENT_STRANDED_FINISHED',
+        entity: 'MmgAgentPayment',
+        entityId: String(facts['paymentId']),
+        changes: { ...facts, channel: p.channel, finishedBy: 'poll-mmg-billing', ...(typeof enteredBy === 'string' ? { enteredBy } : {}) },
+      },
+    });
+  };
+}
 
 export interface InboundFeePayment {
   externalId: string;
@@ -160,13 +228,46 @@ export class AgentCashService {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
         const existing = await this.prisma.mmgAgentPayment.findUniqueOrThrow({
           where: { channel_externalId: { channel: p.channel, externalId: p.externalId } },
-          select: { id: true },
+          select: { id: true, status: true, createdAt: true },
         });
+        // [MMG-RECV] A redelivery of an observation stranded RECEIVED finishes
+        // it: `duplicate` would leave money on disk that nothing credits. One
+        // still inside its first delivery is left to that delivery.
+        if (existing.status === 'RECEIVED' && FINISHABLE_CHANNELS.includes(p.channel)
+          && existing.createdAt.getTime() < (await databaseNow(this.prisma)).getTime() - STRANDED_AFTER_MS) {
+          return this.finishStranded(existing.id, onAudit);
+        }
         return { status: 'duplicate', paymentId: existing.id };
       }
       throw e;
     }
 
+    return this.judge(row, p, onAudit);
+  }
+
+  /** [G5-F6] Finish an observation that was persisted and never judged: the
+   *  process died between step 1 (the raw row) and its verdict. The replay
+   *  guard answers every later delivery of it `duplicate`, so without this
+   *  the money on disk is never credited. Steps 2 to 5 run exactly as ingest
+   *  runs them, and the credit compare-and-set still admits one winner. */
+  async resumeReceived(paymentId: string, onAudit?: OnAudit): Promise<IngestResult> {
+    const row = await this.prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
+    if (row.status !== 'RECEIVED') throw new Error('NOT_RECEIVED');
+    return this.judge(row, {
+      channel: row.channel,
+      externalId: row.externalId,
+      sanRaw: row.sanRaw,
+      amount: Number(row.amount),
+      payerMsisdn: row.payerMsisdn ?? undefined,
+    }, onAudit);
+  }
+
+  /** Steps 2 to 5 for a persisted observation: identity, sanity, SAN, credit. */
+  private async judge(
+    row: MmgAgentPayment,
+    p: { channel: string; externalId: string; sanRaw: string; amount: number; payerMsisdn?: string },
+    onAudit?: OnAudit,
+  ): Promise<IngestResult> {
     // 2. [M-18] The identity: one provider transaction, one lifecycle. This
     //    record is an immutable observation of it. Before, cross-channel
     //    dedupe looked for an already-MATCHED sibling — so two channels
@@ -231,10 +332,14 @@ export class AgentCashService {
 
   /** Mark an observation as a duplicate of the credit that already stands. */
   private async reconcileAgainst(paymentId: string, originalPaymentId: string, why: string): Promise<IngestResult> {
-    await this.prisma.mmgAgentPayment.update({
-      where: { id: paymentId },
+    // [MMG-RECV] Every verdict is a compare-and-set on RECEIVED: of two
+    // finishers of one observation, the first decides and the second writes
+    // nothing over it.
+    const decided = await this.prisma.mmgAgentPayment.updateMany({
+      where: { id: paymentId, status: 'RECEIVED' },
       data: { status: 'RECONCILED', note: `duplicate of ${originalPaymentId} (${why})`, resolvedAt: new Date() },
     });
+    if (decided.count !== 1) throw new Error('NOT_RECEIVED');
     return { status: 'reconciled', paymentId, originalPaymentId };
   }
 
@@ -389,12 +494,95 @@ export class AgentCashService {
   }
 
   private async suspense(paymentId: string, failureCode: string): Promise<IngestResult> {
-    await this.prisma.mmgAgentPayment.update({
-      where: { id: paymentId },
+    const decided = await this.prisma.mmgAgentPayment.updateMany({
+      where: { id: paymentId, status: 'RECEIVED' },
       data: { status: 'UNMATCHED', failureCode },
     });
+    if (decided.count !== 1) throw new Error('NOT_RECEIVED'); // [MMG-RECV] another finisher decided it first
     log().warn({ paymentId, failureCode }, 'agent payment suspensed — money recorded, human resolution needed');
     return { status: 'received_unmatched', paymentId, failureCode };
+  }
+
+  /** [MMG-RECV] Finish an observation stranded RECEIVED, through the same
+   *  steps 2 to 5, exactly once. A finisher that lost the race (another one
+   *  decided it first, and every verdict is a compare-and-set on RECEIVED)
+   *  writes nothing and is answered `duplicate`. */
+  async finishStranded(paymentId: string, onAudit?: OnAudit): Promise<IngestResult> {
+    try {
+      return await this.resumeReceived(paymentId, onAudit);
+    } catch (e) {
+      if (!(e instanceof Error) || !LOST_RACE.has(e.message)) throw e;
+      const now = await this.prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId }, select: { status: true } });
+      if (now.status === 'RECEIVED') throw e; // not a lost race: nobody decided it
+      return { status: 'duplicate', paymentId };
+    }
+  }
+
+  /** [MMG-RECV] The repair pass (poll-mmg-billing). Every webhook or manual
+   *  observation stranded RECEIVED is finished, each in its own tenant, with
+   *  a system audit row joining its credit. FAIR: never tried first, then the
+   *  least recently tried; one whose finish just failed waits out
+   *  STRANDED_RETRY_BACKOFF_MS; one that fails again after
+   *  STRANDED_GIVE_UP_AFTER_MS goes to the suspense queue for a person.
+   *  `paymentIds` narrows the pass (tests, a drill). */
+  async finishStrandedPayments(opts: { limit?: number; paymentIds?: string[] } = {}): Promise<{ finished: string[]; failed: string[]; suspensed: string[] }> {
+    const out = { finished: [] as string[], failed: [] as string[], suspensed: [] as string[] };
+    const now = await databaseNow(this.prisma);
+    const strandedWhere = {
+      status: 'RECEIVED',
+      channel: { in: [...FINISHABLE_CHANNELS] },
+      createdAt: { lt: new Date(now.getTime() - STRANDED_AFTER_MS) },
+      ...(opts.paymentIds ? { id: { in: opts.paymentIds } } : {}),
+    };
+    const due = await runAsSystem('agent-cash-stranded-repair', () => this.prisma.mmgAgentPayment.findMany({
+      where: { ...strandedWhere, OR: [{ finishAttemptAt: null }, { finishAttemptAt: { lt: new Date(now.getTime() - STRANDED_RETRY_BACKOFF_MS) } }] },
+      orderBy: [{ finishAttemptAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }, { id: 'asc' }],
+      take: Math.max(1, opts.limit ?? 20),
+      select: { id: true, tenantId: true, channel: true, raw: true },
+    }));
+    for (const p of due) {
+      await runWithTenant(p.tenantId, async () => {
+        try {
+          const res = await this.finishStranded(p.id, strandedFinishAudit(p));
+          if (res.status !== 'duplicate') out.finished.push(p.id);
+        } catch (err) {
+          const left = await this.recordFailedFinish(p.id);
+          if (left === 'UNMATCHED') {
+            out.suspensed.push(p.id);
+            await this.page('agent-cash-stranded-unfinished', 'A paid fee could not be credited', `Agent-cash payment ${p.id} (${p.channel}) was saved but never credited, and the repair pass has kept failing to finish it for over an hour. It is in the suspense queue as UNFINISHED: check it against the MMG statement and attach it to the right account.`, { variant: 'stranded_unfinished', paymentId: p.id });
+          } else if (left === 'RECEIVED') {
+            out.failed.push(p.id);
+          }
+          log().error({ err, paymentId: p.id, channel: p.channel, left }, '[MMG-RECV] a stranded agent-cash payment could not be finished — retried after the backoff, then a person');
+        }
+      });
+    }
+    // What is still stranded after the pass: money on disk nothing credited yet.
+    agentCashStrandedGauge.set(await runAsSystem('agent-cash-stranded-repair', () => this.prisma.mmgAgentPayment.count({ where: strandedWhere })));
+    return out;
+  }
+
+  /** [MMG-RECV · fenced] Record a failed finish in ONE guarded statement that
+   *  reads the database clock itself, and only while the observation is
+   *  still RECEIVED: a verdict another finisher wrote meanwhile is never
+   *  overwritten. One that has failed before and is stranded past the
+   *  give-up age goes to the suspense queue instead. Answers the status it
+   *  left, or null when another finisher had decided it. */
+  private async recordFailedFinish(paymentId: string): Promise<'RECEIVED' | 'UNMATCHED' | null> {
+    const tenantId = getTenantId();
+    const givingUp = Prisma.sql`("finishAttemptAt" IS NOT NULL AND "createdAt" < ${DB_NOW} - (${STRANDED_GIVE_UP_AFTER_MS} * interval '1 millisecond'))`;
+    const [row] = await this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      return tx.$queryRaw<Array<{ status: string }>>`
+        UPDATE "mmg_agent_payments"
+           SET "finishAttemptAt" = ${DB_NOW},
+               "status" = CASE WHEN ${givingUp} THEN 'UNMATCHED' ELSE "status" END,
+               "failureCode" = CASE WHEN ${givingUp} THEN 'UNFINISHED' ELSE "failureCode" END
+         WHERE "id" = ${paymentId} ${tenantId ? Prisma.sql`AND "tenantId" = ${tenantId}` : Prisma.empty}
+           AND "status" = 'RECEIVED'
+        RETURNING "status"`;
+    });
+    return row ? (row.status as 'RECEIVED' | 'UNMATCHED') : null;
   }
 
   /** Suspense resolution [spec 4.6]: attach to an account — credits via the

@@ -587,6 +587,17 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (repaired.repaired > 0 || repaired.stillOpen > 0) {
             ctx.log.warn(repaired, '[M-04] terminal MMG payments without a recorded outcome — reconciled');
           }
+          {
+            // [MMG-RECV] Agent-cash payments stranded RECEIVED (the delivery
+            // that saved them died before its verdict) are finished here,
+            // fairly and each exactly once; one that keeps failing goes to
+            // the suspense queue for a person.
+            const { AgentCashService } = await import('../modules/billing/agent-cash.service');
+            const stranded = await new AgentCashService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)).finishStrandedPayments();
+            if (stranded.finished.length + stranded.failed.length + stranded.suspensed.length > 0) {
+              ctx.log.warn(stranded, '[MMG-RECV] agent-cash payments stranded RECEIVED — finished');
+            }
+          }
           // [M-08] Top-up commands whose notice / re-bill tail is still owed
           // are drained here; historical unkeyed top-ups that look doubled are
           // reported for a person. Nothing is reversed automatically.
