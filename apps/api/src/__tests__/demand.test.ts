@@ -53,12 +53,16 @@ async function makeUser(roles: string[], activeRole: string) {
   return { user: u, token };
 }
 
-function taxiRequest(at: { lat: number; lng: number }, minutesAgo = 1) {
+async function taxiRequest(at: { lat: number; lng: number }, minutesAgo = 1) {
+  // Each waiting request is its own passenger: one customer can hold only one
+  // live taxi (orders_one_live_taxi_per_customer_key), and demand never reads
+  // who is waiting, only where.
+  const passenger = await makeUser(['CUSTOMER'], 'CUSTOMER');
   return app.prisma.order.create({
     data: {
       orderNumber: `DMD-${nanoid(8)}`,
       orderType: 'TAXI' as never,
-      customerId,
+      customerId: passenger.user.id,
       status: 'PENDING' as never,
       pickupLat: at.lat, pickupLng: at.lng,
       pickupAddress: 'x', deliveryAddress: 'y',

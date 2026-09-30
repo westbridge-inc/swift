@@ -160,7 +160,7 @@ async function quote(
 export default async function courierRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const dispatch = makeDispatchService(app);
-  const orderService = new OrderService(app.prisma, app.io);
+  const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const notifications = new NotificationService(app.prisma, app.io);
   // [M-28] The cash rail — the same one the rider's door handover and the driver's fare outcome use.
   const cashRules = new CashRulesService(app.prisma, notifications, orderService);

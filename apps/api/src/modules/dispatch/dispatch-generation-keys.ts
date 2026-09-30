@@ -12,6 +12,30 @@ import { createHash } from 'node:crypto';
 export const deliveryGenerationSuffix = (version?: number | null): string =>
   version != null && Number.isSafeInteger(version) && version > 0 ? `:fv${version}` : '';
 
+/** The live offer PAIR. Forward: an order has at most one live card, valued
+ *  `<moverId>:<attemptId>`. Reverse: a mover holds at most one live card,
+ *  valued `<orderId>:<attemptId>`. Not generation-suffixed: the attempt id
+ *  inside the value carries the generation. dispatch.service writes them;
+ *  offer-withdrawal.ts removes the pair of an order that has closed. */
+export const dispatchOfferKey = (orderId: string): string => `dispatch:offer:${orderId}`;
+export const dispatchMoverOfferKey = (moverId: string): string => `dispatch:mover-offer:${moverId}`;
+
+/** [AX299 F2 · AX310] The cards withdrawn from under this mover (their order
+ *  closed) that could still be on their screen, should the withdrawal event
+ *  never reach the app: a sorted set, one member per card,
+ *  `<withdrawnAt>:<orderId>:<attemptId>`, scored with the card's own server
+ *  deadline (ms since epoch). offer-withdrawal.ts writes it; an offer sent to
+ *  the mover AFTER such a withdrawal and before that deadline (plus the screen
+ *  skew) never earns an expiry penalty. */
+export const dispatchWithdrawnCardsKey = (moverId: string): string => `dispatch:withdrawn-cards:${moverId}`;
+
+/** [AX299 F2 · AX310] How far past a card's server deadline it may still be on
+ *  the mover's screen: the app stamps its own deadline on arrival, a network hop
+ *  later and rounded up to whole seconds. ONE value for the writer (a withdrawn
+ *  card is recorded while its deadline plus this is still ahead) and the reader
+ *  (an offer sent before the deadline plus this is excused), so they agree. */
+export const WITHDRAWN_CARD_SCREEN_SKEW_MS = 3_000;
+
 export const dispatchDeclinedKey = (orderId: string, version?: number | null): string =>
   `dispatch:declined:${orderId}${deliveryGenerationSuffix(version)}`;
 

@@ -146,10 +146,14 @@ describe('the taxi slow lane past the fast cap', () => {
     // before the CAS excluded it, that refusal failed the paid ride's run and
     // stopped a sweep over the rides after it.
     const admin = await makeUser(['ADMIN'], 'ADMIN');
-    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
-    const first = await makeTaxiRide(customer.id, TAXI_WAIT_LIMIT_MIN + 1);
-    const paid = await makeTaxiRide(customer.id, TAXI_WAIT_LIMIT_MIN + 1, { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' });
-    const last = await makeTaxiRide(customer.id, TAXI_WAIT_LIMIT_MIN + 1);
+    // A customer holds at most one live taxi (orders_one_live_taxi_per_customer_key),
+    // so each ride in the batch has its own passenger.
+    const firstPassenger = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const paidPassenger = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const lastPassenger = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const first = await makeTaxiRide(firstPassenger.id, TAXI_WAIT_LIMIT_MIN + 1);
+    const paid = await makeTaxiRide(paidPassenger.id, TAXI_WAIT_LIMIT_MIN + 1, { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' });
+    const last = await makeTaxiRide(lastPassenger.id, TAXI_WAIT_LIMIT_MIN + 1);
     for (const r of [first, paid, last]) await app.redis.set(`dispatch:exhausts:${r.id}`, String(EXHAUST_CAP));
 
     // One sweep over the batch, ride after ride, with no per-ride catch.
@@ -165,12 +169,13 @@ describe('the taxi slow lane past the fast cap', () => {
     expect(byId.get(last.id)?.status).toBe('CANCELLED');
     expect(byId.get(paid.id)).toMatchObject({ status: 'PENDING', cancelledAt: null, cancellationReason: null });
     expect(await app.prisma.orderStatusLog.count({ where: { orderId: paid.id, status: 'CANCELLED' } })).toBe(0);
-    // The customer is told about the two rides that WERE released, never the held one.
+    // Each passenger of a ride that WAS released is told about it; the held ride tells no one.
     const told = await app.prisma.notification.findMany({
-      where: { userId: customer.id, data: { path: ['kind'], equals: 'ride_released_no_drivers' } },
-      select: { data: true },
+      where: { userId: { in: [firstPassenger.id, paidPassenger.id, lastPassenger.id] }, data: { path: ['kind'], equals: 'ride_released_no_drivers' } },
+      select: { userId: true, data: true },
     });
-    expect(told.map((n) => (n.data as { orderId: string }).orderId).sort()).toEqual([first.id, last.id].sort());
+    expect(told.map((n) => `${n.userId}:${(n.data as { orderId: string }).orderId}`).sort())
+      .toEqual([`${firstPassenger.id}:${first.id}`, `${lastPassenger.id}:${last.id}`].sort());
     // An operator is told about the held one.
     const paged = await app.prisma.notification.findMany({
       where: { userId: admin.id, title: 'Ride not released: paid by MMG' },
