@@ -7,9 +7,9 @@
 // it always has.
 //
 // One law for every OSRM route answer. The single-leg route (routeKm) reads
-// it here; the multi-stop route (taxi multi-stop, PR 2 of 8, unmerged) carries
-// the same rule in maps-provider.ts, and moves onto this module once both
-// have merged.
+// it here. The multi-stop route (routeLegs, taxi multi-stop 2/8) carries the
+// same rule as private helpers in maps-provider.ts; a follow-up moves it onto
+// this module.
 // ---------------------------------------------------------------------------
 
 /** A measure OSRM may give: a finite, non-negative number (metres, seconds). */
