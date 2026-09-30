@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from 'next';
+import { appleStartupImages } from '@/lib/apple-startup-images';
 import './globals.css';
 import { appChrome, swiftDesignVariables } from '@/lib/design-tokens';
 import { ServiceWorkerRegistrar } from '@/components/service-worker-registrar';
@@ -46,7 +47,7 @@ export const metadata: Metadata = {
   // home-screen icon and title from these tags, not from the manifest's icons.
   // 'default' keeps the status bar solid with dark text above the customer
   // shell's white header; 'black-translucent' would lay white status text over it.
-  appleWebApp: { capable: true, title: 'Swift', statusBarStyle: 'default' },
+  appleWebApp: { capable: true, title: 'Swift', statusBarStyle: 'default', startupImage: appleStartupImages },
   icons: {
     icon: [{ url: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' }],
     apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],

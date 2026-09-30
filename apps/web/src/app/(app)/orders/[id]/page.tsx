@@ -1,5 +1,7 @@
 'use client';
 
+import OrderDetailSkeleton from './loading';
+
 import { OpenSwiftApp } from '@/components/open-swift-app';
 import { useParams } from 'next/navigation';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
@@ -330,7 +332,7 @@ export default function OrderDetailPage() {
     );
   }
 
-  if (!order) return <div className={styles.loading} aria-label="Loading order tracking" />;
+  if (!order) return <OrderDetailSkeleton />;
 
   const cancelled = order.status === 'CANCELLED';
   const refunded = order.status === 'REFUNDED';
