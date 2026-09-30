@@ -119,13 +119,13 @@ async function makeDriver(firstName: string, fix: { lat: number; lng: number }) 
       vehicleColor: 'Silver',
       licensePlate: `G3T-${seq}`,
       driverLicenseUrl: 'storage://gold3/dl.jpg',
-      vehicleInsuranceUrl: 'storage://gold3/ins.jpg',
+      vehicleInsuranceUrl: `verification/${u.userId}/insurance.enc`,
       documentsVerified: true,
     },
   }));
   await sys(() => app.prisma.verificationDocument.create({
     data: {
-      userId: u.userId, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: 'storage://gold3/ins.jpg', status: 'APPROVED',
+      userId: u.userId, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: `verification/${u.userId}/insurance.enc`, status: 'APPROVED',
       coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true, consentAt: new Date(), privacyNoticeVersion: 'v1',
     },
   }));
@@ -262,6 +262,7 @@ async function purgeFixtures() {
     await app.prisma.driver.deleteMany({ where: { id: { in: driverIds } } });
     await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
     await purgeRedis([...ids, ...driverIds, ...orderIds]);
   });

@@ -10,12 +10,12 @@ import { approvedEvidenceFor, anyChecklistEvidenceFor, type EvidenceRow } from '
 import { compileStorefrontDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
-import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
+import { purgeDocumentWithClaim, probeCommittedPurge, finishDocumentPurge, assertCompleteSourceCensus } from './purge-fence';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
 import { assertNotRecused } from './recusal';
-import { placeDocLegalHoldIn } from './legal-hold';
+import { placeDocLegalHoldIn, PurgeHoldConflict, recordHoldConflict } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
 import { clusterMemberIds } from '../integrity/identity.service';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -263,7 +263,7 @@ export class VerificationService {
   // -------------------------------------------------------------------------
 
 
-  /** [REPORT-022 F-022-09] The write-side of the deletion barrier: a FOR SHARE
+  /** [REPORT-022 F-022-09] The write-side of the deletion barrier: a FOR UPDATE
    *  read of the User row inside the same transaction as a PII insert blocks
    *  against deletion's FOR UPDATE — so a request that observed ACTIVE, then
    *  paused (KYC latency), cannot land new PII after the purge committed. */
@@ -273,13 +273,16 @@ export class VerificationService {
   ) {
     const doc = await this.prisma.$transaction(async (tx) => {
       const alive = await tx.$queryRaw<{ status: string; tenantId: string; countryCode: string }[]>(
-        Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} FOR SHARE`,
+        Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} FOR UPDATE`,
       );
       const status = alive[0]?.status;
       if (!status || ['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(status)) {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
       }
-      await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId });
+      await tx.$queryRaw`SELECT "sourceId" FROM encrypted_objects WHERE "fileKey" = ${data.fileUrl} FOR UPDATE`;
+      await assertCompleteSourceCensus(tx);
+      const source = await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId });
+      if (source.retiredClaimId || source.uploadState !== 'READY') throw verificationObjectUnavailable();
       // [DOC-1 P5-1] Every submission walks the machine from CAPTURED (T1): the row
       // is born PENDING/CAPTURED and the verdict is REACHED by transitions the trigger
       // judges. The ledger lands first, so T8's guard (no blocking FAIL) and T17's
@@ -1034,6 +1037,9 @@ export class VerificationService {
       await projectProviderVerificationLocked(tx, updated.userId);
       await this.projectVendorActivation(tx, updated.userId);
       return { kind: 'UPDATED' as const, document: updated };
+    }).catch(async (error: unknown) => {
+      if (error instanceof PurgeHoldConflict) await recordHoldConflict(this.prisma, error);
+      throw error;
     });
     if (outcome.kind === 'NOT_PENDING') {
       throw new AppError(400, 'NOT_PENDING', `Document is ${outcome.status}, only PENDING documents can be reviewed`);
@@ -1082,23 +1088,10 @@ export class VerificationService {
       select: { id: true, userId: true, fileUrl: true, docType: true, state: true, legalHoldId: true, imagePurgedAt: true, user: { select: { tenantId: true } } },
     });
     if (!doc || doc.state !== 'COMMITTED' || doc.legalHoldId || doc.imagePurgedAt || !doc.fileUrl) return 'NOT_PURGED';
-    const storage = getStorageProvider();
-    const evidence = await shredAndProbe(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
-    const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
-    if (evidence.probe === 'FAILED') {
-      await writeDeletionReceipt(this.prisma, receipt);
-      return 'PROBE_FAILED';
-    }
-    const done = await this.prisma.$transaction(async (tx) => {
-      const won = await tx.verificationDocument.updateMany({
-        where: { id: doc.id, imagePurgedAt: null, legalHoldId: null, state: 'COMMITTED' },
-        data: { imagePurgedAt: now, fileUrl: '' },
-      });
-      if (won.count !== 1) return false;
-      await writeDeletionReceipt(tx, receipt);
-      return true;
-    });
-    return done ? 'PURGED' : 'NOT_PURGED';
+    return purgeDocumentWithClaim(this.prisma, getStorageProvider(), {
+      documentId: doc.id, userId: doc.userId, tenantId: doc.user.tenantId,
+      mode: 'IMAGE_ONLY', initiatedBy: deletedBy, now,
+    }, async () => undefined);
   }
 
   /**
@@ -1404,9 +1397,15 @@ export class VerificationService {
     for (const vendor of owner?.vendors ?? []) await this.subscriptions.priceForActivation({ vendorId: vendor.id }, db);
   }
 
+  async projectDocumentPurge(tx: Prisma.TransactionClient, userId: string): Promise<void> {
+    await projectProviderVerificationLocked(tx, userId);
+    await this.projectVendorActivation(tx, userId, false);
+  }
+
   private async projectVendorActivation(
     db: Prisma.TransactionClient | PrismaClient,
     userId: string,
+    notifyPromotion = true,
   ): Promise<void> {
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
@@ -1417,6 +1416,7 @@ export class VerificationService {
     // owner holds — automatic, audited, once. Runs before the activation projection so the
     // promoted store's checklist is read at its new tier.
     await promoteIfRegistered(db, userId, new Date(), async (vendorId, ownerUserId) => {
+      if (!notifyPromotion) return;
       await this.notifications.send({
         userId: ownerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
@@ -1850,25 +1850,50 @@ export class VerificationService {
    *  clear the fileKey, and leave an auditable purgedAt marker. Daily job. */
   async purgeExpiredDocuments(): Promise<number> {
     const now = new Date();
-    // [DOC-1 §9.4 · DOC-INV-14] Exclude legal holds here and recheck at the
-    // final DB transition. Irreversible storage actions still precede that
-    // final check; the committed purge/legal-hold fence is separate work.
+    // Recover permanent claims independently of retention clocks and pointers.
+    // These are already committed capabilities; new holds cannot revoke them.
+    let recovered = 0;
+    let unavailable = false;
+    let after: string | undefined;
+    for (;;) {
+      const claims = await this.prisma.documentPurgeClaim.findMany({
+        where: { state: 'COMMITTED', documentId: { not: null }, ...(after && { id: { gt: after } }) },
+        orderBy: { id: 'asc' }, take: 100,
+      });
+      for (const claim of claims) {
+        try {
+          const evidence = await probeCommittedPurge(this.prisma, getStorageProvider(), claim.id, claim.tenantId);
+          const result = await finishDocumentPurge(this.prisma, claim.id, claim.tenantId, evidence, this.projectDocumentPurge.bind(this));
+          if (result === 'PURGED') recovered += 1;
+          else unavailable = true;
+        } catch {
+          unavailable = true; // retain authority; a failed source cannot starve later claims
+        }
+      }
+      if (claims.length < 100) break;
+      const next = claims[claims.length - 1]!.id;
+      if (next === after) throw new Error('Purge recovery cursor did not advance');
+      after = next;
+    }
     const due = await this.prisma.verificationDocument.findMany({
-      where: { retentionExpiresAt: { lt: now }, purgedAt: null, legalHoldId: null },
+      where: { retentionExpiresAt: { lt: now }, legalHoldId: null, OR: [
+        { purgedAt: null }, { fieldsPurgedAt: null, user: { phone: { startsWith: 'deleted:' } } },
+      ] },
       select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
-    if (due.length === 0) { await recordReaperRun(this.prisma, now); return 0; }
+    if (due.length === 0) {
+      if (unavailable) throw verificationObjectUnavailable();
+      await recordReaperRun(this.prisma, now); return recovered;
+    }
 
-    let purged = 0;
-    let unavailable = false;
+    let purged = recovered;
     for (const doc of due) {
       try {
         // Account-erasure intent is read at the final locked transition, not
         // from this earlier candidate snapshot.
         const outcome = await this.purgeDocumentNow(doc, 'reaper', { requireRetentionElapsed: true, shredFields: false, now });
         if (outcome === 'PURGED') purged += 1;
-      } catch (error) {
-        if (!(error instanceof AppError) || error.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw error;
+      } catch {
         unavailable = true; // retain the pointer/clock; process the other due rows
       }
     }
@@ -1882,56 +1907,22 @@ export class VerificationService {
   /**
    * The one purge of one document: delete the bytes, shred the key, PROBE
    * (DOC-INV-7 — a receipt without a passing probe is not a receipt), then the
-   * compare-and-set under the person's row lock, the receipt in the same
-   * transaction, and the projections. The reaper calls it at retention; a
-   * data-subject erasure (Part XXV) calls it on request and also crypto-shreds
-   * the extracted field VALUES (the run DEKs). Ordinary retention keeps them
-   * to the record's lifecycle; recovery of account erasure shreds them too.
+   * a committed exact-source claim before storage, then actual absence probes
+   * and atomic receipt/projections. Retention preserves extracted values;
+   * erasure receives a separate immutable scope containing exact run/field IDs.
    */
   async purgeDocumentNow(
     doc: { id: string; userId: string; fileUrl: string; docType: string; user: { tenantId: string } },
     deletedBy: string,
-    opts: { requireRetentionElapsed: boolean; shredFields: boolean; now?: Date },
+    opts: { requireRetentionElapsed: boolean; shredFields: boolean; enforceDsarPolicy?: boolean; now?: Date },
   ): Promise<'PURGED' | 'PROBE_FAILED' | 'NOT_PURGED'> {
-    const now = opts.now ?? new Date();
-    const storage = getStorageProvider();
-    const evidence = doc.fileUrl ? await shredAndProbe(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id }) : NOTHING_STORED;
-    const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
-    if (evidence.probe === 'FAILED') {
-      await writeDeletionReceipt(this.prisma, receipt);
-      return 'PROBE_FAILED';
-    }
-    const transitioned = await this.prisma.$transaction(async (tx) => {
-      const users = await tx.$queryRaw<Array<{ id: string; phone: string }>>`
-        SELECT "id", "phone" FROM "users"
-        WHERE "id" = ${doc.userId}
-        FOR UPDATE /* verification-document-purge-authority */
-      `;
-      if (!users[0]) return false;
-      const won = await tx.verificationDocument.updateMany({
-        where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}) },
-        data: { purgedAt: new Date(), fileUrl: '' },
-      });
-      if (won.count !== 1) return false;
-      // The receipt commits with the purge or not at all.
-      await writeDeletionReceipt(tx, receipt);
-      // Account deletion commits this exact marker with its due clocks under
-      // the same user lock. Consume it even if the caller snapshot predates
-      // deletion or a later admin ban replaced DEACTIVATED. A different
-      // subject's marker never grants field-erasure authority.
-      if (opts.shredFields || users[0].phone === `deleted:${doc.userId}`) {
-        // Crypto-shred: without the run DEK every stored value is unrecoverable; the rows
-        // (field codes, verdicts, blind indexes) remain as the custody record (§20.3).
-        await tx.extractionRun.updateMany({ where: { submissionId: doc.id }, data: { wrappedDek: null } });
-        await tx.extractedField.updateMany({ where: { submissionId: doc.id }, data: { valueCt: null } });
-      }
-      await projectProviderVerificationLocked(tx, doc.userId);
-      // [REPORT-012 F-012-05] Purge invalidates evidence — the vendor
-      // projection must land in the same transaction, not never.
-      await this.projectVendorActivation(tx, doc.userId);
-      return true;
+    return purgeDocumentWithClaim(this.prisma, getStorageProvider(), {
+      documentId: doc.id, userId: doc.userId, tenantId: doc.user.tenantId,
+      mode: opts.shredFields ? 'FULL_ERASURE' : 'FULL_RETENTION', initiatedBy: deletedBy,
+      requireRetentionElapsed: opts.requireRetentionElapsed, enforceDsarPolicy: opts.enforceDsarPolicy, now: opts.now,
+    }, async (tx, userId) => {
+      await this.projectDocumentPurge(tx, userId);
     });
-    return transitioned ? 'PURGED' : 'NOT_PURGED';
   }
 
   // -------------------------------------------------------------------------

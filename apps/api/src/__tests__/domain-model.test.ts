@@ -180,7 +180,7 @@ describe('Trust levels, verification documents, strikes', () => {
 
   it('walks a verification document through its full lifecycle', async () => {
     const doc = await prisma.verificationDocument.create({
-      data: { userId: customerId, role: 'CUSTOMER', docType: 'national_id', fileUrl: 'storage://smoke/national_id.jpg' },
+      data: { userId: customerId, role: 'CUSTOMER', docType: 'national_id', fileUrl: `verification/${customerId}/national-id.enc` },
     });
     expect(doc.status).toBe('PENDING');
 
@@ -198,7 +198,7 @@ describe('Trust levels, verification documents, strikes', () => {
     await expect(prisma.verificationDocument.update({ where: { id: doc.id }, data: { status: 'APPROVED' } })).rejects.toThrow(/DOC_STATE_ILLEGAL/);
 
     const second = await prisma.verificationDocument.create({
-      data: { userId: customerId, role: 'CUSTOMER', docType: 'national_id', fileUrl: 'storage://smoke/national_id-2.jpg' },
+      data: { userId: customerId, role: 'CUSTOMER', docType: 'national_id', fileUrl: `verification/${customerId}/national-id-2.enc` },
     });
     await prisma.verificationDocument.update({ where: { id: second.id }, data: { state: 'IN_REVIEW' } });
     const rejected = await prisma.verificationDocument.update({ where: { id: second.id }, data: { state: 'REJECTED', reviewedBy: 'smoke-test', reviewedAt: new Date() } });

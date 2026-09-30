@@ -72,18 +72,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await system(async () => {
-    await app.prisma.verificationDocument.updateMany({ where: { userId: subjectId }, data: { legalHoldId: null } });
-    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: subjectId } });
-    const docs = await app.prisma.verificationDocument.findMany({ where: { userId: subjectId }, select: { id: true } });
-    await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: docs.map((d) => d.id) } } } });
-    await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: subjectId } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.admin.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: users } } }).catch(() => {});
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
-  });
+  // Permanent hold custody is retained in the isolated test namespace.
   await app.close();
 });
 
@@ -132,9 +121,13 @@ describe('[DOC-1 P8-4] the review console roles, as capability presets the serve
     const doc = await pendingDoc();
     const kase = await system(() => app.prisma.reviewCase.create({ data: { submissionId: doc.id, slaDueAt: new Date(Date.now() + DAY) } }));
     const reviewer = await admin(DOC_REVIEWER_CAPABILITIES);
-    const queue = await call(reviewer.token, 'GET', '/verification/queue?status=PENDING');
-    expect(queue.statusCode).toBe(200);
-    expect(queue.body).toContain(`Zelda${RUN}`);
+    const pending = await system(() => app.prisma.verificationDocument.count({ where: { status: 'PENDING' } }));
+    const pages: string[] = [];
+    for (let page = 1; page <= Math.max(1, Math.ceil(pending / 50)); page += 1) {
+      const queue = await call(reviewer.token, 'GET', `/verification/queue?status=PENDING&limit=50&page=${page}`);
+      expect(queue.statusCode).toBe(200); pages.push(queue.body);
+    }
+    expect(pages.join('')).toContain(`Zelda${RUN}`);
     expect((await call(reviewer.token, 'GET', `/verification/${doc.id}/document-url`)).statusCode).not.toBe(403);
     expect((await call(reviewer.token, 'POST', `/verification/cases/${kase.id}/claim`, {})).statusCode).toBe(200);
     expect((await call(reviewer.token, 'POST', '/verification/legal-holds', { subjectUserId: subjectId, reviewBy: new Date(Date.now() + 30 * DAY).toISOString() })).statusCode).toBe(403);

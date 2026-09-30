@@ -48,7 +48,7 @@ async function mover(n: number, kind: 'taxi' | 'delivery', plate: string) {
   else await system(() => app.prisma.rider.create({ data: { userId: u.id, riderType: 'DELIVERY', vehicleType: 'CAR', licensePlate: plate } }));
   return u.id;
 }
-const pending = (userId: string, docType = 'vehicle_registration') => system(() => app.prisma.verificationDocument.create({ data: { userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`, status: 'PENDING' } }));
+const pending = (userId: string, docType = 'vehicle_registration') => system(() => app.prisma.verificationDocument.create({ data: { userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/${userId}/${nanoid(5)}.enc`, status: 'PENDING' } }));
 const admin = (method: 'PUT', url: string, payload: Record<string, unknown>) => adminApp.inject({
   method, url: `/api/v1/admin${url}`, payload, headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
 });

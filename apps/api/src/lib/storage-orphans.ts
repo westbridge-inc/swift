@@ -2,8 +2,8 @@ import type { PrismaClient } from '@prisma/client';
 import {
   isOwnedAvatarKey,
   resolveUnreferencedAvatarObject,
-  resolveVerificationObject,
 } from '../modules/verification/object-authority';
+import { purgeUnattachedObject, purgeDocumentWithClaim, probeCommittedPurge, finishDocumentPurge, type PurgeStorage } from '../modules/verification/purge-fence';
 
 /**
  * [F-026-02] The durable census of storage objects the platform still owes a
@@ -17,10 +17,7 @@ import {
  * absorb this compatibility census into its richer deletion-sink register.
  */
 
-type StorageLike = {
-  delete: (key: string) => Promise<unknown>;
-  getObject: (key: string) => Promise<unknown>;
-};
+type StorageLike = PurgeStorage;
 type Logger = { error: (obj: Record<string, unknown>, msg: string) => void };
 
 export type StorageOrphanInput = {
@@ -154,6 +151,42 @@ export async function retryStorageOrphan(
   orphanId: string,
 ): Promise<boolean> {
   try {
+    const candidate = await db.storageOrphan.findUnique({ where: { id: orphanId } });
+    if (!candidate || candidate.purgedAt) return false;
+    const avatar = (candidate.userId && isOwnedAvatarKey(candidate.key, candidate.userId))
+      || RETRYABLE_AVATAR_REASONS.has(candidate.reason) || candidate.reason.includes('SELFIE') || candidate.reason.includes('ACCOUNT_AVATAR');
+    if (!avatar) {
+      if (!candidate.userId) return false;
+      const bound = await db.documentPurgeClaim.findFirst({ where: { userId: candidate.userId, tenantId: candidate.tenantId, fileKey: candidate.key, documentId: { not: null } } });
+      const attached = bound?.documentId
+        ? await db.verificationDocument.findFirst({ where: { id: bound.documentId, userId: candidate.userId } })
+        : await db.verificationDocument.findFirst({ where: { userId: candidate.userId, fileUrl: candidate.key } });
+      if (attached) {
+        const { VerificationService } = await import('../modules/verification/verification.service');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { SandboxKycProvider } = await import('../providers/kyc/kyc-provider');
+        const service = new VerificationService(db, new NotificationService(db, undefined as never), new SandboxKycProvider());
+        const project = service.projectDocumentPurge.bind(service);
+        const owner = await db.user.findUnique({ where: { id: attached.userId } });
+        if (!owner || owner.tenantId !== candidate.tenantId) return false;
+        let result;
+        const claimId = bound?.id ?? attached.activePurgeClaimId;
+        if (claimId) {
+          const evidence = await probeCommittedPurge(db, storage, claimId, owner.tenantId);
+          result = await finishDocumentPurge(db, claimId, owner.tenantId, evidence, project);
+        } else {
+          result = await purgeDocumentWithClaim(db, storage, {
+            documentId: attached.id, userId: owner.id, tenantId: owner.tenantId,
+            mode: owner.phone === `deleted:${owner.id}` ? 'FULL_ERASURE' : 'FULL_RETENTION',
+            requireRetentionElapsed: true, initiatedBy: 'orphan-reaper',
+          }, project);
+        }
+        if (result !== 'PURGED') return false;
+        await db.storageOrphan.updateMany({ where: { id: orphanId, key: candidate.key, userId: owner.id, tenantId: owner.tenantId }, data: { purgedAt: new Date() } });
+        return true;
+      }
+      return purgeUnattachedObject(db, storage, orphanId);
+    }
     return await db.$transaction(async (tx) => {
       const seed = await tx.storageOrphan.findUnique({ where: { id: orphanId } });
       if (!seed || seed.purgedAt) return false;
@@ -189,24 +222,7 @@ export async function retryStorageOrphan(
         return closed.count === 1;
       }
 
-      const orphanLock = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT "id" FROM "storage_orphans" WHERE "id" = ${seed.id} AND "purgedAt" IS NULL
-        FOR UPDATE /* verification-orphan-row-authority */
-      `;
-      if (!orphanLock[0]) return false;
-      const row = await tx.storageOrphan.findUnique({ where: { id: seed.id } });
-      if (!row || row.purgedAt || !row.userId || row.key !== seed.key || row.reason !== seed.reason
-        || row.userId !== seed.userId || row.tenantId !== seed.tenantId) return false;
-      await resolveVerificationObject(tx, { fileKey: row.key, userId: row.userId });
-      if (!await deleteStorageObjectAndConfirmAbsent(storage, row.key)) return false;
-      const closed = await tx.storageOrphan.updateMany({
-        where: {
-          id: row.id, key: row.key, reason: row.reason, userId: row.userId,
-          tenantId: row.tenantId, purgedAt: null,
-        },
-        data: { purgedAt: new Date() },
-      });
-      return closed.count === 1;
+      return false;
     }, { timeout: 15_000 });
   } catch (err) {
     log.error({ err, orphanId }, '[F-026-02] storage-orphan retry failed — stays open');

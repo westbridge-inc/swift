@@ -57,6 +57,7 @@ export const TENANT_TABLES = [
   'payout_schedules',
   // [DOC-1 DOC-INV-7] proof of purge is evidence about a person: walled like the person.
   'deletion_receipt',
+  'document_purge_claim', 'document_purge_event',
   // [DOC-1 P4-5] human review of a document is about the person: walled like the person.
   'review_case',
   'review_decision',

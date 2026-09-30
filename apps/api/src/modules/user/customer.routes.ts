@@ -878,6 +878,7 @@ export async function customerRoutes(app: FastifyInstance) {
               status: result.status,
               pendingDocuments: result.pendingDocuments,
               pendingAvatarObjects: result.pendingAvatarObjects,
+              pendingVerificationObjects: result.pendingVerificationObjects,
             }),
           },
         },

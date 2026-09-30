@@ -58,6 +58,7 @@ const scoped = { $allOperations: tenantScope };
  */
 const TENANT_QUERY_EXTENSIONS = {
   user: scoped, vendor: scoped, order: scoped,
+  documentPurgeClaim: scoped, documentPurgeEvent: scoped,
   // QR growth engine: codes + scan analytics are tenant-owned rows. The public
   // /s/:code resolver runs pre-auth (no context) and stays unscoped by design —
   // a shortCode is globally unique and names its own tenant.

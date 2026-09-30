@@ -199,7 +199,7 @@ beforeAll(async () => {
         userId: TENANT_B_DRIVER_USER_ID,
         role: 'MOVER',
         docType: 'drivers_licence',
-        fileUrl: 'private://tenant-b/verification-document',
+        fileUrl: `verification/${TENANT_B_DRIVER_USER_ID}/document.enc`,
         status: 'PENDING',
         consentAt: new Date('2026-08-09T09:00:00.000Z'),
         privacyNoticeVersion: 'tenant-isolation-test',

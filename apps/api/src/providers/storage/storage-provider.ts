@@ -7,6 +7,7 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  GetBucketVersioningCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl as presignS3 } from '@aws-sdk/s3-request-presigner';
 import { stripImageMetadata } from '../../utils/images';
@@ -20,9 +21,17 @@ import { localStorageBaseDir, resolveLocalStorageKey, storageProviderKind } from
 // public link, and every issuance is audit-logged at the call site.
 // ---------------------------------------------------------------------------
 
+export interface StorageUploadInput {
+  buffer: Buffer; filename: string; mimeType: string; folder: string;
+  /** Verification metadata/name reservation MUST commit before bytes are written. */
+  reserve?: (fileKey: string, storageNamespace: string) => Promise<void>;
+}
+
 export interface StorageProvider {
+  /** Stable non-secret namespace; refuses versioned stores without exact-version support. */
+  purgeNamespace?(): Promise<string>;
   /** Store bytes; returns the opaque fileKey to persist (never a public URL). */
-  upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }>;
+  upload(input: StorageUploadInput): Promise<{ url: string }>;
   /** Short-lived signed URL to view a stored object. Default TTL 5 min. */
   getSignedUrl(fileKey: string, ttlSeconds?: number): Promise<string>;
   /** Permanently delete an object (retention / right-to-erasure). */
@@ -65,13 +74,21 @@ export class LocalStorageProvider implements StorageProvider {
   private get signingSecret(): string { return storageSigningKeys().current.secret; }
   private publicBase = process.env['API_PUBLIC_URL'] ?? '';
 
-  async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
+  async upload(input: StorageUploadInput): Promise<{ url: string }> {
     const safe = sanitizeForStorage(input);
     const name = createOpaqueStorageName(safe.filename);
     const dir = path.join(this.baseDir, safe.folder);
     await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, name), safe.buffer);
+    if (safe.folder.startsWith('verification/')) {
+      if (!input.reserve) throw new Error('Verification upload requires a committed source reservation');
+      await input.reserve(`/uploads/${safe.folder}/${name}`, await this.purgeNamespace());
+    }
+    await writeFile(path.join(dir, name), safe.buffer, safe.folder.startsWith('verification/') ? { flag: 'wx' } : undefined);
     return { url: `/uploads/${safe.folder}/${name}` };
+  }
+
+  async purgeNamespace(): Promise<string> {
+    return `local:${crypto.createHash('sha256').update(this.baseDir).digest('hex')}`;
   }
 
   /** Dev signed URL: HMAC over key+expiry so it is time-limited, not a raw link. */
@@ -120,20 +137,34 @@ export class S3StorageProvider implements StorageProvider {
     });
   }
 
-  async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
+  async upload(input: StorageUploadInput): Promise<{ url: string }> {
     const safe = sanitizeForStorage(input);
     const key = `${safe.folder}/${createOpaqueStorageName(safe.filename)}`;
+    if (safe.folder.startsWith('verification/')) {
+      if (!input.reserve) throw new Error('Verification upload requires a committed source reservation');
+      await input.reserve(key, await this.purgeNamespace());
+    }
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
         Body: safe.buffer,
         ContentType: safe.mimeType,
+        ...(safe.folder.startsWith('verification/') && { IfNoneMatch: '*' }),
         // R2 rejects unknown SSE headers; only send for native S3 (no endpoint).
         ...(!this.endpoint && { ServerSideEncryption: this.sse as 'AES256' }),
       }),
     );
     return { url: key };
+  }
+
+  async purgeNamespace(): Promise<string> {
+    const versioning = await this.client.send(new GetBucketVersioningCommand({ Bucket: this.bucket }));
+    // Suspended buckets can retain older versions too. A current-key 404 is not
+    // proof of their erasure. Until exact-version binding exists, refuse claims.
+    if (versioning.Status) throw new Error('Versioned verification storage requires exact-version authority');
+    const endpoint = this.endpoint ? new URL(this.endpoint).origin + new URL(this.endpoint).pathname : `aws:${process.env['AWS_REGION'] ?? 'us-east-1'}`;
+    return `object:${crypto.createHash('sha256').update(JSON.stringify([endpoint, this.bucket])).digest('hex')}`;
   }
 
   async getSignedUrl(fileKey: string, ttlSeconds: number = DEFAULT_TTL_SECONDS): Promise<string> {

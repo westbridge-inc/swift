@@ -72,7 +72,7 @@ export async function exportDocumentsFor(prisma: PrismaClient, userId: string) {
       verdicts: d.validationResults.map((v) => ({ validatorCode: v.validatorCode, status: v.status, evaluatedAt: v.evaluatedAt })),
       // Categories only — never the reviewer's note, never the precise reason (§8.5).
       decisions: cases.filter((c) => c.submissionId === d.id).flatMap((c) => c.decisions.map((x) => ({ outcome: x.outcome, category: x.actorFacingCategory, decidedAt: x.decidedAt }))),
-      receipts: receipts.filter((r) => r.submissionId === d.id).map((r) => ({ deletedAt: r.deletedAt, probe: r.verificationProbeResult, stores: r.storeLocations, bytesDeleted: Number(r.bytesDeleted) })),
+      receipts: receipts.filter((r) => r.submissionId === d.id).map((r) => ({ scope: r.scope, purgeClaimId: r.purgeClaimId, deletedAt: r.deletedAt, probe: r.verificationProbeResult, stores: r.storeLocations, bytesDeleted: Number(r.bytesDeleted) })),
     });
   }
   // [DOC-INV-21] A read of PERSONAL fields is audited with a reason code — the subject's own read included.
@@ -111,7 +111,7 @@ export async function eraseDocumentsFor(prisma: PrismaClient, service: Verificat
   };
   const outcomes: EraseOutcome[] = [];
   for (const d of docs) {
-    if (d.purgedAt) { outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'ALREADY_DESTROYED', receipt: await receiptOf(d.id) }); continue; }
+    if (d.fieldsPurgedAt) { outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'ALREADY_DESTROYED', receipt: await receiptOf(d.id) }); continue; }
     const type = await prisma.docType.findUnique({ where: { code: registryCode(user.countryCode, d.docType) }, select: { amlRecordClass: true } });
     const ground = refusalGround({
       held: d.legalHoldId !== null,
@@ -120,10 +120,18 @@ export async function eraseDocumentsFor(prisma: PrismaClient, service: Verificat
       relationshipLive: live,
     });
     if (ground) { outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground }); continue; }
-    const result = await service.purgeDocumentNow({ id: d.id, userId, fileUrl: d.fileUrl, docType: d.docType, user: { tenantId: user.tenantId } }, userId, { requireRetentionElapsed: false, shredFields: true });
+    const result = await service.purgeDocumentNow({ id: d.id, userId, fileUrl: d.fileUrl, docType: d.docType, user: { tenantId: user.tenantId } }, userId, { requireRetentionElapsed: false, shredFields: true, enforceDsarPolicy: true }).catch((error: unknown) => {
+      if (error instanceof AppError && (error.code === 'AML_RECORD' || error.code === 'ACTIVE_LICENCE')) return error.code;
+      throw error;
+    });
+    if (result === 'AML_RECORD' || result === 'ACTIVE_LICENCE') { outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground: result }); continue; }
     if (result === 'PURGED') outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'DESTROYED', receipt: await receiptOf(d.id) });
     else if (result === 'PROBE_FAILED') outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'DESTRUCTION_PENDING', receipt: await receiptOf(d.id) });
-    else outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground: 'LEGAL_HOLD' }); // a hold landed under the lock
+    else {
+      const current = await prisma.verificationDocument.findUniqueOrThrow({ where: { id: d.id } });
+      outcomes.push(current.legalHoldId ? { documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground: 'LEGAL_HOLD' }
+        : { documentId: d.id, docType: d.docType, outcome: 'DESTRUCTION_PENDING' });
+    }
   }
   await prisma.auditLog.create({ data: {
     userId, action: 'DSAR_DOCUMENT_ERASURE', entity: 'User', entityId: userId,

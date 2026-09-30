@@ -1112,11 +1112,16 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     const storage = getStorageProvider();
     const { ciphertext, iv, authTag } = encryptBuffer(pdf, dek);
-    const { url: fileUrl } = await storage.upload({ buffer: ciphertext, filename: `declaration-${DECLARATION_VERSION}.pdf.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
-    await app.prisma.encryptedObject.create({ data: {
-      fileKey: fileUrl, iv: new Uint8Array(iv), authTag: new Uint8Array(authTag), wrappedDek: new Uint8Array(wrappedDek),
-      mimeType: 'application/pdf', sizeBytes: pdf.length, sha256: createHash('sha256').update(pdf).digest('hex'), createdBy: userId,
-    } });
+    const { url: fileUrl } = await storage.upload({
+      buffer: ciphertext, filename: 'declaration.enc', mimeType: 'application/octet-stream', folder: `verification/${userId}`,
+      reserve: async (fileKey, storageNamespace) => {
+        await app.prisma.encryptedObject.create({ data: {
+          fileKey, storageNamespace, uploadState: 'PENDING', iv: new Uint8Array(iv), authTag: new Uint8Array(authTag), wrappedDek: new Uint8Array(wrappedDek),
+          mimeType: 'application/pdf', sizeBytes: pdf.length, sha256: createHash('sha256').update(pdf).digest('hex'), createdBy: userId,
+        } });
+      },
+    });
+    await app.prisma.encryptedObject.update({ where: { fileKey: fileUrl }, data: { uploadState: 'READY' } });
     const doc = await verification.submitDocument(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE', DECLARATION_DOC_TYPE, fileUrl, body.privacyNoticeVersion);
     reply.code(201);
     return { success: true, data: { tier: 'UNREGISTERED', declaration: { id: doc.id, status: doc.status, docType: doc.docType }, status: await verification.getStatus(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE') } };
