@@ -2,13 +2,14 @@ import type { AnchorHTMLAttributes, ReactNode } from 'react';
 
 type TestLinkProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> & {
   children: ReactNode;
+  prefetch?: boolean | null;
   href: string | { pathname?: string };
 };
 
-export default function TestLink({ children, href, ...props }: TestLinkProps) {
+export default function TestLink({ children, href, prefetch, ...props }: TestLinkProps) {
   const resolvedHref = typeof href === 'string' ? href : (href.pathname ?? '');
   return (
-    <a href={resolvedHref} {...props}>
+    <a data-prefetch={prefetch == null ? undefined : String(prefetch)} href={resolvedHref} {...props}>
       {children}
     </a>
   );

@@ -31,7 +31,7 @@ function pngSize(publicPath: string) {
 
 describe('[PWA-1] root metadata for the installed app', () => {
   it('declares an iOS home-screen app titled Swift, with a solid status bar', () => {
-    expect(metadata.appleWebApp).toEqual({ capable: true, title: 'Swift', statusBarStyle: 'default' });
+    expect(metadata.appleWebApp).toMatchObject({ capable: true, title: 'Swift', statusBarStyle: 'default' });
     // Next emits only the standard name for `capable`; older iOS reads the Apple one.
     expect(metadata.other).toMatchObject({ 'apple-mobile-web-app-capable': 'yes' });
   });
@@ -69,4 +69,17 @@ describe('[PWA-1] root metadata for the installed app', () => {
     expect(body).toContain('padding-left: env(safe-area-inset-left)');
     expect(body).toContain('padding-right: env(safe-area-inset-right)');
   });
+});
+
+it('links opaque iPhone startup images with matching portrait and landscape dimensions', () => {
+  const apple = metadata.appleWebApp as { startupImage: Array<{ url: string; media: string }> };
+  expect(apple.startupImage).toHaveLength(22);
+  for (const image of apple.startupImage) {
+    const [, width, height, ratio, orientation] = image.url.match(/iphone-(\d+)-(\d+)-(\d+)-(portrait|landscape)/)!;
+    const w = Number(width), h = Number(height), scale = Number(ratio);
+    expect(pngSize(image.url)).toBe(orientation === 'portrait' ? `${w * scale}x${h * scale}` : `${h * scale}x${w * scale}`);
+    expect(image.media).toBe(`(device-width: ${w}px) and (device-height: ${h}px) and (-webkit-device-pixel-ratio: ${scale}) and (orientation: ${orientation})`);
+    const bytes = readFileSync(join(WEB_ROOT, 'public', image.url));
+    expect(bytes[25]).toBe(2);
+  }
 });
