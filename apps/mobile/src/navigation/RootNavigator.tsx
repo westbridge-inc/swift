@@ -67,7 +67,10 @@ export function RootNavigator() {
   // [qr spec Part 6]: same queue-and-flush contract as the tap-router.
   React.useEffect(() => {
     ensureFirstLaunchClaim();
-    return installDeepLinkHandler();
+    const uninstall = installDeepLinkHandler();
+    // Also covers an effect reinstall after the container became ready.
+    if (navigationRef.isReady()) flushPendingDeepLink();
+    return uninstall;
   }, []);
 
   // Earners (mover/vendor) and advertisers must be signed in before their
@@ -153,6 +156,14 @@ export function RootNavigator() {
         ) : (
           <Stack.Screen name="Main" component={Main} />
         )}
+        {/* A scanned store is public, regardless of the selected role or
+            first-open gate. Explicit nested navigation opens its menu while
+            keeping the visitor's existing role and auth state intact. */}
+        <Stack.Screen
+          name="Storefront"
+          component={CustomerStack}
+          navigationKey={wantsAuth && !isAuthenticated ? 'store-auth' : 'store-browse'}
+        />
       </Stack.Navigator>
     </NavigationContainer>
   );

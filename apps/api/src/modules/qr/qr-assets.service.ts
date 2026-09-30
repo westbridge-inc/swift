@@ -42,7 +42,7 @@ export type QrTemplateId = 'card' | 'tabletent' | 'sticker' | 'flyer' | 'decal' 
 export const QR_TEMPLATES: Record<QrTemplateId, { trimWmm: number; trimHmm: number; codeMm: number }> = {
   card: { trimWmm: 88.9, trimHmm: 50.8, codeMm: 30 }, // 3.5×2 in counter card
   tabletent: { trimWmm: 148, trimHmm: 210, codeMm: 52 }, // A5, folded horizontally
-  sticker: { trimWmm: 210, trimHmm: 148, codeMm: 62 }, // A5-landscape sheet: circle + square
+  sticker: { trimWmm: 210, trimHmm: 148, codeMm: 62 }, // A5-landscape sheet: two branded stickers
   flyer: { trimWmm: 148, trimHmm: 210, codeMm: 52 }, // A5 bag insert
   decal: { trimWmm: 210, trimHmm: 297, codeMm: 122 }, // A4 window
   poster: { trimWmm: 297, trimHmm: 420, codeMm: 262 }, // A3 wall
@@ -56,7 +56,8 @@ export function templateCopy(vendorName: string, vendorType: VendorType) {
     : vendorType === 'STORE' ? `Shop ${vendorName} from home — delivery or pickup`
     : `Book ${vendorName} on Swift`;
   return {
-    headline: `${vendorName} is on Swift`,
+    headline: vendorName,
+    attribution: 'powered by Swift',
     action: vendorType === 'SERVICE' ? 'Scan to book' : 'Scan to order',
     promise,
     footer: publicWebBase().replace(/^https?:\/\//, ''),
@@ -157,8 +158,8 @@ interface TemplateData {
   shortUrl: string;
 }
 
-/** One template panel: paper ground, headline, white QR plate, action line,
- *  promise, maroon footer band with the domain. Scaled by the panel rect. */
+/** One template panel: store name, white QR plate, action line, promise and
+ *  a maroon "powered by Swift" footer. Scaled by the panel rect. */
 function drawPanel(
   doc: Pdf,
   data: TemplateData,
@@ -176,8 +177,36 @@ function drawPanel(
   doc.save();
   doc.rect(rect.x, rect.y, rect.w, rect.h).fill(PAPER);
 
-  // Headline
+  // The counter card needs a side-by-side layout: stacking its code and
+  // copy in 2 inches made the action collide with the footer.
+  if (rect.w > rect.h * 1.5) {
+    const pad = rect.w * 0.045;
+    const plate = Math.min(codePt * 1.27, rect.h - bandH - pad * 2);
+    const textW = rect.w - plate - pad * 3;
+    doc.font('display').fontSize(headSize).fillColor(INK);
+    let size = headSize;
+    while (size > 6 && doc.heightOfString(copy.headline, { width: textW }) > rect.h * 0.36) {
+      doc.fontSize(--size);
+    }
+    doc.text(copy.headline, rect.x + pad, rect.y + pad, { width: textW });
+    doc.font('displayMed').fontSize(actionSize).fillColor(MAROON);
+    doc.text(copy.action, rect.x + pad, rect.y + rect.h * 0.48, { width: textW });
+    doc.font('body').fontSize(bodySize).fillColor(MUTED);
+    doc.text(copy.promise, rect.x + pad, rect.y + rect.h * 0.61, { width: textW });
+    drawQrVector(doc, data.shortUrl, rect.x + rect.w - pad - plate, rect.y + pad, plate);
+    doc.rect(rect.x, rect.y + rect.h - bandH, rect.w, bandH).fill(MAROON);
+    doc.font('bodySemi').fontSize(bodySize).fillColor(WHITE);
+    doc.text(copy.attribution, rect.x, rect.y + rect.h - bandH / 2 - bodySize / 2, { width: rect.w, align: 'center' });
+    doc.restore();
+    return;
+  }
+
+  // Reserve two headline lines and shrink longer store names into them.
   doc.font('display').fontSize(headSize).fillColor(INK);
+  let size = headSize;
+  while (size > 6 && doc.heightOfString(copy.headline, { width: rect.w * 0.88 }) > headSize * 2.2) {
+    doc.fontSize(--size);
+  }
   doc.text(copy.headline, rect.x + rect.w * 0.06, rect.y + rect.h * 0.07, {
     width: rect.w * 0.88,
     align: 'center',
@@ -185,7 +214,8 @@ function drawPanel(
 
   // QR plate, centered
   const qrY = rect.y + rect.h * 0.07 + headSize * 2.2;
-  const plate = Math.min(codePt * (1 + (QUIET_MODULES * 2) / 29), rect.w * 0.8, rect.h * 0.62);
+  const copyReserve = unit * 0.05 + actionSize * 1.5 + bodySize * 3 + bandH;
+  const plate = Math.min(codePt * (1 + (QUIET_MODULES * 2) / 29), rect.w * 0.8, rect.y + rect.h - qrY - copyReserve);
   drawQrVector(doc, data.shortUrl, cx - plate / 2, qrY, plate);
 
   // Action + promise under the code
@@ -198,34 +228,24 @@ function drawPanel(
   // Footer band
   doc.rect(rect.x, rect.y + rect.h - bandH, rect.w, bandH).fill(MAROON);
   doc.font('bodySemi').fontSize(bodySize).fillColor(WHITE);
-  doc.text(`swift — ${copy.footer}`, rect.x, rect.y + rect.h - bandH / 2 - bodySize / 2, {
+  doc.text(copy.attribution, rect.x, rect.y + rect.h - bandH / 2 - bodySize / 2, {
     width: rect.w,
     align: 'center',
   });
   doc.restore();
 }
 
-/** Sticker sheet: maroon circle badge + square card, one sheet, both codes. */
+/** Two individually branded stickers; each keeps its store name and credit
+ *  when cut from the sheet. Rectangular panels leave room around the code. */
 function drawStickerSheet(doc: Pdf, data: TemplateData, pageW: number, pageH: number, bleed: number, codePt: number): void {
-  const copy = templateCopy(data.vendorName, data.vendorType);
   doc.rect(0, 0, pageW, pageH).fill(PAPER);
-  const cy = pageH / 2;
-  const r = codePt * 0.78;
-  const cxCircle = bleed + (pageW - bleed * 2) * 0.28;
-  const cxSquare = bleed + (pageW - bleed * 2) * 0.74;
-
-  // Circle sticker: maroon disc, white plate INSIDE keeps the quiet zone law.
-  doc.circle(cxCircle, cy, r + codePt * 0.16).fill(MAROON);
-  drawQrVector(doc, data.shortUrl, cxCircle - r * 0.82, cy - r * 0.82 - codePt * 0.06, r * 1.64);
-  doc.font('bodySemi').fontSize(codePt * 0.075).fillColor(WHITE);
-  doc.text(copy.action, cxCircle - r, cy + r * 0.82, { width: r * 2, align: 'center' });
-
-  // Square sticker
-  const sq = r * 2.05;
-  doc.save().rect(cxSquare - sq / 2, cy - sq / 2, sq, sq).fill(WHITE).restore();
-  drawQrVector(doc, data.shortUrl, cxSquare - sq * 0.42, cy - sq / 2 + sq * 0.06, sq * 0.84);
-  doc.font('displayMed').fontSize(codePt * 0.08).fillColor(MAROON);
-  doc.text(copy.action, cxSquare - sq / 2, cy + sq / 2 - codePt * 0.14, { width: sq, align: 'center' });
+  const gap = 4 * MM_TO_PT;
+  const w = (pageW - bleed * 2 - gap) / 2;
+  for (const x of [bleed, bleed + w + gap]) {
+    drawPanel(doc, data, { x, y: bleed, w, h: pageH - bleed * 2 }, codePt);
+    doc.save().lineWidth(0.25).strokeColor(MUTED)
+      .rect(x, bleed, w, pageH - bleed * 2).stroke().restore();
+  }
 }
 
 export async function renderTemplatePdf(template: QrTemplateId, data: TemplateData): Promise<Buffer> {

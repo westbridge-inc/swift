@@ -24,7 +24,7 @@ function reportAppOpen(code: string | null): void {
   void api.post(`/public/qr/${code}/app-open`, {}).catch(() => undefined);
 }
 
-const FAIL_TOAST = "That link didn't work — here's home instead.";
+const FAIL_TOAST = 'That store link could not be opened. Please try again.';
 
 let pendingUrl: string | null = null;
 let installed = false;
@@ -77,38 +77,33 @@ export async function resolveDestination(dest: LinkDestination): Promise<Resolve
   }
 }
 
-async function resolveAndGo(dest: LinkDestination): Promise<void> {
+async function resolveAndGo(dest: LinkDestination, request: number): Promise<void> {
   const outcome = await resolveDestination(dest);
+  if (request !== latestRequest) return;
   if (outcome.ok) {
-    if (!safeNavigate('Restaurant', { vendorId: outcome.vendorId })) throw new Error('nav');
+    if (!safeNavigate('Storefront', { screen: 'Restaurant', params: { vendorId: outcome.vendorId } })) throw new Error('nav');
     return;
   }
-  // A network failure must still THROW here. handleUrl's catch is what queues a
-  // cold-start link for RootNavigator's onReady to flush, and on a cold start
-  // the request can fail simply because the app is still coming up. Swallowing
-  // it would turn a link that used to open on the retry into a dead toast.
-  // resolveDestination folds that case into a value for the scanner's benefit;
-  // this path puts it back.
-  if (outcome.reason === 'offline') throw new Error('resolve');
   toast.show(FAIL_TOAST);
 }
 
 let navReady = false;
+let latestRequest = 0;
 
-function handleUrl(url: string | null): void {
-  if (!url) return;
+function handleUrl(url: string | null): boolean {
+  if (!url) return false;
   const dest = destinationForUrl(url);
-  if (!dest) return; // not ours — the app opens normally
-  resolveAndGo(dest).catch(() => {
-    // Navigation not ready (cold start) → queue; RootNavigator's onReady
-    // flushes. Genuine resolve failures once ready (retired code, dead
-    // store, offline) → honest toast, the app stays on Home.
-    if (!navReady && pendingUrl === null) {
-      pendingUrl = url;
-    } else {
-      toast.show(FAIL_TOAST);
-    }
+  if (!dest) return false; // not ours — the app opens normally
+  const request = ++latestRequest;
+  if (!navReady) {
+    pendingUrl = url;
+    return true;
+  }
+  resolveAndGo(dest, request).catch(() => {
+    if (request !== latestRequest) return;
+    toast.show(FAIL_TOAST);
   });
+  return true;
 }
 
 /** RootNavigator onReady: deliver the URL that launched a cold start. */
@@ -117,7 +112,7 @@ export function flushPendingDeepLink(): void {
   if (!pendingUrl) return;
   const url = pendingUrl;
   pendingUrl = null;
-  setTimeout(() => handleUrl(url), 300);
+  handleUrl(url);
 }
 
 /** Install once at app start: warm URLs via the listener, cold start via the
@@ -125,6 +120,8 @@ export function flushPendingDeepLink(): void {
 export function installDeepLinkHandler(): () => void {
   if (installed) return () => undefined;
   installed = true;
+  let active = true;
+  let receivedWarmLink = false;
   // [MOB-002] Every origin decision is counted: accepted by origin, rejected by
   // reason (deep_link_accepted / deep_link_rejected). analytics.track is the
   // one seam events leave through, and today it is a no-op by design.
@@ -133,12 +130,20 @@ export function installDeepLinkHandler(): () => void {
     else track('deep_link_rejected', { reason: d.reason });
   });
   const sub = Linking.addEventListener('url', ({ url }) => {
-    try { handleUrl(url); } catch { /* never crash on a link */ }
+    try { receivedWarmLink = handleUrl(url) || receivedWarmLink; } catch { /* never crash on a link */ }
   });
   Linking.getInitialURL()
-    .then((url) => { if (url) { pendingUrl = url; } })
+    .then((url) => {
+      // Initial URL and onReady can finish in either order. A new tap wins
+      // over a late initial URL; a stopped listener never navigates later.
+      if (active && !receivedWarmLink) handleUrl(url);
+    })
     .catch(() => undefined);
   return () => {
+    active = false;
+    latestRequest += 1;
+    pendingUrl = null;
+    navReady = false;
     installed = false;
     setLinkDecisionObserver(null);
     sub.remove();
@@ -150,4 +155,5 @@ export function resetDeepLinksForTests(): void {
   pendingUrl = null;
   navReady = false;
   installed = false;
+  latestRequest = 0;
 }

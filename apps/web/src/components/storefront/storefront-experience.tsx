@@ -21,7 +21,6 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SwiftLogo } from '@/components/swift-logo';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import {
   addToCart,
@@ -171,8 +170,10 @@ function optionGuidance(group: OptionGroup): string {
   return `Choose up to ${group.maxSelect}`;
 }
 
-export function StorefrontExperience({ store, returnPath }: { store: StorefrontDetail; returnPath: string }) {
+export function StorefrontExperience({ store, returnPath, fromQr = false }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean }) {
   const router = useRouter();
+  const [diningNoticeDismissed, setDiningNoticeDismissed] = useState(false);
+  const menu = useRef<HTMLDivElement | null>(null);
   const [catalog, setCatalog] = useState<DisplayVendor>(() => publicCatalog(store));
   const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>('loading');
   const [catalogCheckedAt, setCatalogCheckedAt] = useState<Date | null>(null);
@@ -696,13 +697,14 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
       <header className={styles.topbar}>
         <div className={styles.topbarInner}>
           <div className={styles.brandGroup}>
-            <Link href="/" aria-label="Swift home" className={styles.brandHome}>
-              <SwiftLogo />
-            </Link>
-            <span className={styles.verticalChip}>
+            <div className={styles.storeBrand}>
+              <a href="#store-name" className={styles.brandHome}>{catalog.name}</a>
+              <Link href="/" className={styles.poweredBy}>powered by Swift</Link>
+            </div>
+            {!fromQr ? <span className={styles.verticalChip}>
               <VerticalIcon size={18} aria-hidden="true" />
               <span>{verticalLabel[currentVertical]}</span>
-            </span>
+            </span> : null}
           </div>
           <nav className={styles.topActions} aria-label="Order navigation">
             <Link href={signedIn ? '/orders' : `/login?next=${encodeURIComponent('/orders')}`} className={styles.topLink}>
@@ -720,7 +722,7 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
         </div>
       </header>
 
-      {catalog.coverImageUrl ? (
+      {!fromQr && catalog.coverImageUrl ? (
         <div className={styles.hero}>
           <Image
             src={catalog.coverImageUrl}
@@ -733,7 +735,7 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
         </div>
       ) : null}
 
-      <div className={`${styles.content} ${catalog.coverImageUrl ? styles.withHero : ''}`}>
+      <div className={`${styles.content} ${!fromQr && catalog.coverImageUrl ? styles.withHero : ''}`}>
         <section className={styles.storeCard} aria-labelledby="store-name">
           {catalog.logoUrl ? (
             <span className={styles.logo}>
@@ -745,10 +747,10 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
             </span>
           )}
           <div>
+            <h1 id="store-name" className={styles.storeName}>{catalog.name}</h1>
             <p className={styles.eyebrow}>
               {[catalog.addressLine1, catalog.cuisineTypes?.[0] ?? catalog.vendorType].filter(Boolean).join(' · ')}
             </p>
-            <h1 id="store-name" className={styles.storeName}>{catalog.name}</h1>
             <div className={styles.meta}>
               {/* [M-D6] displayRating is null below the rating-display floor,
                   which is a different thing from having no ratings — but both
@@ -787,6 +789,25 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
           </div>
         </section>
 
+        {fromQr ? (
+          // Present in the server render. Hiding keeps its space, so neither
+          // hydration nor dismissal moves the menu under a visitor's finger.
+          <div className={styles.diningNotice} aria-hidden={diningNoticeDismissed ? true : undefined}>
+            <p role="status" aria-live="polite">Dining in? Browse our menu here and place your order with your server.</p>
+            <button
+              type="button"
+              className={styles.diningDismiss}
+              aria-label="Dismiss dining-in message"
+              onClick={() => {
+                setDiningNoticeDismissed(true);
+                menu.current?.focus({ preventScroll: true });
+              }}
+            >
+              <X size={18} aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
+
         {catalog.description ? <p className={styles.description}>{catalog.description}</p> : null}
 
         {catalogState === 'ready' && catalogCheckedAt ? (
@@ -815,7 +836,7 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
         ) : null}
 
         <div className={styles.layout}>
-          <div className={styles.menu}>
+          <div ref={menu} className={styles.menu} role="region" aria-label="Menu" tabIndex={-1}>
             {catalog.categories.length === 0 || categoryItems.length === 0 ? (
               <p className={styles.emptyMenu}>
                 This store has no orderable menu items right now. Check again later.

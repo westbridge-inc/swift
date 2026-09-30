@@ -1,15 +1,13 @@
 import type { RootEntryGate, RootIntent } from './rootEntryGate';
 
-export interface AuthContinuationDestination {
-  /** The destination is intentionally constrained to screens that are safe to
-   * resume inside the authenticated customer stack: provider onboarding, and
-   * [Q4] the taxi screen a signed-out visitor was sent to sign in from. */
+export type AuthContinuationDestination = {
+  /** Destinations resume only after the root authentication gates complete. */
   screen: 'ServiceProvider' | 'Taxi';
-}
+} | { screen: 'Restaurant'; vendorId: string };
 
 export interface AuthContinuationRootRoute {
-  screen: 'Main';
-  params: { screen: AuthContinuationDestination['screen'] };
+  screen: 'Main' | 'Storefront';
+  params: { screen: AuthContinuationDestination['screen']; params?: { vendorId: string } };
 }
 
 export type AuthContinuationFlushResult =
@@ -39,6 +37,9 @@ export function discardAuthContinuation(): void {
 export function rootRouteForAuthContinuation(
   destination: AuthContinuationDestination,
 ): AuthContinuationRootRoute {
+  if (destination.screen === 'Restaurant') {
+    return { screen: 'Storefront', params: { screen: 'Restaurant', params: { vendorId: destination.vendorId } } };
+  }
   return { screen: 'Main', params: { screen: destination.screen } };
 }
 
@@ -55,9 +56,9 @@ export function flushAuthContinuation(
   if (!pending) return 'none';
   if (!state.isAuthenticated || state.entryGate !== 'main') return 'waiting';
 
-  // Both destinations belong to CustomerStack. A role-routing regression must
-  // never send them into an unrelated earner or advertiser navigator.
-  if (state.intent !== 'customer') {
+  // Taxi/provider onboarding belong to the selected customer experience.
+  // A scanned menu has its own public root and preserves any selected role.
+  if (pending.screen !== 'Restaurant' && state.intent !== 'customer') {
     pending = null;
     return 'discarded';
   }
