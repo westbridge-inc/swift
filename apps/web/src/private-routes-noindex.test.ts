@@ -10,6 +10,9 @@ import sitemap from './app/sitemap';
 // This is an explicit review ledger, not a prefix allowlist: adding ANY page
 // (even below an already-private layout) requires a classification here.
 // "private" also includes identity and utility screens excluded from search.
+// Secret-token/GET-side-effect pages are a separate class: crawling them stays
+// forbidden even though they also carry noindex. Ordinary noindex pages MUST
+// be crawlable so robots.txt does not hide their metadata from search engines.
 const PUBLIC_PAGES = [
   '(app)/page.tsx',
   '(app)/explore/page.tsx',
@@ -33,6 +36,7 @@ const PUBLIC_PAGES = [
   'legal/child-safety/page.tsx',
   'legal/privacy/page.tsx',
   'legal/terms/page.tsx',
+  'signup/page.tsx', // public business acquisition door [AX295 F1]
   'store/[slug]/page.tsx',
 ];
 
@@ -53,14 +57,19 @@ const PRIVATE_PAGES = [
   'portal/documents/page.tsx',
   'portal/history/page.tsx',
   'selfie/page.tsx',
-  'track/[token]/page.tsx', // bearer-link personal data, even without sign-in
-  'trip/[token]/page.tsx',
   'login/page.tsx', // identity flows, not public search content
-  'signup/page.tsx',
   'offline/page.tsx', // utility fallback, already intentionally noindex
   'qr/not-found/page.tsx', // QR lifecycle screens, not store content
   'qr/retired/page.tsx',
   'qr/unavailable/page.tsx',
+];
+
+// Bearer links reveal personal data without sign-in. There are currently no
+// payment-return, magic-link or invite-link pages in this app; new routes of
+// those kinds belong here too, including when the secret is in a query string.
+const TOKEN_DISALLOWED_PAGES = [
+  'track/[token]/page.tsx',
+  'trip/[token]/page.tsx',
 ];
 
 // Public machine resources, not HTML pages. New handlers and metadata endpoints
@@ -149,9 +158,27 @@ function expectRobots(value: Metadata['robots'], index: boolean, context: string
   }
 }
 
+function crawlable(path: string): boolean {
+  const rules = [robots().rules].flat();
+  // Fail closed on agent-specific groups or wildcard patterns until the
+  // matcher models them; otherwise a Googlebot-only ban could evade the test.
+  expect(rules).toHaveLength(1);
+  const rule = rules[0]!;
+  expect([rule.userAgent].flat()).toEqual(['*']);
+  const allow = [rule.allow ?? []].flat();
+  const disallow = [rule.disallow ?? []].flat();
+  for (const prefix of [...allow, ...disallow]) {
+    expect(prefix).toMatch(/^\//);
+    expect(prefix).not.toMatch(/[*$]/);
+  }
+  const matchLength = (prefixes: string[]) => Math.max(-1, ...prefixes
+    .filter((prefix) => path.startsWith(prefix)).map((prefix) => prefix.length));
+  return matchLength(allow) >= matchLength(disallow);
+}
+
 describe('[DS288] every route has a reviewed search classification', () => {
   it('classifies every page exactly once, including new descendants of known segments', () => {
-    const classified = [...PUBLIC_PAGES, ...PRIVATE_PAGES];
+    const classified = [...PUBLIC_PAGES, ...PRIVATE_PAGES, ...TOKEN_DISALLOWED_PAGES];
     expect(new Set(classified).size).toBe(classified.length);
     expect(FILES.filter((file) => PAGE.test(file)).sort()).toEqual(classified.sort());
     expect(new Set(classified.map(urlOf)).size).toBe(classified.length);
@@ -166,12 +193,25 @@ describe('[DS288] every route has a reviewed search classification', () => {
       .toEqual(FILES.filter((file) => PAGE.test(file) || LAYOUT.test(file)).sort());
   });
 
-  it.each(PRIVATE_PAGES)('%s resolves to noindex, nofollow regardless of robots.txt', async (page) => {
+  it.each(PRIVATE_PAGES)('%s is crawlable so its noindex, nofollow is visible', async (page) => {
+    expect(crawlable(urlOf(page)), `${urlOf(page)} must let crawlers read noindex`).toBe(true);
     expectRobots(await effectiveRobots(page), false, `${urlOf(page)} via ${ancestors(page).join(' -> ')}`);
   });
 
-  it.each(PUBLIC_PAGES)('%s stays indexable through all ancestor layouts', async (page) => {
+  it.each(TOKEN_DISALLOWED_PAGES)('%s stays disallowed AND noindex, nofollow', async (page) => {
+    expect(crawlable(urlOf(page)), `${urlOf(page)} must not invite token crawling`).toBe(false);
+    expectRobots(await effectiveRobots(page), false, `${urlOf(page)} via ${ancestors(page).join(' -> ')}`);
+  });
+
+  it.each(PUBLIC_PAGES)('%s stays crawlable and indexable through all ancestor layouts', async (page) => {
+    expect(crawlable(urlOf(page)), `${urlOf(page)} is public and crawlable`).toBe(true);
     expectRobots(await effectiveRobots(page), true, `${urlOf(page)} via ${ancestors(page).join(' -> ')}`);
+  });
+
+  it('pins signup as a public, crawlable and indexable business acquisition door [AX295 F1]', async () => {
+    expect(PUBLIC_PAGES).toContain('signup/page.tsx');
+    expect(crawlable('/signup')).toBe(true);
+    expectRobots(await effectiveRobots('signup/page.tsx'), true, '/signup must stay indexable');
   });
 
   it('checks the storefront missing-data metadata branch without network access', async () => {
@@ -187,21 +227,13 @@ describe('[DS288] every route has a reviewed search classification', () => {
     }
   });
 
-  it('keeps every public page crawlable, including the catalogue under /order/', () => {
-    const rules = robots().rules;
-    const general = [rules].flat().filter((rule) => [rule.userAgent].flat().includes('*'));
-    expect(general).toHaveLength(1);
-    const rule = general[0]!;
-    const allow = [rule.allow ?? []].flat();
-    const disallow = [rule.disallow ?? []].flat();
-    // The current policy uses literal prefixes. Fail closed if it starts
-    // using wildcard/end-anchor syntax until this matcher supports it.
-    for (const prefix of [...allow, ...disallow]) expect(prefix).not.toMatch(/[*$]/);
-    for (const page of PUBLIC_PAGES) {
-      const path = urlOf(page);
-      const allowLength = Math.max(-1, ...allow.filter((prefix) => path.startsWith(prefix)).map((prefix) => prefix.length));
-      const disallowLength = Math.max(-1, ...disallow.filter((prefix) => path.startsWith(prefix)).map((prefix) => prefix.length));
-      expect(allowLength >= disallowLength, `${path} is crawlable`).toBe(true);
+  it('keeps public machine resources crawlable, including both association-file aliases', () => {
+    for (const path of [
+      '/robots.txt', '/sitemap.xml', '/manifest.webmanifest', '/opengraph-image',
+      '/well-known/apple-app-site-association', '/well-known/assetlinks.json',
+      '/.well-known/apple-app-site-association', '/.well-known/assetlinks.json',
+    ]) {
+      expect(crawlable(path), path).toBe(true);
     }
   });
 

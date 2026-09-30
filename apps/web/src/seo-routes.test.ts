@@ -42,7 +42,7 @@ function pagesByUrl(): Map<string, string[]> {
 // [Q7b] `/` became the ordering Home. Every duty the old landing page carried
 // for search engines has to survive the move: the sitemap still lists only
 // real public pages and still leads with `/`, robots still let crawlers read
-// `/` and keep them out of accounts, and `/` still carries the site's
+// `/` and read ordinary private pages' noindex, and `/` still carries the site's
 // canonical address and card. The introduction moved to /welcome, which says
 // so in its own canonical.
 // ---------------------------------------------------------------------------
@@ -66,14 +66,16 @@ describe('[Q7b] the site’s search duties survive the move', () => {
     expect(pages.get('/welcome')).toEqual(['(marketing)/welcome/page.tsx']);
   });
 
-  it('robots lets crawlers read Home and the company pages, and keeps them out of accounts', () => {
+  it('robots lets crawlers read public content and private noindex, but blocks secret-token links', () => {
     const rules = robots();
     const rule = Array.isArray(rules.rules) ? rules.rules[0]! : rules.rules;
     const allow = [rule.allow ?? []].flat();
     const disallow = [rule.disallow ?? []].flat();
     expect(allow).toContain('/');
-    for (const privatePath of ['/cart', '/account', '/orders/', '/order/', '/login', '/dashboard/', '/portal/', '/track/', '/trip/']) {
-      expect(disallow, privatePath).toContain(privatePath);
+    // [AX295 F2] Ordinary private pages must expose their noindex to crawlers;
+    // only the bearer-link pages keep the old Disallow expectation.
+    for (const tokenPath of ['/track/', '/trip/']) {
+      expect(disallow, tokenPath).toContain(tokenPath);
     }
     // No listed page is one robots turns away (the longer Allow wins).
     const blocked = (path: string) => {
@@ -82,6 +84,12 @@ describe('[Q7b] the site’s search duties survive the move', () => {
       return disallowMatch > allowMatch;
     };
     for (const path of paths) expect(blocked(path), path).toBe(false);
+    for (const path of ['/cart', '/account', '/orders/', '/order/', '/login', '/dashboard/', '/portal/', '/selfie', '/courier', '/signup']) {
+      expect(blocked(path), path).toBe(false);
+    }
+    for (const path of ['/track/census-token', '/trip/census-token']) {
+      expect(blocked(path), path).toBe(true);
+    }
     expect(rules.sitemap).toBe(`${SITE}/sitemap.xml`);
     expect(rules.host).toBe(SITE);
   });

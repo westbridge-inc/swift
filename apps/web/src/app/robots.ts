@@ -2,45 +2,26 @@ import type { MetadataRoute } from 'next';
 import { SITE_ORIGIN } from '@/site.config';
 
 /**
- * [SITE-1.1 Part 5 / AC-11] Marketing and legal routes are indexable; every
- * operator, demo and tokenised surface is not.
+ * [SITE-1.1 Part 5 / AC-11, AX295] Public pages are crawlable and indexable.
+ * Ordinary private pages are crawlable so search engines can read their
+ * noindex metadata, including on the sign-in door. Disallow would hide that
+ * directive and could leave an externally linked URL indexed without content.
  *
- * The disallow list is deliberately explicit rather than clever — a crawler
- * reading this file is the same audience as a reviewer reading the site, and
- * both should be able to see exactly which parts of Swift are public.
+ * Secret-token and GET-side-effect routes instead keep BOTH Disallow and
+ * noindex. The only such pages currently in this app are tracking/share links;
+ * the route census requires any new payment return, magic or invite link to
+ * be classified explicitly. Auth and access controls remain the data boundary.
  */
 export default function robots(): MetadataRoute.Robots {
   return {
     rules: [
       {
         userAgent: '*',
-        // The deletion page MUST stay crawlable — Google Play's policy requires a
-        // publicly reachable URL, and a bare `Disallow: /account` would swallow it
-        // as a prefix. The longer Allow wins, so it is listed explicitly first.
-        allow: [
-          '/',
-          '/account/delete',
-          // Public catalogue pages share /order/ with private addresses. The
-          // longer Allow keeps these crawlable without exposing that sibling.
-          '/order/browse',
-          '/order/search',
-          '/order/vendor/',
-        ],
+        allow: '/',
         disallow: [
-          '/dashboard/',   // vendor operator console
-          '/portal/',      // mover document portal
-          '/account',      // signed-in customer account (NOT /account/delete — allowed above)
-          '/cart',
-          '/orders/',
-          '/order/',
-          '/login',
-          '/signup',
-          '/selfie',
           '/trip/',        // tokenised trip share — private by construction
           '/track/',       // tokenised parcel tracking — private by construction
-          '/qr/',          // QR lifecycle states, not content
           '/api/',
-          '/well-known/',  // served at /.well-known/* via rewrite; the internal path is not content
         ],
       },
     ],
