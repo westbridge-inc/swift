@@ -8,6 +8,7 @@ import { color, font, fontSize, radius, space, withAlpha } from '@swift/ui';
 import { useAddToCart, useCart, useReportContent, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
 import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
+import { requestAuthContinuation } from '../../../navigation/authContinuation';
 import { distanceLabel } from '../../../lib/geo';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
@@ -209,7 +210,7 @@ export function RestaurantScreen() {
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
   const vendorId: string = route.params?.vendorId;
-  const { isAuthenticated, promptLogin } = useAuthStore();
+  const { isAuthenticated, wantsAuth, promptLogin } = useAuthStore();
 
   const vendor = useVendor<any>(vendorId);
   const toggleFav = useToggleFavorite();
@@ -300,7 +301,13 @@ export function RestaurantScreen() {
 
   const cartLines: any[] = cart.data?.items ?? [];
   const lineFor = (itemId: string) => cartLines.find((l) => l.itemId === itemId);
-  const guardAuth = (fn: () => void) => (isAuthenticated ? fn() : promptLogin());
+  const guardAuth = (fn: () => void) => {
+    if (isAuthenticated) return fn();
+    requestAuthContinuation({ screen: 'Restaurant', vendorId }, promptLogin);
+    // A scan can open the public menu over an already active sign-in flow.
+    // In that case its root gate is mounted already, so return to it directly.
+    if (wantsAuth) navigation.getParent()?.navigate('Auth');
+  };
 
   const itemCard = (item: any, width: number) => (
     <FoodCard
