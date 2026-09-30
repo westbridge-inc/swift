@@ -1,11 +1,13 @@
 import type { PrismaClient, RideClass } from '@prisma/client';
 import { isRideClassServed } from '../../config/vehicle-classes';
-import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
+import { getMapsProvider, type MapsProvider, type RouteLegsEstimate, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
+import { AppError } from '../../utils/errors';
 import { type GeoPoint } from '../../utils/geo';
-import { resolveFareZones, DEFAULT_TENANT_ID } from './fare-zones';
+import { resolveFareZones, zonePricedPairs, DEFAULT_TENANT_ID } from './fare-zones';
+import { assertTaxiRouteInMarket, placeCode } from './taxi-itinerary';
 import { CountryConfigService } from '../country/country-config.service';
-import { readTaxiRates, readClassRates, assertSaneFare } from '../country/pricing-config';
+import { readTaxiRates, readClassRates, assertSaneFare, type TaxiRates, type ClassRates } from '../country/pricing-config';
 
 // ---------------------------------------------------------------------------
 // Fare engine — deterministic, computed and shown BEFORE
@@ -73,6 +75,17 @@ export function applyClassMultiplier(baseFare: number, multiplier: number, baseM
   return Math.max(scaledMin, scaled);
 }
 
+/**
+ * The country formula, applied ONCE to ONE trip: the base and the minimum
+ * once, the trip's billable kilometres and minutes, one cash-friendly
+ * rounding to 100. A ride with stops is one trip over its whole route: it
+ * comes here once, never once per leg — no fee per stop, none for waiting.
+ */
+export function formulaFare(rates: TaxiRates, billableKm: number, durationMin: number): number {
+  const raw = rates.base + rates.perKm * billableKm + rates.perMin * durationMin;
+  return assertSaneFare(Math.max(rates.minimum, Math.round(raw / 100) * 100), 'formula');
+}
+
 export interface TierEstimate {
   rideClass: RideClass;
   fare: number;
@@ -90,6 +103,52 @@ export interface TieredEstimate {
   billableKm: number;
   /** [ALG-18] The engine that produced it. */
   routeSource: RouteSource;
+}
+
+/** [TAXI multi-stop] One leg of a priced itinerary, for the passenger to read
+ *  and for the stop rows (legMeters / legSeconds). Never money: the fare is
+ *  priced from the whole route. */
+export interface ItineraryLeg {
+  /** PICKUP, STOP_1..STOP_3 or DESTINATION (the itinerary place codes). */
+  from: string;
+  to: string;
+  /** Whole metres. */
+  meters: number;
+  /** Whole seconds; null when the engine gave no duration (the estimate). */
+  seconds: number | null;
+}
+
+export interface ItineraryEstimate extends TieredEstimate {
+  legs: ItineraryLeg[];
+}
+
+/** [TAXI multi-stop] A route a fare may be priced from: not degraded, one leg
+ *  per pair of points, every leg a finite distance of 0 m or more (one leg of
+ *  0 m is real: two points across one road snap to one node), and a whole
+ *  route longer than 0 km. A route of 0 km routed nothing, and is refused
+ *  rather than priced at the minimum. [DS282 F2] */
+function isPriceableRoute(route: RouteLegsEstimate, legCount: number): boolean {
+  const distance = (v: number) => Number.isFinite(v) && v >= 0;
+  const minutes = (v: number | null) => v == null || distance(v);
+  return !route.degraded
+    && route.legs.length === legCount
+    && route.legs.every((leg) => distance(leg.km) && minutes(leg.minutes))
+    && distance(route.km) && route.km > 0
+    && minutes(route.minutes);
+}
+
+/** Each offered tier from ONE base (Economy) fare. */
+function tierFares(baseFare: number, source: TierEstimate['source'], baseMinimum: number, classRates: ClassRates): TierEstimate[] {
+  return offeredRideClasses().map((rideClass) => {
+    const multiplier = classRates[rideClass];
+    return {
+      rideClass,
+      multiplier,
+      fare: assertSaneFare(applyClassMultiplier(baseFare, multiplier, baseMinimum), `tier_${rideClass}`),
+      capacity: CLASS_CAPACITY[rideClass],
+      source,
+    };
+  });
 }
 
 export interface FareEstimate {
@@ -161,8 +220,7 @@ export class FareService {
     }
 
     // Formula fallback — validated rates, cash-friendly rounding
-    const raw = rates.base + rates.perKm * distanceKm + rates.perMin * durationMin;
-    const fare = assertSaneFare(Math.max(rates.minimum, Math.round(raw / 100) * 100), 'formula');
+    const fare = formulaFare(rates, distanceKm, durationMin);
 
     return {
       fare,
@@ -188,18 +246,79 @@ export class FareService {
     const rates = (await readTaxiRates(this.prisma, countryCode)).payload;
     const classRates = (await readClassRates(this.prisma, countryCode)).payload;
 
-    const tiers: TierEstimate[] = offeredRideClasses().map((rideClass) => {
-      const multiplier = classRates[rideClass];
-      return {
-        rideClass,
-        multiplier,
-        fare: assertSaneFare(applyClassMultiplier(base.fare, multiplier, rates.minimum), `tier_${rideClass}`),
-        capacity: CLASS_CAPACITY[rideClass],
-        source: base.source,
-      };
-    });
+    const tiers = tierFares(base.fare, base.source, rates.minimum, classRates);
 
     return { tiers, currencyCode: base.currencyCode, distanceKm: base.distanceKm, durationMin: base.durationMin, billableKm: base.billableKm, routeSource: base.routeSource };
+  }
+
+  /**
+   * [TAXI multi-stop] Tiered fares for a ride with intermediate stops: the
+   * WHOLE route, pickup → stops in order → destination, routed in one call and
+   * priced as one trip — its kilometres rounded once, its minutes once, the
+   * base and the minimum once, no fee per stop and none for waiting (AF.16) —
+   * then the same tiers as any ride. A ride without stops never comes here:
+   * estimateTiers prices it, exactly as before.
+   *
+   * Refuses rather than guesses:
+   *  - 400 STOP_OUT_OF_MARKET when a point of the route lies outside the
+   *    launch market (an engine snaps it to a road it knows and prices the
+   *    wrong place);
+   *  - 409 MULTI_STOP_ZONE_PRICED when the zone table prices any leg, or the
+   *    direct pickup → destination pair (v1; FARE_ZONE_TABLE_KILL=1 bypasses
+   *    the table here as everywhere);
+   *  - 503 ROUTE_UNAVAILABLE when the configured routing engine could not
+   *    route it (ALG-11), or routed nothing (a route of 0 km): a single-leg
+   *    ride keeps its fallback, a ride with stops is never priced from a guess.
+   */
+  async estimateItineraryTiers(pickup: GeoPoint, stops: readonly GeoPoint[], dropoff: GeoPoint, countryCode: string, tenantId: string = DEFAULT_TENANT_ID): Promise<ItineraryEstimate> {
+    if (stops.length === 0) {
+      throw new Error('estimateItineraryTiers prices a ride with stops; a ride without stops is priced by estimateTiers');
+    }
+    assertTaxiRouteInMarket({ pickup, stops, dropoff });
+    const points: GeoPoint[] = [pickup, ...stops.map((s) => ({ lat: s.lat, lng: s.lng })), dropoff];
+
+    // [M-34] The requester's market's zones, every leg and the direct pair.
+    const [zonePriced] = await zonePricedPairs(this.prisma, { tenantId, countryCode }, points);
+    if (zonePriced) {
+      throw new AppError(409, 'MULTI_STOP_ZONE_PRICED',
+        'This trip has a fixed zone fare, so stops cannot be added to it yet. Remove the stops to book it at the fixed fare.',
+        {
+          from: placeCode(zonePriced.from, stops.length),
+          to: placeCode(zonePriced.to, stops.length),
+          fromZoneId: zonePriced.fromZoneId,
+          toZoneId: zonePriced.toZoneId,
+        });
+    }
+
+    const route = await this.maps.routeLegs(points);
+    if (!isPriceableRoute(route, points.length - 1)) {
+      throw new AppError(503, 'ROUTE_UNAVAILABLE',
+        'We cannot route a trip with stops right now. Try again in a moment, or remove the stops.',
+        { stopCount: stops.length });
+    }
+    // [ALG-18] The whole route, rounded ONCE: the fare and the frozen number are one number.
+    const billableKm = canonicalBillableKm(route.km);
+    const durationMin = Math.ceil(route.minutes ?? (billableKm / AVG_SPEED_KMH) * 60);
+
+    const config = await this.countryConfig.getByCode(countryCode);
+    // [M-35] Validated, versioned rates and multipliers.
+    const rates = (await readTaxiRates(this.prisma, countryCode)).payload;
+    const classRates = (await readClassRates(this.prisma, countryCode)).payload;
+
+    return {
+      tiers: tierFares(formulaFare(rates, billableKm, durationMin), 'formula', rates.minimum, classRates),
+      currencyCode: config.currencyCode,
+      distanceKm: round1(billableKm),
+      durationMin,
+      billableKm,
+      routeSource: route.source,
+      legs: route.legs.map((leg, i) => ({
+        from: placeCode(i, stops.length),
+        to: placeCode(i + 1, stops.length),
+        meters: Math.round(leg.km * 1000),
+        seconds: leg.minutes == null ? null : Math.round(leg.minutes * 60),
+      })),
+    };
   }
 }
 

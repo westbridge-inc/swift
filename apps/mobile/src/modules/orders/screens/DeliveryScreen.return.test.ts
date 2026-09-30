@@ -47,7 +47,7 @@ describe('a returned parcel is over', () => {
     expect(SCREEN).toMatch(/else if \(orderStatus === 'RETURNING'\) etaCopy = 'Coming back to you';/);
     // Both return copies come before the stale creation-time estimate can.
     const eta = block(/let etaCopy = pendingSummary;/, /\n\n/);
-    expect(eta.indexOf("'Coming back to you'")).toBeLessThan(eta.indexOf('Server estimate'));
+    expect(eta.indexOf("'Coming back to you'")).toBeLessThan(eta.indexOf('Estimated time'));
     expect(SCREEN).toMatch(/!complete && !returned && orderStatus !== 'RETURNING' \? promiseLine\(/);
   });
 

@@ -1558,10 +1558,10 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
                   toast.show(
                     message,
                     fee == null
-                      ? 'The server confirmed the cancellation.'
+                      ? 'Cancellation confirmed.'
                       : fee > 0
-                        ? `The server recorded ${money(fee)}. Swift does not collect ride money.`
-                        : 'The server confirmed no cancellation fee.',
+                        ? `A ${money(fee)} cancellation fee was recorded. Swift does not collect ride money.`
+                        : 'No cancellation fee was recorded.',
                   );
                   setConfirmCancel(false);
                 },
@@ -1574,7 +1574,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
                     setConfirmCancel(false);
                     toast.show(
                       'Checking ride status',
-                      'We couldn’t confirm the cancellation outcome. The active-ride poll is checking the server before you try again.',
+                      'We couldn’t confirm whether the ride was cancelled. Check your ride before trying again.',
                     );
                     void queryClient.invalidateQueries({ queryKey: ['rides', 'active'] });
                   }

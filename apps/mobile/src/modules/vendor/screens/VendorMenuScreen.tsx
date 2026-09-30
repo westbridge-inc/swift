@@ -465,7 +465,7 @@ export function VendorMenuScreen({ navigation }: any) {
       {menuQ.isLoading ? (
         <LoadingBlock />
       ) : menuQ.isError && !menuQ.data ? (
-        <ErrorState message="We couldn't load your live catalogue. Check your connection and try again." onRetry={() => menuQ.refetch()} />
+        <ErrorState message="We couldn't load your menu. Check your connection and try again." onRetry={() => menuQ.refetch()} />
       ) : (
         <ScrollView
           contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
@@ -474,13 +474,13 @@ export function VendorMenuScreen({ navigation }: any) {
         >
           {menuQ.isError && menuQ.data ? (
             <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
-              Showing the last loaded catalogue — refresh did not complete.
+              Showing the menu from the last check. Check your connection and try again.
             </T>
           ) : null}
           <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: space.md, marginBottom: space.lg }}>
             <View style={{ flex: 1 }}>
               <T variant="micro" tone="muted">
-                LIVE CATALOGUE
+                YOUR MENU
               </T>
               <T variant="heading" style={{ marginTop: space.xs }}>
                 {activeCount} active · {soldOutCount} sold out
@@ -613,9 +613,9 @@ export function VendorMenuScreen({ navigation }: any) {
               claim what the rails actually do. */}
           {categories.length > 0 ? (
             <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-              Sold-out items hide from new orders instantly and return the moment you switch them back
-              on. A live order holding an item you just 86&apos;d asks the customer to swap — or the
-              line is refunded — never a silent removal.
+              Sold-out items are hidden from new orders. They appear again when you switch them on.
+              If a current order has an item you mark sold out, the customer is asked to choose a
+              replacement or the item is marked for a refund. The business handles any money directly.
             </T>
           ) : null}
         </ScrollView>
