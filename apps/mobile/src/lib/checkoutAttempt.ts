@@ -10,8 +10,8 @@
  * The first fix (#990) gave the key the lifetime of an attempt. This one gives
  * the attempt the shape of an INTENT, so the key follows what the person means:
  *
- *   principal   the signed-in account and its login generation — a persisted
- *               intent from another principal (a shared device) is never reused
+ *   principal   the signed-in account and its login generation — another
+ *               account cannot use it; a new login may recover its own sent key
  *   bodyHash    the canonical hash of what will be sent — payment method,
  *               fulfillment, tip, promo, schedule, appointments
  *   state       open  = minted, or refused by the server (a 4xx) or found
@@ -115,20 +115,40 @@ export function createCheckoutAttempt(
   now: () => number = Date.now,
   legacy: Pick<CheckoutKeyStore, 'get' | 'clear'> | null = null,
 ) {
-  let memory: CheckoutIntent | null = null;
+  // One minimal record per account. Switching accounts never evicts an
+  // unresolved key; no request payload, contact data or credentials are stored.
+  let memory: CheckoutIntent[] | null = null;
+  let activeUserId: string | null = null;
   let legacyRead = false;
-
-  const persist = (intent: CheckoutIntent | null) => {
-    memory = intent;
+  const samePrincipal = (a: CheckoutPrincipal, b: CheckoutPrincipal) => a.userId === b.userId && a.generation === b.generation;
+  const read = (): CheckoutIntent[] => {
+    if (memory) return memory;
+    memory = [];
     try {
-      if (intent) store.set(JSON.stringify(intent));
-      else store.clear();
-    } catch {
-      // Memory holds it; the double tap is still one attempt.
-    }
+      const raw = store.get();
+      const old = decodeIntent(raw);
+      if (old) { memory = [old]; activeUserId = old.principal.userId; }
+      else if (raw) {
+        const saved = JSON.parse(raw) as { version?: number; intents?: unknown[]; activeUserId?: string };
+        if (saved.version === 3 && Array.isArray(saved.intents)) {
+          memory = saved.intents.map((v) => decodeIntent(JSON.stringify(v))).filter((v): v is CheckoutIntent => !!v);
+          activeUserId = saved.activeUserId ?? null;
+        }
+      }
+    } catch { /* Memory still protects retries when storage is unavailable. */ }
+    return memory;
   };
-
-  /** The #990 bare key, adopted ONCE as an unresolved intent of unknown body for whoever asks first. */
+  const persist = () => {
+    try {
+      if (read().length) store.set(JSON.stringify({ version: 3, intents: memory, activeUserId }));
+      else store.clear();
+    } catch { /* The in-memory records remain intact. */ }
+  };
+  const put = (intent: CheckoutIntent) => {
+    memory = [...read().filter((i) => i.principal.userId !== intent.principal.userId), intent];
+    activeUserId = intent.principal.userId;
+    persist();
+  };
   const adoptLegacy = (principal: CheckoutPrincipal): CheckoutIntent | null => {
     if (legacyRead || !legacy) return null;
     legacyRead = true;
@@ -137,57 +157,61 @@ export function createCheckoutAttempt(
     try { legacy.clear(); } catch { /* best effort */ }
     if (!validKey(raw)) return null;
     const intent: CheckoutIntent = { key: raw, principal, bodyHash: UNKNOWN_BODY_HASH, state: 'sent', createdAt: now(), sentAt: now() };
-    persist(intent);
+    put(intent);
     return intent;
   };
-
-  const read = (): CheckoutIntent | null => {
-    if (memory) return memory;
-    try {
-      memory = decodeIntent(store.get());
-    } catch {
-      memory = null;
-    }
-    return memory;
+  const owned = (key: string, principal: CheckoutPrincipal) => read().find((i) => i.key === key && samePrincipal(i.principal, principal));
+  const currentFor = (principal: CheckoutPrincipal): CheckoutIntent | null => {
+    const intent = read().find((i) => i.principal.userId === principal.userId) ?? (read().length === 0 ? adoptLegacy(principal) : null);
+    return intent && samePrincipal(intent.principal, principal) ? intent : null;
   };
-
-  const samePrincipal = (a: CheckoutPrincipal, b: CheckoutPrincipal) => a.userId === b.userId && a.generation === b.generation;
-
+  // Called only by a freshly authorized operation/recovery. A returning account
+  // inherits its own unresolved key, but an old generation cannot complete it.
+  const resumeFor = (principal: CheckoutPrincipal): CheckoutIntent | null => {
+    const intent = read().find((i) => i.principal.userId === principal.userId) ?? (read().length === 0 ? adoptLegacy(principal) : null);
+    if (!intent) return null;
+    if (samePrincipal(intent.principal, principal)) return intent;
+    if (intent.state !== 'sent') return null;
+    const adopted = { ...intent, principal };
+    put(adopted);
+    return adopted;
+  };
   return {
-    /** The intent this process holds, whoever it belongs to (the hook filters by principal). */
-    current(): CheckoutIntent | null {
-      return read();
-    },
-    /** The open intent for THIS principal, or null. */
-    currentFor(principal: CheckoutPrincipal): CheckoutIntent | null {
-      const intent = read() ?? adoptLegacy(principal);
-      return intent && samePrincipal(intent.principal, principal) ? intent : null;
-    },
-    /** Reuse, supersede, mint — or refuse to decide while a sent intent with another body is unresolved. Never throws. */
+    current(): CheckoutIntent | null { return read().find((i) => i.principal.userId === activeUserId) ?? null; },
+    currentFor,
+    resumeFor,
     begin(input: { principal: CheckoutPrincipal; bodyHash: string }): BeginOutcome {
-      const existing = read() ?? adoptLegacy(input.principal);
-      if (existing && samePrincipal(existing.principal, input.principal)) {
+      const existing = resumeFor(input.principal);
+      if (existing) {
         if (existing.bodyHash === input.bodyHash) return { kind: 'reused', key: existing.key, state: existing.state };
         if (existing.state === 'sent') return { kind: 'ambiguous', key: null, pending: existing };
-        // an open intent for another body: the person changed their mind before anything left the device
       }
       const intent: CheckoutIntent = { key: mint(), principal: input.principal, bodyHash: input.bodyHash, state: 'open', createdAt: now() };
-      persist(intent);
+      put(intent);
       return { kind: 'new', key: intent.key };
     },
-    /** The request left the device: until an answer comes back, the outcome is unknown. */
-    markSent(key: string): void {
-      const intent = read();
-      if (intent && intent.key === key && intent.state !== 'sent') persist({ ...intent, state: 'sent', sentAt: now() });
+    markSent(key: string, principal: CheckoutPrincipal): void {
+      const intent = owned(key, principal);
+      if (intent && intent.state !== 'sent') put({ ...intent, state: 'sent', sentAt: now() });
     },
-    /** A definitive answer came back without an order (a validation failure): the same key may try again, a changed body may supersede. */
-    markOpen(key: string): void {
-      const intent = read();
-      if (intent && intent.key === key && intent.state !== 'open') persist({ ...intent, state: 'open' });
+    markOpen(key: string, principal: CheckoutPrincipal): void {
+      const intent = owned(key, principal);
+      if (intent && intent.state !== 'open') put({ ...intent, state: 'open' });
     },
-    /** The order was placed (or found placed), or the cart changed: whatever comes next is a new intent. */
-    end(): void {
-      persist(null);
+    /** An authoritative completion can remove only the exact operation. */
+    end(key: string, principal: CheckoutPrincipal): boolean {
+      if (!owned(key, principal)) return false;
+      memory = read().filter((i) => !(i.key === key && samePrincipal(i.principal, principal)));
+      persist();
+      return true;
+    },
+    /** Cart edits supersede an unsent intent, but never an unknown outcome. */
+    invalidateCart(principal: CheckoutPrincipal): void {
+      const intent = currentFor(principal);
+      if (intent?.state === 'open') {
+        memory = read().filter((i) => i !== intent);
+        persist();
+      }
     },
   };
 }

@@ -58,10 +58,10 @@ describe('the intent', () => {
     const attempt = createCheckoutAttempt(memoryStore(), mint);
     const first = attempt.begin({ principal: A, bodyHash: DELIVERY });
     expect(first).toEqual({ kind: 'new', key: 'chk_test_1' });
-    attempt.markSent('chk_test_1');
+    attempt.markSent('chk_test_1', A);
     expect(attempt.begin({ principal: A, bodyHash: DELIVERY })).toEqual({ kind: 'reused', key: 'chk_test_1', state: 'sent' });
     expect(attempt.begin({ principal: A, bodyHash: DELIVERY })).toEqual({ kind: 'reused', key: 'chk_test_1', state: 'sent' });
-    attempt.end();
+    attempt.end(attempt.current()!.key, A);
     expect(attempt.begin({ principal: A, bodyHash: DELIVERY })).toEqual({ kind: 'new', key: 'chk_test_2' });
   });
 
@@ -75,21 +75,21 @@ describe('the intent', () => {
   it('a SENT intent for a changed body is AMBIGUOUS: no key is handed out until the server has been asked', () => {
     const attempt = createCheckoutAttempt(memoryStore(), mint);
     attempt.begin({ principal: A, bodyHash: DELIVERY });
-    attempt.markSent('chk_test_1');
+    attempt.markSent('chk_test_1', A);
     const out = attempt.begin({ principal: A, bodyHash: PICKUP });
     expect(out).toMatchObject({ kind: 'ambiguous', key: null, pending: { key: 'chk_test_1', bodyHash: DELIVERY, state: 'sent' } });
     // still the same intent: nothing was minted, nothing was ended
     expect(attempt.current()?.key).toBe('chk_test_1');
     // the server answered "nothing placed": the caller ends it, and the new body gets its own key
-    attempt.end();
+    attempt.end(attempt.current()!.key, A);
     expect(attempt.begin({ principal: A, bodyHash: PICKUP })).toEqual({ kind: 'new', key: 'chk_test_2' });
   });
 
   it('a definitive failure re-opens the intent: the same key may retry, and a changed body may now supersede', () => {
     const attempt = createCheckoutAttempt(memoryStore(), mint);
     attempt.begin({ principal: A, bodyHash: DELIVERY });
-    attempt.markSent('chk_test_1');
-    attempt.markOpen('chk_test_1');
+    attempt.markSent('chk_test_1', A);
+    attempt.markOpen('chk_test_1', A);
     expect(attempt.begin({ principal: A, bodyHash: DELIVERY })).toEqual({ kind: 'reused', key: 'chk_test_1', state: 'open' });
     expect(attempt.begin({ principal: A, bodyHash: PICKUP })).toEqual({ kind: 'new', key: 'chk_test_2' });
   });
@@ -97,10 +97,10 @@ describe('the intent', () => {
   it('markSent/markOpen touch only the intent they name', () => {
     const attempt = createCheckoutAttempt(memoryStore(), mint);
     attempt.begin({ principal: A, bodyHash: DELIVERY });
-    attempt.markSent('chk_test_other');
+    attempt.markSent('chk_test_other', A);
     expect(attempt.current()?.state).toBe('open');
-    attempt.markSent('chk_test_1');
-    attempt.markOpen('chk_test_other');
+    attempt.markSent('chk_test_1', A);
+    attempt.markOpen('chk_test_other', A);
     expect(attempt.current()?.state).toBe('sent');
   });
 });
@@ -110,13 +110,14 @@ describe('the principal', () => {
     const store = memoryStore();
     const attempt = createCheckoutAttempt(store, mint);
     attempt.begin({ principal: A, bodyHash: DELIVERY });
-    attempt.markSent('chk_test_1');
+    attempt.markSent('chk_test_1', A);
     expect(attempt.currentFor(B)).toBeNull();
     expect(attempt.currentFor(A2)).toBeNull();
     expect(attempt.currentFor(A)?.key).toBe('chk_test_1');
-    // B on the shared device: a fresh key, and A's unresolved intent is gone from the device
+    // B gets a separate key; A's unresolved intent stays privately recoverable.
     expect(attempt.begin({ principal: B, bodyHash: DELIVERY })).toEqual({ kind: 'new', key: 'chk_test_2' });
     expect(attempt.current()?.principal).toEqual(B);
+    expect(attempt.currentFor(A)?.key).toBe('chk_test_1');
   });
 });
 
@@ -125,7 +126,7 @@ describe('durability', () => {
     const store = memoryStore();
     const first = createCheckoutAttempt(store, mint);
     first.begin({ principal: A, bodyHash: DELIVERY });
-    first.markSent('chk_test_1');
+    first.markSent('chk_test_1', A);
     const fresh = createCheckoutAttempt(store, mint);
     expect(fresh.currentFor(A)).toMatchObject({ key: 'chk_test_1', bodyHash: DELIVERY, state: 'sent' });
     expect(fresh.begin({ principal: A, bodyHash: DELIVERY })).toEqual({ kind: 'reused', key: 'chk_test_1', state: 'sent' });
@@ -146,9 +147,9 @@ describe('durability', () => {
     const out = attempt.begin({ principal: A, bodyHash: DELIVERY });
     expect(out).toMatchObject({ kind: 'ambiguous', pending: { key: 'chk_legacy_aaaaaaaaaa', bodyHash: UNKNOWN_BODY_HASH, state: 'sent' } });
     expect(legacy.raw()).toBeNull();
-    expect(JSON.parse(store.raw()!)).toMatchObject({ key: 'chk_legacy_aaaaaaaaaa', principal: A });
+    expect(JSON.parse(store.raw()!).intents).toContainEqual(expect.objectContaining({ key: 'chk_legacy_aaaaaaaaaa', principal: A }));
     // resolved: nothing placed → end → a real intent
-    attempt.end();
+    attempt.end(attempt.current()!.key, A);
     expect(attempt.begin({ principal: A, bodyHash: DELIVERY })).toEqual({ kind: 'new', key: 'chk_test_1' });
     // a second process never adopts it again
     const again = createCheckoutAttempt(memoryStore(), mint, Date.now, legacy);
@@ -159,7 +160,7 @@ describe('durability', () => {
     const stuck = { get: () => 'chk_legacy_stuck_key', clear: () => { throw new Error('mmkv read-only'); } };
     const attempt = createCheckoutAttempt(memoryStore(), mint, Date.now, stuck);
     expect(attempt.begin({ principal: A, bodyHash: DELIVERY }).kind).toBe('ambiguous');
-    attempt.end(); // the server said nothing was placed
+    attempt.end(attempt.current()!.key, A); // the server said nothing was placed
     expect(attempt.begin({ principal: A, bodyHash: DELIVERY })).toEqual({ kind: 'new', key: 'chk_test_1' });
     expect(attempt.begin({ principal: A, bodyHash: PICKUP })).toEqual({ kind: 'new', key: 'chk_test_2' });
   });
@@ -169,7 +170,7 @@ describe('durability', () => {
     const attempt = createCheckoutAttempt(broken, mint);
     expect(attempt.begin({ principal: A, bodyHash: DELIVERY })).toEqual({ kind: 'new', key: 'chk_test_1' });
     expect(attempt.begin({ principal: A, bodyHash: DELIVERY })).toEqual({ kind: 'reused', key: 'chk_test_1', state: 'open' });
-    expect(() => attempt.end()).not.toThrow();
+    expect(() => attempt.end(attempt.current()!.key, A)).not.toThrow();
   });
 
   it('names the storage keys apart: the intent record is not written under the #990 slot', () => {
@@ -238,5 +239,47 @@ describe('[AX372 R1] an unresolved intent is settled by asking the server, with 
     const stuck = answers({ status: 'in_flight' });
     expect(await settleUnresolvedIntent(stuck.probe, { sleep: async () => { gone = true; }, stopped: () => gone })).toEqual({ status: 'in_flight' });
     expect(stuck.asked()).toBe(1);
+  });
+});
+
+
+describe('[SX391] account return preserves unresolved minimal metadata', () => {
+  it('A → B → process restart → A new login recovers K without exposing it to B', () => {
+    const store = memoryStore();
+    const first = createCheckoutAttempt(store, mint);
+    const a = first.begin({ principal: A, bodyHash: DELIVERY });
+    if (a.kind === 'ambiguous') throw new Error('unexpected initial ambiguity');
+    first.markSent(a.key, A);
+    const b = first.begin({ principal: B, bodyHash: DELIVERY });
+    const fresh = createCheckoutAttempt(store, mint);
+    expect(fresh.currentFor(B)?.key).toBe(b.key);
+    const resumed = fresh.begin({ principal: A2, bodyHash: PICKUP });
+    expect(resumed).toMatchObject({ kind: 'ambiguous', pending: { key: a.key, state: 'sent', principal: A2 } });
+    expect(fresh.currentFor(B)?.key).toBe(b.key);
+  });
+});
+
+
+describe('[SX391] intent transitions compare both key and principal', () => {
+  it('old-generation completion and state changes leave the adopted intent intact', () => {
+    const attempt = createCheckoutAttempt(memoryStore(), mint);
+    attempt.begin({ principal: A, bodyHash: DELIVERY }); attempt.markSent('chk_test_1', A);
+    attempt.resumeFor(A2);
+    attempt.markOpen('chk_test_1', A);
+    expect(attempt.end('chk_test_1', A)).toBe(false);
+    expect(attempt.currentFor(A2)).toMatchObject({ state: 'sent' });
+    attempt.markOpen('chk_test_1', A2);
+    attempt.markSent('chk_test_1', A);
+    expect(attempt.currentFor(A2)).toMatchObject({ state: 'open' });
+    expect(attempt.end('chk_test_wrong', A2)).toBe(false);
+    expect(attempt.end('chk_test_1', A2)).toBe(true);
+  });
+  it('the old v2 intent survives migration and another account using the device', () => {
+    const store = memoryStore(JSON.stringify({ key: 'chk_v2_pending', principal: A, bodyHash: DELIVERY, state: 'sent', createdAt: 1, sentAt: 2 }));
+    const migrated = createCheckoutAttempt(store, mint);
+    expect(migrated.currentFor(A)).toMatchObject({ key: 'chk_v2_pending', sentAt: 2 });
+    migrated.begin({ principal: B, bodyHash: DELIVERY });
+    const restarted = createCheckoutAttempt(store, mint);
+    expect(restarted.resumeFor(A2)).toMatchObject({ key: 'chk_v2_pending', principal: A2, state: 'sent', sentAt: 2 });
   });
 });

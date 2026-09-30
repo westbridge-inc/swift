@@ -27,7 +27,15 @@ const env = vi.hoisted(() => {
   process.env['EXPO_PUBLIC_API_URL'] = 'https://api.test';
   return {
     previousApiUrl,
-    session: { userId: 'customer-1', generation: 1, accessToken: 'access-1' },
+    session: { userId: 'customer-1', generation: 1, accessToken: 'access-1', refreshToken: 'refresh-1' },
+    invalidations: [] as unknown[],
+    updates: [] as unknown[],
+    variables: null as any,
+    callbacks: null as any,
+    resetAttempt: () => {},
+    afterMutation: null as null | (() => void),
+    frame: null as null | { refs: Array<{ current: unknown }>; states: unknown[]; refIndex: number; stateIndex: number },
+    mutationView: {} as Record<string, any>,
     mutation: null as null | Record<string, any>,
     effects: [] as Array<() => void | (() => void)>,
   };
@@ -37,8 +45,16 @@ vi.mock('react', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react')>();
   return {
     ...actual,
-    useRef: <T,>(value: T) => ({ current: value }),
-    useState: <T,>(value: T) => [value, () => {}],
+    useRef: <T,>(value: T) => {
+      if (!env.frame) return { current: value };
+      const i = env.frame.refIndex++;
+      return (env.frame.refs[i] ??= { current: value }) as { current: T };
+    },
+    useState: <T,>(value: T) => {
+      const frame = env.frame; const i = frame ? frame.stateIndex++ : -1;
+      if (frame && !(i in frame.states)) frame.states[i] = value;
+      return [frame ? frame.states[i] : value, (next: T) => { env.updates.push(next); if (frame) frame.states[i] = next; }];
+    },
     useEffect: (effect: () => void | (() => void)) => { env.effects.push(effect); },
   };
 });
@@ -46,14 +62,33 @@ vi.mock('@tanstack/react-query', () => ({
   keepPreviousData: Symbol('keepPreviousData'),
   useInfiniteQuery: vi.fn(),
   useQuery: vi.fn(),
-  useQueryClient: () => ({ invalidateQueries: () => Promise.resolve() }),
-  useMutation: (options: Record<string, any>) => { env.mutation = options; return options; },
+  useQueryClient: () => ({ invalidateQueries: (key: unknown) => { env.invalidations.push(key); return Promise.resolve(); } }),
+  useMutation: (options: Record<string, any>) => {
+    env.mutation = options;
+    return { ...options, ...env.mutationView, mutateAsync: async (variables: unknown, callbacks: unknown) => {
+      env.variables = variables; env.callbacks = callbacks;
+      try { const result = await options['mutationFn'](variables); env.afterMutation?.(); return result; }
+      catch (error) { env.afterMutation?.(); throw error; }
+    },
+      mutate: (variables: unknown, callbacks: unknown) => { env.variables = variables; env.callbacks = callbacks; void options['mutationFn'](variables).catch(() => {}); } };
+  },
 }));
-vi.mock('../stores/authStore', () => ({
-  getAuthSessionSnapshot: () => env.session,
-  isAuthSessionSnapshotCurrent: () => true,
-  useAuthStore: { getState: () => ({ rotateTokensIfCurrent: () => null, logoutIfCurrent: () => false }) },
-}));
+vi.mock('../stores/authStore', async () => {
+  const { samePrincipalBoundary } = await vi.importActual<typeof import('../lib/authSession')>('../lib/authSession');
+  class AuthSessionBoundaryError extends Error { constructor() { super('Account changed'); this.name = 'AuthSessionBoundaryError'; } }
+  return {
+    AuthSessionBoundaryError,
+    getAuthSessionSnapshot: () => env.session,
+    requireAuthSessionForPrincipal: (principal: typeof env.session) => {
+      if (!samePrincipalBoundary(env.session, principal)) throw new AuthSessionBoundaryError();
+      return env.session;
+    },
+    isAuthSessionSnapshotCurrent: (s: typeof env.session) => samePrincipalBoundary(s, env.session) && s.refreshToken === env.session.refreshToken,
+    useAuthStore: Object.assign((select: (state: any) => unknown) => select({ user: { id: env.session.userId }, sessionGeneration: env.session.generation }), {
+      getState: () => ({ rotateTokensIfCurrent: () => null, logoutIfCurrent: () => false }),
+    }),
+  };
+});
 vi.mock('../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: null }) } }));
 vi.mock('expo-constants', () => ({ default: { expoConfig: {} } }));
 vi.mock('react-native', () => ({ Platform: { OS: 'ios' }, TurboModuleRegistry: { get: () => null } }));
@@ -61,19 +96,24 @@ vi.mock('../lib/analytics', () => ({ track: vi.fn() }));
 vi.mock('../lib/marketDepthMemory', () => ({ rememberedMarketDepth: () => null, rememberMarketDepth: () => {} }));
 vi.mock('../lib/checkoutAttemptStore', async () => {
   const { createCheckoutAttempt } = await vi.importActual<typeof import('../lib/checkoutAttempt')>('../lib/checkoutAttempt');
-  let stored: string | null = null;
   let minted = 0;
-  return {
-    checkoutAttempt: createCheckoutAttempt(
-      { get: () => stored, set: (value: string) => { stored = value; }, clear: () => { stored = null; } },
-      () => `chk_test_${++minted}_0000000000`,
-    ),
+  const fresh = () => {
+    let stored: string | null = null;
+    return createCheckoutAttempt({ get: () => stored, set: (value: string) => { stored = value; }, clear: () => { stored = null; } }, () => `chk_test_${++minted}_0000000000`);
   };
+  let attempt = fresh();
+  env.resetAttempt = () => { attempt = fresh(); };
+  return { checkoutAttempt: new Proxy({}, { get: (_target, key) => Reflect.get(attempt, key) }) };
 });
 
 import { api } from '../services/api';
+import { stableBodyHash } from '../lib/checkoutAttempt';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
-import { CheckoutAlreadyPlacedError, CheckoutOutcomeUnknownError, useCheckoutRecovery, usePlaceOrder } from './customer';
+import { CheckoutAlreadyPlacedError, CheckoutOutcomeUnknownError, useAddToCart, useUpdateCartItem, useRemoveCartItem, useClearCart, useSetCartAddress, useSetCartTip, useRemoveCartPromo, useReorder, useCheckoutRecovery, usePlaceOrder } from './customer';
+
+// The mocked hook runtime is invoked directly by these deterministic schedulers.
+const renderPlaceOrder = usePlaceOrder;
+const renderCheckoutRecovery = useCheckoutRecovery;
 
 type Reply = { status: number; data?: unknown } | 'offline' | 'timeout';
 
@@ -91,21 +131,26 @@ let seen: InternalAxiosRequestConfig[] = [];
 let placeReplies: Reply[] = [];
 /** Answered in order; the last answer repeats (a key that stays in flight). */
 let probeReplies: Reply[] = [];
+let beforeReply: ((config: InternalAxiosRequestConfig) => Promise<void>) | null = null;
 
 const originalAdapter = api.defaults.adapter;
 beforeEach(() => {
   vi.useFakeTimers();
+  env.session = { userId: 'customer-1', generation: 1, accessToken: 'access-1', refreshToken: 'refresh-1' };
+  env.invalidations = []; env.updates = []; beforeReply = null; env.afterMutation = null; env.frame = null; env.mutationView = {};
   seen = [];
   placeReplies = [];
   probeReplies = [];
   env.mutation = null;
   env.effects = [];
-  checkoutAttempt.end();
+  env.resetAttempt();
   const adapter: AxiosAdapter = async (config) => {
     seen.push(config);
     const probe = config.method === 'get' && (config.url ?? '').startsWith('/customer/checkout/receipts/');
     const place = config.method === 'post' && config.url === '/customer/checkout';
-    const reply = probe ? (probeReplies.length > 1 ? probeReplies.shift() : probeReplies[0]) : place ? placeReplies.shift() : undefined;
+    const cart = (config.url ?? '').startsWith('/customer/cart') || (config.url ?? '').endsWith('/reorder');
+    const reply = probe ? (probeReplies.length > 1 ? probeReplies.shift() : probeReplies[0]) : place ? placeReplies.shift() : cart ? { status: 200, data: { success: true, data: {} } } : undefined;
+    if (beforeReply) await beforeReply(config);
     if (!reply) throw new Error(`unexpected request: ${config.method} ${config.url}`);
     if (reply === 'offline') throw new AxiosError('Network Error', AxiosError.ERR_NETWORK, config);
     if (reply === 'timeout') throw new AxiosError('timeout of 10000ms exceeded', AxiosError.ECONNABORTED, config);
@@ -136,16 +181,15 @@ const posts = () => requests().filter((r) => r.startsWith('POST '));
 /** "Place order", through the real hook, to the end (every backoff wait run
  *  out), then its settle callbacks as React Query would run them. */
 async function placeOrder(payload: unknown): Promise<{ ok: true; data: unknown } | { ok: false; err: any }> {
-  // Rendered outside React: the runtimes above hand back what it registers.
-  (usePlaceOrder as () => unknown)();
+  const hook = renderPlaceOrder();
   const mutation = env.mutation!;
-  const run = (mutation['mutationFn'] as (p: unknown) => Promise<unknown>)(payload)
-    .then((data) => ({ ok: true as const, data }), (err: unknown) => ({ ok: false as const, err }));
+  const run = hook.mutateAsync(payload).then((data) => ({ ok: true as const, data }), (err: unknown) => ({ ok: false as const, err }));
+  const operation = env.variables;
   await vi.runAllTimersAsync();
   const out = await run;
-  if (out.ok) mutation['onSuccess']?.(out.data, payload);
-  else mutation['onError']?.(out.err, payload);
-  mutation['onSettled']?.();
+  if (out.ok) mutation['onSuccess']?.(out.data, operation);
+  else mutation['onError']?.(out.err, operation);
+  mutation['onSettled']?.(out.ok ? out.data : undefined, out.ok ? null : out.err, operation);
   return out;
 }
 
@@ -286,4 +330,221 @@ describe('[AX372 R1] a changed body over an unresolved K asks first, and mints n
     expect((out as { err: CheckoutAlreadyPlacedError }).err.orderIds).toEqual(['order-7']);
     expect(checkoutAttempt.currentFor(PRINCIPAL)).toBeNull();
   });
+});
+
+
+// The request adapter and intent store stay real; only the hook scheduler is
+// controlled so account switches can land at exact await/callback boundaries.
+describe('[SX391] checkout belongs to its captured account through completion', () => {
+  const B = { userId: 'customer-b', generation: 3, accessToken: 'access-b', refreshToken: 'refresh-b' };
+  const start = (payload: unknown, options?: any) => {
+    const hook = renderPlaceOrder();
+    const mutation = env.mutation!;
+    const result = hook.mutateAsync(payload, options).then((data: unknown) => ({ ok: true as const, data }), (err: unknown) => ({ ok: false as const, err }));
+    return { mutation, result, operation: env.variables, callbacks: env.callbacks };
+  };
+  const switchToB = () => {
+    env.session = B;
+    const b = checkoutAttempt.begin({ principal: B, bodyHash: 'b-cart' });
+    if (b.kind === 'ambiguous') throw new Error('unexpected pending B');
+    return b.key;
+  };
+  for (const schedule of ['backoff', 'probe-response'] as const) {
+    it(`stops A at ${schedule}; no B checkout or clearing of B intent`, async () => {
+      const K = await unresolvedFirstOrder();
+      seen = []; probeReplies = schedule === 'backoff' ? [IN_FLIGHT, NONE] : [NONE]; placeReplies = [ORDER];
+      let bKey = '';
+      if (schedule === 'probe-response') beforeReply = async () => { if (!bKey) bKey = switchToB(); };
+      const pending = start(PICKUP);
+      if (schedule === 'backoff') {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(requests()).toEqual([`GET ${K}`]);
+        bKey = switchToB();
+      }
+      await vi.runAllTimersAsync();
+      const answer = await pending.result;
+      expect(answer.ok).toBe(false);
+      expect(posts()).toEqual([]);
+      expect(checkoutAttempt.currentFor(B)?.key).toBe(bKey);
+      expect(seen.every((c) => c.headers.get('Authorization') === 'Bearer access-1')).toBe(true);
+    });
+  }
+  it('the first async key boundary cannot submit A payload after B takes over', async () => {
+    placeReplies = [ORDER];
+    const pending = start(DELIVERY);
+    const bKey = switchToB();
+    await vi.runAllTimersAsync();
+    expect((await pending.result).ok).toBe(false);
+    expect(posts()).toEqual([]);
+    expect(checkoutAttempt.currentFor(B)?.key).toBe(bKey);
+  });
+  for (const reply of [ORDER, failure(422, 'IDEMPOTENCY_KEY_REUSED'), failure(400, 'VALIDATION_ERROR')]) {
+    it(`drops account-specific result after a checkout await (${reply === ORDER ? 'success' : String((reply as { status: number }).status)})`, async () => {
+      placeReplies = [reply];
+      let bKey = '';
+      beforeReply = async () => { bKey = switchToB(); };
+      const pending = start(DELIVERY);
+      await vi.runAllTimersAsync();
+      const answer = await pending.result;
+      expect(answer.ok).toBe(false);
+      if (!answer.ok) expect((answer.err as Error).name).toBe('AuthSessionBoundaryError');
+      expect(checkoutAttempt.currentFor(B)?.key).toBe(bKey);
+      expect(env.invalidations).toEqual([]);
+    });
+  }
+  it('a late A success callback cannot complete or invalidate B intent', async () => {
+    placeReplies = [ORDER];
+    const ui = vi.fn();
+    const pending = start(DELIVERY, { onSuccess: ui });
+    await vi.runAllTimersAsync();
+    const answer = await pending.result;
+    expect(answer.ok).toBe(true);
+    const bKey = switchToB();
+    pending.mutation['onSuccess']?.(answer.ok ? answer.data : undefined, pending.operation);
+    pending.callbacks.onSuccess(answer.ok ? answer.data : undefined, pending.operation);
+    expect(ui).not.toHaveBeenCalled();
+    expect(checkoutAttempt.currentFor(B)?.key).toBe(bKey);
+    expect(env.invalidations).toEqual([]);
+  });
+  it('restart recovery cannot display A order or complete B after a probe await', async () => {
+    await unresolvedFirstOrder();
+    probeReplies = [placed(['order-a'])];
+    let bKey = '';
+    beforeReply = async () => { bKey = switchToB(); };
+    env.invalidations = []; env.updates = [];
+    await recoverOnRestart();
+    expect(checkoutAttempt.currentFor(B)?.key).toBe(bKey);
+    expect(env.updates).not.toContainEqual(['order-a']);
+    expect(env.invalidations).toEqual([]);
+  });
+  it('cart refill preserves unresolved K and its placed receipt prevents K2', async () => {
+    const K = await unresolvedFirstOrder();
+    useAddToCart();
+    const cart = env.mutation!;
+    const principal = cart['onMutate']();
+    const item = { vendorId: 'v1', itemId: 'i1' };
+    const added = await cart['mutationFn'](item);
+    cart['onSuccess']?.(added, item, principal);
+    expect(checkoutAttempt.currentFor(PRINCIPAL)).toMatchObject({ key: K, state: 'sent' });
+    seen = []; probeReplies = [placed(['order-a'])]; placeReplies = [ORDER];
+    const answer = await placeOrder(PICKUP);
+    expect(answer.ok).toBe(false);
+    if (!answer.ok) expect(answer.err).toBeInstanceOf(CheckoutAlreadyPlacedError);
+    expect(posts()).toEqual([]);
+  });
+  it('a late A error callback cannot invalidate B or run the old screen callback', async () => {
+    placeReplies = [failure(422, 'IDEMPOTENCY_KEY_REUSED')];
+    const ui = vi.fn();
+    const pending = start(DELIVERY, { onError: ui });
+    await vi.runAllTimersAsync();
+    const answer = await pending.result;
+    expect(answer.ok).toBe(false);
+    if (answer.ok) throw new Error('expected refusal');
+    const bKey = switchToB();
+    pending.mutation['onError']?.(answer.err, pending.operation);
+    pending.callbacks.onError(answer.err, pending.operation);
+    expect(ui).not.toHaveBeenCalled();
+    expect(checkoutAttempt.currentFor(B)?.key).toBe(bKey);
+    expect(env.invalidations).toEqual([]);
+  });
+  it('returning A adopts its sent key, and an old A generation cannot complete it', async () => {
+    const K = await unresolvedFirstOrder();
+    seen = []; probeReplies = [placed(['order-a'])];
+    const returned = { ...env.session, generation: 7, accessToken: 'access-returned', refreshToken: 'refresh-returned' };
+    beforeReply = async () => {
+      switchToB();
+      env.session = returned;
+      expect(checkoutAttempt.begin({ principal: returned, bodyHash: stableBodyHash(DELIVERY) })).toMatchObject({ kind: 'reused', key: K });
+    };
+    const pending = start(PICKUP);
+    await vi.runAllTimersAsync();
+    const answer = await pending.result;
+    expect(answer.ok).toBe(false);
+    if (!answer.ok) expect((answer.err as Error).name).toBe('AuthSessionBoundaryError');
+    expect(checkoutAttempt.currentFor(returned)).toMatchObject({ key: K, state: 'sent' });
+    expect(posts()).toEqual([]);
+  });
+  it('a late A settled callback cannot unlock a newer B checkout on the same hook', async () => {
+    const hook = renderPlaceOrder(); const mutation = env.mutation!;
+    placeReplies = [ORDER, ORDER, ORDER];
+    const a = hook.mutateAsync(DELIVERY); const aOperation = env.variables;
+    await vi.runAllTimersAsync(); await a;
+    switchToB();
+    // B's cart intent differs, but is unsent and may be superseded.
+    const releases: Array<() => void> = [];
+    beforeReply = () => new Promise<void>((resolve) => { releases.push(resolve); });
+    const b = hook.mutateAsync(PICKUP); const bOperation = env.variables;
+    await vi.advanceTimersByTimeAsync(0);
+    mutation['onSettled']?.(undefined, null, aOperation);
+    const duplicate = hook.mutateAsync(PICKUP).then(() => null, (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    for (const release of releases) release();
+    await b;
+    expect(await duplicate).toMatchObject({ name: 'CheckoutInFlightError' });
+    expect(posts()).toHaveLength(2);
+    mutation['onSettled']?.(undefined, null, bOperation);
+  });
+  const cartChanges: Array<[string, () => unknown, unknown]> = [
+    ['add', useAddToCart, { vendorId: 'v1', itemId: 'i1' }], ['update', useUpdateCartItem, { id: 'i1', quantity: 2 }],
+    ['remove', useRemoveCartItem, 'i1'], ['clear', useClearCart, undefined], ['address', useSetCartAddress, 'a1'],
+    ['tip', useSetCartTip, 100], ['promo', useRemoveCartPromo, undefined], ['reorder', useReorder, 'o1'],
+  ];
+  it.each(cartChanges)('%s preserves sent K; a late cart success cannot clear B', async (_name, render, payload) => {
+    const K = await unresolvedFirstOrder();
+    render(); const mutation = env.mutation!; const principal = mutation['onMutate']();
+    const changed = await mutation['mutationFn'](payload);
+    mutation['onSuccess'](changed, payload, principal);
+    expect(checkoutAttempt.currentFor(PRINCIPAL)).toMatchObject({ key: K, state: 'sent' });
+    const bKey = switchToB();
+    const before = env.invalidations.length;
+    mutation['onSuccess'](changed, payload, principal);
+    expect(checkoutAttempt.currentFor(B)?.key).toBe(bKey);
+    expect(env.invalidations).toHaveLength(before);
+  });
+  it('an open unsent intent is safely superseded after a successful cart change', async () => {
+    const initial = checkoutAttempt.begin({ principal: PRINCIPAL, bodyHash: stableBodyHash(DELIVERY) });
+    useAddToCart(); const mutation = env.mutation!; const principal = mutation['onMutate']();
+    const item = { vendorId: 'v1', itemId: 'i1' };
+    mutation['onSuccess'](await mutation['mutationFn'](item), item, principal);
+    expect(checkoutAttempt.currentFor(PRINCIPAL)).toBeNull();
+    expect(checkoutAttempt.begin({ principal: PRINCIPAL, bodyHash: stableBodyHash(DELIVERY) }).key).not.toBe(initial.key);
+  });
+
+  for (const reply of [ORDER, failure(422, 'IDEMPOTENCY_KEY_REUSED')]) {
+    it(`checks account again after the mutation scheduler yields (${reply === ORDER ? 'success' : 'error'})`, async () => {
+      placeReplies = [reply];
+      let bKey = '';
+      env.afterMutation = () => { bKey = switchToB(); };
+      const pending = start(DELIVERY);
+      await vi.runAllTimersAsync();
+      const answer = await pending.result;
+      expect(answer.ok).toBe(false);
+      if (!answer.ok) expect((answer.err as Error).name).toBe('AuthSessionBoundaryError');
+      expect(checkoutAttempt.currentFor(B)?.key).toBe(bKey);
+    });
+  }
+
+  it('an account switch hides already-settled mutation data and internal operation variables', async () => {
+    env.frame = { refs: [], states: [], refIndex: 0, stateIndex: 0 };
+    const render = () => { env.frame!.refIndex = 0; env.frame!.stateIndex = 0; return renderPlaceOrder(); };
+    const hook = render(); placeReplies = [ORDER];
+    const pending = hook.mutateAsync(DELIVERY); await vi.runAllTimersAsync(); const data = await pending;
+    env.mutationView = { data, variables: env.variables, isSuccess: true, isError: false, isPending: false, isIdle: false, status: 'success' };
+    const own = render();
+    expect(own.isSuccess).toBe(true); expect(own.data).toEqual(data); expect(own.variables).toEqual(DELIVERY);
+    switchToB();
+    const other = render();
+    expect(other.isSuccess).toBe(false); expect(other.data).toBeUndefined(); expect(other.variables).toBeUndefined();
+    expect(other.status).toBe('idle');
+  });
+  it('an account switch hides an already-displayed recovered receipt before the next effect runs', async () => {
+    await unresolvedFirstOrder(); probeReplies = [placed(['order-a'])];
+    env.effects = []; env.frame = { refs: [], states: [], refIndex: 0, stateIndex: 0 };
+    const render = () => { env.frame!.refIndex = 0; env.frame!.stateIndex = 0; return renderCheckoutRecovery(); };
+    render(); env.effects[0]!(); await vi.runAllTimersAsync();
+    expect(render().placedOrderIds).toEqual(['order-a']);
+    switchToB();
+    expect(render()).toEqual({ recovering: false, placedOrderIds: null });
+  });
+
 });

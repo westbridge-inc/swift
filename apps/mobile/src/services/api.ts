@@ -446,20 +446,20 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
-  }, idempotencyKey: string) =>
+  }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
     // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
     // the checkout hook (lib/checkoutAttempt), reused by every retry, ended
-    // only when the order is placed or the cart changes. The server refuses
+    // only when the order is placed or an unsent cart intent changes. The server refuses
     // a concurrent twin and replays a finished one — so a double tap, a
     // timed-out response and a reopened app all resolve to ONE order.
-    api.post('/customer/checkout', data, {
+    api.post('/customer/checkout', data, capturedAuthConfig(session, {
       headers: { 'Idempotency-Key': idempotencyKey },
-    }),
+    })),
   /** [MOB-020] What became of a checkout attempt whose answer never arrived:
    *  placed (the receipt), in flight (the key is claimed), or nothing. Asked
    *  BEFORE a different order is placed over an unresolved one. */
-  checkoutReceipt: (idempotencyKey: string) =>
-    api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`),
+  checkoutReceipt: (idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`, capturedAuthConfig(session)),
   getNotifications: () => api.get('/customer/notifications'),
   reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
   ratingTags: () => api.get('/customer/rating-tags'),

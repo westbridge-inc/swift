@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient, type MutateOptions } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
 import { checkoutFailureOutcome, recordCheckoutOutcome, settleUnresolvedIntent, stableBodyHash, type CheckoutPrincipal, type ReceiptProbe } from '../lib/checkoutAttempt';
-import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
+import { AuthSessionBoundaryError, getAuthSessionSnapshot, requireAuthSessionForPrincipal, useAuthStore } from '../stores/authStore';
 import { homePlaceholderData, homeQueryKey, isHomeFeed, marketDepthVerdict, retainedHomeData } from '../lib/homeReliability';
 import { rememberMarketDepth, rememberedMarketDepth, type MarketDepthBody } from '../lib/marketDepthMemory';
 import { isAxiosError } from 'axios';
 import { marketApi, customerApi, discoveryApi, moderationApi, type AddressInput, type CartQuoteChoices } from '../services/api';
-import type { AuthSessionSnapshot } from '../lib/authSession';
+import { samePrincipalBoundary, type AuthSessionSnapshot } from '../lib/authSession';
 import type { OrderProjection } from '@swift/types';
 import type { PromiseView } from '../lib/promise';
 
@@ -549,94 +549,98 @@ export class CheckoutOutcomeUnknownError extends Error {
 /** The signed-in principal a checkout intent belongs to. */
 function checkoutPrincipal(): CheckoutPrincipal {
   const session = getAuthSessionSnapshot();
-  if (!session) throw new Error('Sign in to place an order.');
+  if (!session) throw new AuthSessionBoundaryError();
   return { userId: session.userId, generation: session.generation };
 }
+const checkoutCurrent = (principal: CheckoutPrincipal) => samePrincipalBoundary(getAuthSessionSnapshot(), principal);
+function requireCheckoutIntent(key: string, principal: CheckoutPrincipal): AuthSessionSnapshot {
+  const session = requireAuthSessionForPrincipal(principal);
+  if (checkoutAttempt.currentFor(principal)?.key !== key) throw new AuthSessionBoundaryError();
+  return session;
+}
 
-/** Ask the server what became of an unresolved intent. A probe that cannot be answered is treated as in flight — never as "nothing". */
-async function probeReceipt(key: string): Promise<ReceiptProbe> {
+/** Every request uses this operation's principal, including across backoff and
+ * token rotation. A late answer cannot cross a logout/login boundary. */
+async function probeReceipt(key: string, principal: CheckoutPrincipal): Promise<ReceiptProbe> {
+  const session = requireCheckoutIntent(key, principal);
   try {
-    const res = await customerApi.checkoutReceipt(key);
+    const res = await customerApi.checkoutReceipt(key, session);
+    requireCheckoutIntent(key, principal);
     const data = res.data?.data as ReceiptProbe | undefined;
     if (data?.status === 'placed' && Array.isArray(data.orderIds)) return { status: 'placed', orderIds: data.orderIds };
     if (data?.status === 'none') return { status: 'none' };
     return { status: 'in_flight' };
   } catch {
+    requireCheckoutIntent(key, principal);
     return { status: 'in_flight' };
   }
 }
-
-/** Ask about an unresolved key until the server can say (placed or none), backing off while it is still in flight. */
-async function settleSentIntent(key: string, stopped?: () => boolean): Promise<ReceiptProbe> {
-  return settleUnresolvedIntent(() => probeReceipt(key), stopped ? { stopped } : {});
+async function settleSentIntent(key: string, principal: CheckoutPrincipal, stopped: () => boolean = () => false): Promise<ReceiptProbe> {
+  return settleUnresolvedIntent(() => probeReceipt(key, principal), {
+    stopped: () => stopped() || !checkoutCurrent(principal) || checkoutAttempt.currentFor(principal)?.key !== key,
+  });
 }
 
-/** The intent this request is: the key the server sees, reused, superseded or resolved first. */
-async function beginCheckoutIntent(payload: unknown, checking: (on: boolean) => void = () => {}): Promise<string> {
-  const principal = checkoutPrincipal();
+interface CheckoutOperation { principal: CheckoutPrincipal; payload: any; key?: string }
+/** Resolve the prior intent before a changed body can mint another key. */
+async function beginCheckoutIntent(operation: CheckoutOperation, checking: (on: boolean) => void): Promise<string> {
+  const { principal, payload } = operation;
+  requireAuthSessionForPrincipal(principal);
   const bodyHash = stableBodyHash(payload);
   const begun = checkoutAttempt.begin({ principal, bodyHash });
+  operation.key = begun.kind === 'ambiguous' ? begun.pending.key : begun.key;
   if (begun.kind !== 'ambiguous') return begun.key;
-  // A previous intent is on the wire with the outcome unknown, and this body
-  // differs. Never place a second order over an unresolved first one: ask,
-  // and keep asking with backoff while it is in flight [AX372 R1]. No key is
-  // minted for this body until the server says the first placed nothing.
   checking(true);
   let probe: ReceiptProbe;
-  try {
-    probe = await settleSentIntent(begun.pending.key);
-  } finally {
-    checking(false);
-  }
+  try { probe = await settleSentIntent(begun.pending.key, principal); }
+  finally { checking(false); }
+  requireCheckoutIntent(begun.pending.key, principal);
   recordCheckoutOutcome('ambiguous_recovery', probe.status);
   track('checkout_ambiguous_recovery', { outcome: probe.status });
   if (probe.status === 'placed') {
-    checkoutAttempt.end();
+    checkoutAttempt.end(begun.pending.key, principal);
     throw new CheckoutAlreadyPlacedError(probe.orderIds);
   }
   if (probe.status === 'in_flight') throw new CheckoutOutcomeUnknownError();
-  // Only "none" re-opens: nothing was placed under the old key.
-  checkoutAttempt.end();
+  // Only authoritative none permits replacement of the unresolved key.
+  checkoutAttempt.end(begun.pending.key, principal);
   const fresh = checkoutAttempt.begin({ principal, bodyHash });
   if (fresh.kind === 'ambiguous') throw new CheckoutOutcomeUnknownError();
+  operation.key = fresh.key;
   return fresh.key;
 }
 
 export function usePlaceOrder<T = any>() {
   const qc = useQueryClient();
-  // [TA-S1-001] A second tap while the first request is in flight is the SAME
-  // attempt, not a second order. The button disables once it renders as
-  // loading; this ref closes the window before that render.
-  // [MOB-020] The key is the INTENT's (lib/checkoutAttempt): bound to the
-  // principal and the body, reused by every retry of the same body, superseded
-  // by a changed body only when nothing is unresolved, and resolved against
-  // the server's receipt before a different order may be placed. The server
-  // replays a finished intent (`replayed: true`), refuses a concurrent twin
-  // (409) and refuses the same key under a different body (422) — each is
-  // read for what it is, never as a generic failure.
-  const inFlight = useRef(false);
-  // [AX372 R1] True while the phone asks the server what became of an order
-  // whose outcome is unknown: the screen says so in plain words.
+  // Subscribe so an old mutation's result is hidden immediately on account switch.
+  useAuthStore((state) => state.sessionGeneration);
+  const inFlight = useRef<CheckoutOperation | null>(null);
+  const latest = useRef<CheckoutOperation | null>(null);
   const [checkingOutcome, setCheckingOutcome] = useState(false);
-  const m = useMutation<T, unknown, any>({
-    mutationFn: async (payload: any) => {
-      const key = await beginCheckoutIntent(payload, setCheckingOutcome);
-      checkoutAttempt.markSent(key);
+  const current = (operation: CheckoutOperation) => latest.current === operation && checkoutCurrent(operation.principal);
+  const m = useMutation<T, unknown, CheckoutOperation>({
+    mutationFn: async (operation) => {
+      const { payload, principal } = operation;
+      const checking = (on: boolean) => { if (current(operation)) setCheckingOutcome(on); };
+      const key = await beginCheckoutIntent(operation, checking);
+      const session = requireCheckoutIntent(key, principal);
+      checkoutAttempt.markSent(key, principal);
       try {
-        const res = await customerApi.placeOrder(payload, key);
+        const res = await customerApi.placeOrder(payload, key, session);
+        requireCheckoutIntent(key, principal);
         if ((res.data as { replayed?: boolean } | undefined)?.replayed) {
           recordCheckoutOutcome('checkout_dedupe_replay');
           track('checkout_dedupe_replay', {});
         }
-        return unwrap<T>(Promise.resolve(res));
+        return res?.data?.data as T;
       } catch (err) {
+        requireCheckoutIntent(key, principal);
         const status = isAxiosError(err) ? err.response?.status : undefined;
         const code = isAxiosError(err) ? (err.response?.data as { error?: { code?: string } } | undefined)?.error?.code : undefined;
         if (status === 422 && code === 'IDEMPOTENCY_KEY_REUSED') {
-          // The key already produced an order for another body: that order exists.
           recordCheckoutOutcome('key_body_conflict');
           track('checkout_key_body_conflict', {});
-          checkoutAttempt.end();
+          checkoutAttempt.end(key, principal);
           throw new CheckoutAlreadyPlacedError([]);
         }
         if (status === 409 && code === 'DUPLICATE_REQUEST') {
@@ -644,99 +648,122 @@ export function usePlaceOrder<T = any>() {
           throw new CheckoutInFlightError();
         }
         if (checkoutFailureOutcome({ status, code }) === 'refused') {
-          // The server refused it (validation, no riders, min order): nothing
-          // was placed, so the intent re-opens and the same key may retry.
-          checkoutAttempt.markOpen(key);
+          checkoutAttempt.markOpen(key, principal);
           throw err;
         }
-        // [AX372 R1] The outcome is UNKNOWN: no answer came back (offline, a
-        // timeout), or the server could not say (any 5xx, its
-        // CHECKOUT_OUTCOME_UNKNOWN among them). The order may exist, so the
-        // intent stays SENT (restart recovery probes it, a changed body asks
-        // first) and the server is asked what became of it, with backoff:
-        // placed → that order; none → only then re-opened; still in flight →
-        // it stays sent.
-        setCheckingOutcome(true);
+        checking(true);
         let settled: ReceiptProbe;
-        try {
-          settled = await settleSentIntent(key);
-        } finally {
-          setCheckingOutcome(false);
-        }
+        try { settled = await settleSentIntent(key, principal); }
+        finally { checking(false); }
+        requireCheckoutIntent(key, principal);
         recordCheckoutOutcome('ambiguous_recovery', `unknown:${settled.status}`);
         track('checkout_ambiguous_recovery', { outcome: settled.status, unknown: true });
         if (settled.status === 'placed') {
-          checkoutAttempt.end();
+          checkoutAttempt.end(key, principal);
           throw new CheckoutAlreadyPlacedError(settled.orderIds);
         }
         if (settled.status === 'none') {
-          checkoutAttempt.markOpen(key);
+          checkoutAttempt.markOpen(key, principal);
           throw err;
         }
         throw new CheckoutOutcomeUnknownError();
       }
     },
-    // Checkout shows its own inline error (orderErr) — no global toast on top.
     meta: { silent: true },
-    onSuccess: (data: any) => {
-      checkoutAttempt.end();
+    onSuccess: (data: any, operation) => {
+      if (!current(operation) || !operation.key || !checkoutAttempt.end(operation.key, operation.principal)) return;
       qc.invalidateQueries({ queryKey: customerKeys.orders });
       qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
       track('order_placed', { orders: data?.orders?.length ?? 1 });
     },
-    onError: (err) => {
+    onError: (err, operation) => {
+      if (!current(operation)) return;
       if (err instanceof CheckoutAlreadyPlacedError) {
         qc.invalidateQueries({ queryKey: customerKeys.orders });
         qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
       }
     },
-    onSettled: () => {
-      inFlight.current = false;
+    onSettled: (_data, _error, operation) => {
+      if (inFlight.current === operation) inFlight.current = null;
     },
   });
-  const mutate: typeof m.mutate = (variables, options) => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    m.mutate(variables, options);
+  type Options = MutateOptions<T, unknown, any>;
+  const callbacks = (operation: CheckoutOperation, options?: Options): MutateOptions<T, unknown, CheckoutOperation> => ({
+    onSuccess: (data, _variables, ...context) => { if (current(operation)) options?.onSuccess?.(data, operation.payload, ...context); },
+    onError: (error, _variables, ...context) => { if (current(operation)) options?.onError?.(error, operation.payload, ...context); },
+    onSettled: (data, error, _variables, ...context) => { if (current(operation)) options?.onSettled?.(data, error, operation.payload, ...context); },
+  });
+  const start = (payload: any): CheckoutOperation | null => {
+    const principal = checkoutPrincipal();
+    if (inFlight.current && samePrincipalBoundary(inFlight.current.principal, principal)) return null;
+    const operation = { payload, principal };
+    inFlight.current = operation; latest.current = operation;
+    setCheckingOutcome(false);
+    return operation;
   };
-  return { ...m, mutate, checkingOutcome };
+  const mutate = (payload: any, options?: Options) => {
+    const operation = start(payload);
+    if (operation) m.mutate(operation, callbacks(operation, options));
+  };
+  const mutateAsync = async (payload: any, options?: Options): Promise<T> => {
+    const operation = start(payload);
+    if (!operation) throw new CheckoutInFlightError();
+    try {
+      const data = await m.mutateAsync(operation, callbacks(operation, options));
+      requireAuthSessionForPrincipal(operation.principal);
+      return data;
+    } catch (error) {
+      requireAuthSessionForPrincipal(operation.principal);
+      throw error;
+    }
+  };
+  const visible = latest.current && current(latest.current);
+  return { ...m, mutate, mutateAsync, checkingOutcome: !!visible && checkingOutcome,
+    data: visible ? m.data : undefined, error: visible ? m.error : null,
+    variables: visible ? m.variables?.payload : undefined, failureReason: visible ? m.failureReason : null,
+    isIdle: !visible || m.isIdle, status: visible ? m.status : 'idle' as const,
+    isSuccess: !!visible && m.isSuccess, isError: !!visible && m.isError, isPending: !!visible && m.isPending };
 }
 
-/** [MOB-020] On the cart screen's mount: an intent this principal sent and
- *  never heard back about (the app died mid-request) is resolved against the
- *  server before "Place order" is enabled — placed: the order exists and the
- *  intent ends; in flight: keep waiting; none: the intent may be retried. */
+/** Resume only this account's sent intent, adopting a new login generation
+ * without allowing any callback from the previous login to complete it. */
 export function useCheckoutRecovery(): { recovering: boolean; placedOrderIds: string[] | null } {
   const qc = useQueryClient();
+  const generation = useAuthStore((state) => state.sessionGeneration);
+  const userId = useAuthStore((state) => state.user?.id);
+  const owner = useRef<CheckoutPrincipal | null>(null);
   const [recovering, setRecovering] = useState(false);
   const [placedOrderIds, setPlacedOrderIds] = useState<string[] | null>(null);
   useEffect(() => {
     const session = getAuthSessionSnapshot();
+    owner.current = session ? { userId: session.userId, generation: session.generation } : null;
+    setPlacedOrderIds(null);
+    setRecovering(false);
     if (!session) return;
-    const pending = checkoutAttempt.currentFor({ userId: session.userId, generation: session.generation });
+    const pending = checkoutAttempt.resumeFor({ userId: session.userId, generation: session.generation });
     if (!pending || pending.state !== 'sent') return;
     let cancelled = false;
+    const current = () => !cancelled && checkoutCurrent(session);
     setRecovering(true);
-    // [AX372 R1] Asked with backoff while the key is still in flight (an
-    // unknown outcome holds it for the server's settle window).
-    void settleUnresolvedIntent(() => probeReceipt(pending.key), { stopped: () => cancelled }).then((probe) => {
-      if (cancelled) return;
+    void settleSentIntent(pending.key, session, () => !current()).then((probe) => {
+      if (!current()) return;
+      requireCheckoutIntent(pending.key, session);
       recordCheckoutOutcome('ambiguous_recovery', `restart:${probe.status}`);
       track('checkout_ambiguous_recovery', { outcome: probe.status, restart: true });
       if (probe.status === 'placed') {
-        checkoutAttempt.end();
+        checkoutAttempt.end(pending.key, session);
         setPlacedOrderIds(probe.orderIds);
         qc.invalidateQueries({ queryKey: customerKeys.orders });
         qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
       } else if (probe.status === 'none') {
-        checkoutAttempt.markOpen(pending.key);
+        checkoutAttempt.markOpen(pending.key, session);
       }
-      // in_flight: the intent stays sent; the next tap replays the same key
-      setRecovering(false);
-    });
+    }).catch(() => { /* Cancelled ownership leaves the unresolved record intact. */ })
+      .finally(() => { if (current()) setRecovering(false); });
     return () => { cancelled = true; };
-  }, [qc]);
-  return { recovering, placedOrderIds };
+  }, [qc, generation, userId]);
+  const visible = owner.current && checkoutCurrent(owner.current);
+  return { recovering: !!visible && recovering, placedOrderIds: visible ? placedOrderIds : null };
 }
 
 // --- Cart ---------------------------------------------------------------------
@@ -754,11 +781,10 @@ export function useCart<T = any>(lat?: number, lng?: number, choices?: CartQuote
   });
 }
 
-function invalidateCart(qc: ReturnType<typeof useQueryClient>) {
+function invalidateCart(qc: ReturnType<typeof useQueryClient>, principal: CheckoutPrincipal) {
+  if (!checkoutCurrent(principal)) return;
   qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
-  // [TA-S1-001] The cart changed, so the next "Place order" is a NEW intent —
-  // never a replay of the last attempt's order.
-  checkoutAttempt.end();
+  checkoutAttempt.invalidateCart(principal);
 }
 
 export function useAddToCart() {
@@ -771,7 +797,8 @@ export function useAddToCart() {
       selectedOptions?: Record<string, unknown>;
       specialInstructions?: string;
     }) => unwrap(customerApi.addToCart(data)),
-    onSuccess: () => invalidateCart(qc),
+    onMutate: checkoutPrincipal,
+    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
   });
 }
 
@@ -780,7 +807,8 @@ export function useUpdateCartItem() {
   return useMutation({
     mutationFn: ({ id, quantity }: { id: string; quantity: number }) =>
       unwrap(customerApi.updateCartItem(id, { quantity })),
-    onSuccess: () => invalidateCart(qc),
+    onMutate: checkoutPrincipal,
+    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
   });
 }
 
@@ -788,7 +816,8 @@ export function useRemoveCartItem() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => unwrap(customerApi.removeCartItem(id)),
-    onSuccess: () => invalidateCart(qc),
+    onMutate: checkoutPrincipal,
+    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
   });
 }
 
@@ -796,7 +825,8 @@ export function useClearCart() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => unwrap(customerApi.clearCart()),
-    onSuccess: () => invalidateCart(qc),
+    onMutate: checkoutPrincipal,
+    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
   });
 }
 
@@ -804,7 +834,8 @@ export function useSetCartAddress() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (addressId: string) => unwrap(customerApi.setCartAddress(addressId)),
-    onSuccess: () => invalidateCart(qc),
+    onMutate: checkoutPrincipal,
+    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
   });
 }
 
@@ -812,7 +843,8 @@ export function useSetCartTip() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (amount: number) => unwrap(customerApi.setCartTip(amount)),
-    onSuccess: () => invalidateCart(qc),
+    onMutate: checkoutPrincipal,
+    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
   });
 }
 
@@ -820,7 +852,8 @@ export function useRemoveCartPromo() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => unwrap(customerApi.removeCartPromo()),
-    onSuccess: () => invalidateCart(qc),
+    onMutate: checkoutPrincipal,
+    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
   });
 }
 
@@ -828,7 +861,8 @@ export function useReorder() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => unwrap(customerApi.reorder(id)),
-    onSuccess: () => invalidateCart(qc),
+    onMutate: checkoutPrincipal,
+    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
   });
 }
 
