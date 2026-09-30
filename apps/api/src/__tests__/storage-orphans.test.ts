@@ -27,7 +27,13 @@ const previousRlsBind = process.env['TENANT_RLS_BIND'];
 const verificationKey = (name: string) => verificationKeys.get(name)!;
 
 afterAll(async () => {
-  // Retain immutable claims, orphan identities and owner lineage.
+  // Retain immutable claims, orphan identities and owner lineage. The foreign
+  // account and its tenant hold none of them, so they go: a second active
+  // tenant left behind changes every later suite on this database. Should that
+  // account ever hold purge authority, the database refuses these deletes.
+  await prisma.storageOrphan.deleteMany({ where: { userId: otherUserId } });
+  await prisma.user.delete({ where: { id: otherUserId } });
+  await prisma.tenant.delete({ where: { id: foreignTenantId } });
   await prisma.$disconnect();
   if (previousRlsBind === undefined) delete process.env['TENANT_RLS_BIND'];
   else process.env['TENANT_RLS_BIND'] = previousRlsBind;
