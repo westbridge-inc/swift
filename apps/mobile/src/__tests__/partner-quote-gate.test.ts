@@ -25,7 +25,7 @@ describe('[PR1270-S2-04] signup commits only to a fetched, current, on-screen qu
   ])('%s gates its submit control on the quote gate', (file, pick) => {
     const s = src(file);
     expect(s).toMatch(/import \{[^}]*\bquoteGate\b[^}]*\} from '(\.\.\/)+lib\/partnerPricing'/);
-    // The signup surface reads a FRESH list — never the hour-old cache a preview may use.
+    // Signup also keeps minute-by-minute refreshes while the quote is on screen.
     expect(s).toMatch(/usePartnerPricing\([^)]*\{ fresh: true \}\)/);
     expect(s).toContain(`quoteGate(pricing, (p) => ${pick})`);
     expect(s).toMatch(/disabled=\{!gate\.ok/);
@@ -40,7 +40,7 @@ describe('[PR1270-S2-04] signup commits only to a fetched, current, on-screen qu
 
   it('a fresh read is fresh: no stale window, refetched on every mount and every minute on screen', () => {
     const hook = src('src/hooks/partnerPricing.ts');
-    expect(hook).toContain('staleTime: fresh ? 0 : HOUR_MS');
+    expect(hook).toContain('staleTime: 0');
     expect(hook).toContain("refetchOnMount: fresh ? 'always' : true");
     expect(hook).toContain('refetchInterval: fresh ? MINUTE_MS : false');
   });
