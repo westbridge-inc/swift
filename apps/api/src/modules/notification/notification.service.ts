@@ -148,15 +148,29 @@ export async function escalateVendorAlert(
  *  not a dashboard someone remembers to open. Fans one notification (row +
  *  live socket) to every active ADMIN/SUPER_ADMIN account. */
 /** Stamp acknowledgment on an alert delivery — the recipient ACTED. Idempotent,
- *  fire-and-caught at call sites (tracking never blocks the action). */
+ *  fire-and-caught at call sites (tracking never blocks the action).
+ *
+ *  [AX323 RR2-1] A mover-offer acknowledgment is evidence about ONE offer
+ *  attempt, and the offer timeout reads it as proof that the card reached the
+ *  mover. Stamped across the whole (order, mover) pair, a delayed decline or
+ *  accept of an expired attempt marked an unseen successor as seen, and that
+ *  successor's lapse then cost the mover acceptance rate. So a MOVER_OFFER
+ *  acknowledgment always names its attempt: `null` is the legacy pre-attempt
+ *  row, never "every attempt". */
+export function acknowledgeAlert(prisma: PrismaClient, kind: 'VENDOR_ORDER', subjectId: string, recipientId?: string): Promise<void>;
+export function acknowledgeAlert(prisma: PrismaClient, kind: 'MOVER_OFFER', subjectId: string, recipientId: string, offerAttemptId: string | null): Promise<void>;
 export async function acknowledgeAlert(
   prisma: PrismaClient,
   kind: 'VENDOR_ORDER' | 'MOVER_OFFER',
   subjectId: string,
   recipientId?: string,
+  offerAttemptId?: string | null,
 ): Promise<void> {
   await prisma.alertDelivery.updateMany({
-    where: { kind, subjectId, ...(recipientId ? { recipientId } : {}), acknowledgedAt: null },
+    where: {
+      kind, subjectId, ...(recipientId ? { recipientId } : {}), acknowledgedAt: null,
+      ...(kind === 'MOVER_OFFER' ? { offerAttemptId: offerAttemptId ?? null } : {}),
+    },
     data: { acknowledgedAt: new Date() },
   });
 }

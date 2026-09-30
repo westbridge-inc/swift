@@ -635,3 +635,120 @@ describe('offer attempt identity [REPORT-014 F-014-04]', () => {
     expect(await app.prisma.dispatchSearch.count({ where: { subjectId: order.id, status: 'EXHAUSTED' } })).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [AX323 RR2-1] An acknowledgment is evidence about ONE attempt, and the offer
+// timeout reads it as proof that the card reached the mover. A stale decline or
+// accept (its own attempt lapsed, the same order re-offered to the same mover
+// since) must stamp nothing: the successor may never have reached the screen,
+// and its lapse must not cost the mover acceptance rate. A current action
+// stamps exactly the attempt it consumed.
+// ---------------------------------------------------------------------------
+describe('only the attempt an action consumed is acknowledged [AX323 RR2-1]', () => {
+  const evidenceOf = (orderId: string, attemptId: string) => app.prisma.alertDelivery.findFirstOrThrow({
+    where: { kind: 'MOVER_OFFER', subjectId: orderId, offerAttemptId: attemptId },
+    select: { seenAt: true, acknowledgedAt: true },
+  });
+  const rateOf = async (riderId: string) =>
+    Number((await app.prisma.rider.findUniqueOrThrow({ where: { id: riderId }, select: { acceptanceRate: true } })).acceptanceRate);
+
+  /** A1 lapses unseen (and is spared); a vendor retry offers A2 for the SAME
+   *  order to the SAME mover, and A2 never reaches their screen. */
+  async function lapsedThenReoffered() {
+    await parkAllRiders();
+    const mover = await makeRider();
+    const order = await makeOrder();
+    const lastJob = () => scheduled.filter((j) => j.orderId === order.id).at(-1)!;
+    expect((await dispatch.dispatchOrder(order.id)).offered).toBe(mover.riderId);
+    const a1 = lastJob().attemptId!;
+    await dispatch.handleOfferTimeout(order.id, mover.riderId, a1);
+    expect((await dispatch.retryDispatch(order.id)).offered).toBe(mover.riderId);
+    const a2 = lastJob().attemptId!;
+    expect(a2).not.toBe(a1);
+    expect(await evidenceOf(order.id, a1)).toEqual({ seenAt: null, acknowledgedAt: null });
+    expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
+    expect(await rateOf(mover.riderId)).toBe(100);
+    return { mover, order, a1, a2 };
+  }
+
+  /** A2 is still the mover's live card, and its timeout really judges it. */
+  async function successorLapses(order: { id: string }, riderId: string, a2: string) {
+    expect(await app.redis.get(offerKey(order.id))).toBe(`${riderId}:${a2}`);
+    await dispatch.handleOfferTimeout(order.id, riderId, a2);
+    expect(await app.redis.zscore(`dispatch:offer-expiries:${riderId}`, `${order.id}:${a2}`)).not.toBeNull();
+  }
+
+  it('a delayed decline naming the lapsed attempt stamps nothing, and the unseen successor lapses free', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    await expect(dispatch.declineOffer(order.id, mover.userId, a1)).rejects.toMatchObject({ statusCode: 409, code: 'OFFER_EXPIRED' });
+
+    expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+    await successorLapses(order, mover.riderId, a2);
+    expect(await rateOf(mover.riderId)).toBe(100);
+  });
+
+  it('a delayed accept naming the lapsed attempt stamps nothing, and the unseen successor lapses free', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    await expect(dispatch.acceptOffer(order.id, mover.userId, undefined, a1)).rejects.toMatchObject({ statusCode: 409, code: 'OFFER_EXPIRED' });
+
+    expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+    await successorLapses(order, mover.riderId, a2);
+    expect(await rateOf(mover.riderId)).toBe(100);
+  });
+
+  it('a current decline acknowledges exactly the attempt it consumed, never the lapsed one before it', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    await dispatch.declineOffer(order.id, mover.userId, a2);
+
+    expect((await evidenceOf(order.id, a2)).acknowledgedAt).toBeInstanceOf(Date);
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+  });
+
+  it('a current accept that echoes no attempt acknowledges the live attempt it consumed, and only that one', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    const claimed = await dispatch.acceptOffer(order.id, mover.userId);
+
+    expect(claimed.riderId).toBe(mover.riderId);
+    expect((await evidenceOf(order.id, a2)).acknowledgedAt).toBeInstanceOf(Date);
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+  });
+
+  it('an accept refused because delivery custody moved on still acknowledges the card it consumed, and only that one', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+    await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: 1 } });
+
+    await expect(dispatch.acceptOffer(order.id, mover.userId, undefined, a2)).rejects.toMatchObject({ statusCode: 409, code: 'OFFER_EXPIRED' });
+
+    expect(await app.redis.get(offerKey(order.id))).not.toBe(`${mover.riderId}:${a2}`);
+    expect((await evidenceOf(order.id, a2)).acknowledgedAt).toBeInstanceOf(Date);
+    expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
+  });
+
+  it('a legacy bare card (pre-attempt deploy) acknowledges its own legacy row only, never an attempt-era one', async () => {
+    await parkAllRiders();
+    const mover = await makeRider();
+    const order = await makeOrder();
+    // An attempt-era card of this order lapsed unseen; then a pre-attempt
+    // instance installed a bare card, with a legacy evidence row of its own.
+    await app.prisma.alertDelivery.create({ data: { kind: 'MOVER_OFFER', subjectId: order.id, recipientId: mover.userId, offerAttemptId: 'lapsed~fv0' } });
+    await app.prisma.alertDelivery.create({ data: { kind: 'MOVER_OFFER', subjectId: order.id, recipientId: mover.userId } });
+    await app.redis.set(offerKey(order.id), mover.riderId, 'EX', 30);
+    await app.redis.set(moverOfferKey(mover.riderId), order.id, 'EX', 30);
+
+    await dispatch.declineOffer(order.id, mover.userId);
+
+    const rows = await app.prisma.alertDelivery.findMany({
+      where: { kind: 'MOVER_OFFER', subjectId: order.id },
+      select: { offerAttemptId: true, acknowledgedAt: true },
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.offerAttemptId === null)!.acknowledgedAt).toBeInstanceOf(Date);
+    expect(rows.find((r) => r.offerAttemptId === 'lapsed~fv0')!.acknowledgedAt).toBeNull();
+  });
+});

@@ -820,6 +820,22 @@ export class DispatchService {
     return Number(removed) === 1;
   }
 
+  /** [AX323 RR2-1] A mover's own decline or accept consumes the card it names,
+   *  and only a card it really consumed is acknowledged: exactly that attempt,
+   *  after the consume has proven it was the mover's live card. The offer
+   *  timeout reads the acknowledgment as proof the card reached the mover, so a
+   *  stale action (its attempt lapsed, a successor offered since) consumes
+   *  nothing and stamps nothing: never the successor, which may not have
+   *  reached the screen yet, and never the lapsed card's own history. */
+  private async consumeActedOffer(orderId: string, moverId: string, moverUserId: string, attemptId?: string): Promise<boolean> {
+    const consumed = await this.removeOfferIfOwned(orderId, moverId, attemptId);
+    if (consumed) {
+      const { acknowledgeAlert } = await import('../notification/notification.service');
+      await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId, attemptId ?? null).catch(() => {});
+    }
+    return consumed;
+  }
+
   /** [REPORT-014 F-014-06] Exhaustion is single-flight. The lock is
    *  deliberately SHORT (10s): it dedups a concurrent burst without ever
    *  eating a legitimate later cycle (taxi re-sweeps are >=15s apart,
@@ -2236,8 +2252,6 @@ export class DispatchService {
    *  mover actually saw; without it, wildcard mode still only ever consumes
    *  this authenticated mover's own live offer. */
   async declineOffer(orderId: string, moverUserId: string, offerAttemptId?: string): Promise<void> {
-    const { acknowledgeAlert } = await import('../notification/notification.service');
-    await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId).catch(() => {});
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
     let resolvedAttemptId = offerAttemptId;
@@ -2248,7 +2262,7 @@ export class DispatchService {
         if (parsed.id === mover.id) resolvedAttemptId = parsed.attemptId;
       }
     }
-    const removed = await this.removeOfferIfOwned(orderId, mover.id, resolvedAttemptId);
+    const removed = await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId);
     if (!removed) {
       throw new AppError(409, 'OFFER_EXPIRED', 'This offer is no longer yours to decline');
     }
@@ -2322,8 +2336,6 @@ export class DispatchService {
    * every rider in town calls this at once, exactly one wins.
    */
   async acceptOffer(orderId: string, moverUserId: string, requestedFare?: number, offerAttemptId?: string) {
-    const { acknowledgeAlert } = await import('../notification/notification.service');
-    await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId).catch(() => {});
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
 
@@ -2369,7 +2381,7 @@ export class DispatchService {
       && rail != null
       && offeredVersion !== rail.fulfillmentModeVersion
     ) {
-      await this.removeOfferIfOwned(orderId, mover.id, resolvedAttemptId);
+      await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId);
       await this.dispatchOrder(orderId).catch(() => {});
       throw new AppError(409, 'OFFER_EXPIRED', 'Delivery ownership changed; refresh for the current offer');
     }
@@ -2380,7 +2392,7 @@ export class DispatchService {
     // next mover. If the DB claim loses, advance the cascade below.
     // [F-014-04] With a client-echoed attempt id this binds to the exact card
     // generation; wildcard is still mover-safe (own offer only).
-    const consumed = await this.removeOfferIfOwned(orderId, mover.id, resolvedAttemptId);
+    const consumed = await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId);
     if (!consumed) {
       return this.explainLostOffer(orderId, mover.id, pool);
     }
