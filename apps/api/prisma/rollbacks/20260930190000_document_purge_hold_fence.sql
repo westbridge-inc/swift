@@ -2,8 +2,13 @@
 -- and stop destructive execution; use a forward correction. Never discard claims.
 -- Run only after excluding ALL destructive workers, then acknowledge in this
 -- session: SET app.document_purge_workers_stopped = 'true';
+-- Run as a role that bypasses row security (superuser or BYPASSRLS): the checks
+-- below must see every row, and any other role is refused.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
+-- The ledgers FORCE row security, so even their owner can get a filtered view
+-- that looks empty while claims exist. Fail instead of filtering.
+SET LOCAL row_security = off;
 DO $$ BEGIN
   IF current_setting('app.document_purge_workers_stopped', true) IS DISTINCT FROM 'true' THEN
     RAISE EXCEPTION 'rollback requires explicit stopped-worker acknowledgement';
