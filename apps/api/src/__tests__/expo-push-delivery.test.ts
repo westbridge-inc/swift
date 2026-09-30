@@ -338,3 +338,35 @@ describe('[Q10 loud alerts 2/4 · AX291 F04] the reason for a push is asked befo
     expect(devChannelLog.map((e) => e.options)).toEqual([pushOptionsFor(data)]);
   });
 });
+
+describe('[AX308] the delivery window is measured after the awaited guard, right before the request', () => {
+  // The guard is a database read that can take seconds. It says yes here,
+  // and moves the clock 2 s on while it answers.
+  const slowYes = async () => { vi.setSystemTime(T0 + 2_000); return true; };
+
+  it('Expo: a deadline that passed while the guard was answering is not sent', async () => {
+    atT0();
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const data = { kind: 'vendor_order_alert', orderId: 'o1', respondBy: iso(1_500) };
+    const res = await new ExpoPushProvider().sendPush([TOKEN], 'T', 'B', data, { ...pushOptionsFor(data), stillWanted: slowYes });
+    expect(res).toEqual({ sent: 0 });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('Expo: the ttl asks only for the time left after the guard', async () => {
+    atT0();
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const data = { kind: 'vendor_order_alert', orderId: 'o1', respondBy: iso(3_500) };
+    await new ExpoPushProvider().sendPush([TOKEN], 'T', 'B', data, { ...pushOptionsFor(data), stillWanted: slowYes });
+    expect(messagesOf(fetchMock).map((m) => m['ttl'])).toEqual([1]);
+  });
+
+  it('dev adapter: measured the same way, so it never logs a push the Expo adapter would drop', async () => {
+    atT0();
+    const data = { kind: 'vendor_order_alert', orderId: 'o1', respondBy: iso(1_500) };
+    expect(await getPushProvider().sendPush(['a'], 'T', 'B', data, { ...pushOptionsFor(data), stillWanted: slowYes })).toEqual({ sent: 0 });
+    expect(devChannelLog).toEqual([]);
+  });
+});

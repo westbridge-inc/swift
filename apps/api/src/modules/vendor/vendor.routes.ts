@@ -798,7 +798,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     // socket that joined the store room while they were on the team would
     // otherwise keep hearing new orders until it reconnected. (Pushes and
     // ladder rungs read the team at send time, so those stop by themselves.)
-    app.io.in(`user:${existing.userId}`).socketsLeave(`vendor:${vendorId}`);
+    // [AX308 F03] A revocation, not a bare leave: it also stops a subscription
+    // already in flight from joining after it (store-room.ts), on every
+    // instance. Only after the delete is committed.
+    const { revokeStoreRoom } = await import('../notification/store-room');
+    revokeStoreRoom(app.io, vendorId, existing.userId);
     return { success: true, data: { deleted: true } };
   });
 

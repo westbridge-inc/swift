@@ -30,6 +30,7 @@ import {
   type LadderRung,
 } from '../modules/notification/store-alert-ladder';
 import { isStoreRoomMember } from '../modules/notification/store-alert-recipients';
+import { STORE_ROOM_REVOKED, revokeStoreRoom, setStoreRoomCluster, storeRoomEpoch } from '../modules/notification/store-room';
 import { autoCancelUnresponsiveOrder, type JobContext } from '../jobs/queue';
 import { SmsNotSubmittedError, devChannelLog, getChannels, type DevChannelEntry, type PushProvider } from '../providers/notifications/channels';
 import { STORE_ALERT_SMS_DAILY_PREFIX, checkOtpDailyBudget } from '../utils/sms-budget';
@@ -514,51 +515,118 @@ describe('the whole store hears a new order, and only that store', () => {
     }
   });
 
-  it('a removal that overtakes a subscription in flight still leaves the member out of the room (AX291 F03)', async () => {
+  it('a member removed while their subscription is being decided never hears the store, not even for the length of a query (AX291/AX308 F03)', async () => {
     const sockets: Socket[] = [];
+    const room = `vendor:${storeA}`;
     const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const membership = await joinTeam(storeA, member, ownerA);
+    const real = vi.mocked(isStoreRoomMember).getMockImplementation()!;
     try {
+      // A room member who hears every broadcast: the control that a silent
+      // member is silent because they were never a recipient.
+      const ownerSocket = await socketFor(ownerA.token, sockets);
+      ownerSocket.emit('vendor:subscribe', { vendorId: storeA });
+      await vi.waitFor(async () => expect(await inRoom(room)).toContain(ownerSocket.id), { timeout: 5_000, interval: 25 });
+      const ownerHeard: string[] = [];
+      ownerSocket.on('order:new', (p: { orderId: string }) => ownerHeard.push(p.orderId));
       const memberSocket = await socketFor(member.token, sockets);
-      // Park the subscription right after its membership read said yes...
-      const real = vi.mocked(isStoreRoomMember).getMockImplementation()!;
+      const heard: string[] = [];
+      memberSocket.on('order:new', (p: { orderId: string }) => heard.push(p.orderId));
+      const broadcast = (orderId: string) => { app.io.to(room).emit('order:new', { orderId, vendorId: storeA }); };
+
+      // The subscription's own membership read is parked right after it said
+      // yes. Any LATER read (a re-check after a join) broadcasts while it is
+      // still pending: the window AX308 found.
       let resume!: () => void;
       const parked = new Promise<void>((done) => { resume = done; });
       let readDone!: () => void;
       const firstRead = new Promise<void>((done) => { readDone = done; });
-      vi.mocked(isStoreRoomMember).mockImplementationOnce(async (...args) => {
-        const verdict = await real(...args);
-        readDone();
-        await parked;
-        return verdict;
+      let first = true;
+      vi.mocked(isStoreRoomMember).mockImplementation(async (...args) => {
+        if (first) {
+          first = false;
+          const verdict = await real(...args);
+          readDone();
+          await parked;
+          return verdict;
+        }
+        broadcast('during-a-recheck');
+        await new Promise((settle) => setTimeout(settle, 50));
+        return real(...args);
       });
-      const from = vi.mocked(isStoreRoomMember).mock.calls.length;
-      memberSocket.emit('vendor:subscribe', { vendorId: storeA });
+      const decided = new Promise<{ joined: boolean } | 'no-answer'>((resolve) => {
+        memberSocket.emit('vendor:subscribe', { vendorId: storeA }, (result: { joined: boolean }) => resolve(result));
+        setTimeout(() => resolve('no-answer'), 4_000);
+      });
       await firstRead;
-      // ...land the removal (and its eviction, with nothing yet to evict)...
+      // The removal lands between that read and the join.
       const removed = await call('DELETE', `/api/v1/vendor/staff/${membership.id}`, ownerA.token);
       expect(removed.statusCode, removed.body).toBe(200);
-      // ...then let the stale yes reach the join.
+      broadcast('while-deciding');
       resume();
-      await vi.waitFor(async () => expect(await membershipVerdictsFrom(from)).toEqual([
-        { userId: member.userId, verdict: true },
-        { userId: member.userId, verdict: false },
-      ]), { timeout: 5_000, interval: 20 });
-      await vi.waitFor(async () => expect(await inRoom(`vendor:${storeA}`)).not.toContain(memberSocket.id), { timeout: 5_000, interval: 20 });
+      const outcome = await decided;
+      broadcast('after-deciding');
+      await vi.waitFor(() => expect(ownerHeard).toContain('after-deciding'), { timeout: 5_000, interval: 25 });
+      // A barrier on the member's own connection: its reply comes after any
+      // broadcast the server had already sent that socket.
+      await new Promise<void>((done) => {
+        memberSocket.emit('vendor:subscribe', {}, () => done());
+        setTimeout(done, 1_000);
+      });
 
-      const heard: string[] = [];
-      memberSocket.on('order:new', (p: { orderId: string }) => heard.push(p.orderId));
-      const ownerSocket = await socketFor(ownerA.token, sockets);
-      ownerSocket.emit('vendor:subscribe', { vendorId: storeA });
-      await vi.waitFor(async () => expect(await inRoom(`vendor:${storeA}`)).toContain(ownerSocket.id), { timeout: 5_000, interval: 25 });
-      const ownerHeard: string[] = [];
-      ownerSocket.on('order:new', (p: { orderId: string }) => ownerHeard.push(p.orderId));
-      app.io.to(`vendor:${storeA}`).emit('order:new', { orderId: 'q10b-after-race', vendorId: storeA });
-      await vi.waitFor(() => expect(ownerHeard).toEqual(['q10b-after-race']), { timeout: 5_000, interval: 25 });
       expect(heard).toEqual([]);
+      expect(outcome).toEqual({ joined: false });
+      expect(await inRoom(room)).not.toContain(memberSocket.id);
+    } finally {
+      vi.mocked(isStoreRoomMember).mockImplementation(real);
+      for (const socket of sockets) socket.disconnect();
+      await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
+    }
+  });
+
+  it('a revocation made on another instance is applied here in one step, and a malformed one is ignored (AX308 F03, across instances)', async () => {
+    const sockets: Socket[] = [];
+    const room = `vendor:${storeA}`;
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const membership = await joinTeam(storeA, member, ownerA);
+    try {
+      const memberSocket = await socketFor(member.token, sockets);
+      const joined = await new Promise<{ joined: boolean } | 'no-answer'>((resolve) => {
+        memberSocket.emit('vendor:subscribe', { vendorId: storeA }, resolve);
+        setTimeout(() => resolve('no-answer'), 4_000);
+      });
+      expect(joined).toEqual({ joined: true });
+      expect(await inRoom(room)).toContain(memberSocket.id);
+      const arrive = (payload: unknown) => (app.io.of('/') as unknown as { _onServerSideEmit(args: unknown[]): void })._onServerSideEmit([STORE_ROOM_REVOKED, payload]);
+
+      const before = storeRoomEpoch(storeA, member.userId);
+      arrive({ vendorId: storeA });
+      expect(storeRoomEpoch(storeA, member.userId)).toBe(before);
+      expect(await inRoom(room)).toContain(memberSocket.id);
+
+      arrive({ vendorId: storeA, userId: member.userId });
+      expect(storeRoomEpoch(storeA, member.userId)).toBe(before + 1);
+      expect(await inRoom(room)).not.toContain(memberSocket.id);
     } finally {
       for (const socket of sockets) socket.disconnect();
       await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
+    }
+  });
+
+  it('the instance that removes a member tells the other instances, once, and applies it here itself (AX308 F03, across instances)', () => {
+    const vendorId = `q10b-cluster-${nanoid(6)}`;
+    const userId = `q10b-cluster-${nanoid(6)}`;
+    const told = vi.spyOn(app.io, 'serverSideEmit').mockReturnValue(true);
+    try {
+      revokeStoreRoom(app.io, vendorId, userId);
+      expect(told).not.toHaveBeenCalled(); // one process: nobody else to tell
+      setStoreRoomCluster(true);
+      revokeStoreRoom(app.io, vendorId, userId);
+      expect(told.mock.calls).toEqual([[STORE_ROOM_REVOKED, { vendorId, userId }]]);
+      expect(storeRoomEpoch(vendorId, userId)).toBe(2);
+    } finally {
+      setStoreRoomCluster(false);
+      told.mockRestore();
     }
   });
 });

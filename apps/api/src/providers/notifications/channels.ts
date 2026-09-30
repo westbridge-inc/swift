@@ -144,11 +144,12 @@ class DevSms implements SmsProvider {
 
 class DevPush implements PushProvider {
   async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options: PushOptions = STANDARD_PUSH) {
-    // The log is what WOULD have been sent: a push whose deadline has passed
-    // is dropped here exactly as the Expo adapter drops it, and so is one
-    // whose reason ended before this request [AX291 F04].
-    if (!pushWindow(options, Date.now())) return { sent: 0 };
+    // The log is what WOULD have been sent: a push whose reason ended before
+    // this request is dropped [AX291 F04], and so is one whose deadline has
+    // passed, measured after that awaited guard [AX308], exactly as the Expo
+    // adapter measures it.
     if (options.stillWanted && !(await options.stillWanted())) return { sent: 0, withdrawn: true };
+    if (!pushWindow(options, Date.now())) return { sent: 0 };
     const logged: PushOptions = { ...options };
     delete logged.stillWanted; // a guard, not a delivery option
     for (const token of deviceTokens) {
@@ -307,15 +308,18 @@ export class ExpoPushProvider implements PushProvider {
     const invalidTokens: string[] = [];
 
     for (let i = 0; i < deviceTokens.length; i += ExpoPushProvider.CHUNK) {
-      // Measured per request: a later chunk asks for less time, and nothing
-      // leaves once the deadline has no whole second left.
-      const window = pushWindow(options, Date.now());
-      if (!window) break;
-      // [AX291 F04] ...nor once the reason for it ended, asked per request.
+      // [AX291 F04] Nothing leaves once the reason for it ended, asked per request.
       if (options.stillWanted && !(await options.stillWanted())) {
         withdrawn = true;
         break;
       }
+      // Measured per request, and [AX308] only AFTER the awaited guard, right
+      // before submission: the guard is a database read that can take seconds,
+      // and a window measured before it would send a push already past its
+      // deadline, or ask for time that is gone. A later chunk asks for less
+      // time, and nothing leaves once the deadline has no whole second left.
+      const window = pushWindow(options, Date.now());
+      if (!window) break;
       const chunk = deviceTokens.slice(i, i + ExpoPushProvider.CHUNK);
       const controller = new AbortController();
       const timeoutMs = pushProviderTimeoutMs();

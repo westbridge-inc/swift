@@ -25,12 +25,14 @@ import { warRoomsForSocket } from '../modules/safety/war-room';
 import { isProduction } from '../utils/runtime-mode';
 import { assertRoomAccess } from '../modules/chat/chat-authority';
 import { isStoreRoomMember } from '../modules/notification/store-alert-recipients';
+import { STORE_ROOM_REVOKED, applyStoreRoomRevocation, setStoreRoomCluster, storeRoomEpoch } from '../modules/notification/store-room';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
 const orderEvent = z.object({ orderId: z.string().min(1).max(64) });
 const chatEvent = z.object({ roomId: z.string().min(1).max(64) });
 const vendorEvent = z.object({ vendorId: z.string().min(1).max(64) });
+const storeRoomRevocation = z.object({ vendorId: z.string().min(1).max(64), userId: z.string().min(1).max(64) });
 const MAX_EARLY_AUTH_PACKETS = 4;
 const MAX_SOCKET_PACKET_BYTES = 64 * 1024;
 
@@ -369,6 +371,8 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           // Redis adapter 8.3.0 does not await its ioredis subscriptions. Verify
           // the default namespace subscriptions before plugin readiness.
           await subscriptionGuard.verifyAndStopTracking(['psubscribe', 'subscribe']);
+          // [AX308 F03] Store-room revocations now reach the other instances.
+          setStoreRoomCluster(true);
           socketAdapterHealthy = true;
         })(),
         startupTimeoutMs,
@@ -524,6 +528,15 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
 
   app.decorate('io', io);
 
+  // [AX308 F03] A store-room revocation made on another instance: apply it
+  // here in the same single step (store-room.ts). Only instances on the
+  // cross-instance adapter ever receive this; the payload is validated like
+  // any wire input.
+  io.on(STORE_ROOM_REVOKED, (raw: unknown) => {
+    const parsed = storeRoomRevocation.safeParse(raw);
+    if (parsed.success) applyStoreRoomRevocation(io, parsed.data.vendorId, parsed.data.userId);
+  });
+
   io.on('connection', (socket) => {
     // These values passed the first read, but are not activated until the
     // authorization-only rooms are registered and a second read converges.
@@ -628,22 +641,30 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     // never opened on a staff phone even with the app in hand.
     // [AX291 F02] Membership is the tenant-bound store rule (isStoreRoomMember):
     // a team row pointing across tenants admits nobody.
-    // [AX291 F03] A removal can overtake the first read: the member is deleted
-    // and evicted (DELETE /vendor/staff/:id) after the read said yes and before
-    // the join, and the join would let them back in. So the rule is read again
-    // once the join is done, and a no leaves the room at once.
-    socket.on('vendor:subscribe', async (raw: unknown) => {
+    // [AX291/AX308 F03] A removal can land between the membership read and
+    // the join. The join is therefore gated by the revocation epoch
+    // (store-room.ts): read before the database, compared after it, and the
+    // join follows in the same tick with nothing awaited in between, so no
+    // subscription joins after this process applied a revocation. There is no
+    // join-then-recheck: a socket that is not a member is never in the room,
+    // not even for the length of a query. An optional ack reports the outcome.
+    socket.on('vendor:subscribe', async (raw: unknown, ack?: unknown) => {
+      const reply = (joined: boolean) => {
+        if (typeof ack === 'function') (ack as (result: { joined: boolean }) => void)({ joined });
+      };
       const parsed = vendorEvent.safeParse(raw);
-      if (!parsed.success) return;
-      const room = `vendor:${parsed.data.vendorId}`;
+      if (!parsed.success) return reply(false);
+      const { vendorId } = parsed.data;
+      const epoch = storeRoomEpoch(vendorId, userId);
+      let member = false;
       try {
-        if (!(await isStoreRoomMember(app.prisma, parsed.data.vendorId, userId, tenantId))) return;
-        await socket.join(room);
-        if (!(await isStoreRoomMember(app.prisma, parsed.data.vendorId, userId, tenantId))) await socket.leave(room);
+        member = await isStoreRoomMember(app.prisma, vendorId, userId, tenantId);
       } catch {
-        // Non-fatal, and never left joined on a failed check.
-        await Promise.resolve(socket.leave(room)).catch(() => {});
+        member = false; // non-fatal: the socket simply does not join
       }
+      if (!member || storeRoomEpoch(vendorId, userId) !== epoch) return reply(false);
+      void socket.join(`vendor:${vendorId}`);
+      reply(true);
     });
 
     const failPendingPackets = () => {
