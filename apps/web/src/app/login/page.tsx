@@ -5,7 +5,8 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
 import { verifyCustomerLogin } from '@/lib/customer';
-import { clearStorefrontContinuation, readStorefrontContinuation } from '@/lib/storefront-continuation';
+import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
+import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { SwiftLogo } from '@/components/swift-logo';
 import styles from '../auth-flow.module.css';
 
@@ -20,14 +21,18 @@ function isCustomerReturn(next: string): boolean {
 
 function LoginInner() {
   const router = useRouter();
+  const continueJourney = useStorefrontAuthJourney();
   const params = useSearchParams();
   // Only ever honour a clean in-app path as the post-login redirect. Reject
   // absolute/protocol-relative URLs and any '..' traversal so ?next= can't be an
   // open redirect to a phishing site.
   const [pendingReturn, setPendingReturn] = useState('');
-  useEffect(() => { setPendingReturn(readStorefrontContinuation()?.returnPath ?? ''); }, []);
-  const rawNext = params.get('next') ?? pendingReturn;
-  const next = /^\/(?!\/)/.test(rawNext) && !rawNext.includes('..') && !rawNext.includes('\\') ? rawNext : '';
+  const [next, setNext] = useState('');
+  const requestedNext = params.get('next');
+  useEffect(() => {
+    setNext(storefrontAuthReturn(requestedNext));
+    setPendingReturn(readStorefrontContinuation()?.returnPath ?? '');
+  }, [requestedNext]);
   const isCustomer = isCustomerReturn(next);
 
   const [step, setStep] = useState<'phone' | 'code'>('phone');
@@ -53,6 +58,7 @@ function LoginInner() {
     try {
       if (isCustomer) {
         await verifyCustomerLogin(phone.trim(), code.trim());
+        continueJourney();
         router.replace(next || '/');
       } else {
         const { home } = await verifyPartnerLogin(phone.trim(), code.trim());
@@ -110,6 +116,7 @@ function LoginInner() {
           New to Swift?{' '}
           <Link
             href={next ? `/signup?next=${encodeURIComponent(next)}` : '/signup'}
+            onClick={continueJourney}
             className={styles.inlineLink}
           >
             Create an account
