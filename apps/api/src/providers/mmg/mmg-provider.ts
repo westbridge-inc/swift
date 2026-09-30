@@ -74,11 +74,42 @@ export type MmgLookupDetail =
     /** creditParty values, or null when MMG sent none. */
     creditParties: string[] | null;
     createdAt: string | null;
+    /** [F1] What MMG's answer carries in the CONFIRMED reference field(s)
+     *  (MMG_LOOKUP_REFERENCE_FIELDS), exactly as sent. Empty while no field is
+     *  confirmed, and then nothing binds this transaction to a checkout. */
+    echoedReferences: string[];
     /** The answer as MMG sent it, for the observation record. */
     raw: Record<string, unknown>;
   }
   | { outcome: 'not_found' }
   | { outcome: 'error'; reason: string };
+
+/**
+ * [MMG checkout F1] Which field of MMG's lookup answer echoes the merchant's
+ * own transaction reference. UNCONFIRMED (CHECKOUT-CONTRACT.md U5): MMG's
+ * published material does not say, and no field is read by a guessed name.
+ * Until the first UAT run proves one and it is named here, no lookup binds to
+ * a checkout, so every checkout credit is held for a person.
+ * Each entry is an exact key path ('a.b'). A value counts only when it is a
+ * string, compared whole: never a substring, never a number (an 18-digit
+ * reference does not survive a JSON number).
+ */
+export const MMG_LOOKUP_REFERENCE_FIELDS: readonly string[] = [];
+
+/** The string values at exactly these key paths of a lookup answer. */
+export function echoedReferencesFrom(raw: unknown, fields: readonly string[] = MMG_LOOKUP_REFERENCE_FIELDS): string[] {
+  const out: string[] = [];
+  for (const field of fields) {
+    let node: unknown = raw;
+    for (const part of field.split('.')) {
+      node = node && typeof node === 'object' && !Array.isArray(node) && Object.prototype.hasOwnProperty.call(node, part)
+        ? (node as Record<string, unknown>)[part]
+        : undefined;
+    }
+    if (typeof node === 'string') out.push(node);
+  }
+  return out;
+}
 
 /** The one call the checkout verifier makes. */
 export interface MmgLookupClient {
@@ -227,6 +258,13 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
     const amountMinor = planted?.amountMinor ?? initiated?.amountMinor ?? null;
     const currencyCode = planted?.currencyCode ?? initiated?.currencyCode ?? null;
     const creditParties = planted?.creditParties ?? null;
+    const raw: Record<string, unknown> = {
+      transactionReference: transactionId,
+      transactionStatus: status,
+      ...(amountMinor === null ? {} : { amount: toMajorString(amountMinor) }),
+      ...(currencyCode === null ? {} : { currency: currencyCode }),
+      ...(creditParties === null ? {} : { creditParty: creditParties.map((value) => ({ key: 'accountid', value })) }),
+    };
     return {
       outcome: 'found',
       transactionId,
@@ -235,13 +273,8 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
       currencyCode,
       creditParties,
       createdAt: planted?.createdAt ?? null,
-      raw: {
-        transactionReference: transactionId,
-        transactionStatus: status,
-        ...(amountMinor === null ? {} : { amount: toMajorString(amountMinor) }),
-        ...(currencyCode === null ? {} : { currency: currencyCode }),
-        ...(creditParties === null ? {} : { creditParty: creditParties.map((value) => ({ key: 'accountid', value })) }),
-      },
+      echoedReferences: echoedReferencesFrom(raw),
+      raw,
     };
   }
 }
@@ -501,6 +534,7 @@ export class LiveMmgProvider implements MmgMerchantProvider {
         ? creditParty.map((party: unknown) => (party && typeof party === 'object' ? String((party as Record<string, unknown>)['value'] ?? '') : '')).filter(Boolean)
         : null,
       createdAt: typeof answer['creationDate'] === 'string' ? answer['creationDate'] : null,
+      echoedReferences: echoedReferencesFrom(answer),
       raw: answer,
     };
   }

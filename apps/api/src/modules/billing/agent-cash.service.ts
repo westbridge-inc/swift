@@ -7,6 +7,7 @@ import { captureMmgPayer } from '../integrity/capture-hooks';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { agentCashDuplicateCreditsCounter, agentCashDuplicateCreditsGauge, agentCashProviderIdConflictsCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
+import { claimProviderPaymentInTx, ProviderIdentityError } from './provider-identity';
 import { weeklyFeeAmount } from './subscription-fee';
 
 // Agent-cash ingestion [san spec PART 4] — three channels, ONE pipeline:
@@ -217,12 +218,14 @@ export class AgentCashService {
       }
     }
     await this.prisma.mmgAgentPayment.update({ where: { id: row.id }, data: { providerPaymentId: payment.id } });
-    const conflict = Number(payment.amount) !== Number(row.amount) || payment.currencyCode !== row.currencyCode;
+    // [MMG checkout F7] An identity on record for another tenant is never this
+    // observation's to credit: the same conflict as a different amount.
+    const conflict = Number(payment.amount) !== Number(row.amount) || payment.currencyCode !== row.currencyCode || payment.tenantId !== row.tenantId;
     if (conflict) {
       agentCashProviderIdConflictsCounter.labels(channel).inc();
       log().error(
-        { paymentId: row.id, providerPaymentId: payment.id, providerTxnId: key, observed: { amount: Number(row.amount), currency: row.currencyCode }, identity: { amount: Number(payment.amount), currency: payment.currencyCode } },
-        '[M-18] provider transaction observed with a different amount — suspensed, never credited; a person must look',
+        { paymentId: row.id, providerPaymentId: payment.id, providerTxnId: key, observed: { amount: Number(row.amount), currency: row.currencyCode, tenantId: row.tenantId }, identity: { amount: Number(payment.amount), currency: payment.currencyCode, tenantId: payment.tenantId } },
+        '[M-18] provider transaction observed with a different amount, currency or tenant — suspensed, never credited; a person must look',
       );
       await this.page('agent-cash-provider-id-conflict', 'One MMG transaction, two amounts', `Transaction ${key} arrived by ${channel} with a different amount than an earlier observation. It is parked in suspense — reconcile against the MMG statement before crediting anything.`, { variant: 'provider_id_conflict', paymentId: row.id, providerTxnId: key });
     }
@@ -282,12 +285,42 @@ export class AgentCashService {
 
       const payment = await tx.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
 
-      // [M-18] THE single CAS: exactly one observation of a provider
-      // transaction ever credits. A concurrent channel, or a later attach of
-      // the unmatched original, waits on this row, re-reads the predicate
-      // after the winner commits and gets count=0 — and becomes a reconciled
-      // observation of the credit that won. No money moves for it.
-      if (payment.providerPaymentId) {
+      // [MMG checkout F2] A payment observed before M-18 has no identity yet.
+      // It claims one HERE, inside the credit, like every other channel; it is
+      // never credited without one.
+      if (!payment.providerPaymentId) {
+        try {
+          const claim = await claimProviderPaymentInTx(tx, {
+            provider: PROVIDER,
+            providerTxnId: providerTxnKey(payment),
+            amount: Number(payment.amount),
+            currencyCode: payment.currencyCode,
+            subscriptionId: requestedSubscriptionId,
+            tenantId: payment.tenantId,
+            creditedBy: paymentId,
+          });
+          await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { providerPaymentId: claim.id } });
+          payment.providerPaymentId = claim.id;
+        } catch (e) {
+          // Another amount, currency or tenant on record: a person reconciles it.
+          if (!(e instanceof ProviderIdentityError) || e.identityCode !== 'PROVIDER_TXN_ALREADY_CREDITED') throw e;
+          const [identity] = await tx.$queryRaw<Array<{ creditedPaymentId: string | null; subscriptionId: string | null }>>`
+            SELECT "creditedPaymentId", "subscriptionId" FROM "provider_payments"
+            WHERE "provider" = ${PROVIDER} AND "providerTxnId" = ${providerTxnKey(payment)}`;
+          const original = identity?.creditedPaymentId ?? 'unknown';
+          await tx.mmgAgentPayment.updateMany({
+            where: { id: paymentId, status: resolution.expectedStatus },
+            data: { status: 'RECONCILED', note: `duplicate of ${original} (already credited)`, resolvedAt: new Date() },
+          });
+          await onAudit?.(tx, { paymentId, subscriptionId: identity?.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original });
+          return { paymentId, subscriptionId: identity?.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original };
+        }
+      } else {
+        // [M-18] THE single CAS: exactly one observation of a provider
+        // transaction ever credits. A concurrent channel, or a later attach of
+        // the unmatched original, waits on this row, re-reads the predicate
+        // after the winner commits and gets count=0 — and becomes a reconciled
+        // observation of the credit that won. No money moves for it.
         const won = await tx.providerPayment.updateMany({
           where: { id: payment.providerPaymentId, status: 'OPEN' },
           data: { status: 'CREDITED', creditedPaymentId: paymentId, subscriptionId: requestedSubscriptionId, creditedAt: new Date() },

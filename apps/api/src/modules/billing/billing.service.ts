@@ -19,7 +19,7 @@ import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotice
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 import { payInfo } from './agent-cash.service';
-import { claimProviderPaymentInTx, ProviderIdentityError } from './provider-identity';
+import { claimProviderPaymentInTx, ProviderIdentityError, subscriptionTenantInTx } from './provider-identity';
 import { cardRailKilled, cardRailV2Enabled } from '../../utils/card-rail';
 import {
   assertNever, bindingOf, chargeMatchesIntent, describeBinding, sameBinding,
@@ -296,6 +296,15 @@ export const TOPUP_KEY_MIN = 8;
 export const TOPUP_KEY_MAX = 128;
 export function isUsableTopUpKey(key: unknown): key is string {
   return typeof key === 'string' && key.length >= TOPUP_KEY_MIN && key.length <= TOPUP_KEY_MAX;
+}
+
+/** [MMG checkout F2] Thrown inside a push-rail settlement whose MMG transaction
+ *  is already on record for another credit: it rolls the settlement back whole
+ *  (no half-claimed payment, no orphan identity) before the hold is applied. */
+class PushIdentityRefused extends Error {
+  constructor(readonly identityCode: string) {
+    super(`push settlement refused by the provider identity (${identityCode})`);
+  }
 }
 
 export class BillingService {
@@ -1208,12 +1217,15 @@ export class BillingService {
     });
     if (!notify) return;
     // Only what is true about paying (fee-notice-copy.ts): the confirmation
-    // door arrives with the card screens; until then, the doors that exist.
+    // door arrives with the card screens. Until then, the paying sentence
+    // every fee notice carries [owner rule 2026-09-29]: the MMG checkout while
+    // it is live, otherwise the amount due; never an agent or a Swift Number.
+    const payLine = await this.feePayLine(sub, null);
     await this.notifications.send({
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Card payment not completed',
-      body: `Your bank asked to confirm this week's card payment of $${amount.toLocaleString()} ${sub.currencyCode}, which cannot be done automatically, so it did not go through. You were not charged, and this does not count against you. ${feePayWays(sub)}. ${FEE_RESTORE_LINE}`,
+      body: `Your bank asked to confirm this week's card payment of $${amount.toLocaleString()} ${sub.currencyCode}, which cannot be done automatically, so it did not go through. You were not charged, and this does not count against you. ${payLine} ${FEE_RESTORE_LINE}`,
       audience: this.payerAudience(sub),
       data: { kind: 'billing_card_action_required', subscriptionId: sub.id },
       dedupeKey: `card-action:${paymentId}`,
@@ -2676,7 +2688,7 @@ export class BillingService {
     now: Date,
   ): Promise<'advanced' | 'banked' | 'held' | 'lost'> {
     if (evidence.status !== 'approved') return 'lost';
-    const result = await this.prisma.$transaction(async (tx) => {
+    const settle = () => this.prisma.$transaction(async (tx) => {
       const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
       await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${paymentId} FOR UPDATE`;
       const payment = await tx.subscriptionPayment.findUnique({ where: { id: paymentId } });
@@ -2726,6 +2738,27 @@ export class BillingService {
       });
       if (claimed.count === 0) return { kind: 'lost' as const };
 
+      // [I3 · MMG checkout F2] One MMG transaction, one credit, whichever channel
+      // reaches it first: the push rail claims the same provider identity as
+      // agent cash, admin top-ups and the MMG checkout, inside this settlement.
+      // A transaction another channel already credited (or on record for another
+      // account or amount) rolls this settlement back whole and is held for a
+      // person (below), never settled here.
+      try {
+        await claimProviderPaymentInTx(tx, {
+          provider: 'MMG',
+          providerTxnId: evidence.transactionId,
+          amount: Number(payment.amount),
+          currencyCode: originalAttempt!.currencyCode,
+          subscriptionId: sub.id,
+          tenantId: await subscriptionTenantInTx(tx, sub.id),
+          creditedBy: `push:${payment.id}`,
+        });
+      } catch (error) {
+        if (error instanceof ProviderIdentityError) throw new PushIdentityRefused(error.identityCode);
+        throw error;
+      }
+
       // The approved intent is the immutable money fact. A retry may have a
       // different price and attempt pin; neither can rewrite money received.
       const amount = Number(payment.amount);
@@ -2773,6 +2806,13 @@ export class BillingService {
       if (applied !== 'advanced') throw new Error(`Locked MMG authority changed while settling payment ${payment.id}`);
       return { kind: 'advanced' as const, current, amount, periodKey };
     });
+    let result: Awaited<ReturnType<typeof settle>> | { kind: 'held'; reason: string; paymentId: string; notify: boolean } | { kind: 'lost' };
+    try {
+      result = await settle();
+    } catch (error) {
+      if (!(error instanceof PushIdentityRefused)) throw error;
+      result = await this.holdPushOnIdentityConflict(sub, paymentId, evidence, error.identityCode, now);
+    }
 
     if (result.kind === 'held' && result.notify) {
       await this.notifyMmgReconciliationHold(sub, result.reason, result.paymentId);
@@ -2789,6 +2829,33 @@ export class BillingService {
       await this.afterSuccessfulCharge(result.current, result.amount, result.periodKey);
     }
     return result.kind;
+  }
+
+  /** [MMG checkout F2] The push rail's settlement found its MMG transaction on
+   *  record for another credit and rolled back whole. Keep the approval as
+   *  evidence and hold it for a person, in its own transaction, under the same
+   *  payer -> subscription -> payment lock order. Nothing is booked. */
+  private async holdPushOnIdentityConflict(
+    sub: SubWithRelations,
+    paymentId: string,
+    evidence: MmgApprovalEvidence,
+    identityCode: string,
+    now: Date,
+  ): Promise<{ kind: 'held'; reason: string; paymentId: string; notify: boolean } | { kind: 'lost' }> {
+    const reason = `The MMG transaction is already on record for another credit (${identityCode})`;
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockSubscriptionMoneyAuthority(tx, sub);
+      await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${paymentId} FOR UPDATE`;
+      const payment = await tx.subscriptionPayment.findUnique({ where: { id: paymentId } });
+      if (!payment || payment.subscriptionId !== sub.id || payment.paymentMethod !== 'MOBILE_MONEY' || payment.status === 'CAPTURED') {
+        return { kind: 'lost' as const };
+      }
+      const originalAttempt = payment.clientKey?.startsWith(`sub:${sub.id}:`)
+        ? await tx.billingEvent.findUnique({ where: { idempotencyKey: `charge:${payment.clientKey.slice(4)}` } })
+        : null;
+      const notify = await this.retainMmgApprovalHold(tx, payment, originalAttempt?.currencyCode ?? null, evidence, reason, now);
+      return { kind: 'held' as const, reason, paymentId: payment.id, notify };
+    });
   }
 
   /**
@@ -3911,6 +3978,8 @@ export class BillingService {
           amount: input.amount,
           currencyCode: payee.currencyCode,
           subscriptionId: input.subscriptionId,
+          // [F7] Filed under the payer's tenant, whoever runs the command.
+          tenantId: await subscriptionTenantInTx(tx, input.subscriptionId),
           creditedBy: `topup:${input.adminId}:${input.idempotencyKey}`,
         });
         const balance = await this.recordTopUpInTransaction(tx, {

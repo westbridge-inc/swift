@@ -287,8 +287,11 @@ describe('[C4] requires_action (off-session 3-D Secure) is not a decline', () =>
       expect(notice.body).not.toMatch(door);
     }
     expect(notice.body).toMatch(/not charged/);
-    expect(notice.body).toContain('MMG agent');
-    expect(notice.body).toContain('Swift Number');
+    // [owner rule 2026-09-29, MMG checkout 2/6] The paying sentence every fee
+    // notice carries: with the MMG checkout off here, the amount due, promising
+    // no way to pay; never an MMG agent, cash, a Swift Number or an account number.
+    expect(notice.body).toMatch(/The weekly fee of \S+ is due now\./);
+    expect(notice.body).not.toMatch(/MMG agent|any agent|Swift Number|account number|pay cash|coming soon/i);
 
     // The cycle comes back (hours later, the attempt reclaimed): still no charge, no strike, no second notice.
     expect(await bill(p.subId, new Date(Date.now() + 2 * 60 * 60 * 1000))).toBe('pending');

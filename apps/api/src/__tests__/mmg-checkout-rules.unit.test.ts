@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Prisma, type PrismaClient } from '@prisma/client';
-import { candidatesFrom, judge, sameMsisdn } from '../modules/billing/mmg-checkout.service';
+import { bindingOf, candidatesFrom, judge, sameMsisdn } from '../modules/billing/mmg-checkout.service';
 import {
   FEE_CHECKOUT_PLATFORMS_KEY,
   checkoutAmountGyd,
@@ -13,7 +13,8 @@ import {
 } from '../modules/billing/fee-pay-actions';
 import { FEE_RESTORE_LINE, feeCoveredLine, feeDueLine, guyanaDay, mmgPayLine } from '../modules/billing/fee-notice-copy';
 import type { MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
-import type { MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { MMG_LOOKUP_REFERENCE_FIELDS, echoedReferencesFrom, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { PROVIDER_IDENTITY_BACKFILL_KEY } from '../modules/billing/provider-identity-backfill';
 
 // ---------------------------------------------------------------------------
 // The rules of the MMG weekly-fee checkout that need no database: which MMG
@@ -24,12 +25,15 @@ import type { MmgLookupDetail } from '../providers/mmg/mmg-provider';
 // ---------------------------------------------------------------------------
 
 const REF = '179000000000012345';
+const OTHER_REF = '179000000000099999';
 const MERCHANT = '5926000001';
 const intent = { merchantTransactionId: REF, amount: new Prisma.Decimal(1500), currencyCode: 'GYD', createdAt: new Date('2026-09-29T12:00:00Z') };
 const found = (patch: Partial<Extract<MmgLookupDetail, { outcome: 'found' }>> = {}): MmgLookupDetail => ({
   outcome: 'found', transactionId: 'MMGTX1', status: 'approved', amountMinor: 150_000, currencyCode: 'GYD',
-  creditParties: [MERCHANT], createdAt: '2026-09-29T12:05:00Z', raw: { transactionReference: 'MMGTX1' }, ...patch,
+  creditParties: [MERCHANT], createdAt: '2026-09-29T12:05:00Z', echoedReferences: [], raw: { transactionReference: 'MMGTX1' }, ...patch,
 });
+/** MMG's answer echoing THIS checkout's reference in the confirmed field [F1]. */
+const echo = { echoedReferences: [REF] };
 
 describe('which MMG transaction a reply may be naming (reply field names are unconfirmed)', () => {
   it('takes id-shaped values, id-like keys first, and never our reference, the amount, the merchant, a date or a secret', () => {
@@ -59,10 +63,34 @@ describe('which MMG transaction a reply may be naming (reply field names are unc
   });
 });
 
-describe('what a lookup answer means for a checkout [I2]', () => {
-  it('credits only an approved transaction of exactly the amount asked, in GYD, paid to our merchant', () => {
-    expect(judge(intent, 'MMGTX1', found(), [MERCHANT])).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1' });
-    expect(judge(intent, 'MMGTX1', found({ creditParties: ['6000001'] }), [MERCHANT]).verdict).toBe('CONFIRM');
+describe('what a lookup answer means for a checkout [I2 · F1]', () => {
+  it('credits only an approved transaction of exactly the amount asked, in GYD, paid to our merchant, that MMG ties to THIS checkout', () => {
+    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT])).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1' });
+    expect(judge(intent, 'MMGTX1', found({ ...echo, creditParties: ['6000001'] }), [MERCHANT]).verdict).toBe('CONFIRM');
+    // The same reference in two confirmed fields is still one reference.
+    expect(judge(intent, 'MMGTX1', found({ echoedReferences: [REF, REF] }), [MERCHANT]).verdict).toBe('CONFIRM');
+  });
+
+  it('[F1] an exact approved payment MMG does not tie to this checkout is held for a person at once, never credited', () => {
+    expect(judge(intent, 'MMGTX1', found(), [MERCHANT])).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'REFERENCE_NOT_ECHOED', decisive: true });
+  });
+
+  it.each([
+    ['another checkout’s reference', [OTHER_REF], 'REFERENCE_MISMATCH'],
+    ['ours and another', [REF, OTHER_REF], 'REFERENCE_AMBIGUOUS'],
+    ['our reference padded', [` ${REF}`], 'REFERENCE_MISMATCH'],
+    ['our reference with a digit more', [`${REF}0`], 'REFERENCE_MISMATCH'],
+  ] as const)('[F1] a lookup echoing %s is held at once', (_label, echoedReferences, reason) => {
+    expect(judge(intent, 'MMGTX1', found({ echoedReferences: [...echoedReferences] }), [MERCHANT])).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
+  });
+
+  it('[F1] our reference inside some other text binds nothing: there is no substring binding', () => {
+    const verdict = judge(intent, 'MMGTX1', found({ raw: { description: `Swift ${REF}`, merchantTransactionId: REF } }), [MERCHANT]);
+    expect(verdict).toMatchObject({ verdict: 'HOLD', reason: 'REFERENCE_NOT_ECHOED' });
+  });
+
+  it('[F1] a lookup that names another of our checkouts is held, even when it echoes this one', () => {
+    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT], [OTHER_REF])).toMatchObject({ verdict: 'HOLD', reason: 'REFERENCE_OF_ANOTHER_CHECKOUT', decisive: true });
   });
 
   it.each([
@@ -74,23 +102,58 @@ describe('what a lookup answer means for a checkout [I2]', () => {
     ['someone else’s merchant', { creditParties: ['5926999999'] }, 'MERCHANT_MISMATCH'],
     ['no merchant named', { creditParties: null }, 'MERCHANT_UNCONFIRMED'],
     ['a transaction a week before the checkout', { createdAt: '2026-09-22T12:00:00Z' }, 'OLDER_THAN_CHECKOUT'],
-  ] as const)('holds %s for a person, never credits', (_label, patch, reason) => {
-    const verdict = judge(intent, 'MMGTX1', found(patch as never), [MERCHANT]);
-    expect(verdict).toMatchObject({ verdict: 'HOLD', reason, strong: false });
+  ] as const)('holds %s for a person, never credits: at once when MMG ties it to this checkout, after the window otherwise', (_label, patch, reason) => {
+    expect(judge(intent, 'MMGTX1', found(patch as never), [MERCHANT])).toMatchObject({ verdict: 'HOLD', reason, decisive: false });
+    expect(judge(intent, 'MMGTX1', found({ ...(patch as object), ...echo } as never), [MERCHANT])).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
   });
 
-  it('knows for certain only when MMG’s own answer names our reference', () => {
-    const verdict = judge(intent, 'MMGTX1', found({ amountMinor: 1, raw: { description: `Swift ${REF}` } }), [MERCHANT]);
-    expect(verdict).toMatchObject({ verdict: 'HOLD', strong: true });
-  });
-
-  it('declined, expired and reversed are not payments; pending waits; unknown and errors decide nothing', () => {
-    expect(judge(intent, 'T', found({ status: 'declined' }), [MERCHANT]).verdict).toBe('DECLINED');
-    expect(judge(intent, 'T', found({ status: 'expired' }), [MERCHANT]).verdict).toBe('DECLINED');
-    expect(judge(intent, 'T', found({ status: 'reversed' }), [MERCHANT]).verdict).toBe('DECLINED');
-    expect(judge(intent, 'T', found({ status: 'pending' }), [MERCHANT]).verdict).toBe('PENDING');
+  it('declined, expired and reversed are not payments, and only MMG’s answer for THIS checkout says a payment failed [F5]', () => {
+    for (const status of ['declined', 'expired', 'reversed'] as const) {
+      expect(judge(intent, 'T', found({ status }), [MERCHANT])).toMatchObject({ verdict: 'DECLINED', bound: false });
+      expect(judge(intent, 'T', found({ status, ...echo }), [MERCHANT])).toMatchObject({ verdict: 'DECLINED', bound: true });
+    }
+    expect(judge(intent, 'T', found({ status: 'declined', ...echo }), [MERCHANT], [OTHER_REF])).toMatchObject({ verdict: 'DECLINED', bound: false });
+    expect(judge(intent, 'T', found({ status: 'pending', ...echo }), [MERCHANT]).verdict).toBe('PENDING');
     expect(judge(intent, 'T', { outcome: 'not_found' }, [MERCHANT]).verdict).toBe('NOT_FOUND');
     expect(judge(intent, 'T', { outcome: 'error', reason: 'x' }, [MERCHANT]).verdict).toBe('ERROR');
+  });
+
+  it('[F1] binding is exact: one distinct echoed value, equal to ours', () => {
+    expect(bindingOf(REF, [])).toBe('NOT_ECHOED');
+    expect(bindingOf(REF, [REF])).toBe('BOUND');
+    expect(bindingOf(REF, [REF, REF])).toBe('BOUND');
+    expect(bindingOf(REF, [OTHER_REF])).toBe('MISMATCH');
+    expect(bindingOf(REF, [REF, OTHER_REF])).toBe('AMBIGUOUS');
+  });
+});
+
+describe('the reference MMG’s lookup echoes [F1] (the field is UNCONFIRMED until UAT)', () => {
+  it('no field is confirmed yet, so no lookup answer, whatever it carries, binds to a checkout', () => {
+    expect(MMG_LOOKUP_REFERENCE_FIELDS).toEqual([]);
+    const answer = { merchantTransactionId: REF, reference: REF, merchantReference: REF, externalReference: REF, orderId: REF, description: REF };
+    expect(echoedReferencesFrom(answer)).toEqual([]);
+  });
+
+  it('reads exactly the named key paths, whole strings only: never a substring, never a number', () => {
+    const answer = { a: REF, nested: { ref: REF }, text: `Swift ${REF}`, num: Number(REF), deep: { x: { y: OTHER_REF } } };
+    expect(echoedReferencesFrom(answer, ['a'])).toEqual([REF]);
+    expect(echoedReferencesFrom(answer, ['nested.ref', 'deep.x.y'])).toEqual([REF, OTHER_REF]);
+    expect(echoedReferencesFrom(answer, ['text'])).toEqual([`Swift ${REF}`]);
+    expect(echoedReferencesFrom(answer, ['num', 'missing', 'nested', 'a.b'])).toEqual([]);
+    expect(echoedReferencesFrom(null, ['a'])).toEqual([]);
+  });
+});
+
+describe('the backfill completion record [F2]', () => {
+  it('lives under a key the admin config route can never write, so it cannot be set by hand', () => {
+    // The route's own key rule, read from its source: widening it to allow ':'
+    // would let a person switch checkout crediting on without the backfill.
+    const routes = readFileSync(join(__dirname, '..', 'modules/admin/admin.routes.ts'), 'utf8');
+    const literal = routes.match(/const configKeySchema = z\.string\(\)\.regex\(\/(.+?)\/([a-z]*),/);
+    expect(literal, 'configKeySchema is still a single regex').not.toBeNull();
+    const configKey = new RegExp(literal![1]!, literal![2]);
+    expect(configKey.test('billing.feeCheckout.platforms')).toBe(true);
+    expect(configKey.test(PROVIDER_IDENTITY_BACKFILL_KEY)).toBe(false);
   });
 });
 

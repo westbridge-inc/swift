@@ -16,30 +16,38 @@ import { isDuplicateOn } from '../money/evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import type { BillingService } from './billing.service';
 import { payInfo } from './agent-cash.service';
+import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
 import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
-import { claimProviderPaymentInTx, normalizeProviderTxnId, ProviderIdentityError } from './provider-identity';
+import { claimProviderPaymentInTx, normalizeProviderTxnId, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
+import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout (MMG-CHECKOUT-API.md is the contract).
 //
-// A partner starts a checkout; Swift prices it [I1], persists it, then hands
-// out the MMG page. MMG sends the partner back with an encrypted reply whose
-// field names are still UNCONFIRMED (providers/mmg/CHECKOUT-CONTRACT.md U1-U3),
-// so this service never reads a field by name:
+// A partner starts a checkout; Swift prices it [I1], persists it with its MMG
+// page sealed [F6], then hands the page out. MMG sends the partner back with an
+// encrypted reply whose field names are still UNCONFIRMED
+// (providers/mmg/CHECKOUT-CONTRACT.md U1-U3), so this service never reads a
+// field by name:
 //   - the checkout is the one whose 18-digit reference appears ANYWHERE in the
 //     decrypted reply (we generated it, so we recognise it);
 //   - every other id-shaped value in the reply is a CANDIDATE MMG transaction.
-// MMG's own merchant lookup is the only evidence. A candidate credits only
-// when the lookup reports it approved, for exactly the amount asked, in GYD,
-// paid to our merchant [I2]. The reply, the redirect and the app never credit.
+// The reply is only a pointer. MMG's own merchant lookup is the only evidence
+// [I2], and a candidate credits only when that lookup reports it approved, for
+// exactly the amount asked, in GYD, paid to our merchant, AND names this
+// checkout's own reference in its confirmed reference field [F1]. Attribution is
+// bound to MMG's lookup echo; an unbound confirmation is held for a person.
 //
-// The credit is the provider_payments compare-and-set shared with agent cash
-// and admin top-ups [I3]; one open checkout per subscription is a partial
-// unique index [I4]; a checkout in flight pauses charging and dunning, and a
-// credit re-bills at once [I5]; a mismatch holds for a person [I6]; this table
-// is invisible to the merchant-initiated poller [I7]; expiry is not failure,
-// and a late confirmation still credits [I8]; every reply and lookup is
-// written down before anything is decided on it [I9].
+// The credit is the provider_payments compare-and-set every channel claims
+// [I3 · F2]; one open checkout per subscription is a partial unique index
+// [I4]; a checkout in flight pauses charging and dunning, and a credit
+// re-bills at once [I5]; a mismatch holds for a person [I6]; this table is
+// invisible to the merchant-initiated poller [I7]; expiry is not failure, and
+// a late confirmation still credits [I8]; every reply and lookup is written
+// down, under the checkout's own tenant [F7], before anything is decided on it
+// [I9]. A key that was answered keeps its answer [F3]; an expiry never
+// overwrites a newer state [F4]; only MMG's answer for THIS checkout says a
+// payment failed [F5].
 // ---------------------------------------------------------------------------
 
 /** How long a partner has to finish on the MMG page (MMG's own limit is unconfirmed, U8). */
@@ -56,6 +64,8 @@ const MAX_REPLY_PARAMS = 16;
 const MAX_REPLY_PARAM_CHARS = 4096;
 const POLL_BATCH = 50;
 const CLIENT_KEY = /^[A-Za-z0-9_-]{8,128}$/;
+/** Creating a checkout re-reads after a lost race; it never spins. */
+const CREATE_ATTEMPTS = 3;
 
 export type CheckoutStatus = 'OPEN' | 'CONFIRMING' | 'CONFIRMED' | 'NOT_PAID' | 'EXPIRED' | 'HELD';
 export type ReturnState = 'CONFIRMED' | 'CONFIRMING' | 'NOT_PAID' | 'UNKNOWN';
@@ -140,12 +150,11 @@ function redacted(value: unknown, depth = 0): Prisma.InputJsonValue | null {
 /** A redacted OBJECT, for a Json column (an object stays an object). */
 const redactedObject = (value: Record<string, unknown>): Prisma.InputJsonValue => redacted(value) as Prisma.InputJsonValue;
 
-/** The return path as a short hint (success, error, …): never evidence. */
+/** The return path as a short hint (success, error, …): stored for people, never evidence of anything [F5]. */
 function hintFrom(outcome: unknown): string | null {
   const text = typeof outcome === 'string' ? outcome.toLowerCase() : '';
   return /^[a-z0-9_-]{1,32}$/.test(text) ? text : null;
 }
-const errorHint = (hint: string | null) => !!hint && /error|fail|cancel|declin/.test(hint);
 
 function returnStateFor(status: CheckoutStatus): ReturnState {
   if (status === 'CONFIRMED') return 'CONFIRMED';
@@ -157,32 +166,75 @@ function minorOf(intent: Pick<MmgCheckoutIntent, 'amount' | 'currencyCode'>): nu
   return Number(fromMajor(intent.amount.toString(), intent.currencyCode).minor);
 }
 
+/**
+ * [F1] Whether MMG's own answer ties a transaction to THIS checkout: its
+ * confirmed reference field(s) carry exactly our reference, whole, and nothing
+ * else. Never a substring, never "appears somewhere in the answer".
+ */
+export type Binding = 'BOUND' | 'NOT_ECHOED' | 'MISMATCH' | 'AMBIGUOUS';
+export function bindingOf(merchantTransactionId: string, echoedReferences: readonly string[]): Binding {
+  const distinct = [...new Set(echoedReferences)];
+  if (distinct.length === 0) return 'NOT_ECHOED';
+  if (distinct.length > 1) return 'AMBIGUOUS';
+  return distinct[0] === merchantTransactionId ? 'BOUND' : 'MISMATCH';
+}
+
+type Hold = { verdict: 'HOLD'; txnId: string; reason: string; decisive: boolean };
+type Declined = { verdict: 'DECLINED'; txnId: string; reason: string; bound: boolean };
 type Verdict =
   | { verdict: 'CONFIRM'; txnId: string }
-  | { verdict: 'HOLD' | 'DECLINED'; txnId: string; reason: string; strong: boolean }
+  /** `decisive`: a person must look now. A money mismatch MMG does not tie to
+   *  this checkout may be another transaction the reply named, so it waits out
+   *  the confirmation window before holding. */
+  | Hold
+  /** `bound`: MMG's answer ties the failure to THIS checkout; the only
+   *  failure a partner is ever told about [F5]. */
+  | Declined
   | { verdict: 'PENDING' | 'NOT_FOUND' | 'ERROR'; txnId: string };
 
-/** What one lookup answer means for one checkout. `strong` = MMG's own answer
- *  names our reference, so it is certainly this checkout's transaction. */
-export function judge(intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'amount' | 'currencyCode' | 'createdAt'>, txnId: string, detail: MmgLookupDetail, merchantIds: string[]): Verdict {
+/** What one lookup answer means for one checkout. `otherCheckoutRefs` are OUR
+ *  other checkouts' references that the answer names (whole values): a
+ *  contradiction a person must resolve [F1]. */
+export function judge(
+  intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'amount' | 'currencyCode' | 'createdAt'>,
+  txnId: string,
+  detail: MmgLookupDetail,
+  merchantIds: string[],
+  otherCheckoutRefs: readonly string[] = [],
+): Verdict {
   if (detail.outcome === 'not_found') return { verdict: 'NOT_FOUND', txnId };
   if (detail.outcome === 'error') return { verdict: 'ERROR', txnId };
-  const strong = JSON.stringify(detail.raw).includes(intent.merchantTransactionId);
+  const binding = bindingOf(intent.merchantTransactionId, detail.echoedReferences);
+  const bound = binding === 'BOUND' && otherCheckoutRefs.length === 0;
   if (detail.status === 'approved') {
-    const hold = (reason: string): Verdict => ({ verdict: 'HOLD', txnId, reason, strong });
+    const hold = (reason: string, decisive: boolean): Verdict => ({ verdict: 'HOLD', txnId, reason, decisive });
+    // [F1] Contradictory: MMG ties this payment to another checkout, to another
+    // reference, or to more than one.
+    if (otherCheckoutRefs.length > 0) return hold('REFERENCE_OF_ANOTHER_CHECKOUT', true);
+    if (binding === 'MISMATCH') return hold('REFERENCE_MISMATCH', true);
+    if (binding === 'AMBIGUOUS') return hold('REFERENCE_AMBIGUOUS', true);
     const zoned = detail.createdAt && /(Z|[+-]\d{2}:?\d{2})$/.test(detail.createdAt) ? Date.parse(detail.createdAt) : NaN;
-    if (Number.isFinite(zoned) && zoned < intent.createdAt.getTime() - OLDER_THAN_CHECKOUT_MS) return hold('OLDER_THAN_CHECKOUT');
-    if (detail.amountMinor === null || detail.amountMinor !== minorOf(intent)) return hold('AMOUNT_MISMATCH');
-    if (detail.currencyCode !== intent.currencyCode) return hold('CURRENCY_MISMATCH');
-    if (!detail.creditParties || detail.creditParties.length === 0) return hold('MERCHANT_UNCONFIRMED');
-    if (!detail.creditParties.some((party) => merchantIds.some((merchant) => sameMsisdn(merchant, party)))) return hold('MERCHANT_MISMATCH');
+    if (Number.isFinite(zoned) && zoned < intent.createdAt.getTime() - OLDER_THAN_CHECKOUT_MS) return hold('OLDER_THAN_CHECKOUT', bound);
+    if (detail.amountMinor === null || detail.amountMinor !== minorOf(intent)) return hold('AMOUNT_MISMATCH', bound);
+    if (detail.currencyCode !== intent.currencyCode) return hold('CURRENCY_MISMATCH', bound);
+    if (!detail.creditParties || detail.creditParties.length === 0) return hold('MERCHANT_UNCONFIRMED', bound);
+    if (!detail.creditParties.some((party) => merchantIds.some((merchant) => sameMsisdn(merchant, party)))) return hold('MERCHANT_MISMATCH', bound);
+    // [F1] Everything matches, but only MMG's own echo of THIS checkout's
+    // reference attributes the payment to it. Unbound, a person attributes it.
+    if (!bound) return hold('REFERENCE_NOT_ECHOED', true);
     return { verdict: 'CONFIRM', txnId };
   }
   if (detail.status === 'declined' || detail.status === 'expired' || detail.status === 'reversed') {
-    return { verdict: 'DECLINED', txnId, reason: `MMG_${detail.status.toUpperCase()}`, strong };
+    return { verdict: 'DECLINED', txnId, reason: `MMG_${detail.status.toUpperCase()}`, bound };
   }
   return { verdict: 'PENDING', txnId };
 }
+
+const HOLD_REASON: Record<ProviderIdentityCode, string> = {
+  PROVIDER_TXN_ALREADY_CREDITED: 'ALREADY_CREDITED',
+  PROVIDER_TXN_AMOUNT_CONFLICT: 'AMOUNT_CONFLICT_ON_RECORD',
+  PROVIDER_TXN_TENANT_CONFLICT: 'TENANT_CONFLICT_ON_RECORD',
+};
 
 export class MmgCheckoutService {
   private readonly checkout: () => MmgCheckoutProvider;
@@ -212,22 +264,11 @@ export class MmgCheckoutService {
       throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Starting a checkout needs an Idempotency-Key header of 8-128 letters, digits, - or _. The same key on a retry returns the same checkout.');
     }
     const now = input.now ?? new Date();
+    const who = { userId: input.userId, subscriptionId: input.subscriptionId, clientKey };
 
-    // The same key always gets the same answer.
-    const replay = await this.prisma.mmgCheckoutIntent.findUnique({
-      where: { createdByUserId_clientKey: { createdByUserId: input.userId, clientKey } },
-    });
-    if (replay) {
-      if (replay.subscriptionId !== input.subscriptionId) {
-        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'That Idempotency-Key was used for a different checkout. A new tap needs a new key.');
-      }
-      // An open checkout past its time is expired first: a stale MMG page is never handed out.
-      if (replay.status === 'OPEN' && replay.expiresAt <= now) {
-        await this.expire(replay.id, 'NO_REPLY', now);
-        return { created: false, checkout: this.started(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: replay.id } })) };
-      }
-      return { created: false, checkout: this.started(replay) };
-    }
+    // [F3] A key that was ever answered keeps its answer: never a new checkout.
+    const replay = await this.answerForKey(who, now);
+    if (replay) return replay;
 
     const sub = await this.prisma.subscription.findUnique({ where: { id: input.subscriptionId } });
     if (!sub) throw new AppError(404, 'SUBSCRIPTION_NOT_FOUND', 'There is no subscription to pay.');
@@ -235,57 +276,72 @@ export class MmgCheckoutService {
       throw new AppError(409, 'PAY_ACTION_OFF', 'Paying with MMG is not available for this account here.');
     }
 
-    // [I4] One open checkout per subscription.
-    const open = await this.prisma.mmgCheckoutIntent.findFirst({
-      where: { subscriptionId: sub.id, status: { in: ['OPEN', 'CONFIRMING'] } },
-    });
-    if (open?.status === 'CONFIRMING') {
-      throw new AppError(409, 'CHECKOUT_CONFIRMING', 'An earlier MMG payment is being confirmed. Do not pay again.', { ref: open.id });
-    }
-    if (open && open.expiresAt > now) return { created: false, checkout: this.started(open) };
-    if (open) await this.expire(open.id, 'NO_REPLY', now);
-
-    // [I1] Priced here, from payInfo's own amount due.
-    const amountGyd = checkoutAmountGyd(await payInfo(this.prisma, sub));
-    const merchantTransactionId = newMerchantTransactionId(now);
-    let checkoutUrl: string;
-    try {
-      checkoutUrl = this.checkout().createCheckout({ amount: fromMajor(String(amountGyd), 'GYD'), merchantTransactionId, now }).checkoutUrl;
-    } catch (err) {
-      log().error({ err, subscriptionId: sub.id }, '[MMG checkout] the checkout could not be built');
-      throw new AppError(503, 'MMG_CHECKOUT_UNAVAILABLE', 'The MMG checkout could not be started right now. Try again in a minute.');
-    }
-
-    // Persisted BEFORE the page leaves the server: a checkout nobody wrote
-    // down could be paid and never found.
-    try {
-      const intent = await this.prisma.mmgCheckoutIntent.create({
-        data: {
-          subscriptionId: sub.id,
-          merchantTransactionId,
-          amount: amountGyd,
-          currencyCode: 'GYD',
-          clientKey,
-          createdByUserId: input.userId,
-          platform: input.platform,
-          checkoutUrl,
-          expiresAt: new Date(now.getTime() + MMG_CHECKOUT_TTL_MS),
-        },
+    for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt += 1) {
+      // [I4] One open checkout per subscription, read again after any expiry or lost race.
+      const open = await this.prisma.mmgCheckoutIntent.findFirst({
+        where: { subscriptionId: sub.id, status: { in: ['OPEN', 'CONFIRMING'] } },
       });
-      mmgCheckoutEventsCounter.labels('created').inc();
-      return { created: true, checkout: this.started(intent) };
-    } catch (err) {
-      if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
-      // A concurrent request won: the same key, or another open checkout.
-      const winner = await this.prisma.mmgCheckoutIntent.findUnique({
-        where: { createdByUserId_clientKey: { createdByUserId: input.userId, clientKey } },
-      }) ?? await this.prisma.mmgCheckoutIntent.findFirst({ where: { subscriptionId: sub.id, status: { in: ['OPEN', 'CONFIRMING'] } } });
-      if (!winner) throw err;
-      if (winner.status === 'CONFIRMING') {
-        throw new AppError(409, 'CHECKOUT_CONFIRMING', 'An earlier MMG payment is being confirmed. Do not pay again.', { ref: winner.id });
+      if (open?.status === 'CONFIRMING') {
+        // [F3] Bound to the checkout it was refused for: once that resolves, a
+        // retry of this tap still opens nothing new.
+        const bound = await this.bindKey(who, open, now);
+        if (bound.intentId !== open.id) return bound.answer();
+        throw new AppError(409, 'CHECKOUT_CONFIRMING', 'An earlier MMG payment is being confirmed. Do not pay again.', { ref: open.id });
       }
-      return { created: false, checkout: this.started(winner) };
+      if (open && open.expiresAt > now) {
+        return (await this.bindKey(who, open, now)).answer();
+      }
+      if (open) {
+        // [F4] Past its time: expired only if it is STILL an unanswered OPEN
+        // checkout, then read again: a reply may have made it CONFIRMING.
+        await this.expireUnanswered(open.id, now);
+        continue;
+      }
+
+      // [I1] Priced here, from payInfo's own amount due.
+      const amountGyd = checkoutAmountGyd(await payInfo(this.prisma, sub));
+      const merchantTransactionId = newMerchantTransactionId(now);
+      let checkoutUrl: string;
+      try {
+        checkoutUrl = this.checkout().createCheckout({ amount: fromMajor(String(amountGyd), 'GYD'), merchantTransactionId, now }).checkoutUrl;
+      } catch (err) {
+        log().error({ err, subscriptionId: sub.id }, '[MMG checkout] the checkout could not be built');
+        throw new AppError(503, 'MMG_CHECKOUT_UNAVAILABLE', 'The MMG checkout could not be started right now. Try again in a minute.');
+      }
+      // [F6] The page is sealed before it is written down; with no master key
+      // there is no checkout at all.
+      const sealed = await sealCheckoutUrl(checkoutUrl);
+
+      // Persisted, with the key that asked for it, BEFORE the page leaves the
+      // server: a checkout nobody wrote down could be paid and never found.
+      try {
+        const intent = await this.prisma.$transaction(async (tx) => {
+          const created = await tx.mmgCheckoutIntent.create({
+            data: {
+              subscriptionId: sub.id,
+              merchantTransactionId,
+              amount: amountGyd,
+              currencyCode: 'GYD',
+              createdByUserId: input.userId,
+              platform: input.platform,
+              ...sealed,
+              expiresAt: new Date(now.getTime() + MMG_CHECKOUT_TTL_MS),
+            },
+          });
+          await tx.mmgCheckoutKey.create({ data: { createdByUserId: input.userId, clientKey, intentId: created.id } });
+          return created;
+        });
+        mmgCheckoutEventsCounter.labels('created').inc();
+        return { created: true, checkout: await this.started(intent) };
+      } catch (err) {
+        if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+        // [F3] A concurrent request won: the same key (its answer, for its own
+        // subscription only), or another open checkout (read again).
+        const again = await this.answerForKey(who, now);
+        if (again) return again;
+      }
     }
+    throw new AppError(503, 'MMG_CHECKOUT_UNAVAILABLE', 'The MMG checkout could not be started right now. Try again in a minute.');
   }
 
   /** One checkout of this subscription, or 404 (the same answer for someone else's). */
@@ -331,6 +387,8 @@ export class MmgCheckoutService {
 
       const intent = await this.intentNamedBy(reply);
       await this.observe({
+        // [F7] Filed under the checkout's own tenant; an unmatched reply has none.
+        tenantId: intent?.tenantId ?? null,
         intentId: intent?.id ?? null,
         source: input.source,
         detail: hint,
@@ -361,17 +419,31 @@ export class MmgCheckoutService {
     });
   }
 
-  /** Every two minutes (the poll-mmg-billing job): expire the checkouts no
-   *  reply ever came for, and look again at every checkout that is due. */
+  /** Every two minutes (the poll-mmg-billing job): first make sure every
+   *  earlier credit carries its provider identity [F2], then expire the
+   *  checkouts no reply ever came for, and look again at every one that is due. */
   async pollIntents(now: Date = new Date()): Promise<{ expired: number; checked: number }> {
     return runAsSystem('mmg-checkout-poll', async () => {
       const out = { expired: 0, checked: 0 };
+      try {
+        const backfill = await ensureProviderIdentityBackfill(this.prisma);
+        if (backfill && backfill.conflicts > 0) {
+          await notifyAdmins(this.prisma, this.notifications, {
+            tenantId: null,
+            title: 'MMG payments credited more than once before',
+            body: `The provider-identity backfill found ${backfill.conflicts} earlier credit(s) naming an MMG transaction already on record for another credit, account or amount. Nothing was changed. Reconcile them against the MMG statement.`,
+            data: { kind: 'billing_invariants', alert: 'provider-identity-backfill-conflicts', conflicts: backfill.conflicts },
+          }).catch(() => {});
+        }
+      } catch (err) {
+        log().error({ err }, '[MMG checkout] the provider-identity backfill failed; checkout crediting stays off until it completes');
+      }
       const stale = await this.prisma.mmgCheckoutIntent.findMany({
         where: { status: 'OPEN', expiresAt: { lte: now } },
         select: { id: true },
         take: POLL_BATCH,
       });
-      for (const row of stale) if (await this.expire(row.id, 'NO_REPLY', now)) out.expired += 1;
+      for (const row of stale) if (await this.expireUnanswered(row.id, now)) out.expired += 1;
       const due = await this.prisma.mmgCheckoutIntent.findMany({
         where: { status: { in: ['CONFIRMING', 'EXPIRED', 'NOT_PAID'] }, nextCheckAt: { lte: now } },
         orderBy: { nextCheckAt: 'asc' },
@@ -391,6 +463,53 @@ export class MmgCheckoutService {
   }
 
   // ---------------------------------------------------------------------------
+
+  /** [F3] The answer a key already has, if it has one: the checkout it was
+   *  bound to, as it stands now, and only for the subscription it was bound for. */
+  private async answerForKey(
+    who: { userId: string; subscriptionId: string; clientKey: string },
+    now: Date,
+  ): Promise<{ created: false; checkout: StartedCheckout } | null> {
+    const binding = await this.prisma.mmgCheckoutKey.findUnique({
+      where: { createdByUserId_clientKey: { createdByUserId: who.userId, clientKey: who.clientKey } },
+      include: { intent: true },
+    });
+    if (!binding) return null;
+    if (binding.intent.subscriptionId !== who.subscriptionId) {
+      throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'That Idempotency-Key was used for a different checkout. A new tap needs a new key.');
+    }
+    let intent = binding.intent;
+    // An open checkout past its time is expired first: a stale MMG page is never handed out.
+    if (intent.status === 'OPEN' && intent.expiresAt <= now) {
+      await this.expireUnanswered(intent.id, now);
+      intent = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
+    }
+    return { created: false, checkout: await this.started(intent) };
+  }
+
+  /** [F3] Bind this key to the checkout it is being answered with. When the key
+   *  is already bound (a concurrent request), its first binding wins and is the
+   *  answer, checked against this subscription like any replay. */
+  private async bindKey(
+    who: { userId: string; subscriptionId: string; clientKey: string },
+    intent: MmgCheckoutIntent,
+    now: Date,
+  ): Promise<{ intentId: string; answer: () => Promise<{ created: false; checkout: StartedCheckout }> }> {
+    try {
+      await this.prisma.mmgCheckoutKey.create({ data: { createdByUserId: who.userId, clientKey: who.clientKey, intentId: intent.id } });
+      // Answered as it stands NOW: a reply may have moved it on since it was read,
+      // and a page is only ever handed out while the checkout is still OPEN.
+      return {
+        intentId: intent.id,
+        answer: async () => ({ created: false, checkout: await this.started(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } })) }),
+      };
+    } catch (err) {
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+      const bound = await this.answerForKey(who, now);
+      if (!bound) throw err;
+      return { intentId: bound.checkout.ref, answer: async () => bound };
+    }
+  }
 
   /** Look up every candidate and decide. Only CONFIRM moves money. */
   private async verify(intentId: string, now: Date): Promise<CheckoutStatus> {
@@ -412,6 +531,7 @@ export class MmgCheckoutService {
       const detail = await lookup.transactionLookupDetail(txnId);
       mmgCheckoutLookupsCounter.labels(detail.outcome).inc();
       await this.observe({
+        tenantId: intent.tenantId,
         intentId: intent.id,
         source: 'LOOKUP',
         detail: txnId,
@@ -419,25 +539,42 @@ export class MmgCheckoutService {
         shape: detail.outcome === 'found' ? describeShape(detail.raw) as Prisma.InputJsonValue : undefined,
         failure: detail.outcome === 'not_found' ? 'LOOKUP_NOT_FOUND' : detail.outcome === 'error' ? 'LOOKUP_FAILED' : null,
       });
-      verdicts.push(judge(intent, txnId, detail, merchantIds));
+      const others = detail.outcome === 'found' ? await this.otherCheckoutRefsIn(detail.raw, intent) : [];
+      verdicts.push(judge(intent, txnId, detail, merchantIds, others));
     }
 
     const confirmed = verdicts.find((v) => v.verdict === 'CONFIRM');
-    if (confirmed) return this.confirm(intent, confirmed.txnId, now);
+    if (confirmed) {
+      // [F2] Checkout crediting stays off until every earlier credit carries
+      // its provider identity; the confirmation waits, nothing is lost.
+      if (!(await providerIdentityBackfillDone(this.prisma))) return this.reschedule(intent, now, 'IDENTITY_BACKFILL_PENDING');
+      return this.confirm(intent, confirmed.txnId, now);
+    }
     // Late checks (EXPIRED / NOT_PAID) only ever look for a confirmation.
     if (status !== 'CONFIRMING') return this.reschedule(intent, now, intent.reason);
 
-    const decisive = verdicts.find((v): v is Extract<Verdict, { strong: boolean }> => (v.verdict === 'HOLD' || v.verdict === 'DECLINED') && v.strong);
-    if (decisive?.verdict === 'HOLD') return this.hold(intent, decisive.reason);
-    if (decisive?.verdict === 'DECLINED') return this.notPaid(intent, decisive.reason, now);
-    const nothingPaid = verdicts.every((v) => v.verdict === 'NOT_FOUND' || v.verdict === 'DECLINED');
-    if (errorHint(intent.outcomeHint) && nothingPaid) return this.notPaid(intent, 'RETURNED_ERROR', now);
+    const decisive = verdicts.find((v): v is Hold => v.verdict === 'HOLD' && v.decisive);
+    if (decisive) return this.hold(intent, decisive.reason);
+    // [F5] A payment failed only when MMG's answer for THIS checkout says so.
+    // A redirect's error path, a transaction MMG does not know, or a decline MMG
+    // does not tie to this checkout is never "not paid": the checkout keeps
+    // confirming, then expires without declaring failure.
+    const failed = verdicts.find((v): v is Declined => v.verdict === 'DECLINED' && v.bound);
+    if (failed) return this.notPaid(intent, failed.reason, now);
 
-    // Nothing is certain yet. Evidence that may concern another transaction
+    // Nothing is certain yet. A mismatch that may concern another transaction
     // waits for the window rather than holding a payment that is still arriving.
-    const weak = verdicts.find((v): v is Extract<Verdict, { strong: boolean }> => v.verdict === 'HOLD')
-      ?? verdicts.find((v): v is Extract<Verdict, { strong: boolean }> => v.verdict === 'DECLINED');
-    return this.reschedule(intent, now, weak ? `SEEN:${weak.verdict}:${weak.reason}` : intent.reason);
+    const weak = verdicts.find((v): v is Hold => v.verdict === 'HOLD');
+    return this.reschedule(intent, now, weak ? `SEEN:HOLD:${weak.reason}` : intent.reason);
+  }
+
+  /** [F1] Our OTHER checkouts' references that MMG's answer names, as whole values anywhere in it. */
+  private async otherCheckoutRefsIn(raw: unknown, intent: MmgCheckoutIntent): Promise<string[]> {
+    const refs = [...new Set(replyLeaves(raw).map((leaf) => leaf.value)
+      .filter((value) => MERCHANT_TRANSACTION_ID_SHAPE.test(value) && value !== intent.merchantTransactionId))].slice(0, 16);
+    if (refs.length === 0) return [];
+    const found = await this.prisma.mmgCheckoutIntent.findMany({ where: { merchantTransactionId: { in: refs } }, select: { merchantTransactionId: true } });
+    return found.map((row) => row.merchantTransactionId);
   }
 
   private async reschedule(intent: MmgCheckoutIntent, now: Date, reason: string | null): Promise<CheckoutStatus> {
@@ -446,9 +583,8 @@ export class MmgCheckoutService {
     if (intent.status === 'CONFIRMING') {
       if (now.getTime() >= since + CONFIRM_WINDOW_MS) {
         if (reason?.startsWith('SEEN:HOLD:')) return this.hold(intent, reason.slice('SEEN:HOLD:'.length));
-        if (reason?.startsWith('SEEN:DECLINED:')) return this.notPaid(intent, reason.slice('SEEN:DECLINED:'.length), now);
-        await this.expire(intent.id, 'LOOKUP_NEVER_CONFIRMED', now);
-        return 'EXPIRED';
+        // [F5] No authoritative answer within the window: expired, never "not paid".
+        return this.expireUnconfirmed(intent, now);
       }
       const delay = BACKOFF_MS[Math.min(attempts - 1, BACKOFF_MS.length - 1)] ?? 3_600_000;
       await this.prisma.mmgCheckoutIntent.updateMany({
@@ -464,7 +600,7 @@ export class MmgCheckoutService {
     return intent.status as CheckoutStatus;
   }
 
-  /** [I2 · I3] The credit: one transaction, one provider identity, once. */
+  /** [I2 · I3 · F2] The credit: one transaction, one provider identity, once. */
   private async confirm(intent: MmgCheckoutIntent, txnId: string, now: Date): Promise<CheckoutStatus> {
     const key = normalizeProviderTxnId(txnId);
     const amount = Number(intent.amount);
@@ -476,19 +612,25 @@ export class MmgCheckoutService {
         const current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
         if (current.status === 'CONFIRMED') return 'already' as const;
         if (current.status === 'HELD') return 'held' as const;
-        // The merchant-initiated rail settles its own transactions without a
-        // provider identity: a transaction it already settled never credits here.
-        const pushed = await tx.subscriptionPayment.findFirst({
-          where: { externalRef: { equals: txnId, mode: 'insensitive' } },
-          select: { id: true },
-        });
-        if (pushed) throw new ProviderIdentityError('PROVIDER_TXN_ALREADY_CREDITED', 'The merchant-initiated rail already settled this transaction.');
+        // [F2] The provider identity below is THE guard. These reads are a
+        // second net for a credit an earlier release wrote without claiming an
+        // identity (the push rail's payments, admin top-ups): never relied on,
+        // never skipped.
+        const [pushed, toppedUp] = await Promise.all([
+          tx.subscriptionPayment.findFirst({ where: { externalRef: { equals: txnId, mode: 'insensitive' } }, select: { id: true } }),
+          tx.topUpCommand.findFirst({ where: { providerRef: { equals: txnId, mode: 'insensitive' } }, select: { id: true } }),
+        ]);
+        if (pushed || toppedUp) {
+          throw new ProviderIdentityError('PROVIDER_TXN_ALREADY_CREDITED', 'Another channel already recorded this transaction.');
+        }
         const identity = await claimProviderPaymentInTx(tx, {
           provider: 'MMG',
           providerTxnId: key,
           amount,
           currencyCode: current.currencyCode,
           subscriptionId: current.subscriptionId,
+          // [F7] The checkout's own tenant, named: this runs as the system.
+          tenantId: current.tenantId,
           creditedBy: `mco:${current.id}`,
         });
         if (!identity.already) {
@@ -508,9 +650,7 @@ export class MmgCheckoutService {
         return 'credited' as const;
       });
     } catch (err) {
-      if (err instanceof ProviderIdentityError) {
-        return this.hold(intent, err.identityCode === 'PROVIDER_TXN_AMOUNT_CONFLICT' ? 'AMOUNT_CONFLICT_ON_RECORD' : 'ALREADY_CREDITED');
-      }
+      if (err instanceof ProviderIdentityError) return this.hold(intent, HOLD_REASON[err.identityCode]);
       if (isDuplicateOn(err, 'mmgTransactionId')) return this.hold(intent, 'ALREADY_CREDITED');
       throw err;
     }
@@ -535,7 +675,7 @@ export class MmgCheckoutService {
     });
     if (moved.count === 1) {
       mmgCheckoutEventsCounter.labels('held').inc();
-      log().error({ checkoutId: intent.id, reason }, '[MMG checkout] held for review: the MMG records do not match this checkout');
+      log().error({ checkoutId: intent.id, reason }, '[MMG checkout] held for review: the MMG records cannot be matched to this checkout');
       await notifyAdmins(this.prisma, this.notifications, {
         tenantId: null,
         title: 'MMG checkout held for review',
@@ -548,6 +688,7 @@ export class MmgCheckoutService {
     return (current?.status ?? 'HELD') as CheckoutStatus;
   }
 
+  /** [F5] Only on MMG's own answer, tied to THIS checkout, that the payment failed. */
   private async notPaid(intent: MmgCheckoutIntent, reason: string, now: Date): Promise<CheckoutStatus> {
     const since = (intent.replyAt ?? intent.createdAt).getTime();
     const moved = await this.prisma.mmgCheckoutIntent.updateMany({
@@ -567,21 +708,49 @@ export class MmgCheckoutService {
     return (current?.status ?? 'NOT_PAID') as CheckoutStatus;
   }
 
-  /** [I8] Expiry is not failure: no notice, no dunning; a late confirmation still credits. */
-  private async expire(intentId: string, reason: string, now: Date): Promise<boolean> {
+  /** [I8 · F4] A checkout nobody finished on MMG's page expires at its
+   *  deadline: compare-and-set on OPEN AND that deadline, so a reply that made
+   *  it CONFIRMING a moment ago is never overwritten. No notice, no dunning. */
+  private async expireUnanswered(intentId: string, now: Date): Promise<boolean> {
     const intent = await this.prisma.mmgCheckoutIntent.findUnique({ where: { id: intentId }, select: { candidates: true, replyAt: true, createdAt: true } });
     if (!intent) return false;
     const since = (intent.replyAt ?? intent.createdAt).getTime();
     const moved = await this.prisma.mmgCheckoutIntent.updateMany({
-      where: { id: intentId, status: { in: ['OPEN', 'CONFIRMING'] } },
+      where: { id: intentId, status: 'OPEN', expiresAt: { lte: now } },
       data: {
         status: 'EXPIRED',
-        reason,
+        reason: 'NO_REPLY',
         nextCheckAt: intent.candidates.length > 0 && now.getTime() < since + LATE_WINDOW_MS ? new Date(now.getTime() + LATE_CHECK_MS) : null,
       },
     });
     if (moved.count === 1) mmgCheckoutEventsCounter.labels('expired').inc();
     return moved.count === 1;
+  }
+
+  /** [I8 · F4 · F5] A checkout MMG sent back but nobody could verify within the
+   *  confirmation window expires: compare-and-set on CONFIRMING AND that
+   *  window, never declaring failure. A late confirmation still credits. */
+  private async expireUnconfirmed(intent: MmgCheckoutIntent, now: Date): Promise<CheckoutStatus> {
+    const cutoff = new Date(now.getTime() - CONFIRM_WINDOW_MS);
+    const since = (intent.replyAt ?? intent.createdAt).getTime();
+    const moved = await this.prisma.mmgCheckoutIntent.updateMany({
+      where: {
+        id: intent.id,
+        status: 'CONFIRMING',
+        OR: [{ replyAt: { lte: cutoff } }, { replyAt: null, createdAt: { lte: cutoff } }],
+      },
+      data: {
+        status: 'EXPIRED',
+        reason: 'LOOKUP_NEVER_CONFIRMED',
+        nextCheckAt: intent.candidates.length > 0 && now.getTime() < since + LATE_WINDOW_MS ? new Date(now.getTime() + LATE_CHECK_MS) : null,
+      },
+    });
+    if (moved.count === 1) {
+      mmgCheckoutEventsCounter.labels('expired').inc();
+      return 'EXPIRED';
+    }
+    const current = await this.prisma.mmgCheckoutIntent.findUnique({ where: { id: intent.id }, select: { status: true } });
+    return (current?.status ?? 'EXPIRED') as CheckoutStatus;
   }
 
   /** The partner hears about the three states the contract promises a push for.
@@ -629,9 +798,19 @@ export class MmgCheckoutService {
     return [provider?.merchantId, process.env['MMG_MERCHANT_ID']].filter((id): id is string => typeof id === 'string' && id.length > 0);
   }
 
-  private async observe(row: { intentId?: string | null; source: 'RETURN' | 'NOTIFY' | 'LOOKUP'; detail?: string | null; body?: Prisma.InputJsonValue; shape?: Prisma.InputJsonValue; failure?: string | null }): Promise<void> {
+  private async observe(row: {
+    /** [F7] The matched checkout's tenant, named: replies and polls run as the system. */
+    tenantId?: string | null;
+    intentId?: string | null;
+    source: 'RETURN' | 'NOTIFY' | 'LOOKUP';
+    detail?: string | null;
+    body?: Prisma.InputJsonValue;
+    shape?: Prisma.InputJsonValue;
+    failure?: string | null;
+  }): Promise<void> {
     await this.prisma.mmgCheckoutObservation.create({
       data: {
+        ...(row.tenantId ? { tenantId: row.tenantId } : {}),
         intentId: row.intentId ?? null,
         source: row.source,
         detail: row.detail ?? null,
@@ -642,11 +821,12 @@ export class MmgCheckoutService {
     });
   }
 
-  private started(intent: MmgCheckoutIntent): StartedCheckout {
+  private async started(intent: MmgCheckoutIntent): Promise<StartedCheckout> {
     return {
       ref: intent.id,
       status: intent.status as CheckoutStatus,
-      checkoutUrl: intent.status === 'OPEN' ? intent.checkoutUrl : null,
+      // [F6] Opened only here, for the partner's own answer, and only while OPEN.
+      checkoutUrl: intent.status === 'OPEN' ? await openCheckoutUrl(intent) : null,
       amountGyd: Number(intent.amount),
       currencyCode: 'GYD',
       expiresAt: intent.expiresAt.toISOString(),

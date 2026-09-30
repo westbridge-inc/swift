@@ -3091,14 +3091,17 @@ model MmgCheckoutIntent {
   currencyCode          String    @db.Char(3)
   /// OPEN | CONFIRMING | CONFIRMED | NOT_PAID | EXPIRED | HELD
   status                String    @default("OPEN")
-  /// The partner's Idempotency-Key, unique per creating user.
-  clientKey             String
+  /// The partner whose tap created it. Every Idempotency-Key it answered is
+  /// an MmgCheckoutKey row [F3].
   createdByUserId       String
   /// ios | android | web | unknown — where the checkout was started.
   platform              String
-  /// The MMG page handed to the partner. It carries our encrypted request
-  /// token: returned only to its owner, never logged.
-  checkoutUrl           String
+  /// The MMG page handed to the partner, SEALED at rest with the platform's
+  /// envelope encryption (providers/storage/envelope.ts, as card-vault.ts):
+  /// iv(12) | authTag(16) | ciphertext, under a data key wrapped by the master
+  /// key. Opened only for its owner's answer; never logged.
+  checkoutUrlSealed     Bytes
+  checkoutUrlDek        Bytes
   expiresAt             DateTime
   /// When a reply first named this checkout, and the path it came back on — a
   /// hint for the partner-facing state, never evidence of payment.
@@ -3117,12 +3120,31 @@ model MmgCheckoutIntent {
   nextCheckAt           DateTime?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
+  keys                  MmgCheckoutKey[]
 
-  @@unique([createdByUserId, clientKey])
   @@index([tenantId])
   @@index([subscriptionId, createdAt])
   @@index([status, nextCheckAt])
   @@map("mmg_checkout_intents")
+}
+
+/// [MMG checkout F3] Every Idempotency-Key a checkout answered. Once a key has
+/// been answered with a checkout it keeps answering with THAT checkout, whatever
+/// becomes of it, so a retry can never open a second payable page.
+model MmgCheckoutKey {
+  id              String            @id @default(cuid())
+  tenantId        String            @default("swift-default")
+  /// A key is its sender's alone.
+  createdByUserId String
+  clientKey       String
+  intentId        String
+  intent          MmgCheckoutIntent @relation(fields: [intentId], references: [id], onDelete: Cascade)
+  createdAt       DateTime          @default(now())
+
+  @@unique([createdByUserId, clientKey])
+  @@index([intentId])
+  @@index([tenantId])
+  @@map("mmg_checkout_keys")
 }
 
 /// [I9] Every reply, callback and lookup of an MMG checkout, written BEFORE

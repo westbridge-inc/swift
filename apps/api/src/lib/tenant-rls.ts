@@ -107,7 +107,7 @@ export const TENANT_TABLES = [
   'mmg_agent_payments',
   // [MMG checkout 2/6] A partner's MMG checkout and every observation of it,
   // walled like the provider payment that credits it.
-  'mmg_checkout_intents', 'mmg_checkout_observations',
+  'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations',
   'order_outbox', 'orders', 'pending_attributions',
   // [M-18] One provider transaction, one identity, one credit.
   'provider_payments', 'qr_codes',

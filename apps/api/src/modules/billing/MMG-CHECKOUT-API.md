@@ -109,7 +109,7 @@ The body is `{}`. The server prices the checkout; a client amount would be ignor
 
 **One open checkout per subscription.**
 - If one is `OPEN` and not expired, it comes back (`200`) with the same `ref` and `checkoutUrl`.
-- The same `Idempotency-Key` always gets the same answer.
+- The same `Idempotency-Key` always gets the same answer. A key answered with a checkout (a new one, one handed back, or one it was refused for because it is `CONFIRMING`) stays bound to that checkout: a retry gets that checkout as it stands now, never a new one. The same key for another subscription is `409 IDEMPOTENCY_KEY_REUSED`.
 - If a checkout is `CONFIRMING`, a new one is refused so the partner cannot pay twice.
 
 **The phone flow:**
@@ -133,7 +133,7 @@ poll GET …/mmg-checkout/{ref}            → section 5
 | 409 | `IDEMPOTENCY_KEY_REUSED` | the key was used for a different request | new tap, new key |
 | 409 | `CHECKOUT_CONFIRMING` | an earlier checkout is being confirmed; `error.details.ref` names it | show that checkout (section 5); do not start another |
 | 429 | `RATE_LIMITED` | too many attempts | wait and retry |
-| 503 | `MMG_CHECKOUT_UNAVAILABLE` | the checkout could not be built right now | "Try again in a minute." |
+| 503 | `MMG_CHECKOUT_UNAVAILABLE` | the checkout could not be built or stored safely right now | "Try again in a minute." |
 
 The error body is always `{ success: false, error: { code, message, details? } }`.
 
@@ -174,10 +174,12 @@ type CheckoutStatus = {
 |---|---|---|
 | `OPEN` | created; the partner has not finished on the MMG page, or MMG has not told Swift yet | "Finish paying on the MMG page." After returning: "Waiting for MMG…" |
 | `CONFIRMING` | MMG sent the partner back; Swift is checking with MMG | "Confirming your payment with MMG. Don't pay again." |
-| `CONFIRMED` | MMG's records confirm the payment and the fee is credited | "Paid: GY$X received on <date>." |
-| `NOT_PAID` | MMG's records show this payment did not complete | "MMG didn't complete this payment. You can try again." |
-| `EXPIRED` | the checkout ran out of time and no payment was seen | "This checkout expired. If you paid, it will be credited once MMG confirms it." |
-| `HELD` | MMG's records do not match this checkout (amount, currency or merchant), or the same MMG payment was claimed twice; a person reviews it | "We're checking this payment by hand. Don't pay again. Support will contact you." |
+| `CONFIRMED` | MMG's records confirm the payment and tie it to this checkout, and the fee is credited | "Paid: GY$X received on <date>." |
+| `NOT_PAID` | MMG's own record for this checkout shows the payment did not complete (never a return path or a missing record alone) | "MMG didn't complete this payment. You can try again." |
+| `EXPIRED` | the checkout ran out of time, or MMG never confirmed it within a day; no failure is declared | "This checkout expired. If you paid, it will be credited once MMG confirms it." |
+| `HELD` | MMG's records do not match this checkout (amount, currency or merchant), do not tie the payment to this checkout, or the same MMG payment was claimed twice; a person reviews it | "We're checking this payment by hand. Don't pay again. Support will contact you." |
+
+Attribution is bound to MMG's lookup echo; unbound confirmations are held. Until MMG's lookup field for the merchant's reference is confirmed in UAT, a paid checkout is `HELD` for a person rather than credited automatically.
 
 Never say "paid" before `CONFIRMED`. Never promise an instant restore: access comes back when the payment is credited, and `subscriptionStatus` shows it.
 
@@ -204,7 +206,7 @@ What MMG attaches is not yet confirmed (`CHECKOUT-CONTRACT.md` U3): it may be a 
    |---|---|
    | `CONFIRMED` | "Payment received. Your Swift weekly fee is paid." |
    | `CONFIRMING` | "We're confirming your payment with MMG. Don't pay again. You can close this page." |
-   | `NOT_PAID` | "MMG didn't complete this payment. You can try again in the Swift app." |
+   | `NOT_PAID` | "MMG didn't complete this payment. You can try again in the Swift app." (only when MMG's own record for the checkout says so; the `…/pay/mmg/error` path alone answers `CONFIRMING`) |
    | `UNKNOWN` | "Open the Swift app to see your weekly fee." (a missing or unreadable link, or an unknown checkout) |
 
    Any error from `/return` (`400`, `413`, `429` or `5xx`) renders `UNKNOWN`. The app shows the truth from its own polling.
@@ -232,6 +234,8 @@ The server writes the fee notices. They never offer an agent, cash, a Swift Numb
 ## 8. Operations
 
 - **Configuration:** `MMG_CHECKOUT_*` (`providers/mmg/CHECKOUT-CONTRACT.md`). With the configuration absent or `MMG_CHECKOUT_ENABLED=0`, `MMG_CHECKOUT` is `off` everywhere.
+- **The MMG page at rest:** the server keeps each checkout's `checkoutUrl` sealed with the platform's envelope encryption (`MASTER_KEK`); it is opened only to answer the partner who may pay it. Without a master key no checkout is started (`503 MMG_CHECKOUT_UNAVAILABLE`).
+- **Crediting after an upgrade:** no checkout credits until every earlier MMG credit (push-rail payments, admin top-ups, agent cash) carries its provider identity. The billing poll runs that backfill once and records it; until then a confirmed checkout waits in `CONFIRMING`.
 - **The per-platform switch:** the platform-config key `billing.feeCheckout.platforms`, value `{ "ios": true, "android": true, "web": true }`. A missing row, or a missing platform in it, counts as on (owner ruling "3 b": the iPhone button is on). Setting a platform to `false` hides the MMG checkout there within a minute, with no deploy.
 
 ## 9. Answers to the UI lane (2026-09-29)

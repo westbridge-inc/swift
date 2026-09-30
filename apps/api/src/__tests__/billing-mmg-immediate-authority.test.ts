@@ -82,6 +82,9 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     notificationKeys: new Map<string, string>(),
     rawOpenCount: 1,
     rawQueries: [] as string[],
+    // [MMG checkout F2] The push rail claims the one provider identity inside
+    // its settlement: a minimal provider_payments table (mint, lock, CAS).
+    providerIdentities: new Map<string, { id: string; tenantId: string; status: string; amount: number; currencyCode: string; creditedPaymentId: string | null }>(),
     // Independent synthetic database clock for lease/race schedules. Existing
     // fixed-time tests align it with their drain time; hostile cases override it.
     noticeClock: null as null | (() => Date),
@@ -193,6 +196,12 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
           }).slice(0, 200);
       }
       if (sql.includes('pg_backend_pid()')) return [{ pid: 41 }];
+      // [MMG checkout F2 · F7] The payer's tenant, and the provider identity row lock.
+      if (sql.includes('JOIN "users" u')) return [{ tenantId: 'swift-default' }];
+      if (sql.includes('FROM "provider_payments"')) {
+        const identity = state.providerIdentities.get(values[1]);
+        return identity ? [{ ...identity }] : [];
+      }
       if (sql.includes('FROM "users"')) return [{ status: state.user.status, phone: state.user.phone }];
       if (sql.includes('FROM "subscriptions"')) return [{ status: state.sub.status, autoRenew: state.sub.autoRenew }];
       if (sql.includes('FROM "subscription_payments"')) {
@@ -205,6 +214,21 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     }),
     $executeRaw: vi.fn(async (strings: TemplateStringsArray, ...values: any[]) => {
       const sql = strings.join(' ');
+      // [MMG checkout F2] Mint (ON CONFLICT DO NOTHING) and compare-and-set the provider identity.
+      if (sql.includes('INSERT INTO "provider_payments"')) {
+        const [tenantId, , key, amount, currencyCode] = values;
+        if (!state.providerIdentities.has(key)) {
+          state.providerIdentities.set(key, { id: `pp-${state.providerIdentities.size + 1}`, tenantId, status: 'OPEN', amount: Number(amount), currencyCode, creditedPaymentId: null });
+        }
+        return 1;
+      }
+      if (sql.includes('UPDATE "provider_payments"')) {
+        const [creditedBy, , id, tenantId] = values;
+        const identity = [...state.providerIdentities.values()].find((row) => row.id === id);
+        if (!identity || identity.status !== 'OPEN' || identity.tenantId !== tenantId) return 0;
+        Object.assign(identity, { status: 'CREDITED', creditedPaymentId: creditedBy });
+        return 1;
+      }
       if (!sql.includes('UPDATE "billing_events"')) throw new Error(`unexpected raw execute: ${sql}`);
       const smsStamp = sql.includes('SET "noticeSmsSentAt"');
       const finish = sql.includes('SET "deliveredAt"');
