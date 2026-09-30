@@ -277,7 +277,7 @@ export function useSearchTrending<T = any>(enabled = true) {
     queryKey: customerKeys.searchTrending,
     queryFn: () => unwrap<T>(customerApi.searchTrending()),
     enabled,
-    staleTime: 60_000,
+    staleTime: 0,
   });
 }
 

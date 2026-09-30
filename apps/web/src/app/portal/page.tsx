@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { MutationNotice } from '@/components/mutation-notice';
@@ -37,15 +38,16 @@ function SubscriptionCard({ title, sub, isError, error, onRetry }: {
   return (
     <div className="rounded-2xl border border-black/5 bg-white p-5">
       <p className="font-bold">{title}</p>
+      <Link href="/portal/weekly-fee" className="text-sm font-semibold underline">Weekly fee — view and pay</Link>
       <p className="mt-1 text-sm">
         Status: <b className={good ? 'text-green-600' : 'text-[var(--swift-red)]'}>{status}</b>
         {status === 'TRIAL' && sub['trialEndsAt'] ? (
-          <span className="text-[var(--swift-muted)]"> — free until {new Date(String(sub['trialEndsAt'])).toLocaleDateString()}</span>
+          <span className="text-[var(--swift-muted)]"> — Free trial until {new Date(String(sub['trialEndsAt'])).toLocaleDateString()}</span>
         ) : null}
       </p>
       <p className="mt-0.5 text-sm text-[var(--swift-muted)]">
         {money(Number(sub['weeklyRate'] ?? 0))}/week — you keep 100% of fares, fees and tips.
-        {sub['currentPeriodEnd'] ? ` Paid through ${new Date(String(sub['currentPeriodEnd'])).toLocaleDateString()}.` : ''}
+        {sub['currentPeriodEnd'] ? ` Next bill: ${new Date(String(sub['currentPeriodEnd'])).toLocaleDateString()}.` : ''}
       </p>
     </div>
   );

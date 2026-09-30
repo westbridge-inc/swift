@@ -24,7 +24,7 @@ import { NewOrderTakeover } from './NewOrderTakeover';
 import { catalogueMeta, safeVendorRole, TabHeader } from './shared';
 import { billingBlocked } from '../../lib/vendorProfile';
 import { BusinessSetup, VendorOnboarding } from './screens/BusinessSetup';
-import { VendorSwiftNumberScreen } from './screens/VendorSwiftNumberScreen';
+import { WeeklyFeeRouteScreen } from '../billing/screens/WeeklyFeeRouteScreen';
 import { VendorOps } from './screens/VendorOps';
 import { VendorBillingSuspended } from './screens/VendorBillingSuspended';
 import { VendorMenuScreen } from './screens/VendorMenuScreen';
@@ -116,7 +116,7 @@ function VendorRoot() {
         <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
         <ErrorState
           message={
-            failure === 'unauthorized' ? 'Your session ended. Sign in again to open your store.'
+            failure === 'unauthorized' ? 'You were signed out. Sign in again to open your store.'
               : failure === 'forbidden' ? 'This account cannot open that store. Ask the owner to add you again.'
                 : failure === 'malformed' ? "Swift could not read your store's details. This is our problem, not yours — try again."
                   : "Swift can't reach your store right now. Your orders are safe; try again in a moment."
@@ -251,7 +251,7 @@ export function VendorStack() {
       {/* [MKT G3] Where the backfill's "review your categories" push lands.
           Accepting a suggestion is what writes the tag the Market feed reads. */}
       <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
-      <Stack.Screen name="VendorMySwiftNumber" component={VendorSwiftNumberScreen} />
+      <Stack.Screen name="WeeklyFee" component={WeeklyFeeRouteScreen} />
       {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
       <Stack.Screen name="VendorTier" component={VendorTierScreen} />
       {/* [B-support] Role-agnostic ticket screen — the vendor stack had NO

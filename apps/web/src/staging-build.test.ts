@@ -53,13 +53,22 @@ describe('[Q11] the staging website build', () => {
     });
   });
 
-  it('asks crawlers not to index the whole staging copy; the public site limits that header to QR scan links', async () => {
+  it('asks crawlers not to index the whole staging copy; the public site limits that header to QR scan and MMG return links', async () => {
     expect(headerOf(await siteWideHeaders(await productionConfig(STAGING)), 'X-Robots-Tag')).toBe('noindex, nofollow');
     const publicRules = await (await productionConfig(PUBLIC_SITE)).headers!();
-    // [AX303 F3] Public content stays indexable; /s/ alone now needs a
+    // [AX303 F3] Public content stays indexable; /s/ needs a
     // response noindex because its external resolver returns a redirect.
+    // Payment returns independently suppress indexing, caching and referrers.
     expect(publicRules.filter((rule) => rule.headers.some((header) => header.key === 'X-Robots-Tag')))
-      .toEqual([{ source: '/s/:path*', headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] }]);
+      .toEqual(expect.arrayContaining([
+        { source: '/s/:path*', headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] },
+        { source: '/pay/mmg/:outcome', headers: [
+          { key: 'X-Robots-Tag', value: 'noindex' },
+          { key: 'Cache-Control', value: 'no-store' },
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+        ] },
+      ]));
+    expect(publicRules.filter((rule) => rule.headers.some((header) => header.key === 'X-Robots-Tag'))).toHaveLength(2);
   });
 
   it('keeps every security header the public site sends, unchanged but for the API it connects to', async () => {
@@ -93,7 +102,7 @@ describe('[Q11] the staging website build', () => {
   it('Vercel and CI (no channel, no image switch) get exactly the config they had', async () => {
     const config = await productionConfig(PUBLIC_SITE);
     expect(Object.keys(config).sort()).toEqual(
-      ['env', 'headers', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages'].sort(),
+      ['env', 'headers', 'logging', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages'].sort(),
     );
     expect(config.env).toEqual({ NEXT_PUBLIC_API_URL: RELEASE_BROWSER_API_ORIGIN });
     expect(headerOf(await siteWideHeaders(config), 'Content-Security-Policy')).toBe(
