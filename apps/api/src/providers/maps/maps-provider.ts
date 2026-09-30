@@ -1,5 +1,7 @@
 import { haversineDistance, estimateDrivingDistance } from '../../utils/distance';
+import { AppError } from '../../utils/errors';
 import { osrmOutcomeCounter } from '../../plugins/observability';
+import { isOsrmDurationOrAbsent, isOsrmMeasure } from './osrm-measure';
 
 // ---------------------------------------------------------------------------
 // MapsProvider — hard rule 4: swappable interface. Dispatch only ever asks for
@@ -8,7 +10,7 @@ import { osrmOutcomeCounter } from '../../plugins/observability';
 
 /** Metric bump for OSRM outcomes [SWIFT-UG-ETA-01]; a routing seam must never
  *  break on an accounting failure. */
-function recordOsrm(op: 'eta' | 'route', outcome: 'ok' | 'fallback'): void {
+function recordOsrm(op: 'eta' | 'route', outcome: 'ok' | 'fallback' | 'refused'): void {
   try {
     osrmOutcomeCounter.inc({ op, outcome });
   } catch {
@@ -370,8 +372,22 @@ export class OsrmMapsProvider implements MapsProvider {
     return value;
   }
 
+  /** [money] Count a refused answer and build its refusal: OSRM answered, but
+   *  with a number no fare may be priced from. Not an outage, so never the
+   *  deterministic estimate either. */
+  private refused(op: 'route'): AppError {
+    recordOsrm(op, 'refused');
+    return new AppError(503, 'ROUTE_UNAVAILABLE', 'We cannot work out this route right now. Try again in a moment.');
+  }
+
   /** Real road distance + duration via the OSRM `route` service. Falls back to
-   *  the deterministic estimate on any failure — fares are never blocked. */
+   *  the deterministic estimate when OSRM fails to answer (down, an error, no
+   *  route, no distance beside a valid or absent duration), so an outage never
+   *  blocks a fare. An answer that
+   *  PRESENTS an invalid distance or duration (negative, Infinity, NaN, not a
+   *  number) is refused instead: 503 ROUTE_UNAVAILABLE, never priced and never
+   *  swapped for the estimate. An absent duration stays null, as always: the
+   *  caller applies its own speed model. */
   async routeKm(origin: LatLng, dest: LatLng): Promise<RouteEstimate> {
     const url = `${this.baseUrl.replace(/\/$/, '')}/route/v1/driving/${origin.lng},${origin.lat};${dest.lng},${dest.lat}?overview=false`;
 
@@ -382,14 +398,21 @@ export class OsrmMapsProvider implements MapsProvider {
       if (!res.ok) return this.degraded('route', await this.fallback.routeKm(origin, dest));
       const data = (await res.json()) as OsrmRouteResponse;
       const route = data.code === 'Ok' ? data.routes?.[0] : undefined;
-      if (!route || route.distance == null) return this.degraded('route', await this.fallback.routeKm(origin, dest));
+      if (!route) return this.degraded('route', await this.fallback.routeKm(origin, dest));
+      // A duration OSRM presents is judged BEFORE a missing distance may fall
+      // back, so no distance cannot carry an invalid duration into the
+      // estimate [AX336 R1]. Beside a valid or absent duration it still does.
+      if (!isOsrmDurationOrAbsent(route.duration)) throw this.refused('route');
+      if (route.distance == null) return this.degraded('route', await this.fallback.routeKm(origin, dest));
+      if (!isOsrmMeasure(route.distance)) throw this.refused('route');
       recordOsrm('route', 'ok');
       return {
         km: route.distance / 1000,
         minutes: route.duration != null ? route.duration / 60 : null,
         source: 'osrm',
       };
-    } catch {
+    } catch (err) {
+      if (err instanceof AppError) throw err; // the refusal above, not an outage
       return this.degraded('route', await this.fallback.routeKm(origin, dest));
     } finally {
       clearTimeout(timer);
