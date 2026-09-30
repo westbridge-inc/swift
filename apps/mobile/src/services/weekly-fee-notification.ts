@@ -11,10 +11,13 @@ export async function resolveFeeNotification(params: Record<string, unknown>, on
   if (!owner) return null;
   const attempt = ++resolution;
   const { selectedStoreId: previous, storeGeneration } = useStoreSwitcher.getState();
-  const current = () => {
+  const sameOwner = () => {
     const now = getAuthSessionSnapshot();
+    return now?.userId === owner.userId && now.generation === owner.generation;
+  };
+  const current = () => {
     const selection = useStoreSwitcher.getState();
-    return attempt === resolution && now?.userId === owner.userId && now.generation === owner.generation
+    return attempt === resolution && sameOwner()
       && selection.selectedStoreId === previous && selection.storeGeneration === storeGeneration;
   };
   const fallback = () => ({ ref: undefined, subscriptionId: undefined, vendorId: useStoreSwitcher.getState().selectedStoreId });
@@ -34,22 +37,35 @@ export async function resolveFeeNotification(params: Record<string, unknown>, on
     // A transport failure is not an access denial. Keep every Pay blocked
     // until this notification is resolved or explicitly abandoned.
     unresolved = true;
-    useStoreSwitcher.setState({ feeContextError: {
+    const ownsRecovery = () => sameOwner() && attempt === resolution
+      && useStoreSwitcher.getState().feeContextError === recovery;
+    const retire = () => {
+      if (!ownsRecovery()) return false;
+      resolution++;
+      useStoreSwitcher.setState({ feeContextPending: false, feeContextError: null });
+      return true;
+    };
+    const recovery = {
       retry: async () => {
-        if (!current()) return;
-        const result = await resolveFeeNotification(params, onResolved);
-        if (result) onResolved?.(result);
+        if (!current()) { retire(); return; }
+        if (!ownsRecovery()) return;
+        const next = resolveFeeNotification(params, onResolved);
+        const nextAttempt = resolution;
+        const result = await next;
+        const selection = useStoreSwitcher.getState();
+        const expectedGeneration = storeGeneration + (result?.['vendorId'] === previous ? 0 : 1);
+        if (result && nextAttempt === resolution && sameOwner()
+          && selection.selectedStoreId === result['vendorId'] && selection.storeGeneration === expectedGeneration) onResolved?.(result);
       },
       cancel: () => {
-        if (attempt !== resolution) return;
-        resolution++;
-        useStoreSwitcher.setState({ feeContextPending: false, feeContextError: null });
+        if (!retire()) return;
         const now = getAuthSessionSnapshot();
         if (now?.userId === owner.userId && now.generation === owner.generation) onResolved?.(fallback());
       },
-    } });
+    };
+    useStoreSwitcher.setState({ feeContextError: recovery });
     return fallback();
   } finally {
-    if (attempt === resolution && !unresolved) useStoreSwitcher.setState({ feeContextPending: false, feeContextError: null });
+    if (attempt === resolution && sameOwner() && !unresolved) useStoreSwitcher.setState({ feeContextPending: false, feeContextError: null });
   }
 }

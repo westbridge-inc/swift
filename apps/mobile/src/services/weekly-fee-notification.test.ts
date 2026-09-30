@@ -17,7 +17,7 @@ vi.mock('expo-notifications', () => ({
   getLastNotificationResponseAsync: async () => null,
 }));
 vi.mock('../navigation/navigationRef', () => ({ navigationRef: { isReady: () => true }, safeNavigate: mock.navigate }));
-import { API_URL, api, weeklyFeeApi } from './api';
+import { API_URL, api, weeklyFeeApi, vendorApi } from './api';
 import { getSocket, disconnectSocket } from './socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { destinationFor, installNotificationTapRouter } from './notification-router';
@@ -25,9 +25,9 @@ import { resolveFeeNotification } from './weekly-fee-notification';
 const notice = { kind: 'billing_mmg_checkout', vendorId: 'store-A', subscriptionId: 'subscription-A', ref: 'ref-A', status: 'CONFIRMED' };
 const original = api.defaults.adapter;
 beforeEach(() => {
-  mock.owner.generation = 1;
+  mock.owner.userId = 'owner'; mock.owner.generation = 1; mock.owner.accessToken = 'test-access';
   mock.navigate.mockReset().mockReturnValue(true);
-  useStoreSwitcher.setState({ selectedStoreId: 'store-B', feeContextPending: false });
+  useStoreSwitcher.setState({ selectedStoreId: 'store-B', feeContextPending: false, feeContextError: null });
 });
 afterEach(() => { api.defaults.adapter = original; });
 
@@ -141,5 +141,170 @@ describe('notified subscription context', () => {
     expect(request).toHaveBeenCalledOnce();
     expect(navigate).not.toHaveBeenCalled();
     expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-A');
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(false);
+    expect(useStoreSwitcher.getState().feeContextError).toBeNull();
+  });
+});
+
+
+describe('DS390 obsolete fee recovery ownership', () => {
+  it('retires only its obsolete error after a real store change without requesting or navigating', async () => {
+    const request = vi.fn(async () => { throw { response: { status: 503 } }; });
+    api.defaults.adapter = request;
+    const navigate = vi.fn();
+    await resolveFeeNotification(destinationFor(notice)!.params!, navigate);
+    const recovery = useStoreSwitcher.getState().feeContextError!;
+    const stalePayment = weeklyFeeApi('vendor', { ...mock.owner }, 'store-B');
+    useStoreSwitcher.getState().setSelectedStore('store-C');
+    await recovery.retry();
+    await expect(stalePayment.start('obsolete-payment')).rejects.toThrow('paying account changed');
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(false);
+    expect(useStoreSwitcher.getState().feeContextError).toBeNull();
+    expect(request).toHaveBeenCalledOnce(); expect(navigate).not.toHaveBeenCalled();
+    expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-C');
+  });
+  it.each(['retry', 'cancel'] as const)('old %s cannot clear another account’s recovery state', async action => {
+    api.defaults.adapter = async () => { throw { response: { status: 503 } }; };
+    const navigate = vi.fn();
+    await resolveFeeNotification(destinationFor(notice)!.params!, navigate);
+    const recovery = useStoreSwitcher.getState().feeContextError!;
+    mock.owner.userId = 'next-owner'; mock.owner.generation++;
+    const newer = { retry: vi.fn(), cancel: vi.fn() };
+    useStoreSwitcher.setState({ feeContextPending: true, feeContextError: newer });
+    await recovery[action]();
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(true);
+    expect(useStoreSwitcher.getState().feeContextError).toBe(newer);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('DS390 fee recovery interleavings', () => {
+  it.each(['pending', 'error', 'resolved'] as const)('old retry and cancel preserve a newer %s resolution', async phase => {
+    api.defaults.adapter = async () => { throw { response: { status: 503 } }; };
+    const oldNavigate = vi.fn();
+    await resolveFeeNotification(destinationFor(notice)!.params!, oldNavigate);
+    const old = useStoreSwitcher.getState().feeContextError!;
+    let finish!: () => void;
+    api.defaults.adapter = async config => {
+      if (phase === 'pending') await new Promise<void>(resolve => { finish = resolve; });
+      if (phase === 'error') throw { response: { status: 503 } };
+      return { config, status: 200, statusText: 'OK', headers: {}, data: { data: { id: 'subscription-C' } } };
+    };
+    const next = resolveFeeNotification({ vendorId: 'store-C', subscriptionId: 'subscription-C' });
+    if (phase === 'pending') await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    else await next;
+    const state = useStoreSwitcher.getState();
+    await old.retry(); old.cancel();
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(state.feeContextPending);
+    expect(useStoreSwitcher.getState().feeContextError).toBe(state.feeContextError);
+    expect(oldNavigate).not.toHaveBeenCalled();
+    if (phase === 'pending') { finish(); await next; }
+  });
+  it.each(['retry', 'cancel'] as const)('old %s cannot clear a replacement error even in the same account', async action => {
+    api.defaults.adapter = async () => { throw { response: { status: 503 } }; };
+    const navigate = vi.fn();
+    await resolveFeeNotification(destinationFor(notice)!.params!, navigate);
+    const old = useStoreSwitcher.getState().feeContextError!;
+    useStoreSwitcher.getState().setSelectedStore('store-C');
+    const replacement = { retry: vi.fn(), cancel: vi.fn() };
+    useStoreSwitcher.setState({ feeContextPending: true, feeContextError: replacement });
+    await old[action]();
+    expect(useStoreSwitcher.getState().feeContextError).toBe(replacement);
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(true);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+  it.each(['store', 'roundtrip', 'account'] as const)('a retried request completing after %s cannot navigate or select the old target', async boundary => {
+    api.defaults.adapter = async () => { throw { response: { status: 503 } }; };
+    const navigate = vi.fn();
+    await resolveFeeNotification(destinationFor(notice)!.params!, navigate);
+    let finish!: () => void;
+    api.defaults.adapter = async config => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { config, status: 200, statusText: 'OK', headers: {}, data: { data: { id: 'subscription-A' } } };
+    };
+    const retry = useStoreSwitcher.getState().feeContextError!.retry();
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    if (boundary === 'account') mock.owner.generation++;
+    else { useStoreSwitcher.getState().setSelectedStore('store-C'); if (boundary === 'roundtrip') useStoreSwitcher.getState().setSelectedStore('store-B'); }
+    const replacement = { retry: vi.fn(), cancel: vi.fn() };
+    if (boundary === 'account') useStoreSwitcher.setState({ feeContextPending: true, feeContextError: replacement });
+    finish(); await retry;
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useStoreSwitcher.getState().selectedStoreId).not.toBe('store-A');
+    if (boundary === 'account') { expect(useStoreSwitcher.getState().feeContextError).toBe(replacement); expect(useStoreSwitcher.getState().feeContextPending).toBe(true); }
+  });
+});
+
+
+describe('DS390 captured notification reads and final retry boundary', () => {
+  it('pins profile and order reads to their captured principal and explicit store', async () => {
+    const captured = { ...mock.owner };
+    const calls: Array<[unknown, unknown, unknown]> = [];
+    api.defaults.adapter = async config => {
+      calls.push([config.url, config.headers.get('Authorization'), config.headers.get('x-vendor-id')]);
+      return { config, status: 200, statusText: 'OK', headers: {}, data: { data: {} } };
+    };
+    mock.owner.userId = 'next-owner'; mock.owner.generation++; mock.owner.accessToken = 'next-test-access';
+    useStoreSwitcher.getState().setSelectedStore('store-C');
+    await vendorApi.profile(captured, 'store-A');
+    await vendorApi.order('order-A', captured, 'store-A');
+    expect(calls).toEqual([['/vendor/profile', 'Bearer test-access', 'store-A'], ['/vendor/orders/order-A', 'Bearer test-access', 'store-A']]);
+  });
+  it.each(['store', 'roundtrip', 'account', 'newer-resolution'] as const)('rechecks %s after retry validation and before the callback', async change => {
+    api.defaults.adapter = async () => { throw { response: { status: 503 } }; };
+    const navigate = vi.fn();
+    await resolveFeeNotification(destinationFor(notice)!.params!, navigate);
+    const recovery = useStoreSwitcher.getState().feeContextError!;
+    api.defaults.adapter = async config => {
+      if (config.headers.get('x-vendor-id') === 'store-C') throw { response: { status: 503 } };
+      return { config, status: 200, statusText: 'OK', headers: {}, data: { data: { id: 'subscription-A' } } };
+    };
+    let traversed = false; let newer: Promise<unknown> | undefined;
+    const unsubscribe = useStoreSwitcher.subscribe(state => {
+      if (state.selectedStoreId !== 'store-A' || traversed) return;
+      traversed = true;
+      queueMicrotask(() => {
+        if (change === 'account') mock.owner.generation++;
+        else if (change === 'newer-resolution') newer = resolveFeeNotification({ vendorId: 'store-C', subscriptionId: 'subscription-C' });
+        else { useStoreSwitcher.getState().setSelectedStore('store-B'); if (change === 'roundtrip') useStoreSwitcher.getState().setSelectedStore('store-A'); }
+      });
+    });
+    try {
+      await recovery.retry(); await newer;
+      expect(traversed).toBe(true);
+      expect(navigate).not.toHaveBeenCalled();
+      if (change === 'newer-resolution') { expect(useStoreSwitcher.getState().feeContextPending).toBe(true); expect(useStoreSwitcher.getState().feeContextError).not.toBeNull(); }
+    } finally { unsubscribe(); }
+  });
+});
+
+
+describe('DS390 recovery state finalizer ownership', () => {
+  it.each(['retry', 'cancel'] as const)('an account boundary retires old %s authority even when the error object remains', async action => {
+    api.defaults.adapter = async () => { throw { response: { status: 503 } }; };
+    const navigate = vi.fn();
+    await resolveFeeNotification(destinationFor(notice)!.params!, navigate);
+    const old = useStoreSwitcher.getState().feeContextError!;
+    mock.owner.generation++;
+    await old[action]();
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(true);
+    expect(useStoreSwitcher.getState().feeContextError).toBe(old);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+  it('an older pending request cannot finalize a newer error resolution', async () => {
+    let finish!: () => void;
+    api.defaults.adapter = async config => {
+      if (config.headers.get('x-vendor-id') === 'store-C') throw { response: { status: 503 } };
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { config, status: 200, statusText: 'OK', headers: {}, data: { data: { id: 'subscription-A' } } };
+    };
+    const old = resolveFeeNotification(destinationFor(notice)!.params!);
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    await resolveFeeNotification({ vendorId: 'store-C', subscriptionId: 'subscription-C' });
+    const newer = useStoreSwitcher.getState().feeContextError;
+    finish(); expect(await old).toBeNull();
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(true);
+    expect(useStoreSwitcher.getState().feeContextError).toBe(newer);
   });
 });

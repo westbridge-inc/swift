@@ -49,6 +49,7 @@ function VendorRoot() {
   const myRole = safeVendorRole(owner?.myRole);
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
+  const initializeSelectedStore = useStoreSwitcher((s) => s.initializeSelectedStore);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const { preview, previewType, enterPreview, exitPreview } = useVendorPreview();
   // Preview is a per-store choice: switching stores lands on that store's
@@ -66,8 +67,9 @@ function VendorRoot() {
   useEffect(() => {
     if (stores.length === 0 || validSelection) return;
     const nextStoreId = stores[0].id;
-    setSelectedStore(nextStoreId);
-  }, [stores, validSelection, setSelectedStore]);
+    if (selectedStoreId === null) initializeSelectedStore(nextStoreId);
+    else setSelectedStore(nextStoreId);
+  }, [stores, validSelection, selectedStoreId, setSelectedStore, initializeSelectedStore]);
 
   useEffect(() => {
     if (store) track('vendor_suite_opened', { vendorType: String(store.vendorType ?? '') });
