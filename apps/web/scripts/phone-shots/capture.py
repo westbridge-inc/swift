@@ -2,7 +2,7 @@
 """Local, synthetic phone screenshots. Never contacts the configured API host.
 
 Run a production `next start` with API_URL=http://127.0.0.1:3109, then run
-`python3 capture.py before|after|after-v2|after-v3`. Browser API traffic is intercepted in CDP
+`python3 capture.py before|after|after-v2|after-v3|after-v4`. Browser API traffic is intercepted in CDP
 and fulfilled by this local fixture server. No third-party Python modules.
 """
 import base64
@@ -217,7 +217,7 @@ class WS:
 def main():
     import sys
     phase = sys.argv[1]
-    assert phase in ("before", "after", "after-v2", "after-v3")
+    assert phase in ("before", "after", "after-v2", "after-v3", "after-v4")
     os.makedirs(ROOT, exist_ok=True)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 3109), Mock)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -230,9 +230,9 @@ def main():
                 urllib.request.urlopen("http://127.0.0.1:3110/json/version", timeout=1); break
             except Exception: time.sleep(.2)
         passed = 0; failures = []
-        routes = V2_ROUTES if phase == "after-v2" else V3_ROUTES if phase == "after-v3" else ROUTES
+        routes = V2_ROUTES if phase == "after-v2" else V3_ROUTES if phase in ("after-v3", "after-v4") else ROUTES
         for route in routes:
-            sizes = ((390, 844, 3),) if phase == "after-v3" else ((390, 844, 3), (360, 800, 2))
+            sizes = ((390, 844, 3),) if phase in ("after-v3", "after-v4") else ((390, 844, 3), (360, 800, 2))
             for width, height, dpr in sizes:
                 # Start blank so interception is installed before any app code runs.
                 tab = json.load(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:3110/json/new?about:blank", method="PUT")))
@@ -258,7 +258,7 @@ def main():
                 time.sleep(.5)
                 state = ws.command("Runtime.evaluate", {"expression": "({scroll:document.documentElement.scrollWidth,width:innerWidth,text:document.body.innerText,url:location.href,ready:document.readyState})", "returnByValue": True})["result"]["value"]
                 assert loaded_state(route, state["url"], state["text"], state["ready"], ws.api_errors), f"{route}: fixture changed or API failed: {ws.api_errors}"
-                if phase == "after-v3":
+                if phase in ("after-v3", "after-v4"):
                     ws.command("Runtime.evaluate", {"expression": "document.querySelector('button[aria-label=\"Open menu\"]')?.click()"})
                     fee_href = "/dashboard/weekly-fee" if route == "/dashboard" else "/portal/weekly-fee"
                     for _ in range(30):
@@ -275,7 +275,7 @@ def main():
                     if width < 400:
                         assert all(geometry[i]["bottom"] <= geometry[i+1]["top"] for i in range(3)), f"Takeover controls overlap: {geometry}"
                 slug = route.strip("/").replace("/", "-") or "home"
-                filename = f"after-{slug}-{width}x{height}-v2.png" if phase == "after-v2" else f"after-{slug}-{width}x{height}-v3.png" if phase == "after-v3" else f"{phase}-{slug}-{width}x{height}.png"
+                filename = f"after-{slug}-{width}x{height}-v2.png" if phase == "after-v2" else f"after-{slug}-{width}x{height}-v3.png" if phase == "after-v3" else f"after-{slug}-{width}x{height}-v4.png" if phase == "after-v4" else f"{phase}-{slug}-{width}x{height}.png"
                 image = ws.command("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False})["data"]
                 with open(os.path.join(ROOT, filename), "wb") as out: out.write(base64.b64decode(image))
                 ok = state["scroll"] <= state["width"] and state["scroll"] <= width
@@ -320,7 +320,7 @@ def main():
                         with open(os.path.join(ROOT, name), "wb") as out: out.write(base64.b64decode(shot))
                         print(f"{name}: interaction PASS", flush=True)
                 ws.command("Page.close"); ws.sock.close()
-        print(f"NO OVERFLOW: {passed}/{len(routes) * (1 if phase == 'after-v3' else 2)}; failures={failures}")
+        print(f"NO OVERFLOW: {passed}/{len(routes) * (1 if phase in ('after-v3', 'after-v4') else 2)}; failures={failures}")
         if phase.startswith("after") and failures: sys.exit(1)
     finally:
         chrome.terminate(); server.shutdown()

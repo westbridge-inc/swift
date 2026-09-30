@@ -2,16 +2,16 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { LayoutDashboard, History, FileCheck2, UserRound } from 'lucide-react';
+import { LayoutDashboard, History, FileCheck2, Receipt, UserRound } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import { ConsoleShell } from '@/components/console-shell';
 import { sessionProbe } from '@/lib/auth';
 
-const NAV = [
-  { href: '/portal/weekly-fee', label: 'Weekly fee', icon: History, exact: true },
+export const NAV = [
   { href: '/portal', label: 'Earnings', icon: LayoutDashboard, exact: true },
   { href: '/portal/history', label: 'History', icon: History, exact: false },
   { href: '/portal/documents', label: 'Documents', icon: FileCheck2, exact: false },
+  { href: '/portal/weekly-fee', label: 'Weekly fee', icon: Receipt, exact: true },
   { href: '/portal/account', label: 'Account', icon: UserRound, exact: false },
 ];
 
