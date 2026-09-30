@@ -7,6 +7,7 @@ const navigation = vi.hoisted(() => ({ replace: vi.fn() }));
 vi.mock('next/navigation', () => ({ usePathname: () => '/order/search', useRouter: () => navigation }));
 vi.mock('@/components/swift-logo', () => ({ SwiftLogo: () => <span>Swift</span> }));
 vi.mock('@/components/order-ui', () => ({
+  VendorGridSkeleton: () => <div aria-label="Loading stores" />,
   VendorCard: ({ v }: any) => <p>{v.name}</p>, EmptyNote: ({ children }: any) => <p>{children}</p>,
 }));
 
