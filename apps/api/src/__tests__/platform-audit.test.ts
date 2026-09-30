@@ -168,6 +168,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // [ALG-01] Riders tied at one spot make the fairness band record decisions
+  // about these orders; they outlive the orders unless they go with them.
+  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: createdOrderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });

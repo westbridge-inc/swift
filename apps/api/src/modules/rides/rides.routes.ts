@@ -76,7 +76,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     }
   }] };
   const fareService = new FareService(app.prisma);
-  const orderService = new OrderService(app.prisma, app.io);
+  const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const dispatch = makeDispatchService(app);
 
   /** POST /estimate — exact per-tier fares (Economy/Comfort/XL), before anything

@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { customerApi, riderApi, driverApi } from '../services/api';
 import { track } from '../lib/analytics';
-import { connectSocket, getSocket } from '../services/socket';
 import {
   publishMoverLocation,
   startMoverLocation,
@@ -821,140 +820,7 @@ export interface BoardJob {
   paymentMethod?: 'CASH' | 'MOBILE_MONEY' | (string & {}) | null;
 }
 
-export interface DispatchOffer {
-  orderId: string;
-  offerAttemptId?: string;
-  orderNumber?: string;
-  vendorName?: string;
-  expiresInSeconds?: number;
-  etaMinutes?: number;
-  isExpress?: boolean;
-  // [ALG-06] A rescue bonus from Swift's OWN money on a re-offered job —
-  // server-set, absent on a normal offer. Never the customer's or the store's
-  // money and never cash in hand at the door: Swift settles it.
-  rescueIncentiveGyd?: number | null;
-  // Load-bearing for the MMG fare lock: movers must never submit an MMG fare.
-  paymentMethod?: 'CASH' | 'MOBILE_MONEY' | (string & {});
-  customerTrust?: { trustLevel: string; completedOrders: number; strikes: number } | null;
-  itemCount?: number;
-  estLoad?: string | null;
-  // [REPORT-010 F-07] Authoritative money/route facts carried by the RECOVERY
-  // payload so a rebuilt card never prices itself from a missing board row.
-  deliveryFee?: number;
-  tipAmount?: number;
-  taxiFareTotal?: number | null;
-  pickupAddress?: string | null;
-  deliveryAddress?: string | null;
-  // [WS-6.0] The cash-math triple, SERVER-COMPUTED. Absent on MMG (the customer
-  // already paid the store) and absent whenever the server could not reconcile
-  // the split — the card must render nothing rather than a breakdown that does
-  // not add up. Never compute these client-side.
-  cashMath?: { collectFromCustomer: number; payToVendor: number; youKeep: number } | null;
-}
-
-type RecoveredDispatchOffer = Omit<DispatchOffer, 'offerAttemptId'> & {
-  offerAttemptId: string | null;
-};
-
-/**
- * Real-time dispatch offers. The backend emits `dispatch:offer` to the mover's
- * user room the moment they're the top candidate; we surface it instantly and
- * refresh the available list. Polling (useAvailableJobs) stays as a fallback,
- * so a missed socket event still resolves within the poll interval.
- */
-export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
-  const pv = usePreview();
-  const qc = useQueryClient();
-  // Stacking: offers QUEUE (FIFO, deduped by orderId) instead of overwriting —
-  // with capacity 2 the server may legitimately offer a second job while one
-  // card is showing. The visible card is queue[0]; the rest wait their turn,
-  // exactly the vendor takeover's shape. Each entry carries an ABSOLUTE
-  // deadline stamped at arrival, so backgrounding cannot freeze a countdown
-  // into a lie (master audit G11).
-  const [offerQueue, setOfferQueue] = useState<(DispatchOffer & { deadlineAt?: number })[]>([]);
-  const offer = offerQueue[0] ?? null;
-  const queuedBehind = Math.max(0, offerQueue.length - 1);
-  const pushOffer = (data: DispatchOffer) =>
-    setOfferQueue((q) => (q.some((o) => o.orderId === data.orderId)
-      ? q.map((o) => (o.orderId === data.orderId ? { ...o, ...data, deadlineAt: o.deadlineAt } : o))
-      : [...q, { ...data, deadlineAt: data.expiresInSeconds ? Date.now() + data.expiresInSeconds * 1000 : undefined }]));
-  const dropOffer = (orderId: string) => setOfferQueue((q) => q.filter((o) => o.orderId !== orderId));
-  const setOffer = (data: DispatchOffer | null) => {
-    if (data === null) setOfferQueue((q) => q.slice(1));
-    else pushOffer(data);
-  };
-
-  useEffect(() => {
-    // No live offers in preview (read-only, no socket/auth).
-    if (!kind || !online || pv) {
-      setOfferQueue([]);
-      return;
-    }
-    connectSocket();
-    const s = getSocket();
-    const api = kind === 'DRIVER' ? driverApi : riderApi;
-    // [danger #21] Render proof: the moment the card exists on this device,
-    // tell the server — a timeout WITHOUT this stamp is UNDELIVERABLE and
-    // never decays the acceptance rate. Fire-and-forget garnish.
-    const markSeen = (orderId: string, offerAttemptId?: string) => { void api.offerSeen(orderId, offerAttemptId).catch(() => {}); };
-    const onOffer = (data: DispatchOffer) => {
-      setOffer(data);
-      markSeen(data.orderId, data.offerAttemptId);
-      qc.invalidateQueries({ queryKey: ['mover', 'available', kind] });
-    };
-    s.on('dispatch:offer', onOffer);
-
-    // [E27 / danger #37] Offer RECOVERY: a socket that dropped while the ping
-    // was in flight used to lose the card forever (and the silent timeout
-    // still counted against acceptance). On mount and every reconnect, ask
-    // the server for the live exclusive offer and rebuild the card with its
-    // REAL remaining seconds. Failures are garnish — the poll fallback and
-    // the next socket ping still stand.
-    let gone = false;
-    const recover = async () => {
-      try {
-        const data = await unwrap<{ offer: RecoveredDispatchOffer | null }>(api.currentOffer());
-        if (!gone && data?.offer?.orderId) {
-          const recoveredOffer: DispatchOffer = {
-            ...data.offer,
-            offerAttemptId: data.offer.offerAttemptId ?? undefined,
-          };
-          setOffer(recoveredOffer);
-          markSeen(recoveredOffer.orderId, recoveredOffer.offerAttemptId);
-          qc.invalidateQueries({ queryKey: ['mover', 'available', kind] });
-        }
-      } catch { /* recovery only — never surface */ }
-    };
-    void recover();
-    s.on('connect', recover);
-    return () => {
-      gone = true;
-      s.off('dispatch:offer', onOffer);
-      s.off('connect', recover);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, online, qc, pv]);
-
-  // Auto-dismiss once the offer window lapses (the backend reassigns it).
-  // Keyed to the ABSOLUTE deadline stamped at arrival, and it drops THAT
-  // order, not whatever sits at the head by then — with a queue the two can
-  // differ. A timer that fires late after backgrounding still computes a
-  // non-negative remainder, so a lapsed card cannot linger (G11).
-  useEffect(() => {
-    if (!offer) return;
-    const deadline = offer.deadlineAt ?? (offer.expiresInSeconds ? Date.now() + offer.expiresInSeconds * 1000 : null);
-    if (!deadline) return;
-    const { orderId } = offer;
-    const t = setTimeout(() => dropOffer(orderId), Math.max(0, deadline - Date.now()));
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offer?.orderId]);
-
-  return {
-    offer,
-    // Stacking: how many more offers wait behind the visible card — the UI
-    // states queue depth honestly, like the vendor takeover does.
-    queuedBehind,
-    dismiss: () => { if (offer) dropOffer(offer.orderId); },
-  };
-}
+// The live offer cards (the dispatch:offer stream, the queue, recovery, render
+// proof) live in their own module so their tests can drive the real hook.
+export { useDispatchOffers } from './dispatchOffers';
+export type { DispatchOffer } from './dispatchOffers';

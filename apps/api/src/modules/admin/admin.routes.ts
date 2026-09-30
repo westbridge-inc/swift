@@ -379,7 +379,7 @@ function coerceMoney<T>(value: T): T {
 
 export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
-  const orderService = new OrderService(app.prisma, app.io);
+  const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const discoveryGovernance = new DiscoveryGovernanceService(app.prisma);
 
   const requireTenantId = (): string => {
