@@ -525,6 +525,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
 
       switch (job.name) {
         case 'process-billing': {
+          const confirmationReviews = await billing.surfaceConfirmationReviews();
           const result = await billing.runBillingCycle();
           // [E12] A stopped subscription stays ACTIVE until its paid period
           // ends, then turns PAUSED (not operable, owing nothing); resuming
@@ -543,7 +544,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // paid conversion seamless.
           const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
           const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
+          ctx.log.info({ ...result, confirmationReviews, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
           // [DS213 F1-1] A stopped plan that fails to pause counts too.

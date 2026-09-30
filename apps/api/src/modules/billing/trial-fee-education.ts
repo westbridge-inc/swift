@@ -52,8 +52,9 @@ export async function sweepTrialFeeEducation(
           note: stage === 'd10' ? 'Trial fee education (day 10)' : 'Trial fee reminder with amount (day 13)',
         },
       });
-    } catch {
-      continue; // this stage already sent — the unique key is the gate
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'P2002') throw error;
+      // A saved stage whose delivery was interrupted still enters the durable outbox.
     }
     const fee = await payInfo(prisma, sub);
     const payLine = fee.amountDueGyd <= 0
@@ -67,19 +68,21 @@ export async function sweepTrialFeeEducation(
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your trial ends soon',
-        body: `Your trial ends in ${daysLeft} days. ${payLine}`,
+        body: `Your trial ends on ${sub.trialEndDate!.toISOString().slice(0, 10)}. ${payLine}`,
         audience: audience as never,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
+        feeStageKey: `trial:${stage}`,
       });
       out.day10 += 1;
     } else {
       await notifications.send({
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Your trial ends tomorrow',
-        body: `Your trial ends tomorrow. ${payLine}`,
+        title: 'Your trial ends soon',
+        body: `Your trial ends on ${sub.trialEndDate!.toISOString().slice(0, 10)}. ${payLine}`,
         audience: audience as never,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
+        feeStageKey: `trial:${stage}`,
       });
       out.day13 += 1;
     }

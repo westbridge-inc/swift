@@ -1,3 +1,4 @@
+import { beginConfirmationInTx, lockBillingAuthority, markSettlementApplying, resolveConfirmationInTx } from './dunning-clock';
 import { Prisma, type MmgCheckoutIntent, type PrismaClient, type Subscription, type SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
@@ -18,7 +19,7 @@ import type { BillingService } from './billing.service';
 import { payInfo } from './agent-cash.service';
 import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
 import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
-import { claimProviderPaymentInTx, normalizeProviderTxnId, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
+import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
 
 // ---------------------------------------------------------------------------
@@ -322,8 +323,11 @@ export class MmgCheckoutService {
       // server: a checkout nobody wrote down could be paid and never found.
       try {
         const intent = await this.prisma.$transaction(async (tx) => {
+          const authority = await lockBillingAuthority(tx, sub.id);
+          if (authority.userId !== input.userId) throw new NotFoundError('Subscription', sub.id);
           const created = await tx.mmgCheckoutIntent.create({
             data: {
+              tenantId: authority.tenantId,
               subscriptionId: sub.id,
               merchantTransactionId,
               amount: amountGyd,
@@ -334,7 +338,8 @@ export class MmgCheckoutService {
               expiresAt: new Date(now.getTime() + MMG_CHECKOUT_TTL_MS),
             },
           });
-          await tx.mmgCheckoutKey.create({ data: { createdByUserId: input.userId, clientKey, intentId: created.id } });
+          await beginConfirmationInTx(tx, sub.id, { checkoutId: created.id }, 'MMG_CHECKOUT_PENDING', now);
+          await tx.mmgCheckoutKey.create({ data: { tenantId: authority.tenantId, createdByUserId: input.userId, clientKey, intentId: created.id } });
           return created;
         });
         mmgCheckoutEventsCounter.labels('created').inc();
@@ -417,6 +422,7 @@ export class MmgCheckoutService {
       // Return, notify and poll can overlap. Merge against the locked current
       // row, preserving both candidates and the first reply's timestamp.
       await this.prisma.$transaction(async (tx) => {
+        await lockBillingAuthority(tx, intent.subscriptionId);
         await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${intent.id} FOR UPDATE`;
         const current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
         if (current.status === 'CONFIRMED' || current.status === 'HELD') return;
@@ -626,12 +632,13 @@ export class MmgCheckoutService {
 
   /** [I2 · I3 · F2] The credit: one transaction, one provider identity, once. */
   private async confirm(intent: MmgCheckoutIntent, txnId: string, now: Date): Promise<CheckoutStatus> {
-    const key = normalizeProviderTxnId(txnId);
+    const key = txnId; // Preserve provider spelling; SQL owns identity equivalence.
     const amount = Number(intent.amount);
     let outcome: 'credited' | 'already' | 'held';
     try {
       outcome = await this.prisma.$transaction(async (tx) => {
         // Serialize every verifier of this checkout: return, notify and poll may race.
+        await lockBillingAuthority(tx, intent.subscriptionId);
         await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${intent.id} FOR UPDATE`;
         const current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
         if (current.status === 'CONFIRMED') return 'already' as const;
@@ -672,6 +679,7 @@ export class MmgCheckoutService {
           where: { id: current.id },
           data: { status: 'CONFIRMED', mmgTransactionId: key, providerPaymentId: identity.id, confirmedAt: now, nextCheckAt: null, reason: null },
         });
+        await markSettlementApplying(tx, current.subscriptionId, { checkoutId: current.id }, now);
         return 'credited' as const;
       });
     } catch (err) {
@@ -680,7 +688,10 @@ export class MmgCheckoutService {
       throw err;
     }
     if (outcome === 'held') return 'HELD';
-    if (outcome === 'already') return 'CONFIRMED';
+    if (outcome === 'already') {
+      await this.billing.recoverConfirmationSettlements(intent.subscriptionId, now);
+      return 'CONFIRMED';
+    }
 
     mmgCheckoutEventsCounter.labels('confirmed').inc();
     // [I5] Paying while behind re-bills at once and reinstates. It moves no
@@ -694,15 +705,20 @@ export class MmgCheckoutService {
 
   /** [I6] A person must look: nothing credits, and a reversal is a two-person decision. */
   private async hold(intent: MmgCheckoutIntent, reason: string): Promise<CheckoutStatus> {
-    const moved = await this.prisma.mmgCheckoutIntent.updateMany({
-      where: { id: intent.id, status: { in: ['OPEN', 'CONFIRMING', 'EXPIRED', 'NOT_PAID'] } },
-      data: { status: 'HELD', reason, nextCheckAt: null },
+    const moved = await this.prisma.$transaction(async (tx) => {
+      await lockBillingAuthority(tx, intent.subscriptionId);
+      const changed = await tx.mmgCheckoutIntent.updateMany({
+        where: { id: intent.id, status: { in: ['OPEN', 'CONFIRMING', 'EXPIRED', 'NOT_PAID'] } },
+        data: { status: 'HELD', reason, nextCheckAt: null },
+      });
+      if (changed.count) await beginConfirmationInTx(tx, intent.subscriptionId, { checkoutId: intent.id }, reason);
+      return changed;
     });
     if (moved.count === 1) {
       mmgCheckoutEventsCounter.labels('held').inc();
       log().error({ checkoutId: intent.id, reason }, '[MMG checkout] held for review: the MMG records cannot be matched to this checkout');
       await notifyAdmins(this.prisma, this.notifications, {
-        tenantId: null,
+        tenantId: intent.tenantId,
         title: 'MMG checkout held for review',
         body: `Checkout ${intent.id} is held (${reason}). Nothing was credited. Reconcile it against the MMG statement.`,
         data: { kind: 'billing_invariants', alert: 'mmg-checkout-held', checkoutId: intent.id, reason },
@@ -716,7 +732,9 @@ export class MmgCheckoutService {
   /** [F5] Only on MMG's own answer, tied to THIS checkout, that the payment failed. */
   private async notPaid(intent: MmgCheckoutIntent, reason: string, now: Date): Promise<CheckoutStatus> {
     const since = (intent.replyAt ?? intent.createdAt).getTime();
-    const moved = await this.prisma.mmgCheckoutIntent.updateMany({
+    const moved = await this.prisma.$transaction(async (tx) => {
+      await lockBillingAuthority(tx, intent.subscriptionId);
+      const moved = await tx.mmgCheckoutIntent.updateMany({
       where: { id: intent.id, status: 'CONFIRMING' },
       data: {
         status: 'NOT_PAID',
@@ -724,6 +742,9 @@ export class MmgCheckoutService {
         // A later MMG confirmation still credits (I8): keep looking for a week.
         nextCheckAt: intent.candidates.length > 0 && now.getTime() < since + LATE_WINDOW_MS ? new Date(now.getTime() + LATE_CHECK_MS) : null,
       },
+    });
+      if (moved.count === 1) await resolveConfirmationInTx(tx, intent.subscriptionId, { checkoutId: intent.id }, 'PROVEN_UNPAID', { actor: 'mmg-provider', reference: reason }, now);
+      return moved;
     });
     if (moved.count === 1) {
       mmgCheckoutEventsCounter.labels('not_paid').inc();

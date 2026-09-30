@@ -1,5 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { resolveFinanceConfirmation, confirmationReviewQueue } from '../modules/billing/confirmation-finance';
+import { ExpoPushProvider, withPushRetry, type NotificationChannels } from '../providers/notifications/channels';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '@prisma/client';
+import { beginConfirmationInTx, resolveConfirmationInTx, currentDunningClock, activeOverdueMs, hasConfirmationInTx } from '../modules/billing/dunning-clock';
 import { randomUUID } from 'node:crypto';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -50,6 +53,10 @@ async function run(id: string, hours: number) {
 
 beforeAll(async () => { await db.$connect(); });
 afterAll(async () => {
+  await db.billingNoticeHandoff.deleteMany({ where: { notice: { subscriptionId: { in: subscriptions } } } });
+  await db.billingFeeNotice.deleteMany({ where: { subscriptionId: { in: subscriptions } } });
+  await db.paymentConfirmationHold.deleteMany({ where: { subscriptionId: { in: subscriptions } } });
+  await db.billingDunningClock.deleteMany({ where: { subscriptionId: { in: subscriptions } } });
   await db.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subscriptions } } });
   await db.cardSession.deleteMany({ where: { subscriptionId: { in: subscriptions } } });
   await db.subscription.deleteMany({ where: { id: { in: subscriptions } } });
@@ -86,6 +93,16 @@ describe('owner: a full 48 active hours of weekly-fee grace on every path', () =
     await run(sub.id, 24);
     await run(sub.id, 48);
     expect((await db.subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe('SUSPENDED');
+  });
+
+  it('autoSuspend disabled remains authoritative beyond 48h in the worker and both operability gates', async () => {
+    const { sub } = await fixture();
+    await db.subscription.update({ where: { id: sub.id }, data: { autoSuspendEnabled: false } });
+    await run(sub.id, 0); await run(sub.id, 24); await run(sub.id, 48); await run(sub.id, 100);
+    const fresh = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(fresh.status).toBe('PAST_DUE');
+    expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, at(100)).operable).toBe(true);
+    expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(at(100)) } })).toBe(0);
   });
 });
 
@@ -124,5 +141,198 @@ describe.each(['MMG_HELD', 'CARD_UNKNOWN', 'CARD_3DS', 'LEGACY_CARD_UNKNOWN'] as
     expect(fresh.failedAttempts).toBe(2);
     expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, at(100)).operable).toBe(true);
     expect(await db.notification.count({ where: { userId: user.id } })).toBe(before);
+  });
+});
+
+async function heldCheckout(subscriptionId: string, userId: string, hours: number) {
+  return db.$transaction(async (tx) => {
+    const row = await tx.mmgCheckoutIntent.create({ data: {
+      subscriptionId, createdByUserId: userId, merchantTransactionId: `${Date.now()}${Math.floor(Math.random() * 90000) + 10000}`,
+      amount: 20000, currencyCode: 'GYD', platform: 'web', status: 'HELD',
+      checkoutUrlSealed: Buffer.alloc(40), checkoutUrlDek: Buffer.alloc(40), createdAt: at(hours), expiresAt: at(hours + 1),
+    } });
+    await beginConfirmationInTx(tx, subscriptionId, { checkoutId: row.id }, 'REFERENCE_UNCONFIRMED', at(hours));
+    return row;
+  });
+}
+const rejectCheckout = (subscriptionId: string, checkoutId: string, hours: number) => db.$transaction(async (tx) => {
+  await tx.mmgCheckoutIntent.update({ where: { id: checkoutId }, data: { status: 'NOT_PAID' } });
+  await resolveConfirmationInTx(tx, subscriptionId, { checkoutId }, 'PROVEN_UNPAID', { actor: 'fixture-finance', reference: 'fixture-bank-confirmed-unpaid' }, at(hours));
+});
+
+describe('remaining active time and exact source resolution', () => {
+  it('pause at 47h and reject at 100h preserves exactly one hour, with no new charge to enforce exhausted attempts', async () => {
+    const { sub, user } = await fixture();
+    await run(sub.id, 0); await run(sub.id, 1); await run(sub.id, 2);
+    const checkout = await heldCheckout(sub.id, user.id, 47);
+    await run(sub.id, 100);
+    await rejectCheckout(sub.id, checkout.id, 100);
+    const resumed = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(resumed.status).toBe('PAST_DUE');
+    expect(resumed.billingEnforcementDueAt).toEqual(at(101));
+    expect(resumed.nextRetryAt).toEqual(at(101));
+    expect(subscriptionOperability(resumed, { missingRow: 'BLOCK' }, new Date(at(101).getTime() - 1)).operable).toBe(true);
+    const attempts = await db.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_ATTEMPT' } });
+    expect(await run(sub.id, 100.999)).toBe('pending');
+    expect(await run(sub.id, 101)).toBe('suspended');
+    expect(await db.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_ATTEMPT' } })).toBe(attempts);
+  });
+
+  it('overlapping MMG and card uncertainty consumes the pause once and requires both exact resolutions', async () => {
+    const { sub, user } = await fixture();
+    await run(sub.id, 0); await run(sub.id, 24);
+    const checkout = await heldCheckout(sub.id, user.id, 47);
+    const card = await db.$transaction(async (tx) => {
+      const row = await tx.cardSession.create({ data: { subscriptionId: sub.id, userId: user.id, purpose: 'PAY_NOW', provider: 'simulator',
+        environment: 'sandbox', providerAccount: 'clock-fixture', stateHash: 'c'.repeat(64), amount: 20000, currencyCode: 'GYD',
+        periodStart: due, status: 'UNKNOWN', createdAt: at(60), expiresAt: at(61) } });
+      await beginConfirmationInTx(tx, sub.id, { cardSessionId: row.id }, 'CARD_UNKNOWN', at(60));
+      return row;
+    });
+    expect(await db.$transaction((tx) => hasConfirmationInTx(tx, sub.id, at(100), { checkoutId: checkout.id }))).toBe(true);
+    expect(await db.$transaction((tx) => hasConfirmationInTx(tx, sub.id, at(100), { cardSessionId: card.id }))).toBe(true);
+    await rejectCheckout(sub.id, checkout.id, 100);
+    expect((await db.subscription.findUniqueOrThrow({ where: { id: sub.id } })).billingConfirmationPausedAt).not.toBeNull();
+    await db.$transaction(async (tx) => {
+      await tx.cardSession.update({ where: { id: card.id }, data: { status: 'FAILED' } });
+      await resolveConfirmationInTx(tx, sub.id, { cardSessionId: card.id }, 'PROVEN_UNPAID', { actor: 'card-provider', reference: 'declined' }, at(120));
+    });
+    const clock = await db.$transaction((tx) => currentDunningClock(tx, sub.id, at(120)));
+    expect(activeOverdueMs(clock, at(120))).toBe(47 * HOUR);
+    expect((await db.subscription.findUniqueOrThrow({ where: { id: sub.id } })).billingEnforcementDueAt).toEqual(at(121));
+    await rejectCheckout(sub.id, checkout.id, 130);
+    expect((await db.subscription.findUniqueOrThrow({ where: { id: sub.id } })).billingEnforcementDueAt).toEqual(at(121));
+  });
+
+  it('an eligible but unsuspended PAST_DUE payer remains operable during a late hold; zero time does not suspend in resolution', async () => {
+    const { sub, user } = await fixture();
+    await run(sub.id, 0); await run(sub.id, 1); await run(sub.id, 2);
+    const checkout = await heldCheckout(sub.id, user.id, 50);
+    const held = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(subscriptionOperability(held, { missingRow: 'BLOCK' }, at(100)).operable).toBe(true);
+    expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(at(100)) } })).toBe(0);
+    await rejectCheckout(sub.id, checkout.id, 100);
+    expect((await db.subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe('PAST_DUE');
+    expect(await run(sub.id, 100)).toBe('pending');
+    expect(await run(sub.id, 100.001)).toBe('suspended');
+  });
+
+  it('opening a hold never restores an already suspended vendor', async () => {
+    const { sub, user, vendor } = await fixture();
+    await run(sub.id, 0); await run(sub.id, 24); await run(sub.id, 48);
+    await heldCheckout(sub.id, user.id, 49);
+    const held = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(subscriptionOperability(held, { missingRow: 'BLOCK' }, at(100)).operable).toBe(false);
+    expect((await db.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).status).toBe('SUSPENDED');
+  });
+
+  it('a hold before due consumes no overdue time and preserves all 48 hours', async () => {
+    const { sub, user } = await fixture();
+    const checkout = await heldCheckout(sub.id, user.id, -1);
+    await rejectCheckout(sub.id, checkout.id, 100);
+    expect((await db.subscription.findUniqueOrThrow({ where: { id: sub.id } })).billingEnforcementDueAt).toEqual(at(148));
+  });
+});
+
+function latch() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+const noSms = { sendSms: async () => ({ ref: 'fixture-no-sms' }) };
+const noEmail = { sendEmail: async () => ({ ref: 'fixture-no-email' }) };
+const demand = (userId: string, subscriptionId: string, stage: string, sms = false) => ({
+  userId, type: 'SYSTEM_ANNOUNCEMENT' as const, title: 'Fee fixture', body: 'Weekly fee needs attention',
+  data: { kind: 'billing_failed', subscriptionId }, feeStageKey: stage, ...(sms ? { feeSms: 'Weekly fee fixture' } : {}),
+});
+
+describe('the actual fee-demand handoff is serialized with confirmation', () => {
+  it('a hold after recipient preparation blocks push and resumes the same stage once', async () => {
+    const { sub, user } = await fixture(); await run(sub.id, 0);
+    await db.deviceToken.create({ data: { userId: user.id, token: `fixture-${randomUUID()}`, platform: 'ios' } });
+    const prepared = latch(); const proceed = latch(); let sent = 0;
+    const channels: NotificationChannels = { sms: noSms, email: noEmail, push: {
+      supportsHandoff: true,
+      async sendPush(_tokens, _title, _body, _data, options) {
+        prepared.release(); await proceed.promise;
+        return await options!.handoff!('chunk:0', async () => ({ sent: ++sent })) ?? { sent: 0 };
+      },
+    } };
+    const notifications = new NotificationService(db, io as never, channels);
+    const sending = notifications.send(demand(user.id, sub.id, 'recipient-barrier'));
+    await prepared.promise;
+    const checkout = await heldCheckout(sub.id, user.id, 47);
+    proceed.release(); await sending;
+    expect(sent).toBe(0);
+    const notice = await db.billingFeeNotice.findFirstOrThrow({ where: { subscriptionId: sub.id, stageKey: 'recipient-barrier' } });
+    expect(notice.status).toBe('PENDING');
+    await rejectCheckout(sub.id, checkout.id, 100);
+    await notifications.deliverFeeDemand(notice.id);
+    await notifications.deliverFeeDemand(notice.id);
+    expect(sent).toBe(1);
+    expect(await db.notification.count({ where: { userId: user.id, dedupeKey: `fee-demand:${notice.id}` } })).toBe(1);
+  });
+
+  it('real Expo chunks and retry wrapper recheck after a hold wins between requests', async () => {
+    const { sub, user } = await fixture(); await run(sub.id, 0);
+    await db.deviceToken.createMany({ data: Array.from({ length: 101 }, (_, i) => ({
+      userId: user.id, token: `ExponentPushToken[clock-${sub.id}-${String(i).padStart(3, '0')}]`, platform: 'ios',
+    })) });
+    const submitted = latch(); const response = latch(); let requests = 0;
+    const mock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      requests += 1;
+      if (requests === 1) { submitted.release(); await response.promise; }
+      const count = JSON.parse(String(init?.body)).length;
+      return { ok: true, json: async () => ({ data: Array.from({ length: count }, () => ({ status: 'ok' })) }) } as Response;
+    });
+    try {
+      const notifications = new NotificationService(db, io as never, { sms: noSms, email: noEmail, push: withPushRetry(new ExpoPushProvider(), [0]) });
+      const sending = notifications.send(demand(user.id, sub.id, 'expo-chunks'));
+      await submitted.promise;
+      // This commits while the first network response is still pending: no network await holds the payer lock.
+      const checkout = await heldCheckout(sub.id, user.id, 47);
+      response.release(); await sending;
+      expect(requests).toBe(1);
+      const notice = await db.billingFeeNotice.findFirstOrThrow({ where: { subscriptionId: sub.id, stageKey: 'expo-chunks' } });
+      await rejectCheckout(sub.id, checkout.id, 100);
+      await notifications.deliverFeeDemand(notice.id);
+      expect(requests).toBe(2); // only the unsent second chunk
+      await notifications.deliverFeeDemand(notice.id);
+      expect(requests).toBe(2);
+    } finally { response.release(); mock.mockRestore(); }
+  });
+
+  it('a lost SMS acknowledgement is durably UNKNOWN and never blindly resent', async () => {
+    const { sub, user } = await fixture(); await run(sub.id, 0);
+    let sends = 0;
+    const notifications = new NotificationService(db, io as never, { email: noEmail, push: { sendPush: async () => ({ sent: 0 }) },
+      sms: { async sendSms() { sends += 1; throw new Error('fixture lost acknowledgement'); } },
+    });
+    await expect(notifications.send(demand(user.id, sub.id, 'sms-unknown', true))).rejects.toThrow('lost acknowledgement');
+    const notice = await db.billingFeeNotice.findFirstOrThrow({ where: { subscriptionId: sub.id, stageKey: 'sms-unknown' } });
+    expect(await db.billingNoticeHandoff.findFirst({ where: { noticeId: notice.id, channel: 'sms' } })).toMatchObject({ status: 'UNKNOWN' });
+    await notifications.deliverFeeDemand(notice.id);
+    expect(sends).toBe(1);
+  });
+});
+
+describe('finance proof and source ownership', () => {
+  it('wrong tenant, stale epoch and a paid checkbox alone cannot release an MMG hold', async () => {
+    const { sub, user } = await fixture(); await run(sub.id, 0);
+    const checkout = await heldCheckout(sub.id, user.id, 47);
+    const [row] = (await confirmationReviewQueue(db, 'swift-default', at(100))).filter((r) => r.subscriptionId === sub.id);
+    expect(row).toMatchObject({ overdue: true, remainingGraceMs: HOUR });
+    const input = { id: row!.id, tenantId: 'swift-default', actorId: user.id, sourceId: checkout.id,
+      epoch: row!.epoch, clockVersion: row!.clockVersion, decision: 'PAID' as const, evidenceReference: 'fixture-bank-proof' };
+    const audit = vi.fn(async () => undefined);
+    await expect(resolveFinanceConfirmation(db, { ...input, tenantId: 'clock-foreign' }, audit, at(100))).rejects.toThrow();
+    await expect(resolveFinanceConfirmation(db, { ...input, epoch: row!.epoch + 1 }, audit, at(100))).rejects.toThrow('Reload');
+    await expect(resolveFinanceConfirmation(db, input, audit, at(100))).rejects.toThrow('settlement workflow');
+    expect(audit).not.toHaveBeenCalled();
+    const result = await resolveFinanceConfirmation(db, { ...input, decision: 'UNPAID' }, audit, at(100));
+    expect(result).toMatchObject({ changed: true, status: 'PROVEN_UNPAID' });
+    expect((await db.subscription.findUniqueOrThrow({ where: { id: sub.id } })).billingEnforcementDueAt).toEqual(at(101));
+    expect((await resolveFinanceConfirmation(db, { ...input, decision: 'UNPAID' }, audit, at(110))).changed).toBe(false);
+    expect(audit).toHaveBeenCalledTimes(1);
   });
 });

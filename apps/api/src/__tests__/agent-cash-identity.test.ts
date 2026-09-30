@@ -219,7 +219,7 @@ describe('[M-18 · operations] the historical double credits', () => {
 });
 
 describe('[MMG checkout F2 · F7] agent cash claims the one identity inside its credit, under its own tenant', () => {
-  const keyOf = (id: string) => providerTxnKey({ mmgTxnId: id, externalId: id, channel: 'MMG_AGENT_WEBHOOK' });
+  const keyOf = (id: string) => providerTxnRaw({ mmgTxnId: id, externalId: id, channel: 'MMG_AGENT_WEBHOOK' });
   /** What a pre-M-18 observation left behind: unmatched, and no provider identity. */
   const legacyUnmatched = (id: string, san: string) => prisma.mmgAgentPayment.create({
     data: { channel: 'MMG_AGENT_WEBHOOK', externalId: id, mmgTxnId: id, sanRaw: san, amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'UNMATCHED', raw: {} },

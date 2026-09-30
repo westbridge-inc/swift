@@ -1,3 +1,4 @@
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import Redis from 'ioredis';
@@ -130,6 +131,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   delete process.env['CARD_RAIL_V2'];
   delete process.env['MASTER_KEK'];
   resetKeyProviderForTests();
@@ -386,11 +388,12 @@ describe('PAY_NOW: server-priced, booked ONCE through applySuccessfulCharge, whi
     expect(after.sub.status).toBe('ACTIVE');
   });
 
-  it('an abandoned page (no button pressed) expires in the sweep and books nothing', async () => {
+  it('an unanswered page remains UNKNOWN after local expiry, paused with nothing booked', async () => {
     const p = await partner();
     const session = await start(p, 'PAY_NOW');
     await card.sweepSessions(new Date(Date.parse(session.expiresAt) + 60_000));
-    expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('EXPIRED');
+    expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('UNKNOWN');
+    expect((await money(p.subId)).sub.billingConfirmationPausedAt).not.toBeNull();
     expect((await money(p.subId)).payments).toHaveLength(0);
   });
 
@@ -647,7 +650,7 @@ describe('[AX297 F1] a card that leaves service after billing read it is never c
     const removalHolds = deferred(); const releaseRemoval = deferred();
     let billingPid = 0; let removalPid = 0;
     const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {
-      beforeInstrumentChargeAuthorization: async () => { billingRead.resolve(); await releaseBilling.promise; },
+      beforeInstrumentChargeAuthorization: async () => { billingRead.resolve(); await releaseBilling.promise; billingPid = 0; },
       beforeLateMmgAuthorityLock: async (subscriptionId, tx) => { if (subscriptionId === p.subId && !billingPid) billingPid = await backendPid(tx); },
     }, () => provider);
     const cards = new CardRailService(app.prisma, notifications, racing, () => provider, {
@@ -685,7 +688,7 @@ describe('[AX297 F1] a card that leaves service after billing read it is never c
     const replacementHolds = deferred(); const releaseReplacement = deferred();
     let billingPid = 0; let replacementPid = 0;
     const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {
-      beforeInstrumentChargeAuthorization: async () => { billingRead.resolve(); await releaseBilling.promise; },
+      beforeInstrumentChargeAuthorization: async () => { billingRead.resolve(); await releaseBilling.promise; billingPid = 0; },
       beforeLateMmgAuthorityLock: async (subscriptionId, tx) => { if (subscriptionId === p.subId && !billingPid) billingPid = await backendPid(tx); },
     }, () => provider);
     const cards = new CardRailService(app.prisma, notifications, racing, () => provider, {

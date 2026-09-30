@@ -1,3 +1,4 @@
+import { currentDunningClock, lockBillingAuthority } from '../billing/dunning-clock';
 import { Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
 import { CountryConfigService, partnerRateFor, type PartnerRate } from '../country/country-config.service';
@@ -285,10 +286,17 @@ export class SubscriptionService {
    * the number converted. Idempotent (only TRIAL rows past their end match).
    */
   async convertExpiredTrials(now = new Date()): Promise<number> {
-    const res = await this.prisma.subscription.updateMany({
-      where: { status: 'TRIAL', trialEndDate: { lte: now } },
-      data: { status: 'ACTIVE', isTrialActive: false, nextBillingDate: now },
+    const rows = await this.prisma.subscription.findMany({ where: { status: 'TRIAL', trialEndDate: { lte: now } }, select: { id: true } });
+    let count = 0;
+    for (const row of rows) count += await this.prisma.$transaction(async (tx) => {
+      await lockBillingAuthority(tx, row.id);
+      const sub = await tx.subscription.findUniqueOrThrow({ where: { id: row.id } });
+      if (sub.status !== 'TRIAL' || !sub.trialEndDate || sub.trialEndDate > now) return 0;
+      // Keep the original due date, including time paused before conversion.
+      await tx.subscription.update({ where: { id: row.id }, data: { status: 'ACTIVE', isTrialActive: false } });
+      await currentDunningClock(tx, row.id, now);
+      return 1;
     });
-    return res.count;
+    return count;
   }
 }

@@ -4471,6 +4471,26 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { ingestionMode: row.value } };
   });
 
+  app.get('/billing/confirmations', { preHandler: [adminGuard] }, async () => {
+    const { confirmationReviewQueue } = await import('../billing/confirmation-finance');
+    return { success: true, data: await confirmationReviewQueue(app.prisma, requireTenantId()) };
+  });
+
+  app.post('/billing/confirmations/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+    const body = z.object({ sourceId: z.string().min(1), epoch: z.number().int().positive(), clockVersion: z.number().int().nonnegative(),
+      decision: z.enum(['UNPAID', 'PAID']), providerPaymentId: z.string().min(1).optional(),
+      evidenceReference: z.string().min(8).max(128).regex(/^[A-Za-z0-9._:/-]+$/),
+      reason: z.string().trim().min(8).max(500),
+    }).strict().parse(request.body);
+    const { resolveFinanceConfirmation } = await import('../billing/confirmation-finance');
+    const result = await resolveFinanceConfirmation(app.prisma, { ...body, id, tenantId, actorId: request.user.userId },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+    if (body.decision === 'PAID') await billing.recoverConfirmationSettlements(result.subscriptionId);
+    return { success: true, data: result };
+  });
+
   // ── Collections workbench [san spec PART 21] — the founder's call list ────
 
   /** Tabs of who to call, with tap-to-call + WhatsApp links and the promise
@@ -4488,7 +4508,7 @@ export async function adminRoutes(app: FastifyInstance) {
           : tab === 'suspended'
             ? { status: 'SUSPENDED' as const }
             : { status: 'CHURNED' as const };
-    const where = { ...statusWhere, ...subscriptionTenantScope(tenantId) };
+    const where = { ...statusWhere, billingConfirmationPausedAt: null, ...subscriptionTenantScope(tenantId) };
     const subs = await app.prisma.subscription.findMany({
       where,
       include: {
@@ -4566,7 +4586,12 @@ export async function adminRoutes(app: FastifyInstance) {
       select: { id: true },
     });
     if (!subscription) throw new NotFoundError('Subscription', subscriptionId);
-    const row = await app.prisma.collectionContact.create({
+    const row = await app.prisma.$transaction(async (tx) => {
+      const { currentDunningClock } = await import('../billing/dunning-clock');
+      const clock = await currentDunningClock(tx, subscriptionId);
+      if (clock.tenantId !== tenantId) throw new NotFoundError('Subscription', subscriptionId);
+      if (clock.pausedAt) throw new AppError(409, 'PAYMENT_CONFIRMING', 'Review the pending payment before contacting the payer about collection.');
+      return tx.collectionContact.create({
       data: {
         subscriptionId,
         outcome: body.outcome,
@@ -4574,6 +4599,7 @@ export async function adminRoutes(app: FastifyInstance) {
         note: body.note ?? null,
         byAdminId: request.user.userId,
       },
+    });
     });
     return { success: true, data: row };
   });

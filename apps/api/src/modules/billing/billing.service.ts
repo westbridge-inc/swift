@@ -1,3 +1,5 @@
+import { verifiedCheckoutCredit } from './confirmation-finance';
+import { enqueueFeeDemandInTx } from './fee-demand-delivery';
 import type { OnAudit } from '../../lib/audit-writer';
 import { createHash } from 'node:crypto';
 import type { PrismaClient, Subscription, SubscriptionPayment, Prisma, SubscriptionStatus } from '@prisma/client';
@@ -32,6 +34,7 @@ import { toProviderMinor } from '../../utils/currency-amount';
 import { openVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
 import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, readDunningClock, resolveConfirmationInTx, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
+import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, resolvePaymentConfirmationInTx } from './dunning-clock';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -274,20 +277,26 @@ export async function closeUnsentCardIntents(
     providerEffect: 'NOT_SENT', cancelledBy: reason, revokedAt: now.toISOString(),
     subscriptionOutcome: 'PRESERVED_NO_DUNNING', recoveryDisposition: 'NO_PROVIDER_EFFECT',
   });
+  const candidates = await tx.subscriptionPayment.findMany({ where: 'intentId' in target ? { id: target.intentId } : { instrumentId: target.instrumentId }, select: { subscriptionId: true } });
+  for (const subscriptionId of [...new Set(candidates.map((p) => p.subscriptionId))].sort()) await lockBillingAuthority(tx, subscriptionId);
+  let rows: Array<{ id: string; subscriptionId: string }>;
   if ('intentId' in target) {
-    return tx.$executeRaw`
+    rows = await tx.$queryRaw`
       UPDATE "subscription_payments"
       SET "status" = 'EXPIRED', "failureCode" = 'DISPATCH_REVOKED', "clientKey" = "clientKey" || ':void:' || "id",
           "failureRaw" = COALESCE("failureRaw", '{}'::jsonb) || ${marker}::jsonb || jsonb_build_object('voidedKey', "clientKey")
       WHERE "id" = ${target.intentId} AND "paymentMethod" = 'CARD' AND "instrumentId" IS NOT NULL
-        AND "status" = 'UNKNOWN' AND "externalRef" IS NULL AND "failureRaw"->>'providerEffect' = 'AUTHORIZED'`;
-  }
-  return tx.$executeRaw`
+        AND "status" = 'UNKNOWN' AND "externalRef" IS NULL AND "failureRaw"->>'providerEffect' = 'AUTHORIZED' RETURNING "id", "subscriptionId"`;
+  } else {
+  rows = await tx.$queryRaw`
     UPDATE "subscription_payments"
     SET "status" = 'EXPIRED', "failureCode" = 'DISPATCH_REVOKED', "clientKey" = "clientKey" || ':void:' || "id",
         "failureRaw" = COALESCE("failureRaw", '{}'::jsonb) || ${marker}::jsonb || jsonb_build_object('voidedKey', "clientKey")
     WHERE "instrumentId" = ${target.instrumentId} AND "paymentMethod" = 'CARD'
-      AND "status" = 'UNKNOWN' AND "externalRef" IS NULL AND "failureRaw"->>'providerEffect' = 'AUTHORIZED'`;
+      AND "status" = 'UNKNOWN' AND "externalRef" IS NULL AND "failureRaw"->>'providerEffect' = 'AUTHORIZED' RETURNING "id", "subscriptionId"`;
+  }
+  for (const row of rows) await resolvePaymentConfirmationInTx(tx, row.subscriptionId, row.id, 'PROVEN_NO_EFFECT', { actor: 'card-authority', reference: reason }, now);
+  return rows.length;
 }
 
 /** [AX318 R1] Charges on a card that were HANDED to the provider and have no
@@ -345,8 +354,27 @@ export class BillingService {
   // The weekly cycle
   // -------------------------------------------------------------------------
 
+  async surfaceConfirmationReviews(now = new Date()): Promise<number> {
+    const due = await this.prisma.paymentConfirmationHold.findMany({ where: {
+      status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] }, reviewDueAt: { lte: now }, reviewNotifiedAt: null,
+    }, orderBy: [{ reviewDueAt: 'asc' }, { id: 'asc' }], take: 200 });
+    let notified = 0;
+    for (const hold of due) {
+      await notifyAdmins(this.prisma, this.notifications, {
+        tenantId: hold.tenantId, title: 'Weekly-fee payment needs confirmation',
+        body: 'A payment has been waiting for confirmation for more than one day. Review it in payment confirmations; collection remains paused.',
+        data: { kind: 'billing_manual_reconciliation', subscriptionId: hold.subscriptionId, confirmationId: hold.id },
+        dedupeKey: `confirmation-review:${hold.id}`, requireAll: true,
+      });
+      await this.prisma.paymentConfirmationHold.updateMany({ where: { id: hold.id, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] }, reviewNotifiedAt: null }, data: { reviewNotifiedAt: now } });
+      notified += 1;
+    }
+    return notified;
+  }
+
   /** Bill everything due. One subscription's failure never kills the batch. */
   async runBillingCycle(now = new Date()): Promise<BillingCycleResult> {
+    await this.recoverConfirmationSettlements(undefined, now);
     const due = await this.prisma.subscription.findMany({
       where: {
         autoRenew: true,
@@ -466,6 +494,8 @@ export class BillingService {
     // An unresolved positive observation may concern this or an older attempt.
     // A new retry key, rail choice or wallet top-up is not manual disposition.
     if (await this.subscriptionHasConfirmationHold(this.prisma, sub.id, undefined, now)) return 'pending';
+    const exhausted = await this.finishExhaustedGrace(sub, now);
+    if (exhausted) return exhausted;
     const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
     const attemptKey = `charge:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const usd = usdCtx === undefined ? await this.loadUsdPricing() : usdCtx;
@@ -1226,9 +1256,7 @@ export class BillingService {
         });
         first = moved.count === 1;
       }
-      if (!authority.bankInsteadOfAdvance && ['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status)) {
-        await tx.subscription.update({ where: { id: sub.id }, data: { nextRetryAt: new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000) } });
-      }
+      await beginConfirmationInTx(tx, sub.id, { paymentId }, 'REQUIRES_ACTION', now);
       return first && !authority.suppressNotice;
     });
     if (!notify) return;
@@ -1956,6 +1984,7 @@ export class BillingService {
           data: { status: 'CAPTURED', paidAt: now, externalRef: paymentRef, failureCode: null },
         });
         if (claimed.count !== 1) return 'skipped';
+        await resolvePaymentConfirmationInTx(tx, sub.id, payment.id, 'PAID', { actor: 'card-settlement', reference: paymentRef }, now);
         amount = Number(payment.amount);
         periodKey = originalPeriodKey;
         sub = { ...sub, billingMethod: 'CARD', nextBillingDate: payment.periodStart, currencyCode };
@@ -2186,6 +2215,7 @@ export class BillingService {
         },
       },
     });
+    await beginConfirmationInTx(tx, payment.subscriptionId, await paymentConfirmationSource(tx, payment.id), 'WALLET_CURRENCY_MISMATCH');
     const eventKey = `wallet-currency:${payment.id}`;
     const existingEvent = await tx.billingEvent.findUnique({ where: { idempotencyKey: eventKey }, select: { id: true } });
     if (!existingEvent) {
@@ -2209,6 +2239,7 @@ export class BillingService {
   private async holdUnpinnedCardCapture(tx: Prisma.TransactionClient, payment: SubscriptionPayment, providerRef: string): Promise<void> {
     const existing = payment.failureRaw && typeof payment.failureRaw === 'object' && !Array.isArray(payment.failureRaw)
       ? payment.failureRaw : {};
+    await beginConfirmationInTx(tx, payment.subscriptionId, await paymentConfirmationSource(tx, payment.id), 'CURRENCY_UNPINNED');
     await tx.subscriptionPayment.update({
       where: { id: payment.id },
       data: {
@@ -2257,6 +2288,7 @@ export class BillingService {
       currencyCode: attemptCurrency,
       reference: payment.clientKey,
     };
+    await beginConfirmationInTx(tx, payment.subscriptionId, { paymentId: payment.id }, 'MMG_APPROVAL_REVIEW', now);
     const evidenceKey = `mmg-approval-evidence:${payment.id}:${createHash('sha256').update(JSON.stringify(providerObservation)).digest('hex')}`;
     if (!await tx.billingEvent.findUnique({ where: { idempotencyKey: evidenceKey }, select: { id: true } })) {
       await tx.billingEvent.create({
@@ -2637,7 +2669,7 @@ export class BillingService {
         where: { id: sub.id },
         select: { autoRenew: true },
       });
-      if (await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)
+      if (await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, input.now)
         || authority.bankInsteadOfAdvance || authority.suppressNotice || !live?.autoRenew
         || !['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status)) return false;
 
@@ -2769,6 +2801,8 @@ export class BillingService {
         if (error instanceof ProviderIdentityError) throw new PushIdentityRefused(error.identityCode);
         throw error;
       }
+
+      await resolvePaymentConfirmationInTx(tx, sub.id, payment.id, 'PAID', { actor: 'mmg-settlement', reference: evidence.transactionId }, now);
 
       // The approved intent is the immutable money fact. A retry may have a
       // different price and attempt pin; neither can rewrite money received.
@@ -3037,11 +3071,8 @@ export class BillingService {
     // The instant charge below is anchored to exactly this due date (DS213 F2-1).
     const resumedAt = new Date();
     const updated = await this.prisma.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<Array<{ status: SubscriptionStatus }>>`
-        SELECT "status" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE
-      `;
-      const fresh = rows[0];
-      if (!fresh) throw new NotFoundError('Subscription', subscriptionId);
+      const { sub: fresh } = await lockBillingAuthority(tx, subscriptionId);
+      const clock = await currentDunningClock(tx, subscriptionId, resumedAt);
       if (fresh.status === 'CANCELLED' || fresh.status === 'CHURNED') {
         throw new AppError(
           409,
@@ -3054,23 +3085,25 @@ export class BillingService {
       // Resume the retry clock for a subscription that is behind or suspended:
       // the cycle's PAST_DUE/SUSPENDED arm selects on nextRetryAt, which the
       // stop cleared. Arming now lets the next run attempt the owed week.
-      const behind = fresh.status === 'PAST_DUE' || fresh.status === 'SUSPENDED';
       // [E12] A PAUSED plan (stopped, then its paid period ran out) restarts
       // NOW: ACTIVE and due immediately, so the next cycle charges this week
       // (its period starts at nextBillingDate) exactly like any renewal, and a
       // failed charge follows the normal dunning.
       const paused = fresh.status === 'PAUSED';
+      if (paused && clock.pausedAt) throw new AppError(409, 'PAYMENT_CONFIRMING', 'The weekly-fee payment is being confirmed.');
       resumedFromPause = paused;
-      return tx.subscription.update({
+      await tx.subscription.update({
         where: { id: subscriptionId },
         data: {
           billingMethod: method,
           mmgPayerMsisdn: method === 'MOBILE_MONEY' ? mmgPayerMsisdn!.trim() : null,
           autoRenew: true,
-          ...(behind ? { nextRetryAt: new Date() } : {}),
           ...(paused ? { status: 'ACTIVE', nextBillingDate: resumedAt, nextRetryAt: null } : {}),
         },
       });
+      if (paused) await advanceDunningObligation(tx, subscriptionId, resumedAt, resumedAt);
+      else await projectDunningClock(tx, clock, resumedAt);
+      return tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
     });
     await this.prisma.billingEvent.create({
       data: {
@@ -3160,11 +3193,8 @@ export class BillingService {
    */
   async stopBilling(subscriptionId: string, actorUserId: string) {
     return this.prisma.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus; autoRenew: boolean; currencyCode: string; updatedAt: Date }>>`
-        SELECT "id", "status", "autoRenew", "currencyCode", "updatedAt" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE
-      `;
-      const fresh = rows[0];
-      if (!fresh) throw new NotFoundError('Subscription', subscriptionId);
+      const { sub: fresh } = await lockBillingAuthority(tx, subscriptionId);
+      await currentDunningClock(tx, subscriptionId);
       // [DS198 D5] A closed subscription has nothing to stop: say so rather
       // than answering a no-op 200.
       if (fresh.status === 'CANCELLED' || fresh.status === 'CHURNED') {
@@ -3355,6 +3385,24 @@ export class BillingService {
    * snapshot: every value written is absolute (`failedAttempts + 1` from the
    * snapshot), so a repeat with the same snapshot lands the same row.
    */
+  private async finishExhaustedGrace(sub: SubWithRelations, now: Date): Promise<'pending' | 'suspended' | null> {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
+      const clock = await currentDunningClock(tx, sub.id, now);
+      const fresh = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+      if (fresh.status !== 'PAST_DUE' || fresh.failedAttempts < MAX_FAILED_ATTEMPTS || !fresh.autoSuspendEnabled) return null;
+      if (clock.pausedAt || authority.bankInsteadOfAdvance || !fresh.autoRenew) return 'pending' as const;
+      await tx.billingDunningClock.update({ where: { subscriptionId: sub.id }, data: { retryAtMs: BigInt(FULL_FEE_GRACE_MS) } });
+      await tx.subscription.update({ where: { id: sub.id }, data: { nextRetryAt: activeDeadline(clock, FULL_FEE_GRACE_MS, now) } });
+      if (activeOverdueMs(clock, now) < FULL_FEE_GRACE_MS || clock.resumedAt?.getTime() === now.getTime()) return 'pending' as const;
+      await tx.subscription.update({ where: { id: sub.id }, data: { status: 'SUSPENDED', suspendedAt: now, isInGracePeriod: false } });
+      await this.suspendAccessRows(tx, { ...sub, ...fresh }, fresh.nextBillingDate.toISOString().slice(0, 10), now);
+      return 'suspended' as const;
+    });
+    if (result === 'suspended') await this.suspendAccessNotices(sub);
+    return result;
+  }
+
   private async recordFailureInTx(
     tx: Prisma.TransactionClient,
     sub: SubWithRelations,
@@ -3397,7 +3445,20 @@ export class BillingService {
         ...(willSuspend ? { suspendedAt: now } : {}),
       },
     });
-    if (willSuspend) await this.suspendAccessRows(tx, sub, periodKey);
+    if (willSuspend) await this.suspendAccessRows(tx, sub, periodKey, now);
+    else {
+      const final = attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled;
+      const payLine = await this.feePayLine(sub, null);
+      await enqueueFeeDemandInTx(tx, {
+        userId: this.payerUserId(sub), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub),
+        title: final ? 'Final warning — payment needed' : 'Subscription payment failed',
+        body: final ? `${reason}. Your weekly fee remains unpaid. Access may be suspended after your remaining grace expires. ${payLine}`
+          : `${reason}. We will retry after the remaining retry interval. ${payLine}`,
+        data: { kind: final ? 'billing_final_warning' : 'billing_failed', subscriptionId: sub.id },
+        feeStageKey: `${final ? 'final-warning' : 'failed'}:a${attempts}`,
+        ...(final ? { feeSms: `Swift: your weekly fee remains unpaid. Access may be suspended after your remaining grace expires. ${payLine}` } : {}),
+      });
+    }
     return { attempts, willSuspend, nextRetryAt, finalWarning: attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled };
   }
 
@@ -3417,17 +3478,16 @@ export class BillingService {
         userId: this.payerUserId(sub),
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Final warning — payment needed',
-        body: `${reason}. Your subscription will be SUSPENDED at ${when} unless the weekly fee is paid. ${payLine}`,
+        body: `${reason}. Your weekly fee remains unpaid. Access may be suspended after your remaining grace expires. ${payLine}`,
         audience: this.payerAudience(sub),
-        data: { kind: 'billing_final_warning', subscriptionId: sub.id, suspendsAt: nextRetryAt.toISOString() },
+        data: { kind: 'billing_final_warning', subscriptionId: sub.id },
+        feeStageKey: `final-warning:a${attempts}`,
+        feeSms: `Swift: your weekly fee remains unpaid. Access may be suspended after your remaining grace expires. ${payLine}`,
       }).catch(() => {});
-      await this
-        .smsPayer(sub, `Swift: your account will be suspended at ${when} unless the weekly fee is paid. ${payLine}`)
-        .catch(() => {});
       await notifyAdmins(this.prisma, this.notifications, {
         tenantId: await tenantOfUser(this.prisma, sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId ?? null),
         title: 'Dunning — final warning issued',
-        body: `Subscription ${sub.id} suspends at ${when} (attempt ${attempts}/${MAX_FAILED_ATTEMPTS}). Contact the payer directly before access is cut.`,
+        body: `Subscription ${sub.id} reached warning attempt ${attempts}/${MAX_FAILED_ATTEMPTS}. Check its current payment and grace status before contacting the payer.`,
         data: { kind: 'billing_dunning_ops_task', subscriptionId: sub.id, suspendsAt: nextRetryAt.toISOString() },
       }).catch(() => {});
       return;
@@ -3439,6 +3499,7 @@ export class BillingService {
       body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). ${payLine}`,
       audience: this.payerAudience(sub),
       data: { kind: 'billing_failed', subscriptionId: sub.id },
+      feeStageKey: `failed:a${attempts}`,
     }).catch(() => {});
   }
 
@@ -3473,7 +3534,7 @@ export class BillingService {
       // All rails preserve current lifecycle authority; a card decline must
       // not overwrite cancellation merely because it is not an MMG result.
       const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
-      if (await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)) return null;
+      await currentDunningClock(tx, sub.id, now);
       await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${payment.id} FOR UPDATE`;
       const currentPayment = await tx.subscriptionPayment.findUnique({ where: { id: payment.id } });
       if (!currentPayment || currentPayment.subscriptionId !== sub.id) return null;
@@ -3499,6 +3560,8 @@ export class BillingService {
         },
       });
       if (claimed.count === 0) return null;
+      await resolvePaymentConfirmationInTx(tx, sub.id, payment.id, terminal.providerAbsenceOnly ? 'PROVEN_NO_EFFECT' : 'PROVEN_UNPAID', { actor: 'provider-confirmation', reference: terminal.failureCode }, now);
+      const anotherConfirmation = await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now);
       await this.observer.afterPaymentTerminalized?.({ id: payment.id, status: terminal.status });
 
       if (authority) {
@@ -3516,7 +3579,7 @@ export class BillingService {
         ]);
         if (!fresh) throw new Error(`Locked subscription ${sub.id} disappeared during MMG terminalization`);
         const terminalForDunning = !['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status);
-        if (authority.bankInsteadOfAdvance || terminalForDunning || covered || terminal.preserveWithoutDunning) {
+        if (authority.bankInsteadOfAdvance || terminalForDunning || covered || terminal.preserveWithoutDunning || anotherConfirmation) {
           await tx.subscriptionPayment.update({
             where: { id: payment.id },
             data: {
@@ -3579,7 +3642,15 @@ export class BillingService {
   /** Suspension row writes — MUST run on the same transaction that flips the
    *  subscription status, so the authority is one generation [REPORT-012
    *  F-012-05]. Notifications live in suspendAccessNotices (post-commit). */
-  private async suspendAccessRows(tx: Prisma.TransactionClient, sub: SubWithRelations, periodKey: string) {
+  private async suspendAccessRows(tx: Prisma.TransactionClient, sub: SubWithRelations, periodKey: string, now: Date) {
+    const clock = await currentDunningClock(tx, sub.id, now);
+    const elapsed = activeOverdueMs(clock, now);
+    if (clock.pausedAt || elapsed < FULL_FEE_GRACE_MS || clock.resumedAt?.getTime() === now.getTime()) {
+      throw new AppError(409, 'BILLING_GRACE_ACTIVE', 'Weekly-fee grace is still active.');
+    }
+    await tx.billingDunningClock.update({ where: { subscriptionId: sub.id }, data: {
+      nudgeAtMs: BigInt(elapsed + FEE_RETRY_MS), churnAtMs: BigInt(elapsed + suspensionRetentionMs()),
+    } });
     if (sub.vendor) {
       // SUSPENDED vendors vanish from customer browse (which filters ACTIVE)
       await tx.vendor.update({
@@ -3600,6 +3671,13 @@ export class BillingService {
       });
     }
 
+    const payLine = await this.feePayLine(sub, null);
+    await enqueueFeeDemandInTx(tx, {
+      userId: this.payerUserId(sub), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub),
+      title: 'Subscription suspended', body: `Your subscription is unpaid and your access is suspended. ${payLine} ${FEE_RESTORE_LINE}`,
+      data: { kind: 'billing_suspended', subscriptionId: sub.id }, feeStageKey: 'suspended',
+      feeSms: `Swift: your account is suspended for non-payment. ${payLine} ${FEE_RESTORE_LINE}`,
+    });
     await tx.billingEvent.create({
       data: {
         subscriptionId: sub.id,
@@ -3623,12 +3701,9 @@ export class BillingService {
       body: `Your subscription is unpaid and your access is suspended. ${payLine} ${FEE_RESTORE_LINE}`,
       audience: this.payerAudience(sub),
       data: { kind: 'billing_suspended', subscriptionId: sub.id },
+      feeStageKey: 'suspended',
+      feeSms: `Swift: your account is suspended for non-payment. ${payLine} ${FEE_RESTORE_LINE}`,
     });
-    // §11 stage 5→6: the suspension notice also lands as SMS with the way
-    // back in — the payer may have lost the app or muted push entirely.
-    await this
-      .smsPayer(sub, `Swift: your account is suspended for non-payment. ${payLine} ${FEE_RESTORE_LINE}`)
-      .catch(() => {});
   }
 
   private async reinstateRows(tx: Prisma.TransactionClient, sub: SubWithRelations, periodKey: string) {
@@ -3709,8 +3784,10 @@ export class BillingService {
   /** Retry committed notice intents independently of the current subscription
    * state. In particular, CHURNED no longer hides an undelivered final notice. */
   async drainPendingNotices(now = new Date()): Promise<{ attempted: number; delivered: number }> {
-    return drainPendingBillingNotices(this.prisma, this.notifications, now, (subscriptionId, userId, body, renewLease) =>
+    const historical = await drainPendingBillingNotices(this.prisma, this.notifications, now, (subscriptionId, userId, body, renewLease) =>
       this.sendNoticeSms(subscriptionId, userId, body, renewLease));
+    const current = await this.notifications.drainFeeDemands();
+    return { attempted: historical.attempted + current.attempted, delivered: historical.delivered + current.delivered };
   }
 
   /**
@@ -3753,8 +3830,10 @@ export class BillingService {
             },
           });
           if (!sub || sub.status !== 'SUSPENDED' || await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)) return null;
-          const suspendedSince = sub.suspendedAt ?? sub.updatedAt; // pre-migration rows fall back to last touch
-          if (now.getTime() - suspendedSince.getTime() >= suspensionMaxDays() * DAY_MS) {
+          const suspendedSince = sub.suspendedAt ?? sub.updatedAt;
+          const clock = await currentDunningClock(tx, sub.id, now);
+          const elapsed = activeOverdueMs(clock, now);
+          if (clock.churnAtMs !== null && elapsed >= Number(clock.churnAtMs)) {
             // Keep the state and its audit fact in one commit. The CAS also
             // protects against an older writer that does not take this lock.
             const moved = await tx.subscription.updateMany({
@@ -3786,8 +3865,11 @@ export class BillingService {
 
           // The REMINDER key is the per-day gate. A duplicate aborts this
           // transaction and is handled as an idempotent loser below.
-          const dayKey = now.toISOString().slice(0, 10);
-          const noticeKey = `nudge:${sub.id}:${dayKey}`;
+          if (clock.nudgeAtMs !== null && elapsed < Number(clock.nudgeAtMs)) return null;
+          const stage = clock.nudgeAtMs ?? BigInt(elapsed);
+          const noticeKey = `nudge:${sub.id}:${clock.epoch}:${stage}`;
+          // Missed wall-clock days are never replayed as a burst after a pause.
+          await tx.billingDunningClock.update({ where: { subscriptionId: sub.id }, data: { nudgeAtMs: BigInt(elapsed + FEE_RETRY_MS) } });
           // [AX349] What is owed is what the fee screen says is due, from the
           // same helper: a request already issued at 8,000 is owed at 8,000
           // after the rate moves to 6,000. The weekly fee is not named here.
@@ -3880,10 +3962,55 @@ export class BillingService {
     });
   }
 
+  /** Finish an already credited checkout using wallet funds only. Its pause
+   * stays durable until the paid period or bank-only disposition commits. */
+  async recoverConfirmationSettlements(subscriptionId?: string, now = new Date()): Promise<number> {
+    const pending = await this.prisma.paymentConfirmationHold.findMany({ where: {
+      ...(subscriptionId ? { subscriptionId } : {}), status: 'SETTLEMENT_APPLY_PENDING', checkoutId: { not: null },
+    }, orderBy: { beganAt: 'asc' }, take: 100 });
+    const usd = await this.loadUsdPricing();
+    let recovered = 0;
+    for (const candidate of pending) {
+      const done = await this.prisma.$transaction(async (tx) => {
+        const clock = await currentDunningClock(tx, candidate.subscriptionId, now);
+        const hold = await tx.paymentConfirmationHold.findUnique({ where: { id: candidate.id } });
+        if (hold?.status !== 'SETTLEMENT_APPLY_PENDING' || !hold.checkoutId) return false;
+        const checkout = await tx.mmgCheckoutIntent.findUnique({ where: { id: hold.checkoutId } });
+        if (!checkout || checkout.status !== 'CONFIRMED' || !checkout.providerPaymentId) return false;
+        const proof = await verifiedCheckoutCredit(tx, checkout);
+        if (!proof) return false;
+        const identity = proof.identity;
+        const sub = await tx.subscription.findUniqueOrThrow({ where: { id: hold.subscriptionId }, include: {
+          rider: { select: { userId: true } }, driver: { select: { userId: true } },
+          vendor: { select: { id: true, owner: { select: { userId: true } } } },
+        } });
+        const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
+        const evidence = { actor: 'checkout-settlement', reference: identity.id };
+        if (clock.epoch > hold.sourceEpoch || authority.bankInsteadOfAdvance || sub.nextBillingDate > now) {
+          await resolveConfirmationInTx(tx, sub.id, { checkoutId: checkout.id }, 'PAID', evidence, now);
+          return true;
+        }
+        if (await hasConfirmationInTx(tx, sub.id, now, { checkoutId: checkout.id })) return false;
+        const priced = await this.priceEligibleFor(sub, usd);
+        const amount = sub.feeWaived ? 0 : Number(priced.amount);
+        const balance = await tx.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } });
+        if (amount > 0 && (!balance || balance.currencyCode !== sub.currencyCode || Number(balance.balance) < amount)) return false;
+        await resolveConfirmationInTx(tx, sub.id, { checkoutId: checkout.id }, 'PAID', evidence, now);
+        const result = await this.applySuccessfulChargeInTx(tx, sub, amount, amount > 0 ? 'prepaid' : 'fee-waived', now,
+          sub.nextBillingDate.toISOString().slice(0, 10), undefined, priced.usdTrio, amount);
+        if (result !== 'advanced') throw new Error('Verified checkout balance was not applied');
+        return true;
+      });
+      if (done) recovered += 1;
+    }
+    return recovered;
+  }
+
   /** Post-commit effects for a durable top-up. A caller may safely retry this
    * method: it moves no money; the billing engine's own event keys make an
    * immediate re-bill idempotent. */
   async afterTopUpCommitted(subscriptionId: string, amount: number, opts: { notify?: boolean } = {}): Promise<void> {
+    await this.recoverConfirmationSettlements(subscriptionId);
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
       include: {
@@ -4187,18 +4314,18 @@ export class BillingService {
           },
         });
       } catch (error) {
-        if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') continue; // already reminded
-        throw error;
+        if ((error as Prisma.PrismaClientKnownRequestError).code !== 'P2002') throw error; // existing stage may still need delivery
       }
 
       const mmgLine = await this.mmgLineIfOwed(sub);
       await this.notifications.send({
         userId: payerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Subscription due tomorrow',
-        body: `Your weekly fee of $${Number(this.amountFor(sub)).toLocaleString()} ${sub.currencyCode} is due tomorrow.${mmgLine ? ` ${mmgLine}` : ''}`,
+        title: 'Subscription due soon',
+        body: `Your weekly fee of $${Number(this.amountFor(sub)).toLocaleString()} ${sub.currencyCode} is due on ${sub.nextBillingDate.toISOString().slice(0, 10)}.${mmgLine ? ` ${mmgLine}` : ''}`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_reminder', subscriptionId: sub.id },
+        feeStageKey: `upcoming:${periodKey}`,
       });
       sent += 1;
     }

@@ -77,6 +77,14 @@ export async function deliverBillingNotice(
   const parsed = parseBillingNotice(event.note, event.subscriptionId);
   if (!parsed) return false;
   const notice = historicalPayerNotice(parsed, event);
+  if (notice.target === 'payer') {
+    const delivered = await notifications.send({
+      userId: notice.userId!, type: 'SYSTEM_ANNOUNCEMENT', title: notice.title, body: notice.body,
+      audience: notice.audience, data: notice.data, feeStageKey: `event:${event.id}`, feeSms: notice.sms,
+    });
+    if (delivered) await prisma.billingEvent.update({ where: { id: event.id }, data: { deliveredAt: new Date() } });
+    return !!delivered;
+  }
   const token = randomUUID();
   // Acquisition/renewal use the database wall clock, never a scheduler's old
   // batch time or a worker's potentially skewed host clock.

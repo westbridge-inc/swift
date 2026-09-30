@@ -1,3 +1,4 @@
+import { beginConfirmationInTx, lockBillingAuthority, resolveConfirmationInTx } from './dunning-clock';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { CardObservationSource, CardObservationVerdict, CardObservedStatus, CardSession, CardSessionStatus, Prisma, PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -196,7 +197,9 @@ export class CardRailService {
     const expiresAt = new Date(now.getTime() + CARD_SESSION_TTL_MS);
     let session: CardSession;
     try {
-      session = await this.prisma.cardSession.create({
+      session = await this.prisma.$transaction(async (tx) => {
+      await lockBillingAuthority(tx, sub.id);
+      const created = await tx.cardSession.create({
         data: {
           tenantId,
           subscriptionId: sub.id,
@@ -212,6 +215,9 @@ export class CardRailService {
             ? { amount: priced.amount, currencyCode: priced.currencyCode, periodStart: priced.periodStart }
             : { consentVersion: input.consentVersion, consentAt: now }),
         },
+      });
+      if (created.purpose === 'PAY_NOW') await beginConfirmationInTx(tx, sub.id, { cardSessionId: created.id }, 'CARD_PAGE_PENDING', now);
+      return created;
       });
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
@@ -242,10 +248,10 @@ export class CardRailService {
       created = { status: 'unknown', reason: 'provider call failed', rawSha256: rawDigest({ failed: session.id }) };
     }
     if (created.status !== 'succeeded') {
-      // No page anyone holds: nothing can be paid or enrolled through it.
+      // An ambiguous create response is not proof that the provider created nothing.
       await this.prisma.cardSession.updateMany({
         where: { id: session.id, status: 'OPEN' },
-        data: { status: 'CANCELLED', failureCode: 'PROVIDER_PAGE_UNAVAILABLE', confirmedAt: now },
+        data: { status: input.purpose === 'PAY_NOW' ? 'UNKNOWN' : 'CANCELLED', failureCode: 'PROVIDER_PAGE_UNAVAILABLE', confirmedAt: now },
       });
       throw new AppError(502, 'CARD_SESSION_UNAVAILABLE', 'The card page could not be opened. Please try again in a moment.');
     }
@@ -377,7 +383,7 @@ export class CardRailService {
     // inside it — never on a late or absent one. (A Pay now is always asked:
     // money may have moved.)
     if (session.purpose === 'ENROLL' && expired && !session.returnedAt) return this.close(session, 'EXPIRED', 'EXPIRED_UNUSED', null, now);
-    if (!session.providerSessionRef) return this.close(session, 'CANCELLED', 'PROVIDER_PAGE_UNAVAILABLE', null, now);
+    if (!session.providerSessionRef) return session.purpose === 'PAY_NOW' ? this.resultOf(session) : this.close(session, 'CANCELLED', 'PROVIDER_PAGE_UNAVAILABLE', null, now);
 
     const provider = this.rail();
     if (!sameBinding(bindingOf(session), provider.binding)) {
@@ -395,7 +401,8 @@ export class CardRailService {
         return this.close(session, 'FAILED', 'DECLINED', outcome, now);
       case 'requires_action':
       case 'pending':
-        // The partner has not finished on the page; past the window nothing more can happen there.
+        // Local expiry cannot prove a payable instruction will never settle.
+        if (expired && session.purpose === 'PAY_NOW') return this.markUnknown(session, outcome, now);
         if (expired) return this.close(session, 'EXPIRED', outcome.status === 'pending' ? 'EXPIRED_UNUSED' : 'EXPIRED_UNAUTHENTICATED', outcome, now);
         return this.observeOnly(session, outcome);
       case 'unknown':
@@ -547,6 +554,9 @@ export class CardRailService {
   // -------------------------------------------------------------------------
 
   private async lockSession(tx: Prisma.TransactionClient, sessionId: string): Promise<CardSession | null> {
+    const candidate = await tx.cardSession.findUnique({ where: { id: sessionId }, select: { subscriptionId: true } });
+    if (!candidate) return null;
+    await lockBillingAuthority(tx, candidate.subscriptionId);
     await tx.$queryRaw`SELECT "id" FROM "card_sessions" WHERE "id" = ${sessionId} FOR UPDATE`;
     return tx.cardSession.findUnique({ where: { id: sessionId } });
   }
@@ -577,6 +587,9 @@ export class CardRailService {
 
   private async markUnknown(session: CardSession, outcome: CardSessionOutcome, now: Date): Promise<CardConfirmResult> {
     await this.prisma.$transaction(async (tx) => {
+      const fresh = await this.lockSession(tx, session.id);
+      if (!fresh || !LIVE.includes(fresh.status)) return;
+      if (fresh.purpose === 'PAY_NOW') await beginConfirmationInTx(tx, fresh.subscriptionId, { cardSessionId: fresh.id }, 'CARD_CONFIRMATION_PENDING', now);
       await recordCardObservation(tx, this.observation(session, 'CONFIRM', outcome.rawSha256, observedStatus(outcome.status), 'ACCEPTED'));
       await tx.cardSession.updateMany({ where: { id: session.id, status: 'OPEN' }, data: { status: 'UNKNOWN', failureCode: 'PROVIDER_UNKNOWN' } });
     });
@@ -592,10 +605,16 @@ export class CardRailService {
     now: Date,
   ): Promise<CardConfirmResult> {
     await this.prisma.$transaction(async (tx) => {
+      const fresh = await this.lockSession(tx, session.id);
+      if (!fresh || !LIVE.includes(fresh.status)) return;
+      if (fresh.purpose === 'PAY_NOW') await beginConfirmationInTx(tx, fresh.subscriptionId, { cardSessionId: fresh.id }, 'CARD_CONFIRMATION_PENDING', now);
       if (outcome) {
         await recordCardObservation(tx, this.observation(session, 'CONFIRM', outcome.rawSha256, observedStatus(outcome.status), 'ACCEPTED'));
       }
       await tx.cardSession.updateMany({ where: { id: session.id, status: { in: LIVE } }, data: { status, failureCode, confirmedAt: now } });
+      if (fresh.purpose === 'PAY_NOW' && outcome?.status === 'failed') {
+        await resolveConfirmationInTx(tx, fresh.subscriptionId, { cardSessionId: fresh.id }, 'PROVEN_UNPAID', { actor: 'card-provider', reference: outcome.rawSha256 }, now);
+      }
     });
     return this.resultOf(await this.prisma.cardSession.findUniqueOrThrow({ where: { id: session.id } }));
   }
@@ -604,6 +623,9 @@ export class CardRailService {
    *  booked): nothing is granted, and a person is paged once. */
   private async hold(session: CardSession, outcome: CardSessionOutcome | null, failureCode: string, now: Date): Promise<CardConfirmResult> {
     await this.prisma.$transaction(async (tx) => {
+      const fresh = await this.lockSession(tx, session.id);
+      if (!fresh || !LIVE.includes(fresh.status)) return;
+      if (fresh.purpose === 'PAY_NOW') await beginConfirmationInTx(tx, fresh.subscriptionId, { cardSessionId: fresh.id }, 'CARD_CONFIRMATION_PENDING', now);
       if (outcome) {
         await recordCardObservation(tx, this.observation(session, 'CONFIRM', outcome.rawSha256, observedStatus(outcome.status), 'REJECTED_MISMATCH'));
       }

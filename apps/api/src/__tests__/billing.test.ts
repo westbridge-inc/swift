@@ -1,3 +1,4 @@
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -34,12 +35,13 @@ let billing: BillingService;
 const createdUserIds: string[] = [];
 const createdSubIds: string[] = [];
 
+const phoneRun = Date.now().toString().slice(-7);
 let phoneSeq = 0;
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   phoneSeq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59200055${String(phoneSeq).padStart(2, '0')}`,
+      phone: `+59255${phoneRun}${String(phoneSeq).padStart(2, '0')}`,
       firstName: 'Step5',
       lastName: `User${phoneSeq}`,
       roles,
@@ -73,7 +75,7 @@ async function makeVendorWithSub(opts: { rate: number; prepaid: number; due: Dat
     data: {
       ownerId: owner.id,
       name: `Billing Vendor ${phoneSeq}`,
-      slug: `billing-vendor-${phoneSeq}`,
+      slug: `billing-vendor-${phoneRun}-${phoneSeq}`,
       vendorType: 'RESTAURANT',
       phone: `+5920006${String(phoneSeq).padStart(3, '0')}`,
       addressLine1: '1 Billing Street',
@@ -167,6 +169,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await cleanupPayerBillingClocks(app.prisma, createdUserIds);
   if (createdUserIds.length) {
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });

@@ -590,7 +590,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // verdict maps onto this route's historical codes.
     const sub = await app.prisma.subscription.findFirst({
       where: { riderId: rider.id },
-      select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true },
+      select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
     });
     const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
     if (!operability.operable) {

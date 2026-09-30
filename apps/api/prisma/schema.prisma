@@ -20,6 +20,7 @@ datasource db {
 // ==========================================
 
 model User {
+  billingFeeNotices BillingFeeNotice[]
   id               String     @id @default(cuid())
   phone            String     @unique
   email            String?    @unique
@@ -3034,6 +3035,7 @@ model PaymentConfirmationHold {
   resolvedBy String?
   resolutionEvidence String?
   reviewDueAt DateTime
+  reviewNotifiedAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3052,6 +3054,7 @@ model BillingFeeNotice {
   epoch Int
   stageKey String
   userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
   /// PENDING | DELIVERED | OBSOLETE
   status String @default("PENDING")
   payload Json

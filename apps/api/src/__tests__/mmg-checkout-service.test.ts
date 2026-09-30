@@ -1,3 +1,4 @@
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
@@ -142,7 +143,7 @@ const toldOf = (userId: string, status?: string) => app.prisma.notification.find
 const replyFor = (merchantTransactionId: string, txn: string) => sandbox.sandboxReplyToken({ merchantTransactionId, transactionId: txn, ResultCode: '0', secretKey: 'must-not-be-stored' });
 const reply = (row: { merchantTransactionId: string }, txn: string, outcome = 'success') =>
   service.observeReply({ source: 'RETURN', outcome, params: { token: replyFor(row.merchantTransactionId, txn) } });
-const identityOf = (txn: string) => app.prisma.providerPayment.findUnique({ where: { provider_providerTxnId: { provider: 'MMG', providerTxnId: txn.trim().toUpperCase() } } });
+const identityOf = (txn: string) => app.prisma.providerPayment.findFirst({ where: { provider: 'MMG', providerTxnId: txn.trim().toUpperCase(), status: { not: 'HELD_DUPLICATE' } } });
 const subWithRelations = (subscriptionId: string) => app.prisma.subscription.findUniqueOrThrow({
   where: { id: subscriptionId },
   include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
@@ -197,6 +198,7 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   const intents = await app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: { in: subIds } }, select: { id: true } });
   await app.prisma.mmgCheckoutObservation.deleteMany({ where: { intentId: { in: intents.map((i) => i.id) } } });
   await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -939,7 +941,7 @@ describe('time — expiry is not failure, and billing waits for money in flight'
     expect(await topups(s.subId)).toHaveLength(1);
   });
 
-  it('[I5] while a checkout is open the fee is not charged or dunned; once it expires, billing resumes', async () => {
+  it('[I5] local checkout expiry keeps collection paused until authoritative confirmation', async () => {
     const now = new Date();
     const s = await makeSub({ due: new Date(now.getTime() - 60_000) });
     const row = await intentOf((await start(s)).checkout.ref);
@@ -950,7 +952,7 @@ describe('time — expiry is not failure, and billing waits for money in flight'
     await service.pollIntents(later);
     expect((await intentOf(row.id)).status).toBe('EXPIRED');
     await billing.runBillingCycle(later);
-    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).failedAttempts).toBe(1);
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).toMatchObject({ failedAttempts: 0, billingConfirmationPausedAt: expect.any(Date), nextRetryAt: null });
   });
 
   it('a confirming checkout nobody could verify within a day expires; one MMG says is someone else’s is held', async () => {

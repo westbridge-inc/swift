@@ -1,3 +1,4 @@
+import { bindTenantTransaction } from '../../plugins/prisma';
 import type { BillingDunningClock, PaymentConfirmationHold, Prisma, PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 
@@ -11,6 +12,7 @@ export type ConfirmationResolution = 'PAID' | 'PROVEN_UNPAID' | 'PROVEN_NO_EFFEC
 /** The same payer -> subscriptions -> clock/source order is used by collection,
  * confirmation and final notification handoff. No provider call belongs here. */
 export async function lockBillingAuthority(tx: Tx, subscriptionId: string) {
+  await bindTenantTransaction(tx);
   const select = {
     rider: { select: { userId: true } }, driver: { select: { userId: true } },
     vendor: { select: { owner: { select: { userId: true } } } },
@@ -41,11 +43,12 @@ export function activeDeadline(clock: BillingDunningClock, position: bigint | nu
 
 export async function projectDunningClock(tx: Tx, clock: BillingDunningClock, now: Date) {
   const deadline = activeDeadline(clock, FULL_FEE_GRACE_MS, now);
+  const sub = await tx.subscription.findUniqueOrThrow({ where: { id: clock.subscriptionId }, select: { autoRenew: true } });
   await tx.subscription.update({ where: { id: clock.subscriptionId }, data: {
     billingConfirmationPausedAt: clock.pausedAt,
     billingEnforcementDueAt: deadline,
     gracePeriodEnd: deadline,
-    nextRetryAt: clock.retryAtMs === null ? null : activeDeadline(clock, clock.retryAtMs, now),
+    nextRetryAt: !sub.autoRenew || clock.retryAtMs === null ? null : activeDeadline(clock, clock.retryAtMs, now),
   } });
 }
 
@@ -146,8 +149,13 @@ export async function readDunningClock(db: PrismaClient, subscriptionId: string,
 
 export async function hasConfirmationInTx(tx: Tx, subscriptionId: string, now: Date, except?: ConfirmationSource) {
   await currentDunningClock(tx, subscriptionId, now);
+  // Every source FK is nullable. SQL NOT (checkoutId = id) also rejects a
+  // card/payment row whose checkoutId is NULL, hiding another live rail.
+  const otherSource = except ? Object.entries(except).map(([field, id]) => ({
+    OR: [{ [field]: null }, { [field]: { not: id } }],
+  })) : [];
   return !!await tx.paymentConfirmationHold.findFirst({ where: {
-    subscriptionId, status: { in: ACTIVE_CONFIRMATION_STATES }, ...(except ? { NOT: sourceWhere(except) } : {}),
+    subscriptionId, status: { in: ACTIVE_CONFIRMATION_STATES }, AND: otherSource,
   }, select: { id: true } });
 }
 
@@ -160,7 +168,8 @@ export async function resolveConfirmationInTx(
   await clockRow(tx, subscriptionId, now);
   if (!evidence.actor.trim() || !evidence.reference.trim()) throw new AppError(400, 'PAYMENT_RESOLUTION_EVIDENCE_REQUIRED', 'Record the confirmation evidence.');
   const hold = await tx.paymentConfirmationHold.findFirst({ where: sourceWhere(source) });
-  if (!hold || hold.subscriptionId !== subscriptionId) throw new NotFoundError('Payment confirmation', subscriptionId);
+  if (!hold) return null; // Pre-cutover proven terminal instructions may have no hold.
+  if (hold.subscriptionId !== subscriptionId) throw new NotFoundError('Payment confirmation', subscriptionId);
   if (!ACTIVE_CONFIRMATION_STATES.includes(hold.status)) return hold;
   const resolved = await tx.paymentConfirmationHold.update({ where: { id: hold.id }, data: {
     status: resolution, resolvedAt: now, resolvedBy: evidence.actor, resolutionEvidence: evidence.reference,
@@ -202,4 +211,17 @@ export async function scheduleDunningFailure(tx: Tx, subscriptionId: string, now
   const clock = await tx.billingDunningClock.update({ where: { subscriptionId }, data: { retryAtMs: BigInt(elapsed + FEE_RETRY_MS) } });
   await projectDunningClock(tx, clock, now);
   return { clock, elapsed, maySuspend: elapsed >= FULL_FEE_GRACE_MS && current.resumedAt?.getTime() !== now.getTime() };
+}
+
+/** A hosted session and its payment are one external instruction. */
+export async function paymentConfirmationSource(tx: Tx, paymentId: string): Promise<ConfirmationSource> {
+  const payment = await tx.subscriptionPayment.findUniqueOrThrow({ where: { id: paymentId }, select: { clientKey: true } });
+  return payment.clientKey?.startsWith('cardpay:')
+    ? { cardSessionId: payment.clientKey.slice('cardpay:'.length) } : { paymentId };
+}
+export async function resolvePaymentConfirmationInTx(
+  tx: Tx, subscriptionId: string, paymentId: string, resolution: ConfirmationResolution,
+  evidence: { actor: string; reference: string }, now: Date,
+) {
+  return resolveConfirmationInTx(tx, subscriptionId, await paymentConfirmationSource(tx, paymentId), resolution, evidence, now);
 }
