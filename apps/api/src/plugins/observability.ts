@@ -680,6 +680,15 @@ export const agentCashDuplicateCreditsGauge = new client.Gauge({
   registers: [registry],
 });
 
+/** [MMG-RECV] Webhook and manual agent-cash observations still stranded
+ *  RECEIVED after the repair pass: money on disk that nothing has credited
+ *  yet. Set by the billing poll. */
+export const agentCashStrandedGauge = new client.Gauge({
+  name: 'swift_agent_cash_stranded_payments',
+  help: 'Agent-cash payments (webhook, manual) saved but still RECEIVED past the stranded age after the repair pass',
+  registers: [registry],
+});
+
 /** [M-28] Cash courier jobs DELIVERED with no collected fee — the same census
  *  as the rides', the same page. */
 export const courierDeliveredUnpaidGauge = new client.Gauge({
