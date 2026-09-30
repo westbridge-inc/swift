@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { HOME_RAIL_WINDOW } from '../../../lib/listPerformance';
 import React, { useState } from 'react';
 import { AppState, Dimensions, FlatList, Linking, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
@@ -184,7 +185,7 @@ function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[numb
  * the tracking screen uses, which returns null unless BOTH ends of the window
  * arrived from the server. No local five-minute assumption, one authority.
  */
-function LiveOrderCard({ order, navigation }: { order: LiveOrderProjection; navigation: any }) {
+function LiveOrderCard({ order, navigation, statusNote }: { order: LiveOrderProjection; navigation: any; statusNote: string }) {
   // Tick ONLY while a hold is actually running. `holdRingWindow` is pure, so
   // re-evaluating it against a fresh `now` is the whole animation; when the
   // window closes the interval clears itself and the card goes quiet.
@@ -226,9 +227,9 @@ function LiveOrderCard({ order, navigation }: { order: LiveOrderProjection; navi
                 }}
               />
               <T variant="body" weight="semibold">
-                {hold
+                {[statusNote, hold
                   ? `Held — goes to ${order.vendor?.name ?? recipient} in ${mmss}`
-                  : orderStatusLabel(order.status, vertical)}
+                  : orderStatusLabel(order.status, vertical)].filter(Boolean).join(' · ')}
               </T>
             </View>
             <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
@@ -557,7 +558,13 @@ export function HomeScreen() {
             <PillButton size="sm" label="Try again" onPress={() => { void home.refetch(); }} />
           </Card>
         ) : null}
-        {activeOrder ? <LiveOrderCard order={activeOrder} navigation={navigation} /> : null}
+        {activeOrder ? (
+          <LiveOrderCard
+            order={activeOrder}
+            navigation={navigation}
+            statusNote={home.isFetching || home.isPlaceholderData ? 'Updating order…' : home.isError || home.fetchStatus === 'paused' ? 'Last known' : ''}
+          />
+        ) : null}
 
         {/* THE services grid — 4x2, drawn icons, ON OPEN PAPER.
             [100x pass §5/§6] "hairline rows on open paper (no card chassis)".
@@ -615,6 +622,7 @@ export function HomeScreen() {
               style={{ paddingHorizontal: GUTTER, marginTop: space.xl }}
             />
             <FlatList
+              {...HOME_RAIL_WINDOW}
               horizontal
               showsHorizontalScrollIndicator={false}
               data={popularItems.slice(0, 10)}
@@ -678,6 +686,7 @@ export function HomeScreen() {
                   style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
                 />
                 <FlatList
+                  {...HOME_RAIL_WINDOW}
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   data={orderAgain}
@@ -749,6 +758,7 @@ export function HomeScreen() {
                   style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
                 />
                 <FlatList
+                  {...HOME_RAIL_WINDOW}
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   data={categories}
@@ -803,6 +813,7 @@ export function HomeScreen() {
               </T>
             ) : (
               <FlatList
+                {...HOME_RAIL_WINDOW}
                 horizontal
                 showsHorizontalScrollIndicator={false}
                 data={featured.slice(0, 10)}
@@ -913,6 +924,7 @@ export function HomeScreen() {
                     style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }}
                   />
                   <FlatList
+                    {...HOME_RAIL_WINDOW}
                     horizontal
                     showsHorizontalScrollIndicator={false}
                     data={shops.slice(0, 8)}

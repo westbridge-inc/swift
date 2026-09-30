@@ -392,15 +392,15 @@ function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string
         <SettingsRow icon="calendar" label="Subscription" sub={subLine} right={<TonePill label={pill.label} tone={pill.tone} />} />
         <SettingsRow
           icon="hash"
-          label="My Swift Number"
-          sub="Pay the weekly fee at any MMG agent"
-          onPress={() => navigation.navigate('VendorMySwiftNumber')}
+          label="Weekly fee"
+          sub="View your fee and recent payments"
+          onPress={() => navigation.navigate('WeeklyFee')}
         />
         {phone ? <SettingsRow icon="phone" label="Phone" right={<T variant="label" tone="muted">{phone}</T>} /> : null}
       </Card>
       {/* Only actionable billing status belongs here. A healthy account stays
           quiet; prepaid fee credit is deliberately not framed as a wallet. */}
-      <VendorBillingNotice sub={sub} onPay={() => navigation.navigate('VendorMySwiftNumber')} />
+      <VendorBillingNotice sub={sub} onPay={() => navigation.navigate('WeeklyFee')} />
       <BillingStopControl
         sub={sub}
         who="store"
