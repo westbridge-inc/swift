@@ -10,7 +10,10 @@ import { log } from '../../utils/logger';
 import { notificationFailuresCounter, storeAlertRungsCounter } from '../../plugins/observability';
 import { NotificationService, deactivateDeadTokens, notifyAdmins } from './notification.service';
 import { storeAlertRecipients } from './store-alert-recipients';
-import { storeAlertSubmission } from './store-alert-authority';
+import { storeAlertAuthorityInTx } from './store-alert-authority';
+import { isAuthorityContention, lockStoreAlertOrders, withStoreAlertStop, type AlertPersistenceGuard } from './store-alert-order-authority';
+import { vendorRespondBy, vendorResponseSlaMinutes } from '../order/response-sla';
+import { holdWindowMs } from '../order/order.service';
 
 // ---------------------------------------------------------------------------
 // [Q10 loud alerts 2/4] THE STORE NEW-ORDER LADDER.
@@ -90,6 +93,8 @@ export type RungOutcome =
   | 'already_sent'
   /** Another attempt holds this rung's pre-handoff "sending" claim: the job tries again once that claim can have expired. */
   | 'in_progress'
+  /** No handoff began; contention/churn can retry under the existing bounded policy. */
+  | 'not_submitted'
   /** A prior handoff has no confirmed completion; never blindly resubmit. */
   | 'submission_unknown'
   /** At least one device accepted the re-ring. */
@@ -115,7 +120,7 @@ export type RungOutcome =
 /** Outcomes where a rung that was due reached nobody: warned, never counted
  *  as delivered. */
 const MISSED: ReadonlySet<RungOutcome> = new Set<RungOutcome>([
-  'submission_unknown', 'window_closed', 'unsent', 'sms_unsent', 'sms_uncertain', 'sms_over_budget', 'sms_no_phone', 'admin_unreached',
+  'submission_unknown', 'not_submitted', 'window_closed', 'unsent', 'sms_unsent', 'sms_uncertain', 'sms_over_budget', 'sms_no_phone', 'admin_unreached',
 ]);
 
 export interface LadderDeps {
@@ -158,9 +163,11 @@ const LADDER_ORDER_SELECT = {
   vendorId: true,
   fulfillment: true,
   placedAt: true,
+  createdAt: true,
+  appointmentSlot: true,
   releasedToVendorAt: true,
   vendor: {
-    select: { name: true, phone: true, isCurrentlyOpen: true, owner: { select: { user: { select: { phone: true } } } } },
+    select: { name: true, phone: true, isCurrentlyOpen: true, owner: { select: { user: { select: { phone: true, status: true, tenantId: true } } } } },
   },
 } as const satisfies Prisma.OrderSelect;
 
@@ -175,11 +182,14 @@ type Waiting = { order: WaitingOrder } | { stop: 'gone' | 'answered' | 'held' | 
 /** Anyone on the team saw or acknowledged the alert: a receipt stamped seen
  *  (alert-seen) or acknowledged (ack, accept, reject), or an alert row that
  *  somebody read. */
-async function teamHasSeen(prisma: PrismaClient, orderId: string): Promise<boolean> {
+async function teamHasSeen(prisma: PrismaClient | Prisma.TransactionClient, orderId: string, vendorId: string): Promise<boolean> {
+  const eligible = await storeAlertRecipients(prisma, vendorId);
+  if (eligible.length === 0) return false;
   const receipt = await prisma.alertDelivery.findFirst({
     where: {
       kind: 'VENDOR_ORDER',
       subjectId: orderId,
+      recipientId: { in: eligible },
       OR: [{ seenAt: { not: null } }, { acknowledgedAt: { not: null } }],
     },
     select: { id: true },
@@ -188,6 +198,7 @@ async function teamHasSeen(prisma: PrismaClient, orderId: string): Promise<boole
   const read = await prisma.notification.findFirst({
     where: {
       isRead: true,
+      userId: { in: eligible },
       AND: [
         { data: { path: ['kind'], equals: 'vendor_order_alert' } },
         { data: { path: ['orderId'], equals: orderId } },
@@ -201,7 +212,7 @@ async function teamHasSeen(prisma: PrismaClient, orderId: string): Promise<boole
 /** The order, only while the store still owes it an answer. Read fresh
  *  every time it matters: only the order row knows whether anyone ended the
  *  wait. */
-async function readWaitingOrder(prisma: PrismaClient, orderId: string): Promise<Waiting> {
+async function readWaitingOrder(prisma: PrismaClient | Prisma.TransactionClient, orderId: string): Promise<Waiting> {
   const order = await prisma.order.findUnique({ where: { id: orderId }, select: LADDER_ORDER_SELECT });
   if (!order || !order.vendorId || !order.vendor) return { stop: 'gone' };
   if (order.status !== 'PENDING') return { stop: 'answered' };
@@ -209,7 +220,7 @@ async function readWaitingOrder(prisma: PrismaClient, orderId: string): Promise<
   // has not been shown this order, so there is nothing to escalate. Release
   // clears holdExpiresAt and writes the ladder's first rung itself.
   if (order.holdExpiresAt !== null) return { stop: 'held' };
-  if (await teamHasSeen(prisma, orderId)) return { stop: 'seen' };
+  if (await teamHasSeen(prisma, orderId, order.vendorId)) return { stop: 'seen' };
   return { order: { ...order, vendorId: order.vendorId, vendor: order.vendor } };
 }
 
@@ -240,11 +251,27 @@ async function alertRowsFor(prisma: PrismaClient, orderId: string): Promise<Aler
   });
 }
 
-/** The response deadline the alert went out with (vendorRespondBy). */
-function respondByOf(rows: AlertRow[]): string | undefined {
-  const data = rows[0]?.data;
-  const respondBy = data && typeof data === 'object' && !Array.isArray(data) ? data['respondBy'] : undefined;
-  return typeof respondBy === 'string' ? respondBy : undefined;
+/** Durable auto-cancel timing survives optional inbox persistence and config changes.
+ * The drainer schedules createdAt + delayMs; hold/appointment policy is already
+ * included in that immutable delay. Legacy rows use the existing policy. */
+async function authoritativeRespondBy(prisma: PrismaClient, order: WaitingOrder, rows: AlertRow[]): Promise<string> {
+  const cancel = await prisma.orderOutbox.findFirst({
+    where: { orderId: order.id, tenantId: order.tenantId, kind: 'auto-cancel', queue: 'order' },
+    select: { createdAt: true, delayMs: true },
+  });
+  const earlier = rows.flatMap((row) => {
+    const data = row.data;
+    const value = data && typeof data === 'object' && !Array.isArray(data) ? data['respondBy'] : undefined;
+    const time = typeof value === 'string' ? Date.parse(value) : NaN;
+    return Number.isFinite(time) ? [time] : [];
+  });
+  // Without an outbox, a valid server-written inbox cutoff is the legacy
+  // immutable timing evidence. Current config must not truncate that snapshot.
+  const cutoff = cancel
+    ? cancel.createdAt.getTime() + cancel.delayMs
+    : earlier.length > 0 ? Math.min(...earlier)
+      : vendorRespondBy(order, { slaMinutes: await vendorResponseSlaMinutes(prisma), holdMs: holdWindowMs() ?? 0 })!.getTime();
+  return new Date(Math.min(cutoff, ...earlier)).toISOString();
 }
 
 /** A push needs a whole second of life left to be sent at all (channels.ts
@@ -290,24 +317,31 @@ async function finishRung(redis: Redis, orderId: string, rung: LadderRung, token
     1, rungClaimKey(orderId, rung), token, `done:${outcome}`, RUNG_DONE_TTL_SECONDS);
 }
 
+class SmsDestinationChanged extends Error {}
+
 interface RungAuthority {
-  ready(): Promise<boolean>;
   current(): boolean;
   submit: SubmissionGuard;
+  recipient(userId: string): SubmissionGuard;
+  sms(phone: string): SubmissionGuard;
+  persist: AlertPersistenceGuard;
   stopped(): RungOutcome;
   unknown(): void;
+  retry(): void;
+  canRetry(): boolean;
 }
 
-function rungAuthority(deps: LadderDeps, orderId: string, rung: LadderRung, token: string, respondBy: string | undefined): RungAuthority {
+function rungAuthority(deps: LadderDeps, orderId: string, rung: LadderRung, token: string, respondBy: string): RungAuthority {
   const key = rungClaimKey(orderId, rung);
   let uncertain = false;
+  let retryable = false;
+  let handoffs = 0;
   let leaseReadAt = performance.now();
   const current = () => !windowClosed(respondBy, Date.now()) && performance.now() - leaseReadAt < RUNG_SENDING_TTL_MS;
   const ready = async () => {
     if (uncertain || !(await stillWaiting(deps.prisma, orderId)) || windowClosed(respondBy, Date.now())) return false;
     leaseReadAt = performance.now();
-    // The durable marker is written BEFORE the handoff. If the response or
-    // worker is lost, another worker cannot infer that nothing was submitted.
+    // Retain the conservative marker-before-transport crash boundary.
     const owned = await deps.redis.eval(`
       if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
       local submitted = redis.call('GET', KEYS[2])
@@ -317,11 +351,85 @@ function rungAuthority(deps: LadderDeps, orderId: string, rung: LadderRung, toke
       return 1`, 2, key, `${key}:submitted`, token, RUNG_SENDING_TTL_MS, RUNG_DONE_TTL_SECONDS);
     return owned === 1 && current();
   };
-  const submit: SubmissionGuard = async (start) => {
+  type Authorize = (tx: Prisma.TransactionClient, order: WaitingOrder) => Promise<boolean>;
+  const locked = async <T>(work: (tx: Prisma.TransactionClient, fresh: () => boolean) => Promise<T>, authorize?: Authorize): Promise<T | undefined> => {
     if (!(await ready()) || !current()) return undefined;
-    try { return await start(); } catch (error) { uncertain = true; throw error; }
+    try {
+      return await deps.prisma.$transaction(async (tx) => {
+        const started = performance.now();
+        const fresh = () => current() && performance.now() - started < 4_000;
+        await tx.$executeRaw`SET LOCAL statement_timeout = '4000ms'`;
+        if (!(await lockStoreAlertOrders(tx, [orderId], 'read')) || !fresh()) return undefined;
+        const waiting = await readWaitingOrder(tx, orderId);
+        if (!('order' in waiting) || !fresh()) return undefined;
+        if (authorize && !(await authorize(tx, waiting.order))) return undefined;
+        if (!fresh()) return undefined;
+        return work(tx, fresh);
+      }, { maxWait: 2_000, timeout: 5_000 });
+    } catch (error) {
+      if (isAuthorityContention(error)) { retryable = true; return undefined; }
+      throw error;
+    }
   };
-  return { ready, current, submit, unknown: () => { uncertain = true; }, stopped: () => windowClosed(respondBy, Date.now()) ? 'window_closed' : 'stopped' };
+  const guard = (authorize?: Authorize): SubmissionGuard => async <T>(start: () => Promise<T>) => {
+    let pending: Promise<{ value: T } | { error: unknown }> | undefined;
+    let attempted = false;
+    try {
+      await locked(async (_tx, fresh) => {
+        if (!fresh()) return;
+        // Actual transport begins synchronously under Order + recipient locks.
+        handoffs++; attempted = true;
+        pending = start().then((value) => ({ value }), (error: unknown) => ({ error }));
+      }, authorize);
+    } catch (error) { if (attempted && !(error instanceof PushNotSubmittedError) && !(error instanceof SmsNotSubmittedError)) uncertain = true; throw error; }
+    const result = await pending; // no DB lock spans provider completion
+    if (!result) return undefined;
+    if ('error' in result) {
+      if (!(result.error instanceof PushNotSubmittedError) && !(result.error instanceof SmsNotSubmittedError)) uncertain = true;
+      throw result.error;
+    }
+    return result.value;
+  };
+  const persist: AlertPersistenceGuard = async (write) => {
+    let attempted = false;
+    try {
+      return await locked(async (tx) => {
+        handoffs++; attempted = true;
+        return write(tx); // durable inbox insert commits with the Order authority
+      });
+    } catch (error) { if (attempted) uncertain = true; throw error; }
+  };
+  return {
+    current, submit: guard(), persist,
+    recipient: (userId) => guard((tx, order) => storeAlertAuthorityInTx(tx, order.vendorId, userId, true)),
+    sms: (phone) => guard(async (tx, order) => {
+      const stores = await tx.$queryRaw<Array<{ phone: string | null; ownerPhone: string; status: string }>>`
+        SELECT v.phone, u.phone AS "ownerPhone", u.status FROM "vendors" v
+        JOIN "vendor_owners" o ON o.id = v."ownerId" JOIN "users" u ON u.id = o."userId"
+        WHERE v.id = ${order.vendorId} AND v."tenantId" = ${order.tenantId} AND u."tenantId" = v."tenantId"
+        FOR SHARE OF v, o, u NOWAIT
+      `;
+      const store = stores[0];
+      const destination = store ? storeSmsNumber(store.phone, store.status === 'ACTIVE' ? store.ownerPhone : null) : null;
+      if (destination !== phone) throw new SmsDestinationChanged();
+      return true;
+    }),
+    unknown: () => { uncertain = true; }, retry: () => { retryable = true; },
+    canRetry: () => retryable && handoffs === 0 && !uncertain,
+    stopped: () => uncertain ? 'submission_unknown' : windowClosed(respondBy, Date.now()) ? 'window_closed' : 'stopped',
+  };
+}
+
+/** Only this unsubmitted attempt may relinquish its own claim and marker. */
+async function releaseNotSubmitted(redis: Redis, orderId: string, rung: LadderRung, token: string): Promise<void> {
+  const key = rungClaimKey(orderId, rung);
+  await redis.eval(`
+    if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+    local submitted = redis.call('GET', KEYS[2])
+    if submitted and submitted ~= ARGV[1] then return 0 end
+    redis.call('DEL', KEYS[1])
+    if submitted == ARGV[1] then redis.call('DEL', KEYS[2]) end
+    return 1`, 2, key, `${key}:submitted`, token);
 }
 
 /** A send that threw is retried by the queue: free the claim, if still ours. */
@@ -366,7 +474,7 @@ async function runRung(
   if (!('order' in waiting)) return { outcome: settle(rung, 'stopped', orderId, waiting.stop) };
   const { order } = waiting;
   const rows = await alertRowsFor(deps.prisma, orderId);
-  const respondBy = respondByOf(rows);
+  const respondBy = await authoritativeRespondBy(deps.prisma, order, rows);
   if (windowClosed(respondBy, Date.now())) return { outcome: settle(rung, 'window_closed', orderId) };
   await beforeSend?.(order);
   // Bookings ring only while the store is open [ruling 09-24]. Any other
@@ -395,6 +503,10 @@ async function runRung(
     // carries a dedupe key.)
     await releaseRung(deps.redis, orderId, rung, claim.token).catch(() => {});
     throw err;
+  }
+  if (authority.canRetry()) {
+    await releaseNotSubmitted(deps.redis, orderId, rung, claim.token);
+    return { outcome: settle(rung, 'not_submitted', orderId), retryInMs: 1_000 };
   }
   await finishRung(deps.redis, orderId, rung, claim.token, outcome);
   return { outcome: settle(rung, outcome, orderId) };
@@ -426,13 +538,11 @@ async function ringAgain(deps: LadderDeps, order: WaitingOrder, rows: AlertRow[]
   let sent = 0;
   let withdrawn = false;
   for (const userId of recipients) {
-    const locked = storeAlertSubmission(deps.prisma, order.vendorId, userId, authority.ready, authority.current);
+    const locked = authority.recipient(userId);
     const recipient: SubmissionGuard = async (start) => {
       try { return await locked(start); } catch (error) { if (!(error instanceof PushNotSubmittedError)) authority.unknown(); throw error; }
     };
-    // Authority.ready has already fenced the rung under the membership lock.
-    // The actual adapter start must be synchronous here, so do not nest the
-    // asynchronous rung guard between the locked decision and its handoff.
+    // The combined guard holds Order and recipient authority at actual handoff.
     const handed = await recipient(async () => {
       deps.io.to(`user:${userId}`).emit('vendor:order_alert', {
         ...(rowOf.has(userId) ? { notificationId: rowOf.get(userId) } : {}),
@@ -451,6 +561,7 @@ async function ringAgain(deps: LadderDeps, order: WaitingOrder, rows: AlertRow[]
       notificationFailuresCounter.inc({ channel: 'push', stage: 'escalation' });
     }
   }
+  if (authority.stopped() === 'submission_unknown') return 'submission_unknown';
   if (sent > 0) return 'realerted';
   return withdrawn ? authority.stopped() : 'unsent';
 }
@@ -473,32 +584,39 @@ export function storeSmsNumber(storePhone: string | null | undefined, ownerPhone
 /** sms: text the store, inside the ladder's own daily budget (never the OTP
  *  budget: see checkStoreAlertSmsBudget). Only this rung sends it. */
 async function textTheStore(deps: LadderDeps, order: WaitingOrder, authority: RungAuthority): Promise<RungOutcome> {
-  const phone = storeSmsNumber(order.vendor.phone, order.vendor.owner.user.phone);
-  if (!phone) return 'sms_no_phone';
-  const budget = await checkStoreAlertSmsBudget(deps.redis, phone);
-  if (!budget.allowed) return 'sms_over_budget';
-  const refund = async () => { await budget.refund?.().catch(() => {}); };
-  let handedOff = false;
-  try {
-    const submitted = await authority.submit(() => { handedOff = true; return deps.channels.sms.sendSms(phone, `Swift: order ${order.orderNumber} is still waiting for your response. Open your dashboard now.`); });
-    if (!submitted) { await refund(); return authority.stopped(); }
-    return 'sms_sent';
-  } catch (err) {
-    // The last rung that reaches the store itself failed: never silent
-    // [SWIFT-100]. The number and the text are never logged.
-    notificationFailuresCounter.inc({ channel: 'sms', stage: 'escalation' });
-    // [AX291 F06] Only a text the provider PROVABLY never took gives its
-    // budget back. A timeout or an unreadable reply may still have been sent
-    // and billed, so it keeps its place in the day's count: the cap can
-    // never be passed by texts that went out while their replies were lost.
-    if (!handedOff || err instanceof SmsNotSubmittedError) {
-      await refund();
-      log().warn({ err, orderId: order.id }, 'store ladder: the text to the store was not submitted');
-      return 'sms_unsent';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const waiting = await readWaitingOrder(deps.prisma, order.id);
+    if (!('order' in waiting)) return authority.stopped();
+    const store = waiting.order.vendor;
+    const phone = storeSmsNumber(store.phone, store.owner.user.status === 'ACTIVE' && store.owner.user.tenantId === order.tenantId ? store.owner.user.phone : null);
+    if (!phone) return 'sms_no_phone';
+    const budget = await checkStoreAlertSmsBudget(deps.redis, phone);
+    if (!budget.allowed) return 'sms_over_budget';
+    const refund = async () => { await budget.refund?.().catch(() => {}); };
+    let handedOff = false;
+    try {
+      const submitted = await authority.sms(phone)(() => { handedOff = true; return deps.channels.sms.sendSms(phone, `Swift: order ${order.orderNumber} is still waiting for your response. Open your dashboard now.`); });
+      if (!submitted) { await refund(); return authority.stopped(); }
+      return 'sms_sent';
+    } catch (err) {
+      if (err instanceof SmsDestinationChanged && !handedOff) {
+        await refund();
+        if (attempt === 0) continue;
+        authority.retry();
+        return 'sms_unsent';
+      }
+      notificationFailuresCounter.inc({ channel: 'sms', stage: 'escalation' });
+      if (!handedOff || err instanceof SmsNotSubmittedError) {
+        await refund();
+        log().warn({ err, orderId: order.id }, 'store ladder: the text to the store was not submitted');
+        return 'sms_unsent';
+      }
+      authority.unknown();
+      log().warn({ err, orderId: order.id }, 'store ladder: the text to the store may or may not have gone out');
+      return 'sms_uncertain';
     }
-    log().warn({ err, orderId: order.id }, 'store ladder: the text to the store may or may not have gone out');
-    return 'sms_uncertain';
   }
+  return 'sms_unsent';
 }
 
 /** admin: tell the operators, naming the order and the store. notifyAdmins
@@ -514,7 +632,9 @@ async function tellTheOperators(deps: LadderDeps, order: WaitingOrder, authority
     data: { kind: 'ops_order_unanswered', orderId: order.id, orderNumber: order.orderNumber, vendorId: order.vendorId },
     dedupeKey: `order-unanswered:${order.id}`,
     submit: authority.submit,
+    persist: authority.persist,
   });
+  if (authority.stopped() === 'submission_unknown') return 'submission_unknown';
   return reached > 0 ? 'admin_paged' : authority.current() ? 'admin_unreached' : authority.stopped();
 }
 
@@ -548,7 +668,7 @@ export async function runLadderJob(deps: LadderDeps & { queue: LadderQueue }, da
     return 'stopped';
   }
   const { outcome, retryInMs } = await runRung(deps, orderId, rung, rung === 'ring1' ? (order) => scheduleLaterRungs(deps.queue, order) : undefined);
-  if (outcome === 'in_progress' && retryInMs !== undefined) {
+  if ((outcome === 'in_progress' || outcome === 'not_submitted') && retryInMs !== undefined) {
     // [AX291 F05] Another attempt holds this rung's "sending" claim, perhaps
     // a worker that died mid-send. Try again once that claim can have lapsed:
     // if the other attempt finished, the rung is done; if it died, this sends.
@@ -583,20 +703,22 @@ function seenReceiptId(orderId: string, userId: string): string {
  * Idempotent: their first sighting is the one kept.
  */
 export async function markStoreAlertSeen(prisma: PrismaClient, orderId: string, userId: string, now = new Date()): Promise<void> {
-  const stamped = await prisma.alertDelivery.updateMany({
-    where: { kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: userId, seenAt: null },
-    data: { seenAt: now },
-  });
-  if (stamped.count > 0) return;
-  const receipt = await prisma.alertDelivery.findFirst({
-    where: { kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: userId },
-    select: { id: true },
-  });
-  if (receipt) return; // seen before: the first sighting stands
-  // No receipt at all (added to the team after the alert went out, or a
-  // receipt write that failed): the sighting still counts, on one of theirs.
-  await prisma.alertDelivery.createMany({
-    data: [{ id: seenReceiptId(orderId, userId), kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: userId, sentAt: now, seenAt: now }],
-    skipDuplicates: true,
+  await withStoreAlertStop(prisma, [orderId], async (tx) => {
+    const stamped = await tx.alertDelivery.updateMany({
+      where: { kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: userId, seenAt: null },
+      data: { seenAt: now },
+    });
+    if (stamped.count > 0) return;
+    const receipt = await tx.alertDelivery.findFirst({
+      where: { kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: userId },
+      select: { id: true },
+    });
+    if (receipt) return; // seen before: the first sighting stands
+    // No receipt at all (added to the team after the alert went out, or a
+    // receipt write that failed): the sighting still counts, on one of theirs.
+    await tx.alertDelivery.createMany({
+      data: [{ id: seenReceiptId(orderId, userId), kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: userId, sentAt: now, seenAt: now }],
+      skipDuplicates: true,
+    });
   });
 }

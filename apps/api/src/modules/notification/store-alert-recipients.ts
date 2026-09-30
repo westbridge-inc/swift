@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { runWithTenant } from '../../plugins/tenant-context';
 import { storeRoomMemberKey, type StoreRoomPair } from './store-room';
 
@@ -16,12 +16,12 @@ import { storeRoomMemberKey, type StoreRoomPair } from './store-room';
  * orders to another tenant's people). Owner first, then the team in the
  * order they were added; no one twice.
  */
-export async function storeAlertRecipients(prisma: PrismaClient, vendorId: string): Promise<string[]> {
+export async function storeAlertRecipients(prisma: PrismaClient | Prisma.TransactionClient, vendorId: string): Promise<string[]> {
   const vendor = await prisma.vendor.findUnique({
     where: { id: vendorId },
     select: {
       tenantId: true,
-      owner: { select: { userId: true } },
+      owner: { select: { userId: true, user: { select: { status: true, tenantId: true } } } },
       staff: {
         orderBy: { createdAt: 'asc' },
         select: { userId: true, user: { select: { status: true, tenantId: true } } },
@@ -29,7 +29,8 @@ export async function storeAlertRecipients(prisma: PrismaClient, vendorId: strin
     },
   });
   if (!vendor) return [];
-  const recipients = [vendor.owner.userId];
+  const recipients = vendor.owner.user.status === 'ACTIVE' && vendor.owner.user.tenantId === vendor.tenantId
+    ? [vendor.owner.userId] : [];
   for (const member of vendor.staff) {
     if (member.user.status !== 'ACTIVE' || member.user.tenantId !== vendor.tenantId) continue;
     if (!recipients.includes(member.userId)) recipients.push(member.userId);
@@ -59,7 +60,7 @@ export async function isStoreRoomMember(prisma: PrismaClient, vendorId: string, 
  * [AX317 F03] The store-room rule for many (store, person, tenant) pairs at
  * once: one read per tenant, each with that tenant bound. Returns the keys
  * (storeRoomMemberKey) of the pairs that are members now: the store is in the
- * tenant, and the person is its owner with an account in that tenant, or an
+ * tenant, and the person is its ACTIVE owner with an account in that tenant, or an
  * ACTIVE member of its team with an account in that tenant.
  */
 export async function storeRoomMemberships(prisma: PrismaClient, pairs: readonly StoreRoomPair[]): Promise<Set<string>> {
@@ -78,7 +79,7 @@ export async function storeRoomMemberships(prisma: PrismaClient, pairs: readonly
     // the read for the whole tenant.
     const [owned, staffed] = await runWithTenant(tenantId, () => Promise.all([
       prisma.vendor.findMany({
-        where: { id: { in: vendorIds }, tenantId, owner: { userId: { in: userIds }, user: { tenantId } } },
+        where: { id: { in: vendorIds }, tenantId, owner: { userId: { in: userIds }, user: { tenantId, status: 'ACTIVE' } } },
         select: { id: true, owner: { select: { userId: true } } },
       }),
       prisma.vendorStaff.findMany({

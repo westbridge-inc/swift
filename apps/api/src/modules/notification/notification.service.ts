@@ -7,6 +7,7 @@ import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter } from '../../plugins/observability';
 import { storeAlertRecipients } from './store-alert-recipients';
+import { lockStoreAlertOrders, storeAlertOrderId, withStoreAlertStop, type AlertPersistenceGuard } from './store-alert-order-authority';
 import { storeAlertSubmission, withStoreAlertAuthority } from './store-alert-authority';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
@@ -83,13 +84,15 @@ type AlertAcknowledgment =
 
 export async function acknowledgeAlert(prisma: PrismaClient, ...ack: AlertAcknowledgment): Promise<void> {
   const [kind, subjectId, recipientId] = ack;
-  await prisma.alertDelivery.updateMany({
+  const write = (tx: Prisma.TransactionClient | PrismaClient) => tx.alertDelivery.updateMany({
     where: {
       kind, subjectId, ...(recipientId ? { recipientId } : {}), acknowledgedAt: null,
       ...(ack[0] === 'MOVER_OFFER' ? { offerAttemptId: ack[3] ?? null } : {}),
     },
     data: { acknowledgedAt: new Date() },
   });
+  if (kind === 'VENDOR_ORDER') await withStoreAlertStop(prisma, [subjectId], write);
+  else await write(prisma);
 }
 
 /** Resolve the tenant an admin page belongs to from the person it is about.
@@ -163,6 +166,7 @@ export async function notifyAdmins(
      *  throws so the committed obligation stays retryable. */
     requireAll?: boolean;
     submit?: SubmissionGuard;
+    persist?: AlertPersistenceGuard;
   },
 ): Promise<number> {
   // [REPORT-014 F-014-03] Background workers carry no tenant ALS, so a
@@ -233,7 +237,7 @@ export async function notifyAdmins(
       body: input.body,
       data: input.data,
       ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
-    }, { submit: input.submit });
+    }, { submit: input.submit, persist: input.persist });
     if (id) reached += 1;
   }
   // SWIFT-AUD-D7-03: ops pages get the same ack-tracking as vendor/mover
@@ -260,6 +264,7 @@ export async function notifyAdmins(
 
 interface DeliveryControl {
   submit?: SubmissionGuard;
+  persist?: AlertPersistenceGuard;
   store?: { vendorId: string; userId: string };
 }
 
@@ -293,7 +298,8 @@ export class NotificationService {
       });
       const persisted = control.store
         ? await withStoreAlertAuthority(this.prisma, control.store.vendorId, control.store.userId, (tx) => write(tx))
-        : control.submit ? await control.submit(() => write(this.prisma)) : await write(this.prisma);
+        : control.persist ? await control.persist(write)
+          : control.submit ? await control.submit(() => write(this.prisma)) : await write(this.prisma);
       if (!persisted) return '';
       notification = persisted;
     } catch (err) {
@@ -415,17 +421,25 @@ export class NotificationService {
   }
 
   async markAsRead(userId: string, notificationId: string): Promise<void> {
-    await this.prisma.notification.updateMany({
-      where: { id: notificationId, userId },
-      data: { isRead: true, readAt: new Date() },
-    });
+    await this.markReadWhere(userId, { id: notificationId });
   }
 
   async markAllAsRead(userId: string): Promise<void> {
-    await this.prisma.notification.updateMany({
-      where: { userId, isRead: false },
-      data: { isRead: true, readAt: new Date() },
-    });
+    await this.markReadWhere(userId, { isRead: false });
+  }
+
+  private async markReadWhere(userId: string, where: Prisma.NotificationWhereInput): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SET LOCAL statement_timeout = '4000ms'`;
+      const rows = await tx.notification.findMany({ where: { ...where, userId }, select: { id: true, data: true } });
+      const orderIds = rows.map((row) => storeAlertOrderId(row.data)).filter((id): id is string => id !== null);
+      await lockStoreAlertOrders(tx, orderIds, 'stop');
+      // Only the captured rows: a concurrent new notice has no lock in this set.
+      if (rows.length) await tx.notification.updateMany({
+        where: { userId, id: { in: rows.map((row) => row.id) } },
+        data: { isRead: true, readAt: new Date() },
+      });
+    }, { maxWait: 2_000, timeout: 5_000 });
   }
 
   async getUnreadCount(userId: string): Promise<number> {

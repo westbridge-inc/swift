@@ -16,7 +16,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
-import { NotificationService, dedupedOpsAlertId } from '../modules/notification/notification.service';
+import { NotificationService, acknowledgeAlert, dedupedOpsAlertId } from '../modules/notification/notification.service';
 import {
   LADDER,
   RUNG_SENDING_TTL_MS,
@@ -25,12 +25,14 @@ import {
   rungOf,
   runLadderJob,
   runLadderRung,
+  markStoreAlertSeen,
   storeSmsNumber,
   type LadderDeps,
   type LadderRung,
 } from '../modules/notification/store-alert-ladder';
 import { storeAlertSubmission } from '../modules/notification/store-alert-authority';
-import { isStoreRoomMember } from '../modules/notification/store-alert-recipients';
+import { persistCheckoutOutboxInTransaction } from '../modules/order/checkout-outbox';
+import { isStoreRoomMember, storeAlertRecipients } from '../modules/notification/store-alert-recipients';
 import {
   STORE_ROOM_EVICTION_BOUND_MS as STORE_ROOM_STRICT_BOUND_MS,
   STORE_ROOM_REVOKED,
@@ -337,6 +339,7 @@ async function purgeFixturesUnbound() {
   });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.deviceToken.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.vendorStaff.deleteMany({ where: { OR: [{ userId: { in: ids } }, { vendorId: { in: vendorIds } }] } });
   await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
@@ -1217,7 +1220,8 @@ describe('every rung stops the moment the order no longer waits, read at send ti
       outage.mockRestore();
     }
     await accepted;
-    expect(outcome!).toBe('stopped');
+    // The later acceptance stops future work; it cannot prove the earlier 503 was not delivered.
+    expect(outcome!).toBe('submission_unknown');
     expect(attempts).toBe(1);
     for (const token of teamDevices()) expect(stillWaitingPushesTo(token, o.orderId), token).toEqual([]);
   });
@@ -2048,5 +2052,644 @@ describe('SX392 handoff boundary controls', () => {
       expect(result.sent).toBe(0);
       expect(fetcher).not.toHaveBeenCalled();
     } finally { clock.mockRestore(); fetcher.mockRestore(); }
+  });
+});
+
+
+describe('SX403 active owner authority', () => {
+  for (const phase of ['initial', 'ring1', 'ring2'] as const) {
+    it(`${phase}: committed owner deactivation after selection prevents delivery`, async () => {
+      const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const vendorId = await makeStore(owner, 'Owner authority fixture');
+      const token = await device(owner);
+      const o = await placeAndAlert(vendorId, { alert: phase !== 'initial' });
+      const inboxBefore = await app.prisma.notification.count({ where: { userId: owner.userId } });
+      let deactivated = false;
+      const deactivate = async () => {
+        if (deactivated) return;
+        await app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'DEACTIVATED' } });
+        deactivated = true;
+      };
+      const realDevices = app.prisma.deviceToken.findMany.bind(app.prisma.deviceToken);
+      const realReceipt = app.prisma.alertDelivery.create.bind(app.prisma.alertDelivery);
+      const seam = phase === 'initial'
+        ? vi.spyOn(app.prisma.alertDelivery, 'create').mockImplementation((async (args: Parameters<typeof realReceipt>[0]) => {
+          const row = await realReceipt(args);
+          if (args.data.recipientId === owner.userId) await deactivate();
+          return row;
+        }) as unknown as typeof realReceipt)
+        : vi.spyOn(app.prisma.deviceToken, 'findMany').mockImplementation((async (args: Parameters<typeof realDevices>[0]) => {
+          const rows = await realDevices(args);
+          if (rows.some((row) => row.token === token)) await deactivate();
+          return rows;
+        }) as typeof realDevices);
+      const handed: string[] = [];
+      const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+        const messages = JSON.parse(String(options?.body)) as Array<{ to: string }>;
+        handed.push(...messages.map((message) => message.to));
+        return new Response(JSON.stringify({ data: messages.map(() => ({ status: 'ok' })) }), { status: 200 });
+      });
+      const channels = { ...getChannels(), push: withPushRetry(new ExpoPushProvider(), [1]) };
+      const eventsBefore = emitted.length;
+      try {
+        if (phase === 'initial') await new NotificationService(app.prisma, ioRecorder, channels).newOrderForStore({ vendorId, ...o, itemCount: 1, total: 1500 });
+        else await runLadderRung(deps({ channels }), o.orderId, phase);
+        expect(deactivated).toBe(true);
+        expect(handed).not.toContain(token);
+        expect(emitted.slice(eventsBefore).filter((event) => event.room === `user:${owner.userId}`)).toEqual([]);
+        expect(await app.prisma.notification.count({ where: { userId: owner.userId } })).toBe(inboxBefore);
+        expect(await app.prisma.deviceToken.count({ where: { userId: owner.userId, isActive: true } })).toBe(1);
+      } finally { seam.mockRestore(); fetcher.mockRestore(); }
+    });
+  }
+});
+
+
+describe('SX403 owner transport boundaries', () => {
+  it('an inactive owner is absent from recipient selection and socket membership with devices retained', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const vendorId = await makeStore(owner, 'Inactive selection fixture');
+    await device(owner);
+    expect(await storeAlertRecipients(app.prisma, vendorId)).toContain(owner.userId);
+    expect(await isStoreRoomMember(app.prisma, vendorId, owner.userId, 'swift-default')).toBe(true);
+    await app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'DEACTIVATED' } });
+    expect(await storeAlertRecipients(app.prisma, vendorId)).not.toContain(owner.userId);
+    expect(await isStoreRoomMember(app.prisma, vendorId, owner.userId, 'swift-default')).toBe(false);
+    expect(await app.prisma.deviceToken.count({ where: { userId: owner.userId, isActive: true } })).toBe(1);
+  });
+
+  for (const phase of ['initial', 'ring1', 'ring2'] as const) {
+    it(`${phase}: owner deactivation after a real Expo chunk blocks the next chunk`, async () => {
+      const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const vendorId = await makeStore(owner, 'Owner chunk fixture');
+      const tokens = Array.from({ length: 101 }, (_, i) => `ExponentPushToken[r6-${nanoid(6)}-${i}]`);
+      await app.prisma.deviceToken.createMany({ data: tokens.map((token) => ({ userId: owner.userId, token, platform: 'android', alertsVersion: 0 })) });
+      const o = await placeAndAlert(vendorId, { alert: phase !== 'initial' });
+      let first!: () => void; let resume!: () => void;
+      const entered = new Promise<void>((done) => { first = done; });
+      const wait = new Promise<void>((done) => { resume = done; });
+      const handed: string[] = [];
+      const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+        const messages = JSON.parse(String(options?.body)) as Array<{ to: string }>;
+        handed.push(...messages.map((message) => message.to));
+        first(); await wait;
+        return new Response(JSON.stringify({ data: messages.map(() => ({ status: 'ok' })) }), { status: 200 });
+      });
+      const channels = { ...getChannels(), push: withPushRetry(new ExpoPushProvider(), [1]) };
+      try {
+        const delivery = phase === 'initial'
+          ? new NotificationService(app.prisma, ioRecorder, channels).newOrderForStore({ vendorId, ...o, itemCount: 1, total: 1500 })
+          : runLadderRung(deps({ channels }), o.orderId, phase);
+        await entered;
+        await app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'DEACTIVATED' } });
+        const eventsBefore = emitted.length;
+        resume(); await delivery;
+        expect(handed).toHaveLength(100);
+        expect(emitted.slice(eventsBefore).filter((event) => event.room === `user:${owner.userId}`)).toEqual([]);
+      } finally { resume?.(); fetcher.mockRestore(); }
+    });
+
+    it(`${phase}: committed owner deactivation prevents retry after an Expo rejection`, async () => {
+      const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const vendorId = await makeStore(owner, 'Owner retry fixture');
+      const token = await device(owner);
+      const o = await placeAndAlert(vendorId, { alert: phase !== 'initial' });
+      let attempts = 0; let deactivated: Promise<unknown> | undefined;
+      const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+        const messages = JSON.parse(String(options?.body)) as Array<{ to: string }>;
+        if (messages.some((message) => message.to === token)) {
+          attempts++;
+          deactivated = app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'DEACTIVATED' } }).then(() => undefined);
+          await deactivated; // commit before the rejection makes any retry eligible
+          return new Response('rejected', { status: 429 });
+        }
+        return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      });
+      const channels = { ...getChannels(), push: withPushRetry(new ExpoPushProvider(), [50]) };
+      try {
+        if (phase === 'initial') await new NotificationService(app.prisma, ioRecorder, channels).newOrderForStore({ vendorId, ...o, itemCount: 1, total: 1500 });
+        else await runLadderRung(deps({ channels }), o.orderId, phase);
+        await deactivated;
+        expect(attempts).toBe(1);
+      } finally { fetcher.mockRestore(); }
+    });
+  }
+
+  it('owner deactivation waits for actual transport and commits before its response', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const vendorId = await makeStore(owner, 'Owner lock fixture');
+    let authorityHeld!: () => void; let permit!: () => void; let started!: () => void; let reply!: (response: Response) => void;
+    const locked = new Promise<void>((done) => { authorityHeld = done; });
+    const wait = new Promise<void>((done) => { permit = done; });
+    const invoked = new Promise<void>((done) => { started = done; });
+    const response = new Promise<Response>((done) => { reply = done; });
+    let deactivated = false;
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(() => { expect(deactivated).toBe(false); started(); return response; });
+    let delivery: ReturnType<ExpoPushProvider['sendPush']> | undefined; let cutoff: Promise<void> | undefined;
+    try {
+      const submit = storeAlertSubmission(app.prisma, vendorId, owner.userId, async () => { authorityHeld(); await wait; return true; });
+      delivery = new ExpoPushProvider().sendPush(['ExponentPushToken[r6-owner-lock]'], 'Order', 'Body', undefined, { alertClass: 'standard', priority: 'high', submit });
+      await locked;
+      cutoff = app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'DEACTIVATED' } }).then(() => { deactivated = true; });
+      await vi.waitFor(async () => {
+        const waiting = await app.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%users%'`;
+        expect(Number(waiting[0]!.count)).toBeGreaterThan(0);
+      }, { timeout: 2_000, interval: 10 });
+      expect(fetcher).not.toHaveBeenCalled();
+      permit(); await invoked; await cutoff;
+      expect(deactivated).toBe(true);
+      reply(new Response(JSON.stringify({ data: [{ status: 'ok' }] }), { status: 200 }));
+      expect((await delivery).sent).toBe(1);
+    } finally {
+      permit?.(); reply?.(new Response('{}'));
+      await Promise.allSettled([delivery, cutoff]);
+      fetcher.mockRestore();
+    }
+  });
+});
+
+
+describe('SX403 durable stop and destination boundaries', () => {
+  for (const stop of ['seen', 'ack', 'accept'] as const) {
+    for (const { rung } of LADDER) {
+      it(`${rung}: ${stop} committed inside the final Redis fence prevents subsequent handoff`, async () => {
+        const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+        const vendorId = await makeStore(owner, 'Stop fence fixture');
+        const token = await device(owner);
+        const o = await placeAndAlert(vendorId);
+        const before = emitted.length; const count = await textsCounted(owner.phone);
+        const pushes = pushesTo(token).length;
+        let stopped = false;
+        const redis = new Proxy(app.redis, { get(target, prop) {
+          if (prop === 'eval') return async (...args: Parameters<Redis['eval']>) => {
+            const result = await (target.eval as (...a: unknown[]) => Promise<unknown>)(...args);
+            if (!stopped && String(args[0]).includes('PEXPIRE')) {
+              stopped = true;
+              const response = await call(stop === 'seen' ? 'POST' : 'PUT', `/api/v1/vendor/orders/${o.orderId}/${stop === 'seen' ? 'alert-seen' : stop}`, owner.token);
+              expect(response.statusCode).toBe(200);
+            }
+            return result;
+          };
+          const value = Reflect.get(target, prop, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        } }) as Redis;
+        await runLadderRung(deps({ redis }), o.orderId, rung);
+        expect(stopped).toBe(true);
+        expect(emitted.slice(before).filter((event) => (event.payload as { orderId?: string; data?: { orderId?: string } }).orderId === o.orderId || (event.payload as { data?: { orderId?: string } }).data?.orderId === o.orderId).filter((event) => event.event === 'vendor:order_alert' || event.event === 'notification' && event.room !== `user:${customer.userId}`)).toEqual([]);
+        expect(pushesTo(token)).toHaveLength(pushes);
+        expect(smsTo(owner.phone).filter((entry) => entry.body.includes(o.orderNumber))).toEqual([]);
+        expect(await app.prisma.notification.count({ where: { AND: [{ data: { path: ['kind'], equals: 'ops_order_unanswered' } }, { data: { path: ['orderId'], equals: o.orderId } }] } })).toBe(0);
+        expect(await textsCounted(owner.phone)).toBe(count);
+      });
+    }
+  }
+
+  it('SMS refreshes the reserved destination after a committed phone replacement', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const replacement = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const vendorId = await makeStore(owner, 'Destination fixture');
+    const o = await placeAndAlert(vendorId);
+    const oldCount = await textsCounted(owner.phone); const newCount = await textsCounted(replacement.phone);
+    let changed = false;
+    const redis = new Proxy(app.redis, { get(target, prop) {
+      if (prop === 'incr') return async (key: string) => {
+        const result = await target.incr(key);
+        if (!changed && key.startsWith(STORE_ALERT_SMS_DAILY_PREFIX)) {
+          changed = true;
+          await app.prisma.vendor.update({ where: { id: vendorId }, data: { phone: replacement.phone } });
+        }
+        return result;
+      };
+      const value = Reflect.get(target, prop, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    } }) as Redis;
+    expect(await runLadderRung(deps({ redis }), o.orderId, 'sms')).toBe('sms_sent');
+    expect(changed).toBe(true);
+    expect(smsTo(owner.phone).filter((entry) => entry.body.includes(o.orderNumber))).toEqual([]);
+    expect(smsTo(replacement.phone).filter((entry) => entry.body.includes(o.orderNumber))).toHaveLength(1);
+    expect(await textsCounted(owner.phone)).toBe(oldCount);
+    expect(await textsCounted(replacement.phone)).toBe(newCount + 1);
+  });
+
+  it('SMS cannot use a fallback owner deactivated during budget reservation', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const vendorId = await makeStore(owner, 'Fallback cutoff fixture', '');
+    const o = await placeAndAlert(vendorId);
+    const count = await textsCounted(owner.phone);
+    let changed = false;
+    const redis = new Proxy(app.redis, { get(target, prop) {
+      if (prop === 'incr') return async (key: string) => {
+        const result = await target.incr(key);
+        if (!changed && key.startsWith(STORE_ALERT_SMS_DAILY_PREFIX)) {
+          changed = true;
+          await app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'DEACTIVATED' } });
+        }
+        return result;
+      };
+      const value = Reflect.get(target, prop, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    } }) as Redis;
+    expect(await runLadderRung(deps({ redis }), o.orderId, 'sms')).not.toBe('sms_sent');
+    expect(smsTo(owner.phone).filter((entry) => entry.body.includes(o.orderNumber))).toEqual([]);
+    expect(await textsCounted(owner.phone)).toBe(count);
+  });
+});
+
+describe('SX403 authoritative deadline without inbox', () => {
+  for (const failed of [false, true]) {
+    for (const { rung } of LADDER) {
+      it(`${rung}: ${failed ? 'failed' : 'absent'} initial inbox cannot extend a late pending order`, async () => {
+        const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+        const vendorId = await makeStore(owner, 'Deadline fixture');
+        await device(owner);
+        const o = await placeAndAlert(vendorId, { alert: false, placedAt: new Date(Date.now() - 11 * 60_000) });
+        if (failed) {
+          const persist = vi.spyOn(app.prisma, '$transaction').mockRejectedValueOnce(new Error('synthetic inbox persistence failure'));
+          try { await notifications.newOrderForStore({ vendorId, ...o, itemCount: 1, total: 1500 }); }
+          finally { persist.mockRestore(); }
+        }
+        expect(await app.prisma.notification.count({ where: { userId: owner.userId } })).toBe(0);
+        const events = emitted.length;
+        expect(await runLadderRung(deps(), o.orderId, rung)).toBe('window_closed');
+        expect(emitted.slice(events)).toEqual([]);
+        expect(smsTo(owner.phone).filter((entry) => entry.body.includes(o.orderNumber))).toEqual([]);
+        expect(await app.prisma.notification.count({ where: { AND: [{ data: { path: ['kind'], equals: 'ops_order_unanswered' } }, { data: { path: ['orderId'], equals: o.orderId } }] } })).toBe(0);
+        expect((await app.prisma.order.findUniqueOrThrow({ where: { id: o.orderId } })).status).toBe('PENDING');
+      });
+    }
+  }
+});
+
+
+/** Pause after real subordinate authority rows have been locked. */
+function pauseLockedAuthority() {
+  let held!: () => void; let release!: () => void;
+  const locked = new Promise<void>((done) => { held = done; });
+  const wait = new Promise<void>((done) => { release = done; });
+  const transaction = app.prisma.$transaction.bind(app.prisma);
+  let paused = false;
+  const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation(((work: any, options: any) => {
+    if (typeof work !== 'function') return transaction(work, options);
+    return transaction((tx) => work(new Proxy(tx, { get(target, prop) {
+      if (prop === '$queryRaw') return async (...args: any[]) => {
+        const result = await (target.$queryRaw as any)(...args);
+        const sql = Array.isArray(args[0]) ? args[0].join(' ') : args[0]?.strings?.join(' ') ?? '';
+        if (!paused && sql.includes('FOR SHARE OF') && sql.includes('NOWAIT')) { paused = true; held(); await wait; }
+        return result;
+      };
+      return Reflect.get(target, prop, target);
+    } })), options);
+  }) as typeof transaction);
+  return { locked, release, restore: () => spy.mockRestore() };
+}
+
+function syntheticSmsChannels(from: string) {
+  vi.stubEnv('NOTIFICATION_PROVIDER', 'twilio');
+  vi.stubEnv('TWILIO_ACCOUNT_SID', 'AC' + '1'.repeat(32));
+  vi.stubEnv('TWILIO_API_KEY_SID', 'SK' + '2'.repeat(32));
+  vi.stubEnv('TWILIO_API_KEY_SECRET', '3'.repeat(32));
+  vi.stubEnv('TWILIO_FROM', from);
+  vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', '');
+  return getChannels();
+}
+
+async function waitForOrderLock() {
+  await vi.waitFor(async () => {
+    const waiting = await app.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%orders%'`;
+    expect(Number(waiting[0]!.count)).toBeGreaterThan(0);
+  }, { timeout: 2_000, interval: 10 });
+}
+
+describe('SX403 stop and destination serialization at actual fetch', () => {
+  for (const stop of ['seen', 'ack', 'read', 'read-all', 'vendor-ack'] as const) {
+    it(`${stop}: waits for SMS fetch invocation and commits before its response`, async () => {
+      const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const vendorId = await makeStore(owner, 'Stop ordering fixture');
+      const o = await placeAndAlert(vendorId);
+      const notification = await app.prisma.notification.findFirstOrThrow({ where: { userId: owner.userId, data: { path: ['orderId'], equals: o.orderId } } });
+      // Prove the missing-receipt insert path also takes the parent Order lock.
+      if (stop === 'seen') await app.prisma.alertDelivery.deleteMany({ where: { kind: 'VENDOR_ORDER', subjectId: o.orderId } });
+      const barrier = pauseLockedAuthority();
+      let started!: () => void; let reply!: (response: Response) => void; let committed = false;
+      const invoked = new Promise<void>((done) => { started = done; });
+      const response = new Promise<Response>((done) => { reply = done; });
+      const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(() => { expect(committed).toBe(false); started(); return response; });
+      let delivery: ReturnType<typeof runLadderRung> | undefined; let stopped: Promise<void> | undefined;
+      try {
+        const channels = syntheticSmsChannels(owner.phone);
+        delivery = runLadderRung(deps({ channels }), o.orderId, 'sms');
+        await barrier.locked;
+        stopped = (stop === 'seen' ? markStoreAlertSeen(app.prisma, o.orderId, owner.userId)
+          : stop === 'ack' ? acknowledgeAlert(app.prisma, 'VENDOR_ORDER', o.orderId)
+            : stop === 'read' ? notifications.markAsRead(owner.userId, notification.id)
+              : stop === 'read-all' ? notifications.markAllAsRead(owner.userId)
+                : call('PUT', `/api/v1/vendor/orders/${o.orderId}/ack`, owner.token).then((result) => { expect(result.statusCode).toBe(200); }))
+          .then(() => { committed = true; });
+        await waitForOrderLock(); expect(fetcher).not.toHaveBeenCalled();
+        barrier.release(); await invoked; await stopped;
+        expect(committed).toBe(true); // provider response is still pending
+        reply(new Response(JSON.stringify({ sid: 'SM' + '4'.repeat(32) }), { status: 201 }));
+        expect(await delivery).toBe('sms_sent');
+        expect(fetcher).toHaveBeenCalledTimes(1);
+      } finally {
+        barrier.release(); reply?.(new Response('{}'));
+        // Failed mutation assertions must settle every task before restoring fake transport.
+        await Promise.allSettled([delivery, stopped]);
+        barrier.restore(); fetcher.mockRestore(); vi.unstubAllEnvs();
+      }
+    });
+  }
+
+  it('a replacement phone waits behind SMS authority and commits before the fetch response', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const replacement = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const vendorId = await makeStore(owner, 'Destination ordering fixture');
+    const o = await placeAndAlert(vendorId);
+    const barrier = pauseLockedAuthority();
+    let started!: () => void; let reply!: (response: Response) => void; let changed = false;
+    const invoked = new Promise<void>((done) => { started = done; });
+    const response = new Promise<Response>((done) => { reply = done; });
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      expect(new URLSearchParams(String(init?.body)).get('To')).toBe(owner.phone);
+      expect(changed).toBe(false); started(); return response;
+    });
+    let delivery: ReturnType<typeof runLadderRung> | undefined; let replacementWrite: Promise<void> | undefined;
+    try {
+      delivery = runLadderRung(deps({ channels: syntheticSmsChannels(owner.phone) }), o.orderId, 'sms');
+      await barrier.locked;
+      replacementWrite = app.prisma.vendor.update({ where: { id: vendorId }, data: { phone: replacement.phone } }).then(() => { changed = true; });
+      await vi.waitFor(async () => {
+        const waiting = await app.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%vendors%'`;
+        expect(Number(waiting[0]!.count)).toBeGreaterThan(0);
+      }, { timeout: 2_000, interval: 10 });
+      barrier.release(); await invoked; await replacementWrite;
+      expect(changed).toBe(true);
+      reply(new Response(JSON.stringify({ sid: 'SM' + '4'.repeat(32) }), { status: 201 }));
+      expect(await delivery).toBe('sms_sent');
+    } finally {
+      barrier.release(); reply?.(new Response('{}'));
+      await Promise.allSettled([delivery, replacementWrite]);
+      barrier.restore(); fetcher.mockRestore(); vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe('SX403 durable deadline policy snapshots', () => {
+  for (const kind of ['held', 'appointment'] as const) {
+    it(`${kind}: preserved outbox timing survives absent inbox and later SLA changes`, async () => {
+      const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const vendorId = await makeStore(owner, 'Snapshot timing fixture');
+      const placedAt = new Date();
+      const o = await placeAndAlert(vendorId, { alert: false, placedAt, fulfillment: kind === 'appointment' ? 'APPOINTMENT' : 'PICKUP',
+        ...(kind === 'held' ? { holdExpiresAt: new Date(placedAt.getTime() + 5 * 60_000) } : {}) });
+      // Appointment slot is three hours away: canonical cutoff is slot minus one hour.
+      if (kind === 'appointment') await app.prisma.order.update({ where: { id: o.orderId }, data: { appointmentSlot: new Date(placedAt.getTime() + 3 * 60 * 60_000) } });
+      const order = await app.prisma.order.findUniqueOrThrow({ where: { id: o.orderId } });
+      await app.prisma.$transaction((tx) => persistCheckoutOutboxInTransaction(tx, {
+        orders: [order], timing: { alertDelayMs: 30_000, autoCancelDelayMs: 15 * 60_000, vendorResponseSlaMinutes: 10 },
+      }));
+      const outbox = await app.prisma.orderOutbox.findFirstOrThrow({ where: { orderId: o.orderId, kind: 'auto-cancel' } });
+      expect(outbox.delayMs).toBe(kind === 'held' ? 15 * 60_000 : 2 * 60 * 60_000);
+      if (kind === 'held') await app.prisma.order.update({ where: { id: o.orderId }, data: { holdExpiresAt: null, releasedToVendorAt: new Date(placedAt.getTime() + 5 * 60_000) } });
+      const realConfig = app.prisma.platformConfig.findUnique.bind(app.prisma.platformConfig);
+      const config = vi.spyOn(app.prisma.platformConfig, 'findUnique').mockImplementation(((args: any) => args.where.key === 'order_auto_reject_minutes' ? Promise.resolve({ key: args.where.key, value: 1 }) : realConfig(args)) as typeof realConfig);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(outbox.createdAt.getTime() + (kind === 'held' ? 6 * 60_000 : 90 * 60_000));
+      try {
+        expect(await runLadderRung(deps(), o.orderId, 'sms')).toBe('sms_sent');
+        clock.mockReturnValue(outbox.createdAt.getTime() + outbox.delayMs + 1);
+        expect(await runLadderRung(deps(), o.orderId, 'admin')).toBe('window_closed');
+        expect((await app.prisma.order.findUniqueOrThrow({ where: { id: o.orderId } })).status).toBe('PENDING');
+      } finally { clock.mockRestore(); config.mockRestore(); }
+    });
+  }
+});
+
+
+async function holdUserAuthority(userId: string) {
+  let locked!: () => void; let release!: () => void;
+  const entered = new Promise<void>((done) => { locked = done; });
+  const wait = new Promise<void>((done) => { release = done; });
+  const transaction = app.prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "users" WHERE id = ${userId} FOR UPDATE`;
+    locked(); await wait;
+  }, { timeout: 10_000 });
+  await entered;
+  return { release: async () => { release(); await transaction; } };
+}
+
+describe('SX403 bounded not-submitted ownership', () => {
+  for (const newer of ['none', 'claim', 'marker', 'both'] as const) {
+    it(`pre-handoff contention retries without sending and ${newer === 'none' ? 'releases only its own marker' : `preserves ${newer} token`}`, async () => {
+      const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const vendorId = await makeStore(owner, 'Contention fixture');
+      await device(owner);
+      const o = await placeAndAlert(vendorId);
+      const held = await holdUserAuthority(owner.userId);
+      const key = rungClaimKey(o.orderId, 'ring1');
+      const queue = recordingQueue(); const before = emitted.length;
+      let replaced = false; let expectedClaim: string | null = null; let expectedMarker: string | null = null;
+      const redis = new Proxy(app.redis, { get(target, prop) {
+        if (prop === 'eval') return async (...args: Parameters<Redis['eval']>) => {
+          if (newer !== 'none' && !replaced && String(args[0]).includes("local submitted") && String(args[0]).includes("'DEL'")) {
+            replaced = true;
+            if (newer === 'claim' || newer === 'both') await target.set(key, 'sending:newer-worker', 'PX', RUNG_SENDING_TTL_MS);
+            if (newer === 'marker' || newer === 'both') await target.set(`${key}:submitted`, 'sending:newer-worker', 'EX', 86400);
+            expectedClaim = await target.get(key); expectedMarker = await target.get(`${key}:submitted`);
+          }
+          return (target.eval as (...a: unknown[]) => Promise<unknown>)(...args);
+        };
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      } }) as Redis;
+      try {
+        expect(await runLadderJob({ ...deps({ redis }), queue }, { orderId: o.orderId, rung: 'ring1' })).toBe('not_submitted');
+        expect(emitted.slice(before)).toEqual([]);
+        expect(queue.jobs.filter((job) => job.data['rung'] === 'admin')).toHaveLength(1);
+        expect(queue.jobs.filter((job) => job.data['rung'] === 'ring1')).toMatchObject([{ data: { retry: 1 }, opts: { delay: 1000 } }]);
+        expect(await app.redis.get(key)).toBe(expectedClaim);
+        expect(await app.redis.get(`${key}:submitted`)).toBe(expectedMarker);
+      } finally { await held.release(); }
+    });
+  }
+
+  it('contention after a partial handoff retains its marker and never retries the whole rung', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const vendorId = await makeStore(owner, 'Partial handoff fixture');
+    await joinTeam(vendorId, member, owner);
+    const ownerToken = await device(owner); const memberToken = await device(member);
+    const o = await placeAndAlert(vendorId);
+    const held = await holdUserAuthority(member.userId);
+    const queue = recordingQueue();
+    try {
+      expect(await runLadderJob({ ...deps(), queue }, { orderId: o.orderId, rung: 'ring1' })).toBe('realerted');
+      expect(stillWaitingPushesTo(ownerToken, o.orderId)).toHaveLength(1);
+      expect(stillWaitingPushesTo(memberToken, o.orderId)).toEqual([]);
+      expect(queue.jobs.filter((job) => job.data['rung'] === 'ring1')).toEqual([]);
+      expect(queue.jobs.filter((job) => job.data['rung'] === 'admin')).toHaveLength(1);
+      expect(await app.redis.get(`${rungClaimKey(o.orderId, 'ring1')}:submitted`)).not.toBeNull();
+    } finally { await held.release(); }
+  });
+
+  for (const retry of [0, 3]) {
+    it(`two destination changes refund both unused reservations and respect retry count ${retry}`, async () => {
+      const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const second = await makeUser(['CUSTOMER'], 'CUSTOMER'); const third = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      const vendorId = await makeStore(owner, 'Bounded destination fixture');
+      const o = await placeAndAlert(vendorId); const queue = recordingQueue();
+      let reservations = 0;
+      const redis = new Proxy(app.redis, { get(target, prop) {
+        if (prop === 'incr') return async (key: string) => {
+          const result = await target.incr(key);
+          if (key.startsWith(STORE_ALERT_SMS_DAILY_PREFIX)) {
+            reservations++;
+            await app.prisma.vendor.update({ where: { id: vendorId }, data: { phone: reservations === 1 ? second.phone : third.phone } });
+          }
+          return result;
+        };
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      } }) as Redis;
+      expect(await runLadderJob({ ...deps({ redis }), queue }, { orderId: o.orderId, rung: 'sms', retry })).toBe('not_submitted');
+      expect(reservations).toBe(2);
+      for (const actor of [owner, second, third]) {
+        expect(smsTo(actor.phone).filter((entry) => entry.body.includes(o.orderNumber))).toEqual([]);
+        expect(await textsCounted(actor.phone)).toBe(0);
+      }
+      expect(queue.jobs).toHaveLength(retry === 0 ? 1 : 0);
+      expect(await app.redis.get(rungClaimKey(o.orderId, 'sms'))).toBeNull();
+      expect(await app.redis.get(`${rungClaimKey(o.orderId, 'sms')}:submitted`)).toBeNull();
+    });
+  }
+
+  it('an unknown SMS result keeps spend and marker and cannot enter not-submitted retry', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const vendorId = await makeStore(owner, 'Unknown handoff fixture');
+    const o = await placeAndAlert(vendorId); const queue = recordingQueue(); let submissions = 0;
+    const channels = { ...getChannels(), sms: { sendSms: async () => { submissions++; throw new Error('synthetic lost response after transport'); } } };
+    expect(await runLadderJob({ ...deps({ channels }), queue }, { orderId: o.orderId, rung: 'sms' })).toBe('sms_uncertain');
+    expect(submissions).toBe(1); expect(queue.jobs).toEqual([]);
+    expect(await textsCounted(owner.phone)).toBe(1);
+    expect(await app.redis.get(`${rungClaimKey(o.orderId, 'sms')}:submitted`)).not.toBeNull();
+    expect(await runLadderJob({ ...deps({ channels }), queue }, { orderId: o.orderId, rung: 'sms' })).toBe('already_sent');
+    expect(submissions).toBe(1);
+  });
+});
+
+
+describe('DS403 current team stopping authority', () => {
+  for (const history of ['removed-then-read', 'removed-then-read-all', 'read-then-removed', 'seen-then-removed', 'ack-then-removed'] as const) {
+    it(`${history}: historical inbox or receipt does not stop the remaining team`, async () => {
+      const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      const vendorId = await makeStore(owner, 'Historical reader fixture');
+      const membership = await joinTeam(vendorId, member, owner);
+      const ownerToken = await device(owner);
+      const o = await placeAndAlert(vendorId);
+      const notice = await app.prisma.notification.findFirstOrThrow({ where: { userId: member.userId, data: { path: ['orderId'], equals: o.orderId } } });
+      if (history === 'read-then-removed') await notifications.markAsRead(member.userId, notice.id);
+      if (history === 'seen-then-removed') await markStoreAlertSeen(app.prisma, o.orderId, member.userId);
+      if (history === 'ack-then-removed') await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', o.orderId, member.userId);
+      await app.prisma.vendorStaff.delete({ where: { id: membership.id } });
+      if (history === 'removed-then-read') await notifications.markAsRead(member.userId, notice.id);
+      if (history === 'removed-then-read-all') await notifications.markAllAsRead(member.userId);
+      expect(await runLadderRung(deps(), o.orderId, 'ring1')).toBe('realerted');
+      expect(stillWaitingPushesTo(ownerToken, o.orderId)).toHaveLength(1);
+      expect(await app.prisma.notification.findUnique({ where: { id: notice.id } })).not.toBeNull();
+      if (history.includes('read')) expect((await app.prisma.notification.findUniqueOrThrow({ where: { id: notice.id } })).isRead).toBe(true);
+      else expect(await app.prisma.alertDelivery.findFirst({ where: { subjectId: o.orderId, recipientId: member.userId, ...(history === 'seen-then-removed' ? { seenAt: { not: null } } : { acknowledgedAt: { not: null } }) } })).not.toBeNull();
+    });
+  }
+
+  it('inactive owner historical read cannot silence an active staff member', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const vendorId = await makeStore(owner, 'Inactive reader fixture');
+    await joinTeam(vendorId, member, owner); const token = await device(member);
+    const o = await placeAndAlert(vendorId);
+    await notifications.markAllAsRead(owner.userId);
+    await app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'DEACTIVATED' } });
+    expect(await runLadderRung(deps(), o.orderId, 'ring1')).toBe('realerted');
+    expect(stillWaitingPushesTo(token, o.orderId)).toHaveLength(1);
+  });
+
+  it('a current eligible member still stops pending rungs and accepted status remains authoritative', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const vendorId = await makeStore(owner, 'Current reader fixture');
+    const membership = await joinTeam(vendorId, member, owner); await device(owner);
+    const o = await placeAndAlert(vendorId);
+    await notifications.markAllAsRead(member.userId);
+    expect(await runLadderRung(deps(), o.orderId, 'ring1')).toBe('stopped');
+    await app.prisma.order.update({ where: { id: o.orderId }, data: { status: 'ACCEPTED' } });
+    await app.prisma.vendorStaff.delete({ where: { id: membership.id } });
+    expect(await runLadderRung(deps(), o.orderId, 'sms')).toBe('stopped');
+  });
+});
+
+describe('DS403 partial delivery uncertainty', () => {
+  it('partial socket handoff and ambiguous push preserve unknown when later recipients are suppressed', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const vendorId = await makeStore(owner, 'Unknown push fixture');
+    await joinTeam(vendorId, member, owner); await device(owner); await device(member);
+    const o = await placeAndAlert(vendorId); const queue = recordingQueue(); const before = emitted.length;
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('unavailable', { status: 503 }));
+    try {
+      const channels = { ...getChannels(), push: withPushRetry(new ExpoPushProvider(), [1]) };
+      expect(await runLadderJob({ ...deps({ channels }), queue }, { orderId: o.orderId, rung: 'ring1' })).toBe('submission_unknown');
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(emitted.slice(before).filter((event) => event.room === `user:${owner.userId}`)).toHaveLength(1);
+      expect(emitted.slice(before).filter((event) => event.room === `user:${member.userId}`)).toEqual([]);
+      expect(queue.jobs.filter((job) => job.data['rung'] === 'ring1')).toEqual([]);
+      expect(await app.redis.get(`${rungClaimKey(o.orderId, 'ring1')}:submitted`)).not.toBeNull();
+    } finally { fetcher.mockRestore(); }
+  });
+});
+
+
+describe('SX403 last durable boundaries', () => {
+  it('operator inbox insertion rolls back with its Order authority transaction', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const vendorId = await makeStore(owner, 'Atomic inbox fixture');
+    const o = await placeAndAlert(vendorId);
+    const transaction = app.prisma.$transaction.bind(app.prisma);
+    let rolledBack = false;
+    const guard = vi.spyOn(app.prisma, '$transaction').mockImplementation(((work: any, options: any) => {
+      if (typeof work !== 'function') return transaction(work, options);
+      return transaction(async (tx) => {
+        const result = await work(tx);
+        if (await tx.notification.count({ where: { AND: [{ data: { path: ['kind'], equals: 'ops_order_unanswered' } }, { data: { path: ['orderId'], equals: o.orderId } }] } })) {
+          rolledBack = true; throw new Error('synthetic failure before authority commit');
+        }
+        return result;
+      }, options);
+    }) as typeof transaction);
+    try {
+      expect(await runLadderRung(deps(), o.orderId, 'admin')).toBe('submission_unknown');
+      expect(rolledBack).toBe(true);
+      expect(await app.prisma.notification.count({ where: { AND: [{ data: { path: ['kind'], equals: 'ops_order_unanswered' } }, { data: { path: ['orderId'], equals: o.orderId } }] } })).toBe(0);
+    } finally { guard.mockRestore(); }
+  });
+
+  it('expiry after the final destination lock prevents fetch and refunds its reservation', async () => {
+    const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const vendorId = await makeStore(owner, 'Last deadline fixture');
+    const o = await placeAndAlert(vendorId);
+    const barrier = pauseLockedAuthority(); const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ sid: 'SM' + '4'.repeat(32) }), { status: 201 }));
+    let delivery: ReturnType<typeof runLadderRung> | undefined;
+    try {
+      delivery = runLadderRung(deps({ channels: syntheticSmsChannels(owner.phone) }), o.orderId, 'sms');
+      await barrier.locked;
+      clock.mockReturnValue(o.respondBy.getTime() + 1);
+      barrier.release();
+      expect(await delivery).toBe('window_closed');
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(await textsCounted(owner.phone)).toBe(0);
+    } finally {
+      barrier.release(); await Promise.allSettled([delivery]);
+      barrier.restore(); clock.mockRestore(); fetcher.mockRestore(); vi.unstubAllEnvs();
+    }
   });
 });

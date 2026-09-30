@@ -1,3 +1,4 @@
+import { withStoreAlertStop } from '../notification/store-alert-order-authority';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
@@ -494,7 +495,7 @@ async function requireVendor(
  *  it: nobody is still waiting on it. The explicit ack clears only the
  *  caller's own. Callers have already proven the order is their store's. */
 async function ackVendorAlert(app: FastifyInstance, userId: string, orderId: string, forWholeTeam = false) {
-  await app.prisma.notification.updateMany({
+  await withStoreAlertStop(app.prisma, [orderId], (tx) => tx.notification.updateMany({
     where: {
       ...(forWholeTeam ? {} : { userId }),
       isRead: false,
@@ -504,7 +505,7 @@ async function ackVendorAlert(app: FastifyInstance, userId: string, orderId: str
       ],
     },
     data: { isRead: true, readAt: new Date() },
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------
