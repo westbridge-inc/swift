@@ -1,5 +1,7 @@
 'use client';
 
+import CartSkeleton from './loading';
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -441,7 +443,7 @@ export default function CartPage() {
       <button type="button" onClick={() => void refresh().catch((refreshError) => setError(refreshError instanceof Error ? refreshError.message : 'Could not load your cart.'))} className={`${styles.button} ${styles.buttonPrimary} ${styles.retryButton}`}>Try again</button>
     </section>
   );
-  if (!cart) return <div className={styles.loading} aria-label="Loading your cart" />;
+  if (!cart) return <CartSkeleton />;
   if (!cart.items?.length) return (
     <section className={styles.emptyState}>
       <h1 className={styles.stateTitle}>Your cart is empty</h1>

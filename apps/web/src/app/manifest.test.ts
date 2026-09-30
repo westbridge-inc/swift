@@ -78,3 +78,14 @@ describe('[PWA-1] the web app manifest', () => {
     }
   });
 });
+
+it('offers Search, Orders and Cart shortcuts that resolve to real customer routes', () => {
+  const shortcuts = manifest().shortcuts ?? [];
+  expect(shortcuts.map(({ name, url }) => [name, url])).toEqual([
+    ['Search', '/order/search'], ['Orders', '/orders'], ['Cart', '/cart'],
+  ]);
+  for (const shortcut of shortcuts) {
+    expect(existsSync(join(WEB_ROOT, 'src/app/(app)', shortcut.url, 'page.tsx'))).toBe(true);
+    expect(pngHeader(shortcut.icons![0]!.src).size).toBe('192x192');
+  }
+});

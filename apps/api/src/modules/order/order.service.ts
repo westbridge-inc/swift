@@ -586,7 +586,7 @@ export class OrderService {
     // a refusal names its rule and rolls the whole claim back.
     const stackCapacity = await riderStackingCapacity(this.prisma);
     if (stackCapacity > 1) {
-      const verdict = await stackVerdict(tx, input.riderId, input.orderId);
+      const verdict = await stackVerdict(tx, input.riderId, input.orderId, stackCapacity);
       if (!verdict.eligible && verdict.legs > 0) {
         throw new ConflictError(
           `This job can't be stacked with your current delivery (${verdict.rule}: ${verdict.detail})`,

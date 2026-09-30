@@ -10,6 +10,10 @@ import { customerRoute, HOME_PATH } from '@/lib/customer-routes';
 import { Providers } from '@/components/providers';
 import { CustomerSessionProvider, type CustomerSession, type NearPoint, type SessionStatus } from '@/components/customer-session';
 import { ContentSkeleton, SignInDoor, TabBar, TopBar } from '@/components/customer-shell';
+import CartSkeleton from './cart/loading';
+import OrderDetailSkeleton from './orders/[id]/loading';
+import { OrdersSkeleton } from '@/components/customer-skeletons';
+import { OfflineNotice } from '@/components/offline-notice';
 import { InstallPrompt } from '@/components/install-prompt';
 
 // The customer ordering app. Opening swiftgy.com lands here, on Home.
@@ -176,7 +180,7 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
   let content: React.ReactNode;
   if (route.public || status === 'signed-in') content = children;
   else if (status === 'guest' && restoreTried) content = <SignInDoor door={route.door} returnPath={returnPath()} />;
-  else content = <ContentSkeleton />;
+  else content = <div aria-label="Opening this page">{pathname === '/cart' ? <CartSkeleton /> : pathname === '/orders' ? <OrdersSkeleton /> : pathname.startsWith('/orders/') ? <OrderDetailSkeleton /> : <ContentSkeleton />}</div>;
 
   // [PWA-1] Installed on an iPhone the app runs edge to edge: the header pads
   // below the status bar, the dock sits above the home bar, and the page ends
@@ -197,6 +201,7 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
           returnPath={returnPath}
         />
         <main className="mx-auto max-w-6xl px-4 pt-4 pb-[calc(5rem_+_env(safe-area-inset-bottom))] md:pt-6 md:pb-[calc(1.5rem_+_env(safe-area-inset-bottom))]">
+          <OfflineNotice />
           <div key={pathname} className="swift-route-in">{content}</div>
         </main>
         <TabBar activeTab={route.tab} marketVisible={marketVisible} />
