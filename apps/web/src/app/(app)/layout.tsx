@@ -151,8 +151,7 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
 
   // [Q7b] Market is a tab only when the server's depth verdict says so — the
   // phone app's rule, read from the same public endpoint.
-  const market = useQuery({ queryKey: ['market', 'depth'], queryFn: getMarketDepth, staleTime: 5 * 60_000, retry: false });
-  const marketVisible = marketTabVisible(market.data);
+  const [marketVisible, setMarketVisible] = useState(false);
 
   // A private page opened with an expired access cookie: spend the refresh
   // cookie once before deciding this is a guest.
@@ -204,6 +203,7 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
           <OfflineNotice />
           <div key={pathname} className="swift-route-in">{content}</div>
         </main>
+        <MarketAvailability onChange={setMarketVisible} />
         <TabBar activeTab={route.tab} marketVisible={marketVisible} />
         {/* [PWA-1] Offered on Home only, never over a cart, checkout or live
             order. Mounted from the first render, so an install event that
@@ -212,4 +212,13 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
       </div>
     </CustomerSessionProvider>
   );
+}
+
+/** Observe after page children: a public page can hydrate the shared query
+ * before the shell subscribes. This avoids a duplicate cold depth request. */
+function MarketAvailability({ onChange }: { onChange: (_visible: boolean) => void }) {
+  const market = useQuery({ queryKey: ['market', 'depth'], queryFn: getMarketDepth, staleTime: 5 * 60_000, retry: false });
+  const visible = marketTabVisible(market.data);
+  useEffect(() => { onChange(visible); }, [onChange, visible]);
+  return null;
 }
