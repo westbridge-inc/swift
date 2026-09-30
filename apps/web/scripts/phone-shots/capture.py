@@ -2,7 +2,7 @@
 """Local, synthetic phone screenshots. Never contacts the configured API host.
 
 Run a production `next start` with API_URL=http://127.0.0.1:3109, then run
-`python3 capture.py before|after|after-v2`. Browser API traffic is intercepted in CDP
+`python3 capture.py before|after|after-v2|after-v3`. Browser API traffic is intercepted in CDP
 and fulfilled by this local fixture server. No third-party Python modules.
 """
 import base64
@@ -28,6 +28,7 @@ ROUTES = ["/dashboard", "/dashboard/orders", "/dashboard/inventory",
           "/portal/history", "/portal/documents", "/portal/account",
           "/", "/store/phone-fixture", "/how-it-works"]
 V2_ROUTES = ["/dashboard/orders", "/portal/history"]
+V3_ROUTES = ["/dashboard", "/portal"]
 FIXTURE_MARKERS = {
     "/dashboard": "Today", "/dashboard/orders": "SW-1001",
     "/dashboard/inventory": "Rice", "/dashboard/inventory/import": "Bulk import",
@@ -127,7 +128,7 @@ class Mock(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", WEB)
         self.send_header("Access-Control-Allow-Credentials", "true")
-        self.send_header("Access-Control-Allow-Headers", "content-type,x-swift-client,x-vendor-id")
+        self.send_header("Access-Control-Allow-Headers", "content-type,x-swift-client,x-vendor-id,x-client-platform")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
         if self.path.startswith("/api/v1/auth/me"):
             role = "mover" if "swift_at=fixture-mover" in self.headers.get("Cookie", "") else "owner"
@@ -209,14 +210,14 @@ class WS:
                                 {"name": "Set-Cookie", "value": f"swift_at=fixture-{self.role}; HttpOnly; Secure; SameSite=None; Path=/"},
                                 {"name": "Access-Control-Allow-Origin", "value": WEB},
                                 {"name": "Access-Control-Allow-Credentials", "value": "true"},
-                                {"name": "Access-Control-Allow-Headers", "value": "content-type,x-swift-client,x-vendor-id"},
+                                {"name": "Access-Control-Allow-Headers", "value": "content-type,x-swift-client,x-vendor-id,x-client-platform"},
                                 {"name": "Access-Control-Allow-Methods", "value": "GET,POST,PUT,DELETE,OPTIONS"}],
             "body": base64.b64encode(data).decode()}})
 
 def main():
     import sys
     phase = sys.argv[1]
-    assert phase in ("before", "after", "after-v2")
+    assert phase in ("before", "after", "after-v2", "after-v3")
     os.makedirs(ROOT, exist_ok=True)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 3109), Mock)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -229,9 +230,10 @@ def main():
                 urllib.request.urlopen("http://127.0.0.1:3110/json/version", timeout=1); break
             except Exception: time.sleep(.2)
         passed = 0; failures = []
-        routes = V2_ROUTES if phase == "after-v2" else ROUTES
+        routes = V2_ROUTES if phase == "after-v2" else V3_ROUTES if phase == "after-v3" else ROUTES
         for route in routes:
-            for width, height, dpr in ((390, 844, 3), (360, 800, 2)):
+            sizes = ((390, 844, 3),) if phase == "after-v3" else ((390, 844, 3), (360, 800, 2))
+            for width, height, dpr in sizes:
                 # Start blank so interception is installed before any app code runs.
                 tab = json.load(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:3110/json/new?about:blank", method="PUT")))
                 ws = WS(tab["webSocketDebuggerUrl"])
@@ -256,6 +258,16 @@ def main():
                 time.sleep(.5)
                 state = ws.command("Runtime.evaluate", {"expression": "({scroll:document.documentElement.scrollWidth,width:innerWidth,text:document.body.innerText,url:location.href,ready:document.readyState})", "returnByValue": True})["result"]["value"]
                 assert loaded_state(route, state["url"], state["text"], state["ready"], ws.api_errors), f"{route}: fixture changed or API failed: {ws.api_errors}"
+                if phase == "after-v3":
+                    ws.command("Runtime.evaluate", {"expression": "document.querySelector('button[aria-label=\"Open menu\"]')?.click()"})
+                    fee_href = "/dashboard/weekly-fee" if route == "/dashboard" else "/portal/weekly-fee"
+                    for _ in range(30):
+                        check = "(() => {const dialog=document.querySelector('[role=dialog]'); const fee=dialog?.querySelector('a[href=\"" + fee_href + "\"]'); return {visible:!!dialog,fee:fee?.textContent?.trim(),scroll:document.documentElement.scrollWidth,width:innerWidth}})()"
+                        menu = ws.command("Runtime.evaluate", {"expression": check, "returnByValue": True})["result"]["value"]
+                        if menu["visible"] and menu["fee"] == "Weekly fee": break
+                        time.sleep(.1)
+                    assert menu["visible"] and menu["fee"] == "Weekly fee", f"Weekly fee missing from {route} phone menu: {menu}"
+                    assert menu["scroll"] <= menu["width"] and menu["scroll"] <= width, f"Overflow in {route} phone menu: {menu}"
                 if route == "/dashboard/orders" and phase == "after-v2":
                     geometry = ws.command("Runtime.evaluate", {"expression": "(() => {const panel=Array.from(document.querySelectorAll('h2')).find(e=>e.textContent?.includes('NEW ORDER'))?.parentElement; const controls=panel && Array.from(panel.querySelectorAll('select,button')).filter(e=>['Preparation time','Reject reason','Accept','Reject'].includes(e.getAttribute('aria-label')||e.textContent?.trim())); return controls?.map(e=>({name:e.getAttribute('aria-label')||e.textContent?.trim(),left:e.getBoundingClientRect().left,right:e.getBoundingClientRect().right,top:e.getBoundingClientRect().top,bottom:e.getBoundingClientRect().bottom,height:e.getBoundingClientRect().height}));})()", "returnByValue": True})["result"].get("value")
                     assert geometry and len(geometry) == 4, f"Takeover controls missing: {geometry}"
@@ -263,7 +275,7 @@ def main():
                     if width < 400:
                         assert all(geometry[i]["bottom"] <= geometry[i+1]["top"] for i in range(3)), f"Takeover controls overlap: {geometry}"
                 slug = route.strip("/").replace("/", "-") or "home"
-                filename = f"after-{slug}-{width}x{height}-v2.png" if phase == "after-v2" else f"{phase}-{slug}-{width}x{height}.png"
+                filename = f"after-{slug}-{width}x{height}-v2.png" if phase == "after-v2" else f"after-{slug}-{width}x{height}-v3.png" if phase == "after-v3" else f"{phase}-{slug}-{width}x{height}.png"
                 image = ws.command("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False})["data"]
                 with open(os.path.join(ROOT, filename), "wb") as out: out.write(base64.b64decode(image))
                 ok = state["scroll"] <= state["width"] and state["scroll"] <= width
@@ -308,7 +320,7 @@ def main():
                         with open(os.path.join(ROOT, name), "wb") as out: out.write(base64.b64decode(shot))
                         print(f"{name}: interaction PASS", flush=True)
                 ws.command("Page.close"); ws.sock.close()
-        print(f"NO OVERFLOW: {passed}/{len(routes)*2}; failures={failures}")
+        print(f"NO OVERFLOW: {passed}/{len(routes) * (1 if phase == 'after-v3' else 2)}; failures={failures}")
         if phase.startswith("after") and failures: sys.exit(1)
     finally:
         chrome.terminate(); server.shutdown()

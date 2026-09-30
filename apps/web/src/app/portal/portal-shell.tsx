@@ -8,6 +8,7 @@ import { ConsoleShell } from '@/components/console-shell';
 import { sessionProbe } from '@/lib/auth';
 
 const NAV = [
+  { href: '/portal/weekly-fee', label: 'Weekly fee', icon: History, exact: true },
   { href: '/portal', label: 'Earnings', icon: LayoutDashboard, exact: true },
   { href: '/portal/history', label: 'History', icon: History, exact: false },
   { href: '/portal/documents', label: 'Documents', icon: FileCheck2, exact: false },

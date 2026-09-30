@@ -7,6 +7,8 @@ import axios, {
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthSessionSnapshot, RotatedAuthTokens } from '../lib/authSession';
 
+const nativePlatform = vi.hoisted(() => ({ OS: 'ios' }));
+
 const auth = vi.hoisted(() => {
   const previousApiUrl = process.env['EXPO_PUBLIC_API_URL'];
   delete process.env['EXPO_PUBLIC_API_URL'];
@@ -59,7 +61,7 @@ vi.mock('expo-constants', () => ({
   default: { expoConfig: {} },
 }));
 
-vi.mock('react-native', () => ({
+vi.mock('react-native', () => ({ Platform: nativePlatform,
   TurboModuleRegistry: {
     get: () => ({
       getConstants: () => ({
@@ -82,6 +84,7 @@ import {
   servicesApi,
   verificationApi,
   vendorApi,
+  weeklyFeeApi,
 } from './api';
 
 const originalAxiosAdapter = axios.defaults.adapter;
@@ -147,6 +150,7 @@ function authorization(config: InternalAxiosRequestConfig): string | undefined {
 }
 
 beforeEach(() => {
+  nativePlatform.OS = 'ios';
   auth.current = { ...accountA };
   auth.logoutCalls = 0;
   auth.rotateCalls = 0;
@@ -684,5 +688,46 @@ describe('[MOB-010 / TST-010] the store header is vendor-scoped, never global', 
     });
     await expect(api.get('/customer/orders')).resolves.toMatchObject({ status: 200 });
     expect(seen).toEqual([['/customer/orders', null], ['/customer/orders', null]]);
+  });
+});
+
+
+describe('weekly fee MMG transport', () => {
+  it.each(['ios', 'android', 'web'])('every partner subscription request identifies %s', async (platform) => {
+    nativePlatform.OS = platform;
+    const seen: InternalAxiosRequestConfig[] = [];
+    setAdapter(async (config) => { seen.push(config); return response(config, 200, { success: true, data: {} }); });
+    await vendorApi.subscription(); await riderApi.subscription(); await driverApi.subscription();
+    expect(seen).toHaveLength(3);
+    for (const request of seen) expect(request.headers.get('x-client-platform')).toBe(platform);
+  });
+  it.each(['vendor', 'rider', 'driver'] as const)('%s sends platform, idempotency and the exact empty body; 200 OPEN is accepted', async (family) => {
+    auth.selectedStoreId = 'store-a';
+    const seen: InternalAxiosRequestConfig[] = [];
+    setAdapter(async (config) => { seen.push(config); return response(config, 200, { success: true, data: { ref: 'ref-1', status: 'OPEN', checkoutUrl: 'https://checkout.test/opaque' } }); });
+    const client = weeklyFeeApi(family, accountA, 'store-a');
+    expect(await client.start('new-tap-key')).toMatchObject({ ref: 'ref-1', status: 'OPEN' });
+    await client.read('ref/1');
+    expect(seen.map((c) => c.url)).toEqual([`/${family}/subscription/mmg-checkout`, `/${family}/subscription/mmg-checkout/ref%2F1`]);
+    expect(seen[0]!.headers.get('Idempotency-Key')).toBe('new-tap-key');
+    expect(seen[0]!.data).toBe('{}');
+    for (const request of seen) {
+      expect(request.headers.get('x-client-platform')).toBe('ios');
+      expect(authorization(request)).toBe(`Bearer ${accountA.accessToken}`);
+      expect(request.headers.get('x-vendor-id')).toBe(family === 'vendor' ? 'store-a' : undefined);
+    }
+  });
+  it('a checkout may not borrow a new store or principal, including a late reply', async () => {
+    auth.selectedStoreId = 'store-a';
+    const pending = deferred<AxiosResponse>();
+    let sent!: InternalAxiosRequestConfig;
+    setAdapter((config) => { sent = config; return pending.promise; });
+    const client = weeklyFeeApi('vendor', accountA, 'store-a');
+    const request = client.start('tap-key-1');
+    auth.selectedStoreId = 'store-b';
+    pending.resolve(response(sent, 200, { success: true, data: { ref: 'old-ref' } }));
+    await expect(request).rejects.toThrow('paying account changed');
+    await expect(client.start('tap-key-2')).rejects.toThrow('paying account changed');
+    auth.current = accountB; await expect(client.read('old-ref')).rejects.toThrow('paying account changed');
   });
 });
