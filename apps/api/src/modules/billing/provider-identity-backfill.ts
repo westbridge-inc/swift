@@ -48,19 +48,19 @@ export async function providerIdentityBackfillDone(prisma: Pick<PrismaClient, 'p
 }
 
 /** The provider transaction id as every channel stores it (normalizeProviderTxnId: trimmed, upper-cased). */
-const keyOf = (column: string) => Prisma.raw(`upper(regexp_replace(${column}, '^[[:space:]]+|[[:space:]]+$', '', 'g'))`);
+const keyOf = (column: Prisma.Sql): Prisma.Sql => Prisma.sql`upper(regexp_replace(${column}, '^[[:space:]]+|[[:space:]]+$', '', 'g'))`;
 
 /** The payer whose tenant owns a subscription's money (subscriptionTenantInTx). */
-const PAYER = Prisma.raw(`
+const PAYER = Prisma.sql`
     LEFT JOIN "riders" r ON r."id" = s."riderId"
     LEFT JOIN "drivers" d ON d."id" = s."driverId"
     LEFT JOIN "vendors" v ON v."id" = s."vendorId"
     LEFT JOIN "vendor_owners" vo ON vo."id" = v."ownerId"
-    JOIN "users" u ON u."id" = COALESCE(r."userId", d."userId", vo."userId")`);
+    JOIN "users" u ON u."id" = COALESCE(r."userId", d."userId", vo."userId")`;
 
 function pushSource(scope: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`
-    SELECT ${keyOf('p."externalRef"')} AS "key", 'push:' || p."id" AS "claimant", p."subscriptionId",
+    SELECT ${keyOf(Prisma.sql`p."externalRef"`)} AS "key", 'push:' || p."id" AS "claimant", p."subscriptionId",
            p."amount"::numeric AS "amount", COALESCE(att."currencyCode", s."currencyCode")::text AS "currencyCode",
            COALESCE(p."paidAt", p."createdAt") AS "creditedAt", u."tenantId"
     FROM "subscription_payments" p
@@ -68,13 +68,13 @@ function pushSource(scope: Prisma.Sql): Prisma.Sql {
     ${PAYER}
     LEFT JOIN "billing_events" att ON p."clientKey" LIKE 'sub:%' AND att."idempotencyKey" = 'charge:' || substr(p."clientKey", 5)
     WHERE p."paymentMethod" = 'MOBILE_MONEY' AND p."status" = 'CAPTURED'
-      AND p."externalRef" IS NOT NULL AND ${keyOf('p."externalRef"')} <> ''
+      AND p."externalRef" IS NOT NULL AND ${keyOf(Prisma.sql`p."externalRef"`)} <> ''
       ${scope}`;
 }
 
 function topupSource(scope: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`
-    SELECT ${keyOf('fr."mmgRef"')} AS "key",
+    SELECT ${keyOf(Prisma.sql`fr."mmgRef"`)} AS "key",
            COALESCE('topup:' || tc."adminId" || ':' || tc."idempotencyKey", 'receipt:' || fr."billingEventId") AS "claimant",
            fr."subscriptionId", fr."amount"::numeric AS "amount", ev."currencyCode"::text AS "currencyCode",
            ev."createdAt" AS "creditedAt", u."tenantId"
@@ -83,12 +83,12 @@ function topupSource(scope: Prisma.Sql): Prisma.Sql {
     LEFT JOIN "topup_commands" tc ON tc."billingEventId" = fr."billingEventId"
     JOIN "subscriptions" s ON s."id" = fr."subscriptionId"
     ${PAYER}
-    WHERE fr."channel" = 'ADMIN_TOPUP' AND fr."mmgRef" IS NOT NULL AND ${keyOf('fr."mmgRef"')} <> ''
+    WHERE fr."channel" = 'ADMIN_TOPUP' AND fr."mmgRef" IS NOT NULL AND ${keyOf(Prisma.sql`fr."mmgRef"`)} <> ''
       ${scope}`;
 }
 
 function agentCashSource(scope: Prisma.Sql): Prisma.Sql {
-  const raw = `COALESCE(ap."mmgTxnId", CASE WHEN ap."channel" = 'MANUAL_ADMIN' THEN regexp_replace(ap."externalId", '^MANUAL:', '') ELSE ap."externalId" END)`;
+  const raw = Prisma.sql`COALESCE(ap."mmgTxnId", CASE WHEN ap."channel" = 'MANUAL_ADMIN' THEN regexp_replace(ap."externalId", '^MANUAL:', '') ELSE ap."externalId" END)`;
   return Prisma.sql`
     SELECT ${keyOf(raw)} AS "key", ap."id" AS "claimant", ap."subscriptionId",
            ap."amount"::numeric AS "amount", ap."currencyCode"::text AS "currencyCode", ap."paidAt" AS "creditedAt", ap."tenantId"
@@ -135,12 +135,12 @@ export async function runProviderIdentityBackfill(
   prisma: PrismaClient,
   opts: { subscriptionIds?: string[] } = {},
 ): Promise<ProviderIdentityBackfillResult> {
-  const only = (column: string) => (opts.subscriptionIds
-    ? (opts.subscriptionIds.length > 0 ? Prisma.sql`AND ${Prisma.raw(column)} IN (${Prisma.join(opts.subscriptionIds)})` : Prisma.sql`AND false`)
+  const only = (column: Prisma.Sql): Prisma.Sql => (opts.subscriptionIds
+    ? (opts.subscriptionIds.length > 0 ? Prisma.sql`AND ${column} IN (${Prisma.join(opts.subscriptionIds)})` : Prisma.sql`AND false`)
     : Prisma.empty);
-  const push = await fileIdentities(prisma, pushSource(only('p."subscriptionId"')));
-  const topups = await fileIdentities(prisma, topupSource(only('fr."subscriptionId"')));
-  const agentCash = await fileIdentities(prisma, agentCashSource(only('ap."subscriptionId"')));
+  const push = await fileIdentities(prisma, pushSource(only(Prisma.sql`p."subscriptionId"`)));
+  const topups = await fileIdentities(prisma, topupSource(only(Prisma.sql`fr."subscriptionId"`)));
+  const agentCash = await fileIdentities(prisma, agentCashSource(only(Prisma.sql`ap."subscriptionId"`)));
   return {
     push: push.filed,
     topups: topups.filed,

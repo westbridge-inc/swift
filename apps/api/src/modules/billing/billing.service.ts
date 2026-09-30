@@ -2,6 +2,7 @@ import type { OnAudit } from '../../lib/audit-writer';
 import { createHash } from 'node:crypto';
 import type { PrismaClient, Subscription, SubscriptionPayment, Prisma, SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
@@ -2083,8 +2084,18 @@ export class BillingService {
    *  through it. */
   private async creditWalletInTx(
     tx: Prisma.TransactionClient,
-    opts: { subscriptionId: string; amount: number; currencyCode: string; eventKey: string; note: string; channel: string; mmgRef?: string; rail?: 'CARD' },
+    opts: { subscriptionId: string; amount: number; currencyCode: string; eventKey: string; note: string; channel: string; mmgRef?: string; rail?: 'CARD'; expectedTenantId?: string },
   ) {
+    // A system payment has no request tenant. Derive ownership from the
+    // trusted payer inside this transaction, never from a receipt default.
+    const tenantId = await subscriptionTenantInTx(tx, opts.subscriptionId);
+    const requestTenantId = getTenantId();
+    if (requestTenantId && requestTenantId !== tenantId) {
+      throw new AppError(403, 'SUBSCRIPTION_TENANT_MISMATCH', 'The payment tenant does not match the subscription payer.');
+    }
+    if (opts.expectedTenantId && opts.expectedTenantId !== tenantId) {
+      throw new ProviderIdentityError('PROVIDER_TXN_TENANT_CONFLICT', 'The checkout tenant does not match the subscription payer.');
+    }
     // One subscription has one currency-denominated wallet. Even an empty
     // wallet must never be relabelled or incremented with another currency.
     // Materialize/lock the row, then include its currency in the monetary CAS;
@@ -2117,6 +2128,7 @@ export class BillingService {
     await issueReceipt(tx, {
       subscriptionId: opts.subscriptionId,
       billingEventId: event.id,
+      tenantId,
       amount: opts.amount,
       channel: opts.channel,
       mmgRef: opts.mmgRef,
@@ -3847,6 +3859,8 @@ export class BillingService {
       reference?: string;
       /** Globally unique for the real-world payment, not the destination. */
       eventKey: string;
+      /** Trusted checkout ownership, checked against the payer in the credit transaction. */
+      expectedTenantId?: string;
       /** The rail the money came by, when the caller names it (MMG_CHECKOUT). */
       channel?: string;
     },
@@ -3863,6 +3877,7 @@ export class BillingService {
       amount: input.amount,
       currencyCode: sub.currencyCode,
       eventKey: input.eventKey,
+      expectedTenantId: input.expectedTenantId,
       note: input.reference
         ? `ref: ${input.reference} (by ${input.recordedBy})`
         : `recorded by ${input.recordedBy}`,

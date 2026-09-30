@@ -187,7 +187,7 @@ Never say "paid" before `CONFIRMED`. Never promise an instant restore: access co
 
 After payment, MMG sends the partner's browser to the return address registered for Swift's merchant account: `<MMG_CHECKOUT_RETURN_ORIGIN>/pay/mmg/<outcome>`, for example `…/pay/mmg/success` and `…/pay/mmg/error`.
 
-What MMG attaches is not yet confirmed (`CHECKOUT-CONTRACT.md` U3): it may be a query parameter or a form POST, and the name is unknown. The page therefore forwards everything and interprets nothing.
+The official merchant page says MMG posts an encrypted TOKEN to the configured Response URL. The exact transport parameter spelling remains unconfirmed. The page forwards bounded fields and interprets nothing. MMG must also register the Error URL; the optional Notify URL requires separate authentication and transport confirmation. Checkout series PR 3 owns the API route wiring and route-level checks below; these are pending integration requirements, not completed PR 2 behavior.
 
 1. **Accept both GET and POST.** Take every query parameter (GET) or form field (POST) exactly as received:
    - a key that appears more than once is forwarded as an array of its values, in order;
@@ -221,9 +221,19 @@ What MMG attaches is not yet confirmed (`CHECKOUT-CONTRACT.md` U3): it may be a 
      The return page cannot tell who paid: its answer names no one. A cookie set when the checkout started would not survive MMG's cross-site redirect (SameSite), least of all a form POST.
 5. **Headers and privacy:** send `X-Robots-Tag: noindex`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. Never log, render or forward the received values anywhere except `/return`. Keep the query out of analytics.
 
-`POST /api/v1/billing/mmg-checkout/notify` is for MMG's servers, if MMG calls one (U3). It accepts JSON or a form of up to 16 KB and always answers `200 { success: true }`. The app and the web never call it.
+The planned `POST /api/v1/billing/mmg-checkout/notify` is for MMG's servers. Its authentication and server-to-server behavior must be confirmed with MMG before enabling it (U3). It accepts JSON or a form of up to 16 KB and always answers `200 { success: true }`. The app and the web never call it.
 
 Both public routes are rate-limited and size-capped. Neither credits anything by itself: they only prompt the server to check with MMG.
+
+### Official response interpretation (service boundary)
+
+The service accepts only root `merchantTransactionId`, `transactionId` and string `ResultCode` (`0`–`7`). The merchant reference must exactly equal a persisted checkout reference. Messages, HTML and nested or guessed fields never identify a transaction or decide a state.
+
+- `0` (success), `1` (agent not registered), `2` (failed), `6` (cancelled), and `7` (timed out) trigger an authoritative lookup. A bound paid record can confirm the payment, including a timed-out attempt. Only a bound authoritative failure becomes `NOT_PAID`; an absent or unbound record keeps confirming and can expire.
+- `3` (invalid secret), `4` (merchant mismatch), and `5` (token decryption failed) hold an uncredited checkout and alert operators once. They never credit it.
+- An unknown code or malformed response leaves the checkout unchanged. `ResultMessage` and `htmlResponse` are never rendered.
+
+The response's merchant reference does not establish the lookup reference field. `MMG_LOOKUP_REFERENCE_FIELDS` remains empty pending lookup UAT, so live automatic crediting remains held. The F2 canonical identity integration still depends on PR #1395.
 
 ## 7. Notices (push, SMS, inbox)
 

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Prisma, type PrismaClient } from '@prisma/client';
-import { bindingOf, candidatesFrom, judge, sameMsisdn } from '../modules/billing/mmg-checkout.service';
+import { bindingOf, checkoutReplyFrom, judge, sameMsisdn } from '../modules/billing/mmg-checkout.service';
 import {
   FEE_CHECKOUT_PLATFORMS_KEY,
   checkoutAmountGyd,
@@ -35,24 +35,26 @@ const found = (patch: Partial<Extract<MmgLookupDetail, { outcome: 'found' }>> = 
 /** MMG's answer echoing THIS checkout's reference in the confirmed field [F1]. */
 const echo = { echoedReferences: [REF] };
 
-describe('which MMG transaction a reply may be naming (reply field names are unconfirmed)', () => {
-  it('takes id-shaped values, id-like keys first, and never our reference, the amount, the merchant, a date or a secret', () => {
-    const reply = {
-      merchantTransactionId: REF,
-      amount: '1500',
-      merchant: MERCHANT,
-      when: '2026-09-29T12:00:00Z',
-      secretKey: 'SECRET999999',
-      note: 'ZZ12345678',
-      nested: { transactionId: 'MMG-TX-777' },
-      message: 'Payment successful',
-    };
-    expect(candidatesFrom(reply, { merchantTransactionId: REF, amountGyd: 1500 }, [MERCHANT])).toEqual(['MMG-TX-777', 'ZZ12345678']);
+describe('the official MMG response fields', () => {
+  it('reads only root fields and keeps the exact transaction string', () => {
+    expect(checkoutReplyFrom({ merchantTransactionId: REF, transactionId: 'MMG-TX-777', ResultCode: '0', nested: { transactionId: 'OTHER999' }, htmlResponse: 'NO888' }))
+      .toEqual({ merchantTransactionId: REF, transactionId: 'MMG-TX-777', resultCode: '0' });
   });
 
-  it('is bounded: at most five candidates', () => {
-    const reply = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`transactionId${i}`, `TX${100000 + i}`]));
-    expect(candidatesFrom(reply, { merchantTransactionId: REF, amountGyd: 1500 }, [])).toHaveLength(5);
+  it('does not guess candidates from arbitrary fields, even if many look like ids', () => {
+    const ids = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`transactionId${i}`, `TX${100000 + i}`]));
+    expect(checkoutReplyFrom({ ...ids, merchantTransactionId: REF, ResultCode: '0' })).toBeNull();
+  });
+
+  it('failure codes can omit transactionId; a success without one is malformed', () => {
+    for (const ResultCode of ['1', '2', '3', '4', '5', '6', '7']) {
+      expect(checkoutReplyFrom({ merchantTransactionId: REF, ResultCode })).toEqual({ merchantTransactionId: REF, transactionId: null, resultCode: ResultCode });
+    }
+    expect(checkoutReplyFrom({ merchantTransactionId: REF, ResultCode: '0' })).toBeNull();
+  });
+
+  it.each([123, [], {}, ' TX1', 'TX1 ', 'TX1\n', 'TX/1', 'X'.repeat(129)])('rejects malformed transactionId %s', (transactionId) => {
+    expect(checkoutReplyFrom({ merchantTransactionId: REF, ResultCode: '0', transactionId })).toBeNull();
   });
 
   it('one MSISDN spelled with or without 592', () => {

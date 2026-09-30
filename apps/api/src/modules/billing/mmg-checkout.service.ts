@@ -26,12 +26,9 @@ import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './
 //
 // A partner starts a checkout; Swift prices it [I1], persists it with its MMG
 // page sealed [F6], then hands the page out. MMG sends the partner back with an
-// encrypted reply whose field names are still UNCONFIRMED
-// (providers/mmg/CHECKOUT-CONTRACT.md U1-U3), so this service never reads a
-// field by name:
-//   - the checkout is the one whose 18-digit reference appears ANYWHERE in the
-//     decrypted reply (we generated it, so we recognise it);
-//   - every other id-shaped value in the reply is a CANDIDATE MMG transaction.
+// encrypted reply with the official root-level merchantTransactionId,
+// transactionId and ResultCode fields. No nested value or guessed key binds
+// a reply to a checkout or supplies a transaction id.
 // The reply is only a pointer. MMG's own merchant lookup is the only evidence
 // [I2], and a candidate credits only when that lookup reports it approved, for
 // exactly the amount asked, in GYD, paid to our merchant, AND names this
@@ -115,26 +112,35 @@ function replyLeaves(value: unknown, path = '', out: Leaf[] = [], depth = 0): Le
 
 /** Key names that may carry a secret: never looked up, never stored. */
 const SECRET_PATH = /secret|password|passwd|token|apikey|api_key|privatekey|private_key/i;
-/** Key names the MMG lookup itself uses for a transaction (the Postman collection), tried first. */
-const ID_HINT = /transaction|reference|receipt|execution|(^|[^a-z])id$/i;
-
-/** The MMG transaction ids a reply may be naming, best first. */
-export function candidatesFrom(reply: unknown, own: { merchantTransactionId: string; amountGyd: number }, merchantIds: string[]): string[] {
-  const seen = new Set<string>();
-  const ranked: Array<{ value: string; hinted: boolean }> = [];
-  for (const leaf of replyLeaves(reply)) {
-    const value = leaf.value;
-    if (SECRET_PATH.test(leaf.path) || seen.has(value)) continue;
-    if (value === own.merchantTransactionId || value === String(own.amountGyd)) continue;
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{5,63}$/.test(value) || !/\d/.test(value)) continue;
-    if (/^\d{4}-\d{2}-\d{2}/.test(value)) continue; // a date, not an id
-    if (merchantIds.some((merchant) => sameMsisdn(merchant, value))) continue;
-    seen.add(value);
-    const last = leaf.path.split('.').pop() ?? '';
-    ranked.push({ value, hinted: ID_HINT.test(last) });
-  }
-  return [...ranked.filter((r) => r.hinted), ...ranked.filter((r) => !r.hinted)].slice(0, MAX_CANDIDATES).map((r) => r.value);
+export type MmgResultCode = '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7';
+export interface MmgCheckoutReply {
+  merchantTransactionId: string;
+  transactionId: string | null;
+  resultCode: MmgResultCode;
 }
+
+/** The official response fields, exactly as sent. Messages and HTML never
+ *  select a checkout, a transaction, or a payment state. */
+export function checkoutReplyFrom(reply: unknown): MmgCheckoutReply | null {
+  if (!reply || typeof reply !== 'object' || Array.isArray(reply)) return null;
+  const fields = reply as Record<string, unknown>;
+  const ref = fields['merchantTransactionId'];
+  const code = fields['ResultCode'];
+  const txn = fields['transactionId'];
+  if (typeof ref !== 'string' || ref.length !== 18 || !MERCHANT_TRANSACTION_ID_SHAPE.test(ref)) return null;
+  if (typeof code !== 'string' || code.length !== 1 || !/^[0-7]$/.test(code)) return null;
+  // Failed attempts may have no transaction. A success must name one.
+  const absent = txn === undefined || txn === null || txn === '';
+  if (absent && code === '0') return null;
+  if (!absent && (typeof txn !== 'string' || txn.trim() !== txn || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(txn))) return null;
+  return { merchantTransactionId: ref, transactionId: absent ? null : txn as string, resultCode: code as MmgResultCode };
+}
+
+const CONFIG_FAILURES: Partial<Record<MmgResultCode, string>> = {
+  '3': 'MMG_RESULT_3_INVALID_SECRET_KEY',
+  '4': 'MMG_RESULT_4_MERCHANT_ID_MISMATCH',
+  '5': 'MMG_RESULT_5_TOKEN_DECRYPTION_FAILED',
+};
 
 /** The reply as stored: keys that may carry a secret are replaced, and size is bounded. */
 function redacted(value: unknown, depth = 0): Prisma.InputJsonValue | null {
@@ -385,36 +391,47 @@ export class MmgCheckoutService {
         return 'UNKNOWN';
       }
 
-      const intent = await this.intentNamedBy(reply);
+      const parsed = checkoutReplyFrom(reply);
+      const intent = parsed ? await this.prisma.mmgCheckoutIntent.findUnique({ where: { merchantTransactionId: parsed.merchantTransactionId } }) : null;
+      const resultHint = parsed ? `MMG_RESULT_${parsed.resultCode}` : null;
       await this.observe({
         // [F7] Filed under the checkout's own tenant; an unmatched reply has none.
         tenantId: intent?.tenantId ?? null,
         intentId: intent?.id ?? null,
         source: input.source,
-        detail: hint,
+        detail: resultHint ?? hint,
         body: redactedObject(reply),
         shape: describeShape(reply) as Prisma.InputJsonValue,
-        failure: intent ? null : 'NO_CHECKOUT',
+        failure: !parsed ? 'INVALID_RESPONSE' : intent ? null : 'NO_CHECKOUT',
       });
-      if (!intent) {
+      if (!intent || !parsed) {
         mmgCheckoutEventsCounter.labels('reply_unmatched').inc();
         return 'UNKNOWN';
       }
       mmgCheckoutEventsCounter.labels('reply').inc();
       if (intent.status === 'CONFIRMED') return 'CONFIRMED';
+      if (intent.status === 'HELD') return 'CONFIRMING';
+      const configFailure = CONFIG_FAILURES[parsed.resultCode];
+      if (configFailure) return returnStateFor(await this.hold(intent, configFailure));
 
-      const named = candidatesFrom(reply, { merchantTransactionId: intent.merchantTransactionId, amountGyd: Number(intent.amount) }, this.merchantIds(provider));
-      await this.prisma.mmgCheckoutIntent.update({
-        where: { id: intent.id },
-        data: {
-          candidates: [...new Set([...intent.candidates, ...named])].slice(0, MAX_CANDIDATES),
-          replyAt: intent.replyAt ?? now,
-          outcomeHint: intent.outcomeHint ?? hint,
-          nextCheckAt: now,
-        },
+      // Return, notify and poll can overlap. Merge against the locked current
+      // row, preserving both candidates and the first reply's timestamp.
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${intent.id} FOR UPDATE`;
+        const current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
+        if (current.status === 'CONFIRMED' || current.status === 'HELD') return;
+        const named = parsed.transactionId ? [parsed.transactionId] : [];
+        await tx.mmgCheckoutIntent.updateMany({
+          where: { id: current.id, status: current.status },
+          data: {
+            candidates: [...new Set([...current.candidates, ...named])].slice(0, MAX_CANDIDATES),
+            replyAt: !current.replyAt || now < current.replyAt ? now : current.replyAt,
+            outcomeHint: current.outcomeHint ?? resultHint,
+            nextCheckAt: now,
+            ...(current.status === 'OPEN' ? { status: 'CONFIRMING' } : {}),
+          },
+        });
       });
-      // The partner came back through MMG: an open checkout is now confirming.
-      await this.prisma.mmgCheckoutIntent.updateMany({ where: { id: intent.id, status: 'OPEN' }, data: { status: 'CONFIRMING' } });
       return returnStateFor(await this.verify(intent.id, now));
     });
   }
@@ -507,7 +524,14 @@ export class MmgCheckoutService {
       if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
       const bound = await this.answerForKey(who, now);
       if (!bound) throw err;
-      return { intentId: bound.checkout.ref, answer: async () => bound };
+      return {
+        intentId: bound.checkout.ref,
+        answer: async () => {
+          const current = await this.answerForKey(who, new Date());
+          if (!current) throw new AppError(503, 'MMG_CHECKOUT_UNAVAILABLE', 'The checkout binding could not be read.');
+          return current;
+        },
+      };
     }
   }
 
@@ -636,6 +660,7 @@ export class MmgCheckoutService {
         if (!identity.already) {
           await this.billing.recordTopUpInTransaction(tx, {
             subscriptionId: current.subscriptionId,
+            expectedTenantId: current.tenantId,
             amount,
             recordedBy: 'mmg-checkout',
             channel: 'MMG_CHECKOUT',
@@ -786,14 +811,6 @@ export class MmgCheckoutService {
     }
   }
 
-  /** The one checkout whose reference the reply carries, anywhere in it. */
-  private async intentNamedBy(reply: Record<string, unknown>): Promise<MmgCheckoutIntent | null> {
-    const refs = [...new Set(replyLeaves(reply).map((leaf) => leaf.value).filter((value) => MERCHANT_TRANSACTION_ID_SHAPE.test(value)))].slice(0, 16);
-    if (refs.length === 0) return null;
-    const found = await this.prisma.mmgCheckoutIntent.findMany({ where: { merchantTransactionId: { in: refs } }, take: 2 });
-    return found.length === 1 ? found[0]! : null;
-  }
-
   private merchantIds(provider: MmgCheckoutProvider | null): string[] {
     return [provider?.merchantId, process.env['MMG_MERCHANT_ID']].filter((id): id is string => typeof id === 'string' && id.length > 0);
   }
@@ -822,14 +839,22 @@ export class MmgCheckoutService {
   }
 
   private async started(intent: MmgCheckoutIntent): Promise<StartedCheckout> {
+    // Unwrapping may await a key service while the checkout changes state.
+    // Read after that await; never emit a URL from the earlier OPEN snapshot.
+    const opened = intent.status === 'OPEN' ? await openCheckoutUrl(intent) : null;
+    let current = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
+    const now = new Date();
+    if (current.status === 'OPEN' && current.expiresAt <= now) {
+      await this.expireUnanswered(current.id, now);
+      current = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
+    }
     return {
-      ref: intent.id,
-      status: intent.status as CheckoutStatus,
-      // [F6] Opened only here, for the partner's own answer, and only while OPEN.
-      checkoutUrl: intent.status === 'OPEN' ? await openCheckoutUrl(intent) : null,
-      amountGyd: Number(intent.amount),
+      ref: current.id,
+      status: current.status as CheckoutStatus,
+      checkoutUrl: current.status === 'OPEN' ? opened : null,
+      amountGyd: Number(current.amount),
       currencyCode: 'GYD',
-      expiresAt: intent.expiresAt.toISOString(),
+      expiresAt: current.expiresAt.toISOString(),
     };
   }
 
