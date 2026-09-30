@@ -18,6 +18,8 @@ declare const styles: {
   readonly content: string;
   readonly clearActions: string;
   readonly description: string;
+  readonly diningDismiss: string;
+  readonly diningNotice: string;
   readonly emptyMenu: string;
   readonly emptyRail: string;
   readonly eyebrow: string;
@@ -67,6 +69,7 @@ declare const styles: {
   readonly options: string;
   readonly page: string;
   readonly popular: string;
+  readonly poweredBy: string;
   readonly priceRow: string;
   readonly primaryButton: string;
   readonly quantity: string;
@@ -103,6 +106,7 @@ declare const styles: {
   readonly statusPaused: string;
   readonly statusRow: string;
   readonly storeCard: string;
+  readonly storeBrand: string;
   readonly storeName: string;
   readonly topActions: string;
   readonly topLink: string;

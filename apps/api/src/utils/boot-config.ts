@@ -4,6 +4,7 @@ import { assertDisabledCardRailConfig } from './card-rail';
 import { testControlEnabled } from '../modules/ops/test-control';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
+import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 
 /**
  * [R2 C2] `/test-control/identity` exists only in loadtest and test builds
@@ -73,6 +74,11 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     }
   }
 
+  // [AX352] SETTLEMENT_PUBLICATION_LEASE_MS is a test and drill setting: a
+  // shorter settlement publication lease can lapse while a slow row replays,
+  // before any progress is written, and strand the unpaid tail of a file.
+  assertSettlementPublicationLeaseConfig(env);
+
   // OTP records are only six digits; an unkeyed hash is recoverable offline in
   // seconds. Require a strong HMAC key (dedicated, or the already load-bearing
   // JWT secret with domain separation) before accepting production traffic.
@@ -106,6 +112,32 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: PAYMENT_PROVIDER must be stripe, powertranz or disabled in production; sandbox/unset can record fake captured revenue. Refusing to start.');
   }
   assertDisabledCardRailConfig(env);
+  // [PT-1 · C10] Card rail v2. The card simulator is a test page with no real
+  // money: production refuses to start while it is even named — whatever the
+  // flag says. And this build has no production-capable v2 provider (the
+  // first real one is written from its provider's own documentation), so
+  // production refuses to switch the rail on rather than fail at a partner's
+  // first tap. The flag is 1 or 0 (or unset = 0), never a guess.
+  if (env['CARD_RAIL_PROVIDER'] === 'simulator') {
+    throw new Error('FATAL: CARD_RAIL_PROVIDER=simulator in production — the card simulator is a test page with no real money. Refusing to start.');
+  }
+  const cardRailV2 = env['CARD_RAIL_V2'];
+  if (cardRailV2 !== undefined && cardRailV2 !== '' && cardRailV2 !== '0' && cardRailV2 !== '1') {
+    throw new Error('FATAL: CARD_RAIL_V2 must be 1 or 0 in production. Refusing to start.');
+  }
+  if (cardRailV2 === '1') {
+    throw new Error('FATAL: CARD_RAIL_V2=1 in production, but this build has no production card rail v2 provider (only the simulator, which production refuses). Refusing to start.');
+  }
+  // [AX297 F5] Draining v2 after it was switched off is its own switch, held
+  // to the same rules: 1 or 0, and never 1 while production has no v2 provider
+  // (v2 has never run there, so there is nothing to drain).
+  const cardRailV2Drain = env['CARD_RAIL_V2_DRAIN'];
+  if (cardRailV2Drain !== undefined && cardRailV2Drain !== '' && cardRailV2Drain !== '0' && cardRailV2Drain !== '1') {
+    throw new Error('FATAL: CARD_RAIL_V2_DRAIN must be 1 or 0 in production. Refusing to start.');
+  }
+  if (cardRailV2Drain === '1') {
+    throw new Error('FATAL: CARD_RAIL_V2_DRAIN=1 in production, but this build has no production card rail v2 provider, so there is nothing to drain. Refusing to start.');
+  }
   if (paymentProvider === 'stripe' && !env['STRIPE_SECRET_KEY']?.startsWith('sk_live_')) {
     throw new Error('FATAL: PAYMENT_PROVIDER=stripe requires a live STRIPE_SECRET_KEY in production. Refusing to start.');
   }

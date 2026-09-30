@@ -29,6 +29,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { installGlobalErrorHandler } from './lib/crash-reporter';
 import { RootNavigator } from './navigation/RootNavigator';
 import { queryClient } from './lib/queryClient';
+import { bindQueryCacheScope } from './lib/appQueryPolicy';
 import { initSecureStorage } from './lib/storage';
 import { track } from './lib/analytics';
 import { PermissionPrimeSheet } from './components/PermissionPrimeSheet';
@@ -38,6 +39,10 @@ import { useAppStore } from './stores/appStore';
 import { useDeviceLocation } from './hooks/useDeviceLocation';
 import { PillButton, Screen, T } from './kit';
 import { SwiftMark } from './components/SwiftLogo';
+
+// One app-lifetime cache boundary, before persisted auth hydration or queries.
+// Logout/account switch/token rejection still use the existing auth lifecycle.
+bindQueryCacheScope(queryClient, useAuthStore);
 
 // Hold the native splash until the brand fonts are ready (avoids a System-font flash).
 SplashScreen.preventAutoHideAsync().catch(() => {});

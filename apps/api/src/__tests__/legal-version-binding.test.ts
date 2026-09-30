@@ -101,9 +101,28 @@ const PUBLISHED: Record<
     driver_agreement: 'b82cc69dafaf15e5a61dcb58e5bf925ca2ee483ab5b804b3775b9c34d3fdf2f1',
     vendor_agreement: '3672c61f804747d8977981bcee4c75ff4b9935808c00cd0fcd21800bf67f21e2',
   },
+  // [LEGAL-FEE · owner 2026-09-29] Partner weekly fees use MMG's checkout
+  // in the Swift app, or card where offered — no agent or Swift Number.
+  // Only those two payment clauses change; the shared last-updated date
+  // changes all four hashes. Every previously published pin stays intact.
+  '2026-09-30': {
+    terms: 'aaaeb7f005377df71401298b1b5f6ac289d8930d8d5dd7ac29455843eaca3940',
+    privacy: '3607dc2de84b9e22e6931cfcd297f842fdddcf452496e0789a84a70adedfcf59',
+    driver_agreement: '7e560184f2106df06f56b95888d6dc4e2c5e3db3aeeae193396a75bc4e3b11f7',
+    vendor_agreement: '28757aca7ff1309b7c7bb6914b782c1950fb4d353c71ceb5961231f81e33b693',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
+  it.each([
+    ['Mover Agreement', DRIVER_AGREEMENT],
+    ['Business Agreement', VENDOR_AGREEMENT],
+  ])('%s directs weekly-fee payment to checkout in the Swift app', (_name, agreement) => {
+    expect(agreement).not.toMatch(/MMG\s+agent|Swift\s+Number|account\s+number/i);
+    const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
+    expect(feeParagraph).toContain("payable in the Swift app through MMG's checkout, or by card where the app offers it.");
+  });
+
   it('the served version is a version this file has pinned', () => {
     expect(
       Object.keys(PUBLISHED),

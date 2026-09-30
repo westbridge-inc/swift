@@ -3,7 +3,7 @@
 // Typed client over the EXISTING vendor endpoints — the web dashboard is
 // another client on the same backend; it never invents its own order logic.
 import { apiFetch } from './auth';
-import { formatAmount, parseAmount } from './money';
+import { formatMoney, parseAmount } from './money';
 
 const V = '/api/v1/vendor';
 
@@ -45,11 +45,11 @@ export function toAmount(value: unknown): number | null {
  * guards `!= null` before coercing; web used to not guard at all and printed
  * the letters "$NaN" onto a vendor's own order total).
  *
- * A value that is not a finite number renders an em-dash — never "$NaN", never
- * "$0". A real zero still renders "$0".
+ * A value that is not a finite number renders an em-dash. A real zero still
+ * renders "GY$0".
  */
 export function money(value: unknown): string {
-  return formatAmount(value, '$');
+  return formatMoney(value);
 }
 
 export interface OrderLine {

@@ -33,7 +33,7 @@ function tsFilesUnder(dir: string): string[] {
 // too many benign error/status codes — the real ride/pickup codes are covered
 // by their compound names.
 const SECRET =
-  /\$\{[^}]*\b(otp|otpCode|token|refreshToken|accessToken|password|passwordHash|secret|mmgPassword|ridePin|pickupCode|deliveryPin|cvc|cardNumber|mkey|msecret)\b[^}]*\}/i;
+  /\$\{[^}]*\b(otp|otpCode|token|refreshToken|accessToken|password|passwordHash|secret|mmgPassword|ridePin|pickupCode|deliveryPin|cvc|cardNumber|mkey|msecret|vaultToken)\b[^}]*\}/i;
 
 // A logging call opener (pino instance, request/reply logger, or console).
 const LOGCALL =

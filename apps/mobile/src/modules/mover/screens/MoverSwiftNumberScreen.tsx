@@ -1,24 +1,10 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { Header, Screen } from '../../../kit';
+import { WeeklyFeeScreen } from '../../billing/screens/WeeklyFeeScreen';
 import { useMoverKind, useMoverSubscription } from '../../../hooks';
-import { SwiftNumberView } from '../../../components/billing/BillingSurfaces';
 
-/** "My Swift Number" for the earner — the payer's SAN, wallet, amount due and
- *  agent-cash steps. Data is the same GET /rider|/driver/subscription payload
- *  the Earnings + Account screens already read. */
-export function MoverSwiftNumberScreen() {
-  const { kind, loading: kindLoading } = useMoverKind();
+export function MoverSwiftNumberScreen({ route }: { route?: { params?: { ref?: string } } }) {
+  const { kind, loading } = useMoverKind();
   const q = useMoverSubscription(kind);
-  return (
-    <Screen>
-      <Header title="My Swift Number" />
-      <SwiftNumberView
-        sub={q.data}
-        loading={kindLoading || q.isLoading}
-        error={q.isError}
-        onRetry={() => q.refetch()}
-      />
-    </Screen>
-  );
+  return <WeeklyFeeScreen key={kind} family={kind === 'DRIVER' ? 'driver' : 'rider'} sub={q.data} loading={loading || q.isLoading} error={q.isError} refresh={q.refetch} checkoutRef={route?.params?.ref} />;
 }

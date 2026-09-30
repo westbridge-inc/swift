@@ -27,7 +27,7 @@ vi.mock('../stores/storeSwitcher', () => ({
   useStoreSwitcher: { getState: () => ({ selectedStoreId: auth.selectedStoreId }) },
 }));
 vi.mock('expo-constants', () => ({ default: { expoConfig: {} } }));
-vi.mock('react-native', () => ({ TurboModuleRegistry: { get: () => null } }));
+vi.mock('react-native', () => ({ Platform: { OS: 'ios' }, TurboModuleRegistry: { get: () => null } }));
 
 import { api, riderApi, vendorApi } from './api';
 

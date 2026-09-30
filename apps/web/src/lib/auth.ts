@@ -1,5 +1,6 @@
 'use client';
 
+import { invalidateStorefrontContinuations } from '@/lib/storefront-continuation';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 // ── The session ──────────────────────────────────────────────────────────────
@@ -98,11 +99,13 @@ function responseContextIsCurrent(snapshot: AuthSnapshot, storeId: string | null
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly details?: { ref?: string };
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, details?: { ref?: string }) {
     super(message);
     this.name = 'ApiRequestError';
     this.status = status;
+    this.details = details;
     if (code !== undefined) this.code = code;
   }
 }
@@ -122,7 +125,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
   const forget = () => {
     const known = sessionPrincipal !== null;
     sessionPrincipal = null;
-    if (known) announceSessionChange();
+    if (known) { invalidateStorefrontContinuations(); announceSessionChange(); }
     return { ok: false };
   };
   try {
@@ -138,6 +141,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
       // fail every concurrent request with a spurious SESSION_CHANGED. Only a
       // switch between two KNOWN people is a change.
       if (sessionPrincipal !== null) {
+        invalidateStorefrontContinuations();
         clearStoredCheckoutAttempts();
         authGeneration += 1;
       }
@@ -154,6 +158,10 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
 /** Adopt a session the server has just issued as cookies. No tokens involved. */
 export function adoptSession(principal: string | null) {
   if (typeof window === 'undefined') return;
+  if (sessionPrincipal !== principal || principal === null) {
+    // Only this tab’s guest sign-in may carry its Add into the new session.
+    invalidateStorefrontContinuations(sessionPrincipal === null && principal !== null);
+  }
   if (!sessionPrincipal || !principal || sessionPrincipal !== principal) clearStoredCheckoutAttempts();
   authGeneration += 1;
   sessionPrincipal = principal;
@@ -201,11 +209,13 @@ export async function logout(): Promise<void> {
 }
 
 export function clearSession() {
+  invalidateStorefrontContinuations();
   if (typeof window === 'undefined') return;
   authGeneration += 1;
   sessionPrincipal = null;
   clearStoredCheckoutAttempts();
   localStorage.removeItem(STORE_KEY);
+  announceStoreChange();
   announceSessionChange();
 }
 
@@ -213,7 +223,28 @@ export function getSelectedStore() {
   return typeof window !== 'undefined' ? localStorage.getItem(STORE_KEY) : null;
 }
 export function setSelectedStore(vendorId: string) {
-  if (typeof window !== 'undefined') localStorage.setItem(STORE_KEY, vendorId);
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(STORE_KEY, vendorId);
+    announceStoreChange();
+  }
+}
+
+const storeListeners = new Set<() => void>();
+function announceStoreChange() { for (const listener of [...storeListeners]) listener(); }
+/** Storage covers other tabs; focus also catches changes before the storage
+ * event has been delivered. Same-tab selections notify synchronously. */
+export function subscribeSelectedStore(listener: () => void): () => void {
+  storeListeners.add(listener);
+  const storage = (event: StorageEvent) => {
+    if ((event.storageArea === null || event.storageArea === localStorage) && (event.key === null || event.key === STORE_KEY)) listener();
+  };
+  window.addEventListener('storage', storage);
+  window.addEventListener('focus', listener);
+  return () => {
+    storeListeners.delete(listener);
+    window.removeEventListener('storage', storage);
+    window.removeEventListener('focus', listener);
+  };
 }
 
 let refreshFlight: Promise<boolean> | null = null;
@@ -241,22 +272,29 @@ async function tryRefresh(): Promise<boolean> {
 export async function apiFetch(
   path: string,
   options?: RequestInit,
-  policy: { redirectOnExpired?: boolean } = {},
+  policy: { redirectOnExpired?: boolean; storeId?: string | null } = {},
 ) {
   const requestSession = authSnapshot();
-  const requestStore = getSelectedStore();
-  const doFetch = () =>
-    fetch(`${API_URL}${path}`, {
+  const requestStore = 'storeId' in policy ? policy.storeId ?? null : getSelectedStore();
+  const doFetch = () => {
+    // Check before BOTH the initial send and the 401 retry. A fee view owns
+    // its captured store even if another tab has already selected a new one.
+    if (!responseContextIsCurrent(requestSession, requestStore)) {
+      throw new ApiRequestError('The paying account or selected store changed. Try again.', 409, 'SESSION_CHANGED');
+    }
+    return fetch(`${API_URL}${path}`, {
       ...options,
       credentials: 'include',
       headers: {
         // Multipart bodies set their own boundary — only default JSON otherwise.
         ...(options?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
         ...clientHeaders,
+        ...(/^\/api\/v1\/(vendor|rider|driver)(?:\/|$)/.test(path) ? { 'x-client-platform': 'web' } : {}),
         ...(requestStore && { 'x-vendor-id': requestStore }),
         ...options?.headers,
       },
     });
+  };
 
   let res = await doFetch();
   if (res.status === 401) {
@@ -288,6 +326,7 @@ export async function apiFetch(
         : 'We couldn’t complete that. Please try again.'),
       res.status,
       typeof json?.error?.code === 'string' ? json.error.code : undefined,
+      typeof json?.error?.details?.ref === 'string' ? { ref: json.error.details.ref } : undefined,
     );
   }
   return json;
