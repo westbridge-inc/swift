@@ -100,14 +100,14 @@ describe('vendor order board — money is never invented', () => {
     await dismissTakeover(user);
 
     // The list row: `totalAmount` arrived as the STRING "4500.00".
-    expect(row.textContent).toContain(`$${(4500).toLocaleString()}`);
+    expect(row.textContent).toContain(`GY$${(4500).toLocaleString()}`);
 
     // The detail pane: order total plus each line total (`totalCustomer`).
     await user.click(row);
     await waitFor(() => expect(screen.getByText('Total (Cash)')).toBeTruthy());
-    expect(screen.getByText(`$${(4500).toLocaleString()}`)).toBeTruthy();
-    expect(screen.getByText(`$${(3000).toLocaleString()}`)).toBeTruthy();
-    expect(screen.getByText(`$${(1000).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`GY$${(4500).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`GY$${(3000).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`GY$${(1000).toLocaleString()}`)).toBeTruthy();
 
     // The headline guarantee: the letters N-a-N reach no part of this page.
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);

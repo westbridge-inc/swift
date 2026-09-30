@@ -4,8 +4,8 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getDriverProfile, getDriverRides, getRiderDeliveries, getRiderProfile } from '@/lib/mover-api';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { formatMoney as money, parseAmount } from '@/lib/money';
 
-const money = (n: unknown) => `$${Math.round(Number(n ?? 0)).toLocaleString()}`;
 const when = (iso: unknown) => (iso ? new Date(String(iso)).toLocaleString() : '—');
 
 function statusChip(s: string) {
@@ -35,8 +35,8 @@ function DeliveriesTable() {
   const q = useQuery({ queryKey: ['p-deliveries', page], queryFn: () => getRiderDeliveries(page) });
   const rows = q.data?.rows ?? [];
   return (
-    <div className="overflow-hidden rounded-2xl border border-black/5 bg-white">
-      <table className="w-full text-sm">
+    <div className="max-w-full overflow-x-auto rounded-2xl border border-black/5 bg-white">
+      <table className="min-w-[680px] w-full text-sm">
         <thead className="border-b border-black/5 bg-[var(--swift-subtle)] text-left text-xs uppercase tracking-wide text-[var(--swift-muted)]">
           <tr>
             <th className="px-4 py-3">Order</th>
@@ -77,8 +77,8 @@ function RidesTable() {
   const q = useQuery({ queryKey: ['p-rides', page], queryFn: () => getDriverRides(page) });
   const rows = q.data?.rows ?? [];
   return (
-    <div className="overflow-hidden rounded-2xl border border-black/5 bg-white">
-      <table className="w-full text-sm">
+    <div className="max-w-full overflow-x-auto rounded-2xl border border-black/5 bg-white">
+      <table className="min-w-[680px] w-full text-sm">
         <thead className="border-b border-black/5 bg-[var(--swift-subtle)] text-left text-xs uppercase tracking-wide text-[var(--swift-muted)]">
           <tr>
             <th className="px-4 py-3">Ride</th>
@@ -106,7 +106,7 @@ function RidesTable() {
               </td>
               <td className="px-4 py-3">{statusChip(String(r['status'] ?? ''))}</td>
               <td className="px-4 py-3 font-medium">{money(r['taxiFareTotal'] ?? r['totalAmount'])}</td>
-              <td className="px-4 py-3 text-[var(--swift-muted)]">{Number(r['tipAmount'] ?? 0) > 0 ? money(r['tipAmount']) : '—'}</td>
+              <td className="px-4 py-3 text-[var(--swift-muted)]">{(parseAmount(r['tipAmount']) ?? 0) > 0 ? money(r['tipAmount']) : '—'}</td>
             </tr>
           ))}
         </tbody>

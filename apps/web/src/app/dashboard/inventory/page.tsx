@@ -127,13 +127,13 @@ export default function InventoryPage() {
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        <div className="relative">
+        <div className="relative w-full max-w-64">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--swift-muted)]" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search name or SKU"
-            className="w-64 rounded-lg border border-black/10 bg-white py-2 pl-9 pr-3 text-sm"
+            className="w-full rounded-lg border border-black/10 bg-white py-2 pl-9 pr-3 text-sm"
           />
         </div>
         <select
@@ -151,8 +151,8 @@ export default function InventoryPage() {
         <span className="text-sm text-[var(--swift-muted)]">{list.length} items</span>
       </div>
 
-      <div className="overflow-hidden rounded-2xl border border-black/5 bg-white">
-        <table className="w-full text-sm">
+      <div className="max-w-full overflow-x-auto rounded-2xl border border-black/5 bg-white">
+        <table className="min-w-[760px] w-full text-sm">
           <thead className="border-b border-black/5 bg-[var(--swift-subtle)] text-left text-xs uppercase tracking-wide text-[var(--swift-muted)]">
             <tr>
               <th className="px-4 py-3">Item</th>

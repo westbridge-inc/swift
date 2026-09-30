@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { activeRide, cancelOrder, getOrder, getRide, money } from '@/lib/customer';
+import { lineDisplayAmount } from '@/lib/money';
 import styles from './tracking.module.css';
 
 const POLL_INTERVAL_MS = 8_000;
@@ -644,7 +645,7 @@ export default function OrderDetailPage() {
             {(order.items ?? []).map((item, index) => (
               <div key={item.id ?? `${item.name}-${index}`} className={styles.line}>
                 <span>{item.quantity}× {item.name}</span>
-                <strong>{money(item.lineTotal ?? Number(item.customerPrice ?? 0) * item.quantity)}</strong>
+                <strong>{money(lineDisplayAmount(item.lineTotal, item.customerPrice, item.quantity))}</strong>
               </div>
             ))}
           </div>
@@ -654,7 +655,7 @@ export default function OrderDetailPage() {
             {!isTaxi && typeof order.deliveryFee === 'number' ? <div className={styles.line}><span>Delivery fee</span><strong>{money(order.deliveryFee)}</strong></div> : null}
             {Number(order.discount ?? 0) > 0 ? <div className={styles.line}><span>Discount</span><strong>−{money(Number(order.discount))}</strong></div> : null}
             {Number(order.tipAmount ?? 0) > 0 ? <div className={styles.line}><span>{isTaxi ? 'Driver tip' : 'Rider tip'}</span><strong>{money(Number(order.tipAmount))}</strong></div> : null}
-            <div className={styles.totalLine}><span>Total</span><strong>{money(order.totalAmount ?? order.total ?? 0)}</strong></div>
+            <div className={styles.totalLine}><span>Total</span><strong>{money(order.totalAmount ?? order.total)}</strong></div>
           </div>
           {showPaymentTruth ? (
             <div className={styles.cashTruth}>

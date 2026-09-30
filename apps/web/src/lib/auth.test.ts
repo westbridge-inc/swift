@@ -275,12 +275,19 @@ describe('[W-01] signing out is a server act, because only the server can expire
     expect(code(confirm), 'components/sign-out-button.tsx').toMatch(/logout\(\)/);
     expect(code(confirm), 'components/sign-out-button.tsx').not.toMatch(/clearSession/);
     for (const file of [
-      ['src', 'app', 'portal', 'portal-shell.tsx'],
-      ['src', 'app', 'dashboard', 'dashboard-shell.tsx'],
+      ['src', 'components', 'console-shell.tsx'],
       ['src', 'app', '(app)', 'account', 'page.tsx'],
     ]) {
       const source = readFileSync(join(process.cwd(), ...file), 'utf8');
       expect(source, file.join('/')).toMatch(/<SignOutButton\b/);
+      expect(code(source), file.join('/')).not.toMatch(/clearSession/);
+    }
+    for (const file of [
+      ['src', 'app', 'portal', 'portal-shell.tsx'],
+      ['src', 'app', 'dashboard', 'dashboard-shell.tsx'],
+    ]) {
+      const source = readFileSync(join(process.cwd(), ...file), 'utf8');
+      expect(source, file.join('/')).toMatch(/<ConsoleShell\b/);
       expect(code(source), file.join('/')).not.toMatch(/clearSession/);
     }
   });

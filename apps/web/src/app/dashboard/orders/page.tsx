@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
@@ -328,7 +328,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
         </div>
         <div className="flex items-center gap-2">
           {statusChip(s)}
-          <button onClick={onClose} className="text-sm text-[var(--swift-muted)] hover:text-[var(--swift-ink)]">✕</button>
+          <button onClick={onClose} aria-label="Close order detail" className="text-sm text-[var(--swift-muted)] hover:text-[var(--swift-ink)]">✕</button>
         </div>
       </div>
 
@@ -519,6 +519,17 @@ export default function OrdersPage() {
   const storeId = useStoreId();
   const [bucket, setBucket] = useState<BucketKey>('new');
   const [selected, setSelected] = useState<string | null>(null);
+  useEffect(() => {
+    if (!selected || !window.matchMedia('(max-width: 1279px)').matches) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setSelected(null); };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.body.style.overflow = previous;
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [selected]);
 
   // One poll feeds every lane — the queue is the live surface, keep it fresh.
   const orders = useQuery({
@@ -610,7 +621,9 @@ export default function OrdersPage() {
             </button>
           ))}
         </div>
-        <div className="xl:sticky xl:top-6 xl:self-start">
+        <div className={selected
+          ? 'fixed inset-0 z-40 overflow-y-auto bg-[var(--swift-subtle)] p-4 pt-[calc(env(safe-area-inset-top)_+_1rem)] pb-[calc(env(safe-area-inset-bottom)_+_1rem)] xl:sticky xl:inset-auto xl:top-6 xl:z-auto xl:self-start xl:overflow-visible xl:bg-transparent xl:p-0'
+          : 'hidden xl:sticky xl:top-6 xl:block xl:self-start'}>
           {selected ? (
             <OrderDetail id={selected} onClose={() => setSelected(null)} />
           ) : (
