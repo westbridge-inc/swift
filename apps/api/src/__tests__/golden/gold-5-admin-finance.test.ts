@@ -458,6 +458,10 @@ describe('GOLD-5 · ADMIN-04 — G5-F6', () => {
     await withApproval(ops, approver, importFile(csv, source('stuck-retry')));
   }, 60_000);
 
+  // GOLD-7 re-measure: settlement-import.ts:199 replays PUBLISHING without
+  // resuming, while :248 claims only STAGED. A guarded resume must replay
+  // row ingest idempotently, credit the missing row and close PUBLISHED.
+  // Money implementation is coordinator-owned; this defining pin stays red.
   it.fails('[G5-F6] after a publication dies mid-file, importing the file again credits the missing row once and closes the import', async () => {
     const row = await sys(() => app.prisma.settlementImport.findUniqueOrThrow({ where: { id: stuckImport } }));
     expect(row.status).toBe('PUBLISHED');
