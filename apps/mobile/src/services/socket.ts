@@ -12,14 +12,15 @@ import { canTeardownRuntime } from '../lib/runtimeOwnership';
 // EXPO_PUBLIC_API_URL override — so a staging/preview EAS build repoints both at
 // once. The previous `__DEV__ ? localhost : api.swiftgy.com` hardcode had no env
 // escape hatch, so a non-prod build could never reach a non-prod socket.
-const SOCKET_URL = API_URL;
+// Read API_URL when connecting: store handoffs now load this module during
+// API/auth initialization, before the API export is necessarily initialized.
 
 let socket: Socket | null = null;
 let socketOwner: AuthPrincipalBoundary | null = null;
 
 export function getSocket(): Socket {
   if (!socket) {
-    socket = io(SOCKET_URL, {
+    socket = io(API_URL, {
       autoConnect: false,
       transports: ['websocket'],
       // Callback form: every (re)connection attempt reads the CURRENT access

@@ -5,8 +5,11 @@ const mock = vi.hoisted(() => ({
   owner: { userId: 'owner', generation: 1, accessToken: 'test-access', refreshToken: 'test-refresh' },
   listener: undefined as undefined | ((_response: unknown) => void),
   navigate: vi.fn(),
+  io: vi.fn(() => ({ disconnect: vi.fn() })),
 }));
+vi.mock('socket.io-client', () => ({ io: mock.io }));
 vi.mock('../stores/authStore', () => ({ getAuthSessionSnapshot: () => ({ ...mock.owner }), useAuthStore: { getState: () => ({}) } }));
+vi.mock('../kit/toast', () => ({ toast: { error: vi.fn() } }));
 vi.mock('expo-constants', () => ({ default: { expoConfig: {} } }));
 vi.mock('react-native', () => ({ Platform: { OS: 'ios' } }));
 vi.mock('expo-notifications', () => ({
@@ -14,7 +17,8 @@ vi.mock('expo-notifications', () => ({
   getLastNotificationResponseAsync: async () => null,
 }));
 vi.mock('../navigation/navigationRef', () => ({ navigationRef: { isReady: () => true }, safeNavigate: mock.navigate }));
-import { api, weeklyFeeApi } from './api';
+import { API_URL, api, weeklyFeeApi } from './api';
+import { getSocket, disconnectSocket } from './socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { destinationFor, installNotificationTapRouter } from './notification-router';
 import { resolveFeeNotification } from './weekly-fee-notification';
@@ -28,6 +32,12 @@ beforeEach(() => {
 afterEach(() => { api.defaults.adapter = original; });
 
 describe('notified subscription context', () => {
+  it('keeps the socket origin when the API loads the shared store handoff first', () => {
+    disconnectSocket();
+    getSocket();
+    expect(mock.io).toHaveBeenLastCalledWith(API_URL, expect.any(Object));
+    disconnectSocket();
+  });
   it('selects A before navigation and polls A only with A’s header; push status is not evidence', async () => {
     const calls: Array<[string | undefined, unknown]> = [];
     let finish!: () => void;

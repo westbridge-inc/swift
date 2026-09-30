@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Vibration } from 'react-native';
-import { useMutation, useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
+import { useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
 import { vendorApi, vendorDiscoveryApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
@@ -24,6 +24,7 @@ import { accountHoldsRole } from '../lib/roleLanding';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
 import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
+import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -58,7 +59,7 @@ function usePreviewSafeMutation<TData = unknown, TError = unknown, TVars = void,
   options: UseMutationOptions<TData, TError, TVars, TCtx>,
 ): UseMutationResult<TData, TError, TVars, TCtx> {
   const pv = usePreviewDataset();
-  const m = useMutation(options);
+  const m = useVendorMutation(options);
   return (pv ? previewMutation() : m) as UseMutationResult<TData, TError, TVars, TCtx>;
 }
 
@@ -249,7 +250,7 @@ const passThrough: MutationGuard = (fn) => fn;
 export function useAddStaff(guard: MutationGuard = passThrough) {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: guard((data: { phone: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.addStaff(data))),
+    mutationFn: guard(guardVendorOperation((data: { phone: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.addStaff(data)))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
   });
 }
@@ -265,7 +266,7 @@ export function useRemoveStaff() {
 export function useUpdateStaffRole(guard: MutationGuard = passThrough) {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: guard(({ id, role }: { id: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.updateStaff(id, role))),
+    mutationFn: guard(guardVendorOperation(({ id, role }: { id: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.updateStaff(id, role)))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
   });
 }
