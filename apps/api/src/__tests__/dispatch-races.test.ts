@@ -251,12 +251,15 @@ function holdNext(target: object, method: string) {
   let resume!: () => void;
   const entered = new Promise<void>((resolve) => { markEntered = resolve; });
   const released = new Promise<void>((resolve) => { resume = resolve; });
+  let result: unknown;
   const spy = vi.spyOn(host, method).mockImplementationOnce(async function (this: unknown, ...args: unknown[]) {
     markEntered();
     await released;
-    return original.apply(this, args);
+    result = await original.apply(this, args);
+    return result;
   });
-  return { entered, release: () => resume(), restore: () => spy.mockRestore() };
+  /** What the held call returned once it ran: the service-level answer. */
+  return { entered, release: () => resume(), restore: () => spy.mockRestore(), result: () => result };
 }
 
 /** Hold EVERY call of `method` at its door until `expected` callers are waiting
@@ -1063,6 +1066,79 @@ describe('[DISPATCH 1/3] after the race: retries, give-backs and the words mover
       await park();
     }
   }, 180_000);
+
+  // [AX299 F1] The retry's answer is read under the lock that decided it. The
+  // retry is held at the door of the read that builds its answer while the
+  // other side runs; a cancel or a give-back must either wait for that answer
+  // or come first and be told. Never a 200 carrying a cancelled ride, a
+  // released one, or another driver's.
+  const settledWithin = (p: Promise<unknown>, ms: number) =>
+    Promise.race([p.then(() => true), new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), ms); })]);
+
+  it('[B3 · AX299 F1] controlled: the customer cancels while the winner\'s retry is being answered — the answer is a ride they hold, never a cancelled one', async () => {
+    const customer = await makeCustomer();
+    const carded = await makeDriver(SPOT);
+    const ride = await makeTaxi(customer);
+    const card = await offer(ride.id, (await dispatch.dispatchOrder(ride.id)).offered!);
+    const won = await acceptCard(carded, 'driver', ride.id, card.attemptId);
+    expect(won.statusCode, won.body).toBe(200);
+
+    const hold = holdNext(DispatchService.prototype, 'committedAssignment');
+    try {
+      const retrying = acceptCard(carded, 'driver', ride.id, card.attemptId);
+      await hold.entered;
+      const cancelling = call('POST', `/api/v1/rides/${ride.id}/cancel`, customer.token, {});
+      const cancelledInTheGap = await settledWithin(cancelling, 1_500);
+      hold.release();
+      const [retry, cancel] = await Promise.all([retrying, cancelling]);
+      expect(cancel.statusCode, cancel.body).toBe(200);
+      expect(retry.statusCode, retry.body).toBe(200);
+      expect(retry.json().data.status).toBe('DRIVER_ASSIGNED');
+      // The route answers orderId, status and number; whose ride it is, is in
+      // the row the service built the answer from.
+      const built = hold.result() as { status: string; driverId: string | null };
+      expect({ status: built.status, driverId: built.driverId }).toEqual({ status: 'DRIVER_ASSIGNED', driverId: carded.driverId });
+      expect(cancelledInTheGap, 'the cancel waits for the answer the retry is building under the lock').toBe(false);
+    } finally {
+      hold.restore();
+    }
+    // The cancel then lands after the answer: one order of events, both true.
+    expect((await orderRow(ride.id)).status).toBe('CANCELLED');
+  });
+
+  it('[B3 · AX299 F1] controlled: the ride is given back and another driver takes it while the retry is being answered — never another driver\'s ride', async () => {
+    const carded = await makeDriver(SPOT);
+    const next = await makeDriver(near(300));
+    const ride = await makeTaxi(await makeCustomer());
+    const card = await offer(ride.id, (await dispatch.dispatchOrder(ride.id)).offered!);
+    expect(card.moverId).toBe(carded.driverId);
+    const won = await acceptCard(carded, 'driver', ride.id, card.attemptId);
+    expect(won.statusCode, won.body).toBe(200);
+
+    const hold = holdNext(DispatchService.prototype, 'committedAssignment');
+    try {
+      const retrying = acceptCard(carded, 'driver', ride.id, card.attemptId);
+      await hold.entered;
+      const reassigning = (async () => {
+        const giveBack = await call('POST', `/api/v1/driver/rides/${ride.id}/cancel`, carded.token, { reason: 'Vehicle broke down' });
+        const grab = await grabRide(next, ride.id);
+        return { giveBack, grab };
+      })();
+      const reassignedInTheGap = await settledWithin(reassigning, 1_500);
+      hold.release();
+      const [retry, { giveBack, grab }] = await Promise.all([retrying, reassigning]);
+      expect(giveBack.statusCode, giveBack.body).toBe(200);
+      expect(grab.statusCode, grab.body).toBe(200);
+      expect(retry.statusCode, retry.body).toBe(200);
+      expect(retry.json().data.status).toBe('DRIVER_ASSIGNED');
+      const built = hold.result() as { status: string; driverId: string | null };
+      expect({ status: built.status, driverId: built.driverId }, 'the answer is the ride this driver holds, not the next driver\'s').toEqual({ status: 'DRIVER_ASSIGNED', driverId: carded.driverId });
+      expect(reassignedInTheGap, 'the give-back waits for the answer the retry is building under the lock').toBe(false);
+    } finally {
+      hold.restore();
+    }
+    expect((await orderRow(ride.id)).driverId).toBe(next.driverId);
+  });
 
   it('[B2] a driver who gives back an accepted ride is not offered it again — the next driver is, and alone they are not', async () => {
     const quitter = await makeDriver(SPOT);

@@ -2376,9 +2376,17 @@ export class DispatchService {
    * Read-only: nothing is marked, consumed or re-dispatched here. FOR SHARE
    * waits out a claim still committing on this row, so a retry that arrives
    * mid-commit reads the committed winner rather than a stale PENDING.
+   *
+   * [AX299 F1] ONE locked read decides AND answers. The assignment returned is
+   * built inside the same transaction, under the FOR SHARE lock that proved
+   * this mover holds the order: a cancel, a give-back or a reassignment either
+   * commits first and is reported, or waits until this answer is built. It
+   * used to be read after the lock was released, so a cancel in between was
+   * answered 200 with the cancelled order, a reassignment with the next
+   * mover's.
    */
   private async explainLostOffer(orderId: string, moverId: string, pool: DispatchPool, fallback?: unknown) {
-    const row = await this.prisma.$transaction(async (tx) => {
+    const verdict = await this.prisma.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<Array<{
         status: OrderStatus; driverId: string | null; riderId: string | null;
         customerId: string; cancelledBy: string | null;
@@ -2387,15 +2395,19 @@ export class DispatchService {
         FROM "orders" WHERE "id" = ${orderId}
         FOR SHARE
       `;
-      return rows[0] ?? null;
+      const row = rows[0];
+      if (!row) return { kind: 'missing' as const };
+      if (row.status === 'CANCELLED') return { kind: 'cancelled' as const, row };
+      const holder = pool === 'DRIVER' ? row.driverId : row.riderId;
+      if (holder === moverId && !TERMINAL_ORDER_STATUSES.includes(row.status)) {
+        return { kind: 'held' as const, assignment: await this.committedAssignment(tx, orderId) };
+      }
+      return { kind: 'elsewhere' as const, holder };
     });
-    if (!row) throw new NotFoundError('Order', orderId);
-    if (row.status === 'CANCELLED') throw this.orderCancelled(row);
-    const holder = pool === 'DRIVER' ? row.driverId : row.riderId;
-    if (holder === moverId && !TERMINAL_ORDER_STATUSES.includes(row.status)) {
-      return this.committedAssignment(this.prisma, orderId);
-    }
-    if (holder && holder !== moverId && !(await this.offerRanOut(orderId, moverId))) {
+    if (verdict.kind === 'missing') throw new NotFoundError('Order', orderId);
+    if (verdict.kind === 'cancelled') throw this.orderCancelled(verdict.row);
+    if (verdict.kind === 'held') return verdict.assignment;
+    if (verdict.holder && verdict.holder !== moverId && !(await this.offerRanOut(orderId, moverId))) {
       throw this.offerTaken(pool);
     }
     throw fallback ?? new AppError(409, 'OFFER_EXPIRED', 'This offer has expired or went to another mover');
