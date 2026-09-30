@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('react-native', () => ({ Pressable: 'Pressable', View: 'View' }));
 vi.mock('expo-image', () => ({ Image: 'Image' }));
+vi.mock('react-native-reanimated', () => ({ useReducedMotion: () => false }));
 vi.mock('@expo/vector-icons', () => ({ Feather: 'Feather' }));
 // Inert placeholder palette: these tests assert structure and text, never
 // colour (the UI barrier forbids real brand hex outside packages/ui).

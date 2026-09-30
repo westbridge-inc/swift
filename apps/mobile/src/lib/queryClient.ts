@@ -22,7 +22,7 @@ const mutationCache = new MutationCache({
 
 // Single app-wide client, module-scoped so non-React code (e.g. authStore.logout)
 // can clear it without a hook.
-export const queryClient = new QueryClient({
+export const queryClient: QueryClient = new QueryClient({
   mutationCache,
   defaultOptions: {
     queries: {

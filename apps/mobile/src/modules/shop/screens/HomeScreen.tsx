@@ -227,10 +227,9 @@ function LiveOrderCard({ order, navigation, statusNote }: { order: LiveOrderProj
                 }}
               />
               <T variant="body" weight="semibold">
-                {statusNote}
-                {hold
+                {[statusNote, hold
                   ? `Held — goes to ${order.vendor?.name ?? recipient} in ${mmss}`
-                  : orderStatusLabel(order.status, vertical)}
+                  : orderStatusLabel(order.status, vertical)].filter(Boolean).join(' · ')}
               </T>
             </View>
             <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
@@ -563,7 +562,7 @@ export function HomeScreen() {
           <LiveOrderCard
             order={activeOrder}
             navigation={navigation}
-            statusNote={home.isFetching || home.isPlaceholderData ? 'Updating order… · ' : home.isError || home.fetchStatus === 'paused' ? 'Last known · ' : ''}
+            statusNote={home.isFetching || home.isPlaceholderData ? 'Updating order…' : home.isError || home.fetchStatus === 'paused' ? 'Last known' : ''}
           />
         ) : null}
 
