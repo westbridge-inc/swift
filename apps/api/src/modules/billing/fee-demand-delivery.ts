@@ -1,3 +1,4 @@
+import { billingEffectsReady } from './billing-cutover';
 import type { BillingFeeNotice, Prisma, PrismaClient } from '@prisma/client';
 import type { NotificationPayload } from '../notification/notification.service';
 import { currentDunningClock, lockBillingAuthority } from './dunning-clock';
@@ -28,24 +29,27 @@ export async function enqueueFeeDemandInTx(tx: Prisma.TransactionClient, payload
     if (!recipient || recipient.tenantId !== tenantId || (kind === 'billing_dunning_ops_task'
       ? !recipient.roles.includes('ADMIN') : payerUserId !== userId)) throw new Error('Fee demand recipient changed');
     const clock = await currentDunningClock(tx, subscriptionId);
+    if (clock.subscriptionId !== subscriptionId) throw new Error('Fee demand names a historical source');
     const stageKey = payload.feeStageKey ?? payload.dedupeKey ?? `${kind}:a${sub.failedAttempts}`;
     await tx.billingFeeNotice.updateMany({ where: {
-      subscriptionId, epoch: clock.epoch, userId, status: 'PENDING', stageKey: { not: stageKey },
+      clockId: clock.id, epoch: clock.epoch, userId, status: 'PENDING', stageKey: { not: stageKey },
       payload: { path: ['data', 'kind'], equals: kind },
     }, data: { status: 'OBSOLETE' } });
     return tx.billingFeeNotice.upsert({
-      where: { subscriptionId_epoch_stageKey_userId: { subscriptionId, epoch: clock.epoch, stageKey, userId } },
-      create: { tenantId, subscriptionId, epoch: clock.epoch, stageKey, userId,
+      where: { clockId_epoch_stageKey_userId: { clockId: clock.id, epoch: clock.epoch, stageKey, userId } },
+      create: { tenantId, subscriptionId, clockId: clock.id, epoch: clock.epoch, stageKey, userId,
         payload: JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue },
       update: {},
     });
 }
 
 async function permitted(tx: Prisma.TransactionClient, noticeId: string) {
+  if (!await billingEffectsReady(tx)) return null;
   const notice = await tx.billingFeeNotice.findUnique({ where: { id: noticeId } });
   if (!notice || notice.status === 'OBSOLETE') return null;
-  const { sub, userId, userStatus } = await lockBillingAuthority(tx, notice.subscriptionId);
   const clock = await currentDunningClock(tx, notice.subscriptionId);
+  if (clock.id !== notice.clockId) throw new Error('Fee notice clock identity changed');
+  const { sub, userId, userStatus } = await lockBillingAuthority(tx, clock.subscriptionId);
   const payload = notice.payload as unknown as NotificationPayload;
   const kind = payload.data?.['kind'];
   const admin = kind === 'billing_dunning_ops_task'

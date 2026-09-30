@@ -1,3 +1,4 @@
+import { billingEffectsReady } from '../billing/billing-cutover';
 import type { Prisma, PrismaClient, Subscription } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { bindTenantTransaction } from '../../plugins/prisma';
@@ -112,6 +113,7 @@ async function hasFinancialHistory(db: Db, sources: Subscription[]): Promise<boo
     db.collectionContact.findFirst({ where: linked, select: { id: true } }),
     db.paymentInstrument.findFirst({ where: linked, select: { id: true } }),
     db.cardSession.findFirst({ where: linked, select: { id: true } }),
+    db.mmgCheckoutIntent.findFirst({ where: linked, select: { id: true } }),
     db.cardObservation.findFirst({ where: linked, select: { id: true } }),
     db.ledgerEntry.findFirst({ where: { subledgerId: { in: ids } }, select: { id: true } }),
     db.ledgerTransaction.findFirst({ where: { OR: ids.flatMap((id) => [
@@ -219,7 +221,10 @@ async function persistDecision(
   await tx.moverFeeSubscription.createMany({
     data: sourceSubscriptionIds.map((subscriptionId) => ({ subscriptionId, userId: payerUserId, tenantId: resolution.tenantId })), skipDuplicates: true,
   });
-  return { ...resolution, revision };
+  const result = { ...resolution, revision };
+  const { syncMoverDunningAuthorityInTx } = await import('../billing/dunning-clock');
+  await syncMoverDunningAuthorityInTx(tx, result);
+  return result;
 }
 
 /** Authorized mutations persist classification under User -> sorted sources. */
@@ -261,9 +266,10 @@ export async function activateMoverFeeType(tx: Prisma.TransactionClient, payer: 
 /** Decide NEW collection authority; never redirect historical settlement. */
 export async function lockFeeCollectionAuthority(tx: Prisma.TransactionClient, subscriptionId: string): Promise<{ allowed: boolean; mover: MoverFeeResolution | null }> {
   const payer = await lockSubscriptionPayer(tx, subscriptionId);
-  if (payer.kind === 'VENDOR') return { allowed: true, mover: null };
+  const ready = await billingEffectsReady(tx);
+  if (payer.kind === 'VENDOR') return { allowed: ready, mover: null };
   const mover = await lockMoverFeeAuthority(tx, payer);
-  return { allowed: !!mover && mover.state === 'ACTIVE' && mover.canonicalSubscriptionId === subscriptionId, mover };
+  return { allowed: ready && !!mover && mover.state === 'ACTIVE' && mover.canonicalSubscriptionId === subscriptionId, mover };
 }
 
 /** Authenticated readers use one canonical view while retaining each original
@@ -285,13 +291,19 @@ export async function moverFeeOperability(
   opts: { missingRow: 'BLOCK' | 'GRANDFATHER' }, now = new Date(),
 ) {
   const { subscriptionOperability } = await import('./operate-gate');
+  const { activeDeadline, FULL_FEE_GRACE_MS } = await import('../billing/dunning-clock');
   const view = await readMoverFeeSubscription(db, payer);
   if (!view) return subscriptionOperability(null, opts, now);
+  const clock = await db.billingDunningClock.findUnique({ where: { subscriptionId: view.authority.canonicalSubscriptionId } });
+  const ready = await billingEffectsReady(db);
   // A finance hold grants no permission and creates no new suspension. Every
   // original restriction remains effective, so changing roles cannot evade it.
   for (const source of view.sources) {
-    const gated = view.authority.state === 'FINANCE_HOLD' && source.status === 'PAST_DUE'
-      ? { ...source, gracePeriodEnd: null } : source;
+    const pausedAt = !ready || !clock || view.authority.state === 'FINANCE_HOLD'
+      ? clock?.pausedAt ?? source.billingConfirmationPausedAt ?? now : clock.pausedAt;
+    const gated = { ...source, billingConfirmationPausedAt: pausedAt,
+      billingEnforcementDueAt: clock && ready && !clock.pausedAt
+        ? activeDeadline(clock, FULL_FEE_GRACE_MS, now) : null, gracePeriodEnd: null };
     const result = subscriptionOperability(gated, opts, now);
     if (!result.operable) return result;
   }

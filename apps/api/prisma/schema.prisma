@@ -2887,6 +2887,7 @@ enum MoverFeeAuthorityState {
 /// Original money/source ownership stays on Subscription; feeType is the
 /// activated entitlement that determines the shared future tariff.
 model MoverFeeAuthority {
+  dunningClock BillingDunningClock?
   userId                  String @id
   tenantId                String
   payer                   User @relation(fields: [userId, tenantId], references: [id, tenantId], onDelete: Cascade, onUpdate: Restrict)
@@ -2925,6 +2926,8 @@ model MoverFeeSubscription {
 }
 
 model Subscription {
+  confirmationHolds PaymentConfirmationHold[]
+  billingFeeNotices BillingFeeNotice[]
   moverFeeAuthority MoverFeeAuthority? @relation("CanonicalMoverFee")
   moverFeeMembership MoverFeeSubscription?
   id                 String                @id @default(cuid())
@@ -3043,9 +3046,13 @@ model BillingEvent {
 /// One active-time clock for the canonical subscription's current fee obligation.
 /// Provider uncertainty stops this clock; it never rewrites the original due date.
 model BillingDunningClock {
-  subscriptionId String @id
+  id String @id @default(cuid())
+  /// Audited canonical projection; the clock ID never changes.
+  subscriptionId String @unique
   subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
   tenantId String
+  moverPayerUserId String? @unique
+  moverAuthority MoverFeeAuthority? @relation(fields: [moverPayerUserId, tenantId], references: [userId, tenantId], onDelete: Restrict, onUpdate: Restrict)
   dueAt DateTime
   epoch Int @default(1)
   version Int @default(0)
@@ -3053,6 +3060,8 @@ model BillingDunningClock {
   runningSince DateTime?
   pausedAt DateTime?
   resumedAt DateTime?
+  authorityHoldReason String?
+  authorityRevision Int?
   retryAtMs BigInt?
   nudgeAtMs BigInt?
   churnAtMs BigInt?
@@ -3061,6 +3070,7 @@ model BillingDunningClock {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([moverPayerUserId, tenantId])
   @@index([tenantId])
   @@map("billing_dunning_clocks")
 }
@@ -3071,7 +3081,9 @@ model PaymentConfirmationHold {
   id String @id @default(cuid())
   tenantId String
   subscriptionId String
-  clock BillingDunningClock @relation(fields: [subscriptionId], references: [subscriptionId], onDelete: Restrict)
+  originalSubscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  clockId String
+  clock BillingDunningClock @relation(fields: [clockId], references: [id], onDelete: Restrict)
   sourceEpoch Int
   paymentId String? @unique
   payment SubscriptionPayment? @relation(fields: [paymentId], references: [id], onDelete: Restrict)
@@ -3086,6 +3098,9 @@ model PaymentConfirmationHold {
   resolvedAt DateTime?
   resolvedBy String?
   resolutionEvidence String?
+  /// Append-only prior resolutions, including a proven negative superseded by
+  /// a later verified credit. Provider payloads never enter this history.
+  resolutionHistory Json @default("[]")
   reviewDueAt DateTime
   reviewNotifiedAt DateTime?
   createdAt DateTime @default(now())
@@ -3102,7 +3117,9 @@ model BillingFeeNotice {
   id String @id @default(cuid())
   tenantId String
   subscriptionId String
-  clock BillingDunningClock @relation(fields: [subscriptionId], references: [subscriptionId], onDelete: Restrict)
+  originalSubscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  clockId String
+  clock BillingDunningClock @relation(fields: [clockId], references: [id], onDelete: Restrict)
   epoch Int
   stageKey String
   userId String
@@ -3114,7 +3131,7 @@ model BillingFeeNotice {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([subscriptionId, epoch, stageKey, userId])
+  @@unique([clockId, epoch, stageKey, userId])
   @@index([tenantId])
   @@index([status, createdAt])
   @@map("billing_fee_notices")

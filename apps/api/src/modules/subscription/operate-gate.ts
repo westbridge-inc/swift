@@ -37,7 +37,7 @@ export function subscriptionOperability(
   if (!OPERABLE_STATUSES.includes(sub.status)) {
     return { operable: false, why: 'STATUS', status: sub.status };
   }
-  const graceEnd = sub.billingEnforcementDueAt ?? sub.gracePeriodEnd;
+  const graceEnd = sub.billingEnforcementDueAt;
   if (sub.status === 'PAST_DUE' && sub.autoSuspendEnabled && !sub.billingConfirmationPausedAt && graceEnd && graceEnd <= now) {
     return { operable: false, why: 'GRACE_LAPSED', status: sub.status };
   }
@@ -56,10 +56,7 @@ export function inoperableSubscriptionWhere(now = new Date()): Prisma.Subscripti
   return {
     OR: [
       { status: { notIn: [...OPERABLE_STATUSES] } },
-      { status: 'PAST_DUE', autoSuspendEnabled: true, billingConfirmationPausedAt: null, OR: [
-        { billingEnforcementDueAt: { lte: now } },
-        { billingEnforcementDueAt: null, gracePeriodEnd: { lte: now } },
-      ] },
+      { status: 'PAST_DUE', autoSuspendEnabled: true, billingConfirmationPausedAt: null, billingEnforcementDueAt: { lte: now } },
       // [E12] Billing stopped and the paid period (or trial) over — the same
       // refusal subscriptionOperability makes, so a catalogue read never shows
       // a store the gate would refuse.

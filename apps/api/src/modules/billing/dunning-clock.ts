@@ -1,4 +1,6 @@
-import { bindTenantTransaction } from '../../plugins/prisma';
+import { billingEffectsReady } from './billing-cutover';
+import { hasMmgTerminalProof, mmgPaymentRaw } from './mmg-terminal-evidence';
+import { lockSubscriptionPayer, lockMoverFeeAuthority, type MoverFeeResolution } from '../subscription/mover-fee-authority';
 import type { BillingDunningClock, PaymentConfirmationHold, Prisma, PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 
@@ -12,20 +14,13 @@ export type ConfirmationResolution = 'PAID' | 'PROVEN_UNPAID' | 'PROVEN_NO_EFFEC
 /** The same payer -> subscriptions -> clock/source order is used by collection,
  * confirmation and final notification handoff. No provider call belongs here. */
 export async function lockBillingAuthority(tx: Tx, subscriptionId: string) {
-  await bindTenantTransaction(tx);
-  const select = {
+  const payer = await lockSubscriptionPayer(tx, subscriptionId);
+  const userId = payer.userId;
+  const sub = await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId }, include: {
     rider: { select: { userId: true } }, driver: { select: { userId: true } },
     vendor: { select: { owner: { select: { userId: true } } } },
-  } as const;
-  const candidate = await tx.subscription.findUnique({ where: { id: subscriptionId }, select });
-  const userId = candidate?.rider?.userId ?? candidate?.driver?.userId ?? candidate?.vendor?.owner.userId;
-  if (!userId) throw new AppError(409, 'BILLING_OWNER_UNAVAILABLE', 'The subscription needs review before billing can continue.');
-  await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE`;
-  await tx.$queryRaw`SELECT "id" FROM "subscriptions" WHERE "id" = ${subscriptionId} ORDER BY "id" FOR UPDATE`;
-  const sub = await tx.subscription.findUnique({ where: { id: subscriptionId }, include: select });
-  const freshUser = sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId;
-  const user = await tx.user.findUnique({ where: { id: userId }, select: { tenantId: true, status: true } });
-  if (!sub || !user || freshUser !== userId) throw new AppError(409, 'BILLING_OWNER_CHANGED', 'The subscription owner changed. Try again.');
+  } });
+  const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true, status: true } });
   return { sub, userId, tenantId: user.tenantId, userStatus: user.status };
 }
 
@@ -42,23 +37,77 @@ export function activeDeadline(clock: BillingDunningClock, position: bigint | nu
 }
 
 export async function projectDunningClock(tx: Tx, clock: BillingDunningClock, now: Date) {
-  const deadline = activeDeadline(clock, FULL_FEE_GRACE_MS, now);
-  const sub = await tx.subscription.findUniqueOrThrow({ where: { id: clock.subscriptionId }, select: { autoRenew: true } });
-  await tx.subscription.update({ where: { id: clock.subscriptionId }, data: {
-    billingConfirmationPausedAt: clock.pausedAt,
-    billingEnforcementDueAt: deadline,
-    gracePeriodEnd: deadline,
-    nextRetryAt: !sub.autoRenew || clock.retryAtMs === null ? null : activeDeadline(clock, clock.retryAtMs, now),
+  const ready = await billingEffectsReady(tx);
+  const deadline = ready ? activeDeadline(clock, FULL_FEE_GRACE_MS, now) : null;
+  const authority = await tx.moverFeeAuthority.findUnique({ where: { canonicalSubscriptionId: clock.subscriptionId }, include: { members: true } });
+  const ids = authority?.members.map((m) => m.subscriptionId) ?? [clock.subscriptionId];
+  const sources = await tx.subscription.findMany({ where: { id: { in: ids } } });
+  for (const sub of sources) {
+    const data = {
+      billingConfirmationPausedAt: ready ? clock.pausedAt : sub.billingConfirmationPausedAt ?? now,
+      billingEnforcementDueAt: deadline,
+      gracePeriodEnd: sub.status === 'PAST_DUE' ? deadline : sub.gracePeriodEnd,
+      // An ordinary ACTIVE paid period needs no retry marker. Original aliases
+      // retain independently imposed manual restrictions but never collect.
+      nextRetryAt: !ready || sub.id !== clock.subscriptionId || !sub.autoRenew || clock.retryAtMs === null
+        || (['TRIAL', 'ACTIVE'].includes(sub.status) && !sub.failedAttempts)
+        ? null : activeDeadline(clock, clock.retryAtMs, now),
+    };
+    const same = (a: Date | null, b: Date | null) => a?.getTime() === b?.getTime();
+    if (same(sub.billingConfirmationPausedAt, data.billingConfirmationPausedAt)
+      && same(sub.billingEnforcementDueAt, data.billingEnforcementDueAt)
+      && same(sub.gracePeriodEnd, data.gracePeriodEnd) && same(sub.nextRetryAt, data.nextRetryAt)) continue;
+    await tx.subscription.update({ where: { id: sub.id }, data });
+  }
+}
+
+/** Change only the canonical projection of the same stable clock. The mover
+ * resolver has already written its exact independently approved decision. */
+async function moveCanonicalClockInTx(tx: Tx, clock: BillingDunningClock, authority: MoverFeeResolution, now: Date) {
+  const persisted = await tx.moverFeeAuthority.findUniqueOrThrow({ where: { userId: authority.payerUserId }, include: { decision: true } });
+  const facts = persisted.decision.changes as Prisma.JsonObject | null;
+  const refuse = () => new AppError(409, 'BILLING_CLOCK_TRANSITION_REQUIRED', 'The current weekly-fee obligation needs reconciliation before choosing another source.');
+  if (clock.moverPayerUserId !== authority.payerUserId || clock.tenantId !== authority.tenantId
+    || persisted.decision.action !== 'MOVER_FEE_RESOLVED' || facts?.['previousRevision'] !== clock.authorityRevision
+    || authority.revision !== (clock.authorityRevision ?? 0) + 1
+    || await tx.paymentConfirmationHold.count({ where: { clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES } } })) throw refuse();
+  const original = await tx.subscription.findUniqueOrThrow({ where: { id: clock.subscriptionId } });
+  const next = await tx.subscription.findUniqueOrThrow({ where: { id: authority.canonicalSubscriptionId } });
+  const sameDue = next.nextBillingDate.getTime() === clock.dueAt.getTime();
+  if (next.currencyCode !== original.currencyCode) throw refuse();
+  if (sameDue && (next.currentPeriodStart.getTime() !== original.currentPeriodStart.getTime()
+    || next.currentPeriodEnd.getTime() !== original.currentPeriodEnd.getTime())) throw refuse();
+  let paymentProof: string | null = null;
+  if (!sameDue) {
+    if (next.currentPeriodStart > clock.dueAt || next.currentPeriodEnd <= clock.dueAt
+      || next.currentPeriodEnd.getTime() !== next.nextBillingDate.getTime()) throw refuse();
+    const payment = await tx.subscriptionPayment.findFirst({ where: { subscriptionId: next.id, status: 'CAPTURED', paidAt: { not: null },
+      periodStart: next.currentPeriodStart, periodEnd: next.currentPeriodEnd, externalRef: { not: null } } });
+    const event = payment && await tx.billingEvent.findFirst({ where: { subscriptionId: next.id, type: 'CHARGE_SUCCESS',
+      amount: payment.amount, currencyCode: next.currencyCode, paymentRef: payment.externalRef } });
+    if (!payment || !event) throw refuse();
+    paymentProof = payment.id;
+  }
+  const snapshot = JSON.parse(JSON.stringify(clock, (_key, value) => typeof value === 'bigint' ? value.toString() : value)) as Prisma.InputJsonObject;
+  await tx.auditLog.create({ data: { action: 'BILLING_CLOCK_CANONICAL_CHANGED', entity: 'BillingDunningClock', entityId: clock.id,
+    changes: { clockId: clock.id, tenantId: clock.tenantId, payerUserId: authority.payerUserId, previous: snapshot,
+      canonicalSubscriptionId: next.id, authorityRevision: authority.revision, authorityDecisionId: persisted.decisionId, paymentProof } } });
+  if (!sameDue) await tx.billingFeeNotice.updateMany({ where: { clockId: clock.id, epoch: clock.epoch, status: 'PENDING' }, data: { status: 'OBSOLETE' } });
+  return tx.billingDunningClock.update({ where: { id: clock.id }, data: {
+    subscriptionId: next.id,
+    ...(!sameDue ? { dueAt: next.nextBillingDate, epoch: { increment: 1 }, elapsedMs: 0n, runningSince: null, pausedAt: now,
+      retryAtMs: 0n, nudgeAtMs: null, churnAtMs: null } : {}),
   } });
 }
 
-async function clockRow(tx: Tx, subscriptionId: string, now: Date) {
-  const { sub, tenantId } = await lockBillingAuthority(tx, subscriptionId);
+/** Called with the payer and all original subscription rows already locked. */
+async function canonicalClockRow(tx: Tx, subscriptionId: string, tenantId: string, now: Date, moverPayerUserId: string | null = null) {
+  const sub = await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
   let clock = await tx.billingDunningClock.findUnique({ where: { subscriptionId } });
   if (!clock) {
     const age = Math.max(0, now.getTime() - sub.nextBillingDate.getTime());
     clock = await tx.billingDunningClock.create({ data: {
-      subscriptionId, tenantId, dueAt: sub.nextBillingDate, runningSince: sub.nextBillingDate,
+      subscriptionId, tenantId, moverPayerUserId, dueAt: sub.nextBillingDate, runningSince: sub.nextBillingDate,
       retryAtMs: sub.nextRetryAt ? BigInt(age + Math.max(0, sub.nextRetryAt.getTime() - now.getTime())) : 0n,
       ...(sub.status === 'SUSPENDED' ? {
         nudgeAtMs: BigInt(age),
@@ -69,6 +118,37 @@ async function clockRow(tx: Tx, subscriptionId: string, now: Date) {
   await tx.$queryRaw`SELECT "subscriptionId" FROM "billing_dunning_clocks" WHERE "subscriptionId" = ${subscriptionId} FOR UPDATE`;
   if (clock.tenantId !== tenantId) throw new AppError(409, 'BILLING_OWNER_CHANGED', 'The subscription needs review before billing can continue.');
   return clock;
+}
+
+/** The authority resolver calls this after persisting its audited decision.
+ * It does not call the resolver again or invent a separate pause clock. */
+export async function syncMoverDunningAuthorityInTx(tx: Tx, authority: MoverFeeResolution, now = new Date()) {
+  const subscriptionId = authority.canonicalSubscriptionId;
+  let clock = await tx.billingDunningClock.findUnique({ where: { moverPayerUserId: authority.payerUserId } });
+  if (clock && clock.subscriptionId !== subscriptionId) clock = await moveCanonicalClockInTx(tx, clock, authority, now);
+  clock ??= await canonicalClockRow(tx, subscriptionId, authority.tenantId, now, authority.payerUserId);
+  const reason = authority.state === 'FINANCE_HOLD' ? authority.holdReason ?? 'MOVER_FEE_REVIEW_REQUIRED' : null;
+  if (clock.authorityHoldReason !== reason || clock.authorityRevision !== authority.revision) {
+    const paymentsHeld = await tx.paymentConfirmationHold.count({ where: { clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES } } });
+    const pause = reason !== null || paymentsHeld > 0;
+    clock = await tx.billingDunningClock.update({ where: { subscriptionId }, data: {
+      authorityHoldReason: reason, authorityRevision: authority.revision, version: { increment: 1 },
+      ...(pause && !clock.pausedAt ? { elapsedMs: BigInt(activeOverdueMs(clock, now)), runningSince: null, pausedAt: now } : {}),
+      ...(!pause && clock.pausedAt ? { runningSince: new Date(Math.max(now.getTime(), clock.dueAt.getTime())), pausedAt: null, resumedAt: now } : {}),
+    } });
+  }
+  await projectDunningClock(tx, clock, now);
+  return clock;
+}
+
+async function clockRow(tx: Tx, subscriptionId: string, now: Date) {
+  const payer = await lockSubscriptionPayer(tx, subscriptionId);
+  if (payer.kind === 'MOVER') {
+    const authority = await lockMoverFeeAuthority(tx, payer);
+    if (!authority) throw new AppError(409, 'BILLING_OWNER_UNAVAILABLE', 'The subscription needs review before billing can continue.');
+    return syncMoverDunningAuthorityInTx(tx, authority, now);
+  }
+  return canonicalClockRow(tx, subscriptionId, payer.tenantId, now);
 }
 
 export function suspensionRetentionMs() {
@@ -86,15 +166,15 @@ export async function beginConfirmationInTx(
   let clock = await clockRow(tx, subscriptionId, now);
   const prior = await tx.paymentConfirmationHold.findFirst({ where: sourceWhere(source) });
   if (prior) {
-    if (prior.subscriptionId !== subscriptionId) throw new AppError(409, 'PAYMENT_OWNER_MISMATCH', 'The payment needs review.');
+    if (prior.clockId !== clock.id) throw new AppError(409, 'PAYMENT_OWNER_MISMATCH', 'The payment needs review.');
     return prior;
   }
   const hold = await tx.paymentConfirmationHold.create({ data: {
-    tenantId: clock.tenantId, subscriptionId, sourceEpoch: clock.epoch,
+    tenantId: clock.tenantId, subscriptionId, clockId: clock.id, sourceEpoch: clock.epoch,
     ...source, reason, beganAt: now, reviewDueAt: new Date(now.getTime() + FEE_RETRY_MS),
   } });
   if (!clock.pausedAt) {
-    clock = await tx.billingDunningClock.update({ where: { subscriptionId }, data: {
+    clock = await tx.billingDunningClock.update({ where: { id: clock.id }, data: {
       elapsedMs: BigInt(activeOverdueMs(clock, now)), runningSince: null, pausedAt: now,
       version: { increment: 1 },
     } });
@@ -106,37 +186,51 @@ export async function beginConfirmationInTx(
 /** Covers pre-cutover rows and trusted source fixtures. Runtime adapters begin
  * at reservation/handoff; this repair never infers a negative from a timeout. */
 async function discoverUnresolvedSources(tx: Tx, subscriptionId: string, now: Date) {
-  const [checkouts, sessions, payments] = await Promise.all([
-    tx.mmgCheckoutIntent.findMany({ where: { subscriptionId, status: { in: ['OPEN', 'CONFIRMING', 'HELD', 'EXPIRED'] } },
-      select: { id: true, createdAt: true, reason: true } }),
-    tx.cardSession.findMany({ where: { subscriptionId, purpose: 'PAY_NOW', OR: [
+  const authority = await tx.moverFeeAuthority.findUnique({ where: { canonicalSubscriptionId: subscriptionId }, include: { members: true } });
+  const sourceIds = authority?.members.map((m) => m.subscriptionId) ?? [subscriptionId];
+  const sourceSubscription = { in: sourceIds };
+  const [checkouts, sessions, payments, legacyTerminal] = await Promise.all([
+    tx.mmgCheckoutIntent.findMany({ where: { subscriptionId: sourceSubscription, status: { in: ['OPEN', 'CONFIRMING', 'HELD', 'EXPIRED'] } },
+      select: { id: true, subscriptionId: true, createdAt: true, reason: true } }),
+    tx.cardSession.findMany({ where: { subscriptionId: sourceSubscription, purpose: 'PAY_NOW', OR: [
       { status: { in: ['OPEN', 'UNKNOWN', 'HELD'] } },
-      { status: 'EXPIRED', failureCode: { not: 'PROVIDER_PAGE_UNAVAILABLE' } },
-    ] }, select: { id: true, createdAt: true, paymentId: true, failureCode: true } }),
-    tx.subscriptionPayment.findMany({ where: { subscriptionId, paymentMethod: { in: ['MOBILE_MONEY', 'CARD'] }, OR: [
+      { status: 'EXPIRED', OR: [{ failureCode: null }, { failureCode: { not: 'PROVIDER_PAGE_UNAVAILABLE' } }] },
+    ] }, select: { id: true, subscriptionId: true, createdAt: true, paymentId: true, failureCode: true } }),
+    tx.subscriptionPayment.findMany({ where: { subscriptionId: sourceSubscription, paymentMethod: { in: ['MOBILE_MONEY', 'CARD'] }, OR: [
       { status: { in: ['UNKNOWN', 'PENDING'] } },
       { failureCode: { in: ['REQUIRES_ACTION', 'AMOUNT_MISMATCH', 'SETTLEMENT_MISMATCH', 'HISTORY_APPROVAL_UNVERIFIED', 'CURRENCY_UNPINNED', 'WALLET_CURRENCY_MISMATCH', 'PROVIDER_NOT_FOUND'] } },
-    ] }, select: { id: true, createdAt: true, failureCode: true, failureRaw: true, clientKey: true } }),
+    ] }, select: { id: true, subscriptionId: true, createdAt: true, failureCode: true, failureRaw: true, clientKey: true } }),
+    tx.subscriptionPayment.findMany({ where: { subscriptionId: sourceSubscription, paymentMethod: 'MOBILE_MONEY', status: { in: ['FAILED', 'EXPIRED'] } } }),
   ]);
+  for (const payment of legacyTerminal) {
+    const raw = mmgPaymentRaw(payment);
+    if (raw['providerEffect'] === 'NOT_SENT' && !payment.externalRef) continue;
+    const attempt = payment.clientKey?.startsWith(`sub:${payment.subscriptionId}:`)
+      ? await tx.billingEvent.findUnique({ where: { idempotencyKey: `charge:${payment.clientKey.slice(4)}` } }) : null;
+    if (hasMmgTerminalProof(payment, attempt?.currencyCode ?? null) && raw['providerOutcome'] !== 'CAPTURED') continue;
+    // A previously resolved source remains immutable. Finance closure is
+    // checked against its exact source by the resolver and repair boundary.
+    payments.push(payment);
+  }
   const sessionPayments = new Set(sessions.map((s) => s.paymentId).filter(Boolean));
-  const sources: Array<{ source: ConfirmationSource; at: Date; reason: string }> = [
-    ...checkouts.map((s) => ({ source: { checkoutId: s.id }, at: s.createdAt, reason: s.reason ?? 'MMG_CONFIRMATION_PENDING' })),
-    ...sessions.map((s) => ({ source: { cardSessionId: s.id }, at: s.createdAt, reason: s.failureCode ?? 'CARD_CONFIRMATION_PENDING' })),
+  const sources: Array<{ subscriptionId: string; source: ConfirmationSource; at: Date; reason: string }> = [
+    ...checkouts.map((s) => ({ subscriptionId: s.subscriptionId, source: { checkoutId: s.id }, at: s.createdAt, reason: s.reason ?? 'MMG_CONFIRMATION_PENDING' })),
+    ...sessions.map((s) => ({ subscriptionId: s.subscriptionId, source: { cardSessionId: s.id }, at: s.createdAt, reason: s.failureCode ?? 'CARD_CONFIRMATION_PENDING' })),
     ...payments.filter((p) => {
       const raw = p.failureRaw as Record<string, unknown> | null;
       return !sessionPayments.has(p.id) && !p.clientKey?.startsWith('cardpay:')
         && raw?.['providerEffect'] !== 'NOT_SENT';
-    }).map((s) => ({ source: { paymentId: s.id }, at: s.createdAt, reason: s.failureCode ?? 'PAYMENT_CONFIRMATION_PENDING' })),
+    }).map((s) => ({ subscriptionId: s.subscriptionId, source: { paymentId: s.id }, at: s.createdAt, reason: s.failureCode ?? 'PAYMENT_CONFIRMATION_PENDING' })),
   ];
   sources.sort((a, b) => a.at.getTime() - b.at.getTime());
   for (const source of sources) {
-    await beginConfirmationInTx(tx, subscriptionId, source.source, source.reason,
+    await beginConfirmationInTx(tx, source.subscriptionId, source.source, source.reason,
       new Date(Math.min(source.at.getTime(), now.getTime())));
   }
 }
 
 export async function currentDunningClock(tx: Tx, subscriptionId: string, now = new Date(), discover = true) {
-  await clockRow(tx, subscriptionId, now);
+  subscriptionId = (await clockRow(tx, subscriptionId, now)).subscriptionId;
   if (discover) await discoverUnresolvedSources(tx, subscriptionId, now);
   const clock = await tx.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId } });
   await projectDunningClock(tx, clock, now);
@@ -148,14 +242,16 @@ export async function readDunningClock(db: PrismaClient, subscriptionId: string,
 }
 
 export async function hasConfirmationInTx(tx: Tx, subscriptionId: string, now: Date, except?: ConfirmationSource) {
-  await currentDunningClock(tx, subscriptionId, now);
+  const clock = await currentDunningClock(tx, subscriptionId, now);
+  subscriptionId = clock.subscriptionId;
+  if (clock.authorityHoldReason) return true;
   // Every source FK is nullable. SQL NOT (checkoutId = id) also rejects a
   // card/payment row whose checkoutId is NULL, hiding another live rail.
   const otherSource = except ? Object.entries(except).map(([field, id]) => ({
     OR: [{ [field]: null }, { [field]: { not: id } }],
   })) : [];
   return !!await tx.paymentConfirmationHold.findFirst({ where: {
-    subscriptionId, status: { in: ACTIVE_CONFIRMATION_STATES }, AND: otherSource,
+    clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES }, AND: otherSource,
   }, select: { id: true } });
 }
 
@@ -165,22 +261,25 @@ export async function resolveConfirmationInTx(
   tx: Tx, subscriptionId: string, source: ConfirmationSource,
   resolution: ConfirmationResolution, evidence: { actor: string; reference: string }, now = new Date(),
 ) {
-  await clockRow(tx, subscriptionId, now);
+  const clock = await clockRow(tx, subscriptionId, now);
+  subscriptionId = clock.subscriptionId;
   if (!evidence.actor.trim() || !evidence.reference.trim()) throw new AppError(400, 'PAYMENT_RESOLUTION_EVIDENCE_REQUIRED', 'Record the confirmation evidence.');
   const hold = await tx.paymentConfirmationHold.findFirst({ where: sourceWhere(source) });
   if (!hold) return null; // Pre-cutover proven terminal instructions may have no hold.
-  if (hold.subscriptionId !== subscriptionId) throw new NotFoundError('Payment confirmation', subscriptionId);
+  if (hold.clockId !== clock.id) throw new NotFoundError('Payment confirmation', subscriptionId);
   if (!ACTIVE_CONFIRMATION_STATES.includes(hold.status)) return hold;
   const resolved = await tx.paymentConfirmationHold.update({ where: { id: hold.id }, data: {
     status: resolution, resolvedAt: now, resolvedBy: evidence.actor, resolutionEvidence: evidence.reference,
+    resolutionHistory: [...(Array.isArray(hold.resolutionHistory) ? hold.resolutionHistory : []),
+      { status: resolution, at: now.toISOString(), actor: evidence.actor, reference: evidence.reference, epoch: hold.sourceEpoch }] as Prisma.InputJsonValue,
   } });
-  if (!await tx.paymentConfirmationHold.findFirst({ where: { subscriptionId, status: { in: ACTIVE_CONFIRMATION_STATES } }, select: { id: true } })) {
+  if (!clock.authorityHoldReason && !await tx.paymentConfirmationHold.findFirst({ where: { clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES } }, select: { id: true } })) {
     const prior = await tx.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId } });
-    const clock = await tx.billingDunningClock.update({ where: { subscriptionId }, data: {
+    const resumedClock = await tx.billingDunningClock.update({ where: { id: clock.id }, data: {
       pausedAt: null, runningSince: new Date(Math.max(now.getTime(), prior.dueAt.getTime())),
       resumedAt: now, version: { increment: 1 },
     } });
-    await projectDunningClock(tx, clock, now);
+    await projectDunningClock(tx, resumedClock, now);
   }
   return resolved;
 }
@@ -189,13 +288,35 @@ export async function markSettlementApplying(tx: Tx, subscriptionId: string, sou
   const hold = await beginConfirmationInTx(tx, subscriptionId, source, 'SETTLEMENT_APPLY_PENDING', now);
   if (ACTIVE_CONFIRMATION_STATES.includes(hold.status)) {
     await tx.paymentConfirmationHold.update({ where: { id: hold.id }, data: { status: 'SETTLEMENT_APPLY_PENDING', reason: 'SETTLEMENT_APPLY_PENDING' } });
+  } else if (hold.status === 'PROVEN_UNPAID' && 'checkoutId' in source) {
+    const clock = await tx.billingDunningClock.findUniqueOrThrow({ where: { id: hold.clockId } });
+    // An older instruction cannot restart or extend a newer obligation.
+    if (hold.sourceEpoch !== clock.epoch) return;
+    const checkout = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: source.checkoutId } });
+    const { verifiedCheckoutCredit } = await import('./confirmation-finance');
+    const proof = checkout.status === 'CONFIRMED' ? await verifiedCheckoutCredit(tx, checkout) : null;
+    if (!proof) throw new AppError(409, 'SETTLEMENT_EVIDENCE_REQUIRED', 'The payment needs verified settlement evidence.');
+    await tx.paymentConfirmationHold.update({ where: { id: hold.id }, data: {
+      status: 'SETTLEMENT_APPLY_PENDING', reason: 'VERIFIED_POSITIVE_CORRECTION',
+      resolvedAt: null, resolvedBy: null, resolutionEvidence: null,
+      resolutionHistory: [...(Array.isArray(hold.resolutionHistory) ? hold.resolutionHistory : []),
+        { status: 'VERIFIED_POSITIVE_CORRECTION', at: now.toISOString(), providerPaymentId: proof.identity.id,
+          creditEventId: proof.creditEventId, epoch: hold.sourceEpoch }] as Prisma.InputJsonValue,
+    } });
+    if (!clock.pausedAt) {
+      const paused = await tx.billingDunningClock.update({ where: { id: clock.id }, data: {
+        elapsedMs: BigInt(activeOverdueMs(clock, now)), runningSince: null, pausedAt: now, version: { increment: 1 },
+      } });
+      await projectDunningClock(tx, paused, now);
+    }
   }
 }
 
 export async function advanceDunningObligation(tx: Tx, subscriptionId: string, nextDue: Date, now: Date) {
   const previous = await clockRow(tx, subscriptionId, now);
-  await tx.billingFeeNotice.updateMany({ where: { subscriptionId, epoch: previous.epoch, status: 'PENDING' }, data: { status: 'OBSOLETE' } });
-  const held = await tx.paymentConfirmationHold.count({ where: { subscriptionId, status: { in: ACTIVE_CONFIRMATION_STATES } } });
+  if (previous.subscriptionId !== subscriptionId) throw new AppError(409, 'MOVER_FEE_SOURCE_CHANGED', 'Use the current shared weekly fee.');
+  await tx.billingFeeNotice.updateMany({ where: { clockId: previous.id, epoch: previous.epoch, status: 'PENDING' }, data: { status: 'OBSOLETE' } });
+  const held = previous.authorityHoldReason || await tx.paymentConfirmationHold.count({ where: { clockId: previous.id, status: { in: ACTIVE_CONFIRMATION_STATES } } });
   const clock = await tx.billingDunningClock.update({ where: { subscriptionId }, data: {
     dueAt: nextDue, epoch: { increment: 1 }, version: { increment: 1 }, elapsedMs: 0n,
     runningSince: held ? null : nextDue, pausedAt: held ? previous.pausedAt ?? now : null,
@@ -206,6 +327,7 @@ export async function advanceDunningObligation(tx: Tx, subscriptionId: string, n
 
 export async function scheduleDunningFailure(tx: Tx, subscriptionId: string, now: Date) {
   const current = await currentDunningClock(tx, subscriptionId, now);
+  subscriptionId = current.subscriptionId;
   if (current.pausedAt) throw new AppError(409, 'PAYMENT_CONFIRMING', 'The weekly-fee payment is being confirmed.');
   const elapsed = activeOverdueMs(current, now);
   const clock = await tx.billingDunningClock.update({ where: { subscriptionId }, data: { retryAtMs: BigInt(elapsed + FEE_RETRY_MS) } });

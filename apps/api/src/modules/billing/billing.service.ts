@@ -1,7 +1,9 @@
+import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutover';
 import { verifiedCheckoutCredit } from './confirmation-finance';
 import { enqueueFeeDemandInTx } from './fee-demand-delivery';
 import type { OnAudit } from '../../lib/audit-writer';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { hasMmgTerminalProof, isMmgTerminalStatus, matchesLookupGeneration, mmgNegativeMatches, mmgPaymentRaw, mmgTerminalProof, paymentFacts, type MmgLookupObservation } from './mmg-terminal-evidence';
 import type { PrismaClient, Subscription, SubscriptionPayment, Prisma, SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getTenantId } from '../../plugins/tenant-context';
@@ -52,7 +54,7 @@ type ChargeAttemptResult = (
   /** `spendPrepaid` = debit this much from the prepaid balance INSIDE the
    *  advance transaction, so the money and the week it buys commit together. */
   | { ok: true; ref: string; settlePaymentId?: string; spendPrepaid?: number; mmgEvidence?: MmgTransaction }
-  | { ok: false; reason: string; failureCode?: NormalizedFailure; intentId?: string; failureRaw?: string }
+  | { ok: false; reason: string; failureCode?: NormalizedFailure; intentId?: string; failureRaw?: string; mmgInitiateFailure?: MmgTransaction }
   | { ok: false; pendingTx: string; clientKey: string; expiresAt: Date; intentId: string }
   | { ok: false; approvedWithId: MmgTxResult; clientKey: string; intentId: string }
   | { ok: false; approvedWithoutId: MmgTxResult; intentId: string }
@@ -763,7 +765,7 @@ export class BillingService {
       // are ONE transition; a lost claim means another run already applied it.
       const outcome = await this.terminalizeFailedPayment(
         sub, { id: charged.intentId, amount },
-        { status: 'FAILED', failureCode: charged.failureCode ?? 'PROVIDER_ERROR', from: ['UNKNOWN'], requireNoExternalRef: true, ...(charged.failureRaw ? { failureRaw: charged.failureRaw } : {}) },
+        { status: 'FAILED', failureCode: charged.failureCode ?? 'PROVIDER_ERROR', from: ['UNKNOWN'], requireNoExternalRef: true, ...(charged.mmgInitiateFailure ? { mmgInitiateFailure: charged.mmgInitiateFailure } : {}), ...(charged.failureRaw ? { failureRaw: charged.failureRaw } : {}) },
         charged.reason, now, periodKey,
       );
       return outcome ?? 'skipped';
@@ -1810,16 +1812,20 @@ export class BillingService {
           if (prior.status === 'UNKNOWN') return { ok: false, deferred: true, rail: 'MOBILE_MONEY' };
           continue;
         }
+        const lookupSource = await this.startMmgLookup(sub, prior.id, now);
+        if (!lookupSource?.externalRef) return { ok: false, deferred: true, rail: 'MOBILE_MONEY' };
         let priorLookup: MmgTransaction;
         try {
-          priorLookup = await mmg.transactionLookup({ transactionId: prior.externalRef });
+          priorLookup = await mmg.transactionLookup({ transactionId: lookupSource.externalRef });
         } catch {
           return { ok: false, deferred: true, reopenPaymentId: prior.id, rail: 'MOBILE_MONEY' }; // MMG down — never fire blind
         }
         if (priorLookup.status === 'approved') {
           return { ok: true, ref: prior.externalRef, settlePaymentId: prior.id, rail: 'MOBILE_MONEY', mmgEvidence: priorLookup };
         }
-        if (priorLookup.status === 'pending') return { ok: false, deferred: true, reopenPaymentId: prior.id, rail: 'MOBILE_MONEY' };
+        if (!await this.confirmPriorMmgTerminal(sub, lookupSource, priorLookup, now)) {
+          return { ok: false, deferred: true, rail: 'MOBILE_MONEY' };
+        }
       }
 
       // §13 MMG rail — merchant-initiated. Amounts are minor units at the
@@ -1874,7 +1880,8 @@ export class BillingService {
       // it together with the CHARGE_FAILED event and the dunning state in one
       // transaction; a flip here followed by a crash left a FAILED row whose
       // outcome never landed.
-      return { ok: false, reason: result.reason ?? 'MMG request failed', failureCode, intentId: intent.id, rail: 'MOBILE_MONEY', ...(result.reason ? { failureRaw: result.reason } : {}) };
+      return { ok: false, reason: result.reason ?? 'MMG request failed', failureCode, intentId: intent.id, rail: 'MOBILE_MONEY',
+        mmgInitiateFailure: { status: result.status, transactionId: result.transactionId, reference, amountMinor: Math.round(amount * 100), currencyCode: sub.currencyCode }, ...(result.reason ? { failureRaw: result.reason } : {}) };
     }
 
     // Prepaid already tried and came up short above; no usable external rail
@@ -2600,7 +2607,11 @@ export class BillingService {
       if (!payment || payment.subscriptionId !== sub.id || payment.paymentMethod !== rail
         || payment.status !== 'UNKNOWN' || payment.externalRef !== null) return false;
 
-      const maySend = !await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)
+      const liveObligation = await tx.subscription.findUnique({ where: { id: sub.id }, select: { nextBillingDate: true, failedAttempts: true } });
+      const sameObligation = liveObligation?.nextBillingDate.getTime() === sub.nextBillingDate.getTime()
+        && liveObligation.failedAttempts === sub.failedAttempts
+        && payment.periodStart.getTime() === sub.nextBillingDate.getTime();
+      const maySend = sameObligation && !await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)
         && !authority.bankInsteadOfAdvance
         && !authority.suppressNotice
         && ['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status);
@@ -2702,6 +2713,71 @@ export class BillingService {
         where: { id: sub.id },
         data: { nextRetryAt: new Date(input.now.getTime() + RETRY_HOURS * 60 * 60 * 1000) },
       });
+      return true;
+    });
+  }
+
+  private async mmgAttemptCurrency(tx: Prisma.TransactionClient, payment: SubscriptionPayment): Promise<string | null> {
+    if (!payment.clientKey?.startsWith(`sub:${payment.subscriptionId}:`)) return null;
+    const attempt = await tx.billingEvent.findUnique({ where: { idempotencyKey: `charge:${payment.clientKey.slice(4)}` } });
+    return attempt?.currencyCode ?? null;
+  }
+
+  private async startMmgLookup(sub: SubWithRelations, paymentId: string, now: Date): Promise<SubscriptionPayment | null> {
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockPaymentOutcomeAuthority(tx, sub);
+      await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${paymentId} FOR UPDATE`;
+      const payment = await tx.subscriptionPayment.findUnique({ where: { id: paymentId } });
+      if (!payment || payment.subscriptionId !== sub.id || payment.paymentMethod !== 'MOBILE_MONEY'
+        || !['UNKNOWN', 'PENDING', 'FAILED', 'EXPIRED'].includes(payment.status)) return null;
+      return tx.subscriptionPayment.update({ where: { id: payment.id }, data: { failureRaw: {
+        ...mmgPaymentRaw(payment), mmgLookupGeneration: randomUUID(), mmgLookupStartedAt: now.toISOString(),
+      } } });
+    });
+  }
+
+  private mmgLookupObservation(payment: SubscriptionPayment, evidence: MmgTransaction): MmgLookupObservation {
+    return { generation: String(mmgPaymentRaw(payment)['mmgLookupGeneration']), facts: paymentFacts(payment), evidence };
+  }
+
+  /** Preserve every paid/held fact and the original instruction identity. A
+   * legacy terminal flag without proof becomes pollable, never a new debit. */
+  private async holdUnprovenMmgInTx(tx: Prisma.TransactionClient, payment: SubscriptionPayment, now: Date): Promise<void> {
+    if (payment.status === 'CAPTURED') return;
+    const raw = mmgPaymentRaw(payment);
+    await tx.subscriptionPayment.update({ where: { id: payment.id }, data: {
+      status: payment.externalRef ? 'PENDING' : 'UNKNOWN',
+      ...(hasMmgApprovalHold(payment) || raw['providerOutcome'] === 'CAPTURED' ? {} : { failureCode: 'MMG_TERMINAL_UNPROVEN' }),
+      failureRaw: { ...raw, ...(raw['mmgUnprovenTerminal'] ? {} : {
+        mmgUnprovenTerminal: { previousStatus: payment.status, previousFailureCode: payment.failureCode,
+          observedAt: now.toISOString() },
+      }) },
+    } });
+    await beginConfirmationInTx(tx, payment.subscriptionId, { paymentId: payment.id }, 'MMG_TERMINAL_UNPROVEN', now);
+  }
+
+  private async confirmPriorMmgTerminal(sub: SubWithRelations, snapshot: SubscriptionPayment, evidence: MmgTransaction, now: Date): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockPaymentOutcomeAuthority(tx, sub);
+      await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${snapshot.id} FOR UPDATE`;
+      const payment = await tx.subscriptionPayment.findUnique({ where: { id: snapshot.id } });
+      if (!payment || payment.subscriptionId !== sub.id || payment.paymentMethod !== 'MOBILE_MONEY'
+        || !['UNKNOWN', 'PENDING', 'FAILED', 'EXPIRED'].includes(payment.status)) return false;
+      const raw = mmgPaymentRaw(payment);
+      if (payment.paidAt || hasMmgApprovalHold(payment) || raw['providerOutcome'] === 'CAPTURED') return false;
+      const observation = this.mmgLookupObservation(snapshot, evidence);
+      const currency = await this.mmgAttemptCurrency(tx, payment);
+      if (!matchesLookupGeneration(payment, observation)) return false;
+      if (!mmgNegativeMatches(payment, currency, evidence)) {
+        await this.holdUnprovenMmgInTx(tx, payment, now);
+        return false;
+      }
+      // Live rows are resolved by the poller atomically with their outcome.
+      // A retry may only pass a pre-existing terminal outcome for this period.
+      if (!['FAILED', 'EXPIRED'].includes(payment.status) || payment.periodStart.getTime() !== sub.nextBillingDate.getTime()) return false;
+      await tx.subscriptionPayment.update({ where: { id: payment.id }, data: { failureRaw: {
+        ...raw, mmgTerminalEvidence: mmgTerminalProof(payment, currency!, evidence, 'LOOKUP', observation.generation, now),
+      } } });
       return true;
     });
   }
@@ -3019,9 +3095,11 @@ export class BillingService {
         continue;
       }
 
+      const lookupSource = await this.startMmgLookup(sub as SubWithRelations, payment.id, now);
+      if (!lookupSource?.externalRef) { out.stillPending += 1; continue; }
       let lookup: MmgTransaction;
       try {
-        lookup = await mmg.transactionLookup({ transactionId: payment.externalRef });
+        lookup = await mmg.transactionLookup({ transactionId: lookupSource.externalRef });
       } catch {
         out.stillPending += 1; // transport hiccup — the next tick retries
         continue;
@@ -3055,7 +3133,7 @@ export class BillingService {
           // [M-04] Terminal status and dunning outcome land in ONE transaction.
           const outcome = await this.terminalizeFailedPayment(
             sub as SubWithRelations, payment,
-            { status: expired ? 'EXPIRED' : 'FAILED', failureCode: expired ? 'REQUEST_EXPIRED' : mapMmgFailure(status), from: ['PENDING', 'UNKNOWN'], providerAbsenceOnly: status === 'pending' },
+            { status: expired ? 'EXPIRED' : 'FAILED', failureCode: expired ? 'REQUEST_EXPIRED' : mapMmgFailure(status), from: ['PENDING', 'UNKNOWN'], providerAbsenceOnly: status === 'pending', mmgLookup: this.mmgLookupObservation(lookupSource, lookup) },
             `MMG request ${expired ? 'expired unapproved' : status}`, now, periodKey,
           );
           if (!outcome) { out.stillPending += 1; continue; }
@@ -3343,7 +3421,6 @@ export class BillingService {
           // The scan is only a candidate list. Deletion/cancellation, approval,
           // another repair or a retry may have committed since it was read.
           const authority = await this.lockPaymentOutcomeAuthority(tx, sub as SubWithRelations);
-          if (await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)) return { kind: 'skipped' as const };
           // Retry adoption can reopen a FAILED payment without locking the
           // subscription; fence its status too, after payer -> subscription.
           await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${p.id} FOR UPDATE`;
@@ -3363,6 +3440,22 @@ export class BillingService {
             tx.billingEvent.findUnique({ where: { idempotencyKey: `success:${sub.id}:${periodKey}` }, select: { id: true } }),
           ]);
           if (failure || success) return { kind: 'skipped' as const };
+          const currency = await this.mmgAttemptCurrency(tx, payment);
+          const financeResolution = typeof existing['financeConfirmationId'] === 'string'
+            ? await tx.paymentConfirmationHold.findFirst({ where: { id: existing['financeConfirmationId'], paymentId: payment.id,
+              subscriptionId: payment.subscriptionId, status: 'PROVEN_UNPAID', resolvedBy: { not: null }, resolutionEvidence: { not: null } } }) : null;
+          if (financeResolution && existing['providerOutcome'] !== 'CAPTURED' && !hasMmgApprovalHold(payment)) {
+            await tx.subscriptionPayment.update({ where: { id: payment.id }, data: { failureRaw: {
+              ...existing, subscriptionOutcome: PRESERVED_NO_DUNNING, recoveryDisposition: 'FINANCE_CONFIRMED_UNPAID',
+            } } });
+            return { kind: 'preserved' as const };
+          }
+          const provenUnsent = existing['providerEffect'] === 'NOT_SENT' && !payment.externalRef;
+          if (!provenUnsent && !hasMmgTerminalProof(payment, currency)) {
+            await this.holdUnprovenMmgInTx(tx, payment, now);
+            return { kind: 'unproven' as const };
+          }
+          if (await this.subscriptionHasConfirmationHold(tx, sub.id, payment.id, now)) return { kind: 'unproven' as const };
           if (authority.bankInsteadOfAdvance || !['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status)) {
             await tx.subscriptionPayment.update({
               where: { id: payment.id },
@@ -3380,10 +3473,21 @@ export class BillingService {
           // not overwrite a more recent failure or successful payment.
           const fresh = await tx.subscription.findUnique({ where: { id: sub.id } });
           if (!fresh) throw new Error(`Locked subscription ${sub.id} disappeared during MMG repair`);
+          if (fresh.nextBillingDate.getTime() !== payment.periodStart.getTime()) {
+            await tx.subscriptionPayment.update({ where: { id: payment.id }, data: { failureRaw: {
+              ...existing, subscriptionOutcome: PRESERVED_NO_DUNNING, periodOutcome: 'DIFFERENT_OBLIGATION',
+            } } });
+            return { kind: 'preserved' as const };
+          }
           const current = { ...sub, ...fresh } as SubWithRelations;
           const outcome = await this.recordFailureInTx(tx, current, Number(payment.amount), reason, now, periodKey);
           return { kind: 'dunned' as const, current, outcome };
         });
+        if (result.kind === 'unproven') {
+          failedInBatch += 1;
+          oldestMinutes = oldestMinutes == null ? ageMinutes : Math.max(oldestMinutes, ageMinutes);
+          continue;
+        }
         if (result.kind === 'skipped') {
           resolved += 1;
           continue;
@@ -3446,6 +3550,7 @@ export class BillingService {
     now: Date,
     periodKey: string,
   ): Promise<FailureOutcome> {
+    await requireBillingEffectsReady(tx);
     const failedKey = `failed:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: failedKey }, select: { id: true } });
     if (!recorded) {
@@ -3560,6 +3665,8 @@ export class BillingService {
       preserveWithoutDunning?: { providerOutcome: string; recoveryDisposition: string };
       /** Local TTL / empty lookup is not a terminal provider acknowledgement. */
       providerAbsenceOnly?: boolean;
+      mmgLookup?: MmgLookupObservation;
+      mmgInitiateFailure?: MmgTransaction;
     },
     reason: string,
     now: Date,
@@ -3579,10 +3686,31 @@ export class BillingService {
       // expiry winner prevents dispatch; a dispatch winner remains pollable
       // until the provider confirms a terminal outcome. A clock or empty
       // lookup cannot prove an outstanding request will never capture.
-      if (existingRaw['providerOutcome'] === 'CAPTURED'
+      if (currentPayment.paidAt || existingRaw['providerOutcome'] === 'CAPTURED'
         || (terminal.providerAbsenceOnly && (existingRaw['providerEffect'] !== 'NOT_SENT' || currentPayment.externalRef))) return null;
+      let negativeProof: Prisma.InputJsonObject | undefined;
+      if (currentPayment.paymentMethod === 'MOBILE_MONEY' && !terminal.providerAbsenceOnly) {
+        if (!terminal.from.includes(currentPayment.status as 'UNKNOWN' | 'PENDING') || hasMmgApprovalHold(currentPayment)) return null;
+        const currency = await this.mmgAttemptCurrency(tx, currentPayment);
+        if (terminal.mmgLookup && !matchesLookupGeneration(currentPayment, terminal.mmgLookup)) return null;
+        if (terminal.mmgLookup && matchesLookupGeneration(currentPayment, terminal.mmgLookup)
+          && mmgNegativeMatches(currentPayment, currency, terminal.mmgLookup.evidence)) {
+          negativeProof = mmgTerminalProof(currentPayment, currency!, terminal.mmgLookup.evidence, 'LOOKUP', terminal.mmgLookup.generation, now);
+        } else if (terminal.mmgInitiateFailure && !currentPayment.externalRef
+          && existingRaw['providerEffect'] === 'AUTHORIZED' && typeof existingRaw['authorizedAt'] === 'string'
+          && isMmgTerminalStatus(terminal.mmgInitiateFailure.status)
+          && terminal.mmgInitiateFailure.reference === currentPayment.clientKey
+          && terminal.mmgInitiateFailure.amountMinor === Math.round(Number(currentPayment.amount) * 100)
+          && terminal.mmgInitiateFailure.currencyCode === currency) {
+          negativeProof = mmgTerminalProof(currentPayment, currency!, terminal.mmgInitiateFailure, 'INITIATE', existingRaw['authorizedAt'], now);
+        } else {
+          await this.holdUnprovenMmgInTx(tx, currentPayment, now);
+          return null;
+        }
+      }
       const baseFailureRaw = {
         ...existingRaw,
+        ...(negativeProof ? { mmgTerminalEvidence: negativeProof } : {}),
         ...(terminal.failureRaw ? { reason: terminal.failureRaw } : {}),
         ...(terminal.preserveWithoutDunning ?? {}),
       };
@@ -3614,7 +3742,8 @@ export class BillingService {
         ]);
         if (!fresh) throw new Error(`Locked subscription ${sub.id} disappeared during MMG terminalization`);
         const terminalForDunning = !['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status);
-        if (authority.bankInsteadOfAdvance || terminalForDunning || covered || terminal.preserveWithoutDunning || anotherConfirmation) {
+        if (authority.bankInsteadOfAdvance || terminalForDunning || covered || terminal.preserveWithoutDunning || anotherConfirmation
+          || fresh.nextBillingDate.getTime() !== currentPayment.periodStart.getTime()) {
           await tx.subscriptionPayment.update({
             where: { id: payment.id },
             data: {
@@ -3678,6 +3807,7 @@ export class BillingService {
    *  subscription status, so the authority is one generation [REPORT-012
    *  F-012-05]. Notifications live in suspendAccessNotices (post-commit). */
   private async suspendAccessRows(tx: Prisma.TransactionClient, sub: SubWithRelations, periodKey: string, now: Date) {
+    await requireBillingEffectsReady(tx);
     const clock = await currentDunningClock(tx, sub.id, now);
     const elapsed = activeOverdueMs(clock, now);
     if (clock.pausedAt || elapsed < FULL_FEE_GRACE_MS || clock.resumedAt?.getTime() === now.getTime()) {
@@ -4015,6 +4145,7 @@ export class BillingService {
         } });
         const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
         const evidence = { actor: 'checkout-settlement', reference: identity.id };
+        if (!await billingEffectsReady(tx)) return false; // Credit is recorded; preserve application protection through cutover.
         if (clock.epoch > hold.sourceEpoch || authority.bankInsteadOfAdvance || sub.nextBillingDate > now) {
           await resolveConfirmationInTx(tx, sub.id, { checkoutId: checkout.id }, 'PAID', evidence, now);
           return true;

@@ -9,7 +9,7 @@ type Db = PrismaClient | Prisma.TransactionClient;
 export async function moverSourceFinancialFingerprint(db: Db, source: Subscription): Promise<string> {
   const rows = await db.$queryRaw<Array<{ fingerprint: string }>>`
     SELECT encode(sha256(convert_to(jsonb_build_object(
-      'source', (SELECT to_jsonb(s) FROM subscriptions s WHERE s.id=${source.id}),
+      'source', (SELECT to_jsonb(s) - ARRAY['updatedAt','billingConfirmationPausedAt','billingEnforcementDueAt','nextRetryAt','gracePeriodEnd'] FROM subscriptions s WHERE s.id=${source.id}),
       'wallet', (SELECT to_jsonb(w) FROM prepaid_balances w WHERE w."subscriptionId"=${source.id}),
       'payments', (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM subscription_payments p WHERE p."subscriptionId"=${source.id}),
       'refunds', (SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id) FROM subscription_refunds r WHERE r."subscriptionId"=${source.id}),
@@ -23,6 +23,8 @@ export async function moverSourceFinancialFingerprint(db: Db, source: Subscripti
       'tombstone', (SELECT jsonb_agg(to_jsonb(t) ORDER BY t.san) FROM san_tombstones t WHERE t."subscriptionId"=${source.id} OR t.san=${source.san}),
       'instruments', (SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM payment_instruments i WHERE i."subscriptionId"=${source.id}),
       'sessions', (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM card_sessions s WHERE s."subscriptionId"=${source.id}),
+      'checkouts', (SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) FROM mmg_checkout_intents c WHERE c."subscriptionId"=${source.id}),
+      'confirmationHolds', (SELECT jsonb_agg(to_jsonb(h) ORDER BY h.id) FROM payment_confirmation_holds h WHERE h."subscriptionId"=${source.id}),
       'observations', (SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM card_observations o WHERE o."subscriptionId"=${source.id} OR o."sessionId" IN (SELECT id FROM card_sessions WHERE "subscriptionId"=${source.id}) OR o."instrumentId" IN (SELECT id FROM payment_instruments WHERE "subscriptionId"=${source.id}) OR o."paymentId" IN (SELECT id FROM subscription_payments WHERE "subscriptionId"=${source.id})),
       'ledger', (SELECT jsonb_agg(to_jsonb(l) ORDER BY l.id) FROM ledger_transactions l WHERE l."idempotencyKey"='opening:'||${source.id} OR l."idempotencyKey" LIKE 'ledger:success:'||${source.id}||':%' OR l."idempotencyKey" LIKE 'ledger:topup:'||${source.id}||':%' OR l.id IN (SELECT e."transactionId" FROM ledger_entries e WHERE e."subledgerId"=${source.id})),
       'entries', (SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM ledger_entries e WHERE e."subledgerId"=${source.id} OR e."transactionId" IN (SELECT l.id FROM ledger_transactions l WHERE l."idempotencyKey"='opening:'||${source.id} OR l."idempotencyKey" LIKE 'ledger:success:'||${source.id}||':%' OR l."idempotencyKey" LIKE 'ledger:topup:'||${source.id}||':%')),
@@ -45,7 +47,7 @@ export async function paidMoverResolutionBlocker(db: Db, sources: Subscription[]
     if (s.currentPeriodStart < canonical.currentPeriodStart || s.currentPeriodEnd > canonical.currentPeriodEnd
       || s.nextBillingDate > canonical.nextBillingDate) return 'PAID_ENTITLEMENT_NOT_COVERED';
     const linked = { subscriptionId: s.id };
-    const [balance, unconfirmed, paidPeriod, refund, topup, agent, provider, session, tombstone, contacts] = await Promise.all([
+    const [balance, unconfirmed, paidPeriod, refund, topup, agent, provider, session, tombstone, contacts, checkout, confirmation] = await Promise.all([
       db.prepaidBalance.findUnique({ where: linked }),
       db.subscriptionPayment.findFirst({ where: { ...linked, status: { not: 'CAPTURED' } }, select: { id: true } }),
       db.subscriptionPayment.findFirst({ where: { ...linked, status: 'CAPTURED', paidAt: { not: null }, periodStart: s.currentPeriodStart, periodEnd: s.currentPeriodEnd }, select: { id: true } }),
@@ -56,10 +58,12 @@ export async function paidMoverResolutionBlocker(db: Db, sources: Subscription[]
       db.cardSession.findFirst({ where: { ...linked, status: { notIn: ['SUCCEEDED', 'FAILED', 'EXPIRED', 'CANCELLED'] } }, select: { id: true } }),
       db.sanTombstone.findFirst({ where: linked, select: { san: true } }),
       db.collectionContact.findFirst({ where: linked, select: { id: true } }),
+      db.mmgCheckoutIntent.findFirst({ where: { ...linked, status: { notIn: ['CONFIRMED', 'NOT_PAID'] } }, select: { id: true } }),
+      db.paymentConfirmationHold.findFirst({ where: { ...linked, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] } }, select: { id: true } }),
     ]);
     if (s.id !== canonical.id && balance && !balance.balance.equals(0)) return 'ALIAS_FUNDS_REQUIRE_EXISTING_MONEY_COMMAND';
     if (balance && balance.currencyCode !== s.currencyCode) return 'SOURCE_CURRENCY_REQUIRES_REVIEW';
-    if (unconfirmed || refund || topup || agent || provider || session || tombstone || contacts) return 'SOURCE_OBLIGATIONS_REQUIRE_RECONCILIATION';
+    if (unconfirmed || refund || topup || agent || provider || session || tombstone || contacts || checkout || confirmation) return 'SOURCE_OBLIGATIONS_REQUIRE_RECONCILIATION';
     if (!paidPeriod) return 'PAID_PERIOD_PROOF_REQUIRED';
     if (s.san) {
       const rows = await db.$queryRaw<Array<{ pending: boolean }>>`

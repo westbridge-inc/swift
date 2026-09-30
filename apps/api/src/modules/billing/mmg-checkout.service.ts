@@ -1,3 +1,4 @@
+import { lockFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 import { beginConfirmationInTx, lockBillingAuthority, markSettlementApplying, resolveConfirmationInTx } from './dunning-clock';
 import { Prisma, type MmgCheckoutIntent, type PrismaClient, type Subscription, type SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -323,6 +324,7 @@ export class MmgCheckoutService {
       // server: a checkout nobody wrote down could be paid and never found.
       try {
         const intent = await this.prisma.$transaction(async (tx) => {
+          if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) throw new AppError(409, 'PAYMENT_CONFIRMING', 'Weekly-fee collection is paused while payment information is confirmed.');
           const authority = await lockBillingAuthority(tx, sub.id);
           if (authority.userId !== input.userId) throw new NotFoundError('Subscription', sub.id);
           const created = await tx.mmgCheckoutIntent.create({

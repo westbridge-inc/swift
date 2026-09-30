@@ -212,9 +212,8 @@ export class CardRailService {
             : { consentVersion: input.consentVersion, consentAt: now }),
         },
         });
-      });
-      if (created.purpose === 'PAY_NOW') await beginConfirmationInTx(tx, sub.id, { cardSessionId: created.id }, 'CARD_PAGE_PENDING', now);
-      return created;
+        if (created.purpose === 'PAY_NOW') await beginConfirmationInTx(tx, sub.id, { cardSessionId: created.id }, 'CARD_PAGE_PENDING', now);
+        return created;
       });
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
