@@ -278,10 +278,16 @@ interface OsrmRouteResponse {
   routes?: Array<{ distance?: number; duration?: number; legs?: Array<{ distance?: number; duration?: number }> }>;
 }
 
-/** A distance OSRM may have priced: a finite, non-negative number of metres. */
-const isMetres = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
-/** Seconds to minutes, or null when OSRM gave no usable duration. */
-const osrmMinutes = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v / 60 : null);
+/** A measure OSRM may have priced: a finite, non-negative number (of metres,
+ *  or of seconds). */
+const isMeasure = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+/** A duration may be ABSENT (undefined or null): the caller then applies its
+ *  speed model, as today. A duration that is PRESENT must be a real measure.
+ *  Infinity (JSON 1e309), NaN, a negative or a string is not missing but
+ *  wrong, and the route is refused like a bad distance. [AX290 R1] */
+const isDurationOrAbsent = (v: unknown): boolean => v === undefined || v === null || isMeasure(v);
+/** Seconds to minutes; null when absent. Only read from a route already judged. */
+const osrmMinutes = (v: unknown): number | null => (isMeasure(v) ? v / 60 : null);
 
 interface OsrmMatchResponse {
   code?: string;
@@ -392,11 +398,13 @@ export class OsrmMapsProvider implements MapsProvider {
 
   /** [TAXI multi-stop] The whole itinerary through the OSRM `route` service in
    *  ONE call (pickup;stop1..stopN;destination): its legs and its total. Any
-   *  failure, an answer without one finite leg per pair of points, or a whole
+   *  failure, an answer without one finite leg per pair of points, a duration
+   *  that is present but not a real one (on a leg or the total), or a whole
    *  route of 0 m (every point snapped to one node: nothing was routed) gives
    *  the deterministic estimate marked `degraded` (counted, like every other
    *  OSRM fallback) — the fare engine refuses it rather than price a guess.
-   *  One leg of 0 m is kept: two points across one road snap to one node. */
+   *  One leg of 0 m is kept: two points across one road snap to one node. An
+   *  absent duration is kept as null: the fare applies its speed model. */
   async routeLegs(points: LatLng[]): Promise<RouteLegsEstimate> {
     if (points.length < 2) return this.fallback.routeLegs(points);
     const coords = points.map((p) => `${p.lng},${p.lat}`).join(';');
@@ -410,7 +418,9 @@ export class OsrmMapsProvider implements MapsProvider {
       const data = (await res.json()) as OsrmRouteResponse;
       const route = data.code === 'Ok' ? data.routes?.[0] : undefined;
       const legs = route?.legs;
-      if (!route || !isMetres(route.distance) || route.distance === 0 || !legs || legs.length !== points.length - 1 || !legs.every((leg) => isMetres(leg.distance))) {
+      if (!route || !isMeasure(route.distance) || route.distance === 0 || !isDurationOrAbsent(route.duration)
+        || !legs || legs.length !== points.length - 1
+        || !legs.every((leg) => isMeasure(leg.distance) && isDurationOrAbsent(leg.duration))) {
         return await this.degradedLegs(points);
       }
       recordOsrm('route', 'ok');

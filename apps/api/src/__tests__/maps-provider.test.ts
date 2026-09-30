@@ -241,6 +241,14 @@ describe('routeLegs — [TAXI multi-stop] a whole itinerary, in one call', () =>
     expect(r.legs[1]).toEqual({ km: 0, minutes: 0 });
   });
 
+  it('OSRM: an ABSENT whole-route duration (undefined or null) is kept as null — the fare applies its speed model, as today', async () => {
+    for (const duration of [undefined, null]) {
+      vi.stubGlobal('fetch', mockFetch(200, { code: 'Ok', routes: [{ ...okRoute.routes[0], duration }] }));
+      const r = await new OsrmMapsProvider('http://osrm.test').routeLegs(POINTS);
+      expect(r).toMatchObject({ km: 7.4, minutes: null, degraded: false, source: 'osrm' });
+    }
+  });
+
   it('OSRM: a leg without a duration keeps its distance and says so', async () => {
     const route = { ...okRoute.routes[0]!, legs: [{ distance: 2000 }, { distance: 1500, duration: 270 }, { distance: 3900, duration: 540 }] };
     vi.stubGlobal('fetch', mockFetch(200, { code: 'Ok', routes: [route] }));
@@ -263,6 +271,14 @@ describe('routeLegs — [TAXI multi-stop] a whole itinerary, in one call', () =>
       code: 'Ok',
       routes: [{ distance: 0, duration: 0, legs: [{ distance: 0, duration: 0 }, { distance: 0, duration: 0 }, { distance: 0, duration: 0 }] }],
     })],
+    // [AX290 R1] A duration that is PRESENT but not a real one is wrong, not
+    // missing: on a leg or on the whole route, the route is refused.
+    ...([
+      ['Infinity (JSON 1e309)', Number.POSITIVE_INFINITY], ['NaN', Number.NaN], ['negative', -60], ['a string', '600'],
+    ] as Array<[string, unknown]>).flatMap(([what, bad]): Array<[string, () => unknown]> => [
+      [`a leg duration that is ${what}`, () => mockFetch(200, { code: 'Ok', routes: [{ ...okRoute.routes[0], legs: [okRoute.routes[0]!.legs[0], { distance: 1500, duration: bad }, okRoute.routes[0]!.legs[2]] }] })],
+      [`a whole-route duration that is ${what}`, () => mockFetch(200, { code: 'Ok', routes: [{ ...okRoute.routes[0], duration: bad }] })],
+    ]),
   ];
   it.each(failures)('OSRM: %s → the deterministic estimate, marked degraded', async (_label, stub) => {
     vi.stubGlobal('fetch', stub());

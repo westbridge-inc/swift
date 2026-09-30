@@ -141,14 +141,38 @@ describe('switched off (TAXI_MAX_STOPS=0, the default): inert', () => {
   });
 });
 
+describe('a ride without stops answers the same bytes with the switch off AND on (AX290 R2)', () => {
+  // The exact bytes taxi-estimate-single-leg-pin pinned against unmodified
+  // main: the formula, the Central → South zone fare, the minimum fare.
+  const PINNED: Array<[string, { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number } }, string]> = [
+    ['formula', { pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 } },
+      '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":1900,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2600,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":4800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":2.5,"durationMin":6,"billableKm":2.45,"routeSource":"haversine"}}'],
+    ['zone table', { pickup: { lat: 6.81, lng: -58.155 }, dropoff: { lat: 6.755, lng: -58.155 } },
+      '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":2000,"capacity":4,"source":"zone_table"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2700,"capacity":4,"source":"zone_table"},{"rideClass":"GROUP","multiplier":2.5,"fare":5000,"capacity":14,"source":"zone_table"}],"currencyCode":"GYD","distanceKm":8,"durationMin":20,"billableKm":7.95,"routeSource":"haversine"}}'],
+    ['minimum', { pickup: { lat: 6.81, lng: -58.155 }, dropoff: { lat: 6.8105, lng: -58.155 } },
+      '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":1500,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2000,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":3800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":0.1,"durationMin":1,"billableKm":0.07,"routeSource":"haversine"}}'],
+  ];
+
+  it.each(['', '0', '1', '2', '3', 'garbage'])('TAXI_MAX_STOPS=%j: the pinned bytes, for absent, null and empty stops alike', async (flag) => {
+    vi.stubEnv('TAXI_MAX_STOPS', flag);
+    for (const [name, trip, pinned] of PINNED) {
+      for (const noStops of [{}, { stops: null }, { stops: [] }]) {
+        const res = await estimate(app, token, { ...trip, ...noStops });
+        expect(res.body, `${name} ${JSON.stringify(noStops)}`).toBe(pinned);
+      }
+    }
+  });
+});
+
 describe('switched on (TAXI_MAX_STOPS=3)', () => {
-  it('without stops: exactly the estimate of today, plus maxStops and stopCount 0 so the app may offer stops', async () => {
+  it('without stops: exactly the estimate of today, byte for byte — the switch adds nothing (AX290 R2)', async () => {
     const off = await estimate(app, token, { pickup: PICKUP, dropoff: DESTINATION });
     vi.stubEnv('TAXI_MAX_STOPS', '3');
-    const on = await estimate(app, token, { pickup: PICKUP, dropoff: DESTINATION });
-    expect(on.statusCode).toBe(200);
-    expect(on.body).toBe(`${off.body.slice(0, -2)},"maxStops":3,"stopCount":0}}`);
-    expect((await estimate(app, token, { pickup: PICKUP, dropoff: DESTINATION, stops: [] })).body).toBe(on.body);
+    for (const noStops of [{}, { stops: [] }, { stops: null }]) {
+      const on = await estimate(app, token, { pickup: PICKUP, dropoff: DESTINATION, ...noStops });
+      expect(on.statusCode).toBe(200);
+      expect(on.body).toBe(off.body);
+    }
   });
 
   it('one stop: the whole route priced once — maxStops, stopCount, billableKm, routeSource and the legs, byte for byte', async () => {

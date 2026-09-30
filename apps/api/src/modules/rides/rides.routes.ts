@@ -132,9 +132,10 @@ export async function ridesRoutes(app: FastifyInstance) {
   });
 
   /** POST /estimate — [TAXI multi-stop] with `stops`, the whole route priced as
-   *  one trip, plus maxStops, stopCount and its legs. Without stops, exactly
-   *  the estimate of today; while stops are switched on it also carries
-   *  maxStops and stopCount 0, so the app knows it may offer them. */
+   *  one trip, plus maxStops, stopCount and its legs. Without stops (absent,
+   *  null or an empty list), exactly the estimate of today, byte for byte,
+   *  whatever TAXI_MAX_STOPS says: the app learns whether it may offer stops
+   *  from its own capability read, never from this answer. [AX290 R2] */
   app.post('/estimate', auth, async (request) => {
     const body = estimateSchema.parse(request.body);
     // Refused while TAXI_MAX_STOPS is 0, else validated and numbered here,
@@ -144,14 +145,13 @@ export async function ridesRoutes(app: FastifyInstance) {
       where: { id: request.user.userId },
       select: { countryCode: true, tenantId: true },
     });
-    const maxStops = taxiMaxStops();
     if (stops.length === 0) {
       // [M-34] Zone pricing is the requester's tenant's, in the requester's country.
       const estimate = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, user.tenantId);
-      return { success: true, data: maxStops > 0 ? { ...estimate, maxStops, stopCount: 0 } : estimate };
+      return { success: true, data: estimate };
     }
     const estimate = await fareService.estimateItineraryTiers(body.pickup, stops, body.dropoff, user.countryCode, user.tenantId);
-    return { success: true, data: { ...estimate, maxStops, stopCount: stops.length } };
+    return { success: true, data: { ...estimate, maxStops: taxiMaxStops(), stopCount: stops.length } };
   });
 
   /** POST /request — create the ride at the quoted fare and start dispatch.

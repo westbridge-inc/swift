@@ -5,7 +5,7 @@ import { AppError } from '../utils/errors';
 import { FareService, formulaFare } from '../modules/rides/fare.service';
 import { planTaxiStops, taxiMaxStops } from '../modules/rides/taxi-stops-flag';
 import { DEFAULT_TAXI_RATES } from '../modules/country/pricing-config';
-import type { LatLng, MapsProvider, RouteLeg, RouteLegsEstimate, RouteSource } from '../providers/maps/maps-provider';
+import { OsrmMapsProvider, type LatLng, type MapsProvider, type RouteLeg, type RouteLegsEstimate, type RouteSource } from '../providers/maps/maps-provider';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 2/8] Pricing a ride with stops, service-free: the WHOLE
@@ -179,6 +179,13 @@ describe('fails closed: never a price from a guess', () => {
     }
   });
 
+  it('a whole-route duration that is not a real one is refused, whatever engine gave it (never a lower fare)', async () => {
+    for (const minutes of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      const err = await refusal(price([STOP_1], engine([{ km: 3, minutes: 6 }, { km: 1, minutes: 2 }], { km: 4, minutes }).maps));
+      expect([minutes, err.statusCode, err.code]).toEqual([minutes, 503, 'ROUTE_UNAVAILABLE']);
+    }
+  });
+
   it('one leg of 0 m is real (two points across one road snap to one node): the route is priced', async () => {
     const est = await price([STOP_1], engine([{ km: 2, minutes: 4 }, { km: 0, minutes: 0 }]).maps);
     expect(fares(est)).toEqual({ ECONOMY: 1700, COMFORT: 2300, GROUP: 4300 }); // 1000 + 600 + 100
@@ -206,6 +213,45 @@ describe('fails closed: never a price from a guess', () => {
 
   it('a ride without stops is not priced here — estimateTiers prices it, exactly as before', async () => {
     await expect(price([], engine([]).maps)).rejects.toThrow(/without stops is priced by estimateTiers/);
+  });
+});
+
+describe('provider → fare: a RAW OSRM body, parsed as the provider parses it (AX290 R1)', () => {
+  // The body is text, read through a real Response, so JSON itself makes the
+  // values: 1e309 parses to Infinity, which a parsed-object stub never shows.
+  // (JSON has no NaN; maps-provider.test.ts covers NaN on the parsed object.)
+  afterEach(() => vi.unstubAllGlobals());
+  const body = (leg1: string, leg2: string, total: string) =>
+    `{"code":"Ok","routes":[{"distance":10150,"duration":${total},"legs":[{"distance":4000,"duration":${leg1}},{"distance":6150,"duration":${leg2}}]}]}`;
+  const osrmPrice = (raw: string) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, { status: 200, headers: { 'content-type': 'application/json' } })));
+    return new FareService(fakePrisma().prisma, new OsrmMapsProvider('http://osrm.test')).estimateItineraryTiers(PICKUP, [STOP_1], DESTINATION, 'GY');
+  };
+
+  it('a valid body prices the worked example: the raw path is live (4700 / 6300)', async () => {
+    const est = await osrmPrice(body('600', '1020', '1620'));
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300, GROUP: 11800 });
+    expect(est.legs.map((l) => l.seconds)).toEqual([600, 1020]);
+  });
+
+  it.each([
+    ['a leg duration of 1e309 (JSON parses it to Infinity)', body('1e309', '1020', '1620')],
+    ['a leg duration of -1e309 (-Infinity)', body('600', '-1e309', '1620')],
+    ['a negative leg duration (it would lower the fare)', body('-600', '1020', '1620')],
+    ['a leg duration that is a string', body('"600"', '1020', '1620')],
+    ['a whole-route duration of 1e309 (Infinity)', body('600', '1020', '1e309')],
+    ['a negative whole-route duration (it would lower the fare)', body('600', '1020', '-1620')],
+    ['a whole-route duration that is a string', body('600', '1020', '"1620"')],
+  ])('%s → 503 ROUTE_UNAVAILABLE, never a price', async (_label, raw) => {
+    const err = await refusal(osrmPrice(raw));
+    expect([err.statusCode, err.code]).toEqual([503, 'ROUTE_UNAVAILABLE']);
+  });
+
+  it('ABSENT durations (null, or no key at all) fall back to the speed model, as today: 10.15 km → 25 min → 4670 → 4700', async () => {
+    const est = await osrmPrice('{"code":"Ok","routes":[{"distance":10150,"duration":null,"legs":[{"distance":4000,"duration":null},{"distance":6150}]}]}');
+    expect(est).toMatchObject({ billableKm: 10.15, durationMin: 25, routeSource: 'osrm' });
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300, GROUP: 11800 });
+    expect(est.legs.map((l) => l.seconds)).toEqual([null, null]);
   });
 });
 
