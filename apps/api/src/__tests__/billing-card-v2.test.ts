@@ -287,8 +287,11 @@ describe('[C4] requires_action (off-session 3-D Secure) is not a decline', () =>
       expect(notice.body).not.toMatch(door);
     }
     expect(notice.body).toMatch(/not charged/);
-    expect(notice.body).toContain('MMG agent');
-    expect(notice.body).toContain('Swift Number');
+    // The owner, 29 Sep: partners pay with MMG in the app, never at an agent,
+    // in cash or with the Swift Number; the checkout is not live yet, so it
+    // says it opens soon (fee-notice-copy.ts).
+    expect(notice.body).not.toMatch(/\bagents?\b|swift number|\bcash\b/i);
+    expect(notice.body).toContain('Payment with MMG opens in the app soon');
 
     // The cycle comes back (hours later, the attempt reclaimed): still no charge, no strike, no second notice.
     expect(await bill(p.subId, new Date(Date.now() + 2 * 60 * 60 * 1000))).toBe('pending');

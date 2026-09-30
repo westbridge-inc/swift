@@ -4,8 +4,8 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getDriverProfile, getDriverRides, getRiderDeliveries, getRiderProfile } from '@/lib/mover-api';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { formatMoney as money, parseAmount } from '@/lib/money';
 
-const money = (n: unknown) => `$${Math.round(Number(n ?? 0)).toLocaleString()}`;
 const when = (iso: unknown) => (iso ? new Date(String(iso)).toLocaleString() : '—');
 
 function statusChip(s: string) {
@@ -35,8 +35,26 @@ function DeliveriesTable() {
   const q = useQuery({ queryKey: ['p-deliveries', page], queryFn: () => getRiderDeliveries(page) });
   const rows = q.data?.rows ?? [];
   return (
-    <div className="overflow-hidden rounded-2xl border border-black/5 bg-white">
-      <table className="w-full text-sm">
+    <>
+    <div className="space-y-3 sm:hidden">
+      {q.isLoading && <p className="rounded-2xl bg-white p-4 text-sm text-[var(--swift-muted)]">Loading…</p>}
+      {q.isError && <DataUnavailable what="your deliveries" error={q.error} onRetry={() => void q.refetch()} />}
+      {q.isSuccess && rows.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-[var(--swift-muted)]">No deliveries yet.</p>}
+      {rows.map((o) => (
+        <article key={String(o['id'])} aria-label={`Delivery ${String(o['orderNumber'] ?? '')}`} className="min-w-0 rounded-2xl border border-black/5 bg-white p-4 text-sm sm:hidden">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <strong>#{String(o['orderNumber'] ?? '')}</strong>
+            {statusChip(String(o['status'] ?? ''))}
+          </div>
+          <p className="mt-2 break-words text-[var(--swift-muted)]">Store: {(o['vendor'] as { name?: string } | null)?.name ?? '—'}</p>
+          <p className="mt-2 font-semibold">Your fee: {money(o['deliveryFee'])}</p>
+          <p className="mt-1 text-[var(--swift-muted)]">{when(o['placedAt'])}</p>
+        </article>
+      ))}
+      <Pager page={page} setPage={setPage} meta={q.data?.meta} />
+    </div>
+    <div className="hidden max-w-full overflow-x-auto rounded-2xl border border-black/5 bg-white sm:block">
+      <table className="min-w-[680px] w-full text-sm">
         <thead className="border-b border-black/5 bg-[var(--swift-subtle)] text-left text-xs uppercase tracking-wide text-[var(--swift-muted)]">
           <tr>
             <th className="px-4 py-3">Order</th>
@@ -69,6 +87,7 @@ function DeliveriesTable() {
       </table>
       <div className="px-4 pb-4"><Pager page={page} setPage={setPage} meta={q.data?.meta} /></div>
     </div>
+    </>
   );
 }
 
@@ -77,8 +96,26 @@ function RidesTable() {
   const q = useQuery({ queryKey: ['p-rides', page], queryFn: () => getDriverRides(page) });
   const rows = q.data?.rows ?? [];
   return (
-    <div className="overflow-hidden rounded-2xl border border-black/5 bg-white">
-      <table className="w-full text-sm">
+    <>
+    <div className="space-y-3 sm:hidden">
+      {q.isLoading && <p className="rounded-2xl bg-white p-4 text-sm text-[var(--swift-muted)]">Loading…</p>}
+      {q.isError && <DataUnavailable what="your rides" error={q.error} onRetry={() => void q.refetch()} />}
+      {q.isSuccess && rows.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-[var(--swift-muted)]">No rides yet.</p>}
+      {rows.map((r) => (
+        <article key={String(r['id'])} aria-label={`Ride ${String(r['orderNumber'] ?? '')}`} className="min-w-0 rounded-2xl border border-black/5 bg-white p-4 text-sm sm:hidden">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <strong>#{String(r['orderNumber'] ?? '')}</strong>
+            {statusChip(String(r['status'] ?? ''))}
+          </div>
+          <p className="mt-2 break-words text-[var(--swift-muted)]">{String(r['taxiPickupAddress'] ?? '')} → {String(r['taxiDropoffAddress'] ?? '')}</p>
+          <p className="mt-2 font-semibold">Fare: {money(r['taxiFareTotal'] ?? r['totalAmount'])}</p>
+          <p className="mt-1 text-[var(--swift-muted)]">Tip: {(parseAmount(r['tipAmount']) ?? 0) > 0 ? money(r['tipAmount']) : '—'}</p>
+        </article>
+      ))}
+      <Pager page={page} setPage={setPage} meta={q.data?.meta} />
+    </div>
+    <div className="hidden max-w-full overflow-x-auto rounded-2xl border border-black/5 bg-white sm:block">
+      <table className="min-w-[680px] w-full text-sm">
         <thead className="border-b border-black/5 bg-[var(--swift-subtle)] text-left text-xs uppercase tracking-wide text-[var(--swift-muted)]">
           <tr>
             <th className="px-4 py-3">Ride</th>
@@ -106,13 +143,14 @@ function RidesTable() {
               </td>
               <td className="px-4 py-3">{statusChip(String(r['status'] ?? ''))}</td>
               <td className="px-4 py-3 font-medium">{money(r['taxiFareTotal'] ?? r['totalAmount'])}</td>
-              <td className="px-4 py-3 text-[var(--swift-muted)]">{Number(r['tipAmount'] ?? 0) > 0 ? money(r['tipAmount']) : '—'}</td>
+              <td className="px-4 py-3 text-[var(--swift-muted)]">{(parseAmount(r['tipAmount']) ?? 0) > 0 ? money(r['tipAmount']) : '—'}</td>
             </tr>
           ))}
         </tbody>
       </table>
       <div className="px-4 pb-4"><Pager page={page} setPage={setPage} meta={q.data?.meta} /></div>
     </div>
+    </>
   );
 }
 

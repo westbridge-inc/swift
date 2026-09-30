@@ -69,6 +69,9 @@ async function purgeFixtures() {
     select: { id: true },
   });
   const orderIds = orders.map((o) => o.id);
+  // [ALG-01] Riders tied at one spot make the fairness band record decisions
+  // about these orders; they outlive the orders unless they go with them.
+  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   // Carts have a restrict FK to the customer — must go before the user or the
@@ -892,8 +895,9 @@ describe('The offer cascade', () => {
     expect(timeout.delayMs).toBeLessThanOrEqual(20_000);
     expect(timeout.scheduledAt + timeout.delayMs).toBeGreaterThanOrEqual(startedAt + 20_000);
 
-    // 2) A declines -> B is offered; A's acceptance EMA dropped
-    await dispatch.declineOffer(order.id, a.userId);
+    // 2) A declines -> B is offered; A's acceptance EMA dropped. The app names
+    //    the card's attempt; a decline that names none is never charged [AX358].
+    await dispatch.declineOffer(order.id, a.userId, timeout.attemptId);
     const offerNow = await app.redis.get(`dispatch:offer:${order.id}`);
     expect(offerNow!.split(':')[0]).toBe(b.riderId); // value is `<mover>:<attemptId>` [F-014-04]
     const aAfter = await app.prisma.rider.findUniqueOrThrow({ where: { id: a.riderId } });
@@ -1319,8 +1323,11 @@ describe('The offer cascade', () => {
     expect((await app.redis.get(`dispatch:mover-offer:${a.riderId}`))!.split(':')[0]).toBe(order.id); // reverse index set [F-014-04 composite]
     // The card RENDERED on A's screen (the app stamps seen on render) — so
     // quitting now is a dodge and MUST cost. An unrendered card would be
-    // spared instead [F-014-10 evidence-aware release].
-    await dispatch.markOfferSeen(order.id, a.userId);
+    // spared instead [F-014-10 evidence-aware release]. The app names the
+    // card's attempt; a render ping that names none never stamps a generated
+    // card [AX364].
+    const heldAttempt = (await app.redis.get(`dispatch:offer:${order.id}`))!.split(':')[1];
+    await dispatch.markOfferSeen(order.id, a.userId, heldAttempt);
 
     // A taps "Go offline" through the REAL route while still holding the live offer.
     const res = await app.inject({

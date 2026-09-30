@@ -26,7 +26,7 @@ import { isProduction } from '../../utils/runtime-mode';
  */
 
 /** Bump when any value below changes; recorded with every apply. */
-export const PLATFORM_CONFIG_VERSION = '2026-09-23.3';
+export const PLATFORM_CONFIG_VERSION = '2026-09-29.1';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -48,9 +48,12 @@ export const COMPLETE_CARD = 'complete';
 // Driver pays `taxiDriver`, car or bus. Which band a vehicle falls in and
 // which role it provisions is config/vehicle-classes.ts — this file only
 // prices them. Every rate is a whole number of dollars.
+// The owner, 2026-09-29: delivery riders (the STANDARD band) pay 6,000 a week,
+// down from 8,000. Taxi drivers (including taxi drivers who also deliver) and
+// heavy delivery are unchanged. Existing riders move at the next weekly re-tier.
 export const guyanaTiers = {
   card: COMPLETE_CARD,
-  mover: 8000,
+  mover: 6000,
   moverHeavy: 9000,
   taxiDriver: 9000,
   // Services carry no catalogue — a solo tradesman is not a restaurant.

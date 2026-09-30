@@ -597,7 +597,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
 
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
-  const orderService = new OrderService(app.prisma, app.io);
+  const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const analytics = new VendorAnalyticsService(app.prisma);
   const menu = new VendorMenuService(app.prisma);
   const dispatch = makeDispatchService(app);

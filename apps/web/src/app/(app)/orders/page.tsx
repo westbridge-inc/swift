@@ -40,7 +40,7 @@ export default function OrdersPage() {
             </div>
             <div className="text-right">
               <span className="rounded-full bg-[var(--swift-red-50)] px-2.5 py-1 text-xs font-bold text-[var(--swift-red)]">{orders.isPaused ? 'Waiting for connection…' : orders.isFetching ? 'Checking status…' : orders.isError ? 'Status unavailable' : LABEL[o.status] ?? o.status}</span>
-              <p className="mt-1 font-bold">{orders.isFetching || orders.isPaused || orders.isError ? '—' : money(o.totalAmount ?? o.total ?? 0)}</p>
+              <p className="mt-1 font-bold">{orders.isFetching || orders.isPaused || orders.isError ? '—' : money(o.totalAmount ?? o.total)}</p>
             </div>
           </Link>
         ))}

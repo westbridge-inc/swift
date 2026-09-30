@@ -6,6 +6,7 @@ import { recordDecision } from '../algo/decisions';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { log } from '../../utils/logger';
+import { withdrawOfferOfClosedOrder } from './offer-withdrawal';
 import {
   deliveryGenerationSuffix,
   dispatchDeclinedKey,
@@ -186,6 +187,9 @@ export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder
       note: `Food-age cutoff: ready ${ageMinutes} min ago, limit ${limitMinutes} min, no rider found — routed to a human. Nobody is marked.`,
     },
   }).catch(() => {});
+  // [DISPATCH 1/3 · B4] The live card first, as a pair: the bare key delete
+  // below took the order's side and left the mover's pointer holding them.
+  await withdrawOfferOfClosedOrder(deps, order.id);
   await deps.redis.del(...dispatchKeys(order.id, order.fulfillmentModeVersion)).catch(() => {});
   await recordDecision(deps.prisma, {
     algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId, outcome: 'FOOD_TOO_OLD',
