@@ -12,7 +12,7 @@ import type { PrismaClient, VehicleType } from '@prisma/client';
 // Owner rate card (GYD per week, flat, independent of sales):
 //   delivery/courier rider on a standard vehicle   6,000   (owner, 2026-09-29; was 8,000)
 //   heavy delivery (canters, box trucks)            9,000
-//   taxi driver (any vehicle)                        9,000
+//   taxi driver (any vehicle)                        8,000   (owner, 2026-09-30)
 //   service provider                                8,000
 //   restaurant/store/grocery, < 1,000 active items  15,000
 //   1,000–9,999 active items                        20,000
@@ -58,7 +58,7 @@ type Tiers = Record<string, unknown>;
 type MoverKind = 'RIDER' | 'DRIVER';
 type VendorKind = 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
 
-const OWNER = { courier: 6000, courierHeavy: 9000, taxi: 9000, service: 8000, small: 15000, large: 20000, department: 60000 };
+const OWNER = { courier: 6000, courierHeavy: 9000, taxi: 8000, service: 8000, small: 15000, large: 20000, department: 60000 };
 /** Every key the complete card carries — a Guyana card missing any one of them is no card at all. */
 const CARD_KEYS = [
   'mover', 'moverHeavy', 'taxiDriver', 'serviceVendor', 'smallVendor', 'largeVendor', 'departmentVendor',
@@ -416,7 +416,7 @@ describe('Guyana partner rate card — owner rates are the seeded config', () =>
     // Guyana-only launch config, which this card is layered on; 2026-09-23.3
     // carried the 8,000 rider rate (applied on staging) before the owner's
     // 2026-09-29 change to 6,000.
-    for (const applied of ['2026-09-02.1', '2026-09-23.1', '2026-09-23.3']) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
+    for (const applied of ['2026-09-02.1', '2026-09-23.1', '2026-09-23.3', '2026-09-29.1']) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
   });
 
   it('the three mover classes together are exactly the fleet, split by the passenger-vehicle rule provisioning uses', () => {
@@ -559,7 +559,7 @@ describe('signup — the rate a partner is born on', () => {
     }
   });
 
-  it('every taxi driver 9,000, car or bus', async () => {
+  it('every taxi driver 8,000, car or bus', async () => {
     for (const vehicleType of TAXI_VEHICLES) {
       expect((await signup({ kind: 'DRIVER', vehicleType }, seededTiers('GY'))).weeklyRate).toBe(OWNER.taxi);
     }
@@ -719,7 +719,7 @@ describe('public price list — quote equals bill, for every partner', () => {
     const { body } = await priceList({ GY: seededTiers('GY') });
     const d = body.data!;
     expect(d.weekly).toEqual({
-      mover: OWNER.taxi,
+      mover: OWNER.courierHeavy, // Legacy clients show one figure to every mover; heavy delivery is the maximum.
       moverHeavy: OWNER.courierHeavy,
       serviceVendor: OWNER.service,
       smallVendor: OWNER.small,
@@ -854,7 +854,7 @@ describe('the complete card — every key present and valid, or the whole market
   it('replays the review: the fallbacks that quietly re-priced an incomplete card are refusals now', () => {
     // Deleting one key at a time, the review got 8,000 for a taxi driver, 15,000
     // for a service, 20,000 for a department store and no franchise discount — a
-    // different card each time, where the valid card says 9,000 / 8,000 / 60,000 / 7,500.
+    // different card each time, where the valid card says 8,000 / 8,000 / 60,000 / 7,500.
     const t = (tiers: Tiers) => tiers as pricing.SubscriptionTiers;
     const calls = [
       () => pricing.partnerRateFor(t(without('taxiDriver')), { kind: 'DRIVER', vehicleType: 'CAR' }),

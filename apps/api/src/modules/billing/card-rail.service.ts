@@ -1,3 +1,4 @@
+import { lockFeeCollectionAuthority, lockSubscriptionPayer } from '../subscription/mover-fee-authority';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { CardObservationSource, CardObservationVerdict, CardObservedStatus, CardSession, CardSessionStatus, Prisma, PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -125,14 +126,7 @@ export interface CardRailObserver {
  * and one that arrives while a charge is being authorized waits for it.
  */
 async function lockCardAuthority(tx: Prisma.TransactionClient, subscriptionId: string): Promise<void> {
-  const owner = await tx.subscription.findUnique({
-    where: { id: subscriptionId },
-    select: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } },
-  });
-  const payerUserId = owner?.rider?.userId ?? owner?.driver?.userId ?? owner?.vendor?.owner.userId;
-  if (!payerUserId) throw new AppError(500, 'ORPHAN_SUBSCRIPTION', `Subscription ${subscriptionId} has no payer`);
-  await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${payerUserId} FOR UPDATE`;
-  await tx.$queryRaw`SELECT "id" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE`;
+  await lockSubscriptionPayer(tx, subscriptionId);
 }
 
 export class CardRailService {
@@ -196,7 +190,10 @@ export class CardRailService {
     const expiresAt = new Date(now.getTime() + CARD_SESSION_TTL_MS);
     let session: CardSession;
     try {
-      session = await this.prisma.cardSession.create({
+      session = await this.prisma.$transaction(async (tx) => {
+        const authority = await lockFeeCollectionAuthority(tx, sub.id);
+        if (!authority.allowed) throw new AppError(409, 'MOVER_FEE_REVIEW_REQUIRED', 'This weekly fee needs review before opening another payment page.');
+        return tx.cardSession.create({
         data: {
           tenantId,
           subscriptionId: sub.id,
@@ -212,6 +209,7 @@ export class CardRailService {
             ? { amount: priced.amount, currencyCode: priced.currencyCode, periodStart: priced.periodStart }
             : { consentVersion: input.consentVersion, consentAt: now }),
         },
+        });
       });
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
@@ -423,9 +421,11 @@ export class CardRailService {
     const sealed = await sealVaultToken(card.vaultToken);
 
     const result = await this.prisma.$transaction(async (tx) => {
+      await this.opts.observer?.beforeCardLocks?.(session.subscriptionId, tx);
+      const authority = await lockFeeCollectionAuthority(tx, session.subscriptionId);
       const fresh = await this.lockSession(tx, session.id);
       if (!fresh || !LIVE.includes(fresh.status)) return { lost: fresh };
-      await this.opts.observer?.beforeCardLocks?.(fresh.subscriptionId, tx);
+      if (!authority.allowed) return { lost: await tx.cardSession.update({ where: { id: fresh.id }, data: { status: 'HELD', failureCode: 'MOVER_FEE_REVIEW_REQUIRED' } }) };
       // [AX297 F1] payer -> subscription -> the card this replaces: a weekly
       // charge being authorized on that card finishes first, or sees it REPLACED.
       await lockCardAuthority(tx, fresh.subscriptionId);

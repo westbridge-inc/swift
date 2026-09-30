@@ -18,7 +18,7 @@ import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
-import { subscriptionOperability } from '../subscription/operate-gate';
+import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
@@ -162,7 +162,7 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     return {
       success: true,
-      data: driver ? { ...driver, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
+      data: driver ? { ...driver, subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
     };
   });
 
@@ -334,7 +334,8 @@ export async function driverRoutes(app: FastifyInstance) {
 
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — drivers require a
     // subscription row; the verdict maps onto this route's historical codes.
-    const operability = subscriptionOperability(driver.subscription, { missingRow: 'BLOCK' });
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: 'BLOCK' });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
         throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
@@ -357,6 +358,10 @@ export async function driverRoutes(app: FastifyInstance) {
       const authority = await lockUserRoleAuthority(tx, request.user.userId);
       assertActiveMoverAccount(authority.status);
       assertMoverRoleAuthority(authority.activeRole, 'DRIVER');
+      await lockMoverSources(tx, feePayer);
+      if (!(await moverFeeOperability(tx, feePayer, { missingRow: 'BLOCK' })).operable) {
+        throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active shared weekly fee is required to go online.');
+      }
 
       // Revalidate the exact authenticated session under the User lock. A
       // logout/reuse-revocation that completed during the slower gates must
@@ -1697,12 +1702,13 @@ export async function driverRoutes(app: FastifyInstance) {
       },
     });
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
-    const sub = driver!.subscription;
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const sub = (await readMoverFeeSubscription(app.prisma, feePayer))?.subscription;
     if (!sub) return { success: true, data: null };
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
     // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
-    return { success: true, data: { ...sub, ...(await sanDisplay(app.prisma, sub)), ...(await payInfo(app.prisma, sub)) } };
+    return { success: true, data: { ...sub, moverFee: await moverFeeSourceSummary(app.prisma, feePayer), ...(await sanDisplay(app.prisma, sub)), ...(await payInfo(app.prisma, sub)) } };
   });
 
   /** PUT /subscription/billing-method — §13 rail selection (CASH prepaid vs
@@ -1716,7 +1722,7 @@ export async function driverRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
-    const sub = await app.prisma.subscription.findFirst({ where: { driverId: driver.id } });
+    const sub = (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription;
     if (!sub) throw new NotFoundError('Subscription');
     const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
     const updated = body.method === 'NONE'

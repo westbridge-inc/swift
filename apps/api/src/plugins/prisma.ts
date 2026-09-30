@@ -93,6 +93,7 @@ const TENANT_QUERY_EXTENSIONS = {
   // [M-18] The provider-transaction identity behind every agent-cash observation.
   providerPayment: scoped,
   tenantBillingCurrency: scoped, trialGrant: scoped,
+  moverFeeAuthority: scoped, moverFeeSubscription: scoped,
   // [M-08] The prepaid top-up as one persisted command.
   topUpCommand: scoped,
   // [PT-1] Card rail v2: an enrolled card, a hosted session, and the evidence

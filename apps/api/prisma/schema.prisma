@@ -64,6 +64,7 @@ model User {
   /// so every existing + new row is assigned with no app change (stage 1).
   tenantId    String @default("swift-default")
   tenant      Tenant @relation(fields: [tenantId], references: [id])
+  moverFeeAuthority MoverFeeAuthority?
 
   /// Email+password login lands later; phone OTP remains primary.
   passwordHash        String?
@@ -133,6 +134,7 @@ model User {
   @@index([tenantId])
   @@index([isSynthetic])
   @@map("users")
+  @@unique([id, tenantId], map: "users_id_tenantId_key")
 }
 
 enum UserRole {
@@ -390,6 +392,8 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  moverFeeAuthorities MoverFeeAuthority[]
+  moverFeeSubscriptions MoverFeeSubscription[]
   users            User[]
   vendors          Vendor[]
   orders           Order[]
@@ -2873,7 +2877,55 @@ enum RatingType {
 // SUBSCRIPTIONS
 // ==========================================
 
+enum MoverFeeAuthorityState {
+  ACTIVE
+  FINANCE_HOLD
+}
+
+/// One future weekly fee for a payer who may have both mover profiles.
+/// Original money/source ownership stays on Subscription; feeType is the
+/// activated entitlement that determines the shared future tariff.
+model MoverFeeAuthority {
+  userId                  String @id
+  tenantId                String
+  payer                   User @relation(fields: [userId, tenantId], references: [id, tenantId], onDelete: Cascade, onUpdate: Restrict)
+  tenant                  Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  canonicalSubscriptionId String @unique
+  canonicalSubscription   Subscription @relation("CanonicalMoverFee", fields: [canonicalSubscriptionId], references: [id], onDelete: NoAction, onUpdate: Restrict)
+  feeType                 SubscriptionType
+  state                   MoverFeeAuthorityState @default(ACTIVE)
+  holdReason              String?
+  revision                Int @default(1)
+  decisionId              String @unique
+  decision                AuditLog @relation(fields: [decisionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  members                 MoverFeeSubscription[]
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@unique([userId, tenantId])
+  @@index([tenantId, state, updatedAt])
+  @@map("mover_fee_authorities")
+}
+
+/// Immutable source membership. Existing issued charges, SANs and wallets
+/// keep their original subscription ID even after future fees are shared.
+model MoverFeeSubscription {
+  subscriptionId String @id
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  userId         String
+  tenantId       String
+  authority      MoverFeeAuthority @relation(fields: [userId, tenantId], references: [userId, tenantId], onDelete: Cascade, onUpdate: Restrict)
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdAt      DateTime @default(now())
+
+  @@index([userId, tenantId])
+  @@index([tenantId])
+  @@map("mover_fee_subscriptions")
+}
+
 model Subscription {
+  moverFeeAuthority MoverFeeAuthority? @relation("CanonicalMoverFee")
+  moverFeeMembership MoverFeeSubscription?
   id                 String                @id @default(cuid())
   riderId            String?               @unique
   rider              Rider?                @relation(fields: [riderId], references: [id])
@@ -4101,6 +4153,7 @@ model PlatformConfig {
 }
 
 model AuditLog {
+  moverFeeDecision MoverFeeAuthority?
   id        String   @id @default(cuid())
   userId    String?
   action    String

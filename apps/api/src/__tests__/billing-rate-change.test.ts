@@ -6,6 +6,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
+import { driverRoutes } from '../modules/driver/driver.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
@@ -117,6 +118,26 @@ async function makeRiderSub(opts: {
   return { userId, subId: sub.id, httpToken: token };
 }
 
+/** A taxi subscription issued on the previous 9,000 rate. */
+async function makeTaxiSub(opts: {
+  due: Date; status?: SubscriptionStatus; weeklyRate?: number; customRate?: number; feeWaived?: boolean; prepaid?: number; msisdn?: string;
+}) {
+  const { userId, token } = await makeUser(['MOVER', 'DRIVER', 'CUSTOMER'], 'DRIVER');
+  const driver = await app.prisma.driver.create({ data: {
+    userId, vehicleType: 'CAR', vehicleMake: 'Toyota', vehicleModel: 'Test', vehicleYear: 2020,
+    vehicleColor: 'White', licensePlate: `RATE-TAXI-${seq}`, driverLicenseUrl: 'test/licence', vehicleInsuranceUrl: 'test/insurance', documentsVerified: true,
+  } });
+  const sub = await app.prisma.subscription.create({ data: {
+    driverId: driver.id, type: 'TAXI_DRIVER', status: opts.status ?? 'ACTIVE', weeklyRate: opts.weeklyRate ?? 9000,
+    ...(opts.customRate !== undefined ? { customRate: opts.customRate } : {}),
+    ...(opts.feeWaived ? { feeWaived: true, feeWaivedBy: 'test-admin', feeWaivedReason: 'test waiver' } : {}),
+    billingMethod: opts.msisdn ? 'MOBILE_MONEY' : 'CASH', mmgPayerMsisdn: opts.msisdn ?? null,
+    autoRenew: opts.status !== 'PAUSED', currentPeriodStart: new Date(opts.due.getTime() - WEEK), currentPeriodEnd: opts.due, nextBillingDate: opts.due,
+    ...(opts.prepaid !== undefined ? { prepaidBalance: { create: { balance: opts.prepaid, currencyCode: 'GYD' } } } : {}),
+  } });
+  return { userId, subId: sub.id, httpToken: token };
+}
+
 /** A restaurant with no listings (the small tier, 15,000) on a stale 20,000 rate. */
 async function makeVendorSub(opts: { due: Date; status: SubscriptionStatus; autoRenew?: boolean }) {
   const { userId } = await makeUser(['VENDOR_OWNER', 'CUSTOMER'] as UserRole[], 'VENDOR_OWNER');
@@ -189,10 +210,10 @@ const rate = async (subId: string) =>
   Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).weeklyRate);
 
 /** The fee screen's data: GET /rider/subscription, the payload the app renders. */
-async function feeScreen(token: string) {
+async function feeScreen(token: string, kind: 'rider' | 'driver' = 'rider') {
   const res = await app.inject({
     method: 'GET',
-    url: '/api/v1/rider/subscription',
+    url: `/api/v1/${kind}/subscription`,
     headers: { authorization: `Bearer ${token}` },
   });
   expect(res.statusCode, res.body).toBe(200);
@@ -213,6 +234,7 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
+  await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.ready();
   await purgeBlock(); // crash recovery: a failed earlier run left this block behind
   billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
@@ -225,7 +247,7 @@ async function purgeBlock() {
   const ids = users.map((u) => u.id);
   if (ids.length === 0) return;
   const subs = await app.prisma.subscription.findMany({
-    where: { OR: [{ rider: { userId: { in: ids } } }, { vendor: { owner: { userId: { in: ids } } } }] },
+    where: { OR: [{ rider: { userId: { in: ids } } }, { driver: { userId: { in: ids } } }, { vendor: { owner: { userId: { in: ids } } } }] },
     select: { id: true },
   });
   const sids = subs.map((sub) => sub.id);
@@ -238,6 +260,7 @@ async function purgeBlock() {
   await app.prisma.vendor.deleteMany({ where: { owner: { userId: { in: ids } } } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.driver.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
 }
@@ -407,5 +430,61 @@ describe('AX332 F2: due now is the charge already issued', () => {
     // approving it settles its amount, so that amount is what is due.
     await paymentRow(rider.subId, 8000, 'UNKNOWN', due, null);
     expect((await feeScreen(rider.httpToken)).amountDueGyd).toBe(8000);
+  });
+});
+
+
+describe('owner taxi 8,000: future fees change, issued money does not', () => {
+  it.each(['ACTIVE', 'PAST_DUE', 'TRIAL', 'PAUSED', 'SUSPENDED'] as const)('re-tiers a %s taxi once with the new rate and an audit event', async (status) => {
+    const due = new Date(Date.now() + DAY);
+    const taxi = await makeTaxiSub({ due, status });
+    await billing.recalculateMoverTiers();
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: taxi.subId } });
+    expect({ rate: Number(after.weeklyRate), status: after.status, due: after.nextBillingDate }).toEqual({ rate: 8000, status, due });
+    const events = await retierEvents(taxi.subId);
+    expect(events).toHaveLength(1);
+    expect(Number(events[0]!.amount)).toBe(8000);
+    expect(events[0]!.idempotencyKey).toContain(':9000->8000');
+    await billing.recalculateMoverTiers();
+    expect(await retierEvents(taxi.subId)).toHaveLength(1);
+  });
+
+  it('retains negotiated and waived taxi rates while re-tiering ordinary taxis', async () => {
+    const due = new Date(Date.now() + DAY);
+    const custom = await makeTaxiSub({ due, status: 'PAUSED', weeklyRate: 7500, customRate: 7500 });
+    const waived = await makeTaxiSub({ due, status: 'SUSPENDED', feeWaived: true });
+    await billing.recalculateMoverTiers();
+    expect(await rate(custom.subId)).toBe(7500);
+    expect(await rate(waived.subId)).toBe(9000);
+    expect(await retierEvents(custom.subId)).toHaveLength(0);
+    expect(await retierEvents(waived.subId)).toHaveLength(0);
+  });
+
+  it('resumes a paused taxi at 8,000 from prepaid funds', async () => {
+    const taxi = await makeTaxiSub({ due: new Date(Date.now() - DAY), status: 'PAUSED', prepaid: 9000 });
+    await billing.recalculateMoverTiers();
+    const resume = await app.inject({ method: 'PUT', url: '/api/v1/driver/subscription/billing-method', payload: { method: 'CASH' }, headers: { 'content-type': 'application/json', authorization: `Bearer ${taxi.httpToken}` } });
+    expect(resume.statusCode, resume.body).toBe(200);
+    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: taxi.subId } });
+    expect(payments).toHaveLength(1);
+    expect({ amount: Number(payments[0]!.amount), status: payments[0]!.status }).toEqual({ amount: 8000, status: 'CAPTURED' });
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: taxi.subId } })).balance)).toBe(1000);
+  });
+
+  it('keeps an issued 9,000 taxi charge and fee-screen due amount, then bills the next week at 8,000', async () => {
+    const due = new Date(Date.now() - 60_000);
+    const taxi = await makeTaxiSub({ due, msisdn: '6091275' });
+    expect(await billing.billSubscription((await subWithRelations(taxi.subId)) as never)).toBe('pending');
+    const issued = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: taxi.subId } });
+    expect(Number(issued.amount)).toBe(9000);
+    await billing.recalculateMoverTiers();
+    const screen = await feeScreen(taxi.httpToken, 'driver');
+    expect({ due: screen.amountDueGyd, weekly: screen.weeklyFeeGyd }).toEqual({ due: 9000, weekly: 8000 });
+    await billing.pollPendingMmgCharges();
+    const settled = await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: issued.id } });
+    expect({ amount: Number(settled.amount), status: settled.status }).toEqual({ amount: 9000, status: 'CAPTURED' });
+    expect(await billing.billSubscription((await subWithRelations(taxi.subId)) as never)).toBe('pending');
+    const next = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: taxi.subId, periodStart: new Date(due.getTime() + WEEK) } });
+    expect(Number(next.amount)).toBe(8000);
   });
 });

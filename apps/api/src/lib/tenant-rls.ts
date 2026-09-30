@@ -118,6 +118,7 @@ export const TENANT_TABLES = [
   // [M-20] A settlement file as one staged, validated import.
   'settlement_imports', 'slug_redirects', 'storage_orphans', 'supply_watches',
   'tenant_billing_currency',
+  'mover_fee_authorities', 'mover_fee_subscriptions',
   // [M-08] The prepaid top-up as one persisted command.
   'topup_commands', 'trial_grants', 'trip_share_tokens',
   // [PT-1] Card rail v2: enrolled cards, hosted sessions and their evidence.

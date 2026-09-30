@@ -198,10 +198,10 @@ export class IdentityService {
 
   /** Follow mergedIntoId to the root. Public resolver — everything trial-law
    *  reads goes through here. */
-  async resolveCluster(accountId: string): Promise<string | null> {
-    const member = await this.prisma.identityClusterMember.findUnique({ where: { accountId }, select: { clusterId: true } });
+  async resolveCluster(accountId: string, db: PrismaClient | Prisma.TransactionClient = this.prisma): Promise<string | null> {
+    const member = await db.identityClusterMember.findUnique({ where: { accountId }, select: { clusterId: true } });
     if (!member) return null;
-    return this.rootOf(this.prisma, member.clusterId);
+    return this.rootOf(db, member.clusterId);
   }
 
   /** §2.3 SOFT advisories — read-time only, human eyes only: ≥2 distinct SOFT
