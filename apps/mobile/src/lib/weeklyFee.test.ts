@@ -88,4 +88,35 @@ describe('weekly fee contract', () => {
     expect(transport.read).toHaveBeenCalledWith('push-ref'); expect(views.at(-1)?.checkout?.status).toBe('OPEN');
     session.dispose(); const count = views.length; await vi.advanceTimersByTimeAsync(900_000); expect(views).toHaveLength(count);
   });
+  it('reconciles late CONFIRMED for the same ref without an older poll overwriting it', async () => {
+    vi.useFakeTimers(); const { session, transport, views } = setup();
+    transport.read.mockResolvedValueOnce(checkout('EXPIRED'));
+    session.follow('reference-1'); await vi.advanceTimersByTimeAsync(0);
+    expect(checkoutWords(views.at(-1)!.checkout!)).toContain('expired');
+    let reply!: (_value: CheckoutStatus) => void;
+    transport.read.mockImplementation(() => new Promise((resolve) => { reply = resolve; }));
+    await vi.advanceTimersByTimeAsync(3000);
+    session.reconcile(checkout('CONFIRMED'));
+    expect(checkoutWords(views.at(-1)!.checkout!)).toContain('Paid:');
+    reply(checkout('EXPIRED')); await vi.advanceTimersByTimeAsync(0);
+    expect(checkoutWords(views.at(-1)!.checkout!)).toContain('Paid:');
+    session.dispose();
+  });
+  it('does not replace a followed reference with another subscription checkout', async () => {
+    vi.useFakeTimers(); const { session, transport, views } = setup();
+    transport.read.mockResolvedValue(checkout('EXPIRED'));
+    session.follow('reference-1'); await vi.advanceTimersByTimeAsync(0);
+    session.reconcile({ ...checkout('CONFIRMED'), ref: 'other-ref' });
+    expect(views.at(-1)!.checkout!.ref).toBe('reference-1');
+    expect(views.at(-1)!.checkout!.status).toBe('EXPIRED'); session.dispose();
+  });
+
+  it('reconciles the followed ref from recent history when a newer checkout exists', async () => {
+    vi.useFakeTimers(); const { session, transport, views } = setup();
+    transport.read.mockResolvedValue(checkout('EXPIRED'));
+    session.follow('reference-1'); await vi.advanceTimersByTimeAsync(0);
+    session.reconcile({ ...checkout('OPEN'), ref: 'newer-ref' }, [checkout('CONFIRMED')]);
+    expect(checkoutWords(views.at(-1)!.checkout!)).toContain('Paid:'); session.dispose();
+  });
+
 });

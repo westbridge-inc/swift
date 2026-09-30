@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshControl, ScrollView, View } from 'react-native';
+import { AppState, RefreshControl, ScrollView, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import * as WebBrowser from 'expo-web-browser';
 import * as Crypto from 'expo-crypto';
@@ -12,11 +12,13 @@ import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore'
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
 
-export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef }: {
+export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef, contextPending = false }: {
   family: FeeFamily; sub?: FeeSubscription | null; loading?: boolean; error?: boolean;
-  refresh: () => unknown; checkoutRef?: string;
+  refresh: () => unknown; checkoutRef?: string; contextPending?: boolean;
 }) {
   const storeId = useStoreSwitcher((s) => s.selectedStoreId);
+  const resolvingStore = useStoreSwitcher((s) => s.feeContextPending);
+  contextPending = contextPending || resolvingStore;
   const principal = useAuthStore((s) => s.user?.id);
   const generation = useAuthStore((s) => s.sessionGeneration);
   const [view, setView] = useState<CheckoutView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
@@ -34,16 +36,23 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
     });
   }, [family, storeId, principal, generation]);
   useEffect(() => { session.activate(); return () => session.dispose(); }, [session]);
-  useEffect(() => { session.focus(sub?.latestMmgCheckout, checkoutRef); }, [session, sub?.latestMmgCheckout?.ref, checkoutRef]); // eslint-disable-line react-hooks/exhaustive-deps
-  useFocusEffect(useCallback(() => { void refreshRef.current(); session.focus(); }, [session]));
+  useEffect(() => { if (!contextPending) session.focus(sub?.latestMmgCheckout, checkoutRef); }, [session, sub?.latestMmgCheckout?.ref, checkoutRef, contextPending]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!contextPending) session.reconcile(sub?.latestMmgCheckout, sub?.recentCheckouts); }, [session, sub?.latestMmgCheckout, sub?.recentCheckouts, contextPending]);
+  useFocusEffect(useCallback(() => { if (!contextPending) { void refreshRef.current(); session.focus(); } }, [session, contextPending]));
+  useEffect(() => {
+    const listener = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && !contextPending) { void refreshRef.current(); session.focus(); }
+    });
+    return () => listener.remove();
+  }, [session, contextPending]);
   useEffect(() => {
     const timer = setInterval(() => { void refreshRef.current(); }, 60_000);
     return () => clearInterval(timer);
   }, []);
-  const pull = usePullToRefresh(async () => { await refreshRef.current(); session.focus(undefined, checkoutRef); });
+  const pull = usePullToRefresh(async () => { await refreshRef.current(); if (!contextPending) session.focus(undefined, checkoutRef); });
   const action = liveMmg(sub);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
-  const blocked = view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const blocked = contextPending || view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
   return <Screen>
     <Header title="Weekly fee" />
     {loading ? <LoadingBlock /> : error || !sub ? <ErrorState message="We couldn't load your weekly fee. Try again." onRetry={() => { void refresh(); }} /> :
@@ -55,7 +64,7 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
           {view.returned && !checkout ? <T variant="body">Waiting for MMG…</T> : null}
           {view.error ? <T variant="caption" tone="error" style={{ marginTop: space.md }}>{view.error}</T> : null}
           {action && !blocked ? <PillButton label={`Pay ${feeMoney(action.amountGyd)} with MMG`} loading={view.busy} style={{ marginTop: space.lg }} onPress={() => { void session.pay(); }} /> : null}
-          <PillButton label="Refresh status" variant="soft" style={{ marginTop: space.md }} onPress={() => { void refresh(); session.focus(undefined, checkoutRef); }} />
+          <PillButton label="Refresh status" variant="soft" style={{ marginTop: space.md }} onPress={() => { void refresh(); if (!contextPending) session.focus(undefined, checkoutRef); }} />
         </Card>
         <T variant="caption">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</T>
         <View>

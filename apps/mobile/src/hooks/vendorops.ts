@@ -367,7 +367,16 @@ export function useVendorOrderHistory(filters: OrderHistoryFilters) {
 export function useVendorSubscription(enabled = true) {
   // Billing is owner-only (staff & roles §4.1) — staff sessions skip the call.
   const pv = usePreviewDataset();
-  const q = useQuery({ queryKey: ['vendor', 'subscription'], queryFn: () => unwrap(vendorApi.subscription()), enabled: enabled && !pv });
+  const storeId = useStoreSwitcher((s) => s.selectedStoreId);
+  const principal = useAuthStore((s) => s.user?.id);
+  const generation = useAuthStore((s) => s.sessionGeneration);
+  const q = useQuery({ queryKey: ['vendor', 'subscription', storeId, principal, generation], queryFn: async () => {
+    const session = requireAuthSessionSnapshot();
+    const sub = await unwrap(vendorApi.subscription(session, storeId));
+    const current = getAuthSessionSnapshot();
+    if (current?.userId !== session.userId || current?.generation !== session.generation || useStoreSwitcher.getState().selectedStoreId !== storeId) throw new Error('The paying account changed.');
+    return sub;
+  }, enabled: enabled && !pv });
   // Preview bills the sample store the live quote for its business type — the
   // public price list, read only in preview — never a number frozen in the app.
   const pricing = usePartnerPricing(VENDOR_PREVIEW_MARKET, !!pv);

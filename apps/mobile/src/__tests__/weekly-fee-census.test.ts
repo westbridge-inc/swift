@@ -3,12 +3,12 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 const source = (path: string) => readFileSync(join(process.cwd(), path), 'utf8');
 function files(path: string): string[] {
-  return readdirSync(path, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? files(join(path, e.name)) : /\.tsx$/.test(e.name) && !e.name.includes('.test.') ? [join(path, e.name)] : []);
+  return readdirSync(path, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? (['__tests__', 'test', '__mocks__'].includes(e.name) ? [] : files(join(path, e.name))) : /\.(?:[cm]?[jt]sx?|html|json|css)$/.test(e.name) && !e.name.includes('.test.') && !e.name.includes('.spec.') ? [join(path, e.name)] : []);
 }
-const roots = ['src/modules/billing', 'src/components/billing', 'src/modules/vendor', 'src/modules/mover', '../web/src/app/dashboard', '../web/src/app/portal'];
+const roots = ['src', '../web/src', '../web/public'];
 export function retiredPaymentCopy(text: string) {
   const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-  return /\b(?:sanFormatted|payCashSteps|activationCopy)\b|\bsub\??\.san\b|MMG agent|pay[^\n]{0,80}Swift Number|coming soon/i.test(code);
+  return /\b(?:sanFormatted|payCashSteps|activationCopy)\b|(?:\?\.|\.)san\b|\[\s*[\x27\x22]san[\x27\x22]\s*\]|MMG[\s-]+agent|Swift[\s-]+Number|pay[^\n]{0,80}account[\s-]+number|(?:weekly fee|subscription)[^\n]{0,80}(?:paid by card|pay by card|pay in cash)|coming soon/i.test(code);
 }
 describe('partner checkout surface census', () => {
   it('no deprecated payload, agent instruction or teased method can be rendered', () => {

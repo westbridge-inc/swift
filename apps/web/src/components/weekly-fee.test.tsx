@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { WeeklyFee } from './weekly-fee';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
@@ -36,6 +36,9 @@ describe('rendered weekly fee', () => {
     setSelectedStore('store-checkout');
     const calls = mockApi(({ method, url, init }) => {
       expect(new Headers(init?.headers).get('x-client-platform')).toBe('web');
+      expect(new Headers(init?.headers).get('x-swift-client')).toBe('web');
+      expect(new Headers(init?.headers).has('Authorization')).toBe(false);
+      expect(init?.credentials).toBe('include');
       if (family === 'vendor') expect(new Headers(init?.headers).get('x-vendor-id')).toBe('store-checkout');
       if (method === 'POST') {
         expect(new Headers(init?.headers).get('Idempotency-Key')).toMatch(/^[A-Za-z0-9_-]{8,128}$/); expect(init?.body).toBe('{}');
@@ -49,4 +52,20 @@ describe('rendered weekly fee', () => {
     expect(screen.queryByRole('button', { name: /Pay GY/ })).toBeNull();
     await waitFor(() => expect(calls.mock.calls.some(([url]) => String(url).endsWith(`/${family}/subscription/mmg-checkout/earlier-ref`))).toBe(true)); view.unmount();
   });
+  it.each(['subscription refresh', 'tab focus'])('EXPIRED becomes Paid from fresh server state on %s', async (trigger) => {
+    let status = 'EXPIRED';
+    const checkout = () => ({ ref: 'late-ref', status, amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE', confirmedAt: status === 'CONFIRMED' ? '2026-09-29T12:00:00Z' : null });
+    mockApi(({ url }) => url.pathname.endsWith('/late-ref')
+      ? { body: { success: true, data: checkout() } }
+      : { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, latestMmgCheckout: checkout(), recentCheckouts: [checkout()] } } });
+    const view = renderWithQuery(<WeeklyFee family="rider" />);
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('expired'));
+    status = 'CONFIRMED';
+    if (trigger === 'subscription refresh') await act(async () => { await view.queryClient.invalidateQueries({ queryKey: ['weekly-fee'] }); });
+    else act(() => { window.dispatchEvent(new Event('focus')); });
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Paid: GY$1,200'));
+    expect(document.body.textContent).not.toContain('This checkout expired');
+    view.unmount();
+  });
+
 });

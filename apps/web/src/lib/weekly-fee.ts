@@ -1,4 +1,4 @@
-// MMG-CHECKOUT-API 628c8206. Kept identical across the two independently built apps.
+// MMG-CHECKOUT-API ca425ee7. Kept identical across the two independently built apps.
 export type FeeFamily = 'vendor' | 'rider' | 'driver';
 export type CheckoutState = 'OPEN' | 'CONFIRMING' | 'CONFIRMED' | 'NOT_PAID' | 'EXPIRED' | 'HELD';
 export type PayAction = { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD' } | { id: 'MMG_CHECKOUT' | 'CARD'; state: 'off' };
@@ -7,7 +7,7 @@ export interface CheckoutStatus {
   createdAt: string; expiresAt: string; confirmedAt: string | null; subscriptionStatus: string;
 }
 export interface FeeSubscription {
-  status: string; amountDueGyd?: number | string; nextBillingDate?: string | null;
+  id?: string; status: string; amountDueGyd?: number | string; nextBillingDate?: string | null;
   currentPeriodEnd?: string | null; gracePeriodEnd?: string | null;
   payActions?: PayAction[]; latestMmgCheckout?: CheckoutStatus | null; recentCheckouts?: CheckoutStatus[];
 }
@@ -119,6 +119,13 @@ export class FeeCheckoutSession {
       if (delay !== null) this.timer = setTimeout(tick, delay);
     };
     void tick();
+  }
+  /** A refreshed subscription is server evidence, even when its ref is unchanged. */
+  reconcile(latest?: CheckoutStatus | null, recent: CheckoutStatus[] = []) {
+    latest = this.followingRef ? [latest, ...recent].find((c) => c?.ref === this.followingRef) : latest;
+    if (!latest) return;
+    if (pollDelay(0, latest.status) === null) { this.generation++; clearTimeout(this.timer); }
+    this.emit({ checkout: latest, blocked: latest.status === 'CONFIRMING' || latest.status === 'HELD' });
   }
   focus(latest?: CheckoutStatus | null, ref?: string) {
     const target = ref ?? latest?.ref ?? this.followingRef;

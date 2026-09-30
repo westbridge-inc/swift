@@ -21,6 +21,7 @@ export default function robots(): MetadataRoute.Robots {
         disallow: [
           '/dashboard/',   // vendor operator console
           '/portal/',      // mover document portal
+          '/pay/mmg/',     // token-bearing payment returns
           '/account',      // signed-in customer account (NOT /account/delete — allowed above)
           '/cart',
           '/orders/',

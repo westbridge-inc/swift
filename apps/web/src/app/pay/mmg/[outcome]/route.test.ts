@@ -17,7 +17,7 @@ describe('MMG return document', () => {
     stub(state); const r = await GET(new Request('https://web.test/pay/mmg/success?reply=private-value&state=CONFIRMED'), context('error'));
     const html = await r.text(); expect(html).toContain(words); expect(html).not.toMatch(/private-value|must-not-render|99|<script/);
     for (const [other, text] of Object.entries(texts)) if (state !== other) expect(html).not.toContain(text);
-    expect(html).toContain('href="swift://pay/mmg/return"'); expect(html).toContain('href="/dashboard/weekly-fee"');
+    expect(html).toContain('href="swift://pay/mmg/return"'); expect(html).toContain('href="/weekly-fee"');
     expect(r.headers.get('x-robots-tag')).toBe('noindex'); expect(r.headers.get('cache-control')).toBe('no-store'); expect(r.headers.get('referrer-policy')).toBe('no-referrer');
   });
   it('forwards every decoded GET value only to the API, with no-store and no redirects', async () => {
@@ -38,10 +38,27 @@ describe('MMG return document', () => {
     const fetcher = stub('CONFIRMING'); const params = new URLSearchParams(Array.from({ length: 16 }, (_, i) => [`field${i}`, 'x'.repeat(4096)]));
     await GET(new Request(`https://web.test/pay/mmg/success?${params}`), context()); expect(fetcher).toHaveBeenCalledOnce();
   });
-  it.each(['long', 'many', 'duplicate'])('unreadable %s input is UNKNOWN without truncating or forwarding', async (kind) => {
-    const fetcher = stub('CONFIRMED'); const params = kind === 'long' ? `x=${'x'.repeat(4097)}` : kind === 'duplicate' ? 'x=one&x=two' : Array.from({ length: 17 }, (_, i) => `f${i}=x`).join('&');
+  it.each(['long', 'many'])('unreadable %s input is UNKNOWN without truncating or forwarding', async (kind) => {
+    const fetcher = stub('CONFIRMED'); const params = kind === 'long' ? `x=${'x'.repeat(4097)}` : Array.from({ length: 17 }, (_, i) => `f${i}=x`).join('&');
     const r = await GET(new Request(`https://web.test/pay/mmg/success?${params}`), context());
     expect(await r.text()).toContain(texts.UNKNOWN); expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each(['GET', 'POST-form', 'POST-multipart'])('preserves repeated keys in order for %s, letting only the API decide state', async (method) => {
+    const fetcher = stub('CONFIRMED');
+    const entries = [['reply', 'first'], ['other', 'x'], ['reply', 'second'], ['__proto__', 'one'], ['__proto__', 'two']];
+    const body = method === 'POST-multipart' ? new FormData() : new URLSearchParams();
+    for (const [key, value] of entries) body.append(key!, value!);
+    const request = method === 'GET' ? new Request(`https://web.test/pay/mmg/error?${body}`) : new Request('https://web.test/pay/mmg/error', { method: 'POST', body });
+    const response = await (method === 'GET' ? GET : POST)(request, context('error'));
+    const init = (fetcher.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(JSON.parse(init.body as string)).toEqual({ outcome: 'error', params: JSON.parse('{"reply":["first","second"],"other":"x","__proto__":["one","two"]}') });
+    expect(await response.text()).toContain(texts.CONFIRMED);
+  });
+  it('counts repeated values toward the limit of 16', async () => {
+    const fetcher = stub('CONFIRMED');
+    const values = new URLSearchParams(Array.from({ length: 17 }, () => ['reply', 'x']));
+    const response = await GET(new Request(`https://web.test/pay/mmg/success?${values}`), context());
+    expect(await response.text()).toContain(texts.UNKNOWN); expect(fetcher).not.toHaveBeenCalled();
   });
   it.each([400, 413, 429, 500, 503])('API %s cannot imply paid', async (status) => {
     stub('CONFIRMED', status); const r = await GET(new Request('https://web.test/pay/mmg/success'), context()); expect(await r.text()).toContain(texts.UNKNOWN);

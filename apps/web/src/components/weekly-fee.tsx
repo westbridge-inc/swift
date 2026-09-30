@@ -21,6 +21,7 @@ export function WeeklyFee({ family }: { family: FeeFamily }) {
   }, () => crypto.randomUUID(), setView, (e) => e instanceof ApiRequestError ? e : {}), [base, client, queryKey]);
   useEffect(() => { session.activate(); return () => session.dispose(); }, [session]);
   useEffect(() => { session.focus(q.data?.latestMmgCheckout); }, [session, q.data?.latestMmgCheckout?.ref]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { session.reconcile(q.data?.latestMmgCheckout, q.data?.recentCheckouts); }, [session, q.data?.latestMmgCheckout, q.data?.recentCheckouts]);
   useEffect(() => {
     const focus = () => { void client.invalidateQueries({ queryKey }); session.focus(); };
     window.addEventListener('focus', focus);

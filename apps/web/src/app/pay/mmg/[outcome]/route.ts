@@ -24,12 +24,14 @@ async function handle(request: Request, context: Context) {
       if (typeof key !== 'string' || typeof value !== 'string' || value.length > 4096 || entries.length >= 16) throw new Error('Unreadable return');
       entries.push([key, value]);
     });
-    // Record<string,string> cannot represent repeated keys or files. Treat an
-    // unrepresentable link as unreadable; never drop or reinterpret a value.
-    if (entries.length > 16 || entries.some(([, value]) => typeof value !== 'string' || value.length > 4096) || new Set(entries.map(([key]) => key)).size !== entries.length) throw new Error('Unreadable return');
+    const params: Record<string, string | string[]> = Object.create(null);
+    for (const [key, value] of entries) {
+      const previous = params[key];
+      params[key] = previous === undefined ? value : Array.isArray(previous) ? [...previous, value] : [previous, value];
+    }
     const response = await fetch(`${process.env['API_URL'] ?? BROWSER_API_ORIGIN}/api/v1/billing/mmg-checkout/return`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store', redirect: 'error',
-      body: JSON.stringify({ outcome, params: Object.fromEntries(entries) }),
+      body: JSON.stringify({ outcome, params }),
       signal: AbortSignal.timeout(10_000),
     });
     if (response.ok) {
@@ -40,7 +42,7 @@ async function handle(request: Request, context: Context) {
   } catch { /* Deliberately no logging: URLs, form fields and fetch errors can carry return tokens. */ }
   // A route-handler document bypasses the React layout and all analytics. No
   // return input, outcome, amount, identity or reference reaches this HTML.
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><title>Swift weekly fee</title><style>body{margin:0;background:#faf8f6;color:#261d20;font:18px/1.6 system-ui,sans-serif}main{max-width:32rem;margin:10vh auto;padding:2rem}h1{font-size:2rem;line-height:1.2}a{display:inline-block;color:#8e243f;font-weight:650;text-underline-offset:4px}p{margin-top:1.5rem}</style></head><body><main><h1>Weekly fee</h1><p>${words[state]}</p><p><a href="swift://pay/mmg/return">Back to the Swift app</a></p><p><a href="/dashboard/weekly-fee">Continue on the web</a></p></main></body></html>`, { headers });
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><title>Swift weekly fee</title><style>body{margin:0;background:#faf8f6;color:#261d20;font:18px/1.6 system-ui,sans-serif}main{max-width:32rem;margin:10vh auto;padding:2rem}h1{font-size:2rem;line-height:1.2}a{display:inline-block;color:#8e243f;font-weight:650;text-underline-offset:4px}p{margin-top:1.5rem}</style></head><body><main><h1>Weekly fee</h1><p>${words[state]}</p><p><a href="swift://pay/mmg/return">Back to the Swift app</a></p><p><a href="/weekly-fee">Continue on the web</a></p></main></body></html>`, { headers });
 }
 export const GET = handle;
 export const POST = handle;
