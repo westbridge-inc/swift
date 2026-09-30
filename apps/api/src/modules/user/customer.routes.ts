@@ -26,7 +26,7 @@ import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { visibleVendorRelForCaller, visibleVendorForCaller } from '../vendor/vendor-visibility';
 import { compileStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { createHash, randomInt } from 'node:crypto';
-import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED } from '../order/order.service';
+import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
@@ -2120,6 +2120,13 @@ export async function customerRoutes(app: FastifyInstance) {
     }
 
     let result;
+    // [CHECKOUT-IDEM · AX354 S1] The service reports the moment its order
+    // transaction commits. Before that point a failure placed nothing: the key
+    // is released so the same key can retry once the customer fixes the
+    // problem (e.g. MIN_ORDER). After it the order EXISTS: the claim is kept
+    // (releasing it is what let the receipt probe answer "none" for a placed
+    // order) and the answer is the committed receipt.
+    let commit = null as CheckoutCommit | null;
     try {
       result = await orderService.checkout({
         userId,
@@ -2132,12 +2139,19 @@ export async function customerRoutes(app: FastifyInstance) {
         express: body.express,
         appointments: body.appointments,
         ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
+        onCommitted: (committed) => { commit = committed; },
       });
     } catch (err) {
-      // A failed attempt must not hold the key hostage — release so the same
-      // key can retry once the customer fixes the problem (e.g. MIN_ORDER).
-      if (redisKey) await app.redis.del(redisKey).catch(() => {});
-      throw err;
+      if (!commit) {
+        // A failed attempt must not hold the key hostage — release so the same
+        // key can retry once the customer fixes the problem (e.g. MIN_ORDER).
+        if (redisKey) await app.redis.del(redisKey).catch(() => {});
+        throw err;
+      }
+      // checkout never throws past its commit point; should anything still
+      // escape it, the order stands: keep the claim, answer the receipt.
+      request.log.error({ err, receiptId: commit.receiptId }, '[CHECKOUT-IDEM] checkout threw after its commit; answering the committed receipt, claim kept');
+      result = commit.answer;
     }
 
     // [M-11] The vendor alert ladder and the auto-cancel were written INSIDE
@@ -2181,16 +2195,35 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/checkout/receipts/:key', async (request: AuthRequest) => {
     const { key } = z.object({ key: z.string().min(8).max(128) }).parse(request.params ?? {});
     const { userId } = request.user;
+    // [CHECKOUT-IDEM · AX354 S1] The claim FIRST, the receipt SECOND. The
+    // checkout route releases a claim only after its order transaction has
+    // settled, and never once the commit is reported, so by the time a claim
+    // is gone any receipt that transaction wrote is visible: a receipt read
+    // AFTER the claim read sees every order the claim read missed. Read the
+    // other way round, a probe could miss the receipt (not committed yet),
+    // then miss the claim (gone after the commit), and answer "none" for a
+    // placed order.
+    let claimed: string | null = null;
+    let claimUnknown = false;
+    try {
+      claimed = await app.redis.get(`checkout:idem:${userId}:${key}`);
+    } catch (err) {
+      // An unreadable claim is not an absent one: it never answers "none".
+      claimUnknown = true;
+      request.log.warn({ err }, '[CHECKOUT-IDEM] receipt probe could not read the claim');
+    }
     const receipt = await findCheckoutReceipt(app.prisma, userId, key);
     if (receipt) {
       checkoutIdempotencyCounter.labels('probe_placed').inc();
       return { success: true, data: { status: 'placed', orderIds: receipt.orderIds } };
     }
-    const claimed = await app.redis.get(`checkout:idem:${userId}:${key}`);
     if (claimed) {
       // A cached result without a receipt row cannot happen (the receipt is written in the order's transaction); a claim is in flight.
       checkoutIdempotencyCounter.labels('probe_in_flight').inc();
       return { success: true, data: { status: 'in_flight' } };
+    }
+    if (claimUnknown) {
+      throw new AppError(503, 'CHECKOUT_STATUS_UNAVAILABLE', 'We could not check on this order just now. Try again in a moment.');
     }
     checkoutIdempotencyCounter.labels('probe_none').inc();
     return { success: true, data: { status: 'none' } };

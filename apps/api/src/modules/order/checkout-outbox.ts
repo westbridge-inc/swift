@@ -241,12 +241,14 @@ export async function persistDispatchCommandInTransaction(
   return { id, dedupeKey };
 }
 
-/** Write the command's one immutable result, inside the caller's transaction. */
+/** Write the command's one immutable result, inside the caller's transaction.
+ *  Returns the receipt row id: once that transaction resolves, the row is the
+ *  command's commit point [CHECKOUT-IDEM]. */
 export async function persistCheckoutReceiptInTransaction(
   tx: Prisma.TransactionClient,
   input: { userId: string; tenantId: string; idempotencyKey: string; requestHash: string; orderIds: string[]; result: unknown },
-): Promise<void> {
-  await tx.checkoutReceipt.create({
+): Promise<string> {
+  const row = await tx.checkoutReceipt.create({
     data: {
       tenantId: input.tenantId,
       userId: input.userId,
@@ -257,7 +259,9 @@ export async function persistCheckoutReceiptInTransaction(
       // exactly as they do in the response, so a replay is byte-equivalent.
       result: JSON.parse(JSON.stringify(input.result)) as Prisma.InputJsonValue,
     },
+    select: { id: true },
   });
+  return row.id;
 }
 
 export async function findCheckoutReceipt(
