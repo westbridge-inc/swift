@@ -24,7 +24,7 @@ import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
-import { compileStorefrontDisclosure } from '../verification/storefront-disclosure';
+import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -1551,7 +1551,7 @@ export async function customerRoutes(app: FastifyInstance) {
         isFavorite,
         // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
         // records on every read — never hand-written prose; incomplete blocks say what is missing.
-        disclosure: await compileStorefrontDisclosure(app.prisma, id),
+        disclosure: await compilePublicStorefrontDisclosure(app.prisma, id),
         distanceKm,
         deliveryFee,
         etaMin,
@@ -1971,26 +1971,25 @@ export async function customerRoutes(app: FastifyInstance) {
     });
     if (!address) throw new NotFoundError('Address', addressId);
 
-    const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
+    const cart = await app.prisma.cart.findUnique({ where: { customerId: userId, vendor: vendorTenantForCaller() } });
     if (!cart) throw new AppError(400, 'NO_CART', 'No active cart');
 
     // Check delivery radius
-    const vendor = await app.prisma.vendor.findUnique({
-      where: { id: cart.vendorId },
+    const vendor = await app.prisma.vendor.findFirst({
+      where: { id: cart.vendorId, ...vendorTenantForCaller() },
       select: { latitude: true, longitude: true, deliveryRadius: true, name: true },
     });
-    if (vendor) {
-      const dist = estimateDrivingDistance(
-        vendor.latitude, vendor.longitude,
-        address.latitude, address.longitude,
-      );
-      if (dist > (vendor.deliveryRadius || MAX_DELIVERY_RADIUS_KM)) {
-        throw new AppError(400, 'OUT_OF_RANGE',
-          `${vendor.name} only delivers within ${vendor.deliveryRadius || MAX_DELIVERY_RADIUS_KM} km. This address is ${dist.toFixed(1)} km away.`);
-      }
+    if (!vendor) throw new AppError(400, 'NO_CART', 'No active cart');
+    const dist = estimateDrivingDistance(
+      vendor.latitude, vendor.longitude,
+      address.latitude, address.longitude,
+    );
+    if (dist > (vendor.deliveryRadius || MAX_DELIVERY_RADIUS_KM)) {
+      throw new AppError(400, 'OUT_OF_RANGE',
+        `${vendor.name} only delivers within ${vendor.deliveryRadius || MAX_DELIVERY_RADIUS_KM} km. This address is ${dist.toFixed(1)} km away.`);
     }
 
-    await app.prisma.cart.update({ where: { id: cart.id }, data: { deliveryAddressId: addressId, lastActivityAt: new Date() } });
+    await app.prisma.cart.update({ where: { id: cart.id, vendor: vendorTenantForCaller() }, data: { deliveryAddressId: addressId, lastActivityAt: new Date() } });
     await app.redis.del(`cart:${userId}`).catch(() => {});
 
     const updatedCart = await buildCartResponse(app, userId);
@@ -3242,8 +3241,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // Compute estimated discount using current cart if available
     let estimatedDiscount: number | null = null;
     const cart = await app.prisma.cart.findUnique({
-      where: { customerId: userId },
-      include: { items: { include: { item: true } } },
+      where: { customerId: userId, vendor: vendorTenantForCaller() },
+      include: { items: { where: { item: { vendor: vendorTenantForCaller() } }, include: { item: true } } },
     });
 
     if (cart && cart.items.length > 0) {
@@ -3279,7 +3278,7 @@ export async function customerRoutes(app: FastifyInstance) {
       estimatedDiscount = promoDiscount(promo, { subtotal, deliveryFee: assumedDeliveryFee });
 
       // Apply promo to cart
-      await app.prisma.cart.update({ where: { id: cart.id }, data: { promoCodeId: promo.id } });
+      await app.prisma.cart.update({ where: { id: cart.id, vendor: vendorTenantForCaller() }, data: { promoCodeId: promo.id } });
       await app.redis.del(`cart:${userId}`).catch(() => {});
     }
 

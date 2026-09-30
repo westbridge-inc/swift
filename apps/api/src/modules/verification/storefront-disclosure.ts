@@ -19,6 +19,9 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { getKeyProvider } from '../../providers/storage/envelope';
 import { unpackAndDecrypt } from './extraction-ledger';
 import { BUCKET_OF, IDENTITY_DOC_TYPES, LICENCE_DISCLOSURE_TYPES } from './doc-registry';
+import { vendorTenantForCaller } from '../vendor/vendor-visibility';
+import { inoperableSubscriptionWhere } from '../subscription/operate-gate';
+import { getTenantId } from '../../plugins/tenant-context';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
@@ -48,15 +51,28 @@ export function platformOperator(env: Record<string, string | undefined> = proce
   return legalName && registeredAddress && supportEmail ? { legalName, registeredAddress, supportEmail } : null;
 }
 
-/** Decrypt the named fields of a VALID record's submission — absent when never extracted or the KEK is gone. */
-async function readFields(db: Db, submissionId: string, codes: readonly string[]): Promise<Map<string, string>> {
+type RecordSource = { id: string; tenantId: string; accountId: string; subjectId: string | null; docType: string; submissionId: string };
+
+/** Only declared non-PII BUSINESS fields enter this reader. Neither purpose
+ * needs PERSONAL values: a valid licence's on-file fact is sufficient. */
+async function readFields(db: Db, record: RecordSource, codes: readonly string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
-  const runs = await db.extractionRun.findMany({ where: { submissionId }, orderBy: { startedAt: 'desc' }, select: { wrappedDek: true, fields: { where: { fieldCode: { in: [...codes] } }, select: { fieldCode: true, valueCt: true } } } });
+  if (!codes.length) return out;
+  const runs = await db.extractionRun.findMany({
+    where: { tenantId: record.tenantId, submissionId: record.submissionId,
+      submission: { userId: record.accountId, docType: record.docType, subjectId: record.subjectId, purgedAt: null } },
+    orderBy: { startedAt: 'desc' },
+    select: { id: true, wrappedDek: true, fields: {
+      where: { tenantId: record.tenantId, submissionId: record.submissionId, fieldCode: { in: [...codes] } },
+      select: { runId: true, fieldCode: true, valueCt: true },
+    } },
+  });
   const kp = getKeyProvider();
   for (const run of runs) {
-    if (!run.wrappedDek || !kp) continue;
+    const fields = run.fields.filter(f => f.runId === run.id && f.valueCt && !out.has(f.fieldCode));
+    if (!fields.length || !run.wrappedDek || !kp) continue;
     const dek = await kp.unwrapDek(Buffer.from(run.wrappedDek));
-    for (const f of run.fields) {
+    for (const f of fields) {
       if (f.valueCt && !out.has(f.fieldCode)) out.set(f.fieldCode, unpackAndDecrypt(Buffer.from(f.valueCt), dek).toString('utf8'));
     }
   }
@@ -69,40 +85,85 @@ export async function disclosureGateEngaged(db: Db, countryCode: string): Promis
   return active > 0;
 }
 
-export async function compileStorefrontDisclosure(db: Db, vendorId: string, now = new Date()): Promise<DisclosureBlock> {
-  const vendor = await db.vendor.findUnique({
-    where: { id: vendorId },
-    select: { name: true, addressLine1: true, addressLine2: true, owner: { select: { userId: true, user: { select: { firstName: true, lastName: true, phone: true, isPhoneVerified: true } } } } },
+const DISCLOSURE_VENDOR_SELECT = {
+  id: true, tenantId: true, name: true, addressLine1: true, addressLine2: true,
+  owner: { select: { userId: true, user: { select: {
+    tenantId: true, countryCode: true, firstName: true, lastName: true, phone: true, isPhoneVerified: true,
+  } } } },
+} satisfies Prisma.VendorSelect;
+type DisclosureVendor = Prisma.VendorGetPayload<{ select: typeof DISCLOSURE_VENDOR_SELECT }>;
+
+/** The direct-link shell may be closed, pending or suspended. Private supplier
+ * details have their own current eligibility read before owner/evidence access. */
+export async function compilePublicStorefrontDisclosure(db: Db, vendorId: string, now = new Date()): Promise<DisclosureBlock | null> {
+  const vendor = await db.vendor.findFirst({
+    where: { id: vendorId, ...vendorTenantForCaller(), status: { in: ['ACTIVE', 'CLOSED'] },
+      isVerified: true, subscription: { isNot: inoperableSubscriptionWhere(now) },
+      owner: { user: { status: 'ACTIVE' } } },
+    select: DISCLOSURE_VENDOR_SELECT,
   });
-  const missing: string[] = [];
+  if (!vendor || vendor.owner.user.tenantId !== vendor.tenantId) return null;
+  return compileDisclosure(db, vendor, 'PUBLIC_STOREFRONT', now);
+}
+
+/** Internal activation computes completeness before a store is approved. It
+ * must name the exact payer and tenant already resolved by the decision path;
+ * public lifecycle conditions would strand this transition. */
+export async function compileActivationDisclosure(
+  db: Db, vendorId: string, authority: { accountId: string; tenantId: string }, now = new Date(),
+): Promise<DisclosureBlock> {
+  const callerTenant = getTenantId();
+  const vendor = authority.accountId && authority.tenantId && (!callerTenant || callerTenant === authority.tenantId)
+    ? await db.vendor.findFirst({
+      where: { id: vendorId, tenantId: authority.tenantId,
+        owner: { userId: authority.accountId, user: { tenantId: authority.tenantId } } },
+      select: DISCLOSURE_VENDOR_SELECT,
+    }) : null;
   if (!vendor) return { complete: false, missing: ['vendor'], legalName: null, address: null, contact: null, licences: [], operator: platformOperator(), compiledAt: now.toISOString() };
+  return compileDisclosure(db, vendor, 'VENDOR_ACTIVATION', now);
+}
+
+async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: 'PUBLIC_STOREFRONT' | 'VENDOR_ACTIVATION', now: Date): Promise<DisclosureBlock> {
+  const missing: string[] = [];
   const accountId = vendor.owner.userId;
-  const records = await db.documentRecord.findMany({
-    where: { accountId, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }], submission: { purgedAt: null } },
-    select: { id: true, docType: true, submissionId: true },
-  });
-  const business = records.filter((r) => BUCKET_OF[r.docType] === 'BUSINESS');
+  const records = (await db.documentRecord.findMany({
+    where: { tenantId: vendor.tenantId, accountId, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }],
+      submission: { userId: accountId, purgedAt: null } },
+    select: { id: true, tenantId: true, accountId: true, subjectId: true, docType: true, submissionId: true,
+      submission: { select: { docType: true, subjectId: true } } },
+  })).filter(r => r.docType === r.submission.docType && r.subjectId === r.submission.subjectId);
+  // The historical map cannot declassify a runtime PERSONAL type. Unknown
+  // types/fields, and either PERSONAL classification, never reach unwrap.
+  const candidates = records.filter((r) => BUCKET_OF[r.docType] === 'BUSINESS');
+  const registry = candidates.length ? await db.docType.findMany({
+    where: { countryCode: vendor.owner.user.countryCode, legacyCode: { in: candidates.map(r => r.docType) }, bucket: 'BUSINESS' },
+    select: { legacyCode: true, fields: { where: { isPii: false }, select: { fieldCode: true } } },
+  }) : [];
+  const publicFields = new Map(registry.map(r => [r.legacyCode, new Set(r.fields.map(f => f.fieldCode))]));
+  const business = candidates.filter(r => publicFields.has(r.docType));
+  const fieldsFor = (r: RecordSource, codes: readonly string[]) => readFields(db, r, codes.filter(c => publicFields.get(r.docType)?.has(c)));
+  const provenance = (r: RecordSource) => ({ docType: r.docType, ...(purpose === 'VENDOR_ACTIVATION' ? { recordId: r.id } : {}) });
   const identity = records.find((r) => IDENTITY_DOC_TYPES.includes(r.docType));
 
   // Legal / registered name: a VALID business record's read name; else the verified proprietor "trading as".
   let legalName: DisclosureElement | null = null;
   for (const r of business) {
-    const f = await readFields(db, r.submissionId, NAME_FIELDS);
+    const f = await fieldsFor(r, NAME_FIELDS);
     const v = NAME_FIELDS.map((c) => f.get(c)).find((x) => x && x.trim());
-    if (v) { legalName = { value: v.trim(), source: 'RECORD', docType: r.docType, recordId: r.id }; break; }
+    if (v) { legalName = { value: v.trim(), source: 'RECORD', ...provenance(r) }; break; }
   }
   if (!legalName && identity) {
     const proprietor = `${vendor.owner.user.firstName} ${vendor.owner.user.lastName}`.trim();
-    if (proprietor) legalName = { value: `${proprietor} trading as ${vendor.name}`, source: 'PROPRIETOR', docType: identity.docType, recordId: identity.id };
+    if (proprietor) legalName = { value: `${proprietor} trading as ${vendor.name}`, source: 'PROPRIETOR', ...provenance(identity) };
   }
   if (!legalName) missing.push('legalName');
 
   // Principal geographic address: a business record's read address; else the self-declared address, labelled.
   let address: DisclosureElement | null = null;
   for (const r of business) {
-    const f = await readFields(db, r.submissionId, ADDRESS_FIELDS);
+    const f = await fieldsFor(r, ADDRESS_FIELDS);
     const v = ADDRESS_FIELDS.map((c) => f.get(c)).find((x) => x && x.trim());
-    if (v) { address = { value: v.trim(), source: 'RECORD', docType: r.docType, recordId: r.id }; break; }
+    if (v) { address = { value: v.trim(), source: 'RECORD', ...provenance(r) }; break; }
   }
   if (!address) {
     const declared = [vendor.addressLine1, vendor.addressLine2].filter((x) => x && x.trim()).join(', ');
@@ -115,12 +176,14 @@ export async function compileStorefrontDisclosure(db: Db, vendorId: string, now 
     ? { value: vendor.owner.user.phone, source: 'ACCOUNT' } : null;
   if (!contact) missing.push('contact');
 
-  // Licence disclosures: every VALID licence-class record, with its number when read.
+  // PERSONAL licences truthfully disclose only their on-file fact. Their
+  // numbers are not required for completeness in either caller, so neither
+  // caller needs a PERSONAL read or an associated privileged audit capability.
   const licences: DisclosureElement[] = [];
   for (const r of records.filter((x) => LICENCE_DISCLOSURE_TYPES.includes(x.docType))) {
-    const f = await readFields(db, r.submissionId, ['licence_number', 'certificate_number', 'permit_number']);
+    const f = await fieldsFor(r, ['licence_number', 'certificate_number', 'permit_number']);
     const number = [...f.values()].find((x) => x && x.trim());
-    licences.push({ value: number ? number.trim() : 'on file', source: 'RECORD', docType: r.docType, recordId: r.id });
+    licences.push({ value: number ? number.trim() : 'on file', source: 'RECORD', ...provenance(r) });
   }
 
   const operator = platformOperator();
