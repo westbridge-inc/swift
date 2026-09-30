@@ -1,38 +1,43 @@
+import { formatMoney } from '../../utils/currency-amount';
+
 /**
- * How a partner can ACTUALLY pay the weekly fee today — the words every fee
- * notice uses, in one place.
+ * The words every weekly-fee notice uses about paying, in one place.
  *
- * The app has no pay button. Its "How to pay" screen (VendorSwiftNumberScreen,
- * and SwiftNumberView in BillingSurfaces for movers) shows the Swift Number and
- * the agent steps this API serves (agent-cash.service.ts payCashSteps: visit
- * any MMG agent, give your Swift Number, pay cash). A notice that said "tap Pay
- * in the app" or "open the app to pay" sent a partner who was about to lose
- * their income looking for a button that does not exist, and "update your
- * card" named a card door the app deliberately does not have.
- *
- * Two doors, and only two:
- *   - cash at any MMG agent with the Swift Number, for every subscription;
- *   - approving the MMG request on the phone, only where the rail really sends
- *     one: MOBILE_MONEY with a payer number, while the account is still being
- *     retried. A CHURNED account is not retried, so it is never offered there.
- *
- * And no promise of an instant restore. The server reinstates the moment a
- * payment is RECORDED, but an agent payment is recorded at its channel pace
- * (within 1 business day in MANUAL mode, per the activationCopy the app shows).
- * "As soon as your payment reaches us" is true on every channel.
+ * The owner's rule (2026-09-29): partners pay the weekly fee on the MMG
+ * checkout in the Swift app. No notice offers an MMG agent, cash, a Swift
+ * Number or an account number. So the paying sentence of a notice is one of
+ * two, and nothing else:
+ *   - "Pay GY$X with MMG in the Swift app." ONLY while the MMG checkout is
+ *     live for the partner on every platform (fee-pay-actions.ts), for exactly
+ *     what the checkout would charge;
+ *   - otherwise the amount and when it is due, promising no way to pay.
  */
 
-/** The agent door, open to every subscription. */
-export const AGENT_PAY_WAY = 'Pay cash at any MMG agent with your Swift Number (shown in the app)';
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
+/** Guyana keeps UTC−4 all year (no daylight saving). */
+const GUYANA_OFFSET_MS = -4 * 3_600_000;
 
-/** What happens after paying, on every channel. */
-export const FEE_RESTORE_LINE = 'Access comes back as soon as your payment reaches us.';
-
-/** The ways to pay for an account the billing cycle still retries (PAST_DUE
- *  and SUSPENDED are retried daily), as one sentence without its full stop.
- *  An account no longer retried (CHURNED) gets AGENT_PAY_WAY alone. */
-export function feePayWays(sub: { billingMethod?: string | null; mmgPayerMsisdn?: string | null }): string {
-  return sub.billingMethod === 'MOBILE_MONEY' && Boolean(sub.mmgPayerMsisdn)
-    ? 'Approve the MMG request on your phone when one arrives, or pay cash at any MMG agent with your Swift Number (shown in the app)'
-    : AGENT_PAY_WAY;
+/** A day as a partner in Guyana reads it: "Tue 29 Sep". */
+export function guyanaDay(at: Date): string {
+  const local = new Date(at.getTime() + GUYANA_OFFSET_MS);
+  return `${WEEKDAYS[local.getUTCDay()]} ${local.getUTCDate()} ${MONTHS[local.getUTCMonth()]}`;
 }
+
+/** The checkout sentence: only when fee-pay-actions says MMG is live everywhere. */
+export function mmgPayLine(amountGyd: number): string {
+  return `Pay ${formatMoney(amountGyd, 'GYD', { whole: true })} with MMG in the Swift app.`;
+}
+
+/** The amount and when it is due, promising no way to pay. */
+export function feeDueLine(amount: number, currencyCode: string, due: Date | null, opts: { first?: boolean } = {}): string {
+  return `${opts.first ? 'Your first weekly fee' : 'The weekly fee'} of ${formatMoney(amount, currencyCode)} is due ${due ? `on ${guyanaDay(due)}` : 'now'}.`;
+}
+
+/** A wallet that already covers the fee: nothing to pay, so no way to pay is named. */
+export function feeCoveredLine(amount: number, currencyCode: string, opts: { first?: boolean } = {}): string {
+  return `Your balance already covers ${opts.first ? 'your first weekly fee' : 'the weekly fee'} of ${formatMoney(amount, currencyCode)}.`;
+}
+
+/** What happens after paying: true on every rail, promising no way to pay. */
+export const FEE_RESTORE_LINE = 'Your access comes back as soon as your payment is received.';

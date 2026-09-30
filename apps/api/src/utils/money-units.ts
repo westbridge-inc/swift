@@ -78,6 +78,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'LedgerEntry', field: 'credit', unit: 'MAJOR_WHOLE' },
   { model: 'LedgerEntry', field: 'debit', unit: 'MAJOR_WHOLE' },
   { model: 'MmgAgentPayment', field: 'amount', unit: 'MAJOR_WHOLE' },
+  // [MMG checkout 2/6] What a partner was asked to pay on the MMG page: whole GYD.
+  { model: 'MmgCheckoutIntent', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'Option', field: 'additionalPrice', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'deliveryFee', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'discount', unit: 'MAJOR_WHOLE' },

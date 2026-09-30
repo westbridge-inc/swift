@@ -53,6 +53,9 @@ export const MMG_CHECKOUT_UAT_URL = 'https://mmgpg.mmgtest.net/mmg-pg/web/paymen
  *  A sandbox URL can never reach MMG, or anyone else. */
 export const MMG_CHECKOUT_SANDBOX_URL = 'https://mmg-checkout.sandbox.invalid/mmg-pg/web/payments';
 
+/** The obviously fake merchant the sandbox pays. */
+export const SANDBOX_MERCHANT_ID = '0000000000';
+
 /** The productDescription of every checkout: the fee is the only thing sold. */
 export const MMG_CHECKOUT_PRODUCT_DESCRIPTION = 'Swift weekly fee';
 
@@ -583,6 +586,8 @@ export interface MmgCheckoutCreate {
 
 export interface MmgCheckoutProvider {
   readonly driver: 'disabled' | 'sandbox' | 'live';
+  /** The merchant MSISDN a checkout pays: what a verifier matches MMG's creditParty against. */
+  readonly merchantId: string | null;
   /** Builds the MMG page URL for one attempt. Local only: no network. */
   createCheckout(input: MmgCheckoutCreate): MmgCheckoutSession;
   /** Opens a reply token into its generic object. A hint, never proof [I2]. */
@@ -620,6 +625,7 @@ function createCheckoutWith(parties: CheckoutParties, input: MmgCheckoutCreate):
 /** The flag is off: every door refuses, like the disabled card rail. */
 class DisabledMmgCheckoutProvider implements MmgCheckoutProvider {
   readonly driver = 'disabled' as const;
+  readonly merchantId = null;
   createCheckout(_input: MmgCheckoutCreate): MmgCheckoutSession {
     throw new AppError(503, 'MMG_CHECKOUT_DISABLED', 'Paying on the MMG checkout page is not available.');
   }
@@ -630,6 +636,9 @@ class DisabledMmgCheckoutProvider implements MmgCheckoutProvider {
 
 export class LiveMmgCheckoutProvider implements MmgCheckoutProvider {
   readonly driver = 'live' as const;
+  get merchantId(): string {
+    return this.config.merchantId;
+  }
   constructor(private readonly config: MmgCheckoutConfig) {}
   createCheckout(input: MmgCheckoutCreate): MmgCheckoutSession {
     return createCheckoutWith(this.config, input);
@@ -661,6 +670,7 @@ function oneSharedPair(): SandboxCheckoutKeys {
  */
 export class SandboxMmgCheckoutProvider implements MmgCheckoutProvider {
   readonly driver = 'sandbox' as const;
+  readonly merchantId = SANDBOX_MERCHANT_ID;
   private generated: SandboxCheckoutKeys | null = null;
 
   /** Keys are made on first use (a 4096-bit pair takes a moment), unless given. */
@@ -675,7 +685,7 @@ export class SandboxMmgCheckoutProvider implements MmgCheckoutProvider {
   createCheckout(input: MmgCheckoutCreate): MmgCheckoutSession {
     return createCheckoutWith({
       checkoutPage: MMG_CHECKOUT_SANDBOX_URL,
-      merchantId: '0000000000',
+      merchantId: SANDBOX_MERCHANT_ID,
       clientId: 'sandbox',
       merchantName: 'Swift Sandbox',
       secretKey: 'sandbox',

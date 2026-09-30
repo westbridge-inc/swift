@@ -16,7 +16,10 @@ import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billi
 import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor, weeklyFeeAmount } from './subscription-fee';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice, type BillingNoticeLeaseGuard } from './billing-notice-delivery';
-import { AGENT_PAY_WAY, FEE_RESTORE_LINE, feePayWays } from './fee-notice-copy';
+import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
+import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
+import { payInfo } from './agent-cash.service';
+import { claimProviderPaymentInTx, ProviderIdentityError } from './provider-identity';
 import { cardRailKilled } from '../../utils/card-rail';
 
 // ---------------------------------------------------------------------------
@@ -1407,10 +1410,24 @@ export class BillingService {
    * retain every distinct approval fact. No automatic path clears this marker.
    * A separate, audited manual reconciliation must decide its disposition. */
   private async subscriptionHasMmgApprovalHold(
-    db: Pick<Prisma.TransactionClient, 'subscriptionPayment'>,
+    db: Pick<Prisma.TransactionClient, 'subscriptionPayment' | 'mmgCheckoutIntent'>,
     subscriptionId: string,
     exceptPaymentId?: string,
   ): Promise<boolean> {
+    // [MMG checkout I5] A checkout the partner may be paying right now (OPEN,
+    // not yet expired) or one MMG sent them back from (CONFIRMING) is money in
+    // flight, exactly like an unresolved approval: no charge on another rail,
+    // no dunning, no suspension, until it resolves. EXPIRED, NOT_PAID and HELD
+    // do not hold billing (I8: expiry is not failure). A late MMG confirmation
+    // credits them anyway, and a new payment always reinstates at once.
+    const checkoutInFlight = await db.mmgCheckoutIntent.findFirst({
+      where: {
+        subscriptionId,
+        OR: [{ status: 'CONFIRMING' }, { status: 'OPEN', expiresAt: { gt: new Date() } }],
+      },
+      select: { id: true },
+    });
+    if (checkoutInFlight) return true;
     return !!await db.subscriptionPayment.findFirst({
       where: {
         subscriptionId,
@@ -2535,18 +2552,19 @@ export class BillingService {
       return;
     }
     const { attempts, nextRetryAt, finalWarning } = outcome;
+    const payLine = await this.feePayLine(sub, null);
     if (finalWarning) {
       const when = nextRetryAt.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
       await this.notifications.send({
         userId: this.payerUserId(sub),
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Final warning — payment needed',
-        body: `${reason}. Your subscription will be SUSPENDED at ${when} unless the weekly fee is paid. Pay now to keep operating.`,
+        body: `${reason}. Your subscription will be SUSPENDED at ${when} unless the weekly fee is paid. ${payLine}`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_final_warning', subscriptionId: sub.id, suspendsAt: nextRetryAt.toISOString() },
       }).catch(() => {});
       await this
-        .smsPayer(sub, `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. ${feePayWays(sub)}.`)
+        .smsPayer(sub, `Swift: your account will be suspended at ${when} unless the weekly fee is paid. ${payLine}`)
         .catch(() => {});
       await notifyAdmins(this.prisma, this.notifications, {
         tenantId: await tenantOfUser(this.prisma, sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId ?? null),
@@ -2560,7 +2578,7 @@ export class BillingService {
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription payment failed',
-      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). ${feePayWays(sub)} to stay active.`,
+      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). ${payLine}`,
       audience: this.payerAudience(sub),
       data: { kind: 'billing_failed', subscriptionId: sub.id },
     }).catch(() => {});
@@ -2735,23 +2753,23 @@ export class BillingService {
     });
   }
 
-  /** Post-commit suspension side effects (push + SMS). The ways to pay are
-   *  the real ones (fee-notice-copy.ts): the app has no pay button, and an
-   *  agent payment is not recorded instantly. */
+  /** Post-commit suspension side effects (push + SMS). The paying sentence
+   *  is fee-notice-copy.ts: the MMG checkout only while it is live, otherwise
+   *  the amount and when it is due. */
   private async suspendAccessNotices(sub: SubWithRelations) {
-    const ways = feePayWays(sub);
+    const payLine = await this.feePayLine(sub, null);
     await this.notifications.send({
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription suspended',
-      body: `Your subscription is unpaid and your access is suspended. ${ways}. ${FEE_RESTORE_LINE}`,
+      body: `Your subscription is unpaid and your access is suspended. ${payLine} ${FEE_RESTORE_LINE}`,
       audience: this.payerAudience(sub),
       data: { kind: 'billing_suspended', subscriptionId: sub.id },
     });
     // §11 stage 5→6: the suspension notice also lands as SMS with the way
     // back in — the payer may have lost the app or muted push entirely.
     await this
-      .smsPayer(sub, `Swift: your account is suspended for non-payment. ${ways}. ${FEE_RESTORE_LINE}`)
+      .smsPayer(sub, `Swift: your account is suspended for non-payment. ${payLine} ${FEE_RESTORE_LINE}`)
       .catch(() => {});
   }
 
@@ -2858,6 +2876,9 @@ export class BillingService {
     const out = { nudged: 0, churned: 0 };
     for (const candidate of suspended) {
       try {
+        // The paying sentence for either notice below, read before the
+        // transaction: the committed note is the audit record of the decision.
+        const payLine = await this.feePayLine(candidate, null);
         // The selection is only a candidate. MMG hold creation takes these
         // same payer -> subscription locks, so a hold committed first must be
         // visible before either the churn CAS or daily nudge event is written.
@@ -2887,8 +2908,7 @@ export class BillingService {
               noticeVersion: 1, target: 'payer', userId: this.payerUserId(sub), audience: this.payerAudience(sub),
               title: 'Subscription closed',
               body: 'Your subscription was closed after 30 days unpaid. You can rejoin anytime — pay your weekly fee and your access is restored.',
-              // Never the MMG request here: a CHURNED account is no longer retried.
-              sms: `Swift: your subscription was closed after 30 days unpaid. You can rejoin anytime. ${AGENT_PAY_WAY}. ${FEE_RESTORE_LINE}`,
+              sms: `Swift: your subscription was closed after 30 days unpaid. You can rejoin anytime. ${payLine} ${FEE_RESTORE_LINE}`,
               data: { kind: 'billing_churned', subscriptionId: sub.id },
             };
             await tx.billingEvent.create({
@@ -2909,14 +2929,11 @@ export class BillingService {
           // transaction and is handled as an idempotent loser below.
           const dayKey = now.toISOString().slice(0, 10);
           const noticeKey = `nudge:${sub.id}:${dayKey}`;
-          // A SUSPENDED account is still retried daily, so the MMG request is
-          // real where the rail sends one (fee-notice-copy.ts).
-          const ways = feePayWays(sub);
           const notice: BillingNotice = {
             noticeVersion: 1, target: 'payer', userId: this.payerUserId(sub), audience: this.payerAudience(sub),
             title: 'Suspended — pay to restore access',
-            body: `Your weekly fee of $${weeklyFeeAmount(sub).toLocaleString()} ${sub.currencyCode} is unpaid. ${ways}. ${FEE_RESTORE_LINE}`,
-            sms: `Swift: your account is still suspended. ${ways}. ${FEE_RESTORE_LINE}`,
+            body: `Your access is suspended until the weekly fee is paid. ${payLine} ${FEE_RESTORE_LINE}`,
+            sms: `Swift: your account is still suspended. ${payLine} ${FEE_RESTORE_LINE}`,
             data: { kind: 'billing_suspended_nudge', subscriptionId: sub.id },
           };
           await tx.billingEvent.create({
@@ -2968,6 +2985,8 @@ export class BillingService {
       reference?: string;
       /** Globally unique for the real-world payment, not the destination. */
       eventKey: string;
+      /** The rail the money came by, when the caller names it (MMG_CHECKOUT). */
+      channel?: string;
     },
   ) {
     if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
@@ -2985,9 +3004,9 @@ export class BillingService {
       note: input.reference
         ? `ref: ${input.reference} (by ${input.recordedBy})`
         : `recorded by ${input.recordedBy}`,
-      channel: input.recordedBy.startsWith('agent-cash:')
+      channel: input.channel ?? (input.recordedBy.startsWith('agent-cash:')
         ? input.recordedBy.slice('agent-cash:'.length)
-        : 'ADMIN_TOPUP',
+        : 'ADMIN_TOPUP'),
       mmgRef: input.reference,
     });
   }
@@ -2995,7 +3014,7 @@ export class BillingService {
   /** Post-commit effects for a durable top-up. A caller may safely retry this
    * method: it moves no money; the billing engine's own event keys make an
    * immediate re-bill idempotent. */
-  async afterTopUpCommitted(subscriptionId: string, amount: number): Promise<void> {
+  async afterTopUpCommitted(subscriptionId: string, amount: number, opts: { notify?: boolean } = {}): Promise<void> {
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
       include: {
@@ -3006,14 +3025,18 @@ export class BillingService {
     });
     if (!sub) throw new NotFoundError('Subscription', subscriptionId);
 
-    await this.notifications.send({
-      userId: this.payerUserId(sub as SubWithRelations),
-      type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Top-up received',
-      body: `$${amount.toLocaleString()} ${sub.currencyCode} added to your subscription balance.`,
-      audience: this.payerAudience(sub),
-      data: { kind: 'billing_topup', subscriptionId },
-    });
+    // A caller that tells the payer itself (the MMG checkout's own notice)
+    // passes notify:false, so one payment is one notice.
+    if (opts.notify !== false) {
+      await this.notifications.send({
+        userId: this.payerUserId(sub as SubWithRelations),
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'Top-up received',
+        body: `$${amount.toLocaleString()} ${sub.currencyCode} added to your subscription balance.`,
+        audience: this.payerAudience(sub),
+        data: { kind: 'billing_topup', subscriptionId },
+      });
+    }
 
     // A top-up while behind triggers an instant billing attempt — paying
     // reinstates immediately, no waiting for the next cycle. CHURNED included:
@@ -3103,6 +3126,19 @@ export class BillingService {
     let command: { id: string; result: unknown };
     try {
       command = await this.prisma.$transaction(async (tx) => {
+        // [I3] The reference IS the transfer. The same transaction credited by
+        // another channel (agent cash, an MMG checkout) must not be credited
+        // here again, so the command claims the one provider identity first.
+        const payee = await tx.subscription.findUnique({ where: { id: input.subscriptionId }, select: { currencyCode: true } });
+        if (!payee) throw new NotFoundError('Subscription', input.subscriptionId);
+        await claimProviderPaymentInTx(tx, {
+          provider: 'MMG',
+          providerTxnId: input.reference,
+          amount: input.amount,
+          currencyCode: payee.currencyCode,
+          subscriptionId: input.subscriptionId,
+          creditedBy: `topup:${input.adminId}:${input.idempotencyKey}`,
+        });
         const balance = await this.recordTopUpInTransaction(tx, {
           subscriptionId: input.subscriptionId,
           amount: input.amount,
@@ -3153,7 +3189,10 @@ export class BillingService {
       // A clash on the REFERENCE is a second credit for one real-world
       // transfer — refuse it, loudly. A clash on the idempotency key is the
       // same request arriving twice — answer the winner's result.
-      if (isDuplicateOn(error, 'providerRef')) {
+      // [I3] The same answer whether an earlier top-up or another channel
+      // (agent cash, an MMG checkout) already credited this transfer.
+      if (isDuplicateOn(error, 'providerRef')
+        || (error instanceof ProviderIdentityError && error.identityCode === 'PROVIDER_TXN_ALREADY_CREDITED')) {
         billingTopupDuplicateReferenceCounter.inc();
         throw new AppError(
           409,
@@ -3281,11 +3320,12 @@ export class BillingService {
         throw error;
       }
 
+      const mmgLine = await this.mmgLineIfOwed(sub);
       await this.notifications.send({
         userId: payerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Subscription due tomorrow',
-        body: `Your weekly fee of $${Number(this.amountFor(sub)).toLocaleString()} ${sub.currencyCode} is due tomorrow.`,
+        body: `Your weekly fee of $${Number(this.amountFor(sub)).toLocaleString()} ${sub.currencyCode} is due tomorrow.${mmgLine ? ` ${mmgLine}` : ''}`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_reminder', subscriptionId: sub.id },
       });
@@ -3461,5 +3501,36 @@ export class BillingService {
   /** Billing notices belong to the surface that pays the fee. */
   private payerAudience(sub: SubWithRelations): 'earner' | 'business' {
     return sub.vendor ? 'business' : 'earner';
+  }
+
+  /** [owner rule 2026-09-29 · DS287 S3] The paying sentence of every fee
+   *  notice (fee-notice-copy.ts): the MMG checkout while it is live for the
+   *  partner on every platform, for exactly what it would charge; otherwise
+   *  the amount and when it is due. Never an agent, cash, a Swift Number or an
+   *  account number. A failed read falls back to the due line: a notice never
+   *  promises a way to pay it could not check. */
+  private async feePayLine(sub: Subscription, due: Date | null): Promise<string> {
+    try {
+      const fee = await payInfo(this.prisma, sub);
+      if (await mmgCheckoutLive(this.prisma, sub, 'unknown')) return mmgPayLine(checkoutAmountGyd(fee));
+      return feeDueLine(fee.amountDueGyd > 0 ? fee.amountDueGyd : fee.weeklyFeeGyd, sub.currencyCode, due);
+    } catch (err) {
+      log().warn({ err, subscriptionId: sub.id }, 'fee notice: the paying sentence fell back to the due line');
+      return feeDueLine(weeklyFeeAmount(sub), sub.currencyCode, due);
+    }
+  }
+
+  /** The MMG sentence alone, only while the checkout is live and something is
+   *  owed; '' otherwise (a wallet that already covers the fee is not a reason
+   *  to pay again). */
+  private async mmgLineIfOwed(sub: Subscription): Promise<string> {
+    try {
+      const fee = await payInfo(this.prisma, sub);
+      if (!(fee.amountDueGyd > 0) || !(await mmgCheckoutLive(this.prisma, sub, 'unknown'))) return '';
+      return mmgPayLine(checkoutAmountGyd(fee));
+    } catch (err) {
+      log().warn({ err, subscriptionId: sub.id }, 'fee reminder: sent without the MMG sentence');
+      return '';
+    }
   }
 }

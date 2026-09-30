@@ -311,6 +311,7 @@ const CENSUS: Case[] = [
   { k: 'billing_banked', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
   { k: 'billing_churned', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
   { k: 'billing_topup', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_mmg_checkout', d: { subscriptionId: 's1', ref: 'r1', status: 'CONFIRMED' }, to: null, why: 'GAP: an MMG checkout settled; the weekly-fee screen arrives with the checkout UI lane (MMG-CHECKOUT-API.md section 5)' },
   { k: 'trial_fee_education', d: { subscriptionId: 's1', stage: 'MID' }, to: null, why: 'GAP: same' },
   { k: 'fx_change_notice', d: { subscriptionId: 's1', fxRateId: 'f1' }, to: null, why: 'GAP: same' },
   { k: 'usd_migration_notice', d: { subscriptionId: 's1', mode: 'A' }, to: null, why: 'GAP: same' },

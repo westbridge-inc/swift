@@ -68,7 +68,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // not a marketing nudge, so it stays loud)
     'billing_mmg_pending', 'billing_success', 'billing_failed', 'billing_final_warning',
     'billing_suspended', 'billing_suspended_nudge', 'billing_reminder', 'billing_banked',
-    'billing_churned', 'billing_topup', 'fx_change_notice', 'usd_migration_notice',
+    'billing_churned', 'billing_topup', 'billing_mmg_checkout', 'fx_change_notice', 'usd_migration_notice',
     'claim', 'claim_update', 'claim_over_gate', 'rlp_suspended', 'rlp_reinstated',
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',
     // Verification and trust

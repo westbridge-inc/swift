@@ -218,26 +218,47 @@ describe('§11 stages 6..N — suspended nudges and the CHURNED terminal', () =>
 });
 
 // ---------------------------------------------------------------------------
-// The notices say only what is TRUE about paying. The app has no pay button
-// and no card door: its How-to-pay screen shows the Swift Number and the agent
-// steps (agent-cash.service.ts payCashSteps), and an agent payment is recorded
-// at its channel pace (within 1 business day in MANUAL mode), so no notice may
-// promise an instant restore either. The MMG request is offered only where the
-// rail really sends one: MOBILE_MONEY with a payer number, while still retried.
+// The notices say only what is TRUE about paying (owner, 2026-09-29): partners
+// pay on the MMG checkout in the Swift app. No notice offers an MMG agent,
+// cash, a Swift Number, an account number, the merchant-initiated request or
+// "coming soon", and none promises an instant restore. The paying sentence is
+// "Pay GY$X with MMG in the Swift app." only while the checkout is live;
+// otherwise the amount and when it is due (fee-notice-copy.ts). [DS287 S3] The
+// final-warning push carries it too.
 // ---------------------------------------------------------------------------
 
-/** Every door a fee notice named that the app does not have. */
-const UNTRUE_DOORS = [/tap pay/i, /open the app to pay/i, /pay (?:your weekly fee )?in the app/i, /balance in the app/i, /update your card/i];
-/** The promise an agent payment cannot keep. */
+/** Every way to pay a fee notice may NOT name. */
+const FORBIDDEN = [
+  /tap pay/i, /open the app to pay/i, /pay (?:your weekly fee )?in the app/i, /balance in the app/i, /update your card/i,
+  /MMG agent|any agent|Swift Number|account number|pay cash|coming soon/i, /MMG request/i,
+];
 const INSTANT = /instantly|the moment you pay/i;
+/** The makeBrokeVendorSub week: GY$20,000, nothing in the wallet. */
+const DUE_NOW = 'The weekly fee of GY$20,000 is due now.';
+const PAY_MMG = 'Pay GY$20,000 with MMG in the Swift app.';
 
-function expectTruthful(text: string | null | undefined, label: string) {
+function expectTruthful(text: string | null | undefined, label: string, mode: 'off' | 'live') {
   expect(text, label).toBeTruthy();
-  for (const door of UNTRUE_DOORS) expect(text, `${label} names a door the app does not have: ${door}`).not.toMatch(door);
+  for (const door of FORBIDDEN) expect(text, `${label} names a way to pay that does not exist: ${door}`).not.toMatch(door);
   expect(text, `${label} promises an instant restore`).not.toMatch(INSTANT);
-  // The one door every partner has: cash at an MMG agent with the Swift Number.
-  expect(text, label).toContain('MMG agent');
-  expect(text, label).toContain('Swift Number');
+  if (mode === 'live') {
+    expect(text, label).toContain(PAY_MMG);
+  } else {
+    expect(text, label).toContain(DUE_NOW);
+    expect(text, `${label} points to a checkout that is off`).not.toMatch(/with MMG in the Swift app/);
+  }
+}
+
+/** The MMG checkout on (sandbox driver) for one test. */
+async function withCheckoutLive<T>(fn: () => Promise<T>): Promise<T> {
+  const before = process.env['MMG_CHECKOUT_ENABLED'];
+  process.env['MMG_CHECKOUT_ENABLED'] = '1';
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env['MMG_CHECKOUT_ENABLED'];
+    else process.env['MMG_CHECKOUT_ENABLED'] = before;
+  }
 }
 
 const pushBody = async (userId: string, title: string) =>
@@ -256,12 +277,12 @@ async function committedNotice(subscriptionId: string, keyPrefix: 'nudge:' | 'ch
   return JSON.parse(event!.note!) as { body: string; sms?: string };
 }
 
-/** What the partner actually receives for a committed notice: never a door
- *  the app does not have. */
+/** What the partner actually receives for a committed notice: never a way
+ *  to pay that does not exist. */
 function expectDeliveredHonestly(phone: string, label: string) {
   const delivered = smsTo(phone);
   expect(delivered.length, `${label} delivered`).toBeGreaterThan(0);
-  for (const text of delivered) for (const door of UNTRUE_DOORS) expect(text, label).not.toMatch(door);
+  for (const text of delivered) for (const door of FORBIDDEN) expect(text, label).not.toMatch(door);
 }
 
 /** A vendor already SUSPENDED on the given rail. The sweep reads it directly:
@@ -279,28 +300,38 @@ async function makeSuspendedVendorSub(rail: { billingMethod: 'MOBILE_MONEY' | 'C
   return v;
 }
 
-describe('fee notices name only the ways to pay that exist', () => {
-  it('the retry notice, the final warning and the suspension send the partner to an MMG agent with the Swift Number', async () => {
-    const t0 = new Date('2026-07-01T12:00:00Z');
-    const v = await makeBrokeVendorSub(t0);
+/** The dunning ladder to suspension, checking every notice on the way. */
+async function ladderNotices(mode: 'off' | 'live') {
+  const t0 = new Date('2026-07-01T12:00:00Z');
+  const v = await makeBrokeVendorSub(t0);
 
-    await billing.runBillingCycle(t0); // attempt 1 — the retry notice (push)
-    expectTruthful(await pushBody(v.userId, 'Subscription payment failed'), 'retry notice');
+  await billing.runBillingCycle(t0); // attempt 1: the retry notice (push)
+  expectTruthful(await pushBody(v.userId, 'Subscription payment failed'), 'retry notice', mode);
 
-    resetDevChannelLog();
-    await billing.runBillingCycle(new Date(t0.getTime() + 25 * HOUR)); // attempt 2 — final warning
-    const [finalSms] = smsTo(v.phone);
-    expectTruthful(finalSms, 'final-warning SMS');
-    expect(finalSms).toContain('suspended at');
+  resetDevChannelLog();
+  await billing.runBillingCycle(new Date(t0.getTime() + 25 * HOUR)); // attempt 2: final warning
+  const [finalSms] = smsTo(v.phone);
+  expectTruthful(finalSms, 'final-warning SMS', mode);
+  expect(finalSms).toContain('suspended at');
+  expectTruthful(await pushBody(v.userId, 'Final warning — payment needed'), 'final-warning push', mode);
 
-    resetDevChannelLog();
-    await billing.runBillingCycle(new Date(t0.getTime() + 50 * HOUR)); // attempt 3 — suspended
-    expect((await sub(v.subId)).status).toBe('SUSPENDED');
-    expectTruthful(await pushBody(v.userId, 'Subscription suspended'), 'suspension push');
-    expectTruthful(smsTo(v.phone)[0], 'suspension SMS');
+  resetDevChannelLog();
+  await billing.runBillingCycle(new Date(t0.getTime() + 50 * HOUR)); // attempt 3: suspended
+  expect((await sub(v.subId)).status).toBe('SUSPENDED');
+  expectTruthful(await pushBody(v.userId, 'Subscription suspended'), 'suspension push', mode);
+  expectTruthful(smsTo(v.phone)[0], 'suspension SMS', mode);
+}
+
+describe('fee notices name only the way to pay that exists', () => {
+  it('with the MMG checkout off, every ladder notice states the amount due and promises no way to pay', async () => {
+    await ladderNotices('off');
   });
 
-  it('the daily nudge offers the MMG request only where the rail sends one', async () => {
+  it('with the MMG checkout live, every ladder notice points to it for exactly what it would charge', async () => {
+    await withCheckoutLive(() => ladderNotices('live'));
+  });
+
+  it('the daily nudge names neither the merchant-initiated request nor an agent, on any rail', async () => {
     const now = new Date();
     const suspendedAt = new Date(now.getTime() - 2 * DAY);
     const mmg = await makeSuspendedVendorSub({ billingMethod: 'MOBILE_MONEY', payer: true }, suspendedAt);
@@ -310,29 +341,28 @@ describe('fee notices name only the ways to pay that exist', () => {
     resetDevChannelLog();
     await billing.sweepSuspended(now);
 
-    for (const [label, v, offersRequest] of [['MOBILE_MONEY', mmg, true], ['MOBILE_MONEY without a payer number', mmgNoPayer, false], ['CARD', card, false]] as const) {
+    for (const [label, v] of [['MOBILE_MONEY', mmg], ['MOBILE_MONEY without a payer number', mmgNoPayer], ['CARD', card]] as const) {
       const notice = await committedNotice(v.subId, 'nudge:');
       for (const [channel, text] of [['push', notice.body], ['SMS', notice.sms]] as const) {
-        expectTruthful(text, `${label} nudge ${channel}`);
-        if (offersRequest) expect(text, `${label} nudge ${channel}`).toContain('Approve the MMG request on your phone when one arrives');
-        else expect(text, `${label} nudge ${channel}`).not.toContain('MMG request');
+        expectTruthful(text, `${label} nudge ${channel}`, 'off');
       }
       expectDeliveredHonestly(v.phone, `${label} nudge as delivered`);
     }
   });
 
-  it('the churn notice never offers an MMG request — the retries have stopped', async () => {
+  it('the churn notice: the amount due while the checkout is off, the checkout to rejoin while it is live', async () => {
     const now = new Date();
-    const v = await makeSuspendedVendorSub({ billingMethod: 'MOBILE_MONEY', payer: true }, new Date(now.getTime() - 31 * DAY));
-
+    const off = await makeSuspendedVendorSub({ billingMethod: 'MOBILE_MONEY', payer: true }, new Date(now.getTime() - 31 * DAY));
     resetDevChannelLog();
     await billing.sweepSuspended(now);
+    expect((await sub(off.subId)).status).toBe('CHURNED');
+    const closed = await committedNotice(off.subId, 'churned:');
+    expectTruthful(closed.sms, 'churn SMS', 'off');
+    expect(closed.sms).toContain('closed');
+    expectDeliveredHonestly(off.phone, 'churn SMS as delivered');
 
-    expect((await sub(v.subId)).status).toBe('CHURNED');
-    const { sms } = await committedNotice(v.subId, 'churned:');
-    expectTruthful(sms, 'churn SMS');
-    expect(sms).toContain('closed');
-    expect(sms).not.toContain('MMG request');
-    expectDeliveredHonestly(v.phone, 'churn SMS as delivered');
+    const live = await makeSuspendedVendorSub({ billingMethod: 'CARD' }, new Date(now.getTime() - 31 * DAY));
+    await withCheckoutLive(() => billing.sweepSuspended(now));
+    expectTruthful((await committedNotice(live.subId, 'churned:')).sms, 'churn SMS (checkout live)', 'live');
   });
 });

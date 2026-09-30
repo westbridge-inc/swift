@@ -52,6 +52,37 @@ export interface MmgTransaction {
   currencyCode: string;
   reference?: string;
   createdAt?: string;
+  /** The account(s) the money went to (a lookup's creditParty values). */
+  creditParties?: string[];
+}
+
+/**
+ * [MMG checkout 2/6] One transaction as the merchant lookup reports it, with
+ * the three outcomes a verifier must tell apart: MMG answered with the
+ * transaction, MMG does not know the id, or MMG could not be asked. Only a
+ * `found` answer is evidence. Every field MMG did not send, or sent in a
+ * form that cannot be read exactly, is null: never a default.
+ */
+export type MmgLookupDetail =
+  | {
+    outcome: 'found';
+    transactionId: string;
+    status: MmgTxStatus;
+    /** Exact minor units, or null when the amount was absent or unreadable. */
+    amountMinor: number | null;
+    currencyCode: string | null;
+    /** creditParty values, or null when MMG sent none. */
+    creditParties: string[] | null;
+    createdAt: string | null;
+    /** The answer as MMG sent it, for the observation record. */
+    raw: Record<string, unknown>;
+  }
+  | { outcome: 'not_found' }
+  | { outcome: 'error'; reason: string };
+
+/** The one call the checkout verifier makes. */
+export interface MmgLookupClient {
+  transactionLookupDetail(transactionId: string): Promise<MmgLookupDetail>;
 }
 
 /**
@@ -183,6 +214,36 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
   async accountBalance(): Promise<MmgBalance> {
     return { currencyCode: 'GYD', balanceMinor: 0 };
   }
+
+  /** [MMG checkout 2/6] Only a transaction this sandbox initiated or was told
+   *  about (sandboxAddHistory) is found; any other id is not_found. A stateless
+   *  "approved" for an unknown id would be the synthetic proof of payment the
+   *  checkout verifier exists to refuse. */
+  async transactionLookupDetail(transactionId: string): Promise<MmgLookupDetail> {
+    const planted = historyRows.find((row) => row.transactionId === transactionId);
+    const initiated = initiatedRows.get(transactionId);
+    if (!planted && !initiated) return { outcome: 'not_found' };
+    const status = txStatusOverrides.get(transactionId) ?? planted?.status ?? 'approved';
+    const amountMinor = planted?.amountMinor ?? initiated?.amountMinor ?? null;
+    const currencyCode = planted?.currencyCode ?? initiated?.currencyCode ?? null;
+    const creditParties = planted?.creditParties ?? null;
+    return {
+      outcome: 'found',
+      transactionId,
+      status,
+      amountMinor,
+      currencyCode,
+      creditParties,
+      createdAt: planted?.createdAt ?? null,
+      raw: {
+        transactionReference: transactionId,
+        transactionStatus: status,
+        ...(amountMinor === null ? {} : { amount: toMajorString(amountMinor) }),
+        ...(currencyCode === null ? {} : { currency: currencyCode }),
+        ...(creditParties === null ? {} : { creditParty: creditParties.map((value) => ({ key: 'accountid', value })) }),
+      },
+    };
+  }
 }
 
 export interface LiveMmgConfig {
@@ -230,6 +291,17 @@ function toMinor(major: string | undefined): number {
     return Number(fromMajor(String(major ?? '0'), MMG_CURRENCY).minor);
   } catch {
     return 0;
+  }
+}
+/** The exact minor amount of what MMG sent, or null. Never 0 for "unreadable":
+ *  a verifier compares this to what was asked for. */
+function exactMinor(major: unknown): number | null {
+  if (typeof major !== 'string' && typeof major !== 'number') return null;
+  try {
+    const minor = fromMajor(String(major), MMG_CURRENCY).minor;
+    return minor >= 0n && minor <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(minor) : null;
+  } catch {
+    return null;
   }
 }
 
@@ -399,6 +471,40 @@ export class LiveMmgProvider implements MmgMerchantProvider {
     };
   }
 
+  /** [MMG checkout 2/6] GET /lookup for the checkout verifier. Never throws:
+   *  400/404/422 mean MMG does not know the id; anything else that is not an
+   *  answer is an error to retry, never a verdict. */
+  async transactionLookupDetail(transactionId: string): Promise<MmgLookupDetail> {
+    let res: Response;
+    try {
+      const headers = await this.wssHeaders(`lkp-${transactionId}`);
+      res = await this.call(
+        `/e-merchant-initiated-transactions/lookup?transactionId=${encodeURIComponent(transactionId)}`,
+        { method: 'GET', headers },
+      );
+    } catch (err) {
+      return { outcome: 'error', reason: `MMG lookup unreachable: ${(err as Error).message}` };
+    }
+    if (res.status === 400 || res.status === 404 || res.status === 422) return { outcome: 'not_found' };
+    if (!res.ok) return { outcome: 'error', reason: `MMG lookup HTTP ${res.status}` };
+    const body: unknown = await res.json().catch(() => null);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return { outcome: 'error', reason: 'MMG lookup answered with no object' };
+    const answer = body as Record<string, unknown>;
+    const creditParty = answer['creditParty'];
+    return {
+      outcome: 'found',
+      transactionId: typeof answer['transactionReference'] === 'string' ? answer['transactionReference'] : transactionId,
+      status: mapMmgStatus(typeof answer['transactionStatus'] === 'string' ? answer['transactionStatus'] : undefined),
+      amountMinor: exactMinor(answer['amount']),
+      currencyCode: typeof answer['currency'] === 'string' ? answer['currency'] : null,
+      creditParties: Array.isArray(creditParty)
+        ? creditParty.map((party: unknown) => (party && typeof party === 'object' ? String((party as Record<string, unknown>)['value'] ?? '') : '')).filter(Boolean)
+        : null,
+      createdAt: typeof answer['creationDate'] === 'string' ? answer['creationDate'] : null,
+      raw: answer,
+    };
+  }
+
   /** GET /txn-history. Throws on transport. */
   async transactionHistory(req?: { from?: Date; to?: Date; limit?: number }): Promise<MmgTransaction[]> {
     const now = new Date();
@@ -443,6 +549,53 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   }
 }
 
+/** The live merchant credentials, or a refusal naming what is missing. */
+function readLiveMmgConfig(env: Record<string, string | undefined>): LiveMmgConfig {
+  const cfg: LiveMmgConfig = {
+    baseUrl: env['MMG_API_URL'] ?? MMG_UAT_URL,
+    apiKey: env['MMG_API_KEY'] ?? '',
+    merchantMsisdn: env['MMG_MERCHANT_ID'] ?? '',
+    password: env['MMG_PASSWORD'] ?? '',
+    mkey: env['MMG_MKEY'] ?? '',
+    msecret: env['MMG_MSECRET'] ?? '',
+  };
+  const missing = (['apiKey', 'merchantMsisdn', 'password', 'mkey', 'msecret'] as const).filter((k) => !cfg[k]);
+  if (missing.length > 0) {
+    throw new Error(
+      'MMG_DRIVER=live needs MMG_API_KEY, MMG_MERCHANT_ID, MMG_PASSWORD, MMG_MKEY and MMG_MSECRET ' +
+        `(missing: ${missing.join(', ')})`,
+    );
+  }
+  return cfg;
+}
+
+/**
+ * [MMG checkout 2/6] The lookup the checkout verifier uses: the same driver
+ * and credentials as the merchant-initiated rail, WITHOUT that rail's
+ * MMG_REFERENCE_ROUNDTRIP_VERIFIED gate. That gate proves the push rail can
+ * find its own requests by OUR reference in lookup and history; the checkout
+ * looks up MMG's own transaction id and depends on no such round trip.
+ */
+export function getMmgLookupProvider(env: Record<string, string | undefined> = process.env): MmgLookupClient {
+  const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  if (isProduction(env) && driver === 'sandbox') {
+    throw new Error('MMG_DRIVER=sandbox is forbidden in production');
+  }
+  switch (driver) {
+    case 'sandbox':
+      return new SandboxMmgProvider();
+    case 'live': {
+      const cfg = readLiveMmgConfig(env);
+      if (isProduction(env) && /mmgtest|\buat\b|sandbox/i.test(cfg.baseUrl)) {
+        throw new Error('A non-UAT MMG_API_URL is required in production');
+      }
+      return new LiveMmgProvider(cfg);
+    }
+    default:
+      throw new Error(`Unknown MMG_DRIVER: ${driver}`);
+  }
+}
+
 /** Driver selection is config, not code. Defaults to the sandbox. */
 export function getMmgProvider(): MmgMerchantProvider {
   const driver = process.env['MMG_DRIVER'] ?? 'sandbox';
@@ -453,21 +606,7 @@ export function getMmgProvider(): MmgMerchantProvider {
     case 'sandbox':
       return new SandboxMmgProvider();
     case 'live': {
-      const cfg: LiveMmgConfig = {
-        baseUrl: process.env['MMG_API_URL'] ?? MMG_UAT_URL,
-        apiKey: process.env['MMG_API_KEY'] ?? '',
-        merchantMsisdn: process.env['MMG_MERCHANT_ID'] ?? '',
-        password: process.env['MMG_PASSWORD'] ?? '',
-        mkey: process.env['MMG_MKEY'] ?? '',
-        msecret: process.env['MMG_MSECRET'] ?? '',
-      };
-      const missing = (['apiKey', 'merchantMsisdn', 'password', 'mkey', 'msecret'] as const).filter((k) => !cfg[k]);
-      if (missing.length > 0) {
-        throw new Error(
-          'MMG_DRIVER=live needs MMG_API_KEY, MMG_MERCHANT_ID, MMG_PASSWORD, MMG_MKEY and MMG_MSECRET ' +
-            `(missing: ${missing.join(', ')})`,
-        );
-      }
+      const cfg = readLiveMmgConfig(process.env);
       if (process.env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] !== '1') {
         throw new Error(
           'MMG_DRIVER=live requires MMG_REFERENCE_ROUNDTRIP_VERIFIED=1 after sandbox UAT proves ' +

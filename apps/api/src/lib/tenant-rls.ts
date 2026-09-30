@@ -104,7 +104,11 @@ export const TENANT_TABLES = [
   'discovery_categories', 'discovery_category_requests',
   'discovery_category_suggestions', 'fee_receipts', 'house_ads',
   'identity_keys', 'item_discovery_categories', 'item_feedbacks',
-  'mmg_agent_payments', 'order_outbox', 'orders', 'pending_attributions',
+  'mmg_agent_payments',
+  // [MMG checkout 2/6] A partner's MMG checkout and every observation of it,
+  // walled like the provider payment that credits it.
+  'mmg_checkout_intents', 'mmg_checkout_observations',
+  'order_outbox', 'orders', 'pending_attributions',
   // [M-18] One provider transaction, one identity, one credit.
   'provider_payments', 'qr_codes',
   'rating_reports', 'rating_tag_defs', 'receipt_counters',

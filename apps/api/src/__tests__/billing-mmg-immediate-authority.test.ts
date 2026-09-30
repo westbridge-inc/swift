@@ -226,6 +226,8 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
       return 1;
     }),
     subscriptionPayment: payments,
+    // [MMG checkout I5] the approval-hold gate also reads checkouts in flight; none here.
+    mmgCheckoutIntent: { findFirst: vi.fn(async () => null) },
     billingEvent,
     subscription: {
       update: vi.fn(async ({ data }: any) => { Object.assign(state.sub, data); return { ...state.sub }; }),

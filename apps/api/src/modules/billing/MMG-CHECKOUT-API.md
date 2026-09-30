@@ -97,8 +97,10 @@ The body is `{}`. The server prices the checkout; a client amount would be ignor
 ```ts
 { success: true, data: {
   ref: string;            // opaque; keep it and poll with it
-  status: 'OPEN';
-  checkoutUrl: string;    // the MMG page; open it in the in-app browser; never log, store or share it
+  status: 'OPEN' | CheckoutStatus['status']; // OPEN, except on a key replay (see checkoutUrl)
+  checkoutUrl: string | null; // the MMG page; open it in the in-app browser; never log, store or share it.
+                          // null only when the same Idempotency-Key replays a checkout that is no longer OPEN:
+                          // the page is never handed out twice. Follow `ref` instead (section 5).
   amountGyd: number;
   currencyCode: 'GYD';
   expiresAt: string;      // ISO time; after it, this checkout cannot be started on MMG

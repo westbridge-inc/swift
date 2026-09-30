@@ -3064,6 +3064,88 @@ model ProviderPayment {
   @@map("provider_payments")
 }
 
+/// [MMG checkout 2/6] One partner's attempt to pay the weekly fee on the MMG
+/// hosted page (modules/billing/MMG-CHECKOUT-API.md). A table of its own [I7]:
+/// the merchant-initiated poller and the SWIFT-004 guard never see it. Nothing
+/// on this row credits money. The credit is the ProviderPayment compare-and-set,
+/// taken only after the MMG lookup confirms the exact amount, currency and
+/// merchant [I2]. Ids, not foreign keys, like the other M-18 money rows: money
+/// evidence is never removed by a cascade.
+///
+/// [I4] One OPEN or CONFIRMING checkout per subscription: a PARTIAL unique index
+/// in the migration (Prisma cannot express partial uniques, so it lives in SQL),
+/// with CHECKs on the status, the whole-dollar amount and the 18-digit reference.
+model MmgCheckoutIntent {
+  id                    String    @id @default(cuid())
+  tenantId              String    @default("swift-default")
+  subscriptionId        String
+  /// Ours, sent to MMG: 18 digits (providers/mmg newMerchantTransactionId).
+  merchantTransactionId String    @unique
+  /// Exactly what MMG was asked for, in whole GYD [I1].
+  amount                Decimal   @db.Decimal(12, 2)
+  currencyCode          String    @db.Char(3)
+  /// OPEN | CONFIRMING | CONFIRMED | NOT_PAID | EXPIRED | HELD
+  status                String    @default("OPEN")
+  /// The partner's Idempotency-Key, unique per creating user.
+  clientKey             String
+  createdByUserId       String
+  /// ios | android | web | unknown — where the checkout was started.
+  platform              String
+  /// The MMG page handed to the partner. It carries our encrypted request
+  /// token: returned only to its owner, never logged.
+  checkoutUrl           String
+  expiresAt             DateTime
+  /// When a reply first named this checkout, and the path it came back on — a
+  /// hint for the partner-facing state, never evidence of payment.
+  replyAt               DateTime?
+  outcomeHint           String?
+  /// MMG transaction ids a reply named, checked with the lookup until one confirms.
+  candidates            String[]  @default([])
+  /// The MMG transaction the lookup confirmed, normalized. One MMG transaction,
+  /// one checkout [I3]; the ProviderPayment row enforces it across every channel.
+  mmgTransactionId      String?   @unique
+  providerPaymentId     String?   @unique
+  confirmedAt           DateTime?
+  /// Why NOT_PAID, EXPIRED or HELD — for operators, never shown as-is.
+  reason                String?
+  checkAttempts         Int       @default(0)
+  nextCheckAt           DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([createdByUserId, clientKey])
+  @@index([tenantId])
+  @@index([subscriptionId, createdAt])
+  @@index([status, nextCheckAt])
+  @@map("mmg_checkout_intents")
+}
+
+/// [I9] Every reply, callback and lookup of an MMG checkout, written BEFORE
+/// anything is decided on it, in one insert that nothing updates. The decrypted
+/// reply is kept as MMG sent it (keys that name a secret dropped); the token
+/// itself never is.
+model MmgCheckoutObservation {
+  id        String   @id @default(cuid())
+  tenantId  String   @default("swift-default")
+  /// The checkout the observation was matched to, if any.
+  intentId  String?
+  /// RETURN | NOTIFY | LOOKUP
+  source    String
+  /// RETURN/NOTIFY: the path the partner came back on. LOOKUP: the transaction id asked about.
+  detail    String?
+  /// The decrypted reply (RETURN/NOTIFY) or the lookup answer (LOOKUP).
+  body      Json?
+  /// Key names and JSON types only (describeShape): safe for any log.
+  shape     Json?
+  /// Why nothing could be used: NO_TOKEN | NO_CHECKOUT | LOOKUP_NOT_FOUND | LOOKUP_FAILED
+  failure   String?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([intentId, createdAt])
+  @@map("mmg_checkout_observations")
+}
+
 /// Bank-truth reconciliation [san spec PART 25]: ledger truth vs what MMG
 /// actually deposited, minus their fees. INERT until the settlement cadence
 /// config is set (MMG question 10) — built now, activated by an answer.

@@ -1,16 +1,18 @@
 import type { PrismaClient } from '@prisma/client';
 import type { NotificationService } from '../notification/notification.service';
-import { formatSan } from './san';
-import { ensureSan } from './san.service';
-import { weeklyFeeAmount } from './subscription-fee';
+import { payInfo } from './agent-cash.service';
+import { feeCoveredLine, feeDueLine, mmgPayLine } from './fee-notice-copy';
+import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 
-// Trial first-payment funnel [san spec 21.4]: teach HOW to pay before the
-// first bill ever exists. Day 10 (trial end − 4d): "how you'll pay your
-// weekly fee" with the agent steps + their Swift Number. Day 13 (− 1d): the
-// exact GY$ and the nudge to preload so conversion is seamless. Dedup rides
-// the same BillingEvent unique-key idiom as every other reminder — restart
-// and overlap safe. first_payment_before_trial_end is THE pilot metric; it
-// derives from rows this sequence leaves behind.
+// Trial first-payment funnel [san spec 21.4]: the first fee, told before the
+// first bill ever exists. Day 10 (trial end − 4d) and day 13 (− 1d): the exact
+// GY$ and when it is due, and — only while the MMG checkout is live — the one
+// way to pay it, the checkout in the Swift app (fee-notice-copy.ts; never an
+// agent, cash or a Swift Number: the owner's rule of 2026-09-29). A wallet
+// that already covers the fee is told so, never asked to pay again. Dedup
+// rides the same BillingEvent unique-key idiom as every other reminder —
+// restart and overlap safe. first_payment_before_trial_end is THE pilot
+// metric; it derives from rows this sequence leaves behind.
 
 const DAY_MS = 86_400_000;
 
@@ -53,15 +55,19 @@ export async function sweepTrialFeeEducation(
     } catch {
       continue; // this stage already sent — the unique key is the gate
     }
-    const san = formatSan(await ensureSan(prisma, sub.id));
-    const weekly = weeklyFeeAmount(sub);
+    const fee = await payInfo(prisma, sub);
+    const payLine = fee.amountDueGyd <= 0
+      ? feeCoveredLine(fee.weeklyFeeGyd, sub.currencyCode, { first: true })
+      : await mmgCheckoutLive(prisma, sub, 'unknown')
+        ? mmgPayLine(checkoutAmountGyd(fee))
+        : feeDueLine(fee.amountDueGyd, sub.currencyCode, sub.trialEndDate, { first: true });
     const audience = sub.vendor ? 'VENDOR' : 'MOVER';
     if (stage === 'd10') {
       await notifications.send({
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'How you’ll pay your weekly fee',
-        body: `Your trial ends in ${daysLeft} days. Pay cash at any MMG agent — say you’re paying a Swift bill and give your Swift Number ${san}. Load it before your trial ends and service continues without a beat.`,
+        title: 'Your trial ends soon',
+        body: `Your trial ends in ${daysLeft} days. ${payLine}`,
         audience: audience as never,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
       });
@@ -71,7 +77,7 @@ export async function sweepTrialFeeEducation(
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your trial ends tomorrow',
-        body: `Your first weekly fee is GY$${weekly.toLocaleString()}. Pay cash at any MMG agent with your Swift Number ${san} — pay today and you won’t be interrupted.`,
+        body: `Your trial ends tomorrow. ${payLine}`,
         audience: audience as never,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
       });

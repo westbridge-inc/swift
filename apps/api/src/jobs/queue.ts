@@ -564,6 +564,16 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (tails.retried > 0 || tails.pending > 0) {
             ctx.log.warn(tails, '[M-08] top-up tails owed — drained');
           }
+          // [MMG checkout 2/6] Hosted checkouts: expire the ones no reply ever
+          // came for (I8, no dunning) and look again at every one that is due.
+          // Isolated: a checkout failure never stops the rest of this poll.
+          try {
+            const { MmgCheckoutService } = await import('../modules/billing/mmg-checkout.service');
+            const checkouts = await new MmgCheckoutService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)).pollIntents();
+            if (checkouts.expired + checkouts.checked > 0) ctx.log.info(checkouts, 'MMG checkouts polled');
+          } catch (err) {
+            ctx.log.error({ err }, '[MMG checkout] poll failed; the next poll retries');
+          }
           await billing.scanUnkeyedTopUpDuplicates();
           // [M-20] Settlement imports a person must see: unbalanced publications
           // and rejected files with a credited row. Reported, never reversed.
