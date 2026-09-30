@@ -1,12 +1,14 @@
 import { lockSubscriptionPayer } from '../subscription/mover-fee-authority';
 import type { OnAudit } from '../../lib/audit-writer';
-import { Prisma, type MmgAgentPayment, type PrismaClient } from '@prisma/client';
+import { Prisma, type MmgAgentPayment, type ProviderPayment, type PrismaClient } from '@prisma/client';
 import type { BillingService } from './billing.service';
-import { resolveSan } from './san.service';
+import { resolveSan, subscriptionOwnerTenant } from './san.service';
 import { validateSanShape } from './san';
 import { captureMmgPayer } from '../integrity/capture-hooks';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
-import { agentCashDuplicateCreditsCounter, agentCashDuplicateCreditsGauge, agentCashProviderIdConflictsCounter } from '../../plugins/observability';
+import { agentCashDuplicateCreditsCounter, agentCashDuplicateCreditsGauge, agentCashProviderIdConflictsCounter, agentCashStrandedGauge } from '../../plugins/observability';
+import { bindTenantTransaction } from '../../plugins/prisma';
+import { getTenantId, runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { weeklyFeeAmount } from './subscription-fee';
 import { amountDueNow } from './amount-due';
@@ -23,6 +25,72 @@ export const AGENT_CASH_LIMITS = {
   minPaymentGyd: 500,
   maxSinglePaymentGyd: 500_000,
 };
+
+// [MMG-RECV] STRANDED RECEIVED. An observation is saved RECEIVED first and
+// judged after. When the delivery that saved it dies in between (a restart, a
+// dropped connection, a credit that threw), it stays RECEIVED; every
+// redelivery used to answer `duplicate` (the webhook tells MMG to stop, and a
+// re-keyed receipt reads as done), and nothing looked at RECEIVED again: money
+// on disk, never credited. Now:
+//   1. a redelivery of an observation stranded RECEIVED finishes it, through
+//      the same steps 2 to 5; one still inside its first delivery is left to it;
+//   2. the repair pass of poll-mmg-billing finishes the rest, each in its own
+//      tenant, and writes a system audit row with the credit;
+//   3. FENCED: every verdict is a compare-and-set on RECEIVED (the credit
+//      transaction claims the row first; suspense and reconciliation are
+//      conditional), so of two finishers one decides and the other writes
+//      nothing and is answered `duplicate`;
+//   4. the DATABASE clock only: the age that makes an observation stranded is
+//      stamped by the INSERT itself (the createdAt default), and a failed
+//      attempt is stamped inside its own guarded statement;
+//   5. FAIR: never tried first, then the least recently tried; one whose
+//      attempt just failed waits out a backoff, and one that keeps failing
+//      goes to the suspense queue for a person after the give-up age.
+// A settlement-file row is not finished here: its own import resumes it,
+// under the publication hold [G5-F6].
+
+/** [MMG-RECV] Still RECEIVED this long after it was saved (database clock),
+ *  an observation is stranded. Far above any live delivery, whose credit
+ *  transaction times out within seconds. */
+export const STRANDED_AFTER_MS = 2 * 60_000;
+/** A stranded observation whose finish just failed is left alone this long. */
+export const STRANDED_RETRY_BACKOFF_MS = 5 * 60_000;
+/** Stranded this long, one that fails again goes to the suspense queue
+ *  (UNMATCHED, UNFINISHED) for a person, and the operators are paged. */
+export const STRANDED_GIVE_UP_AFTER_MS = 60 * 60_000;
+const FINISHABLE_CHANNELS: readonly string[] = ['MMG_AGENT_WEBHOOK', 'MANUAL_ADMIN'];
+
+/** [MMG-RECV] The database clock, for READS only (which observations look
+ *  stranded): a sampled time can only make one look younger, never older.
+ *  Every lease WRITE reads the clock inside its own statement. */
+async function databaseNow(db: Pick<PrismaClient, '$queryRaw'>): Promise<Date> {
+  const [row] = await db.$queryRaw<Array<{ now: Date }>>`SELECT now() AS now`;
+  return row!.now;
+}
+/** The database clock as the UTC wall time the timestamp(3) columns hold. */
+const DB_NOW = Prisma.sql`timezone('UTC'::text, clock_timestamp())`;
+/** A verdict another finisher already wrote: this finisher lost the race. */
+const LOST_RACE = new Set(['NOT_RECEIVED', 'PAYMENT_NOT_RECEIVED']);
+
+/** [MMG-RECV · ADM-002] The repair pass is the actor when it credits a
+ *  stranded observation: a system audit row (no user) joins the credit
+ *  transaction and names the payment and, for a manual entry, the admin who
+ *  keyed it (that admin's own audit row rolled back with the credit that
+ *  failed). */
+function strandedFinishAudit(p: { channel: string; raw: unknown }): OnAudit {
+  const enteredBy = (p.raw as { enteredBy?: unknown } | null)?.enteredBy;
+  return async (tx, facts) => {
+    await tx.auditLog.create({
+      data: {
+        userId: null,
+        action: 'AGENT_PAYMENT_STRANDED_FINISHED',
+        entity: 'MmgAgentPayment',
+        entityId: String(facts['paymentId']),
+        changes: { ...facts, channel: p.channel, finishedBy: 'poll-mmg-billing', ...(typeof enteredBy === 'string' ? { enteredBy } : {}) },
+      },
+    });
+  };
+}
 
 export interface InboundFeePayment {
   externalId: string;
@@ -44,13 +112,10 @@ export type IngestResult =
   | { status: 'reconciled'; paymentId: string; originalPaymentId: string }
   | { status: 'received_unmatched'; paymentId: string; failureCode: string };
 
-/** [M-18] One real-world provider transaction is ONE identity, whatever
- *  channel observed it. The key is the provider's transaction id — or, for a
- *  manual entry, the receipt reference the admin verified in the MMG portal,
- *  which is that same id — normalized so a spelling cannot mint a second one. */
-export function providerTxnKey(p: { mmgTxnId?: string | null; externalId: string; channel: string }): string {
-  const raw = p.mmgTxnId ?? (p.channel === 'MANUAL_ADMIN' ? p.externalId.replace(/^MANUAL:/, '') : p.externalId);
-  return raw.trim().toUpperCase();
+/** Preserve the provider's raw spelling. Only mmg_txn_canon in PostgreSQL
+ *  decides transaction equivalence; JavaScript case folding differs. */
+export function providerTxnRaw(p: { mmgTxnId?: string | null; externalId: string; channel: string }): string {
+  return p.mmgTxnId ?? (p.channel === 'MANUAL_ADMIN' ? p.externalId.replace(/^MANUAL:/, '') : p.externalId);
 }
 export const PROVIDER = 'MMG';
 
@@ -167,8 +232,15 @@ export class AgentCashService {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
         const existing = await this.prisma.mmgAgentPayment.findUniqueOrThrow({
           where: { channel_externalId: { channel: p.channel, externalId: p.externalId } },
-          select: { id: true },
+          select: { id: true, status: true, createdAt: true },
         });
+        // [MMG-RECV] A redelivery of an observation stranded RECEIVED finishes
+        // it: `duplicate` would leave money on disk that nothing credits. One
+        // still inside its first delivery is left to that delivery.
+        if (existing.status === 'RECEIVED' && FINISHABLE_CHANNELS.includes(p.channel)
+          && existing.createdAt.getTime() < (await databaseNow(this.prisma)).getTime() - STRANDED_AFTER_MS) {
+          return this.finishStranded(existing.id, onAudit);
+        }
         return { status: 'duplicate', paymentId: existing.id };
       }
       throw e;
@@ -220,7 +292,7 @@ export class AgentCashService {
     }
 
     // 4. Resolve the SAN platform-wide.
-    const res = await resolveSan(this.prisma, p.sanRaw);
+    const res = await resolveSan(this.prisma, p.sanRaw, { tenantId: row.tenantId }); // [AX363-F2] this tenant's accounts only
     if (!res.ok) return this.suspense(row.id, res.code);
 
     // 5. Credit through the SAME pipeline every rail uses.
@@ -233,41 +305,110 @@ export class AgentCashService {
    *  amount or currency disagrees with the identity is a CONFLICT: never
    *  credited, suspensed for a person, counted and paged. */
   private async identityFor(
-    row: { id: string; tenantId: string; channel: string; externalId: string; mmgTxnId: string | null; amount: Prisma.Decimal; currencyCode: string },
+    row: Pick<MmgAgentPayment, 'id' | 'tenantId' | 'channel' | 'externalId' | 'mmgTxnId' | 'amount' | 'currencyCode' | 'providerPaymentId' | 'status' | 'failureCode'>,
     channel: string,
-  ): Promise<{ payment: { id: string; status: string; creditedPaymentId: string | null }; conflict: boolean }> {
-    const key = providerTxnKey(row);
-    const where = { provider_providerTxnId: { provider: PROVIDER, providerTxnId: key } };
-    let payment = await this.prisma.providerPayment.findUnique({ where });
-    if (!payment) {
-      try {
-        payment = await this.prisma.providerPayment.create({
-          data: { tenantId: row.tenantId, provider: PROVIDER, providerTxnId: key, amount: row.amount, currencyCode: row.currencyCode },
-        });
-      } catch (e) {
-        if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
-        payment = await this.prisma.providerPayment.findUniqueOrThrow({ where });
+  ): Promise<{ payment: { id: string; status: string; creditedPaymentId: string | null }; conflict: false } | { payment: ProviderPayment | null; conflict: true }> {
+    const raw = providerTxnRaw(row);
+    const resolved = await this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const readLive = () => tx.$queryRaw<ProviderPayment[]>`
+        SELECT * FROM "provider_payments" WHERE "provider" = ${PROVIDER}
+          AND mmg_txn_canon("providerTxnId") = mmg_txn_canon(${raw})
+          AND "status" <> 'HELD_DUPLICATE'`;
+      let payment: ProviderPayment | undefined;
+      let historicalConflict = false;
+      if (row.providerPaymentId) {
+        // Never redirect a linked observation, including one the migration held.
+        [payment] = await tx.$queryRaw<ProviderPayment[]>`SELECT * FROM "provider_payments" WHERE "id" = ${row.providerPaymentId}`;
+      } else {
+        // [SX394] A survivor may no longer store its old key. Permanent SQL
+        // reservations include singletons and held/transitive siblings. They
+        // are global even if this caller cannot read the target tenant's row.
+        const [alias] = await tx.$queryRaw<Array<{ providerPaymentId: string }>>`
+          SELECT "providerPaymentId" FROM "provider_payment_aliases"
+           WHERE "provider" = ${PROVIDER} AND "aliasKey" = mmg_txn_canon(${raw})`;
+        if (alias) {
+          const [reserved] = await tx.$queryRaw<Array<ProviderPayment & { canonicalMatches: boolean }>>`
+            SELECT p.*, mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${raw}) AS "canonicalMatches"
+              FROM "provider_payments" p WHERE p."id" = ${alias.providerPaymentId}`;
+          if (!reserved) return { payment: null, conflict: true as const };
+          payment = reserved;
+          historicalConflict = !reserved.canonicalMatches || reserved.status === 'HELD_DUPLICATE'
+            || reserved.tenantId !== row.tenantId || Number(reserved.amount) !== Number(row.amount)
+            || reserved.currencyCode !== row.currencyCode;
+        } else {
+          [payment] = await readLive();
+        }
+        if (!payment) {
+          // Legacy JS keys sometimes collapsed several SQL spellings into one
+          // identity. If the migration retained a different raw spelling, the
+          // historical observation is evidence, never permission to mint again.
+          [payment] = await tx.$queryRaw<ProviderPayment[]>`
+            SELECT p.* FROM "provider_payments" p WHERE p."provider" = ${PROVIDER} AND (
+              (p."status" = 'HELD_DUPLICATE' AND mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${raw})) OR
+              (mmg_txn_canon(p."providerTxnId") <> mmg_txn_canon(${raw}) AND EXISTS (
+                SELECT 1 FROM "mmg_agent_payments" m WHERE m."providerPaymentId" = p."id"
+                  AND mmg_txn_canon(COALESCE(m."mmgTxnId", CASE WHEN m."channel" = 'MANUAL_ADMIN'
+                    THEN regexp_replace(m."externalId", '^MANUAL:', '') ELSE m."externalId" END)) = mmg_txn_canon(${raw})
+              ))) ORDER BY p."createdAt", p."id" LIMIT 1`;
+          historicalConflict = !!payment;
+        }
+        if (!payment) {
+          await tx.$executeRaw`
+            INSERT INTO "provider_payments" ("id", "tenantId", "provider", "providerTxnId", "amount", "currencyCode", "updatedAt")
+            VALUES (gen_random_uuid()::text, ${row.tenantId}, ${PROVIDER}, mmg_txn_canon(${raw}), ${row.amount}, ${row.currencyCode}, CURRENT_TIMESTAMP)
+            ON CONFLICT ("provider", mmg_txn_canon("providerTxnId")) WHERE "status" <> 'HELD_DUPLICATE' DO NOTHING`;
+          // A separate READ COMMITTED statement sees a concurrent winner that
+          // committed after INSERT began. A single-statement CTE cannot.
+          [payment] = await readLive();
+        }
+        if (!payment) throw new Error('PROVIDER_IDENTITY_MISSING');
+        if (!historicalConflict) {
+          const linked = await tx.$executeRaw`
+            UPDATE "mmg_agent_payments" SET "providerPaymentId" = ${payment.id}
+             WHERE "id" = ${row.id} AND "tenantId" = ${row.tenantId}
+               AND "providerPaymentId" IS NULL AND "status" = ${row.status}
+               AND "status" IN ('RECEIVED', 'UNMATCHED')
+               AND "failureCode" IS DISTINCT FROM 'PROVIDER_ID_CONFLICT'`;
+          if (linked !== 1) {
+            const current = await tx.mmgAgentPayment.findUniqueOrThrow({ where: { id: row.id } });
+            if (current.status !== row.status) throw new Error(row.status === 'UNMATCHED' ? 'NOT_UNMATCHED' : 'NOT_RECEIVED');
+            if (current.failureCode === 'PROVIDER_ID_CONFLICT') return { payment, conflict: true as const };
+            if (!current.providerPaymentId) throw new Error('PROVIDER_IDENTITY_MISSING');
+            [payment] = await tx.$queryRaw<ProviderPayment[]>`SELECT * FROM "provider_payments" WHERE "id" = ${current.providerPaymentId}`;
+          }
+        }
       }
-    }
-    await this.prisma.mmgAgentPayment.update({ where: { id: row.id }, data: { providerPaymentId: payment.id } });
-    const conflict = Number(payment.amount) !== Number(row.amount) || payment.currencyCode !== row.currencyCode;
-    if (conflict) {
+      if (!payment) throw new Error('PROVIDER_IDENTITY_MISSING');
+      const [canonical] = await tx.$queryRaw<Array<{ matches: boolean }>>`
+        SELECT mmg_txn_canon(${payment.providerTxnId}) = mmg_txn_canon(${raw}) AS matches`;
+      const conflict = historicalConflict || row.failureCode === 'PROVIDER_ID_CONFLICT'
+        || payment.status === 'HELD_DUPLICATE' || payment.provider !== PROVIDER
+        || payment.tenantId !== row.tenantId || !canonical?.matches
+        || Number(payment.amount) !== Number(row.amount) || payment.currencyCode !== row.currencyCode;
+      return conflict ? { payment, conflict: true as const } : { payment, conflict: false as const };
+    });
+    if (resolved.conflict) {
       agentCashProviderIdConflictsCounter.labels(channel).inc();
-      log().error(
-        { paymentId: row.id, providerPaymentId: payment.id, providerTxnId: key, observed: { amount: Number(row.amount), currency: row.currencyCode }, identity: { amount: Number(payment.amount), currency: payment.currencyCode } },
-        '[M-18] provider transaction observed with a different amount — suspensed, never credited; a person must look',
-      );
-      await this.page('agent-cash-provider-id-conflict', 'One MMG transaction, two amounts', `Transaction ${key} arrived by ${channel} with a different amount than an earlier observation. It is parked in suspense — reconcile against the MMG statement before crediting anything.`, { variant: 'provider_id_conflict', paymentId: row.id, providerTxnId: key });
+      log().error({ paymentId: row.id },
+        '[AX384] provider identity conflicts with this observation; held for finance review');
+      await this.page('agent-cash-provider-id-conflict', 'Payment needs finance review',
+        `Observation ${row.id} conflicts with its provider identity. No money was credited.`,
+        { variant: 'provider_id_conflict', paymentId: row.id });
     }
-    return { payment, conflict };
+    return resolved;
   }
 
   /** Mark an observation as a duplicate of the credit that already stands. */
   private async reconcileAgainst(paymentId: string, originalPaymentId: string, why: string): Promise<IngestResult> {
-    await this.prisma.mmgAgentPayment.update({
-      where: { id: paymentId },
+    // [MMG-RECV] Every verdict is a compare-and-set on RECEIVED: of two
+    // finishers of one observation, the first decides and the second writes
+    // nothing over it.
+    const decided = await this.prisma.mmgAgentPayment.updateMany({
+      where: { id: paymentId, status: 'RECEIVED' },
       data: { status: 'RECONCILED', note: `duplicate of ${originalPaymentId} (${why})`, resolvedAt: new Date() },
     });
+    if (decided.count !== 1) throw new Error('NOT_RECEIVED');
     return { status: 'reconciled', paymentId, originalPaymentId };
   }
 
@@ -302,6 +443,7 @@ export class AgentCashService {
     onAudit?: OnAudit,
   ): Promise<IngestResult> {
     const committed = await this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       await lockSubscriptionPayer(tx, requestedSubscriptionId);
       // A same-value compare-and-set acquires the row lock at the beginning of
       // the transaction. A concurrent attach waits, rechecks the predicate,
@@ -316,27 +458,57 @@ export class AgentCashService {
 
       const payment = await tx.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
 
+      // [AX363-F1] Every credit is the credit OF one provider transaction: its
+      // identity must exist and agree with this observation, and the CAS
+      // below is the one gate. Missing or disagreeing, nothing is credited
+      // and the payment stays held for a person. There is no per-observation
+      // fallback key that could credit the same cash a second time.
+      const providerPaymentId = payment.providerPaymentId;
+      if (!providerPaymentId) throw new Error('PROVIDER_IDENTITY_MISSING');
+      // Re-read under the identity lock after claiming the observation. A
+      // resolver's earlier read cannot authorize a credit after a hold.
+      const [identity] = await tx.$queryRaw<Array<ProviderPayment & { canonicalMatches: boolean }>>`
+        SELECT p.*, mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${providerTxnRaw(payment)}) AS "canonicalMatches"
+          FROM "provider_payments" p WHERE p."id" = ${providerPaymentId} FOR UPDATE`;
+      if (!identity) throw new Error('PROVIDER_IDENTITY_MISSING');
+      if (payment.failureCode === 'PROVIDER_ID_CONFLICT' || identity.status === 'HELD_DUPLICATE') {
+        await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'UNMATCHED', failureCode: 'PROVIDER_ID_CONFLICT' } });
+        return { paymentId, subscriptionId: requestedSubscriptionId, credited: false, duplicateOf: null, conflict: true };
+      }
+      if (identity.provider !== PROVIDER || identity.tenantId !== payment.tenantId || !identity.canonicalMatches
+        || Number(identity.amount) !== Number(payment.amount) || identity.currencyCode !== payment.currencyCode) {
+        throw new Error('PROVIDER_ID_CONFLICT');
+      }
+      if (identity.status !== 'OPEN' && !(identity.status === 'CREDITED' && identity.creditedPaymentId)) {
+        throw new Error('PROVIDER_ID_CONFLICT');
+      }
+      // [AX363-F2] The destination belongs to the observation's tenant, read
+      // here whatever query extension the caller's client carries: money
+      // never crosses a tenant.
+      if ((await subscriptionOwnerTenant(tx, requestedSubscriptionId)) !== payment.tenantId) {
+        throw new Error('DESTINATION_TENANT_MISMATCH');
+      }
+
       // [M-18] THE single CAS: exactly one observation of a provider
       // transaction ever credits. A concurrent channel, or a later attach of
       // the unmatched original, waits on this row, re-reads the predicate
       // after the winner commits and gets count=0 — and becomes a reconciled
       // observation of the credit that won. No money moves for it.
-      if (payment.providerPaymentId) {
-        const won = await tx.providerPayment.updateMany({
-          where: { id: payment.providerPaymentId, status: 'OPEN' },
-          data: { status: 'CREDITED', creditedPaymentId: paymentId, subscriptionId: requestedSubscriptionId, creditedAt: new Date() },
+      const won = await tx.providerPayment.updateMany({
+        where: { id: providerPaymentId, status: 'OPEN' },
+        data: { status: 'CREDITED', creditedPaymentId: paymentId, subscriptionId: requestedSubscriptionId, creditedAt: new Date() },
+      });
+      if (won.count !== 1) {
+        const credited = await tx.providerPayment.findUniqueOrThrow({ where: { id: providerPaymentId } });
+        if (credited.status !== 'CREDITED' || !credited.creditedPaymentId) throw new Error('PROVIDER_ID_CONFLICT');
+        const original = credited.creditedPaymentId;
+        await tx.mmgAgentPayment.updateMany({
+          where: { id: paymentId, status: resolution.expectedStatus },
+          data: { status: 'RECONCILED', note: `duplicate of ${original} (already credited)`, resolvedAt: new Date() },
         });
-        if (won.count !== 1) {
-          const identity = await tx.providerPayment.findUniqueOrThrow({ where: { id: payment.providerPaymentId } });
-          const original = identity.creditedPaymentId ?? 'unknown';
-          await tx.mmgAgentPayment.updateMany({
-            where: { id: paymentId, status: resolution.expectedStatus },
-            data: { status: 'RECONCILED', note: `duplicate of ${original} (already credited)`, resolvedAt: new Date() },
-          });
-          // [ADM-002] The caller's audit row commits with the reconciliation.
-          await onAudit?.(tx, { paymentId, subscriptionId: identity.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original });
-          return { paymentId, subscriptionId: identity.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original };
-        }
+        // [ADM-002] The caller's audit row commits with the reconciliation.
+        await onAudit?.(tx, { paymentId, subscriptionId: credited.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original });
+        return { paymentId, subscriptionId: credited.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original };
       }
 
       // Heal the one legacy crash window from the pre-atomic implementation:
@@ -361,7 +533,8 @@ export class AgentCashService {
           // second key merely because an admin selects another subscription —
           // and [M-18] the key is the provider transaction's, so the ledger's
           // own uniqueness refuses a second credit even if the CAS were bypassed.
-          eventKey: payment.providerPaymentId ? `agent-cash:pp:${payment.providerPaymentId}` : `agent-cash:${paymentId}`,
+          // [AX363-F1] Always: there is no per-observation key any more.
+          eventKey: `agent-cash:pp:${providerPaymentId}`,
         });
       }
 
@@ -376,14 +549,18 @@ export class AgentCashService {
         },
       });
       if (finalized.count !== 1) throw new Error('PAYMENT_FINALIZE_CONFLICT');
-      if (payment.providerPaymentId && subscriptionId !== requestedSubscriptionId) {
-        await tx.providerPayment.update({ where: { id: payment.providerPaymentId }, data: { subscriptionId } });
+      if (subscriptionId !== requestedSubscriptionId) {
+        await tx.providerPayment.update({ where: { id: providerPaymentId }, data: { subscriptionId } });
       }
       // [ADM-002] The caller's audit row is the last statement of the credit.
       await onAudit?.(tx, { paymentId: payment.id, subscriptionId, credited: !legacy, finalStatus: resolution.finalStatus });
       return { paymentId: payment.id, subscriptionId, credited: !legacy, duplicateOf: null as string | null };
     });
 
+    if ('conflict' in committed && committed.conflict) {
+      if (resolution.expectedStatus === 'UNMATCHED') throw new Error('PROVIDER_ID_CONFLICT');
+      return { status: 'received_unmatched', paymentId, failureCode: 'PROVIDER_ID_CONFLICT' };
+    }
     if (committed.duplicateOf) {
       // [M-18] A credit attempt on an already-credited transaction: the race
       // loser, or an admin attaching the unmatched original after the second
@@ -423,12 +600,95 @@ export class AgentCashService {
   }
 
   private async suspense(paymentId: string, failureCode: string): Promise<IngestResult> {
-    await this.prisma.mmgAgentPayment.update({
-      where: { id: paymentId },
+    const decided = await this.prisma.mmgAgentPayment.updateMany({
+      where: { id: paymentId, status: 'RECEIVED' },
       data: { status: 'UNMATCHED', failureCode },
     });
+    if (decided.count !== 1) throw new Error('NOT_RECEIVED'); // [MMG-RECV] another finisher decided it first
     log().warn({ paymentId, failureCode }, 'agent payment suspensed — money recorded, human resolution needed');
     return { status: 'received_unmatched', paymentId, failureCode };
+  }
+
+  /** [MMG-RECV] Finish an observation stranded RECEIVED, through the same
+   *  steps 2 to 5, exactly once. A finisher that lost the race (another one
+   *  decided it first, and every verdict is a compare-and-set on RECEIVED)
+   *  writes nothing and is answered `duplicate`. */
+  async finishStranded(paymentId: string, onAudit?: OnAudit): Promise<IngestResult> {
+    try {
+      return await this.resumeReceived(paymentId, onAudit);
+    } catch (e) {
+      if (!(e instanceof Error) || !LOST_RACE.has(e.message)) throw e;
+      const now = await this.prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId }, select: { status: true } });
+      if (now.status === 'RECEIVED') throw e; // not a lost race: nobody decided it
+      return { status: 'duplicate', paymentId };
+    }
+  }
+
+  /** [MMG-RECV] The repair pass (poll-mmg-billing). Every webhook or manual
+   *  observation stranded RECEIVED is finished, each in its own tenant, with
+   *  a system audit row joining its credit. FAIR: never tried first, then the
+   *  least recently tried; one whose finish just failed waits out
+   *  STRANDED_RETRY_BACKOFF_MS; one that fails again after
+   *  STRANDED_GIVE_UP_AFTER_MS goes to the suspense queue for a person.
+   *  `paymentIds` narrows the pass (tests, a drill). */
+  async finishStrandedPayments(opts: { limit?: number; paymentIds?: string[] } = {}): Promise<{ finished: string[]; failed: string[]; suspensed: string[] }> {
+    const out = { finished: [] as string[], failed: [] as string[], suspensed: [] as string[] };
+    const now = await databaseNow(this.prisma);
+    const strandedWhere = {
+      status: 'RECEIVED',
+      channel: { in: [...FINISHABLE_CHANNELS] },
+      createdAt: { lt: new Date(now.getTime() - STRANDED_AFTER_MS) },
+      ...(opts.paymentIds ? { id: { in: opts.paymentIds } } : {}),
+    };
+    const due = await runAsSystem('agent-cash-stranded-repair', () => this.prisma.mmgAgentPayment.findMany({
+      where: { ...strandedWhere, OR: [{ finishAttemptAt: null }, { finishAttemptAt: { lt: new Date(now.getTime() - STRANDED_RETRY_BACKOFF_MS) } }] },
+      orderBy: [{ finishAttemptAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }, { id: 'asc' }],
+      take: Math.max(1, opts.limit ?? 20),
+      select: { id: true, tenantId: true, channel: true, raw: true },
+    }));
+    for (const p of due) {
+      await runWithTenant(p.tenantId, async () => {
+        try {
+          const res = await this.finishStranded(p.id, strandedFinishAudit(p));
+          if (res.status !== 'duplicate') out.finished.push(p.id);
+        } catch (err) {
+          const left = await this.recordFailedFinish(p.id);
+          if (left === 'UNMATCHED') {
+            out.suspensed.push(p.id);
+            await this.page('agent-cash-stranded-unfinished', 'A paid fee could not be credited', `Agent-cash payment ${p.id} (${p.channel}) was saved but never credited, and the repair pass has kept failing to finish it for over an hour. It is in the suspense queue as UNFINISHED: check it against the MMG statement and attach it to the right account.`, { variant: 'stranded_unfinished', paymentId: p.id });
+          } else if (left === 'RECEIVED') {
+            out.failed.push(p.id);
+          }
+          log().error({ err, paymentId: p.id, channel: p.channel, left }, '[MMG-RECV] a stranded agent-cash payment could not be finished — retried after the backoff, then a person');
+        }
+      });
+    }
+    // What is still stranded after the pass: money on disk nothing credited yet.
+    agentCashStrandedGauge.set(await runAsSystem('agent-cash-stranded-repair', () => this.prisma.mmgAgentPayment.count({ where: strandedWhere })));
+    return out;
+  }
+
+  /** [MMG-RECV · fenced] Record a failed finish in ONE guarded statement that
+   *  reads the database clock itself, and only while the observation is
+   *  still RECEIVED: a verdict another finisher wrote meanwhile is never
+   *  overwritten. One that has failed before and is stranded past the
+   *  give-up age goes to the suspense queue instead. Answers the status it
+   *  left, or null when another finisher had decided it. */
+  private async recordFailedFinish(paymentId: string): Promise<'RECEIVED' | 'UNMATCHED' | null> {
+    const tenantId = getTenantId();
+    const givingUp = Prisma.sql`("finishAttemptAt" IS NOT NULL AND "createdAt" < ${DB_NOW} - (${STRANDED_GIVE_UP_AFTER_MS} * interval '1 millisecond'))`;
+    const [row] = await this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      return tx.$queryRaw<Array<{ status: string }>>`
+        UPDATE "mmg_agent_payments"
+           SET "finishAttemptAt" = ${DB_NOW},
+               "status" = CASE WHEN ${givingUp} THEN 'UNMATCHED' ELSE "status" END,
+               "failureCode" = CASE WHEN ${givingUp} THEN 'UNFINISHED' ELSE "failureCode" END
+         WHERE "id" = ${paymentId} ${tenantId ? Prisma.sql`AND "tenantId" = ${tenantId}` : Prisma.empty}
+           AND "status" = 'RECEIVED'
+        RETURNING "status"`;
+    });
+    return row ? (row.status as 'RECEIVED' | 'UNMATCHED') : null;
   }
 
   /** Suspense resolution [spec 4.6]: attach to an account — credits via the
@@ -438,6 +698,12 @@ export class AgentCashService {
   async attach(paymentId: string, subscriptionId: string, adminId: string, onAudit?: OnAudit): Promise<IngestResult> {
     const row = await this.prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
     if (row.status !== 'UNMATCHED') throw new Error('NOT_UNMATCHED');
+    // [AX363-F1] The provider identity first, resolved (or minted) and
+    // validated exactly as ingest does: a payment whose delivery died before
+    // it was linked, and that the repair pass then gave up on, is credited
+    // only THROUGH its identity. A conflict keeps it held for a person.
+    const identity = await this.identityFor(row, row.channel);
+    if (identity.conflict) throw new Error('PROVIDER_ID_CONFLICT');
     return this.creditAtomic(paymentId, subscriptionId, {
       amount: Number(row.amount),
       channel: row.channel,
@@ -471,7 +737,9 @@ export class AgentCashService {
             ? 'valid checksum but nobody holds it (mis-key that beat the odds)'
             : r.failureCode === 'TOMBSTONED' || r.failureCode === 'ACCOUNT_CLOSED'
               ? 'paid to a closed account — refund flag likely'
-              : r.failureCode ?? 'unknown',
+              : r.failureCode === 'UNFINISHED'
+                ? 'saved but never credited: the repair pass kept failing (check it against the MMG statement, then attach)'
+                : r.failureCode ?? 'unknown',
       hoursOld: Math.round((now - r.createdAt.getTime()) / 3_600_000),
       breachesSla: now - r.createdAt.getTime() > 24 * 3_600_000,
     }));
@@ -502,4 +770,3 @@ export async function scanDuplicateCredits(prisma: PrismaClient): Promise<Array<
   }
   return found;
 }
-
