@@ -218,7 +218,7 @@ export default function SignupPage() {
             ) : (
               <>
                 <button ref={storePinButton} type="button" disabled={busy || !biz.addressLine1.trim() || !biz.city.trim()} className={styles.roleButton} onClick={() => { setError(null); setPlacingStore(true); }}>{storePin ? 'Move the store pin' : 'Place your store on the map'}</button>
-                {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed. {storePin.address ?? biz.addressLine1} — Latitude {storePin.latitude.toFixed(6)}, Longitude {storePin.longitude.toFixed(6)}</p>}
+                {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed: {storePin.address ?? biz.addressLine1}.</p>}
               </>
             )}
             <DocumentChecklist role={biz.vendorType as ChecklistRole} />

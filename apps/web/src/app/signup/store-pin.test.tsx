@@ -291,7 +291,8 @@ describe('Q8 website store pin', () => {
     expect(readout.textContent).not.toContain('No street name found');
     await user.click(screen.getByRole('button', { name: 'Confirm store location' }));
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move the store pin' }));
-    expect(screen.getByRole('status').textContent).toContain('12 Regent Street, Georgetown');
+    expect(screen.getByRole('status').textContent).toContain('Store location confirmed: 12 Regent Street, Georgetown.');
+    expect(screen.getByRole('status').textContent).not.toContain('Latitude');
     await user.click(screen.getByRole('button', { name: 'Move the store pin' }));
     await user.click(screen.getByRole('button', { name: 'Close without placing the pin' }));
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move the store pin' }));
