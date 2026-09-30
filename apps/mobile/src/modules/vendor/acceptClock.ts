@@ -5,6 +5,16 @@
  * slot-relative and can be up to a day away, and "1440:00" is not a time
  * anyone reads — so past an hour the clock reads hours and minutes.
  */
+/**
+ * [Q12] Is the takeover's decision still open? The server's order says. One
+ * that stopped waiting for the store — the customer cancelled it, another
+ * device answered it, the no-response timer reaped it — is settled, and the
+ * takeover stops ringing for it. Not yet loaded is not settled.
+ */
+export function takeoverSettled(order: { status?: unknown } | null | undefined): boolean {
+  return typeof order?.status === 'string' && order.status !== 'PENDING';
+}
+
 export function acceptClockLabel(remainSecs: number): string {
   const s = Math.max(0, Math.floor(remainSecs));
   if (s < 3600) return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
