@@ -96,6 +96,7 @@ const TENANT_QUERY_EXTENSIONS = {
   mmgCheckoutIntent: scoped, mmgCheckoutKey: scoped, mmgCheckoutObservation: scoped,
   billingDunningClock: scoped, paymentConfirmationHold: scoped, billingFeeNotice: scoped, billingNoticeHandoff: scoped,
   tenantBillingCurrency: scoped, trialGrant: scoped,
+  moverFeeAuthority: scoped, moverFeeSubscription: scoped,
   // [M-08] The prepaid top-up as one persisted command.
   topUpCommand: scoped,
   // [PT-1] Card rail v2: an enrolled card, a hosted session, and the evidence

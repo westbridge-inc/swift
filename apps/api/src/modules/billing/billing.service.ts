@@ -35,6 +35,7 @@ import { openVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
 import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, readDunningClock, resolveConfirmationInTx, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
 import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, resolvePaymentConfirmationInTx } from './dunning-clock';
+import { lockFeeCollectionAuthority, lockMoverFeeAuthority, lockSubscriptionPayer, moverFeeTariffSubject, resolveMoverFeeAuthority, subscriptionPayer } from '../subscription/mover-fee-authority';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -445,6 +446,7 @@ export class BillingService {
       // page, so a row that keeps failing is seen, not just logged.
       try {
         const done = await this.prisma.$transaction(async (tx) => {
+          if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
           // Guarded: a resume that armed autoRenew in between wins.
           const flipped = await tx.subscription.updateMany({
             where: { id: sub.id, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: { lte: now } },
@@ -491,6 +493,19 @@ export class BillingService {
      *  with the very row that licensed this pass. */
     reclaimedAttempt = false,
   ): Promise<'succeeded' | 'failed' | 'suspended' | 'skipped' | 'pending'> {
+    // Selection is not collection authority. Old workers carrying a second
+    // source ID must not open another fee after the payer has one authority.
+    const candidate = await this.prisma.$transaction(async (tx) => {
+      const authority = await lockFeeCollectionAuthority(tx, sub.id);
+      if (!authority.allowed) return null;
+      const fresh = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, include: {
+        rider: { select: { userId: true } }, driver: { select: { userId: true } },
+        vendor: { select: { id: true, owner: { select: { userId: true } } } },
+      } });
+      return { ...fresh, type: authority.mover?.feeType ?? fresh.type };
+    });
+    if (!candidate) return 'skipped';
+    sub = candidate;
     // An unresolved positive observation may concern this or an older attempt.
     // A new retry key, rail choice or wallet top-up is not manual disposition.
     if (await this.subscriptionHasConfirmationHold(this.prisma, sub.id, undefined, now)) return 'pending';
@@ -502,16 +517,21 @@ export class BillingService {
     let priced = await this.priceEligibleFor(sub, usd);
 
     if (!reclaimedAttempt) try {
-      await this.prisma.billingEvent.create({
-        data: {
-          subscriptionId: sub.id,
-          type: 'CHARGE_ATTEMPT',
-          amount: priced.amount,
-          currencyCode: sub.currencyCode,
-          idempotencyKey: attemptKey,
-          ...(priced.usdTrio ?? {}),
-        },
+      const reserved = await this.prisma.$transaction(async (tx) => {
+        if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
+        await tx.billingEvent.create({
+          data: {
+            subscriptionId: sub.id,
+            type: 'CHARGE_ATTEMPT',
+            amount: priced.amount,
+            currencyCode: sub.currencyCode,
+            idempotencyKey: attemptKey,
+            ...(priced.usdTrio ?? {}),
+          },
+        });
+        return true;
       });
+      if (!reserved) return 'skipped';
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
         // [REPORT-013 F-013-09] A duplicate attempt key is NOT always
@@ -1350,8 +1370,16 @@ export class BillingService {
    * due, it is the next week, paid ahead. A client never names the amount.
    */
   async quoteCardPayNow(subscriptionId: string, now = new Date()): Promise<{ amount: number; currencyCode: string; periodStart: Date; due: boolean }> {
-    const sub = await this.prisma.subscription.findUnique({ where: { id: subscriptionId } });
+    let sub = await this.prisma.subscription.findUnique({ where: { id: subscriptionId } });
     if (!sub) throw new NotFoundError('Subscription', subscriptionId);
+    const payer = await subscriptionPayer(this.prisma, subscriptionId);
+    if (payer.kind === 'MOVER') {
+      const authority = await resolveMoverFeeAuthority(this.prisma, payer);
+      if (!authority || authority.state !== 'ACTIVE' || authority.canonicalSubscriptionId !== subscriptionId) {
+        throw new AppError(409, 'MOVER_FEE_REVIEW_REQUIRED', 'This weekly fee needs review before another payment.');
+      }
+      sub = { ...sub, type: authority.feeType };
+    }
     if (sub.feeWaived) throw new AppError(409, 'NOTHING_TO_PAY', 'This week is waived — there is nothing to pay.');
     const priced = await this.priceEligibleFor(sub, await this.loadUsdPricing());
     const amount = Number(priced.amount);
@@ -2133,6 +2161,8 @@ export class BillingService {
     // wallet must never be relabelled or incremented with another currency.
     // Materialize/lock the row, then include its currency in the monetary CAS;
     // a concurrent creator or currency edit cannot turn the read into consent.
+    const payer = await lockSubscriptionPayer(tx, opts.subscriptionId);
+    if (payer.kind === 'MOVER') await lockMoverFeeAuthority(tx, payer);
     const wallet = await this.lockWalletInTx(tx, opts.subscriptionId, opts.currencyCode);
     if (wallet.currencyCode !== opts.currencyCode) {
       throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'Received money and wallet currencies differ; reconciliation is required');
@@ -2173,6 +2203,7 @@ export class BillingService {
       description: `Wallet credit via ${opts.channel}${opts.mmgRef ? ` (${opts.mmgRef})` : ''}`,
       entries: topupPostings(opts.subscriptionId, opts.amount, opts.rail),
     });
+    if (payer.kind === 'MOVER') await lockMoverFeeAuthority(tx, payer);
     return tx.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: opts.subscriptionId } });
   }
 
@@ -2494,28 +2525,22 @@ export class BillingService {
   private async lockSubscriptionMoneyAuthority(
     tx: Prisma.TransactionClient,
     sub: SubWithRelations,
-  ): Promise<{ payerStatus: string; payerPhone: string; status: SubscriptionStatus; autoRenew: boolean }> {
-    const payerUserId = this.payerUserId(sub);
-    const payerRows = await tx.$queryRaw<Array<{ status: string; phone: string }>>`
-      SELECT "status", "phone" FROM "users" WHERE "id" = ${payerUserId} FOR UPDATE
-    `;
-    const subRows = await tx.$queryRaw<Array<{ status: SubscriptionStatus; autoRenew: boolean }>>`
-      SELECT "status", "autoRenew" FROM "subscriptions" WHERE "id" = ${sub.id} FOR UPDATE
-    `;
-    const payer = payerRows[0];
-    const fresh = subRows[0];
-    if (!payer) throw new AppError(500, 'ORPHAN_SUBSCRIPTION', `Subscription ${sub.id} has no payer authority row`);
-    if (!fresh) throw new AppError(500, 'ORPHAN_SUBSCRIPTION', `Subscription ${sub.id} disappeared during MMG settlement`);
-    return { payerStatus: payer.status, payerPhone: payer.phone, status: fresh.status, autoRenew: fresh.autoRenew };
+  ): Promise<{ payerStatus: string; payerPhone: string; status: SubscriptionStatus; autoRenew: boolean; collectionAllowed: boolean }> {
+    const owner = await lockSubscriptionPayer(tx, sub.id);
+    const collection = await lockFeeCollectionAuthority(tx, sub.id);
+    const payer = await tx.user.findUniqueOrThrow({ where: { id: owner.userId }, select: { status: true, phone: true } });
+    const fresh = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, select: { status: true, autoRenew: true } });
+    return { payerStatus: payer.status, payerPhone: payer.phone, status: fresh.status, autoRenew: fresh.autoRenew, collectionAllowed: collection.allowed };
   }
 
   private successfulChargeAuthorityAllowsAdvance(
-    authority: { payerStatus: string; payerPhone: string; status: SubscriptionStatus; autoRenew: boolean },
+    authority: { payerStatus: string; payerPhone: string; status: SubscriptionStatus; autoRenew: boolean; collectionAllowed: boolean },
     sub: SubWithRelations,
   ): boolean {
     const payerUserId = this.payerUserId(sub);
     const deletedAccount = authority.payerStatus === 'DEACTIVATED' || authority.payerPhone === `deleted:${payerUserId}`;
     return !deletedAccount
+      && authority.collectionAllowed
       && authority.payerStatus === 'ACTIVE'
       && authority.autoRenew
       && ['ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CHURNED'].includes(authority.status);
@@ -2545,7 +2570,7 @@ export class BillingService {
     return {
       bankInsteadOfAdvance: !this.successfulChargeAuthorityAllowsAdvance(locked, sub),
       deletedAccount: false,
-      suppressNotice: locked.payerStatus !== 'ACTIVE',
+      suppressNotice: locked.payerStatus !== 'ACTIVE' || !locked.collectionAllowed,
       status: locked.status,
     };
   }
@@ -3071,6 +3096,9 @@ export class BillingService {
     // The instant charge below is anchored to exactly this due date (DS213 F2-1).
     const resumedAt = new Date();
     const updated = await this.prisma.$transaction(async (tx) => {
+      if (!(await lockFeeCollectionAuthority(tx, subscriptionId)).allowed) {
+        throw new AppError(409, 'MOVER_FEE_REVIEW_REQUIRED', 'This weekly fee needs review before billing can resume.');
+      }
       const { sub: fresh } = await lockBillingAuthority(tx, subscriptionId);
       const clock = await currentDunningClock(tx, subscriptionId, resumedAt);
       if (fresh.status === 'CANCELLED' || fresh.status === 'CHURNED') {
@@ -3193,6 +3221,13 @@ export class BillingService {
    */
   async stopBilling(subscriptionId: string, actorUserId: string) {
     return this.prisma.$transaction(async (tx) => {
+      const payer = await lockSubscriptionPayer(tx, subscriptionId);
+      if (payer.userId !== actorUserId) throw new AppError(403, 'FORBIDDEN', 'This weekly fee belongs to another payer.');
+      if (payer.kind === 'MOVER') {
+        const authority = await lockMoverFeeAuthority(tx, payer);
+        if (authority?.canonicalSubscriptionId !== subscriptionId) throw new AppError(409, 'MOVER_FEE_SOURCE_CHANGED', 'Use the current shared weekly fee.');
+        await tx.subscription.updateMany({ where: { id: { in: authority.sourceSubscriptionIds.filter((id) => id !== subscriptionId) } }, data: { autoRenew: false, nextRetryAt: null } });
+      }
       const { sub: fresh } = await lockBillingAuthority(tx, subscriptionId);
       await currentDunningClock(tx, subscriptionId);
       // [DS198 D5] A closed subscription has nothing to stop: say so rather
@@ -3658,17 +3693,10 @@ export class BillingService {
         data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' },
       });
     }
-    if (sub.rider) {
-      await tx.rider.updateMany({
-        where: { userId: sub.rider.userId },
-        data: { isOnline: false, isAvailable: false },
-      });
-    }
-    if (sub.driver) {
-      await tx.driver.updateMany({
-        where: { userId: sub.driver.userId },
-        data: { isOnline: false, isAvailable: false },
-      });
+    const moverUserId = sub.rider?.userId ?? sub.driver?.userId;
+    if (moverUserId) {
+      await tx.rider.updateMany({ where: { userId: moverUserId }, data: { isOnline: false, isAvailable: false } });
+      await tx.driver.updateMany({ where: { userId: moverUserId }, data: { isOnline: false, isAvailable: false } });
     }
 
     const payLine = await this.feePayLine(sub, null);
@@ -3820,7 +3848,7 @@ export class BillingService {
         // visible before either the churn CAS or daily nudge event is written.
         const decision = await this.prisma.$transaction(async (tx) => {
           const authority = await this.lockSubscriptionMoneyAuthority(tx, candidate as SubWithRelations);
-          if (authority.status !== 'SUSPENDED') return null;
+          if (!authority.collectionAllowed || authority.status !== 'SUSPENDED') return null;
           const sub = await tx.subscription.findUnique({
             where: { id: candidate.id },
             include: {
@@ -3940,6 +3968,7 @@ export class BillingService {
     },
   ) {
     if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+    await lockSubscriptionPayer(tx, input.subscriptionId);
     const sub = await tx.subscription.findUnique({
       where: { id: input.subscriptionId },
       select: { id: true, currencyCode: true },
@@ -4304,7 +4333,9 @@ export class BillingService {
 
       const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
       try {
-        await this.prisma.billingEvent.create({
+        const allowed = await this.prisma.$transaction(async (tx) => {
+          if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
+          await tx.billingEvent.create({
           data: {
             subscriptionId: sub.id,
             type: 'REMINDER',
@@ -4312,7 +4343,10 @@ export class BillingService {
             currencyCode: sub.currencyCode,
             idempotencyKey: `reminder:${sub.id}:${periodKey}`,
           },
+          });
+          return true;
         });
+        if (!allowed) continue;
       } catch (error) {
         if ((error as Prisma.PrismaClientKnownRequestError).code !== 'P2002') throw error; // existing stage may still need delivery
       }
@@ -4343,35 +4377,26 @@ export class BillingService {
    */
   async recalculateMoverTiers(): Promise<number> {
     const moverSubs = await this.prisma.subscription.findMany({
-      where: {
-        OR: [{ riderId: { not: null } }, { driverId: { not: null } }],
-        status: { in: RETIER_STATUSES },
-      },
-      include: {
-        rider: { select: { vehicleType: true, user: { select: { countryCode: true } } } },
-        driver: { select: { vehicleType: true, user: { select: { countryCode: true } } } },
-      },
+      where: { OR: [{ riderId: { not: null } }, { driverId: { not: null } }], status: { in: RETIER_STATUSES } },
+      select: { id: true },
     });
-
     let changed = 0;
-    for (const sub of moverSubs) {
+    for (const candidate of moverSubs) {
       try {
-        const mover = sub.rider ?? sub.driver;
-        if (!mover) continue;
-        // A negotiated rate is a human decision — a vehicle swap must not silently
-        // overwrite it. Waived fees are likewise left alone.
-        if (sub.customRate != null || sub.feeWaived) continue;
-
-        const role = sub.rider ? 'RIDER' : 'DRIVER';
-        const tiers = await this.countryConfig.getSubscriptionTiers(mover.user.countryCode);
-        const target = this.retierTarget(sub.id, tiers, { kind: role, vehicleType: mover.vehicleType });
-        if (!target || Number(sub.weeklyRate) === target.rate) continue;
-
-        const note = `${role === 'DRIVER' ? 'taxi driver' : 'rider'} on ${mover.vehicleType} -> ${target.tier} tier`;
-        if (await this.applyTierChange(sub, target, note)) changed += 1;
-      } catch (error) {
-        this.holdTierChange(sub.id, error);
-      }
+        const moved = await this.prisma.$transaction(async (tx) => {
+          const payer = await lockSubscriptionPayer(tx, candidate.id);
+          const authority = await lockMoverFeeAuthority(tx, payer);
+          if (!authority || authority.canonicalSubscriptionId !== candidate.id) return false;
+          const sub = await tx.subscription.findUniqueOrThrow({ where: { id: candidate.id } });
+          if (!RETIER_STATUSES.includes(sub.status) || sub.customRate !== null || sub.feeWaived) return false;
+          const tariff = await moverFeeTariffSubject(tx, authority);
+          const tiers = await this.countryConfig.getSubscriptionTiers(tariff.countryCode, tx);
+          const target = this.retierTarget(sub.id, tiers, tariff.subject);
+          if (!target || sub.weeklyRate.equals(target.rate)) return false;
+          return this.applyTierChange(sub, target, `${tariff.subject.kind === 'DRIVER' ? 'taxi driver' : 'rider'} on ${tariff.subject.vehicleType} -> ${target.tier} tier`, tx);
+        });
+        if (moved) changed += 1;
+      } catch (error) { this.holdTierChange(candidate.id, error); }
     }
     return changed;
   }
@@ -4414,9 +4439,11 @@ export class BillingService {
     sub: { id: string; weeklyRate: Prisma.Decimal; currencyCode: string },
     target: PartnerRate,
     note: string,
+    transaction?: Prisma.TransactionClient,
   ): Promise<boolean> {
     const from = Number(sub.weeklyRate);
-    return this.prisma.$transaction(async (tx) => {
+    const apply = async (tx: Prisma.TransactionClient) => {
+      await lockSubscriptionPayer(tx, sub.id);
       const won = await tx.subscription.updateMany({
         where: { id: sub.id, weeklyRate: sub.weeklyRate },
         data: { weeklyRate: target.rate },
@@ -4434,7 +4461,8 @@ export class BillingService {
         },
       });
       return true;
-    });
+    };
+    return transaction ? apply(transaction) : this.prisma.$transaction(apply);
   }
 
   /**

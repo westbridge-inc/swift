@@ -1,3 +1,4 @@
+import { lockFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 import type { PrismaClient } from '@prisma/client';
 import type { NotificationService } from '../notification/notification.service';
 import { payInfo } from './agent-cash.service';
@@ -43,7 +44,9 @@ export async function sweepTrialFeeEducation(
     const userId = sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId;
     if (!userId) continue;
     try {
-      await prisma.billingEvent.create({
+      const allowed = await prisma.$transaction(async (tx) => {
+        if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
+        await tx.billingEvent.create({
         data: {
           subscriptionId: sub.id,
           type: 'REMINDER',
@@ -51,7 +54,10 @@ export async function sweepTrialFeeEducation(
           idempotencyKey: `trialedu:${sub.id}:${stage}`,
           note: stage === 'd10' ? 'Trial fee education (day 10)' : 'Trial fee reminder with amount (day 13)',
         },
+        });
+        return true;
       });
+      if (!allowed) continue;
     } catch (error) {
       if ((error as { code?: string }).code !== 'P2002') throw error;
       // A saved stage whose delivery was interrupted still enters the durable outbox.

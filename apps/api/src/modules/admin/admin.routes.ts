@@ -18,6 +18,7 @@ import { placeDocLegalHold, releaseDocLegalHold, listDocLegalHolds } from '../ve
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
+import { lockFeeCollectionAuthority, moverFeeSourceSummary, resolveMoverFeeAuthority, resolveMoverFeeHold, subscriptionPayer } from '../subscription/mover-fee-authority';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
@@ -3186,6 +3187,41 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, message: 'Zone deactivated' };
   });
 
+  /** Durable finance holds retain all original money sources. Reads never
+   * classify or clear a hold, and every query binds the authenticated tenant. */
+  app.get('/billing/mover-fees', { preHandler: [adminGuard] }, async () => {
+    const tenantId = requireTenantId();
+    const rows = await app.prisma.moverFeeAuthority.findMany({ where: { tenantId, state: 'FINANCE_HOLD' }, orderBy: { updatedAt: 'asc' }, take: 200 });
+    const data = await Promise.all(rows.map(async (row) => ({ userId: row.userId, revision: row.revision,
+      ...(await moverFeeSourceSummary(app.prisma, { userId: row.userId, tenantId })) })));
+    return { success: true, data };
+  });
+
+  app.get('/billing/mover-fees/:userId', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { userId } = z.object({ userId: z.string().min(1) }).parse(request.params);
+    if (!await app.prisma.user.findFirst({ where: { id: userId, tenantId }, select: { id: true } })) throw new NotFoundError('Mover fee');
+    const authority = await resolveMoverFeeAuthority(app.prisma, { userId, tenantId });
+    if (!authority) throw new NotFoundError('Mover fee');
+    return { success: true, data: { userId, revision: authority.revision, ...(await moverFeeSourceSummary(app.prisma, { userId, tenantId })) } };
+  });
+
+  app.post('/billing/mover-fees/:userId/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { userId } = z.object({ userId: z.string().min(1) }).parse(request.params);
+    const body = z.object({ expectedRevision: z.number().int().positive(), canonicalSubscriptionId: z.string().min(1),
+      sourceSubscriptionIds: z.array(z.string().min(1)).min(1).max(2), reason: z.string().max(500).optional() }).parse(request.body);
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId;
+    if (!approvalId) throw new ForbiddenError('Independent finance approval required');
+    if (!await app.prisma.user.findFirst({ where: { id: userId, tenantId }, select: { id: true } })) throw new NotFoundError('Mover fee');
+    const result = await app.prisma.$transaction(async (tx) => {
+      const authority = await resolveMoverFeeHold(tx, { userId, tenantId }, { ...body, actorUserId: request.user.userId, approvalId });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { decisionRevision: authority.revision, sourceSubscriptionIds: authority.sourceSubscriptionIds.join(','), canonicalSubscriptionId: authority.canonicalSubscriptionId } });
+      return authority;
+    });
+    return { success: true, data: result };
+  });
+
   // ─── Subscriptions ─────────────────────────────────────────────────────
 
   app.get('/subscriptions', { preHandler: [adminGuard] }, async (request) => {
@@ -3217,7 +3253,12 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // Subscription.weeklyRate / customRate are Decimal(10,2) — this IS Swift's
     // revenue line (flat weekly fee, no commission). Coerce at the seam.
-    return { success: true, ...paginatedResponse(coerceMoney(subscriptions), total, { page, limit, skip }) };
+    const current = await Promise.all(subscriptions.map(async (sub) => {
+      const payer = sub.rider?.user.id ?? sub.driver?.user.id;
+      const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
+      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority };
+    }));
+    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }) };
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {
@@ -3243,6 +3284,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // `feeWaived`, so the diff carries the fact and the stated reason rides in
     // `changes.reason` — the legacy row that repeated it is retired.
     const updated = await app.prisma.$transaction(async (tx) => {
+      if (!(await lockFeeCollectionAuthority(tx, id)).allowed) throw new AppError(409, 'MOVER_FEE_REVIEW_REQUIRED', 'Review the shared fee before applying a waiver.');
       const row = await mutationOrNotFound('Subscription', id, () => tx.subscription.update({
         where: { id, ...tenantScope },
         data: {
@@ -4509,7 +4551,7 @@ export async function adminRoutes(app: FastifyInstance) {
             ? { status: 'SUSPENDED' as const }
             : { status: 'CHURNED' as const };
     const where = { ...statusWhere, billingConfirmationPausedAt: null, ...subscriptionTenantScope(tenantId) };
-    const subs = await app.prisma.subscription.findMany({
+    const candidates = await app.prisma.subscription.findMany({
       where,
       include: {
         vendor: { select: { name: true, city: true, owner: { select: { user: { select: { firstName: true, lastName: true, phone: true } } } } } },
@@ -4519,6 +4561,13 @@ export async function adminRoutes(app: FastifyInstance) {
       orderBy: tab === 'due72' ? { nextBillingDate: 'asc' } : { updatedAt: 'asc' },
       take: 200,
     });
+    const subs: typeof candidates = [];
+    for (const sub of candidates) {
+      if (!sub.rider && !sub.driver) { subs.push(sub); continue; }
+      const payer = await subscriptionPayer(app.prisma, sub.id);
+      const authority = await resolveMoverFeeAuthority(app.prisma, payer);
+      if (authority?.state === 'ACTIVE' && authority.canonicalSubscriptionId === sub.id) subs.push({ ...sub, type: authority.feeType });
+    }
     const ids = subs.map((s) => s.id);
     const [balances, contacts, lastPayments] = await Promise.all([
       tenantPrisma.prepaidBalance.findMany({ where: { subscriptionId: { in: ids } } }),

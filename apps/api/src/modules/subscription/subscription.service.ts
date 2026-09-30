@@ -1,6 +1,7 @@
 import { currentDunningClock, lockBillingAuthority } from '../billing/dunning-clock';
 import { Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
-import { NotFoundError } from '../../utils/errors';
+import { AppError, NotFoundError } from '../../utils/errors';
+import { activateMoverFeeType, lockFeeCollectionAuthority, lockMoverFeeAuthority, lockMoverSources, moverFeeTariffSubject, resolveMoverFeeAuthority } from './mover-fee-authority';
 import { CountryConfigService, partnerRateFor, type PartnerRate } from '../country/country-config.service';
 import { TrialEntitlementService } from '../integrity/trial-entitlement.service';
 import { log } from '../../utils/logger';
@@ -55,11 +56,12 @@ export class SubscriptionService {
         riderType: true,
         vehicleType: true,
         subscription: true,
-        user: { select: { countryCode: true } },
+        user: { select: { id: true, tenantId: true, countryCode: true } },
       },
     });
     if (!rider) throw new NotFoundError('Rider', riderId);
-    if (rider.subscription) return { existing: rider.subscription };
+    const authority = await resolveMoverFeeAuthority(db, { userId: rider.user.id, tenantId: rider.user.tenantId });
+    if (authority) return { existing: await db.subscription.findUniqueOrThrow({ where: { id: authority.canonicalSubscriptionId } }) };
 
     const countryCode = rider.user.countryCode;
     const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
@@ -76,11 +78,19 @@ export class SubscriptionService {
       select: {
         vehicleType: true,
         subscription: true,
-        user: { select: { countryCode: true } },
+        user: { select: { id: true, tenantId: true, countryCode: true } },
       },
     });
     if (!driver) throw new NotFoundError('Driver', driverId);
-    if (driver.subscription) return { existing: driver.subscription };
+    const authority = await resolveMoverFeeAuthority(db, { userId: driver.user.id, tenantId: driver.user.tenantId });
+    if (authority) {
+      // A second role still preflights the tariff it is about to adopt.
+      if (authority.feeType !== 'TAXI_DRIVER') {
+        const tiers = await this.countryConfig.getSubscriptionTiers(driver.user.countryCode, db);
+        partnerRateFor(tiers, { kind: 'DRIVER', vehicleType: driver.vehicleType });
+      }
+      return { existing: await db.subscription.findUniqueOrThrow({ where: { id: authority.canonicalSubscriptionId } }) };
+    }
 
     const countryCode = driver.user.countryCode;
     const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
@@ -144,15 +154,80 @@ export class SubscriptionService {
   }
 
   async startTrialForRider(riderId: string) {
-    const activation = await this.riderActivation(riderId, this.prisma);
-    if (activation.existing) return activation.existing; // idempotent
-    return this.create({ riderId }, activation.type, activation.priced.rate, activation.currencyCode);
+    return this.startMoverTrial({ riderId });
   }
 
   async startTrialForDriver(driverId: string) {
-    const activation = await this.driverActivation(driverId, this.prisma);
-    if (activation.existing) return activation.existing;
-    return this.create({ driverId }, activation.type, activation.priced.rate, activation.currencyCode);
+    return this.startMoverTrial({ driverId });
+  }
+
+  private async startMoverTrial(entity: { riderId: string } | { driverId: string }): Promise<Subscription> {
+    const run = () => this.prisma.$transaction(async (tx) => {
+      const profile = 'riderId' in entity
+        ? await tx.rider.findUniqueOrThrow({ where: { id: entity.riderId }, select: { user: { select: { id: true, tenantId: true } } } })
+        : await tx.driver.findUniqueOrThrow({ where: { id: entity.driverId }, select: { user: { select: { id: true, tenantId: true } } } });
+      const payer = { userId: profile.user.id, tenantId: profile.user.tenantId };
+      await lockMoverSources(tx, payer);
+      const fresh = 'riderId' in entity
+        ? await tx.rider.findUniqueOrThrow({ where: { id: entity.riderId }, select: { userId: true } })
+        : await tx.driver.findUniqueOrThrow({ where: { id: entity.driverId }, select: { userId: true } });
+      if (fresh.userId !== payer.userId) throw new AppError(409, 'MOVER_FEE_OWNERSHIP_INVALID', 'Mover ownership changed during activation.');
+      const activation = await this.activation(entity, tx);
+      if (activation.existing) {
+        const authority = await activateMoverFeeType(tx, payer, 'driverId' in entity ? 'TAXI_DRIVER' : activation.existing.type);
+        let sub = activation.existing;
+        if (authority?.feeType === 'TAXI_DRIVER' && sub.customRate === null && !sub.feeWaived) {
+          const tariff = await moverFeeTariffSubject(tx, authority);
+          const tiers = await this.countryConfig.getSubscriptionTiers(tariff.countryCode, tx);
+          const priced = partnerRateFor(tiers, tariff.subject);
+          if (!sub.weeklyRate.equals(priced.rate)) {
+            const from = Number(sub.weeklyRate);
+            sub = await tx.subscription.update({ where: { id: sub.id }, data: { weeklyRate: priced.rate } });
+            const seq = await tx.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } }) + 1;
+            await tx.billingEvent.create({ data: {
+              subscriptionId: sub.id, type: 'TIER_CHANGE', amount: priced.rate, currencyCode: sub.currencyCode,
+              idempotencyKey: `tier:${sub.id}:${seq}:${from}->${priced.rate}`,
+              note: `Shared mover fee: taxi activation changes the future weekly rate from ${from} to ${priced.rate}; issued charges and periods retained.`,
+            } });
+          }
+        }
+        return sub;
+      }
+      const now = new Date();
+      const trialEnd = new Date(now.getTime() + TRIAL_DAYS * DAY_MS);
+      const role = 'driverId' in entity ? 'DRIVER' : 'RIDER';
+      const decision = await this.trialLaw.decide(payer.userId, role, payer.tenantId, tx);
+      const sub = await tx.subscription.create({ data: {
+        ...entity, type: activation.type, weeklyRate: activation.priced.rate, currencyCode: activation.currencyCode,
+        billingMethod: 'CASH', currentPeriodStart: now,
+        status: decision.grant ? 'TRIAL' : 'ACTIVE', isTrialActive: decision.grant,
+        trialEndDate: decision.grant ? trialEnd : now,
+        currentPeriodEnd: decision.grant ? trialEnd : now, nextBillingDate: decision.grant ? trialEnd : now,
+      } });
+      if (decision.grant) {
+        await this.trialLaw.recordGrant(tx, { accountId: payer.userId, clusterId: decision.clusterId, role,
+          tenantId: payer.tenantId, trialDays: TRIAL_DAYS, exception: decision.reason === 'EXCEPTION_GRANT' });
+      } else if (decision.reason === 'TRIAL_CONSUMED' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE') {
+        await tx.enforcementAction.create({ data: { accountId: payer.userId, clusterId: decision.clusterId,
+          level: 'DENY_TRIAL', reasonCode: decision.reason, signalsFired: [{ note: 'trial law at activation', role }], decidedBy: 'SYSTEM' } });
+      }
+      await lockMoverFeeAuthority(tx, payer);
+      return sub;
+    });
+    let sub: Subscription;
+    try { sub = await run(); } catch (error) {
+      // Cross-account identity grants can still race. Re-read the law in a
+      // fresh transaction; same-payer activations already share the User lock.
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
+      sub = await run();
+    }
+    try {
+      const { ensureSan } = await import('../billing/san.service');
+      return { ...sub, san: await ensureSan(this.prisma, sub.id) };
+    } catch (error) {
+      log().error({ err: error, subscriptionId: sub.id }, 'SAN assignment at activation failed — backstop will heal');
+      return sub;
+    }
   }
 
   async startTrialForVendor(vendorId: string) {
@@ -289,10 +364,10 @@ export class SubscriptionService {
     const rows = await this.prisma.subscription.findMany({ where: { status: 'TRIAL', trialEndDate: { lte: now } }, select: { id: true } });
     let count = 0;
     for (const row of rows) count += await this.prisma.$transaction(async (tx) => {
-      await lockBillingAuthority(tx, row.id);
-      const sub = await tx.subscription.findUniqueOrThrow({ where: { id: row.id } });
+      if (!(await lockFeeCollectionAuthority(tx, row.id)).allowed) return 0;
+      const { sub } = await lockBillingAuthority(tx, row.id);
       if (sub.status !== 'TRIAL' || !sub.trialEndDate || sub.trialEndDate > now) return 0;
-      // Keep the original due date, including time paused before conversion.
+      // Preserve the original obligation and time already paused before conversion.
       await tx.subscription.update({ where: { id: row.id }, data: { status: 'ACTIVE', isTrialActive: false } });
       await currentDunningClock(tx, row.id, now);
       return 1;

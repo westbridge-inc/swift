@@ -83,9 +83,14 @@ describe('the CI gate — no route may fork the rule again', () => {
     }
     expect(offenders).toEqual([]); // an inline copy of the rule is a build failure
 
-    for (const gate of ['modules/driver/driver.routes.ts', 'modules/rider/rider.routes.ts', 'modules/vendor/vendor.routes.ts']) {
-      expect(readFileSync(join(SRC, gate), 'utf8')).toContain('subscriptionOperability');
+    for (const gate of ['modules/driver/driver.routes.ts', 'modules/rider/rider.routes.ts']) {
+      const source = readFileSync(join(SRC, gate), 'utf8');
+      expect(source).toContain('moverFeeOperability(app.prisma');
+      expect(source).toContain('moverFeeOperability(tx');
+      expect(source).toContain('lockMoverSources(tx');
     }
+    expect(readFileSync(join(SRC, 'modules/subscription/mover-fee-authority.ts'), 'utf8')).toContain('subscriptionOperability(gated, opts, now)');
+    expect(readFileSync(join(SRC, 'modules/vendor/vendor.routes.ts'), 'utf8')).toContain('subscriptionOperability');
   });
 });
 
