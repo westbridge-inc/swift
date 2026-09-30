@@ -24,7 +24,7 @@ grantSuiteCapability('ddl');
 //
 // Two independent controls, because either alone leaves a hole:
 //   * the READ binds `id + tenantId` and validates `entityType`, so a corrupt
-//     row that already exists resolves UNAVAILABLE — and, critically, never
+//     row that already exists resolves as MISSING — and, critically, never
 //     discloses the foreign vendor's slug;
 //   * a constraint TRIGGER refuses to write such a row at all.
 // ---------------------------------------------------------------------------
@@ -100,7 +100,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await prisma.$executeRawUnsafe(`DELETE FROM "qr_codes" WHERE "shortCode" LIKE 'LIN${RUN.slice(0, 4).toUpperCase()}%'`).catch(() => 0);
   await prisma.$executeRawUnsafe(`DELETE FROM "slug_redirects" WHERE "entityId" IN ($1, $2)`, vendorA, vendorB).catch(() => 0);
-  await prisma.vendor.deleteMany({ where: { id: { in: [vendorA, vendorB, vendorLive, vendorCredit] } } }).catch(() => {});
+  await prisma.qrCode.deleteMany({ where: { entityId: { in: [vendorLive, vendorCredit, vendorMove] } } });
+  await prisma.vendor.deleteMany({ where: { id: { in: [vendorA, vendorB, vendorLive, vendorCredit, vendorMove] } } }).catch(() => {});
   if (ownerId) await prisma.vendorOwner.deleteMany({ where: { userId: ownerId } }).catch(() => {});
   if (ownerId) await prisma.user.deleteMany({ where: { id: ownerId } }).catch(() => {});
   await prisma.tenant.deleteMany({ where: { id: { in: [tenantA, tenantB] } } }).catch(() => {});
@@ -150,7 +151,7 @@ describe('[PR1197-S1-04] storage refuses a QR row whose target is in another ten
 });
 
 describe('[PR1197-S1-04] the resolver never discloses a foreign vendor', () => {
-  it('a legacy cross-tenant row resolves UNAVAILABLE and leaks no slug', async () => {
+  it('a legacy cross-tenant row takes the missing-code path and leaks no slug or tenant', async () => {
     // The trigger cannot fix rows that predate it, so the READ must fail closed
     // independently. A pre-migration row is written with the trigger off — but
     // [review] `ALTER TABLE ... DISABLE TRIGGER` autocommits and is visible to
@@ -167,9 +168,7 @@ describe('[PR1197-S1-04] the resolver never discloses a foreign vendor', () => {
     });
 
     const found = await svc.findByShortCode(code('LG'));
-    expect(found, 'the row itself still resolves — it is a real code').not.toBeNull();
-    expect(found!.tenantId, 'and it still names ITS OWN tenant').toBe(tenantA);
-    expect(found!.entity, 'but the foreign target is not resolved').toBeNull();
+    expect(found, 'a corrupt legacy row must be indistinguishable from an unknown code').toBeNull();
     expect(JSON.stringify(found), 'and nothing in the answer discloses the other tenant’s storefront').not.toContain(slugB);
   });
 
@@ -187,8 +186,7 @@ describe('[PR1197-S1-04] the resolver never discloses a foreign vendor', () => {
 
     const found = await new QrService(futureType).findByShortCode(code('FT'));
 
-    expect(found, 'the code row still resolves').not.toBeNull();
-    expect(found!.entity, 'but an unresolvable type yields no entity').toBeNull();
+    expect(found, 'an unresolvable type takes the missing-code path').toBeNull();
     expect(vendorLookups, 'and the vendor table was never asked').toBe(0);
     expect(JSON.stringify(found)).not.toContain(slugB);
   });
@@ -203,7 +201,7 @@ describe('[PR1197-S1-04] the resolver never discloses a foreign vendor', () => {
     await prisma.tenant.update({ where: { id: tenantA }, data: { isActive: false } });
     try {
       const found = await svc.findByShortCode(code('LV'));
-      expect(found?.entity?.live, 'a code in a deactivated tenant is not live').toBe(false);
+      expect(found, 'a code in a deactivated tenant takes the missing-code path').toBeNull();
     } finally {
       await prisma.tenant.update({ where: { id: tenantA }, data: { isActive: true } });
     }
@@ -290,7 +288,7 @@ describe('[PR1197-S1-04] a vendor cannot walk away from its printed codes', () =
 
   it('the supported move carries the printed code with it — the sticker keeps working', async () => {
     const minted = await svc.getOrCreateForVendor(vendorMove, ownerId);
-    expect((await svc.findByShortCode(minted.shortCode))?.entity).not.toBeNull();
+    expect(await svc.findByShortCode(minted.shortCode)).toMatchObject({ status: 'ACTIVE', entity: { live: true } });
     try {
       await prisma.$executeRawUnsafe(`SELECT move_vendor_tenant($1, $2)`, vendorMove, tenantB);
 
@@ -298,7 +296,7 @@ describe('[PR1197-S1-04] a vendor cannot walk away from its printed codes', () =
       // resolves after the move. The first attempt at this fix turned a
       // cross-tenant disclosure into a permanent dead code, which is worse.
       const resolved = await svc.findByShortCode(minted.shortCode);
-      expect(resolved?.entity, 'the ALREADY-PRINTED code still resolves after the move').not.toBeNull();
+      expect(resolved, 'the ALREADY-PRINTED code still resolves after the move').toMatchObject({ status: 'ACTIVE', entityId: vendorMove, entity: { live: true } });
       const row = await prisma.qrCode.findUniqueOrThrow({ where: { id: minted.id }, select: { tenantId: true, status: true } });
       expect(row.tenantId, 'the code moved with its vendor').toBe(tenantB);
       expect(row.status, 'and it is still the live code, not deactivated history').toBe('ACTIVE');
@@ -309,7 +307,7 @@ describe('[PR1197-S1-04] a vendor cannot walk away from its printed codes', () =
 
   it('leaves no row of any credit table behind in the old tenant', async () => {
     const minted = await svc.getOrCreateForVendor(vendorMove, ownerId);
-    await prisma.scanEvent.create({ data: { tenantId: tenantA, qrCodeId: minted.id, decision: 'WEB_RENDER' } }).catch(() => {});
+    await prisma.scanEvent.create({ data: { tenantId: tenantA, qrCodeId: minted.id, decision: 'WEB_RENDER' } });
     try {
       await prisma.$executeRawUnsafe(`SELECT move_vendor_tenant($1, $2)`, vendorMove, tenantB);
       const stranded = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(

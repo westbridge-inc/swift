@@ -1,6 +1,8 @@
 import type { PrismaClient, QrCode } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { generateShortCode, type QrLookup } from './qr-codes';
+import { VISIBLE_VENDOR } from '../vendor/vendor-visibility';
+import { runAsSystem } from '../../plugins/tenant-context';
 
 // ---------------------------------------------------------------------------
 // QrCode lifecycle. One ACTIVE code per entity, enforced by the raw-SQL
@@ -13,14 +15,6 @@ import { generateShortCode, type QrLookup } from './qr-codes';
  *  code keeps resolving. Printed materials die slowly. */
 export const QR_GRACE_CONFIG_KEY = 'qr.supersede_grace_days';
 export const QR_GRACE_DEFAULT_DAYS = 30;
-
-/** The resolver's row-4 liveness rule — the SAME predicate the public
- *  storefront surface uses (public.routes.ts PUBLIC_WHERE): live commerce only,
- *  and a scan of anything else explains nothing (no suspension leakage). */
-// [F-028-07] tenant.isActive is part of the rule: a scan of a code whose
-// OPERATOR the platform deactivated used to classify as a live destination.
-const publiclyLive = (vendor: { status: string; isVerified: boolean; tenant?: { isActive: boolean } | null }): boolean =>
-  vendor.status === 'ACTIVE' && vendor.isVerified && vendor.tenant?.isActive === true;
 
 export type QrLookupRow = QrLookup & { id: string; tenantId: string; version: number; entityId: string };
 
@@ -40,39 +34,45 @@ export class QrService {
    *  for classifyScan. Unauthenticated path — runs without tenant context by
    *  design (shortCode is globally unique; the row itself names its tenant). */
   async findByShortCode(shortCode: string): Promise<QrLookupRow | null> {
-    const qr = await this.prisma.qrCode.findUnique({
-      where: { shortCode },
-      select: { id: true, tenantId: true, shortCode: true, status: true, supersededAt: true, version: true, entityId: true, entityType: true },
+    // This is always a PUBLIC lookup, even if a caller has a REVIEW session.
+    // The named system capability permits the globally unique code lookup
+    // under the app's RLS client; the destination is explicitly tenant-bound
+    // and PRODUCTION-only. Hidden targets take the missing path BEFORE any
+    // lifecycle classification, including retired codes and app-open reports.
+    return runAsSystem('public-qr-resolution', async () => {
+      const qr = await this.prisma.qrCode.findUnique({
+        where: { shortCode },
+        select: { id: true, tenantId: true, shortCode: true, status: true, supersededAt: true, version: true, entityId: true, entityType: true },
+      });
+      if (!qr || qr.entityType !== 'VENDOR') return null;
+      // [PR1197-S1-04] THE TARGET MUST BELONG TO THE CODE'S OWN TENANT.
+      //
+      // This looked up the vendor by `id` ALONE. The resolver is deliberately
+      // unauthenticated — a printed code names its own tenant — so nothing else
+      // bound the two, and a malformed or migrated row could pair tenant A's QR
+      // code with tenant B's storefront. AttributionService then persists that
+      // pairing: tenant A gets the credit, tenant B gets the traffic, and the
+      // attribution ledger records something that never happened.
+      //
+      // `entityType` is checked for the same reason. It is a single-valued enum
+      // today, which is exactly when a polymorphic read is written without a
+      // check and exactly when the second value silently breaks it.
+      const vendor = await this.prisma.vendor.findFirst({
+        where: { ...VISIBLE_VENDOR, id: qr.entityId, tenantId: qr.tenantId, tenant: { isActive: true, kind: 'PRODUCTION' } },
+        select: { slug: true },
+      });
+      if (!vendor) return null;
+      return {
+        id: qr.id,
+        tenantId: qr.tenantId,
+        shortCode: qr.shortCode,
+        status: qr.status,
+        supersededAt: qr.supersededAt,
+        version: qr.version,
+        entityId: qr.entityId,
+        entity: { live: true, slug: vendor.slug },
+      };
     });
-    if (!qr) return null;
-    // [PR1197-S1-04] THE TARGET MUST BELONG TO THE CODE'S OWN TENANT.
-    //
-    // This looked up the vendor by `id` ALONE. The resolver is deliberately
-    // unauthenticated — a printed code names its own tenant — so nothing else
-    // bound the two, and a malformed or migrated row could pair tenant A's QR
-    // code with tenant B's storefront. AttributionService then persists that
-    // pairing: tenant A gets the credit, tenant B gets the traffic, and the
-    // attribution ledger records something that never happened.
-    //
-    // `entityType` is checked for the same reason. It is a single-valued enum
-    // today, which is exactly when a polymorphic read is written without a
-    // check and exactly when the second value silently breaks it.
-    const vendor = qr.entityType === 'VENDOR'
-      ? await this.prisma.vendor.findFirst({
-        where: { id: qr.entityId, tenantId: qr.tenantId },
-        select: { slug: true, status: true, isVerified: true, tenant: { select: { isActive: true } } },
-      })
-      : null;
-    return {
-      id: qr.id,
-      tenantId: qr.tenantId,
-      shortCode: qr.shortCode,
-      status: qr.status,
-      supersededAt: qr.supersededAt,
-      version: qr.version,
-      entityId: qr.entityId,
-      entity: vendor ? { live: publiclyLive(vendor), slug: vendor.slug } : null,
-    };
   }
 
   /** Idempotent get-or-create of the entity's ACTIVE code. Concurrency-safe:
