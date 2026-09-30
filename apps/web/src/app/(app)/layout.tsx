@@ -1,8 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getSessionPrincipal, restoreSession, sessionProbe, subscribeSession } from '@/lib/auth';
 import { getMarketDepth } from '@/lib/customer';
 import { marketTabVisible } from '@/lib/app-rules';
@@ -214,9 +214,23 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** Observe after page children: a public page can hydrate the shared query
- * before the shell subscribes. This avoids a duplicate cold depth request. */
+/** The Market page owns depth while its server response streams. Merely
+ * disabling useQuery would still create an empty entry and defer hydration. */
 function MarketAvailability({ onChange }: { onChange: (_visible: boolean) => void }) {
+  const pathname = usePathname();
+  return pathname === '/market' ? <HydratedMarketAvailability onChange={onChange} /> : <QueriedMarketAvailability onChange={onChange} />;
+}
+
+function HydratedMarketAvailability({ onChange }: { onChange: (_visible: boolean) => void }) {
+  const client = useQueryClient();
+  const subscribe = useCallback((notify: () => void) => client.getQueryCache().subscribe(notify), [client]);
+  const snapshot = useCallback(() => marketTabVisible(client.getQueryData(['market', 'depth'])), [client]);
+  const visible = useSyncExternalStore(subscribe, snapshot, snapshot);
+  useEffect(() => { onChange(visible); }, [onChange, visible]);
+  return null;
+}
+
+function QueriedMarketAvailability({ onChange }: { onChange: (_visible: boolean) => void }) {
   const market = useQuery({ queryKey: ['market', 'depth'], queryFn: getMarketDepth, staleTime: 5 * 60_000, retry: false });
   const visible = marketTabVisible(market.data);
   useEffect(() => { onChange(visible); }, [onChange, visible]);

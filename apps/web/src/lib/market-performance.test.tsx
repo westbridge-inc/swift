@@ -1,7 +1,9 @@
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { HydrationBoundary } from '@tanstack/react-query';
-import { renderToString } from 'react-dom/server';
+import { renderToPipeableStream, renderToString } from 'react-dom/server';
+import { lazy, Suspense } from 'react';
+import { PassThrough } from 'node:stream';
 import { loadMarket } from './market-server';
 import { MarketPrefetch } from '@/components/market-prefetch';
 import { mayPrefetch } from './market-queries';
@@ -80,6 +82,26 @@ describe('Market request phases and server rendering', () => {
     await screen.findByText('Test hammer');
     await waitFor(() => expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/auth/me'))).toBe(true));
     expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual(['http://vendor-api.test/api/v1/auth/me']);
+  });
+
+  it('renders catalogue HTML even when the Market segment streams after the shell', async () => {
+    mockApi(({ url }) => ok(url.pathname.endsWith('/depth') ? { visible: true, items: 400, vendors: 6 } : url.pathname.endsWith('/categories') ? rail : items));
+    const page = await MarketLayout({ children: <MarketPage /> });
+    const Delayed = lazy(() => new Promise<{ default: () => React.ReactNode }>((resolve) => {
+      setTimeout(() => resolve({ default: () => page }), 20);
+    }));
+    const html = await new Promise<string>((resolve, reject) => {
+      const output = new PassThrough();
+      let chunks = '';
+      output.on('data', (chunk) => { chunks += String(chunk); });
+      output.on('end', () => resolve(chunks));
+      const stream = renderToPipeableStream(<AppLayout><Suspense fallback={<p>Opening Market</p>}><Delayed /></Suspense></AppLayout>, {
+        onShellReady() { stream.pipe(output); }, onError: reject,
+      });
+    });
+    const markup = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+    expect(markup).toContain('Test hammer');
+    expect(markup).not.toContain('Loading market items');
   });
 
   it('prefetches the focused category, deduplicates hover, and reuses it on navigation', async () => {

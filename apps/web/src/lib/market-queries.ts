@@ -1,12 +1,6 @@
-import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
-import { getMarketCategories, getMarketDepth, getMarketItems } from './customer';
+import { infiniteQueryOptions } from '@tanstack/react-query';
+import { getMarketItems } from './customer';
 
-export const marketDepthQuery = () => queryOptions({
-  queryKey: ['market', 'depth'], queryFn: getMarketDepth, staleTime: 5 * 60_000, retry: false,
-});
-export const marketCategoriesQuery = () => queryOptions({
-  queryKey: ['market', 'categories'], queryFn: getMarketCategories, staleTime: 60_000,
-});
 export const marketItemsQuery = (category: string) => infiniteQueryOptions({
   queryKey: ['market', 'items', category],
   queryFn: ({ pageParam }) => getMarketItems({ category: category || undefined, cursor: pageParam }),

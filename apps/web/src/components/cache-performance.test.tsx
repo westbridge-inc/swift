@@ -8,6 +8,7 @@ import ProfilePage from '@/app/(app)/account/profile/page';
 import SearchPage from '@/app/(app)/order/search/page';
 import OrdersPage from '@/app/(app)/orders/page';
 import type { ReactNode } from 'react';
+import { onlineManager } from '@tanstack/react-query';
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn(), replace: vi.fn() }), usePathname: () => '/account' }));
 const session: CustomerSession = { status: 'signed-in', scope: 'person-a', epoch: 0, ensureSignedIn: async () => true, nearPoint: null, setNearPoint: () => undefined };
@@ -102,5 +103,21 @@ describe('per-person reuse without changing live money reads', () => {
     await screen.findByText('Delivered');
     expect(screen.getByText('GY$1,500')).toBeTruthy();
     expect(count).toBe(2);
+  });
+
+  it('does not present cached orders as current when a refetch is paused offline', async () => {
+    mockApi(() => ok([{ id: 'o1', vendorName: 'Test store', status: 'PENDING', totalAmount: 1000 }]));
+    const view = renderWithQuery(wrap(<OrdersPage />));
+    await screen.findByText('Pending');
+    view.rerender(wrap(<div>away</div>));
+    onlineManager.setOnline(false);
+    try {
+      view.rerender(wrap(<OrdersPage />));
+      await screen.findByText('Waiting for connection…');
+      expect(screen.queryByText('Pending')).toBeNull();
+      expect(screen.queryByText('GY$1,000')).toBeNull();
+    } finally {
+      view.unmount(); onlineManager.setOnline(true);
+    }
   });
 });
