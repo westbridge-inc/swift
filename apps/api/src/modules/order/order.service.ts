@@ -1979,7 +1979,7 @@ export class OrderService {
    * Never throws: the order is already closed. */
   private async withdrawLiveOffer(orderId: string): Promise<void> {
     if (!this.offerStore) return;
-    await withdrawOfferOfClosedOrder({ prisma: this.prisma, redis: this.offerStore }, orderId);
+    await withdrawOfferOfClosedOrder({ prisma: this.prisma, redis: this.offerStore, io: this.io }, orderId);
   }
 
   /** Serialize a transition on the canonical Order lock, then publish only

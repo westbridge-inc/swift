@@ -27,6 +27,7 @@ import { LIVE_ORDER_STATUSES } from '../modules/order/order-status';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { AppError } from '../utils/errors';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
+import { dispatchWithdrawnCardKey } from '../modules/dispatch/dispatch-generation-keys';
 
 // ---------------------------------------------------------------------------
 // [DISPATCH 1/3] EXACTLY ONE WINNER — proven by racing it.
@@ -927,6 +928,114 @@ describe('[DISPATCH 1/3 · B4] every cancellation withdraws the card — through
     expect(await app.redis.get(`dispatch:mover-offer:${carded.riderId}`), 'the pointer went with the card').toBeNull();
     const next = await makeDelivery(await makeCustomer());
     expect((await dispatch.dispatchOrder(next.id)).offered).toBe(carded.riderId);
+  });
+});
+
+describe('[DISPATCH 1/3 · AX299 F2] a withdrawn card leaves the screen, and never costs the next one', () => {
+  // Withdrawing the card at the cancel frees the mover at once, so the next
+  // offer can ring a second later. An app never told the first card went kept
+  // it on top until its deadline; the new card queued behind it, was marked
+  // seen on arrival and could lapse hidden, charged as an ignored offer. The
+  // app is now told which card went; and, whatever the app does, an offer sent
+  // while a withdrawn card could still be on screen is never charged.
+
+  /** Every socket emit, recorded on its way to the real server. */
+  function recordEmits() {
+    const emits: Array<{ room: string; event: string; payload: unknown }> = [];
+    const realTo = app.io.to.bind(app.io);
+    const spy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => {
+      const target = realTo(room);
+      return new Proxy(target, {
+        get(t, prop, receiver) {
+          if (prop === 'emit') {
+            return (event: string, ...args: unknown[]) => {
+              emits.push({ room, event, payload: args[0] });
+              return (t.emit as (...a: unknown[]) => boolean)(event, ...args);
+            };
+          }
+          const value = Reflect.get(t, prop, receiver) as unknown;
+          return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(t) : value;
+        },
+      });
+    }) as never);
+    return { withdrawals: () => emits.filter((e) => e.event === 'dispatch:offer_withdrawn'), restore: () => spy.mockRestore() };
+  }
+
+  it('taxi and delivery: a customer cancel tells the mover\'s app exactly which card went — order and attempt', async () => {
+    await park();
+    const taxiCustomer = await makeCustomer();
+    const driver = await makeDriver(SPOT);
+    const ride = await makeTaxi(taxiCustomer);
+    const rideCard = await offer(ride.id, (await dispatch.dispatchOrder(ride.id)).offered!);
+    const shopper = await makeCustomer();
+    const rider = await makeRider(SPOT);
+    const order = await makeDelivery(shopper);
+    const orderCard = await offer(order.id, (await dispatch.dispatchOrder(order.id)).offered!);
+    expect([rideCard.moverId, orderCard.moverId]).toEqual([driver.driverId, rider.riderId]);
+
+    const tap = recordEmits();
+    try {
+      expect((await call('POST', `/api/v1/rides/${ride.id}/cancel`, taxiCustomer.token, {})).statusCode).toBe(200);
+      expect((await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, shopper.token, {})).statusCode).toBe(200);
+    } finally {
+      tap.restore();
+    }
+    expect(tap.withdrawals()).toEqual([
+      { room: `user:${driver.userId}`, event: 'dispatch:offer_withdrawn', payload: { orderId: ride.id, offerAttemptId: rideCard.attemptId, reason: 'ORDER_CANCELLED' } },
+      { room: `user:${rider.userId}`, event: 'dispatch:offer_withdrawn', payload: { orderId: order.id, offerAttemptId: orderCard.attemptId, reason: 'ORDER_CANCELLED' } },
+    ]);
+  });
+
+  it('an offer sent while a withdrawn card could still be on screen never earns an expiry penalty; once that card would have run out, a lapsed card costs what it always did', async () => {
+    await park();
+    const carded = await makeDriver(SPOT);
+    const customer = await makeCustomer();
+    const first = await makeTaxi(customer);
+    const a = await offer(first.id, (await dispatch.dispatchOrder(first.id)).offered!);
+    expect((await call('POST', '/api/v1/driver/offers/seen', carded.token, { orderId: first.id, offerAttemptId: a.attemptId })).statusCode).toBe(200);
+    expect((await call('POST', `/api/v1/rides/${first.id}/cancel`, customer.token, {})).statusCode).toBe(200);
+    const rate = async () => Number((await driverRow(carded.driverId)).acceptanceRate);
+    const before = await rate();
+
+    // The freed driver is offered B at once. An app still showing A marks B
+    // seen as it queues behind it; B lapses unanswered.
+    const second = await makeTaxi(await makeCustomer());
+    const b = await offer(second.id, (await dispatch.dispatchOrder(second.id)).offered!);
+    expect(b.moverId).toBe(carded.driverId);
+    expect((await call('POST', '/api/v1/driver/offers/seen', carded.token, { orderId: second.id, offerAttemptId: b.attemptId })).statusCode).toBe(200);
+    await dispatch.handleOfferTimeout(second.id, carded.driverId, b.attemptId);
+    expect(await rate(), 'B was sent while the withdrawn card A could still be on the screen').toBe(before);
+    // The expiry itself is still recorded, and the card is gone: only the charge is spared.
+    expect(await expiryLogged(carded.driverId, second.id, b.attemptId)).toBe(true);
+    expect((await offerOf(second.id))?.attemptId).not.toBe(b.attemptId);
+
+    // As if A's countdown had run out: a card seen and ignored costs again.
+    await app.redis.set(dispatchWithdrawnCardKey(carded.driverId), String(Date.now() - 60_000), 'PX', 60_000);
+    const third = await makeTaxi(await makeCustomer());
+    const c = await offer(third.id, (await dispatch.dispatchOrder(third.id)).offered!);
+    expect(c.moverId).toBe(carded.driverId);
+    expect((await call('POST', '/api/v1/driver/offers/seen', carded.token, { orderId: third.id, offerAttemptId: c.attemptId })).statusCode).toBe(200);
+    await dispatch.handleOfferTimeout(third.id, carded.driverId, c.attemptId);
+    expect(await rate()).toBeLessThan(before);
+  });
+
+  it('the same when the mover goes offline holding that next card: the released card is not charged either', async () => {
+    await park();
+    const carded = await makeDriver(SPOT);
+    const customer = await makeCustomer();
+    const first = await makeTaxi(customer);
+    const a = await offer(first.id, (await dispatch.dispatchOrder(first.id)).offered!);
+    expect((await call('POST', '/api/v1/driver/offers/seen', carded.token, { orderId: first.id, offerAttemptId: a.attemptId })).statusCode).toBe(200);
+    expect((await call('POST', `/api/v1/rides/${first.id}/cancel`, customer.token, {})).statusCode).toBe(200);
+    const before = Number((await driverRow(carded.driverId)).acceptanceRate);
+
+    const second = await makeTaxi(await makeCustomer());
+    const b = await offer(second.id, (await dispatch.dispatchOrder(second.id)).offered!);
+    expect(b.moverId).toBe(carded.driverId);
+    expect((await call('POST', '/api/v1/driver/offers/seen', carded.token, { orderId: second.id, offerAttemptId: b.attemptId })).statusCode).toBe(200);
+    await dispatch.releaseHeldOffer(carded.driverId);
+    expect((await offerOf(second.id))?.attemptId, 'the released card is gone').not.toBe(b.attemptId);
+    expect(Number((await driverRow(carded.driverId)).acceptanceRate), 'B was sent while A could still be on the screen').toBe(before);
   });
 });
 

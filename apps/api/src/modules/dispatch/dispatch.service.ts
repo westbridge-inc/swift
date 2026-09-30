@@ -46,6 +46,7 @@ import {
   dispatchGenerationInitKey,
   dispatchReplayTag,
   dispatchRoundKey,
+  dispatchWithdrawnCardKey,
   exhaustJobKey,
   redispatchJobId,
 } from './dispatch-generation-keys';
@@ -329,6 +330,11 @@ function isUniqueViolationOn(error: unknown, column: string): boolean {
   const target = e.meta?.target;
   return target === undefined || (Array.isArray(target) ? target.includes(column) : String(target).includes(column));
 }
+
+/** [AX299 F2] How far past a withdrawn card's server deadline it may still
+ *  be on the mover's screen: the app stamps its own deadline on arrival, a
+ *  network hop later and rounded up to whole seconds. */
+const WITHDRAWN_CARD_SCREEN_SKEW_MS = 3_000;
 
 /** An order should have been in the cascade this long before we treat a
  *  missing offer key as LOST STATE rather than an in-flight gap. */
@@ -2068,6 +2074,40 @@ export class DispatchService {
     return !!ping && (ping.seenAt !== null || ping.acknowledgedAt !== null);
   }
 
+  /** [AX299 F2] Was this card sent while a card withdrawn from under the same
+   *  mover (its order closed) could still be on their screen? An app that never
+   *  heard of that withdrawal kept the dead card on top of its queue until the
+   *  dead card's own deadline, and this one waited behind it: seen on arrival
+   *  by an older app, or shown with its window half gone. Its lapse is never
+   *  charged then, whatever the render proof says. Read from the marker
+   *  offer-withdrawal.ts writes and from this attempt's own evidence row (when
+   *  the card was sent). Fails fair, like the render proof: a read that fails
+   *  spares the mover. */
+  private async shadowedByWithdrawnCard(orderId: string, moverId: string, pool: DispatchPool, attemptId?: string): Promise<boolean> {
+    try {
+      const raw = await this.redis.get(dispatchWithdrawnCardKey(moverId));
+      const shownUntil = raw ? Number(raw) : Number.NaN;
+      if (!Number.isFinite(shownUntil)) return false;
+      const mover = pool === 'DRIVER'
+        ? await this.prisma.driver.findUnique({ where: { id: moverId }, select: { userId: true } })
+        : await this.prisma.rider.findUnique({ where: { id: moverId }, select: { userId: true } });
+      if (!mover) return false;
+      const sent = await this.prisma.alertDelivery.findFirst({
+        where: {
+          kind: 'MOVER_OFFER',
+          subjectId: orderId,
+          recipientId: mover.userId,
+          ...(attemptId ? { offerAttemptId: attemptId } : {}),
+        },
+        orderBy: { sentAt: 'desc' },
+        select: { sentAt: true },
+      });
+      return !!sent && sent.sentAt.getTime() < shownUntil + WITHDRAWN_CARD_SCREEN_SKEW_MS;
+    } catch {
+      return true;
+    }
+  }
+
   /** Timeout: the offer lapsed unanswered — penalise softly and move on.
    *  [F-014-04] attemptId (present on every job armed after the cutover)
    *  binds the whole consequence chain — removal, decline mark, decay,
@@ -2102,7 +2142,11 @@ export class DispatchService {
     // they never saw. [F-014-04] The evidence read is scoped to THIS
     // generation's row; [F-014-10] a MISSING row (the fire-and-caught insert
     // failed) is absence of proof, not proof of delivery — spared too.
-    if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
+    // [AX299 F2] And a card sent while a withdrawn one could still be on the
+    // screen is never charged, render proof or not.
+    if (await this.shadowedByWithdrawnCard(orderId, moverId, pool, attemptId)) {
+      log().info({ orderId, moverId, pool, attemptId }, 'dispatch: offer timeout behind a withdrawn card that could still be on screen — acceptance rate spared');
+    } else if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
       await this.recordOfferOutcome(moverId, false, pool);
     } else {
       log().info({ orderId, moverId, pool, attemptId }, 'dispatch: offer timeout UNDELIVERABLE — no render proof, acceptance rate spared');
@@ -2147,8 +2191,11 @@ export class DispatchService {
     await this.redis.expire(declinedKey(orderId, offerVersion), 3600);
     // [F-014-10] Same fail-fair law as the timeout: a release racing the
     // publish tail — before the socket emit ever ran — must not charge the
-    // mover a miss for a card that never reached a screen.
-    if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
+    // mover a miss for a card that never reached a screen. [AX299 F2] Nor
+    // for one sent while a withdrawn card could still be on it.
+    if (await this.shadowedByWithdrawnCard(orderId, moverId, pool, attemptId)) {
+      log().info({ orderId, moverId, pool, attemptId }, 'dispatch: released offer sat behind a withdrawn card that could still be on screen — acceptance rate spared');
+    } else if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
       await this.recordOfferOutcome(moverId, false, pool);
     } else {
       log().info({ orderId, moverId, pool, attemptId }, 'dispatch: released offer had no render proof — acceptance rate spared');
@@ -2396,17 +2443,17 @@ export class DispatchService {
         FOR SHARE
       `;
       const row = rows[0];
-      if (!row) return { kind: 'missing' as const };
-      if (row.status === 'CANCELLED') return { kind: 'cancelled' as const, row };
+      if (!row) return { found: 'missing' as const };
+      if (row.status === 'CANCELLED') return { found: 'cancelled' as const, row };
       const holder = pool === 'DRIVER' ? row.driverId : row.riderId;
       if (holder === moverId && !TERMINAL_ORDER_STATUSES.includes(row.status)) {
-        return { kind: 'held' as const, assignment: await this.committedAssignment(tx, orderId) };
+        return { found: 'held' as const, assignment: await this.committedAssignment(tx, orderId) };
       }
-      return { kind: 'elsewhere' as const, holder };
+      return { found: 'elsewhere' as const, holder };
     });
-    if (verdict.kind === 'missing') throw new NotFoundError('Order', orderId);
-    if (verdict.kind === 'cancelled') throw this.orderCancelled(verdict.row);
-    if (verdict.kind === 'held') return verdict.assignment;
+    if (verdict.found === 'missing') throw new NotFoundError('Order', orderId);
+    if (verdict.found === 'cancelled') throw this.orderCancelled(verdict.row);
+    if (verdict.found === 'held') return verdict.assignment;
     if (verdict.holder && verdict.holder !== moverId && !(await this.offerRanOut(orderId, moverId))) {
       throw this.offerTaken(pool);
     }
@@ -3026,7 +3073,7 @@ export class DispatchService {
           if (released.count === 0) await this.pageHeldPaidMmgRide(order);
           if (released.count > 0) {
             // [DISPATCH 1/3 · B4] A card a re-sweep installed meanwhile goes with the ride.
-            await withdrawOfferOfClosedOrder({ prisma: this.prisma, redis: this.redis }, order.id);
+            await withdrawOfferOfClosedOrder({ prisma: this.prisma, redis: this.redis, io: this.io }, order.id);
             await this.prisma.orderStatusLog
               .create({ data: { orderId: order.id, status: 'CANCELLED', changedBy: 'system', note: `Released after ${TAXI_WAIT_LIMIT_MIN} min — no drivers available` } })
               .catch(() => {});

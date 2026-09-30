@@ -20,6 +20,13 @@ export const deliveryGenerationSuffix = (version?: number | null): string =>
 export const dispatchOfferKey = (orderId: string): string => `dispatch:offer:${orderId}`;
 export const dispatchMoverOfferKey = (moverId: string): string => `dispatch:mover-offer:${moverId}`;
 
+/** [AX299 F2] A card withdrawn from under this mover (its order closed) may
+ *  still be on their screen until its own deadline, if the withdrawal event
+ *  never reached the app. Valued with that deadline (ms since epoch; the latest
+ *  when several), kept a while past it: offer-withdrawal.ts writes it, and an
+ *  offer sent to the mover before that deadline never earns an expiry penalty. */
+export const dispatchWithdrawnCardKey = (moverId: string): string => `dispatch:withdrawn-card:${moverId}`;
+
 export const dispatchDeclinedKey = (orderId: string, version?: number | null): string =>
   `dispatch:declined:${orderId}${deliveryGenerationSuffix(version)}`;
 
