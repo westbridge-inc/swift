@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Order, PrismaClient, RideClass, VehicleType } from '@prisma/client';
+import type { Order, OrderStatus, PrismaClient, RideClass, VehicleType } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
@@ -28,6 +28,7 @@ import { clampDriverFare } from '../../utils/markup';
 import { assertMmgFulfilmentAllowed } from '../order/order.service';
 import { mmgDispatchBlocked } from '../order/mmg-claim.service';
 import { FloatService, riderFloatForOrder } from './float.service';
+import { withdrawOfferOfClosedOrder } from './offer-withdrawal';
 import {
   hasTaxiPassengerCustody,
   lockTaxiOrderForCustodyDecision,
@@ -38,13 +39,17 @@ import { stackVerdict } from './stack-eligibility';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, riderDispatchReadinessFilter, withheldAwaitingReadiness } from './dispatch-trigger';
 import {
   dispatchDeclinedKey,
+  dispatchMoverOfferKey,
+  dispatchOfferKey,
   dispatchExhaustKey,
   dispatchExhaustLockKey,
   dispatchGenerationInitKey,
   dispatchReplayTag,
   dispatchRoundKey,
+  dispatchWithdrawnCardsKey,
   exhaustJobKey,
   redispatchJobId,
+  WITHDRAWN_CARD_SCREEN_SKEW_MS,
 } from './dispatch-generation-keys';
 
 declare module 'fastify' {
@@ -152,7 +157,7 @@ function verticalForOrder(order: { orderType: string }): string {
   return 'DELIVERY';
 }
 
-const offerKey = (orderId: string) => `dispatch:offer:${orderId}`;
+const offerKey = dispatchOfferKey;
 /** Installed but not yet armed for publication. Never survives promotion of
  * an emitted card; slow evidence/push must not make that card look orphaned. */
 const offerPendingKey = (orderId: string, attemptId: string) => `dispatch:offer-pending:${orderId}:${attemptId}`;
@@ -281,7 +286,7 @@ const deliveryOfferAttemptId = (version: number) => `${randomUUID()}~fv${version
 // re-validated against the authoritative offerKey before use, so a stale
 // pointer is a safe no-op, never a wrong release. Lets go-offline find and
 // release a live offer without scanning every open order.
-const moverOfferKey = (moverId: string) => `dispatch:mover-offer:${moverId}`;
+const moverOfferKey = dispatchMoverOfferKey;
 const roundKey = dispatchRoundKey;
 const exhaustKey = dispatchExhaustKey;
 const reconciledKey = (orderId: string) => `dispatch:reconciled:${orderId}`;
@@ -318,6 +323,15 @@ function warnAfterClaimCommit(bindings: Record<string, unknown>, message: string
   }
 }
 
+/** A Prisma unique violation (P2002) on the given column. Duck-typed on the
+ *  error shape, so it reads the same through any client or transaction. */
+function isUniqueViolationOn(error: unknown, column: string): boolean {
+  const e = error as { code?: unknown; meta?: { target?: unknown } } | null;
+  if (e?.code !== 'P2002') return false;
+  const target = e.meta?.target;
+  return target === undefined || (Array.isArray(target) ? target.includes(column) : String(target).includes(column));
+}
+
 /** An order should have been in the cascade this long before we treat a
  *  missing offer key as LOST STATE rather than an in-flight gap. */
 export const RECONCILE_STUCK_MINUTES = 3;
@@ -351,6 +365,44 @@ interface GeoCandidateRow {
 type DispatchOrderAuthority = Pick<Order,
   'id' | 'orderType' | 'status' | 'fulfillment' | 'fulfillmentMode' |
   'fulfillmentModeVersion' | 'riderId' | 'driverId' | 'foodAgeHeldAt' | 'holdExpiresAt'>;
+
+/**
+ * [DISPATCH 1/3 · B1, ported from F-108-03] WHY WAS THIS CLAIM REFUSED?
+ *
+ * acceptOffer used to answer every refusal it did not special-case by putting
+ * the mover in the declined set for an hour. ALREADY_TAKEN fell there, so the
+ * LOSER of a race was recorded as having declined. They did not decline, they
+ * were beaten to it, and when the winner later cancelled or handed the job
+ * back, that stale marker kept an eligible mover off the reopened job.
+ *
+ * A typed outcome, and only ONE of the four is about this mover:
+ *
+ *   order-held        nobody may claim it right now (a hold, not a person)
+ *   lost-race         somebody else holds it, or it was cancelled under them
+ *   mover-ineligible  THIS mover cannot take it; another mover can
+ *   unknown           we do not know, so we charge it to nobody
+ */
+export type ClaimRefusal = 'order-held' | 'lost-race' | 'mover-ineligible' | 'unknown';
+
+const ORDER_HELD_CLAIM_CODES: ReadonlySet<string> = new Set(['ORDER_NOT_READY', 'ORDER_HELD', 'MMG_CLAIM_MISMATCH', 'MMG_PAYMENT_PENDING']);
+const LOST_RACE_CLAIM_CODES: ReadonlySet<string> = new Set(['ALREADY_TAKEN', 'OFFER_TAKEN', 'ORDER_CANCELLED']);
+const MOVER_INELIGIBLE_CLAIM_CODES: ReadonlySet<string> = new Set([
+  'MOVER_INACTIVE', 'CAPACITY_EXCEEDED', 'DRIVER_BUSY', 'FLOAT_EXCEEDED', 'STACK_INELIGIBLE', 'SELF_OWN_ORDER',
+]);
+
+export function classifyClaimRefusal(error: unknown): ClaimRefusal {
+  if (!(error instanceof AppError)) return 'unknown';
+  if (ORDER_HELD_CLAIM_CODES.has(error.code)) return 'order-held';
+  if (LOST_RACE_CLAIM_CODES.has(error.code)) return 'lost-race';
+  if (MOVER_INELIGIBLE_CLAIM_CODES.has(error.code)) return 'mover-ineligible';
+  return 'unknown';
+}
+
+/** Only a refusal that is about this mover may put them in the declined set.
+ *  A hold, a lost race or an unknown failure marks nobody. */
+export function claimRefusalMarksTheMover(outcome: ClaimRefusal): boolean {
+  return outcome === 'mover-ineligible';
+}
 
 export class DispatchService {
   private notifications: NotificationService;
@@ -766,6 +818,28 @@ export class DispatchService {
       attemptId ?? '',
     );
     return Number(removed) === 1;
+  }
+
+  /** [AX323 RR2-1] A mover's own decline or accept consumes the card it names,
+   *  and only a card it really consumed is acknowledged: exactly that attempt,
+   *  after the consume has proven it was the mover's live card. The offer
+   *  timeout reads the acknowledgment as proof the card reached the mover, so a
+   *  stale action (its attempt lapsed, a successor offered since) consumes
+   *  nothing and stamps nothing: never the successor, which may not have
+   *  reached the screen yet, and never the lapsed card's own history.
+   *  [AX358] `countsForMover` is false for an action that named NO attempt
+   *  (older app builds) when the card it consumed is a generated attempt: it
+   *  may have been meant for an earlier card of the same order, so it still
+   *  releases the live card but stamps nothing against it. */
+  private async consumeActedOffer(
+    orderId: string, moverId: string, moverUserId: string, attemptId: string | undefined, countsForMover: boolean,
+  ): Promise<boolean> {
+    const consumed = await this.removeOfferIfOwned(orderId, moverId, attemptId);
+    if (consumed && countsForMover) {
+      const { acknowledgeAlert } = await import('../notification/notification.service');
+      await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId, attemptId ?? null).catch(() => {});
+    }
+    return consumed;
   }
 
   /** [REPORT-014 F-014-06] Exhaustion is single-flight. The lock is
@@ -1969,25 +2043,22 @@ export class DispatchService {
    *  one the network ate. Scoped to the caller's own row — no cross-user
    *  effect — and idempotent (first render wins). */
   async markOfferSeen(orderId: string, moverUserId: string, offerAttemptId?: string): Promise<void> {
-    // [F-014-04] Render proof is evidence about ONE generation. Prefer the
-    // client's echoed attempt id; otherwise resolve the live attempt from the
-    // authoritative offer key so a late render of an old card can't stamp a
-    // newer attempt it never showed. The recipientId scope means a forged or
-    // foreign attempt id can only ever match the caller's own row.
-    let attemptId = offerAttemptId;
-    if (!attemptId) {
-      const live = await this.redis.get(offerKey(orderId));
-      attemptId = live ? parseOfferValue(live).attemptId : undefined;
-    }
+    // [F-014-04] Render proof is evidence about ONE generation: the attempt
+    // the client names. The recipientId scope means a forged or foreign
+    // attempt id can only ever match the caller's own row.
+    // [AX364] A ping that names NO attempt (older builds) never stamps a
+    // generated attempt. It used to be given the live attempt (or, with none
+    // live, every unseen row), so a delayed render of an earlier card of this
+    // order stamped a successor the mover never saw, and that successor's
+    // lapse or go-offline release was then charged. It reaches only the
+    // legacy pre-attempt row, like the acknowledgment [AX323 · AX358].
     await this.prisma.alertDelivery.updateMany({
       where: {
         kind: 'MOVER_OFFER',
         subjectId: orderId,
         recipientId: moverUserId,
         seenAt: null,
-        // Legacy shape (pre-attempt row + pre-attempt client + no live
-        // composite offer): fall back to the old unscoped stamp.
-        ...(attemptId ? { offerAttemptId: attemptId } : {}),
+        offerAttemptId: offerAttemptId ?? null,
       },
       data: { seenAt: new Date() },
     });
@@ -2018,12 +2089,76 @@ export class DispatchService {
     return !!ping && (ping.seenAt !== null || ping.acknowledgedAt !== null);
   }
 
+  /** [AX299 F2 · AX310] The cards withdrawn from under this mover that could
+   *  still be on their screen (offer-withdrawal.ts records them), read while
+   *  the card being judged still holds the mover's reservation. Once that
+   *  reservation is freed a NEWER card can be offered and withdrawn, and its
+   *  record must never excuse an earlier lapse. `null`: the read failed. */
+  private async withdrawnCardsOf(moverId: string): Promise<Array<{ withdrawnAt: number; shownUntil: number }> | null> {
+    try {
+      const flat = await this.redis.zrange(dispatchWithdrawnCardsKey(moverId), 0, -1, 'WITHSCORES');
+      const cards: Array<{ withdrawnAt: number; shownUntil: number }> = [];
+      for (let i = 0; i + 1 < flat.length; i += 2) {
+        const member = flat[i]!;
+        const withdrawnAt = Number(member.slice(0, member.indexOf(':')));
+        const shownUntil = Number(flat[i + 1]);
+        if (Number.isFinite(withdrawnAt) && Number.isFinite(shownUntil)) cards.push({ withdrawnAt, shownUntil });
+      }
+      return cards;
+    } catch {
+      return null;
+    }
+  }
+
+  /** [AX299 F2 · AX310] Could a withdrawn card have hidden THIS one? Only a
+   *  card withdrawn BEFORE this one was sent, whose own deadline (plus the
+   *  screen skew) was still ahead when it came: an app that never heard of
+   *  that withdrawal kept the dead card on top of its queue, and this one
+   *  waited behind it (seen on arrival by an older app, or shown with its
+   *  window half gone). Its lapse is never charged then, whatever the render
+   *  proof says. `withdrawn` is the record read before this card's reservation
+   *  was freed; when is "sent" comes from this attempt's own evidence row. The
+   *  same skew allows for the clocks of two API instances on the lower bound:
+   *  a card offered after this one lapsed was withdrawn a whole offer window
+   *  later. Fails fair, like the render proof: a failed read spares the mover. */
+  private async shadowedByWithdrawnCard(
+    orderId: string, moverId: string, pool: DispatchPool, attemptId: string | undefined,
+    withdrawn: Array<{ withdrawnAt: number; shownUntil: number }> | null,
+  ): Promise<boolean> {
+    if (withdrawn === null) return true;
+    if (withdrawn.length === 0) return false;
+    try {
+      const mover = pool === 'DRIVER'
+        ? await this.prisma.driver.findUnique({ where: { id: moverId }, select: { userId: true } })
+        : await this.prisma.rider.findUnique({ where: { id: moverId }, select: { userId: true } });
+      if (!mover) return false;
+      const sent = await this.prisma.alertDelivery.findFirst({
+        where: {
+          kind: 'MOVER_OFFER',
+          subjectId: orderId,
+          recipientId: mover.userId,
+          ...(attemptId ? { offerAttemptId: attemptId } : {}),
+        },
+        orderBy: { sentAt: 'desc' },
+        select: { sentAt: true },
+      });
+      if (!sent) return false;
+      const at = sent.sentAt.getTime();
+      return withdrawn.some((card) =>
+        card.withdrawnAt <= at + WITHDRAWN_CARD_SCREEN_SKEW_MS && at < card.shownUntil + WITHDRAWN_CARD_SCREEN_SKEW_MS);
+    } catch {
+      return true;
+    }
+  }
+
   /** Timeout: the offer lapsed unanswered — penalise softly and move on.
    *  [F-014-04] attemptId (present on every job armed after the cutover)
    *  binds the whole consequence chain — removal, decline mark, decay,
    *  redispatch — to the exact generation this job was scheduled for. A
    *  stale generation-1 job firing while generation 2 is live is a no-op. */
   async handleOfferTimeout(orderId: string, moverId: string, attemptId?: string): Promise<void> {
+    // [AX310] Read while this attempt still holds the mover's reservation.
+    const withdrawnBefore = await this.withdrawnCardsOf(moverId);
     const removed = await this.removeOfferIfOwned(orderId, moverId, attemptId);
     if (!removed) return; // answered or superseded — never delete the new offer
     const pool = await this.poolOf(orderId);
@@ -2052,7 +2187,11 @@ export class DispatchService {
     // they never saw. [F-014-04] The evidence read is scoped to THIS
     // generation's row; [F-014-10] a MISSING row (the fire-and-caught insert
     // failed) is absence of proof, not proof of delivery — spared too.
-    if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
+    // [AX299 F2] And a card sent while a withdrawn one could still be on the
+    // screen is never charged, render proof or not.
+    if (await this.shadowedByWithdrawnCard(orderId, moverId, pool, attemptId, withdrawnBefore)) {
+      log().info({ orderId, moverId, pool, attemptId }, 'dispatch: offer timeout behind a withdrawn card that could still be on screen — acceptance rate spared');
+    } else if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
       await this.recordOfferOutcome(moverId, false, pool);
     } else {
       log().info({ orderId, moverId, pool, attemptId }, 'dispatch: offer timeout UNDELIVERABLE — no render proof, acceptance rate spared');
@@ -2074,6 +2213,8 @@ export class DispatchService {
     const reverse = await this.redis.get(moverOfferKey(moverId));
     if (!reverse) return;
     const { id: orderId, attemptId } = parseOfferValue(reverse);
+    // [AX310] Read while this attempt still holds the mover's reservation.
+    const withdrawnBefore = await this.withdrawnCardsOf(moverId);
     // [F-014-04] Strict-generation release: if a NEWER attempt installed
     // between the read above and this consume, the compare misses and we
     // touch nothing — the newer offer's own lifecycle owns it.
@@ -2097,8 +2238,11 @@ export class DispatchService {
     await this.redis.expire(declinedKey(orderId, offerVersion), 3600);
     // [F-014-10] Same fail-fair law as the timeout: a release racing the
     // publish tail — before the socket emit ever ran — must not charge the
-    // mover a miss for a card that never reached a screen.
-    if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
+    // mover a miss for a card that never reached a screen. [AX299 F2] Nor
+    // for one sent while a withdrawn card could still be on it.
+    if (await this.shadowedByWithdrawnCard(orderId, moverId, pool, attemptId, withdrawnBefore)) {
+      log().info({ orderId, moverId, pool, attemptId }, 'dispatch: released offer sat behind a withdrawn card that could still be on screen — acceptance rate spared');
+    } else if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
       await this.recordOfferOutcome(moverId, false, pool);
     } else {
       log().info({ orderId, moverId, pool, attemptId }, 'dispatch: released offer had no render proof — acceptance rate spared');
@@ -2111,8 +2255,6 @@ export class DispatchService {
    *  mover actually saw; without it, wildcard mode still only ever consumes
    *  this authenticated mover's own live offer. */
   async declineOffer(orderId: string, moverUserId: string, offerAttemptId?: string): Promise<void> {
-    const { acknowledgeAlert } = await import('../notification/notification.service');
-    await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId).catch(() => {});
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
     let resolvedAttemptId = offerAttemptId;
@@ -2123,7 +2265,14 @@ export class DispatchService {
         if (parsed.id === mover.id) resolvedAttemptId = parsed.attemptId;
       }
     }
-    const removed = await this.removeOfferIfOwned(orderId, mover.id, resolvedAttemptId);
+    // [AX358] Only an action that names its attempt is evidence about the
+    // mover (or a legacy action on a legacy bare card, where neither side has
+    // one). A decline that names none may be a delayed one for an earlier card
+    // of this order: it still releases the live card and the cascade moves on,
+    // but a generated card it never identified is neither acknowledged nor
+    // charged.
+    const countsForMover = !!offerAttemptId || !resolvedAttemptId;
+    const removed = await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId, countsForMover);
     if (!removed) {
       throw new AppError(409, 'OFFER_EXPIRED', 'This offer is no longer yours to decline');
     }
@@ -2146,7 +2295,11 @@ export class DispatchService {
       : undefined;
     await this.redis.sadd(declinedKey(orderId, offerVersion), mover.id);
     await this.redis.expire(declinedKey(orderId, offerVersion), 3600);
-    await this.recordOfferOutcome(mover.id, false, pool);
+    if (countsForMover) {
+      await this.recordOfferOutcome(mover.id, false, pool);
+    } else {
+      log().info({ orderId, moverId: mover.id, pool, attemptId: resolvedAttemptId }, 'dispatch: a decline naming no attempt released a generated card — acceptance rate spared');
+    }
     // [ALG-01] An explicit decline is not an expiry: logged apart, counted by nobody as a gate.
     await this.redis.zadd(offerOutcomeKey(mover.id, 'declines'), Date.now(), `${orderId}:${resolvedAttemptId ?? ''}`).catch(() => {});
     await this.redis.expire(offerOutcomeKey(mover.id, 'declines'), OFFER_LOG_TTL_S).catch(() => {});
@@ -2197,8 +2350,6 @@ export class DispatchService {
    * every rider in town calls this at once, exactly one wins.
    */
   async acceptOffer(orderId: string, moverUserId: string, requestedFare?: number, offerAttemptId?: string) {
-    const { acknowledgeAlert } = await import('../notification/notification.service');
-    await acknowledgeAlert(this.prisma, 'MOVER_OFFER', orderId, moverUserId).catch(() => {});
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
 
@@ -2210,13 +2361,15 @@ export class DispatchService {
     let resolvedAttemptId = offerAttemptId;
     if (!resolvedAttemptId) {
       const live = await this.redis.get(offerKey(orderId));
-      if (!live) throw new AppError(409, 'OFFER_EXPIRED', 'This offer has expired or went to another mover');
-      const parsed = parseOfferValue(live);
-      if (parsed.id !== mover.id) {
-        throw new AppError(409, 'OFFER_EXPIRED', 'This offer has expired or went to another mover');
-      }
+      const parsed = live ? parseOfferValue(live) : null;
+      // [B3] No live card of this mover: the order row says why (their own
+      // earlier accept, a cancel, another mover, or an expired card).
+      if (!parsed || parsed.id !== mover.id) return this.explainLostOffer(orderId, mover.id, pool);
       resolvedAttemptId = parsed.attemptId;
     }
+    // [AX358] As in declineOffer: an accept that names no attempt may still
+    // take the live card, but it acknowledges no generated attempt.
+    const countsForMover = !!offerAttemptId || !resolvedAttemptId;
 
     // [REPORT-012 F-012-02] Prove the rail BEFORE consuming the exclusive
     // offer. A positive fare on a non-CASH order used to ride into claimOrder,
@@ -2245,7 +2398,7 @@ export class DispatchService {
       && rail != null
       && offeredVersion !== rail.fulfillmentModeVersion
     ) {
-      await this.removeOfferIfOwned(orderId, mover.id, resolvedAttemptId);
+      await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId, countsForMover);
       await this.dispatchOrder(orderId).catch(() => {});
       throw new AppError(409, 'OFFER_EXPIRED', 'Delivery ownership changed; refresh for the current offer');
     }
@@ -2256,9 +2409,9 @@ export class DispatchService {
     // next mover. If the DB claim loses, advance the cascade below.
     // [F-014-04] With a client-echoed attempt id this binds to the exact card
     // generation; wildcard is still mover-safe (own offer only).
-    const consumed = await this.removeOfferIfOwned(orderId, mover.id, resolvedAttemptId);
+    const consumed = await this.consumeActedOffer(orderId, mover.id, moverUserId, resolvedAttemptId, countsForMover);
     if (!consumed) {
-      throw new AppError(409, 'OFFER_EXPIRED', 'This offer has expired or went to another mover');
+      return this.explainLostOffer(orderId, mover.id, pool);
     }
 
     try {
@@ -2286,7 +2439,6 @@ export class DispatchService {
         if (authority.vendorDelivery) await this.retireForVendorDelivery(orderId, authority.deliveryAuthorityVersion);
         throw error;
       }
-      if (error instanceof AppError && ['ORDER_NOT_READY', 'ORDER_HELD'].includes(error.code)) throw error;
       if (error instanceof AppError && error.code === 'OFFER_EXPIRED') {
         // The mover acted on a real card, but its delivery-custody generation
         // was superseded before the locked claim. That is not a decline and
@@ -2294,11 +2446,120 @@ export class DispatchService {
         await this.dispatchOrder(orderId).catch(() => {});
         throw error;
       }
-      await this.redis.sadd(declinedKey(orderId, offeredVersion), mover.id).catch(() => {});
-      await this.redis.expire(declinedKey(orderId, offeredVersion), 3600).catch(() => {});
-      await this.dispatchOrder(orderId).catch(() => {});
+      // [B1] Only a refusal about THIS mover marks them declined. A lost race
+      // is explained from the order row instead: the winner may even be this
+      // mover (an earlier tap or a board grab), and then it is not an error.
+      const outcome = classifyClaimRefusal(error);
+      if (outcome === 'lost-race') return this.explainLostOffer(orderId, mover.id, pool, error);
+      if (claimRefusalMarksTheMover(outcome)) {
+        await this.redis.sadd(declinedKey(orderId, offeredVersion), mover.id).catch(() => {});
+        await this.redis.expire(declinedKey(orderId, offeredVersion), 3600).catch(() => {});
+      }
+      // A hold means nobody can take it now, so there is no one to cascade to.
+      // Otherwise the consumed card leaves the order unoffered: keep it moving.
+      if (outcome !== 'order-held') await this.dispatchOrder(orderId).catch(() => {});
       throw error;
     }
+  }
+
+  /**
+   * [DISPATCH 1/3 · B3] Why this accept could not take the card, read from the
+   * order row (the assignment authority), never guessed from Redis.
+   *
+   *   THIS mover already holds the order  the same assignment, 200: a winner
+   *                                        retrying after a lost response, or a
+   *                                        second tap, is answered with the job
+   *                                        they already hold
+   *   the order was cancelled             ORDER_CANCELLED
+   *   another mover holds it              OFFER_TAKEN, unless the own card of
+   *                                        this mover had already run out or
+   *                                        been declined (then the fallback: an
+   *                                        expiry is not a race they lost)
+   *   anything else                       the fallback (OFFER_EXPIRED)
+   *
+   * Read-only: nothing is marked, consumed or re-dispatched here. FOR SHARE
+   * waits out a claim still committing on this row, so a retry that arrives
+   * mid-commit reads the committed winner rather than a stale PENDING.
+   *
+   * [AX299 F1] ONE locked read decides AND answers. The assignment returned is
+   * built inside the same transaction, under the FOR SHARE lock that proved
+   * this mover holds the order: a cancel, a give-back or a reassignment either
+   * commits first and is reported, or waits until this answer is built. It
+   * used to be read after the lock was released, so a cancel in between was
+   * answered 200 with the cancelled order, a reassignment with the next
+   * mover's.
+   */
+  private async explainLostOffer(orderId: string, moverId: string, pool: DispatchPool, fallback?: unknown) {
+    const verdict = await this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{
+        status: OrderStatus; driverId: string | null; riderId: string | null;
+        customerId: string; cancelledBy: string | null;
+      }>>`
+        SELECT "status"::text AS "status", "driverId", "riderId", "customerId", "cancelledBy"
+        FROM "orders" WHERE "id" = ${orderId}
+        FOR SHARE
+      `;
+      const row = rows[0];
+      if (!row) return { found: 'missing' as const };
+      if (row.status === 'CANCELLED') return { found: 'cancelled' as const, row };
+      const holder = pool === 'DRIVER' ? row.driverId : row.riderId;
+      if (holder === moverId && !TERMINAL_ORDER_STATUSES.includes(row.status)) {
+        return { found: 'held' as const, assignment: await this.committedAssignment(tx, orderId) };
+      }
+      return { found: 'elsewhere' as const, holder };
+    });
+    if (verdict.found === 'missing') throw new NotFoundError('Order', orderId);
+    if (verdict.found === 'cancelled') throw this.orderCancelled(verdict.row);
+    if (verdict.found === 'held') return verdict.assignment;
+    if (verdict.holder && verdict.holder !== moverId && !(await this.offerRanOut(orderId, moverId))) {
+      throw this.offerTaken(pool);
+    }
+    throw fallback ?? new AppError(409, 'OFFER_EXPIRED', 'This offer has expired or went to another mover');
+  }
+
+  /** Did a card of this mover for this order end by its timeout, or by their
+   *  own decline? Both are logged per attempt [ALG-01]. Keyed on the mover and
+   *  the order, never on the attempt a client echoes: a stale or borrowed
+   *  attempt id must not turn an expiry into a lost race. */
+  private async offerRanOut(orderId: string, moverId: string): Promise<boolean> {
+    try {
+      const [expiries, declines] = await Promise.all([
+        this.redis.zrange(offerOutcomeKey(moverId, 'expiries'), 0, -1),
+        this.redis.zrange(offerOutcomeKey(moverId, 'declines'), 0, -1),
+      ]);
+      return [...expiries, ...declines].some((m) => m.startsWith(`${orderId}:`));
+    } catch {
+      return false;
+    }
+  }
+
+  /** The request was cancelled under the mover: say so, never "taken". */
+  private orderCancelled(order: { customerId: string; cancelledBy: string | null }): AppError {
+    return new AppError(409, 'ORDER_CANCELLED', order.cancelledBy === order.customerId
+      ? 'The customer cancelled this request.'
+      : 'This request was cancelled.');
+  }
+
+  /** Another mover won the job this card was for. */
+  private offerTaken(pool: DispatchPool): AppError {
+    return new AppError(409, 'OFFER_TAKEN', pool === 'DRIVER'
+      ? 'Another driver took this ride.'
+      : 'Another rider took this order.');
+  }
+
+  /** The assignment row an accepting mover is answered with: one shape for the
+   *  winning claim and for the winner asking again [B3]. [F-0011] The mover
+   *  VERIFIES the ride PIN, so the handover secrets never ride along. */
+  private committedAssignment(db: Prisma.TransactionClient, orderId: string) {
+    return db.order.findUniqueOrThrow({
+      where: { id: orderId },
+      omit: HANDOVER_SECRETS_OMIT,
+      include: {
+        // [F-027-07] allow-list, not `include` — see utils/counterparty.
+        rider: { select: riderCounterpartySelect({ withPhone: false }) },
+        driver: { include: { user: { select: { firstName: true } } } },
+      },
+    });
   }
 
   /** [ALG-06 ①] The incentive attached to this order's current search, or null. Never throws. */
@@ -2407,9 +2668,10 @@ export class DispatchService {
         mmgClaimMismatchAt: Date | null;
         fulfillmentMode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY' | null;
         fulfillmentModeVersion: number;
+        cancelledBy: string | null;
       }>>`
         SELECT "customerId", "taxiFareTotal", "mmgClaimMismatchAt", "fulfillmentMode"::text AS "fulfillmentMode",
-               "fulfillmentModeVersion",
+               "fulfillmentModeVersion", "cancelledBy",
                "status"::text AS "status", "holdExpiresAt",
                "paymentMethod"::text AS "paymentMethod",
                "paymentStatus"::text AS "paymentStatus",
@@ -2426,6 +2688,10 @@ export class DispatchService {
       if (lockedOrder.customerId === moverAuthority.userId) {
         throw new AppError(409, 'SELF_OWN_ORDER', 'You cannot accept a request created by your own account');
       }
+      // [DISPATCH 1/3] A request cancelled under the mover says exactly that.
+      // The CAS below would refuse it too, but as ALREADY_TAKEN, which told a
+      // driver another driver had the ride when the customer had cancelled it.
+      if (lockedOrder.status === 'CANCELLED') throw this.orderCancelled(lockedOrder);
       if (pool === 'RIDER' && lockedOrder.fulfillmentMode === 'VENDOR_DELIVERY') {
         throw new AppError(409, 'VENDOR_DELIVERY_SELECTED', 'The store is delivering this order');
       }
@@ -2502,6 +2768,13 @@ export class DispatchService {
                 ? { taxiFareTotal: chosenTaxiFare, totalAmount: chosenTaxiFare }
                 : {}),
             },
+          }).catch((error: unknown) => {
+            // [DISPATCH 1/3] orders_one_live_taxi_per_driver_key: the database
+            // itself refuses a second live ride for this driver. Same answer as
+            // the mover reservation below gives, never a raw constraint error.
+            throw isUniqueViolationOn(error, 'driverId')
+              ? new AppError(409, 'DRIVER_BUSY', 'You already have an active ride — finish it before taking another')
+              : error;
           })
         : await tx.order.updateMany({
             where: {
@@ -2596,17 +2869,9 @@ export class DispatchService {
       // Capture the committed response in the same boundary. A second DB read
       // after commit could fail and falsely tell the mover they lost a claim
       // that is already durable.
-      const committedOrder = await tx.order.findUniqueOrThrow({
-        where: { id: orderId },
-        // [F-0011] This row is returned straight to the accepting mover by the
-        // taxi accept route. The mover VERIFIES the ride PIN — they must not read it.
-        omit: HANDOVER_SECRETS_OMIT,
-        include: {
-          // [F-027-07] allow-list, not `include` — see utils/counterparty.
-          rider: { select: riderCounterpartySelect({ withPhone: false }) },
-          driver: { include: { user: { select: { firstName: true } } } },
-        },
-      });
+      // [F-0011] This row is returned straight to the accepting mover by the
+      // taxi accept route. The mover VERIFIES the ride PIN — they must not read it.
+      const committedOrder = await this.committedAssignment(tx, orderId);
       const sequence = await tx.orderStatusLog.count({ where: { orderId, status: assignedStatus } });
       return { order: committedOrder, assignmentSequence: sequence };
     });
@@ -2864,6 +3129,8 @@ export class DispatchService {
           });
           if (released.count === 0) await this.pageHeldPaidMmgRide(order);
           if (released.count > 0) {
+            // [DISPATCH 1/3 · B4] A card a re-sweep installed meanwhile goes with the ride.
+            await withdrawOfferOfClosedOrder({ prisma: this.prisma, redis: this.redis, io: this.io }, order.id);
             await this.prisma.orderStatusLog
               .create({ data: { orderId: order.id, status: 'CANCELLED', changedBy: 'system', note: `Released after ${TAXI_WAIT_LIMIT_MIN} min — no drivers available` } })
               .catch(() => {});

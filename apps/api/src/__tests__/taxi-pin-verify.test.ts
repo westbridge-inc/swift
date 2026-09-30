@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -122,7 +122,11 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.ready();
+});
 
+// Each case books a live ride, and one customer holds one live taxi
+// (orders_one_live_taxi_per_customer_key): every case gets its own ride owner.
+beforeEach(async () => {
   customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
 });
 
