@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance, type HTTPMethods } from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
@@ -35,7 +35,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
     for (const member of members) savedClusterIds.add(member.clusterId);
   }
 
-  function call(method: HTTPMethods, url: string, token: string, payload?: unknown, headers: Record<string, string> = {}) {
+  function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown, headers: Record<string, string> = {}) {
     return app.inject({ method, url, headers: {
       ...headers, authorization: `Bearer ${token}`,
       ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
