@@ -2043,25 +2043,22 @@ export class DispatchService {
    *  one the network ate. Scoped to the caller's own row — no cross-user
    *  effect — and idempotent (first render wins). */
   async markOfferSeen(orderId: string, moverUserId: string, offerAttemptId?: string): Promise<void> {
-    // [F-014-04] Render proof is evidence about ONE generation. Prefer the
-    // client's echoed attempt id; otherwise resolve the live attempt from the
-    // authoritative offer key so a late render of an old card can't stamp a
-    // newer attempt it never showed. The recipientId scope means a forged or
-    // foreign attempt id can only ever match the caller's own row.
-    let attemptId = offerAttemptId;
-    if (!attemptId) {
-      const live = await this.redis.get(offerKey(orderId));
-      attemptId = live ? parseOfferValue(live).attemptId : undefined;
-    }
+    // [F-014-04] Render proof is evidence about ONE generation: the attempt
+    // the client names. The recipientId scope means a forged or foreign
+    // attempt id can only ever match the caller's own row.
+    // [AX364] A ping that names NO attempt (older builds) never stamps a
+    // generated attempt. It used to be given the live attempt (or, with none
+    // live, every unseen row), so a delayed render of an earlier card of this
+    // order stamped a successor the mover never saw, and that successor's
+    // lapse or go-offline release was then charged. It reaches only the
+    // legacy pre-attempt row, like the acknowledgment [AX323 · AX358].
     await this.prisma.alertDelivery.updateMany({
       where: {
         kind: 'MOVER_OFFER',
         subjectId: orderId,
         recipientId: moverUserId,
         seenAt: null,
-        // Legacy shape (pre-attempt row + pre-attempt client + no live
-        // composite offer): fall back to the old unscoped stamp.
-        ...(attemptId ? { offerAttemptId: attemptId } : {}),
+        offerAttemptId: offerAttemptId ?? null,
       },
       data: { seenAt: new Date() },
     });

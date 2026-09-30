@@ -1323,8 +1323,11 @@ describe('The offer cascade', () => {
     expect((await app.redis.get(`dispatch:mover-offer:${a.riderId}`))!.split(':')[0]).toBe(order.id); // reverse index set [F-014-04 composite]
     // The card RENDERED on A's screen (the app stamps seen on render) — so
     // quitting now is a dodge and MUST cost. An unrendered card would be
-    // spared instead [F-014-10 evidence-aware release].
-    await dispatch.markOfferSeen(order.id, a.userId);
+    // spared instead [F-014-10 evidence-aware release]. The app names the
+    // card's attempt; a render ping that names none never stamps a generated
+    // card [AX364].
+    const heldAttempt = (await app.redis.get(`dispatch:offer:${order.id}`))!.split(':')[1];
+    await dispatch.markOfferSeen(order.id, a.userId, heldAttempt);
 
     // A taps "Go offline" through the REAL route while still holding the live offer.
     const res = await app.inject({

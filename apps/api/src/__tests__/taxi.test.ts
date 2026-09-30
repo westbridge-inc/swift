@@ -478,8 +478,11 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     expect((await app.redis.get(`dispatch:offer:${ride.id}`))!.split(':')[0]).toBe(driver.driverId); // [F-014-04 composite]
     const before = (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } })).acceptanceRate;
     // The card RENDERED (the app stamps seen on render) — quitting now is a
-    // dodge and must cost. An unrendered card is spared [F-014-10].
-    const seen = await inject('POST', '/api/v1/driver/offers/seen', { orderId: ride.id }, driver.token);
+    // dodge and must cost. An unrendered card is spared [F-014-10]. The app
+    // names the card's attempt; a ping that names none never stamps a
+    // generated card [AX364].
+    const offerAttemptId = (await app.redis.get(`dispatch:offer:${ride.id}`))!.split(':')[1];
+    const seen = await inject('POST', '/api/v1/driver/offers/seen', { orderId: ride.id, offerAttemptId }, driver.token);
     expect(seen.statusCode).toBe(200);
 
     const off = await inject('POST', '/api/v1/driver/go-offline', {}, driver.token);

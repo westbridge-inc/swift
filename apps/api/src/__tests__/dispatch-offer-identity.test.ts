@@ -736,6 +736,30 @@ describe('only the attempt an action consumed is acknowledged [AX323 RR2-1]', ()
     expect(await app.redis.get(moverOfferKey(mover.riderId))).toBeNull();
   });
 
+  // [AX364] Render proof follows the same rule: a ping naming no attempt (an
+  // older app) may be a delayed one for an earlier card of the same order.
+  it('[AX364] a delayed render ping naming no attempt never stamps the unseen successor, and its lapse costs nothing', async () => {
+    const { mover, order, a1, a2 } = await lapsedThenReoffered();
+
+    await dispatch.markOfferSeen(order.id, mover.userId);
+    await successorLapses(order, mover.riderId, a2);
+
+    expect(await rateOf(mover.riderId)).toBe(100);
+    expect(await evidenceOf(order.id, a2)).toEqual({ seenAt: null, acknowledgedAt: null });
+    expect((await evidenceOf(order.id, a1)).seenAt).toBeNull();
+  });
+
+  it('[AX364] nor does that ping make the unseen successor chargeable when the mover goes offline', async () => {
+    const { mover, order, a2 } = await lapsedThenReoffered();
+
+    await dispatch.markOfferSeen(order.id, mover.userId);
+    await dispatch.releaseHeldOffer(mover.riderId);
+
+    expect(await app.redis.get(offerKey(order.id))).not.toBe(`${mover.riderId}:${a2}`);
+    expect(await app.redis.get(moverOfferKey(mover.riderId))).toBeNull();
+    expect(await rateOf(mover.riderId)).toBe(100);
+  });
+
   it('[AX358] an accept naming no attempt still takes the live card, but acknowledges no generated attempt', async () => {
     const { mover, order, a1, a2 } = await lapsedThenReoffered();
 
@@ -757,7 +781,7 @@ describe('only the attempt an action consumed is acknowledged [AX323 RR2-1]', ()
     expect((await evidenceOf(order.id, a1)).acknowledgedAt).toBeNull();
   });
 
-  it('a legacy bare card (pre-attempt deploy) acknowledges its own legacy row only, never an attempt-era one', async () => {
+  it('a legacy bare card (pre-attempt deploy): render proof and acknowledgment reach its own legacy row only, never an attempt-era one', async () => {
     await parkAllRiders();
     const mover = await makeRider();
     const order = await makeOrder();
@@ -768,14 +792,17 @@ describe('only the attempt an action consumed is acknowledged [AX323 RR2-1]', ()
     await app.redis.set(offerKey(order.id), mover.riderId, 'EX', 30);
     await app.redis.set(moverOfferKey(mover.riderId), order.id, 'EX', 30);
 
+    await dispatch.markOfferSeen(order.id, mover.userId); // [AX364]
     await dispatch.declineOffer(order.id, mover.userId);
 
     const rows = await app.prisma.alertDelivery.findMany({
       where: { kind: 'MOVER_OFFER', subjectId: order.id },
-      select: { offerAttemptId: true, acknowledgedAt: true },
+      select: { offerAttemptId: true, seenAt: true, acknowledgedAt: true },
     });
     expect(rows).toHaveLength(2);
     expect(rows.find((r) => r.offerAttemptId === null)!.acknowledgedAt).toBeInstanceOf(Date);
     expect(rows.find((r) => r.offerAttemptId === 'lapsed~fv0')!.acknowledgedAt).toBeNull();
+    expect(rows.find((r) => r.offerAttemptId === null)!.seenAt).toBeInstanceOf(Date);
+    expect(rows.find((r) => r.offerAttemptId === 'lapsed~fv0')!.seenAt).toBeNull();
   });
 });
