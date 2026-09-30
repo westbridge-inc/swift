@@ -14,7 +14,7 @@ import { customerRoutes } from '../../modules/user/customer.routes';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { riderRoutes } from '../../modules/rider/rider.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
-import { applyDueMmgLinkChanges } from '../../modules/integrity/money-surface';
+import { startGoldenWorker } from './gold-7-worker';
 import { hashVelocityId } from '../../modules/integrity/velocity';
 import { autoCancelUnresponsiveOrder } from '../../jobs/queue';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
@@ -64,6 +64,7 @@ const STORE = { lat: 6.8013, lng: -58.1551 };
 const REASON = { 'x-swift-reason': 'GOLD-2 golden journey: deciding a disputed MMG payment claim' };
 
 let app: FastifyInstance;
+let linkWorker: Awaited<ReturnType<typeof startGoldenWorker>> | undefined;
 let seq = 0;
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
 
@@ -156,7 +157,22 @@ async function stageLink(owner: Actor, vendorId: string, url: string) {
  *  `mmg-link-apply` executor runs. */
 async function coolOffPasses(vendorId: string) {
   await sys(() => app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgPayUrlApplyAt: new Date(Date.now() - 1000) } }));
-  return applyDueMmgLinkChanges({ prisma: app.prisma, io: app.io });
+  const before = await sys(() => app.prisma.moneySurfaceCommand.count({ where: { entityId: vendorId, kind: 'MMG_LINK_APPLY', state: 'APPLIED' } }));
+  await applyMmgLinks();
+  const after = await sys(() => app.prisma.moneySurfaceCommand.count({ where: { entityId: vendorId, kind: 'MMG_LINK_APPLY', state: 'APPLIED' } }));
+  return { applied: after - before };
+}
+
+// GOLD-7: the production dispatch consumer composes link application and
+// notice retry. Refuse any foreign pending subject before starting the global scan.
+async function applyMmgLinks() {
+  await sys(async () => {
+    const own = (await app.prisma.vendor.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } })).map((v) => v.id);
+    expect(await app.prisma.vendor.count({ where: { id: { notIn: own }, mmgPayUrlPending: { not: null } } })).toBe(0);
+    expect(await app.prisma.driver.count({ where: { mmgPayUrlPending: { not: null } } })).toBe(0);
+    expect(await app.prisma.moneySurfaceCommand.count({ where: { entityId: { notIn: own }, noticeKind: { not: null }, noticeSentAt: null } })).toBe(0);
+  });
+  await linkWorker!.tick('mmg-link-apply');
 }
 
 async function checkoutMmg(lines: Array<{ vendorId: string; itemId: string; quantity: number }>, who: Actor = customer) {
@@ -290,6 +306,7 @@ beforeAll(async () => {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   await purgeFixtures();
+  linkWorker = await startGoldenWorker(app, 'dispatch', 'gold7-mmg-link');
 
   customer = await makeUser('Mala', ['CUSTOMER'], 'CUSTOMER');
   stranger = await makeUser('Tess', ['CUSTOMER'], 'CUSTOMER');
@@ -324,9 +341,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await purgeFixtures();
-  await app.close();
+  const errors: unknown[] = [];
+  const finish = async (fn: () => Promise<unknown>) => { try { await fn(); } catch (error) { errors.push(error); } };
+  if (linkWorker) await finish(() => linkWorker!.close());
+  await finish(() => purgeFixtures());
+  await finish(() => app.close());
   vi.unstubAllEnvs();
+  if (errors.length) throw new AggregateError(errors, 'GOLD-7 MMG worker fixture cleanup failed');
 });
 
 describe('GOLD-2 · VEND-03 / MONEY-02 — the pay link', () => {
@@ -387,7 +408,7 @@ describe('GOLD-2 · VEND-03 / MONEY-02 — the pay link', () => {
     expect(await sys(() => app.prisma.order.count({ where: { vendorId: cafe.vendorId } }))).toBe(0);
 
     // The cool-off executor before the cool-off has passed applies nothing.
-    await applyDueMmgLinkChanges({ prisma: app.prisma, io: app.io });
+    await applyMmgLinks();
     expect(await linkState()).toEqual(pending);
 
     // The cool-off passes; the executor makes it live and tells the owner.

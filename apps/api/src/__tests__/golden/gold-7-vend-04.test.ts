@@ -11,7 +11,6 @@ import { socketPlugin } from '../../plugins/socket';
 import { registerTenantHeaderScope } from '../../plugins/tenant-header-scope';
 import { registerEmptyJsonBodyParser } from '../../plugins/empty-json';
 import { registerErrorHandler } from '../../middleware/error-handler';
-import { closeResourcesBounded, withTimeout } from '../../utils/async-lifecycle';
 import { rateLimitKey } from '../../utils/rate-limit-key';
 import { customerRoutes } from '../../modules/user/customer.routes';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
@@ -19,9 +18,8 @@ import { adminRoutes } from '../../modules/admin/admin.routes';
 import { agentCashRoutes } from '../../modules/billing/agent-cash.routes';
 import { SubscriptionService } from '../../modules/subscription/subscription.service';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
+import { startGoldenWorker } from './gold-7-worker';
 
-import { QueueEvents, type Job } from 'bullmq';
-import { bullConnectionOpts, createQueues, createWorkers, QUEUE_NAMES, type SwiftQueues } from '../../jobs/queue';
 
 // ---------------------------------------------------------------------------
 // GOLD-7 · VEND-04 — bill → dun → suspend → agent cash → reinstate → stop.
@@ -49,12 +47,7 @@ const RATE_CARD_SMALL_VENDOR = 15_000;
 const webhookSigning = randomBytes(24).toString('hex');
 let app: FastifyInstance;
 let subscriptions: SubscriptionService;
-let queues: SwiftQueues | undefined;
-let workers: Awaited<ReturnType<typeof createWorkers>> | undefined;
-let queueEvents: QueueEvents | undefined;
-let workerLoop: Promise<void> | undefined;
-let workerError: unknown;
-const ownedJobs: Job[] = [];
+let worker: Awaited<ReturnType<typeof startGoldenWorker>> | undefined;
 let seq = 0;
 let clockStart = 0;
 let foreignBefore = '';
@@ -237,38 +230,13 @@ async function purgeRedis(ids: string[]) {
   } while (cursor !== '0');
 }
 
-/** Start the same consumer the server starts, only for subscription jobs.
- *  No recurring schedules or unrelated consumers run in this isolated DB. */
-async function startWorker() {
-  queues = createQueues(app.redis);
-  expect(await queues.subscriptionQueue.isPaused()).toBe(false);
-  expect(await queues.subscriptionQueue.getRepeatableJobs()).toHaveLength(0);
-  expect(await queues.subscriptionQueue.getJobCounts('waiting', 'active', 'delayed', 'paused', 'prioritized', 'waiting-children'))
-    .toEqual({ waiting: 0, active: 0, delayed: 0, paused: 0, prioritized: 0, 'waiting-children': 0 });
-  queueEvents = new QueueEvents(QUEUE_NAMES.SUBSCRIPTION, { connection: bullConnectionOpts(app.redis) });
-  queueEvents.on('error', (error: unknown) => { workerError ??= error; });
-  await queueEvents.waitUntilReady();
-  workers = await createWorkers({ prisma: app.prisma, redis: app.redis, io: app.io, log: app.log }, queues);
-  await workers.waitUntilReady();
-  workerLoop = workers.subscriptionWorker.run().catch((error: unknown) => { workerError = error; });
-}
-
 function advanceTo(at: number) {
   expect(at).toBeGreaterThanOrEqual(clockStart);
   expect(at).toBeLessThanOrEqual(clockStart + 32 * DAY);
   vi.setSystemTime(at);
 }
 
-async function tick(name: 'convert-trials' | 'process-billing') {
-  expect(workerError).toBeUndefined();
-  const job = await queues!.subscriptionQueue.add(name, {}, {
-    jobId: `gold7-vend04-${nanoid(12)}`, removeOnComplete: false, removeOnFail: false,
-  });
-  ownedJobs.push(job);
-  await job.waitUntilFinished(queueEvents!, 30_000);
-  expect(await job.getState()).toBe('completed');
-  expect(workerError).toBeUndefined();
-}
+const tick = (name: 'convert-trials' | 'process-billing') => worker!.tick(name);
 
 async function moneySnapshot(id: string) {
   return {
@@ -334,19 +302,13 @@ beforeAll(async () => {
   vi.useFakeTimers({ toFake: ['Date'] });
   advanceTo(clockStart);
   admin = await makeUser('Ama', ['ADMIN'], 'ADMIN', { admin: true });
-  await startWorker();
+  worker = await startGoldenWorker(app, 'subscription', 'gold7-vend04');
 });
 
 afterAll(async () => {
   const errors: unknown[] = [];
   const finish = async (fn: () => Promise<unknown>) => { try { await fn(); } catch (error) { errors.push(error); } };
-  if (workers) await finish(() => workers!.cleanup());
-  if (workerLoop) await finish(() => withTimeout(workerLoop!, 10_000, 'subscription worker loop shutdown'));
-  for (const job of ownedJobs) await finish(() => withTimeout(job.remove(), 10_000, 'own job removal'));
-  await finish(() => closeResourcesBounded([
-    ...(queueEvents ? [{ name: 'subscription events', close: () => queueEvents!.close() }] : []),
-    ...Object.entries(queues ?? {}).map(([name, queue]) => ({ name, close: () => queue.close() })),
-  ], 10_000));
+  if (worker) await finish(() => worker!.close());
   if (app && foreignBefore) await finish(async () => { expect(await foreignSnapshot() === foreignBefore).toBe(true); });
   vi.useRealTimers();
   if (app) {
