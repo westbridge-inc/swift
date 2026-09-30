@@ -688,7 +688,9 @@ async function main() {
         userId,
         role,
         docType,
-        fileUrl: `storage://seed/${docType}.jpg`,
+        // The database accepts only a canonical, owner-scoped source name for a
+        // new document. The demo seed stores no bytes behind it (it never did).
+        fileUrl: `verification/${userId}/${docType}.enc`,
         status: 'APPROVED' as const,
         reviewedBy: 'seed',
         reviewedAt: new Date(),
