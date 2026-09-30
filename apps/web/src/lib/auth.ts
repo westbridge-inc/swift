@@ -302,7 +302,7 @@ export async function apiFetch(
         const returnPath = `${window.location.pathname}${window.location.search}`;
         window.location.href = `/login?next=${encodeURIComponent(returnPath)}`;
       }
-      throw new ApiRequestError('Session expired. Please sign in again.', 401, 'SESSION_EXPIRED');
+      throw new ApiRequestError('You were signed out. Please sign in again.', 401, 'SESSION_EXPIRED');
     }
   }
   if (!responseContextIsCurrent(requestSession, requestStore)) {
@@ -314,7 +314,9 @@ export async function apiFetch(
   }
   if (!res.ok || json?.success === false) {
     throw new ApiRequestError(
-      json?.error?.message || `Request failed (${res.status})`,
+      json?.error?.message || (res.status >= 500
+        ? 'Something went wrong on our side. Please try again.'
+        : 'We couldn’t complete that. Please try again.'),
       res.status,
       typeof json?.error?.code === 'string' ? json.error.code : undefined,
       typeof json?.error?.details?.ref === 'string' ? { ref: json.error.details.ref } : undefined,

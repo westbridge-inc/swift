@@ -103,10 +103,11 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // owns the slot; their Schedule agenda shows it. customer = the person whose
   // appointment moved. Schedule is mounted ONLY by VendorStack, so a customer
   // tap aimed there opened nothing. The customer copy returns null (the app
-  // opens normally) because no customer screen shows the moved time: the
-  // order screen renders Order.appointmentSlot, which a reschedule does not
-  // update, so a Delivery deep link would show the OLD time. An untagged row
-  // cannot say whose it is, so it also opens the app normally.
+  // opens normally): the push carries the bookingId, not the orderId a
+  // Delivery deep link needs. (A reschedule now moves Order.appointmentSlot
+  // with the booking [Q12], so the order screen shows the new time once the
+  // customer opens it.) An untagged row cannot say whose it is, so it also
+  // opens the app normally.
   if (kind === 'booking_rescheduled') {
     return audience === 'business' ? { screen: 'Schedule' } : null;
   }
