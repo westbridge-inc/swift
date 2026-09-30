@@ -208,6 +208,7 @@ export function clearSession() {
   sessionPrincipal = null;
   clearStoredCheckoutAttempts();
   localStorage.removeItem(STORE_KEY);
+  announceStoreChange();
   announceSessionChange();
 }
 
@@ -215,7 +216,28 @@ export function getSelectedStore() {
   return typeof window !== 'undefined' ? localStorage.getItem(STORE_KEY) : null;
 }
 export function setSelectedStore(vendorId: string) {
-  if (typeof window !== 'undefined') localStorage.setItem(STORE_KEY, vendorId);
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(STORE_KEY, vendorId);
+    announceStoreChange();
+  }
+}
+
+const storeListeners = new Set<() => void>();
+function announceStoreChange() { for (const listener of [...storeListeners]) listener(); }
+/** Storage covers other tabs; focus also catches changes before the storage
+ * event has been delivered. Same-tab selections notify synchronously. */
+export function subscribeSelectedStore(listener: () => void): () => void {
+  storeListeners.add(listener);
+  const storage = (event: StorageEvent) => {
+    if ((event.storageArea === null || event.storageArea === localStorage) && (event.key === null || event.key === STORE_KEY)) listener();
+  };
+  window.addEventListener('storage', storage);
+  window.addEventListener('focus', listener);
+  return () => {
+    storeListeners.delete(listener);
+    window.removeEventListener('storage', storage);
+    window.removeEventListener('focus', listener);
+  };
 }
 
 let refreshFlight: Promise<boolean> | null = null;
@@ -243,12 +265,17 @@ async function tryRefresh(): Promise<boolean> {
 export async function apiFetch(
   path: string,
   options?: RequestInit,
-  policy: { redirectOnExpired?: boolean } = {},
+  policy: { redirectOnExpired?: boolean; storeId?: string | null } = {},
 ) {
   const requestSession = authSnapshot();
-  const requestStore = getSelectedStore();
-  const doFetch = () =>
-    fetch(`${API_URL}${path}`, {
+  const requestStore = 'storeId' in policy ? policy.storeId ?? null : getSelectedStore();
+  const doFetch = () => {
+    // Check before BOTH the initial send and the 401 retry. A fee view owns
+    // its captured store even if another tab has already selected a new one.
+    if (!responseContextIsCurrent(requestSession, requestStore)) {
+      throw new ApiRequestError('The paying account or selected store changed. Try again.', 409, 'SESSION_CHANGED');
+    }
+    return fetch(`${API_URL}${path}`, {
       ...options,
       credentials: 'include',
       headers: {
@@ -260,6 +287,7 @@ export async function apiFetch(
         ...options?.headers,
       },
     });
+  };
 
   let res = await doFetch();
   if (res.status === 401) {

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkoutWords, dueLine, FeeCheckoutSession, liveMmg, pollDelay, type CheckoutStatus, type CheckoutView } from './weeklyFee';
+import { checkoutWords, dueLine, FeeCheckoutSession, liveMmg, pollDelay, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weeklyFee';
 const checkout = (status: CheckoutStatus['status']): CheckoutStatus => ({ ref: 'reference-1', status, amountGyd: 1200, currencyCode: 'GYD', createdAt: '2026-09-29T12:00:00Z', expiresAt: '2026-09-29T13:00:00Z', confirmedAt: status === 'CONFIRMED' ? '2026-09-29T12:02:00Z' : null, subscriptionStatus: 'ACTIVE' });
 function setup() {
   const views: CheckoutView[] = [];
-  const transport = { start: vi.fn(async (_key: string) => ({ ref: 'reference-1', status: 'OPEN' as const, checkoutUrl: 'https://checkout.test/private', amountGyd: 1200, currencyCode: 'GYD' as const, expiresAt: '2026-09-29T13:00:00Z' })), read: vi.fn(async () => checkout('OPEN')), open: vi.fn(async (_url: string): Promise<unknown> => ({ type: 'success', url: 'swift://pay/mmg/return?status=CONFIRMED' })), refresh: vi.fn() };
+  const transport = { start: vi.fn(async (_key: string): Promise<CheckoutStart> => ({ ref: 'reference-1', status: 'OPEN' as const, checkoutUrl: 'https://checkout.test/private', amountGyd: 1200, currencyCode: 'GYD' as const, expiresAt: '2026-09-29T13:00:00Z' })), read: vi.fn(async () => checkout('OPEN')), open: vi.fn(async (_url: string): Promise<unknown> => ({ type: 'success', url: 'swift://pay/mmg/return?status=CONFIRMED' })), refresh: vi.fn() };
   let keys = 0;
   const session = new FeeCheckoutSession(transport, () => `tap-key-${++keys}`, (v) => views.push(v), (e) => e as { status?: number; code?: string; details?: { ref?: string } });
   return { session, transport, views };
@@ -59,6 +59,20 @@ describe('weekly fee contract', () => {
     vi.useFakeTimers(); const { session, transport } = setup(); await session.pay(); await session.pay();
     expect(transport.start.mock.calls.map(([key]) => key)).toEqual(['tap-key-1', 'tap-key-2']);
     expect(transport.open).toHaveBeenCalledTimes(2); session.dispose();
+  });
+  it.each([
+    ['CONFIRMING', null], ['CONFIRMED', null], ['CONFIRMING', 'https://checkout.test/private'], ['OPEN', null],
+  ] as const)('replayed %s with URL %s polls without reopening the checkout page', async (status, checkoutUrl) => {
+    vi.useFakeTimers();
+    const { session, transport, views } = setup();
+    transport.start.mockResolvedValue({ ...checkout(status), checkoutUrl });
+    transport.read.mockResolvedValue(checkout(status));
+    await session.pay(); await vi.advanceTimersByTimeAsync(0);
+    expect(transport.open).not.toHaveBeenCalled();
+    expect(transport.read).toHaveBeenCalledWith('reference-1');
+    expect(views.at(-1)?.checkout?.status).toBe(status);
+    if (status === 'CONFIRMING') expect(views.at(-1)?.blocked).toBe(true);
+    session.dispose();
   });
   it('retries an uncertain tap with its original key and suppresses double taps', async () => {
     const { session, transport } = setup(); transport.start.mockRejectedValueOnce(Error('offline'));

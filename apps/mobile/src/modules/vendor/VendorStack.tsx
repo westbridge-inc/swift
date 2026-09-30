@@ -24,7 +24,7 @@ import { NewOrderTakeover } from './NewOrderTakeover';
 import { catalogueMeta, safeVendorRole, TabHeader } from './shared';
 import { billingBlocked } from '../../lib/vendorProfile';
 import { BusinessSetup, VendorOnboarding } from './screens/BusinessSetup';
-import { VendorSwiftNumberScreen } from './screens/VendorSwiftNumberScreen';
+import { WeeklyFeeRouteScreen } from '../billing/screens/WeeklyFeeRouteScreen';
 import { VendorOps } from './screens/VendorOps';
 import { VendorBillingSuspended } from './screens/VendorBillingSuspended';
 import { VendorMenuScreen } from './screens/VendorMenuScreen';
@@ -251,7 +251,7 @@ export function VendorStack() {
       {/* [MKT G3] Where the backfill's "review your categories" push lands.
           Accepting a suggestion is what writes the tag the Market feed reads. */}
       <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
-      <Stack.Screen name="WeeklyFee" component={VendorSwiftNumberScreen} />
+      <Stack.Screen name="WeeklyFee" component={WeeklyFeeRouteScreen} />
       {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
       <Stack.Screen name="VendorTier" component={VendorTierScreen} />
       {/* [B-support] Role-agnostic ticket screen — the vendor stack had NO

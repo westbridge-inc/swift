@@ -5,7 +5,7 @@ import { useStoreSwitcher } from '../stores/storeSwitcher';
 let resolution = 0;
 /** Validate the notified store with its explicit header before selecting it.
  * No checkout ref is read until the router has adopted that store. */
-export async function resolveFeeNotification(params: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+export async function resolveFeeNotification(params: Record<string, unknown>, onResolved?: (_params: Record<string, unknown>) => void): Promise<Record<string, unknown> | null> {
   if (typeof params['vendorId'] !== 'string') return params;
   const owner = getAuthSessionSnapshot();
   if (!owner) return null;
@@ -16,7 +16,9 @@ export async function resolveFeeNotification(params: Record<string, unknown>): P
     return attempt === resolution && now?.userId === owner.userId && now.generation === owner.generation
       && useStoreSwitcher.getState().selectedStoreId === previous;
   };
-  useStoreSwitcher.getState().setFeeContextPending(true);
+  const fallback = () => ({ ref: undefined, subscriptionId: undefined, vendorId: useStoreSwitcher.getState().selectedStoreId });
+  let unresolved = false;
+  useStoreSwitcher.setState({ feeContextPending: true, feeContextError: null });
   try {
     const response = await vendorApi.subscription(owner, params['vendorId']);
     if (!current()) return null;
@@ -28,9 +30,25 @@ export async function resolveFeeNotification(params: Record<string, unknown>): P
     if (!current()) return null;
     const status = (error as { response?: { status?: number } }).response?.status;
     if (status === 403 || status === 404) return { ref: undefined, subscriptionId: undefined, vendorId: previous };
-    // An unavailable probe cannot authorize a store switch or a ref read.
-    return null;
+    // A transport failure is not an access denial. Keep every Pay blocked
+    // until this notification is resolved or explicitly abandoned.
+    unresolved = true;
+    useStoreSwitcher.setState({ feeContextError: {
+      retry: async () => {
+        if (!current()) return;
+        const result = await resolveFeeNotification(params, onResolved);
+        if (result) onResolved?.(result);
+      },
+      cancel: () => {
+        if (attempt !== resolution) return;
+        resolution++;
+        useStoreSwitcher.setState({ feeContextPending: false, feeContextError: null });
+        const now = getAuthSessionSnapshot();
+        if (now?.userId === owner.userId && now.generation === owner.generation) onResolved?.(fallback());
+      },
+    } });
+    return fallback();
   } finally {
-    if (attempt === resolution) useStoreSwitcher.getState().setFeeContextPending(false);
+    if (attempt === resolution && !unresolved) useStoreSwitcher.setState({ feeContextPending: false, feeContextError: null });
   }
 }

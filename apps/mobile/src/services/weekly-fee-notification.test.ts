@@ -42,7 +42,7 @@ describe('notified subscription context', () => {
     }) as AxiosAdapter;
     mock.navigate.mockImplementation((_screen, params) => {
       expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-A');
-      expect(params).toEqual({ vendorId: 'store-A', subscriptionId: 'subscription-A', ref: 'ref-A' });
+      expect(params).toEqual({ vendorId: 'store-A', subscriptionId: 'subscription-A', ref: 'ref-A', feeFamily: 'vendor' });
       return true;
     });
     const uninstall = installNotificationTapRouter();
@@ -67,6 +67,28 @@ describe('notified subscription context', () => {
     expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-B');
     expect(params).toEqual({ vendorId: 'store-B', ref: undefined, subscriptionId: undefined });
     expect(useStoreSwitcher.getState().feeContextPending).toBe(false);
+  });
+  it.each(['timeout', '503'])('keeps %s unresolved until Retry succeeds, or Cancel returns to B without A’s ref', async (failure) => {
+    const error = failure === 'timeout' ? { code: 'ECONNABORTED' } : { response: { status: 503 } };
+    api.defaults.adapter = async () => { throw error; };
+    const navigate = vi.fn();
+    await resolveFeeNotification(destinationFor(notice)!.params!, navigate);
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(true);
+    const recovery = useStoreSwitcher.getState().feeContextError;
+    expect(recovery).not.toBeNull();
+    expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-B');
+    recovery!.cancel();
+    expect(navigate).toHaveBeenLastCalledWith({ vendorId: 'store-B', ref: undefined, subscriptionId: undefined });
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(false);
+    expect(useStoreSwitcher.getState().feeContextError).toBeNull();
+
+    await resolveFeeNotification(destinationFor(notice)!.params!, navigate);
+    api.defaults.adapter = async (config) => ({ config, status: 200, statusText: 'OK', headers: {}, data: { data: { id: 'subscription-A' } } });
+    await useStoreSwitcher.getState().feeContextError!.retry();
+    expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-A');
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(false);
+    expect(useStoreSwitcher.getState().feeContextError).toBeNull();
+    expect(navigate).toHaveBeenLastCalledWith(destinationFor(notice)!.params);
   });
   it.each(['store', 'account'])('does not navigate if the %s changes during resolution', async (change) => {
     api.defaults.adapter = async (config) => {

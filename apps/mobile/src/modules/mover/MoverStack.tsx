@@ -20,7 +20,7 @@ import { JobHistoryScreen } from './screens/JobHistoryScreen';
 import { MoverAccountScreen } from './screens/MoverAccountScreen';
 import { MoverDocumentsScreen } from './screens/MoverDocumentsScreen';
 import { MoverVehicleScreen } from './screens/MoverVehicleScreen';
-import { MoverSwiftNumberScreen } from './screens/MoverSwiftNumberScreen';
+import { WeeklyFeeRouteScreen } from '../billing/screens/WeeklyFeeRouteScreen';
 import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
 // [B-support] The ticket screen is role-agnostic (generic create+list); the
 // mover stack simply never registered it — an earner mid-shift had NO route
@@ -120,7 +120,7 @@ export function MoverStack() {
         <Stack.Screen name="MoverDocuments" component={MoverDocumentsScreen} />
         {/* [VEHICLES] Change the vehicle: offline until the new one's papers are approved. */}
         <Stack.Screen name="MoverVehicle" component={MoverVehicleScreen} />
-        <Stack.Screen name="WeeklyFee" component={MoverSwiftNumberScreen} />
+        <Stack.Screen name="WeeklyFee" component={WeeklyFeeRouteScreen} />
         <Stack.Screen name="Conversation" component={ConversationScreen} />
         <Stack.Screen name="GetHelp" component={GetHelpScreen} />
         <Stack.Screen name="LivenessCheck" component={LivenessCheckScreen} />

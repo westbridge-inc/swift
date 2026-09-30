@@ -2,7 +2,7 @@ import { act, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { WeeklyFee } from './weekly-fee';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
-import { setSelectedStore } from '@/lib/auth';
+import { apiFetch, setSelectedStore } from '@/lib/auth';
 
 describe('rendered weekly fee', () => {
   it('opens new and handed-back OPEN checkouts in the same tab with a fresh key per tap', async () => {
@@ -66,6 +66,63 @@ describe('rendered weekly fee', () => {
     await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Paid: GY$1,200'));
     expect(document.body.textContent).not.toContain('This checkout expired');
     view.unmount();
+  });
+
+  it.each(['storage then focus', 'focus before storage', 'storage only'])('two tabs: %s never sends A’s ref with B’s header or retains A’s Paid', async (order) => {
+    setSelectedStore('store-A');
+    const checkout = { ref: 'ref-A', status: 'CONFIRMED', amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE', confirmedAt: '2026-09-29T12:00:00Z' };
+    const calls: Array<[string, string | null]> = [];
+    mockApi(({ url, init }) => {
+      const store = new Headers(init?.headers).get('x-vendor-id');
+      calls.push([url.pathname, store]);
+      return { body: { success: true, data: url.pathname.endsWith('/ref-A') ? checkout : store === 'store-A'
+        ? { status: 'ACTIVE', amountDueGyd: 0, latestMmgCheckout: checkout }
+        : { status: 'ACTIVE', amountDueGyd: 3400, latestMmgCheckout: null, recentCheckouts: [], payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 3400, currencyCode: 'GYD' }] } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Paid: GY$1,200'));
+    calls.length = 0;
+    // Tab 2 updates their shared storage. Tab 1 has not rendered yet.
+    localStorage.setItem('swift_web_store', 'store-B');
+    const storage = () => window.dispatchEvent(new StorageEvent('storage', { key: 'swift_web_store', oldValue: 'store-A', newValue: 'store-B', storageArea: localStorage }));
+    act(() => {
+      if (order !== 'focus before storage') storage();
+      if (order !== 'storage only') window.dispatchEvent(new Event('focus'));
+    });
+    await screen.findByText('GY$3,400 due now');
+    if (order === 'focus before storage') act(storage);
+    expect(calls.some(([url, store]) => url.endsWith('/ref-A') && store === 'store-B')).toBe(false);
+    expect(document.body.textContent).not.toContain('Paid:');
+    expect(screen.queryByRole('status')).toBeNull();
+    view.unmount();
+  });
+
+  it.each(['subscription', 'subscription/mmg-checkout/ref-A', 'subscription/mmg-checkout'])('refuses stale captured context before sending %s', async (path) => {
+    setSelectedStore('store-A');
+    const policy = { storeId: 'store-A' };
+    localStorage.setItem('swift_web_store', 'store-B');
+    const fetch = mockApi(() => ({ body: { success: true, data: {} } }));
+    await expect(apiFetch(`/api/v1/vendor/${path}`, path.endsWith('mmg-checkout') ? { method: 'POST', body: '{}' } : undefined, policy)).rejects.toMatchObject({ code: 'SESSION_CHANGED' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses the original store request when another tab switches during a 401 refresh', async () => {
+    setSelectedStore('store-A');
+    let finishRefresh!: () => void;
+    const calls = mockApi(async ({ url }) => {
+      if (url.pathname.endsWith('/auth/refresh')) {
+        await new Promise<void>((resolve) => { finishRefresh = resolve; });
+        return { body: { success: true } };
+      }
+      return { status: 401, body: {} };
+    });
+    const request = apiFetch('/api/v1/vendor/subscription/mmg-checkout/ref-A', undefined, { storeId: 'store-A' });
+    const rejected = expect(request).rejects.toMatchObject({ code: 'SESSION_CHANGED' });
+    await waitFor(() => expect(finishRefresh).toBeTypeOf('function'));
+    localStorage.setItem('swift_web_store', 'store-B');
+    finishRefresh();
+    await rejected;
+    expect(calls).toHaveBeenCalledTimes(2); // one read + refresh; no retry
   });
 
 });

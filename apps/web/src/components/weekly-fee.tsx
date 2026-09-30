@@ -8,17 +8,22 @@ import { checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg,
 
 export function WeeklyFee({ family }: { family: FeeFamily }) {
   const storeId = useStoreId();
+  // A store change unmounts the whole checkout lifetime, including its view.
+  return <WeeklyFeeContext key={`${family}:${storeId ?? 'no-store'}`} family={family} storeId={storeId} />;
+}
+
+function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: string | null }) {
   const client = useQueryClient();
   const queryKey = useMemo(() => ['weekly-fee', family, family === 'vendor' ? storeId : null], [family, storeId]);
   const base = `/api/v1/${family}/subscription`;
-  const q = useQuery<FeeSubscription>({ queryKey, queryFn: () => apiFetch(base).then((r) => r.data), staleTime: 0, refetchInterval: 60_000 });
+  const q = useQuery<FeeSubscription>({ queryKey, queryFn: () => apiFetch(base, undefined, { storeId }).then((r) => r.data), staleTime: 0, refetchInterval: 60_000 });
   const [view, setView] = useState<CheckoutView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
   const session = useMemo(() => new FeeCheckoutSession({
-    start: (key) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }).then((r) => r.data),
-    read: (ref) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}`).then((r) => r.data),
+    start: (key) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
+    read: (ref) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}`, undefined, { storeId }).then((r) => r.data),
     open: async (url) => { window.location.assign(url); },
     refresh: () => { void client.invalidateQueries({ queryKey }); },
-  }, () => crypto.randomUUID(), setView, (e) => e instanceof ApiRequestError ? e : {}), [base, client, queryKey]);
+  }, () => crypto.randomUUID(), setView, (e) => e instanceof ApiRequestError ? e : {}), [base, client, queryKey, storeId]);
   useEffect(() => { session.activate(); return () => session.dispose(); }, [session]);
   useEffect(() => { session.focus(q.data?.latestMmgCheckout); }, [session, q.data?.latestMmgCheckout?.ref]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { session.reconcile(q.data?.latestMmgCheckout, q.data?.recentCheckouts); }, [session, q.data?.latestMmgCheckout, q.data?.recentCheckouts]);

@@ -219,9 +219,11 @@ async function go(dest: Destination | null) {
   if (!navigationRef.isReady()) { pending = dest; return; }
   if (dest.screen === 'WeeklyFee' && typeof dest.params?.['vendorId'] === 'string') {
     const { resolveFeeNotification } = await import('./weekly-fee-notification');
-    const params = await resolveFeeNotification(dest.params);
+    const params = await resolveFeeNotification(dest.params, (resolved) => { safeNavigate('WeeklyFee', { ...resolved, feeFamily: 'vendor' }); });
     if (!params) return;
-    dest = { ...dest, params };
+    dest = { ...dest, params: { ...params, feeFamily: 'vendor' } };
+  } else if (dest.screen === 'WeeklyFee') {
+    dest = { ...dest, params: { ...dest.params, feeFamily: 'mover' } };
   }
   if (!safeNavigate(dest.screen, dest.params)) pending = dest;
 }

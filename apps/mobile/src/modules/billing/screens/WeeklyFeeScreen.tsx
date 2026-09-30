@@ -18,6 +18,7 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
 }) {
   const storeId = useStoreSwitcher((s) => s.selectedStoreId);
   const resolvingStore = useStoreSwitcher((s) => s.feeContextPending);
+  const contextError = useStoreSwitcher((s) => s.feeContextError);
   contextPending = contextPending || resolvingStore;
   const principal = useAuthStore((s) => s.user?.id);
   const generation = useAuthStore((s) => s.sessionGeneration);
@@ -55,6 +56,11 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
   const blocked = contextPending || view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
   return <Screen>
     <Header title="Weekly fee" />
+    {contextError ? <Card>
+      <T variant="body">Couldn&apos;t open the notified store&apos;s weekly fee.</T>
+      <PillButton label="Retry" onPress={() => { void contextError.retry(); }} />
+      <PillButton label="Cancel" variant="soft" onPress={contextError.cancel} />
+    </Card> : null}
     {loading ? <LoadingBlock /> : error || !sub ? <ErrorState message="We couldn't load your weekly fee. Try again." onRetry={() => { void refresh(); }} /> :
       <ScrollView refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={{ padding: space['2xl'], gap: space.lg }}>
         <Card>

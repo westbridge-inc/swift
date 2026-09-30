@@ -8,7 +8,7 @@ const host = vi.hoisted(() => ({
   index: 0, slots: [] as Array<{ value?: unknown; deps?: unknown[]; cleanup?: () => void }>,
   effects: [] as Array<() => void>,
   read: vi.fn(), active: undefined as undefined | ((_state: string) => void),
-  pending: false,
+  pending: false, recovery: null as null | { retry: () => void; cancel: () => void },
 }));
 vi.mock('react', async (original) => {
   const actual = await original<typeof import('react')>();
@@ -33,7 +33,7 @@ vi.mock('@swift/ui', () => ({ space: {} }));
 vi.mock('../../../kit', () => Object.fromEntries(['Card', 'ErrorState', 'Header', 'LoadingBlock', 'PillButton', 'Screen', 'T'].map((name) => [name, name])));
 vi.mock('../../../services/api', () => ({ weeklyFeeApi: () => ({ start: vi.fn(), read: host.read }) }));
 vi.mock('../../../stores/authStore', () => ({ getAuthSessionSnapshot: () => null, useAuthStore: (pick: (_s: unknown) => unknown) => pick({ user: { id: 'test-partner' } }) }));
-vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: (pick: (_s: unknown) => unknown) => pick({ selectedStoreId: 'store-B', feeContextPending: host.pending }) }));
+vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: (pick: (_s: unknown) => unknown) => pick({ selectedStoreId: 'store-B', feeContextPending: host.pending, feeContextError: host.recovery }) }));
 import { WeeklyFeeScreen } from './WeeklyFeeScreen';
 function text(node: unknown): string {
   if (Array.isArray(node)) return node.map(text).join(' ');
@@ -50,7 +50,7 @@ function render(sub: FeeSubscription) {
   for (const run of host.effects.splice(0)) run();
   return text(tree);
 }
-beforeEach(() => { vi.useFakeTimers(); host.slots = []; host.index = 0; host.effects = []; host.pending = false; host.read.mockReset().mockResolvedValue(checkout('EXPIRED')); refresh.mockReset(); });
+beforeEach(() => { vi.useFakeTimers(); host.slots = []; host.index = 0; host.effects = []; host.pending = false; host.recovery = null; host.read.mockReset().mockResolvedValue(checkout('EXPIRED')); refresh.mockReset(); });
 afterEach(() => { for (const slot of host.slots) slot.cleanup?.(); vi.useRealTimers(); });
 describe('phone checkout lifecycle', () => {
   it('shows late CONFIRMED from a refreshed subscription with the SAME ref', async () => {
@@ -75,4 +75,23 @@ describe('phone checkout lifecycle', () => {
     host.pending = true;
     expect(render({ status: 'ACTIVE', payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] })).not.toContain('Pay GY$1,200 with MMG');
   });
+  it('renders actionable Retry and Cancel while the notification remains unresolved', () => {
+    host.pending = true;
+    host.recovery = { retry: vi.fn(), cancel: vi.fn() };
+    host.index = 0;
+    const tree = WeeklyFeeScreen({ family: 'vendor', sub: { status: 'ACTIVE', payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] }, refresh });
+    expect(text(tree)).toContain("Couldn't open the notified store's weekly fee.");
+    expect(text(tree)).not.toContain('Pay GY$');
+    const buttons = (node: unknown): Array<{ label?: string; onPress?: () => void }> => {
+      if (Array.isArray(node)) return node.flatMap(buttons);
+      if (!node || typeof node !== 'object' || !('props' in node)) return [];
+      const props = (node as ReactElement<{ label?: string; onPress?: () => void; children?: unknown }>).props;
+      return [props, ...buttons(props.children)];
+    };
+    buttons(tree).find((p) => p.label === 'Retry')!.onPress!();
+    buttons(tree).find((p) => p.label === 'Cancel')!.onPress!();
+    expect(host.recovery.retry).toHaveBeenCalledOnce();
+    expect(host.recovery.cancel).toHaveBeenCalledOnce();
+  });
+
 });

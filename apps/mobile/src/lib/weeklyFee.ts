@@ -11,7 +11,7 @@ export interface FeeSubscription {
   currentPeriodEnd?: string | null; gracePeriodEnd?: string | null;
   payActions?: PayAction[]; latestMmgCheckout?: CheckoutStatus | null; recentCheckouts?: CheckoutStatus[];
 }
-export interface CheckoutStart { ref: string; status: 'OPEN'; checkoutUrl: string; amountGyd: number; currencyCode: 'GYD'; expiresAt: string }
+export interface CheckoutStart { ref: string; status: CheckoutState; checkoutUrl: string | null; amountGyd: number; currencyCode: 'GYD'; expiresAt: string }
 export const feeMoney = (n: number) => `GY$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 export function feeDate(value?: string | null): string {
   return value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'America/Guyana' }) : '';
@@ -81,7 +81,13 @@ export class FeeCheckoutSession {
       this.retryKey = undefined;
       // Only the opaque reference survives the browser call. Never cache its URL.
       this.followingRef = started.ref;
-      try { await this.transport.open(started.checkoutUrl); } catch { /* Poll even when the browser cannot finish. */ }
+      // Replaying a tap can return a checkout that has already left OPEN.
+      // Its page must never reopen; only its server reference is followed.
+      if (started.status === 'OPEN' && started.checkoutUrl !== null) {
+        try { await this.transport.open(started.checkoutUrl); } catch { /* Poll even when the browser cannot finish. */ }
+      } else {
+        this.emit({ blocked: started.status === 'CONFIRMING' || started.status === 'HELD' });
+      }
       if (this.active) { this.emit({ returned: true }); this.follow(started.ref, true); }
     } catch (e) {
       if (!this.active) return;
