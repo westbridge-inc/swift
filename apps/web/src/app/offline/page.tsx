@@ -1,3 +1,4 @@
+import { OFFLINE_RECONNECT } from './reconnect';
 import type { CSSProperties } from 'react';
 import type { Metadata } from 'next';
 import { WifiOff } from 'lucide-react';
@@ -10,7 +11,7 @@ import { SwiftLogo } from '@/components/swift-logo';
  *
  * It has to work from its HTML alone: offline, the stylesheet and scripts it
  * links may not be in any cache. So it is styled inline from the token
- * variables the root layout sets on <html>, and "Try again" is a plain link to
+ * variables the root layout sets on <html>, and "Try again" is a plain form submitting to
  * the current address — served in place of /orders/123, it reloads
  * /orders/123, with no JavaScript needed.
  *
@@ -54,19 +55,20 @@ const retry: CSSProperties = {
   color: 'var(--swift-white)',
   fontWeight: 600,
   textDecoration: 'none',
+  border: 0,
+  cursor: 'pointer',
 };
 
 export default function OfflinePage() {
   return (
-    <main style={page}>
+    <main style={page} data-swift-offline="true">
       <div style={panel}>
         <SwiftLogo />
         <WifiOff aria-hidden="true" size={28} color="var(--swift-muted)" />
         <h1 style={heading}>You’re offline.</h1>
-        <p style={{ margin: 0, color: 'var(--swift-muted)' }}>Swift needs a connection to order.</p>
-        <a href="" style={retry}>
-          Try again
-        </a>
+        <p style={{ margin: 0, color: 'var(--swift-muted)' }}>Reconnect to keep ordering. Your cart is kept on your account.</p>
+        <form action="" method="get"><button type="submit" style={retry}>Try again</button></form>
+        <script dangerouslySetInnerHTML={{ __html: OFFLINE_RECONNECT }} />
       </div>
     </main>
   );

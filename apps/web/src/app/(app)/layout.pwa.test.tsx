@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AppLayout from './layout';
 
@@ -37,8 +37,10 @@ beforeEach(() => {
 
 describe('[PWA-1] the customer shell, installed', () => {
   it('pads the header below the status bar, the dock above the home bar, and ends the page above both', async () => {
-    const { container } = render(<AppLayout><p>Home page</p></AppLayout>);
+    const { container } = render(<AppLayout><button>Home page</button></AppLayout>);
     await screen.findByText('Home page');
+    fireEvent.click(screen.getByText('Home page'));
+    fireEvent.click(screen.getByText('Home page'));
     expect(container.querySelector('header')?.className).toContain('pt-[env(safe-area-inset-top)]');
     expect(screen.getByRole('navigation', { name: 'Swift tabs' }).className).toContain('pb-[env(safe-area-inset-bottom)]');
     const main = container.querySelector('main')?.className ?? '';
@@ -58,22 +60,28 @@ describe('[PWA-1] the customer shell, installed', () => {
     expect(card()).toBeNull();
 
     state.pathname = '/';
-    view.rerender(<AppLayout><p>Home page</p></AppLayout>);
+    view.rerender(<AppLayout><button>Home page</button></AppLayout>);
     await screen.findByText('Home page');
+    fireEvent.click(screen.getByText('Home page'));
+    fireEvent.click(screen.getByText('Home page'));
     expect(card()).not.toBeNull();
   });
 
   it('offers it on Home while the sign-in check is still running — Home never waits for it', async () => {
     state.sessionProbe.mockReturnValue(new Promise(() => undefined));
-    render(<AppLayout><p>Home page</p></AppLayout>);
+    render(<AppLayout><button>Home page</button></AppLayout>);
     expect(screen.getByText('Home page')).toBeTruthy();
+    fireEvent.click(screen.getByText('Home page'));
+    fireEvent.click(screen.getByText('Home page'));
     act(() => { window.dispatchEvent(installEvent()); });
     expect(card()).not.toBeNull();
   });
 
   it('rides above the phone dock, not over it', async () => {
-    const { container } = render(<AppLayout><p>Home page</p></AppLayout>);
+    const { container } = render(<AppLayout><button>Home page</button></AppLayout>);
     await screen.findByText('Home page');
+    fireEvent.click(screen.getByText('Home page'));
+    fireEvent.click(screen.getByText('Home page'));
     act(() => { window.dispatchEvent(installEvent()); });
     expect(card()?.className).toContain('var(--swift-dock');
     // The shell says how tall the dock is: the dock plus the home bar on

@@ -1,11 +1,12 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render as renderComponent, screen } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { INSTALL_PROMPT_KEY, InstallPrompt, isIosSafari } from './install-prompt';
 
 // ---------------------------------------------------------------------------
-// [PWA-1] The install card asks once and never nags: never inside the
-// installed app, never again after a dismissal, a "no" or an install, and
+// [PWA-1] The install card waits for engagement: Android at most once per 14 days,
+// Safari once ever, and neither inside the installed app. An install is final;
 // Chrome's own mini-infobar is kept away throughout.
 // ---------------------------------------------------------------------------
 
@@ -60,6 +61,50 @@ function fire(event: Event) {
 
 const card = () => screen.queryByRole('complementary', { name: 'Install Swift' });
 
+function engage() {
+  fireEvent.click(screen.getByRole('button', { name: 'Browse stores' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Browse stores' }));
+}
+
+function render(ui: ReactElement) {
+  const view = renderComponent(<><main><button>Browse stores</button></main>{ui}</>);
+  engage();
+  return { ...view, rerender: (next: ReactElement) => view.rerender(<><main><button>Browse stores</button></main>{next}</>) };
+}
+
+describe('install engagement and frequency', () => {
+  it('waits for two real interactions with the app before offering installation', () => {
+    device(ANDROID_CHROME);
+    renderComponent(<><main><button>Browse stores</button></main><InstallPrompt enabled /></>);
+    fire(installEvent().event);
+    expect(card()).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Browse stores' }));
+    expect(card()).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Browse stores' }));
+    expect(card()).not.toBeNull();
+  });
+
+  it('spends the Android offer on display and allows another only after 14 days', () => {
+    device(ANDROID_CHROME);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const first = render(<InstallPrompt enabled />);
+    fire(installEvent().event);
+    expect(card()).not.toBeNull();
+    expect(localStorage.getItem(INSTALL_PROMPT_KEY)).not.toBeNull();
+    first.unmount();
+    clock.mockReturnValue(now + 14 * 86_400_000 - 1);
+    const second = render(<InstallPrompt enabled />);
+    fire(installEvent().event);
+    expect(card()).toBeNull();
+    second.unmount();
+    clock.mockReturnValue(now + 14 * 86_400_000);
+    render(<InstallPrompt enabled />);
+    fire(installEvent().event);
+    expect(card()).not.toBeNull();
+  });
+});
+
 describe('[PWA-1] install card on Chrome (Android, desktop)', () => {
   it('turns the install event into a card, and keeps Chrome’s own infobar away', () => {
     device(ANDROID_CHROME);
@@ -72,7 +117,7 @@ describe('[PWA-1] install card on Chrome (Android, desktop)', () => {
     expect(screen.getByRole('button', { name: 'Install' })).toBeTruthy();
   });
 
-  it('Install opens the browser’s dialog once, and the card never comes back', async () => {
+  it('Install opens the browser’s dialog once, and the card stays gone during the offer window', async () => {
     device(ANDROID_CHROME);
     const user = userEvent.setup();
     const view = render(<InstallPrompt enabled />);
@@ -178,7 +223,9 @@ describe('[PWA-1] Safari on iPhone and iPad', () => {
     device(IPHONE_SAFARI);
     const view = render(<InstallPrompt enabled />);
     expect(card()).not.toBeNull();
-    expect(card()!.textContent).toMatch(/Tap\s*Share, then Add to Home Screen\./);
+    expect(card()!.textContent).toMatch(/Share/);
+    expect(card()!.textContent).toMatch(/Add to Home Screen/);
+    expect(card()!.querySelectorAll('li')).toHaveLength(3);
     // There is no install dialog on iOS, so no Install button.
     expect(screen.queryByRole('button', { name: 'Install' })).toBeNull();
 

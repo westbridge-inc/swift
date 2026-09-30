@@ -368,3 +368,7 @@ describe('[PWA-1] install, activate and the update path', () => {
     expect(worker.skipWaiting).toHaveBeenCalledTimes(1);
   });
 });
+
+it('ships a new offline cache version for the reconnect-capable offline document', () => {
+  expect(SOURCE).toContain("const VERSION = 'v2';");
+});

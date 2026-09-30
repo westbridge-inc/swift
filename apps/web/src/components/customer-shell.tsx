@@ -84,7 +84,7 @@ export function TopBar({
         <ul className="mx-auto flex max-w-6xl items-center justify-end gap-5 px-4 py-1.5 text-xs font-semibold text-[var(--swift-muted)]">
           {BUSINESS_LINKS.map((link) => (
             <li key={link.href}>
-              <Link href={link.href} className="hover:text-[var(--swift-ink)]">{link.label}</Link>
+              <Link href={link.href} className="inline-flex items-center hover:text-[var(--swift-ink)]">{link.label}</Link>
             </li>
           ))}
         </ul>
@@ -96,12 +96,12 @@ export function TopBar({
             type="button"
             onClick={onBack}
             aria-label="Back"
-            className={`-ml-2 grid h-10 w-10 shrink-0 place-items-center rounded-full hover:bg-[var(--swift-subtle)] ${PRESS}`}
+            className={`-ml-2 grid h-11 w-11 shrink-0 place-items-center rounded-full hover:bg-[var(--swift-subtle)] ${PRESS}`}
           >
             <ChevronLeft className="h-6 w-6" aria-hidden />
           </button>
         ) : null}
-        <Link href="/" aria-label="Swift home" className="shrink-0">
+        <Link href="/" aria-label="Swift home" className="inline-flex shrink-0 items-center">
           <SwiftLogo />
         </Link>
 
@@ -112,8 +112,9 @@ export function TopBar({
               <Link
                 key={tab}
                 href={href}
+                prefetch={true}
                 aria-current={activeTab === tab ? 'page' : undefined}
-                className={`rounded-full px-3.5 py-1.5 text-sm font-semibold ${
+                className={`inline-flex items-center rounded-full px-3.5 py-1.5 text-sm font-semibold ${
                   activeTab === tab ? 'bg-[var(--swift-red-50)] text-[var(--swift-red)]' : 'text-[var(--swift-muted)] hover:text-[var(--swift-ink)]'
                 }`}
               >
@@ -124,8 +125,9 @@ export function TopBar({
 
         <Link
           href="/order/search"
+          prefetch={true}
           aria-label="Search Swift"
-          className={`ml-auto flex h-10 items-center gap-2 rounded-full border border-[var(--swift-border)] px-3 text-sm text-[var(--swift-muted)] hover:bg-[var(--swift-subtle)] md:w-72 md:px-4 ${PRESS}`}
+          className={`ml-auto flex h-11 items-center gap-2 rounded-full border border-[var(--swift-border)] px-3 text-sm text-[var(--swift-muted)] hover:bg-[var(--swift-subtle)] md:w-72 md:px-4 ${PRESS}`}
         >
           <Search className="h-4.5 w-4.5" aria-hidden />
           <span className="hidden md:inline">Search Swift</span>
@@ -133,15 +135,16 @@ export function TopBar({
 
         <Link
           href="/cart"
+          prefetch={true}
           aria-label="Cart"
           aria-current={activeTab === 'cart' ? 'page' : undefined}
-          className={`hidden h-10 w-10 place-items-center rounded-full border border-[var(--swift-border)] hover:bg-[var(--swift-subtle)] md:grid ${PRESS}`}
+          className={`hidden h-11 w-11 place-items-center rounded-full border border-[var(--swift-border)] hover:bg-[var(--swift-subtle)] md:grid ${PRESS}`}
         >
           <ShoppingBag className="h-4.5 w-4.5" aria-hidden />
         </Link>
         {status === 'checking' ? (
           // The account slot keeps its size while the one probe is answered.
-          <span aria-hidden className="hidden h-10 w-10 md:block" />
+          <span aria-hidden className="hidden h-11 w-11 md:block" />
         ) : guest ? (
           <Link
             href={signInPath(returnPath())}
@@ -154,7 +157,7 @@ export function TopBar({
             href="/account"
             aria-label="Profile"
             aria-current={activeTab === 'profile' ? 'page' : undefined}
-            className={`hidden h-10 w-10 place-items-center rounded-full border border-[var(--swift-border)] hover:bg-[var(--swift-subtle)] md:grid ${PRESS}`}
+            className={`hidden h-11 w-11 place-items-center rounded-full border border-[var(--swift-border)] hover:bg-[var(--swift-subtle)] md:grid ${PRESS}`}
           >
             <CircleUser className="h-4.5 w-4.5" aria-hidden />
           </Link>
@@ -166,7 +169,7 @@ export function TopBar({
           aria-label="More from Swift"
           aria-haspopup="dialog"
           aria-expanded={menuOpen}
-          className={`-mr-1 grid h-10 w-10 place-items-center rounded-full hover:bg-[var(--swift-subtle)] md:hidden ${PRESS}`}
+          className={`-mr-1 grid h-11 w-11 place-items-center rounded-full hover:bg-[var(--swift-subtle)] md:hidden ${PRESS}`}
         >
           <Menu className="h-5 w-5" aria-hidden />
         </button>
@@ -193,7 +196,7 @@ function MoreMenu({ guest, returnPath, onClose }: { guest: boolean; returnPath: 
       <div className="absolute inset-x-0 top-0 max-h-full overflow-y-auto overscroll-contain rounded-b-3xl bg-[var(--swift-card)] px-4 pb-6 pt-[calc(env(safe-area-inset-top)_+_0.5rem)] shadow-[var(--swift-elevation-floating)]">
         <div className="flex h-12 items-center justify-between">
           <SwiftLogo />
-          <button ref={close} type="button" onClick={onClose} aria-label="Close" className="grid h-10 w-10 place-items-center rounded-full hover:bg-[var(--swift-subtle)]">
+          <button ref={close} type="button" onClick={onClose} aria-label="Close" className="grid h-11 w-11 place-items-center rounded-full hover:bg-[var(--swift-subtle)]">
             <X className="h-5 w-5" aria-hidden />
           </button>
         </div>
@@ -224,7 +227,7 @@ export function TabBar({ activeTab, marketVisible }: { activeTab: CustomerTab; m
   return (
     <nav
       aria-label="Swift tabs"
-      className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--swift-border)] bg-[var(--swift-card)] pb-[env(safe-area-inset-bottom)] md:hidden"
+      className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--swift-border)] bg-[var(--swift-card)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] md:hidden"
     >
       <ul className="mx-auto flex max-w-md">
         {visibleTabs(marketVisible).map(({ tab, href, label, Icon }) => {
@@ -233,6 +236,7 @@ export function TabBar({ activeTab, marketVisible }: { activeTab: CustomerTab; m
             <li key={tab} className="flex-1">
               <Link
                 href={href}
+                prefetch={true}
                 aria-current={active ? 'page' : undefined}
                 className={`flex h-14 flex-col items-center justify-center gap-0.5 ${PRESS} ${
                   active ? 'text-[var(--swift-red)]' : 'text-[var(--swift-muted-soft)]'

@@ -13,7 +13,8 @@ import { currentCoords } from '@/lib/geolocate';
 import { useCustomerSession } from '@/components/customer-session';
 import { PRESS } from '@/components/customer-shell';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { EmptyNote, VendorCard, VendorGridSkeleton } from '@/components/order-ui';
+import { HomeSkeleton, RAIL } from '@/components/home-skeleton';
+import { EmptyNote, VendorCard } from '@/components/order-ui';
 
 /**
  * [Q7b] HOME — what swiftgy.com opens on. The phone app's Home on the web:
@@ -199,7 +200,7 @@ function DeliveryPoint({
 }) {
   const pill = `inline-flex max-w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-3.5 py-2 text-sm ${PRESS}`;
   if (status === 'checking' || savedLoading) {
-    return <span aria-hidden className="inline-block h-9 w-48 animate-pulse rounded-full bg-[var(--swift-subtle)] motion-reduce:animate-none" />;
+    return <span aria-hidden className="inline-block h-11 w-48 animate-pulse rounded-full bg-[var(--swift-subtle)] motion-reduce:animate-none" />;
   }
   if (status === 'signed-in') {
     return (
@@ -247,14 +248,12 @@ function LiveOrder({ order }: { order: NonNullable<HomeFeed['activeOrder']> }) {
   );
 }
 
-const RAIL = 'mt-3 -mx-4 flex snap-x snap-mandatory gap-3 overflow-x-auto px-4 pb-2 [overscroll-behavior-x:contain] [scrollbar-width:none]';
-
 function PopularRail({ items }: { items: PopularItem[] }) {
   return (
     <section aria-labelledby="popular-title">
       <div className="flex items-end justify-between">
         <h2 id="popular-title" className="text-xl font-extrabold">Popular on Swift</h2>
-        <Link href="/order/search" className="text-sm font-semibold text-[var(--swift-red)]">See all</Link>
+        <Link href="/order/search" prefetch={true} className="inline-flex items-center text-sm font-semibold text-[var(--swift-red)]">See all</Link>
       </div>
       <ul className={RAIL}>
         {items.map((item) => (
@@ -264,7 +263,7 @@ function PopularRail({ items }: { items: PopularItem[] }) {
               className={`block overflow-hidden rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] ${PRESS}`}
             >
               <span className="relative block h-28 bg-[var(--swift-subtle)]">
-                {item.imageUrl ? <Image src={item.imageUrl} alt="" fill unoptimized className="object-cover" /> : null}
+                {item.imageUrl ? <Image src={item.imageUrl} alt="" fill unoptimized sizes="(min-width: 640px) 176px, 160px" loading="lazy" className="object-cover" /> : null}
               </span>
               <span className="block p-2.5">
                 <span className="block truncate text-sm font-bold">{item.name}</span>
@@ -300,21 +299,5 @@ function VendorRail({ title, vendors }: { title: string; vendors: Vendor[] }) {
         ))}
       </ul>
     </section>
-  );
-}
-
-function HomeSkeleton() {
-  return (
-    <div aria-busy="true" aria-label="Loading stores" className="space-y-8">
-      <div>
-        <div className="h-6 w-44 animate-pulse rounded-lg bg-[var(--swift-subtle)] motion-reduce:animate-none" />
-        <div className="mt-3 flex gap-3 overflow-hidden">
-          {Array.from({ length: 4 }).map((_, index) => (
-            <div key={index} className="h-44 w-40 shrink-0 animate-pulse rounded-2xl bg-[var(--swift-subtle)] motion-reduce:animate-none" />
-          ))}
-        </div>
-      </div>
-      <VendorGridSkeleton />
-    </div>
   );
 }
