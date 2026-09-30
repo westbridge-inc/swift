@@ -6,6 +6,58 @@ import { PartnerService } from '../../modules/partner/partner.service';
 import { proveOwnerDiscovery } from '../helpers/cleanup-race';
 import { createGolden } from './gold-7-helpers';
 
+// Finalizers attempt every independent release and report every failure.
+// A failed peer removal must never prevent terminal app/mock disposal.
+async function finish(...actions: Array<() => unknown | Promise<unknown>>) {
+  const errors: unknown[] = [];
+  for (const action of actions) {
+    try { await action(); } catch (error) { errors.push(error); }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, 'GOLD-7 cleanup finalization failed');
+}
+
+it('always disposes a retained app when peer removal fails and reports the original removal failure', async () => {
+  const h = createGolden('+5920978', 'gold7-peer-removal-failure');
+  const other = new PrismaClient();
+  const users: string[] = [];
+  const notices: string[] = [];
+  const removalError = new Error('intentional peer removal failure');
+  let onClose = 0;
+  try {
+    await h.start(async (app) => { app.addHook('onClose', async () => { onClose++; }); });
+    const actor = await h.actor(); users.push(actor.userId);
+    const user = await other.user.findUniqueOrThrow({ where: { id: actor.userId } });
+    const notice = await other.notification.create({ data: {
+      userId: actor.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Peer blocker', body: 'Fixture only',
+    } }); notices.push(notice.id);
+    await expect(h.close({ retainForRetry: true })).rejects.toThrow(/untracked notifications block fixture user cleanup/);
+    const removal = vi.spyOn(other.notification, 'delete').mockRejectedValueOnce(removalError);
+    try {
+      // Exercise the same finalizer used by every intentional-refusal consumer.
+      await expect(finish(() => other.notification.delete({ where: { id: notice.id } }), () => h.dispose())).rejects.toBe(removalError);
+      expect(onClose).toBe(1);
+      expect(h.app.redis.status).toBe('end');
+      expect([h.app.prisma.alertDelivery.create, h.app.prisma.alertDelivery.createMany,
+        h.app.prisma.notification.create, h.app.prisma.notification.createMany].some(vi.isMockFunction)).toBe(false);
+      expect(await other.user.findUnique({ where: { id: actor.userId } })).toEqual(user);
+      expect(await other.notification.findUnique({ where: { id: notice.id } })).toEqual(notice);
+    } finally { removal.mockRestore(); }
+  } finally {
+    await finish(
+      () => h.dispose(),
+      () => other.$transaction(async (tx) => {
+        await tx.notification.deleteMany({ where: { id: { in: notices } } });
+        await tx.address.deleteMany({ where: { userId: { in: users } } });
+        await tx.session.deleteMany({ where: { userId: { in: users } } });
+        await tx.customer.deleteMany({ where: { userId: { in: users } } });
+        await tx.user.deleteMany({ where: { id: { in: users } } });
+      }),
+      () => other.$disconnect(),
+    );
+  }
+});
+
 // [G7-01] Cleanup isolation, not a journey. A concurrent writer can use the
 // same admin subject and recipient. Before/after census is not ownership.
 // Phone +5920978…: run-random suffix plus sequence; no shared literal phone.
@@ -111,7 +163,7 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
     expect(await other.notification.count({ where: { id: { in: ownedNotificationIds } } })).toBe(2);
     const peerBeforeClose = await other.user.findUniqueOrThrow({ where: { id: peerId } });
     const vendorBeforeClose = await other.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
-    await expect(h.close()).rejects.toThrow(/untracked notifications block fixture user cleanup/);
+    await expect(h.close({ retainForRetry: true })).rejects.toThrow(/untracked notifications block fixture user cleanup/);
     expect(await other.notification.findUnique({ where: { id: peerAdminNotice.id } })).toEqual(peerAdminNotice);
     expect(await other.user.findUnique({ where: { id: admin.userId } })).not.toBeNull();
     // The peer owns its notice and removes it. Insert another peer notice
@@ -129,7 +181,7 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
       return result;
     }) as typeof findNotices);
     try {
-      await expect(h.close()).rejects.toThrow(/untracked notifications block fixture user cleanup/);
+      await expect(h.close({ retainForRetry: true })).rejects.toThrow(/untracked notifications block fixture user cleanup/);
       expect(lateNoticeId).toBeDefined();
       expect(await other.notification.findUnique({ where: { id: lateNoticeId! } })).not.toBeNull();
       expect(await other.user.findUnique({ where: { id: admin.userId } })).not.toBeNull();
@@ -147,20 +199,21 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
     expect(await other.user.findUnique({ where: { id: peerId } })).toEqual(peerBeforeClose);
     expect(await other.vendor.findUnique({ where: { id: vendor.id } })).toEqual(vendorBeforeClose);
   } finally {
-    try {
-      if (!closed && h.app) await h.close();
-    } finally {
-      peerTracking.mockRestore();
-      peerNotificationTracking.mockRestore();
-      try {
-        await other.alertDelivery.deleteMany({ where: { id: { in: [beforeId, duringId, peerOfferId, ...peerAlertIds, ...ownedAlertIds] } } });
+    await finish(
+      () => peerTracking.mockRestore(),
+      () => peerNotificationTracking.mockRestore(),
+      () => other.notification.deleteMany({ where: { id: { in: peerNotificationIds } } }),
+      async () => { if (!closed && h.app) await h.close(); },
+      () => h.dispose(),
+      () => other.alertDelivery.deleteMany({ where: { id: { in: [beforeId, duringId, peerOfferId, ...peerAlertIds] } } }),
+      async () => {
         const stores = await other.vendor.findMany({ where: { owner: { userId: peerId } }, select: { id: true } });
-        await other.notification.deleteMany({ where: { id: { in: peerNotificationIds } } });
         await other.vendor.deleteMany({ where: { id: { in: stores.map((store) => store.id) } } });
         await other.vendorOwner.deleteMany({ where: { userId: peerId } });
         await other.user.deleteMany({ where: { id: peerId } });
-      } finally { await other.$disconnect(); }
-    }
+      },
+      () => other.$disconnect(),
+    );
   }
 });
 
@@ -187,17 +240,20 @@ it('refuses to remove a fixture vendor while a peer order belongs to it', async 
       deliveryFee: 0, totalAmount: 1200, paymentMethod: 'CASH',
     } });
     orderId = order.id;
-    await expect(h.close()).rejects.toThrow(`foreign orders block fixture cleanup: ${orderId}`);
+    await expect(h.close({ retainForRetry: true })).rejects.toThrow(`foreign orders block fixture cleanup: ${orderId}`);
     expect(await other.order.findUnique({ where: { id: orderId } })).toEqual(order);
     expect(await other.vendor.findUnique({ where: { id: store.vendorId } })).not.toBeNull();
     await other.order.delete({ where: { id: orderId } });
     await h.close(); closed = true;
     expect(await other.user.findUnique({ where: { id: peerId } })).not.toBeNull();
   } finally {
-    if (orderId) await other.order.deleteMany({ where: { id: orderId } });
-    if (!closed && h.app) await h.close().catch(() => {});
-    await other.user.deleteMany({ where: { id: peerId } });
-    await other.$disconnect();
+    await finish(
+      async () => { if (orderId) await other.order.deleteMany({ where: { id: orderId } }); },
+      async () => { if (!closed && h.app) await h.close(); },
+      () => h.dispose(),
+      () => other.user.deleteMany({ where: { id: peerId } }),
+      () => other.$disconnect(),
+    );
   }
 });
 
@@ -234,7 +290,7 @@ it.each(['RIDER', 'DRIVER'] as const)('refuses existing and post-preflight peer 
       ? other.rider.findUnique({ where: { id: profile.id } })
       : other.driver.findUnique({ where: { id: profile.id } });
     const existing = await insertPeer();
-    await expect(h.close().then(() => { closed = true; })).rejects.toThrow(`foreign orders block fixture cleanup: ${existing.id}`);
+    await expect(h.close({ retainForRetry: true }).then(() => { closed = true; })).rejects.toThrow(`foreign orders block fixture cleanup: ${existing.id}`);
     expect(await other.order.findUnique({ where: { id: existing.id } })).toEqual(existing);
     expect(await readProfile()).toEqual(profile);
     expect(await other.alertDelivery.findUnique({ where: { id: ownedAlert.id } })).toEqual(ownedAlert);
@@ -248,7 +304,7 @@ it.each(['RIDER', 'DRIVER'] as const)('refuses existing and post-preflight peer 
       return result;
     }) as typeof findOrders);
     try {
-      await expect(h.close().then(() => { closed = true; })).rejects.toThrow(/foreign orders block fixture cleanup/);
+      await expect(h.close({ retainForRetry: true }).then(() => { closed = true; })).rejects.toThrow(/foreign orders block fixture cleanup/);
       expect(late).toBeDefined();
       expect(await other.order.findUnique({ where: { id: late!.id } })).toEqual(late);
       expect(await readProfile()).toEqual(profile);
@@ -259,20 +315,23 @@ it.each(['RIDER', 'DRIVER'] as const)('refuses existing and post-preflight peer 
     expect(await readProfile()).toBeNull();
     expect(await other.alertDelivery.findUnique({ where: { id: ownedAlert.id } })).toBeNull();
   } finally {
-    await other.order.deleteMany({ where: { id: { in: peerOrders } } });
-    if (!closed && h.app) await h.close();
-    await other.user.deleteMany({ where: { id: peerId } });
-    await other.$disconnect();
+    await finish(
+      () => other.order.deleteMany({ where: { id: { in: peerOrders } } }),
+      async () => { if (!closed && h.app) await h.close(); },
+      () => h.dispose(),
+      () => other.user.deleteMany({ where: { id: peerId } }),
+      () => other.$disconnect(),
+    );
   }
 });
 
 it('locks the GOLD7 intermediary owner before discovering an existing or lock-scheduled new vendor', async () => {
   const h = createGolden('+5920978', 'gold7-owner-discovery');
-  await h.start();
   try {
+    await h.start();
     const owner = await h.actor(['VENDOR_OWNER']);
     await h.vendor(owner);
     const profile = await h.sys(() => h.app.prisma.vendorOwner.findUniqueOrThrow({ where: { userId: owner.userId } }));
     await proveOwnerDiscovery(h.app.prisma, h.purge, profile.id, owner.userId);
-  } finally { await h.close(); }
+  } finally { await finish(async () => { if (h.app) await h.close(); }, () => h.dispose()); }
 });

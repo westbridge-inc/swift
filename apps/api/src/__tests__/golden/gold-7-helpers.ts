@@ -36,8 +36,8 @@ export function createGolden(phonePrefix: string, fixture: string) {
   const createdAlertIds = new Set<string>();
   const createdNotificationIds = new Set<string>();
   const createdOrderIds = new Set<string>();
-  let restoreNotificationTracking: (() => void) | undefined;
-  let restoreAlertTracking: (() => void) | undefined;
+  const restoreTracking: Array<() => void> = [];
+  let disposal: Promise<void> | undefined;
   const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, fixture);
 
   async function rememberClusters(userId: string) {
@@ -215,7 +215,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       for (const row of inserted) createdAlertIds.add(row.id);
       return { count: inserted.length };
     }) as unknown as typeof alerts.createMany);
-    restoreAlertTracking = () => { singleTracking.mockRestore(); bulkTracking.mockRestore(); };
+    restoreTracking.push(() => singleTracking.mockRestore(), () => bulkTracking.mockRestore());
     const notifications = app.prisma.notification;
     const createNotification = notifications.create.bind(notifications);
     const createNotifications = notifications.createManyAndReturn.bind(notifications);
@@ -230,7 +230,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       for (const row of inserted) createdNotificationIds.add(row.id);
       return { count: inserted.length };
     }) as unknown as typeof notifications.createMany);
-    restoreNotificationTracking = () => { singleNotificationTracking.mockRestore(); bulkNotificationTracking.mockRestore(); };
+    restoreTracking.push(() => singleNotificationTracking.mockRestore(), () => bulkNotificationTracking.mockRestore());
     await purge();
   }
 
@@ -239,15 +239,36 @@ export function createGolden(phonePrefix: string, fixture: string) {
     expect(added.statusCode, added.json().error?.code).toBe(201);
   }
 
-  return { get app() { return app; }, sys, call, actor, vendor, start, purge, fillCart, rememberClusters, nextPhone,
-    close: async () => {
-      // Admin audit writes may finish just after the response (GOLD-5). A
-      // blocked purge leaves the app available so the peer can remove its row
-      // and the owner can retry; closing would strand our fixture parents.
+  function dispose() {
+    // Terminal resource disposal never purges data. Attempt every release,
+    // even if another release fails, and retain all failures for the caller.
+    return disposal ??= (async () => {
+      const errors: unknown[] = [];
+      for (const release of [...restoreTracking, app && (() => app.close())]) {
+        try { await release?.(); } catch (error) { errors.push(error); }
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, `GOLD-7 ${fixture}: resource disposal failed`);
+    })();
+  }
+
+  async function close(options: { retainForRetry?: boolean } = {}) {
+    try {
+      // Admin audit writes may finish just after the response (GOLD-5).
       await new Promise((resolve) => setTimeout(resolve, 300));
       await purge();
-      restoreAlertTracking?.(); restoreNotificationTracking?.();
-      await app.close();
-    },
-  };
+    } catch (error) {
+      // Intentional refusal tests must opt in and still dispose in finally.
+      // Default teardown releases resources without retrying or deleting data.
+      if (!options.retainForRetry) {
+        try { await dispose(); } catch (disposalError) {
+          throw new AggregateError([error, disposalError], `GOLD-7 ${fixture}: cleanup and disposal failed`, { cause: error });
+        }
+      }
+      throw error;
+    }
+    await dispose();
+  }
+
+  return { get app() { return app; }, sys, call, actor, vendor, start, purge, dispose, close, fillCart, rememberClusters, nextPhone };
 }
