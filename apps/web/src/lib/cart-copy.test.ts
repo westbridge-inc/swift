@@ -38,6 +38,12 @@ describe('cart customer copy census', () => {
     ['ID_VERIFICATION_REQUIRED', 'verify your identity'], ['ACCOUNT_RESTRICTED', 'Contact support'],
     ['STRIKE_RESTRICTED', 'Contact support'], ['OUT_OF_RANGE', 'closer delivery address'],
     ['MIN_ORDER', 'minimum order amount'], ['CART_CHANGED', 'Review your items'],
+    ['PROMO_WRONG_VENDOR', 'another store. Remove it to continue'],
+    ['INVALID_PROMO', 'no longer available. Remove it to continue'],
+    ['EXPIRED_PROMO', 'expired. Remove it to continue'],
+    ['USED_PROMO', 'cannot be used again. Remove it to continue'],
+    ['MIN_ORDER_PROMO', 'minimum amount for this promo code. Remove it to continue'],
+    ['PROMO_UNAVAILABLE_CASH_DELIVERY', 'cannot be used for cash delivery. Remove it to continue'],
   ])('keeps %s actionable without diagnostics', (code, copy) => {
     expect(cartErrorMessage(new ApiRequestError('server diagnostic', 400, code))).toContain(copy);
   });

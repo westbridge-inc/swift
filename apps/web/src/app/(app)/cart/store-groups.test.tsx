@@ -83,6 +83,64 @@ describe('store cart recovery', () => {
     ]);
   });
 
+  it('recovers from a removed store’s saved promotion with explicit removal and a fresh quote', async () => {
+    cart.promoCode = { code: 'FIRSTSTORE' };
+    special = ({ method, url }) => {
+      if (url.pathname.endsWith('/checkout') && cart.promoCode) return {
+        status: 400, body: { success: false, error: { code: 'PROMO_WRONG_VENDOR', message: 'server promo diagnostic' } },
+      };
+      if (method === 'DELETE' && url.pathname.endsWith('/cart/promo')) {
+        cart = { ...cart, promoCode: null, deliveryFee: 125 };
+        return ok({ message: 'Promo removed' });
+      }
+      return null;
+    };
+    render(<CartPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove First Store items' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Place cash order · GY$900' }));
+    await screen.findByText('This promo code was for another store. Remove it to continue.');
+    expect(document.body.textContent).not.toContain('server promo diagnostic');
+    expect(cart.promoCode?.code).toBe('FIRSTSTORE');
+    expect(requests.filter((r) => r.path.endsWith('/cart/promo'))).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove promo code' }));
+    const place = await screen.findByRole('button', { name: 'Place cash order · GY$925' });
+    const removalIndex = requests.findIndex((r) => r.method === 'DELETE' && r.path.endsWith('/cart/promo'));
+    expect(removalIndex).toBeGreaterThan(-1);
+    expect(requests.slice(removalIndex + 1)).toContainEqual({ method: 'GET', path: '/api/v1/customer/cart', body: null });
+    expect(screen.queryByText('FIRSTSTORE')).toBeNull();
+    expect(cart.items.map((item) => item.id)).toEqual(['l2']);
+    expect(cart.items[0]?.selectedOptionNames).toEqual(['Large']);
+    fireEvent.click(place);
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/orders/o1'));
+    expect(orderedItems).toEqual(['l2']);
+    expect(requests.filter((r) => r.path.endsWith('/checkout')).map((r) => r.body)).toEqual([
+      { paymentMethod: 'CASH', tipAmount: 0, promoCode: 'FIRSTSTORE' },
+      { paymentMethod: 'CASH', tipAmount: 0 },
+    ]);
+  });
+
+  it('does not remove a saved promotion during an unresolved order', async () => {
+    cart.promoCode = { code: 'FIRSTSTORE' };
+    persistCheckoutAttempt({ signature: 'earlier-order', key: 'fixture-replay-key' });
+    render(<CartPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove promo code' }));
+    expect(await screen.findByText(/Your last order is still being confirmed/)).toBeTruthy();
+    expect(requests.filter((r) => r.method === 'DELETE')).toHaveLength(0);
+    expect(cart.promoCode?.code).toBe('FIRSTSTORE');
+  });
+
+  it('retains the saved promotion and items when promotion removal fails', async () => {
+    cart.promoCode = { code: 'FIRSTSTORE' };
+    special = ({ method, url }) => method === 'DELETE' && url.pathname.endsWith('/cart/promo')
+      ? { status: 500, body: { success: false, error: { message: 'server diagnostic' } } } : null;
+    render(<CartPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove promo code' }));
+    await screen.findByText('Could not update your cart. Please try again.');
+    expect(screen.getByText('FIRSTSTORE')).toBeTruthy();
+    expect(cart.items.map((item) => item.id)).toEqual(['l1', 'l2']);
+    expect(navigation.push).not.toHaveBeenCalled();
+  });
+
   it('does not guess when removing the last-added store leaves stale store details', async () => {
     render(<CartPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Remove Second Store items' }));

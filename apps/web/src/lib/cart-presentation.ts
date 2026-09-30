@@ -35,6 +35,12 @@ export function cartErrorMessage(error: unknown, fallback = 'Could not update yo
       OUT_OF_RANGE: 'This store cannot deliver to that address. Choose a closer delivery address.',
       MIN_ORDER: 'Add more items to reach this store’s minimum order amount.',
       CART_CHANGED: 'Your cart changed. Review your items and total before ordering again.',
+      PROMO_WRONG_VENDOR: 'This promo code was for another store. Remove it to continue.',
+      INVALID_PROMO: 'This promo code is no longer available. Remove it to continue.',
+      EXPIRED_PROMO: 'This promo code has expired. Remove it to continue.',
+      USED_PROMO: 'This promo code cannot be used again. Remove it to continue.',
+      MIN_ORDER_PROMO: 'Your order no longer meets the minimum amount for this promo code. Remove it to continue.',
+      PROMO_UNAVAILABLE_CASH_DELIVERY: 'This promo code cannot be used for cash delivery. Remove it to continue.',
     };
     if (error.code && messages[error.code]) return messages[error.code]!;
     if (error.code?.startsWith('MMG_')) return 'MMG is unavailable for this order. Review your payment choice and try again.';

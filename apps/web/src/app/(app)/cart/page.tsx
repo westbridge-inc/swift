@@ -23,6 +23,7 @@ import {
   persistCheckoutAttempt,
   readCheckoutAttempt,
   removeCartLine,
+  removeCartPromo,
   setCartAddress,
   updateCartLine,
   type Cart,
@@ -137,7 +138,7 @@ export default function CartPage() {
           : 'Some items cannot be delivered together. Remove them and choose delivery items from the store.');
     }
     if (Number(c.discount ?? 0) > 0) {
-      return block('This promotion cannot be used with this delivery. Clear your cart and add the items again without the promotion.');
+      return block('This promotion cannot be used with this delivery. Remove the promo code to continue.');
     }
     const quotedDistance = Number(c.deliveryDistanceKm ?? c.vendor.distanceKm);
     const deliveryRadius = Number(c.vendor.deliveryRadius);
@@ -516,6 +517,15 @@ export default function CartPage() {
       </section>
 
       <aside ref={checkoutRail} tabIndex={-1} className={styles.rail} aria-label="Checkout">
+        {cart.promoCode?.code ? (
+          <section className={styles.panel} aria-labelledby="promo-title">
+            <h2 id="promo-title" className={styles.panelTitle}>Promo code</h2>
+            <p className={styles.stateCopy}>{cart.promoCode.code}</p>
+            <button type="button" disabled={busy} onClick={() => void mutateCart(() => removeCartPromo())} className={`${styles.button} ${styles.buttonSecondary}`}>
+              Remove promo code
+            </button>
+          </section>
+        ) : null}
         {cartSafety !== 'safe' && !mixedStores ? (
           <div ref={safetyNotice} tabIndex={-1} className={`${styles.safety} ${cartSafety === 'blocked' ? styles.safetyBlocked : styles.safetyNotice}`} role={cartSafety === 'blocked' ? 'alert' : 'status'}>
             <div className={styles.panelStack}>
