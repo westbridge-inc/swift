@@ -47,7 +47,7 @@ import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counte
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
-import { checkoutRequestHash, drainCheckoutOutbox, findCheckoutReceipt } from '../order/checkout-outbox';
+import { CheckoutOutcomeUnknownError, checkoutRequestHash, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
@@ -2089,6 +2089,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // [M-11] The request's fingerprint travels with the key: one key, one
     // request, one immutable answer — over the canonical request.
     const requestHash = checkoutRequestHash({ ...body, ...(scheduledForCanonical ? { scheduledFor: scheduledForCanonical } : {}) });
+    // [AX366 F1] This request's own claim token: only its holder may release it.
+    const claim = newCheckoutClaim();
     if (redisKey) {
       // [M-11] The DATABASE is the truth for a replay. Before touching the
       // in-flight lock, ask whether this command already has a receipt: if
@@ -2107,10 +2109,10 @@ export async function customerRoutes(app: FastifyInstance) {
         // exposes internal order columns.
         return { success: true, data: shapeStoredCheckoutResult(receipt.result), replayed: true };
       }
-      const claimed = await app.redis.set(redisKey, 'IN_FLIGHT', 'EX', 86_400, 'NX');
+      const claimed = await app.redis.set(redisKey, claim, 'EX', 86_400, 'NX');
       if (!claimed) {
         const existing = await app.redis.get(redisKey);
-        if (existing && existing !== 'IN_FLIGHT') {
+        if (existing && !isCheckoutClaim(existing)) {
           checkoutIdempotencyCounter.labels('replayed_cache').inc();
           return { success: true, data: JSON.parse(existing), replayed: true };
         }
@@ -2121,9 +2123,10 @@ export async function customerRoutes(app: FastifyInstance) {
 
     let result;
     // [CHECKOUT-IDEM · AX354 S1] The service reports the moment its order
-    // transaction commits. Before that point a failure placed nothing: the key
-    // is released so the same key can retry once the customer fixes the
-    // problem (e.g. MIN_ORDER). After it the order EXISTS: the claim is kept
+    // transaction commits. Before that point, a CONFIRMED rollback placed
+    // nothing: this request's claim is released so the same key can retry once
+    // the customer fixes the problem (e.g. MIN_ORDER); an UNKNOWN commit
+    // outcome keeps it [AX366 F1]. After it the order EXISTS: the claim is kept
     // (releasing it is what let the receipt probe answer "none" for a placed
     // order) and the answer is the committed receipt.
     let commit = null as CheckoutCommit | null;
@@ -2143,9 +2146,19 @@ export async function customerRoutes(app: FastifyInstance) {
       });
     } catch (err) {
       if (!commit) {
-        // A failed attempt must not hold the key hostage — release so the same
-        // key can retry once the customer fixes the problem (e.g. MIN_ORDER).
-        if (redisKey) await app.redis.del(redisKey).catch(() => {});
+        if (err instanceof CheckoutOutcomeUnknownError) {
+          // [AX366 F1] The commit's outcome is UNKNOWN and no durable receipt
+          // proves the order: unknown is not "nothing placed". The claim is
+          // kept (the probe answers in_flight, a same-key retry is refused)
+          // until the receipt appears or the claim expires.
+          request.log.error({ err, receiptId: err.receiptId }, '[CHECKOUT-IDEM] checkout outcome unknown; claim kept');
+          throw err;
+        }
+        // A CONFIRMED rollback: nothing was placed. A failed attempt must not
+        // hold the key hostage — release so the same key can retry once the
+        // customer fixes the problem (e.g. MIN_ORDER). Only this request's own
+        // claim: never a newer request's after this one's claim was lost.
+        if (redisKey) await releaseCheckoutClaim(app.redis, redisKey, claim).catch(() => {});
         throw err;
       }
       // checkout never throws past its commit point; should anything still
@@ -2196,13 +2209,13 @@ export async function customerRoutes(app: FastifyInstance) {
     const { key } = z.object({ key: z.string().min(8).max(128) }).parse(request.params ?? {});
     const { userId } = request.user;
     // [CHECKOUT-IDEM · AX354 S1] The claim FIRST, the receipt SECOND. The
-    // checkout route releases a claim only after its order transaction has
-    // settled, and never once the commit is reported, so by the time a claim
-    // is gone any receipt that transaction wrote is visible: a receipt read
-    // AFTER the claim read sees every order the claim read missed. Read the
-    // other way round, a probe could miss the receipt (not committed yet),
-    // then miss the claim (gone after the commit), and answer "none" for a
-    // placed order.
+    // checkout route releases a claim only for a confirmed rollback, never
+    // once a commit is reported or while its outcome is unknown [AX366 F1],
+    // so by the time a claim is gone any receipt its transaction wrote is
+    // visible: a receipt read AFTER the claim read sees every order the claim
+    // read missed. Read the other way round, a probe could miss the receipt
+    // (not committed yet), then miss the claim (gone after the commit), and
+    // answer "none" for a placed order.
     let claimed: string | null = null;
     let claimUnknown = false;
     try {

@@ -1,7 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Prisma, type PrismaClient, type FulfillmentType } from '@prisma/client';
 import type { Queue } from 'bullmq';
 import type { FastifyBaseLogger } from 'fastify';
+import type Redis from 'ioredis';
+import { AppError } from '../../utils/errors';
 import { appointmentAutoCancelDelayMs, vendorResponseSlaMinutes } from './response-sla';
 
 /**
@@ -273,6 +275,49 @@ export async function findCheckoutReceipt(
     where: { userId_idempotencyKey: { userId, idempotencyKey } },
     select: { requestHash: true, orderIds: true, result: true },
   });
+}
+
+/**
+ * [CHECKOUT-IDEM · AX366 F1] The in-flight claim on a checkout command key
+ * carries a token of the request that holds it, so a release can prove
+ * ownership: an older request that fails must never delete a newer request's
+ * claim on the same key (after the older claim expired or was evicted). A
+ * bare 'IN_FLIGHT' is the value claims held before tokens.
+ */
+const CHECKOUT_CLAIM_PREFIX = 'IN_FLIGHT';
+
+export function newCheckoutClaim(): string {
+  return `${CHECKOUT_CLAIM_PREFIX}:${randomUUID()}`;
+}
+
+/** An in-flight claim, as opposed to the cached answer a finished command leaves under the key. */
+export function isCheckoutClaim(value: string): boolean {
+  return value === CHECKOUT_CLAIM_PREFIX || value.startsWith(`${CHECKOUT_CLAIM_PREFIX}:`);
+}
+
+const RELEASE_CHECKOUT_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('DEL', KEYS[1])
+return 1
+`;
+
+/** Release the claim only while it is still this request's own (atomic compare-and-delete). */
+export async function releaseCheckoutClaim(redis: Redis, key: string, claim: string): Promise<boolean> {
+  return Number(await redis.eval(RELEASE_CHECKOUT_CLAIM_SCRIPT, 1, key, claim)) === 1;
+}
+
+/**
+ * [CHECKOUT-IDEM · AX366 F1] A checkout whose commit outcome cannot be
+ * established yet: its transaction rejected after the body had finished (a
+ * commit error, or a lost acknowledgement), and no durable receipt proves the
+ * order. Not a refusal: the order may exist. The caller keeps the command's
+ * claim, and the customer asks what became of it (the receipt probe) instead
+ * of placing it again.
+ */
+export class CheckoutOutcomeUnknownError extends AppError {
+  constructor(public readonly receiptId: string | null) {
+    super(503, 'CHECKOUT_OUTCOME_UNKNOWN', 'We could not confirm this order yet. Check your orders before you try again.');
+  }
 }
 
 function claimLeaseMs(): number {

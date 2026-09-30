@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { OrderService } from '../modules/order/order.service';
+import { NotificationService } from '../modules/notification/notification.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
@@ -96,6 +97,46 @@ function failVendorOwnerLookupOnce() {
 }
 
 /**
+ * [AX366 F1] A lost COMMIT acknowledgement. The next checkout's transaction
+ * body runs to its end and hands its work to COMMIT, then the caller sees a
+ * connection error either way. `landed` decides what the database really did:
+ * true → it committed (the acknowledgement was lost on the way back); false →
+ * it did not (the commit failed, and the error cannot say so).
+ */
+function loseCommitAcknowledgement(landed: boolean) {
+  let fired = 0;
+  const realCheckout = OrderService.prototype.checkout;
+  const spy = vi.spyOn(OrderService.prototype, 'checkout').mockImplementationOnce(async function (this: OrderService, input) {
+    const prisma = app.prisma;
+    const realTx = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+    const txSpy = vi.spyOn(prisma, '$transaction').mockImplementation((async (operation: unknown, options?: unknown) => {
+      if (typeof operation !== 'function') return realTx(operation, options);
+      let isCheckout = false;
+      const undo = new Error('the commit did not land');
+      try {
+        const result = await realTx(async (tx: unknown) => {
+          const staged = await (operation as (tx: unknown) => Promise<unknown>)(tx);
+          isCheckout = !!staged && typeof staged === 'object' && 'orders' in staged && 'answer' in staged;
+          if (isCheckout && !landed) throw undo;
+          return staged;
+        }, options);
+        if (!isCheckout) return result;
+      } catch (err) {
+        if (err !== undo) throw err;
+      }
+      fired += 1;
+      throw new Error('Server has closed the connection (the COMMIT acknowledgement never arrived)');
+    }) as never);
+    try {
+      return await realCheckout.call(this, input);
+    } finally {
+      txSpy.mockRestore();
+    }
+  });
+  return { fired: () => fired, restore: () => spy.mockRestore() };
+}
+
+/**
  * The race, driven deterministically. A checkout is held in flight — its key
  * claimed, its transaction not yet begun — and the probe starts. The FIRST of
  * the probe's two reads (whichever store it reads first) returns what it saw,
@@ -111,7 +152,7 @@ async function probeAcrossCheckout(c: Customer, key: string, between: () => Prom
   });
   const posting = checkout(c, key);
   await inFlight.promise;
-  expect(await app.redis.get(claimKey(c, key))).toBe('IN_FLIGHT');
+  expect(await app.redis.get(claimKey(c, key))).toMatch(/^IN_FLIGHT/);
   expect(await receiptOf(c, key)).toBeNull();
 
   let interleaved = false;
@@ -405,5 +446,115 @@ describe('(c) the probe reads the claim FIRST, then the receipt', () => {
     expect(failedReads).toBeGreaterThanOrEqual(1); // the outage was really injected into a probe's claim read
     expect(known.statusCode, known.body).toBe(200);
     expect(known.json().data).toEqual({ status: 'placed', orderIds: [placed.json().data.orders[0].id] });
+  });
+});
+
+describe('[AX366 F1] a commit whose outcome is unknown is settled by the durable receipt, never released blind', () => {
+  it('the COMMIT lands but its acknowledgement is lost: the receipt proves it, so the answer is the placed receipt (200), the claim is kept, the store is told, and the probe says placed', async () => {
+    const c = await makeCustomer();
+    await fillCart(c, vendorId, itemId);
+    const key = `ckidem-${nanoid(10)}`;
+    const told = vi.spyOn(NotificationService.prototype, 'newOrderForVendor');
+    const lost = loseCommitAcknowledgement(true);
+    let res: LightMyRequestResponse;
+    try {
+      res = await checkout(c, key);
+    } finally {
+      lost.restore();
+    }
+    expect(lost.fired()).toBe(1); // the checkout's own transaction rejected after its body finished
+    const receipt = await receiptOf(c, key);
+    expect(receipt).not.toBeNull(); // the database did commit
+    expect(res.statusCode, res.body).toBe(200); // not an error for a placed order
+    expect(res.json().data).toEqual(receipt!.result);
+    expect(await ordersOf(c.userId)).toBe(1);
+    expect(await app.redis.get(claimKey(c, key))).not.toBeNull();
+    expect((await probe(c, key)).json().data).toEqual({ status: 'placed', orderIds: receipt!.orderIds });
+    // The committed order is treated as committed all the way: its store is told.
+    expect(told.mock.calls.some((args) => args[4] === receipt!.orderIds[0])).toBe(true);
+
+    await fillCart(c, vendorId, itemId);
+    const again = await checkout(c, key);
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json().replayed).toBe(true);
+    expect(await ordersOf(c.userId)).toBe(1);
+  });
+
+  it('the COMMIT does not land and the error cannot say so: no receipt, so the claim is KEPT, the answer is a retryable 503, the probe says in_flight, and a same-key retry places nothing', async () => {
+    const c = await makeCustomer();
+    await fillCart(c, vendorId, itemId);
+    const key = `ckidem-${nanoid(10)}`;
+    const lost = loseCommitAcknowledgement(false);
+    let res: LightMyRequestResponse;
+    try {
+      res = await checkout(c, key);
+    } finally {
+      lost.restore();
+    }
+    expect(lost.fired()).toBe(1);
+    expect(await receiptOf(c, key)).toBeNull();
+    expect(await ordersOf(c.userId)).toBe(0);
+    expect(res.statusCode, res.body).toBe(503);
+    expect(res.json().error.code).toBe('CHECKOUT_OUTCOME_UNKNOWN');
+    // Unknown is not "nothing placed": the claim stays until the receipt appears or it expires.
+    expect(await app.redis.get(claimKey(c, key))).toMatch(/^IN_FLIGHT/);
+    expect(await app.redis.ttl(claimKey(c, key))).toBeGreaterThan(0);
+    expect((await probe(c, key)).json().data).toEqual({ status: 'in_flight' });
+    const again = await checkout(c, key);
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json().error.code).toBe('DUPLICATE_REQUEST');
+    expect(await ordersOf(c.userId)).toBe(0);
+  });
+});
+
+describe('[AX366 F1] a claim is released only by the request that holds it', () => {
+  it('an older request that fails before its commit never deletes a newer request’s claim on the same key', async () => {
+    const c = await makeCustomer();
+    await fillCart(c, vendorId, itemId);
+    const key = `ckidem-${nanoid(10)}`;
+    const olderInFlight = deferred();
+    const olderGate = deferred();
+    const newerInFlight = deferred();
+    const newerGate = deferred();
+    let calls = 0;
+    const realCheckout = OrderService.prototype.checkout;
+    const spy = vi.spyOn(OrderService.prototype, 'checkout').mockImplementation(async function (this: OrderService, input) {
+      calls += 1;
+      if (calls === 1) {
+        return realCheckout.call(this, { ...input, beforeTransaction: async () => { olderInFlight.resolve(); await olderGate.promise; throw new Error('the older attempt failed before its commit'); } });
+      }
+      return realCheckout.call(this, { ...input, beforeTransaction: async () => { newerInFlight.resolve(); await newerGate.promise; } });
+    });
+    let older: Promise<LightMyRequestResponse> | undefined;
+    let newer: Promise<LightMyRequestResponse> | undefined;
+    try {
+      older = checkout(c, key);
+      await olderInFlight.promise;
+      const olderClaim = await app.redis.get(claimKey(c, key));
+      expect(olderClaim).toMatch(/^IN_FLIGHT/);
+      await app.redis.del(claimKey(c, key)); // the older claim is lost (its TTL lapsed, Redis evicted it)
+      newer = checkout(c, key);
+      await newerInFlight.promise;
+      const newerClaim = await app.redis.get(claimKey(c, key));
+      expect(newerClaim).toMatch(/^IN_FLIGHT/);
+      expect(newerClaim).not.toBe(olderClaim); // each request holds a token of its own
+
+      olderGate.resolve();
+      const olderRes = await older;
+      expect(olderRes.statusCode, olderRes.body).toBe(500);
+      expect(await app.redis.get(claimKey(c, key))).toBe(newerClaim); // not the older request's to release
+      expect((await probe(c, key)).json().data).toEqual({ status: 'in_flight' });
+
+      newerGate.resolve();
+      const newerRes = await newer;
+      expect(newerRes.statusCode, newerRes.body).toBe(200);
+      expect(await ordersOf(c.userId)).toBe(1);
+      expect((await probe(c, key)).json().data.status).toBe('placed');
+    } finally {
+      spy.mockRestore();
+      olderGate.resolve();
+      newerGate.resolve();
+      await Promise.allSettled([older, newer]);
+    }
   });
 });

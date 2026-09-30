@@ -35,7 +35,7 @@ import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from '.
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
-import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
+import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
 import { shapeCheckoutAnswer, type CheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
@@ -107,6 +107,16 @@ export interface CheckoutCommit {
   receiptId: string | null;
   /** The committed answer: the value the receipt holds. */
   answer: CheckoutAnswer;
+}
+
+/** An order as the checkout transaction creates it (the post-commit notices read these fields). */
+type CheckoutCreatedOrder = Prisma.OrderGetPayload<{ include: { items: true; vendor: { select: { id: true; name: true; ownerId: true } } } }>;
+
+/** What the checkout transaction's body hands to COMMIT. */
+interface CheckoutStaged {
+  orders: CheckoutCreatedOrder[];
+  answer: CheckoutAnswer;
+  receiptId: string | null;
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
@@ -1132,6 +1142,10 @@ export class OrderService {
     // [M-11] The two effects every order owes after it commits carry their
     // delays; computed before the transaction so the rows inside it are whole.
     const queueTiming = await checkoutQueueTiming(this.prisma);
+    // [CHECKOUT-IDEM · AX366 F1] Set as the body's last act, when it hands its
+    // work to COMMIT: how a rejected transaction is told apart (see
+    // settleCheckoutCommit).
+    let staged = null as CheckoutStaged | null;
     // Atomic: all orders, stock movements, stats, and the cart deletion commit together
     const checkoutCommit = await this.prisma.$transaction(async (tx) => {
       // Global creation lock order starts with User. Account deletion takes the
@@ -1568,13 +1582,15 @@ export class OrderService {
         })
         : null;
       await input.afterDurableTail?.();
-      return { orders: created, answer, receiptId };
-    });
+      staged = { orders: created, answer, receiptId };
+      return staged;
+    }).catch((err: unknown) => this.settleCheckoutCommit(staged, err));
     const { orders, answer, receiptId } = checkoutCommit;
 
     // ── [CHECKOUT-IDEM · AX354 S1] THE COMMIT POINT ──────────────────────────
-    // The transaction resolved: the orders, their outbox tail and the receipt
-    // are durable. Nothing below may throw to the caller: the order exists, the
+    // The transaction resolved (or its lost acknowledgement was settled by the
+    // durable receipt): the orders, their outbox tail and the receipt are
+    // durable. Nothing below may throw to the caller: the order exists, the
     // answer is the committed receipt, and every step from here is best-effort,
     // logged when it fails. (A post-commit throw used to reach the route, which
     // released the command's claim and answered 500 for a placed order, so the
@@ -1640,6 +1656,35 @@ export class OrderService {
     }
 
     return answer;
+  }
+
+  /**
+   * [CHECKOUT-IDEM · AX366 F1] Settle a rejected checkout transaction.
+   * - The body never finished (nothing staged): COMMIT was never sent, so the
+   *   transaction rolled back. A CONFIRMED rollback, rethrown as it is.
+   * - The body finished: the rejection came from the commit itself (a commit
+   *   error, or an acknowledgement lost after the database committed). The
+   *   outcome is UNKNOWN, and only the durable rows can settle it. This
+   *   transaction's receipt (or, without a key, its first order) present: the
+   *   order committed, so carry on as committed. Absent or unreadable:
+   *   CheckoutOutcomeUnknownError, and the caller keeps its claim.
+   */
+  private async settleCheckoutCommit(staged: CheckoutStaged | null, err: unknown): Promise<CheckoutStaged> {
+    if (!staged) throw err;
+    let landed = false;
+    try {
+      landed = staged.receiptId
+        ? (await this.prisma.checkoutReceipt.count({ where: { id: staged.receiptId } })) === 1
+        : (await this.prisma.order.count({ where: { id: staged.orders[0]!.id } })) === 1;
+    } catch (readErr) {
+      log().error({ err: readErr, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] the durable receipt could not be read to settle an unknown commit');
+    }
+    if (landed) {
+      log().warn({ err, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] commit acknowledgement lost; the durable receipt proves the order committed');
+      return staged;
+    }
+    log().error({ err, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] commit outcome unknown and no durable receipt yet; the claim is kept');
+    throw new CheckoutOutcomeUnknownError(staged.receiptId);
   }
 
   /**
