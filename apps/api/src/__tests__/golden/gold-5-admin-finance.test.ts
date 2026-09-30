@@ -156,14 +156,14 @@ async function holdingImportRow<T>(importId: string, waiters: number, start: () 
   let sent: Array<Promise<T>> = [];
   await sys(() => app.prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT "id" FROM "settlement_imports" WHERE "id" = ${importId} FOR UPDATE`;
-    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    const pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid;
     sent = start();
     const deadline = Date.now() + 15_000;
     for (;;) {
       // A second waiter queues behind the first one, not behind this lock.
-      const [{ blocked }] = await app.prisma.$queryRaw<Array<{ blocked: number }>>`SELECT count(*)::int AS blocked FROM pg_stat_activity a
+      const blocked = (await app.prisma.$queryRaw<Array<{ blocked: number }>>`SELECT count(*)::int AS blocked FROM pg_stat_activity a
         WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))
-           OR EXISTS (SELECT 1 FROM unnest(pg_blocking_pids(a.pid)) AS b(p) WHERE ${pid}::int = ANY(pg_blocking_pids(b.p)))`;
+           OR EXISTS (SELECT 1 FROM unnest(pg_blocking_pids(a.pid)) AS b(p) WHERE ${pid}::int = ANY(pg_blocking_pids(b.p)))`)[0]!.blocked;
       if (blocked >= waiters) return;
       if (Date.now() > deadline) throw new Error(`only ${blocked} of ${waiters} requests reached the import row`);
       await new Promise((resolve) => setTimeout(resolve, 25));
