@@ -183,6 +183,9 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
 /** Provider directories that are not a processor, with the reason the census accepts. */
 export const NON_PROCESSOR_DIRS: Readonly<Record<string, string>> = {
   prescreen: 'in-process heuristics (HeuristicAdPreScreenProvider); no network call',
+  // [PT-1] Card rail v2 holds only the provider-neutral interface and the Swift
+  // simulator. The first real card processor added there registers above, with its hosts.
+  card: 'card rail v2 interface and the Swift simulator only (state in Swift Redis); no third party is called',
 };
 
 /** Outbound host literals in source that are not processors, with the reason. */

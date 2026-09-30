@@ -7,11 +7,12 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { LayoutDashboard, ClipboardList, Boxes, FileUp, Settings, LogOut, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import { SignOutButton } from '@/components/sign-out-button';
-import { getSelectedStore, sessionProbe, setSelectedStore } from '@/lib/auth';
+import { sessionProbe, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
-import { switchStore } from '@/lib/store-scope';
+import { switchStore, useStoreId } from '@/lib/store-scope';
 
 const NAV = [
+  { href: '/dashboard/weekly-fee', label: 'Weekly fee', icon: Settings, exact: true },
   { href: '/dashboard', label: 'Today', icon: LayoutDashboard, exact: true },
   { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
   { href: '/dashboard/inventory', label: 'Inventory', icon: Boxes, exact: true },
@@ -156,7 +157,7 @@ function StoreShell({ children }: { children: React.ReactNode }) {
   // The store is React state as well as localStorage: the shell must RE-RENDER
   // (and remount its subtree) the moment it changes, which a localStorage read
   // alone would never trigger.
-  const [storeId, setStoreId] = useState<string | null>(() => getSelectedStore());
+  const storeId = useStoreId();
 
   const onSwitch = useCallback(
     (id: string) => {
@@ -167,7 +168,6 @@ function StoreShell({ children }: { children: React.ReactNode }) {
         // rejected by the response-context guard rather than cached.
         commit: (next) => {
           setSelectedStore(next);
-          setStoreId(next);
         },
         confirmDiscard: (ids) =>
           window.confirm(

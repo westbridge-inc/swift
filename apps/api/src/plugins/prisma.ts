@@ -97,6 +97,9 @@ const TENANT_QUERY_EXTENSIONS = {
   tenantBillingCurrency: scoped, trialGrant: scoped,
   // [M-08] The prepaid top-up as one persisted command.
   topUpCommand: scoped,
+  // [PT-1] Card rail v2: an enrolled card, a hosted session, and the evidence
+  // of every provider answer all belong to the payer's operator.
+  paymentInstrument: scoped, cardSession: scoped, cardObservation: scoped,
   // Ads platform.
   advertiser: scoped, adPlacement: scoped, adCampaign: scoped, adInvoice: scoped,
   adRefundIntent: scoped, adRefundItem: scoped, adRefundOutbox: scoped,

@@ -40,6 +40,10 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'BillingEvent', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'BillingEvent', field: 'amountUsd', unit: 'USD_MAJOR' },
   { model: 'BillingEvent', field: 'fxRateUsed', unit: 'FX_RATE' },
+  // [PT-1] A hosted Pay-now session's server-priced amount: the weekly fee it
+  // pays, in the same unit as the BillingEvent / SubscriptionPayment it becomes.
+  // It reaches a provider only through toProviderMinor, at the seam.
+  { model: 'CardSession', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'Cart', field: 'tipAmount', unit: 'MAJOR_WHOLE' },
   { model: 'CountryConfig', field: 'floatL1', unit: 'MAJOR_WHOLE' },
   { model: 'CountryConfig', field: 'floatL2', unit: 'MAJOR_WHOLE' },
