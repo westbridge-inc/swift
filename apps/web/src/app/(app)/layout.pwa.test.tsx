@@ -7,6 +7,7 @@ import * as api from '@/lib/customer';
 const state = vi.hoisted(() => ({ pathname: '/', principal: null as string | null, replace: vi.fn(), sessionProbe: vi.fn() }));
 vi.mock('next/navigation', () => ({ usePathname: () => state.pathname, useRouter: () => ({ replace: state.replace, push: vi.fn(), back: vi.fn() }) }));
 vi.mock('@/lib/auth', () => ({
+  subscribePrivateCacheInvalidation: () => () => undefined,
   sessionProbe: state.sessionProbe,
   restoreSession: vi.fn().mockResolvedValue({ ok: false }),
   getSessionPrincipal: () => state.principal,

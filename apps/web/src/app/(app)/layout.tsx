@@ -7,7 +7,7 @@ import { getSessionPrincipal, restoreSession, sessionProbe, subscribeSession } f
 import { getMarketDepth } from '@/lib/customer';
 import { marketTabVisible } from '@/lib/app-rules';
 import { customerRoute, HOME_PATH } from '@/lib/customer-routes';
-import { Providers } from '@/components/providers';
+import { Providers, useCacheIdentityReady, usePrivateCacheEpoch } from '@/components/providers';
 import { CustomerSessionProvider, type CustomerSession, type NearPoint, type SessionStatus } from '@/components/customer-session';
 import { ContentSkeleton, SignInDoor, TabBar, TopBar } from '@/components/customer-shell';
 import CartSkeleton from './cart/loading';
@@ -21,16 +21,16 @@ import { InstallPrompt } from '@/components/install-prompt';
 // [Q7b] THE SHELL STAYS PUT. It used to re-run the session check on every
 // page change and blank the whole screen with "Loading…" each time, so moving
 // between pages felt like reloading a website. Now:
-//   - the server is asked ONCE per page load ([W-01]: the session is an
-//     HttpOnly cookie, so its word is the only word), and told of later
-//     changes — sign-in, sign-out, an expired session — by lib/auth;
+//   - the shell asks for initial identity; Providers revalidates before
+//     private-cache reuse on navigation/resume. HttpOnly cookies make the
+//     server the authority; lib/auth also relays cross-tab invalidation;
 //   - the header and the tabs never unmount; pages change underneath them;
 //   - browsing is public, like the phone app. A private page (cart, orders,
 //     profile) opened by a guest shows a sign-in door inside the app, and a
 //     page still waiting for its answer shows its shape, never a blank screen.
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
-    <Providers>
+    <Providers preserveShell>
       <CustomerShell>{children}</CustomerShell>
     </Providers>
   );
@@ -142,12 +142,15 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const route = customerRoute(pathname);
   const session = useShellSession();
+  const cacheIdentityReady = useCacheIdentityReady();
+  const cacheEpoch = usePrivateCacheEpoch();
   const { status, principal, restoreTried, epoch, ensureSignedIn } = session;
   const depth = useInAppDepth(pathname);
   const [menuOpen, setMenuOpen] = useState(false);
   const [nearPoint, setNearPoint] = useState<NearPoint | null>(null);
 
   useEffect(() => { setMenuOpen(false); }, [pathname]);
+  useEffect(() => { setNearPoint(null); }, [cacheEpoch]);
 
   // [Q7b] Market is a tab only when the server's depth verdict says so — the
   // phone app's rule, read from the same public endpoint.
@@ -177,7 +180,8 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
   );
 
   let content: React.ReactNode;
-  if (route.public || status === 'signed-in') content = children;
+  if (!cacheIdentityReady) content = <div aria-label="Opening this page"><ContentSkeleton /></div>;
+  else if (route.public || status === 'signed-in') content = children;
   else if (status === 'guest' && restoreTried) content = <SignInDoor door={route.door} returnPath={returnPath()} />;
   else content = <div aria-label="Opening this page">{pathname === '/cart' ? <CartSkeleton /> : pathname === '/orders' ? <OrdersSkeleton /> : pathname.startsWith('/orders/') ? <OrderDetailSkeleton /> : <ContentSkeleton />}</div>;
 
@@ -201,9 +205,9 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
         />
         <main className="mx-auto max-w-6xl px-4 pt-4 pb-[calc(5rem_+_env(safe-area-inset-bottom))] md:pt-6 md:pb-[calc(1.5rem_+_env(safe-area-inset-bottom))]">
           <OfflineNotice />
-          <div key={pathname} className="swift-route-in">{content}</div>
+          <div key={`${pathname}:${cacheEpoch}`} className="swift-route-in">{content}</div>
         </main>
-        <MarketAvailability onChange={setMarketVisible} />
+        <MarketAvailability key={cacheEpoch} onChange={setMarketVisible} />
         <TabBar activeTab={route.tab} marketVisible={marketVisible} />
         {/* [PWA-1] Offered on Home only, never over a cart, checkout or live
             order. Mounted from the first render, so an install event that

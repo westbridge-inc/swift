@@ -21,6 +21,7 @@ beforeEach(() => adoptSession('person-a'));
 describe('per-person reuse without changing live money reads', () => {
   it('reuses Account profile in settings and returns the saved server response to Account', async () => {
     const fetcher = mockApi(({ url, method, init }) => {
+      if (url.pathname.endsWith('/auth/me')) return ok({ user: { id: 'person-a' } });
       if (url.pathname.endsWith('/consent')) return ok({ consents: [] });
       return ok(method === 'PUT' ? { ...profile, ...JSON.parse(String(init?.body)) } : profile);
     });
@@ -46,7 +47,7 @@ describe('per-person reuse without changing live money reads', () => {
     adoptSession(identity.scope);
     view.rerender(wrap(<AccountPage />, { ...session, ...identity }));
     expect(screen.queryByText('Test Person')).toBeNull();
-    await act(async () => resolve(ok({ ...profile, firstName: 'Other' })));
+    await act(async () => resolve(ok({ ...profile, id: identity.scope, firstName: 'Other' })));
     await screen.findByText('Other Person');
     expect(count).toBe(2);
   });
@@ -54,7 +55,14 @@ describe('per-person reuse without changing live money reads', () => {
   it('reuses a repeated search within its person, then hides old results and late responses on account change', async () => {
     let resolve!: (_value: ApiReply) => void;
     let count = 0;
-    const fetcher = mockApi(() => ++count === 1 ? ok([vendor('First shop')]) : new Promise<ApiReply>((done) => { resolve = done; }));
+    let resolveGuest!: (_value: ApiReply) => void;
+    const fetcher = mockApi(() => {
+      count += 1;
+      if (count === 1) return ok([vendor('First shop')]);
+      // Resolve the previous person's request, never whichever newer request
+      // happened to start last (the guest has its own pending response).
+      return new Promise<ApiReply>((done) => { if (count === 2) resolve = done; else resolveGuest = done; });
+    });
     const view = renderWithQuery(wrap(<SearchPage />));
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'tools' } });
     await screen.findByText('First shop');
@@ -67,7 +75,11 @@ describe('per-person reuse without changing live money reads', () => {
     expect(screen.queryByText('First shop')).toBeNull();
     await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
     view.rerender(wrap(<SearchPage />, { ...session, status: 'guest', scope: 'guest', epoch: 2 }));
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
     await act(async () => resolve(ok([vendor('Second person shop')])));
+    expect(screen.queryByText('Second person shop')).toBeNull();
+    await act(async () => resolveGuest(ok([vendor('Guest shop')])));
+    await screen.findByText('Guest shop');
     expect(screen.queryByText('Second person shop')).toBeNull();
   });
 

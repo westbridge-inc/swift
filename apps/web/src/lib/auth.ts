@@ -1,6 +1,7 @@
 'use client';
 
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
+import { clearPrivateBrowserState, listenForSessionInvalidation, publishSessionInvalidation } from './session-events';
 
 // ── The session ──────────────────────────────────────────────────────────────
 // [W-01] THIS APP HOLDS NO CREDENTIAL. It used to keep both tokens in
@@ -35,6 +36,8 @@ const CHECKOUT_ATTEMPT_PREFIX = 'swift_web_checkout_attempt';
 let authGeneration = 0;
 /** Who the SERVER says this browser is. Null until probed or signed in. */
 let sessionPrincipal: string | null = null;
+let probeSequence = 0;
+let lastSettledProbe = 0;
 
 /** [Q7b] The customer shell asks the server once per page load, then keeps
  *  its chrome mounted. It learns of every later change here instead: a
@@ -43,12 +46,40 @@ let sessionPrincipal: string | null = null;
 const sessionListeners = new Set<() => void>();
 
 export function subscribeSession(listener: () => void): () => void {
+  ensureSessionEvents();
   sessionListeners.add(listener);
   return () => { sessionListeners.delete(listener); };
 }
 
 function announceSessionChange(): void {
   for (const listener of [...sessionListeners]) listener();
+}
+
+// Private cache owners subscribe separately from the shell: first learning an
+// identity is not a transition, but even signing back in as the same person is.
+const privateCacheListeners = new Set<() => void>();
+export function subscribePrivateCacheInvalidation(listener: () => void): () => void {
+  ensureSessionEvents();
+  privateCacheListeners.add(listener);
+  return () => { privateCacheListeners.delete(listener); };
+}
+function invalidatePrivateCaches(): void {
+  clearStoredCheckoutAttempts();
+  clearPrivateBrowserState();
+  try { localStorage.removeItem(STORE_KEY); } catch { /* Storage disabled. */ }
+  for (const listener of [...privateCacheListeners]) listener();
+}
+function ensureSessionEvents(): void {
+  listenForSessionInvalidation(() => {
+    // A sibling can invalidate proof, but cannot supply identity. No echo.
+    forgetSession();
+  });
+}
+function forgetSession(): void {
+  authGeneration += 1;
+  sessionPrincipal = null;
+  invalidatePrivateCaches();
+  announceSessionChange();
 }
 
 type AuthSnapshot = { principal: string | null; generation: number };
@@ -108,6 +139,7 @@ export class ApiRequestError extends Error {
 }
 
 export function getSessionPrincipal(): string | null {
+  ensureSessionEvents();
   return typeof window !== 'undefined' ? sessionPrincipal : null;
 }
 
@@ -119,18 +151,26 @@ export function getSessionPrincipal(): string | null {
  */
 export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
   if (typeof window === 'undefined') return { ok: false };
+  ensureSessionEvents();
+  const generation = authGeneration;
+  const probeId = ++probeSequence;
+  const obsolete = () => generation !== authGeneration || probeId < lastSettledProbe;
   const forget = () => {
-    const known = sessionPrincipal !== null;
-    sessionPrincipal = null;
-    if (known) announceSessionChange();
+    if (generation === authGeneration && sessionPrincipal !== null) {
+      forgetSession();
+      publishSessionInvalidation();
+    }
     return { ok: false };
   };
   try {
-    const res = await fetch(`${API_URL}/api/v1/auth/me`, { credentials: 'include', headers: { ...clientHeaders } });
-    if (!res.ok) return forget();
+    const res = await fetch(`${API_URL}/api/v1/auth/me`, { credentials: 'include', cache: 'no-store', headers: { ...clientHeaders } });
+    if (obsolete()) return { ok: false };
+    if (!res.ok) { lastSettledProbe = probeId; return forget(); }
     const json = await res.json().catch(() => null);
+    if (obsolete()) return { ok: false };
+    lastSettledProbe = probeId;
     const user = json?.data?.user as { id?: unknown } | undefined;
-    if (!user || typeof user.id !== 'string') return forget();
+    if (!user || typeof user.id !== 'string' || !user.id) return forget();
     if (sessionPrincipal !== user.id) {
       // LEARNING the principal (null -> id) is not an account change: the
       // request that discovered it carried the very same cookies, so nothing
@@ -138,8 +178,9 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
       // fail every concurrent request with a spurious SESSION_CHANGED. Only a
       // switch between two KNOWN people is a change.
       if (sessionPrincipal !== null) {
-        clearStoredCheckoutAttempts();
         authGeneration += 1;
+        invalidatePrivateCaches();
+        publishSessionInvalidation();
       }
       sessionPrincipal = user.id;
       announceSessionChange();
@@ -147,6 +188,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
     return { ok: true, user: user as Record<string, unknown> };
   } catch {
     // A network failure is not "signed out" — say nothing rather than guess.
+    lastSettledProbe = Math.max(lastSettledProbe, probeId);
     return { ok: false };
   }
 }
@@ -154,10 +196,12 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
 /** Adopt a session the server has just issued as cookies. No tokens involved. */
 export function adoptSession(principal: string | null) {
   if (typeof window === 'undefined') return;
-  if (!sessionPrincipal || !principal || sessionPrincipal !== principal) clearStoredCheckoutAttempts();
+  ensureSessionEvents();
   authGeneration += 1;
+  invalidatePrivateCaches();
   sessionPrincipal = principal;
   announceSessionChange();
+  publishSessionInvalidation();
 }
 
 /**
@@ -202,11 +246,9 @@ export async function logout(): Promise<void> {
 
 export function clearSession() {
   if (typeof window === 'undefined') return;
-  authGeneration += 1;
-  sessionPrincipal = null;
-  clearStoredCheckoutAttempts();
-  localStorage.removeItem(STORE_KEY);
-  announceSessionChange();
+  ensureSessionEvents();
+  forgetSession();
+  publishSessionInvalidation();
 }
 
 export function getSelectedStore() {

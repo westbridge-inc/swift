@@ -9,7 +9,12 @@ const deferred = () => {
   const promise = new Promise<Profile>((done) => { resolve = done; });
   return { promise, resolve };
 };
-beforeEach(() => adoptSession('a'));
+beforeEach(() => {
+  adoptSession('a');
+  // Cache reuse now requires the real server identity endpoint as well as the
+  // profile reader. Keep every existing reuse/save-race assertion unchanged.
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ data: { user: { id: 'a' } } }))));
+});
 
 it('deduplicates concurrent reads and reuses only the current session profile', async () => {
   const pending = deferred();
