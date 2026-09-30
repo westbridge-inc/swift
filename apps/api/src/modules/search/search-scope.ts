@@ -1,7 +1,8 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { enterTenant, getTenantContext } from '../../plugins/tenant-context';
 import { searchScopeCounter } from '../../plugins/observability';
+import { ACCESS_COOKIE, REFRESH_COOKIE, parseCookies } from '../auth/browser-session';
 
 // ---------------------------------------------------------------------------
 // [R048-003] THE PUBLIC MARKET / SEARCH SCOPE.
@@ -163,6 +164,27 @@ export function bindPublicMarketTenant(app: FastifyInstance) {
     const tenantId = await resolvePublicMarketTenant(app);
     enterTenant(tenantId);
     request.publicTenantId = tenantId;
+  };
+}
+
+/** [R048-003] The binding of a browse surface that a signed-in customer and a
+ *  guest both call (search; the Home category rail). A request that carries a
+ *  credential — a Bearer header, or the browser's session cookies — takes the
+ *  strict session path: the caller's own tenant, and a credential that does not
+ *  verify is refused as it is everywhere else. A request that carries none is
+ *  a guest, bound to the public catalogue's tenant. Either way a tenant is
+ *  BOUND before the handler runs, so every tenant-scoped model it touches
+ *  partitions itself under TENANT_UNSCOPED_ACCESS=deny — never a system bypass. */
+export function bindBrowseTenant(app: FastifyInstance) {
+  const bindPublicTenant = bindPublicMarketTenant(app);
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const cookies = parseCookies(request.headers.cookie);
+    if (request.headers.authorization !== undefined ||
+      Object.hasOwn(cookies, ACCESS_COOKIE) || Object.hasOwn(cookies, REFRESH_COOKIE)) {
+      await app.authenticate(request, reply);
+    } else {
+      await bindPublicTenant(request);
+    }
   };
 }
 

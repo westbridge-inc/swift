@@ -337,6 +337,8 @@ vi.mock('./screens/VendorOrderDetailScreen', () => ({ VendorOrderDetailScreen: '
 vi.mock('./screens/VendorOrderHistoryScreen', () => ({ VendorOrderHistoryScreen: 'VendorOrderHistoryScreen' }));
 vi.mock('./screens/VendorScheduleScreen', () => ({ VendorScheduleScreen: 'VendorScheduleScreen' }));
 vi.mock('./screens/VendorSwiftNumberScreen', () => ({ VendorSwiftNumberScreen: 'VendorSwiftNumberScreen' }));
+// WeeklyFee is now a family router; keep both leaf screens native-free in this entry-gate harness.
+vi.mock('../mover/screens/MoverSwiftNumberScreen', () => ({ MoverSwiftNumberScreen: 'MoverSwiftNumberScreen' }));
 vi.mock('./screens/VendorTierScreen', () => ({ VendorTierScreen: 'VendorTierScreen' }));
 
 import { VendorStack } from './VendorStack';
