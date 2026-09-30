@@ -30,7 +30,7 @@ import { startGoldenWorker } from './gold-7-worker';
 // production routes; all assertions inspect real PostgreSQL evidence.
 //
 // Only Date is controlled (Vitest's existing clock); sockets/timers stay real.
-// The clock starts before the seeded trials, whose entire snapshots must stay
+// The clock starts before foreign billing deadlines; their snapshots must stay
 // unchanged. No production sweep is filtered or mocked. Preflight refuses any
 // foreign subscription that could become eligible during this journey.
 // Device/staging-only: physical agent cash collection, live MMG acceptance,
@@ -286,14 +286,22 @@ beforeAll(async () => {
   alertsBefore = new Set((await sys(() => app.prisma.alertDelivery.findMany({ where: { kind: 'ADMIN_OPS', subjectId: 'billing_dunning_ops_task' }, select: { id: true } }))).map((a) => a.id));
   await purgeFixtures();
 
-  // Seeded demo trials are not our fixtures. Put the whole 30-day story before
-  // their education/conversion window and prove the production sweeps leave
-  // them byte-for-byte unchanged. Fail preflight instead of mutating a seed.
+  // Other suites can leave ownerless ACTIVE/PAST_DUE subscriptions when their
+  // drivers are deleted. Preserve those rows too: put the whole story before
+  // every foreign sweep deadline, including reminder/education lead times.
+  // SUSPENDED is never safe: its nudge sweep has no lower date bound.
   const foreign = await foreignSubscriptions();
-  expect(foreign.every((s) => s.status === 'TRIAL' && s.trialEndDate !== null)).toBe(true);
-  const earliest = Math.min(Date.now(), ...foreign.map((s) => s.trialEndDate!.getTime()));
+  expect(foreign.filter((s) => s.status === 'SUSPENDED').map((s) => s.status), 'foreign suspended rows would be nudged').toEqual([]);
+  const foreignDeadlines = foreign.flatMap((s) => {
+    if (s.status === 'TRIAL' && s.trialEndDate) return [s.trialEndDate.getTime() - 4 * DAY];
+    if (s.status === 'ACTIVE') return [s.autoRenew ? s.nextBillingDate.getTime() - DAY : s.currentPeriodEnd.getTime()];
+    if (s.status === 'PAST_DUE' && s.autoRenew && s.nextRetryAt) return [s.nextRetryAt.getTime()];
+    // PAUSED/CANCELLED/CHURNED and undated trials/retries are ineligible.
+    return [];
+  });
+  const earliest = Math.min(Date.now(), ...foreignDeadlines);
   clockStart = earliest - 60 * DAY;
-  expect(foreign.every((s) => s.trialEndDate!.getTime() > clockStart + 36 * DAY)).toBe(true);
+  expect(foreignDeadlines.every((at) => at > clockStart + 32 * DAY)).toBe(true);
   foreignIds = foreign.map((s) => s.id);
   foreignBefore = await foreignSnapshot();
   const currency = await sys(() => app.prisma.tenantBillingCurrency.findUnique({ where: { tenantId: 'swift-default' } }));
