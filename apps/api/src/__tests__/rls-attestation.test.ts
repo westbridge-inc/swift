@@ -283,8 +283,11 @@ describe('[TA-S0-003] the gate cannot be outflanked by a new tenant-creation pat
   // that mints a tenant. If one is ever added, it must call assertTenantWall —
   // this census goes red the day a new `tenant.create` appears in production
   // code, so the reasoning behind the boot-only gate cannot rot silently.
-  // review/provision.ts calls assertTenantWall before it mints the review tenant.
-  const ALLOWED = new Set(['modules/ops/platform-config.ts', 'modules/review/provision.ts']);
+  // review/provision.ts calls assertTenantWall before it mints the review tenant;
+  // [STG-DRILLS D6] ops/drills/fixtures.ts does the same before it mints (or
+  // re-activates) the staging-only `swift-drill` tenant. crash-fixtures.ts
+  // asserts the same wall before minting each protected per-run tenant.
+  const ALLOWED = new Set(['modules/ops/platform-config.ts', 'modules/review/provision.ts', 'modules/ops/drills/fixtures.ts', 'modules/ops/drills/crash-fixtures.ts']);
 
   function sourceFiles(dir: string, out: string[] = []): string[] {
     for (const entry of readdirSync(dir)) {

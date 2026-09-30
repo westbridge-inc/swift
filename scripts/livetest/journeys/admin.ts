@@ -2,8 +2,10 @@
 // actions carry an x-swift-reason (ADM-006); money- and platform-class actions
 // need a second admin (ADM-005, see admin-util.ts).
 
-import type { Journey } from '../journey.js';
-import { GET, POST, PUT, req, sleep, brief, pick, waitFor, placeOrder, orderIdsOf, customerOrder, idemKey, codeOf } from './common.js';
+import type { Journey, Recorder } from '../journey.js';
+import { login, type Session } from '../client.js';
+import type { DrillManifest } from '../drills.js';
+import { GET, POST, PUT, req, sleep, brief, pick, waitFor, placeOrder, orderIdsOf, customerOrder, idemKey, codeOf, runReceipt } from './common.js';
 import type { Ctx } from './context.js';
 import { asAdmin, submitDoc, approveDoc, vendorOf } from '../provision.js';
 import { freshVendor } from './vendor.js';
@@ -75,9 +77,64 @@ export const ADMIN_01: Journey<Ctx> = {
       rec.skipCase('two-person approval (confirmation)', 'needs a second admin; none is provisioned on this target (LIVETEST_ADMIN2_PHONE unset) and no HTTP route creates one');
     }
     for (const t of types.slice(2)) rec.expect(`approve ${t}`, await approveDoc(ctx.admin, ids[t]!, t), 200);
-    rec.skipCase('recusal', 'a reviewer is recused only from a case about themselves (or their identity cluster); staging that needs an admin to become a partner, which moves its active role to the partner role with no HTTP way back (switch-role has no admin role)');
+    if (ctx.drill) {
+      await recusal(rec, ctx, ctx.drill.recusal, ctx.drill.marker);
+    } else {
+      rec.skipCase('recusal', 'no drill fixtures on this run: a reviewer is recused only from a case in their own identity cluster, and the runner cannot put an applicant there over HTTP — deploy/drill-fixtures.sh links one to the test admin on the server (LIVETEST_DRILL_MANIFEST)');
+    }
   },
 };
+
+/**
+ * [STG-DRILLS D5] Recusal, for real: the drill applicant shares the test
+ * admin's phone (one STRONG identity edge, drawn by the identity engine on
+ * the server). The applicant applies as a store and submits a document over
+ * HTTP; the admin can neither claim the case nor decide it; the second admin,
+ * outside the cluster, decides it.
+ */
+async function recusal(rec: Recorder, ctx: Ctx, r: DrillManifest['recusal'], marker: string): Promise<void> {
+  if (r.adminPhone !== ctx.adminPhone) {
+    rec.check('recusal: the drill applicant is linked to this run’s admin', false, `the manifest links ${r.adminPhone}, this run signs in ${ctx.adminPhone}`);
+    return;
+  }
+  let s: Session | null = null;
+  try {
+    s = await login(r.phone);
+  } catch (e: any) {
+    rec.check('recusal: the drill applicant signs in (dev code, private instance)', false, String(e?.message ?? e).slice(0, 200));
+    return;
+  }
+  const become = await POST('/partner/become', {
+    role: 'VENDOR', acceptAgreement: true,
+    business: { name: `${marker} applicant`, vendorType: 'SUPERMARKET', phone: r.phone, addressLine1: `3 ${marker} Street`, city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8150, longitude: -58.1500 },
+  }, s.token);
+  rec.expect('recusal: the applicant in the admin’s identity cluster applies as a store', become, [200, 201], undefined, `store=${become.json?.data?.id ?? become.json?.data?.vendor?.id}`);
+  // A re-run of the same fixtures continues where the last one stopped: a
+  // pending document is reviewed, else the next missing one is submitted.
+  const st = (await GET('/verification/status?role=SUPERMARKET', s.token)).json?.data;
+  let doc = ((st?.documents ?? []) as any[]).find((d) => d.status === 'PENDING') as { id: string; docType: string } | undefined;
+  if (!doc) {
+    const docType = (st?.missing ?? [])[0] as string | undefined;
+    rec.require('recusal: the applicant has a document left to submit', !!docType, `missing=${JSON.stringify(st?.missing ?? null)}`);
+    const d = await submitDoc(s, 'SUPERMARKET', docType!, `recusal-${ctx.runId}`);
+    rec.expect(`recusal: the applicant submits ${docType}`, d.res, 201);
+    if (d.id) doc = { id: d.id, docType: docType! };
+  }
+  rec.require('recusal: a document of the applicant is in review', !!doc, '');
+  const custody = await GET(`/admin/verification/${doc!.id}/custody`, ctx.admin.token);
+  const caseId = pick(custody.json, 'data.review.0.caseId', 'data.caseId');
+  rec.check('recusal: custody names the review case', custody.ok && !!caseId, `→ ${brief(custody)}`);
+  if (caseId) {
+    rec.deny('recusal: the admin cannot claim a case in their own identity cluster', await asAdmin(ctx.admin.token, 'claim a drill review case about my own identity cluster', 'POST', `/admin/verification/cases/${caseId}/claim`), [403], ['REVIEWER_RECUSED']);
+  }
+  rec.deny('recusal: nor decide it', await approveDoc(ctx.admin, doc!.id, doc!.docType), [403], ['REVIEWER_RECUSED']);
+  if (!ctx.roster.admin2) {
+    rec.skipCase('recusal: another reviewer decides', 'needs a second admin outside the cluster; none is provisioned on this target (LIVETEST_ADMIN2_PHONE unset)');
+    return;
+  }
+  const second = await approveDoc(ctx.roster.admin2, doc!.id, doc!.docType);
+  rec.expect('recusal: the second admin, outside the cluster, decides it', second, 200, undefined, `status=${second.json?.data?.status}`);
+}
 
 export const ADMIN_02: Journey<Ctx> = {
   id: 'ADMIN-02',
@@ -163,8 +220,9 @@ export const ADMIN_04: Journey<Ctx> = {
     const san = String(sub?.san ?? '');
     const now = new Date().toISOString();
     // A reference of this journey's own: a provider transaction id that matches another channel's
-    // receipt (MONEY-03 records SYN-<run>) is refused as PROVIDER_ID_CONFLICT, by design.
-    const tx = `SYN-A04-${ctx.runId}`.slice(0, 60);
+    // receipt (MONEY-03 records its own) is refused as PROVIDER_ID_CONFLICT, by design. [AX324 R9]
+    // The run id is hashed, never truncated, so the case suffix always survives.
+    const tx = runReceipt(ctx.runId, 'A04');
     const good = `transaction_id,account_number,amount,paid_at\n${tx},${san},1500,${now}\nTOTAL,1500\n`;
     const bad = `transaction_id,account_number,amount,paid_at\n${tx}-bad,${san},1500,${now}\nTOTAL,9999\n`;
     const before = Number(sub?.walletBalanceGyd ?? 0);
@@ -179,10 +237,60 @@ export const ADMIN_04: Journey<Ctx> = {
       rec.check('the store’s fee wallet moved by exactly one credit', after === before + 1500, `wallet ${before} → ${after}`);
     }
     if (!ctx.roster.admin2) rec.skipAll('staged import, duplicate replay and rejected-file recovery are two-person actions (ADM-005): the request is held (202, proven above) until a second admin approves, and this target has one admin (LIVETEST_ADMIN2_PHONE unset; no HTTP route creates one)');
-    rec.skipCase('process a weekly settlement digest', 'digests are written only by the Sunday 00:00 job for stores with COMPLETED orders in a finished week; a run cannot produce one');
+    await processDigest(rec, ctx);
     void sleep; void waitFor;
   },
 };
+
+/**
+ * [STG-DRILLS D4 · AX324 R4] Process a weekly sales digest — only a digest of a
+ * store THIS RUN owns. The digest is written by the Sunday 00:00 job; on
+ * staging, deploy/drill-run-job.sh settlement-digest runs that SAME job now,
+ * and it digests the most recent complete calendar week — any week in which a
+ * journeys run completed an order at a roster store. Staging also holds the
+ * owner's own stores, and acknowledging or adjusting one of THEIR digests
+ * would write to a real financial record: so a digest qualifies only if its
+ * store is a roster store (the runner's own +5920… account made it) whose id
+ * that store's owner confirms from its OWN profile, and the list is asked for
+ * that store id alone. No such digest → SKIP; the first row of a shared list
+ * is never taken. Acknowledging is a money-class action (two operators); a
+ * second acknowledgement is refused; a correction is a new immutable
+ * ADJUSTMENT row recomputed from the ledger (which the next run can process in
+ * turn).
+ */
+export async function processDigest(rec: Recorder, ctx: Ctx): Promise<void> {
+  const owned: Array<{ key: string; vendorId: string }> = [];
+  for (const [key, v] of Object.entries(ctx.roster.vendors)) {
+    if (!v?.vendorId) continue;
+    const mine = vendorOf((await GET('/vendor/profile', v.session.token)).json, v.vendorId);
+    if (mine?.id === v.vendorId) owned.push({ key, vendorId: v.vendorId });
+  }
+  let digest: any = null;
+  for (const o of owned) {
+    const list = await GET(`/admin/finance/settlements?status=PENDING&vendorId=${encodeURIComponent(o.vendorId)}&limit=50`, ctx.admin.token);
+    const rows: any[] = Array.isArray(list.json?.data) ? list.json.data : [];
+    digest = rows.find((r) => r.vendorId === o.vendorId && r.kind === 'DIGEST') ?? rows.find((r) => r.vendorId === o.vendorId) ?? null;
+    if (digest) break;
+  }
+  if (!digest) {
+    rec.skipCase('process a weekly settlement digest', `no unacknowledged digest of a store this run owns (checked ${owned.map((o) => o.key).join(', ') || 'no verified roster store'}): run ./deploy/drill-run-job.sh settlement-digest — the Sunday job itself — after a calendar week in which the journeys completed an order; an earlier run may already have acknowledged the last one. A digest of any other store (the owner's own staging stores included) is never touched`);
+    return;
+  }
+  const path = `/admin/finance/settlements/${digest.id}/process`;
+  rec.deny('a store cannot acknowledge a sales digest', await req('PUT', path, { token: ctx.roster.vendors.R1!.session.token, body: {} }), [403]);
+  const done = await twoPerson(rec, ctx, `acknowledge the ${digest.kind ?? 'DIGEST'} sales digest of ${digest.vendor?.name ?? digest.vendorId}`, 'PUT', path, { reference: `${ctx.runId}-A04`.slice(0, 200) });
+  if (!done.done) return;
+  rec.check('the digest reads ACKNOWLEDGED — a record of the store’s own sales, never a payout', done.final?.json?.data?.status === 'ACKNOWLEDGED' && !done.final?.json?.data?.paidAt,
+    `status=${done.final?.json?.data?.status} paidAt=${done.final?.json?.data?.paidAt} orders=${digest.totalOrders} netSales=${digest.netSales}`);
+  const again = await twoPerson(rec, ctx, 'acknowledge the same digest again', 'PUT', path, { reference: `${ctx.runId}-A04-dup`.slice(0, 200) }, [400, 409]);
+  rec.check('the same digest again is refused (duplicate)', !!again.final && !again.final.ok && codeOf(again.final) === 'ALREADY_ACKNOWLEDGED', `→ ${brief(again.final ?? again.first)}`);
+  const adj = await twoPerson(rec, ctx, 'correct the digest by recomputing it from the ledger', 'POST', `/admin/finance/settlements/${digest.id}/adjust`, { reason: `journey ${ctx.runId}: recompute the week from the ledger` });
+  if (adj.done) {
+    const a = adj.final?.json?.data;
+    rec.check('the correction is a new immutable ADJUSTMENT row that names the row it supersedes', !!a?.id && a.id !== digest.id && Number(a?.sequence) >= 1 && !!a?.supersedesId,
+      `id=${a?.id} sequence=${a?.sequence} supersedes=${a?.supersedesId}`);
+  }
+}
 
 export const ADMIN_05: Journey<Ctx> = {
   id: 'ADMIN-05',

@@ -73,6 +73,15 @@ services:
       LIVETEST_WEB_ORIGIN: ${LIVETEST_WEB_ORIGIN:-}
       LIVETEST_RUN_ID: ${LIVETEST_RUN_ID:-}
       LIVETEST_OUT_DIR: /results
+      # [STG-DRILLS] Optional: the drill fixture manifest, copied into this
+      # run's results by journeys-run.sh (/results/drill-manifest.json). Ids
+      # and never-a-subscriber phones only; empty = no drill fixtures.
+      LIVETEST_DRILL_MANIFEST: ${LIVETEST_DRILL_MANIFEST:-}
+      # [AX324 R3] Optional pins on the target identity (scripts/livetest/guard.ts):
+      # drill-crash.sh sets them to the identity its in-worker guard judged, so
+      # the API the runner drives and the worker it kills share one database.
+      LIVETEST_EXPECT_DEPLOYMENT_ID: ${LIVETEST_EXPECT_DEPLOYMENT_ID:-}
+      LIVETEST_EXPECT_ENVIRONMENT: ${LIVETEST_EXPECT_ENVIRONMENT:-}
     volumes:
       - ../scripts/livetest:/app/scripts/livetest:ro
       - ${JOURNEYS_RESULTS_DIR:-/var/tmp/swift-journeys}:/results

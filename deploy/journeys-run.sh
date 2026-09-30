@@ -14,6 +14,10 @@
 # Optional: LIVETEST_ADMIN2_PHONE (a second admin minted by the seed
 # break-glass ceremony) lets the two-person admin cases run; without it they
 # are reported SKIP with the reason.
+# Optional: LIVETEST_DRILL_MANIFEST, the path of a drill-manifest.json written
+# by deploy/drill-fixtures.sh create (STG-DRILLS). It is copied into the run's
+# results and handed to the runner, whose drill journeys (ADMIN-01, PLAT-01)
+# then use those fixtures. Without it the run is exactly as before.
 #
 # Safety model (deploy/docker-compose.journeys.yml):
 #   * The PUBLIC api behind Caddy never carries DEV_OTP_BYPASS or
@@ -51,6 +55,16 @@ API_HOST="$(env_value API_HOST)"
   die "set LIVETEST_ADMIN_PHONE to the seed admin's never-a-subscriber phone (+5920 and 6 digits; staging: +5920400000)"
 [ -z "${LIVETEST_ADMIN2_PHONE:-}" ] || [[ "$LIVETEST_ADMIN2_PHONE" =~ ^\+5920[0-9]{6}$ ]] ||
   die "LIVETEST_ADMIN2_PHONE, when set, is the second admin's never-a-subscriber +5920 phone"
+DRILL_MANIFEST="${LIVETEST_DRILL_MANIFEST:-}"
+if [ -n "$DRILL_MANIFEST" ]; then
+  [ -f "$DRILL_MANIFEST" ] || die "LIVETEST_DRILL_MANIFEST names no file ($DRILL_MANIFEST)"
+  python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1], encoding="utf-8"))
+if m.get("version") != 2 or not isinstance(m.get("runId"), str):
+    sys.exit(1)
+' "$DRILL_MANIFEST" || die "LIVETEST_DRILL_MANIFEST is not a drill manifest (deploy/drill-fixtures.sh create writes one)"
+fi
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 
 # The same revision everywhere: the checked-out SHA, its built image, and the running public api.
@@ -87,6 +101,15 @@ mkdir -p "$RESULTS"
 LIVETEST_WEB_ORIGIN="${LIVETEST_WEB_ORIGIN:-$(env_value CORS_ORIGIN | cut -d, -f1 | tr -d '[:space:]')}"
 export LIVETEST_RUN_ID="$RUN_ID" JOURNEYS_RESULTS_DIR="$RESULTS" LIVETEST_ADMIN_PHONE LIVETEST_WEB_ORIGIN
 export LIVETEST_ADMIN2_PHONE="${LIVETEST_ADMIN2_PHONE:-}"
+# The drill manifest travels inside the run's own results (mounted at /results),
+# so the runner needs no new mount; its path there is what the runner reads.
+if [ -n "$DRILL_MANIFEST" ]; then
+  cp "$DRILL_MANIFEST" "$RESULTS/drill-manifest.json"
+  chmod 0644 "$RESULTS/drill-manifest.json"
+  export LIVETEST_DRILL_MANIFEST=/results/drill-manifest.json
+else
+  export LIVETEST_DRILL_MANIFEST=""
+fi
 export JOURNEYS_UID="$(id -u)" JOURNEYS_GID="$(id -g)"
 
 # The private instance exists only for this run.

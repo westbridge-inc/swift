@@ -24,6 +24,7 @@ import { provisionJourneyWorld, moversOffline, startHeartbeat } from '../provisi
 import { sleep } from '../client.js';
 import { latestHoldUntil } from './common.js';
 import type { Ctx } from './context.js';
+import type { DrillManifest } from '../drills.js';
 import { AUTH_01, AUTH_02, AUTH_03, PLAT_03 } from './auth.js';
 import { CUST_01, CUST_02, CUST_03, CUST_04, CUST_05, AUTH_04 } from './customer.js';
 import { VENDOR_JOURNEYS } from './vendor.js';
@@ -81,6 +82,8 @@ export interface SuiteOpts {
   adminPhone: string;
   only?: string;
   log: (s: string) => void;
+  /** [STG-DRILLS] The run's drill fixtures (LIVETEST_DRILL_MANIFEST), already validated, or null. */
+  drill?: DrillManifest | null;
 }
 
 export async function runJourneySuite(o: SuiteOpts): Promise<number> {
@@ -92,11 +95,14 @@ export async function runJourneySuite(o: SuiteOpts): Promise<number> {
   if (missing.length) throw new Error(`journeys missing from the suite: ${missing.join(', ')}`);
   const selected = LEDGER_ORDER.filter((id) => !wanted || wanted.has(id)).map((id) => byId.get(id)!);
 
+  o.log(o.drill
+    ? `Drill fixtures: ${o.drill.marker} (made ${o.drill.createdAt}) — ADMIN-01 and PLAT-01 run their drill cases`
+    : 'Drill fixtures: none (LIVETEST_DRILL_MANIFEST unset) — the drill cases SKIP as before');
   o.log('Phase 1 — roster (real signup path) and world (vendors orderable, movers online)');
   const roster = await seedJourneyRoster(o.log);
   const world = await provisionJourneyWorld(roster, o.admin, o.log);
   const overrides: Record<string, { lat: number; lng: number } | null | undefined> = {};
-  const ctx: Ctx = { runId: o.runId, log: o.log, identity: o.identity, admin: o.admin, adminPhone: o.adminPhone, roster, world, stash: { heartbeatOverrides: overrides } };
+  const ctx: Ctx = { runId: o.runId, log: o.log, identity: o.identity, admin: o.admin, adminPhone: o.adminPhone, roster, world, stash: { heartbeatOverrides: overrides }, drill: o.drill ?? null };
   const stopHeartbeat = startHeartbeat(roster, world, overrides as Record<string, { lat: number; lng: number } | null>);
 
   const runs = new Map(selected.map((j) => [j.id, new JourneyRun<Ctx>(j)]));

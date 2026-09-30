@@ -12,9 +12,16 @@
 //         physical phones, OS backgrounding — the ledger's separate device
 //         gate) may remain unproven under a PASS; they are listed in
 //         `skippedCases` with gate 'device' and named in `reason`.
-//   A case this target cannot run for any other reason (no second admin, a
-//   clock-driven job, a dark feature flag, a provider secret the runner must
-//   not hold) is a 'target' skip, and it makes the journey SKIP.
+//   A case this target cannot run (no second admin, a clock-driven job, a
+//   dark feature flag, a provider secret the runner must not hold) is a
+//   'target' skip, and it makes the journey SKIP.
+//   [AX324 R6] So does an AUTOMATED-ONLY case (gate 'automated'): a server
+//   case that did not run HERE, whose proof is an automated gate elsewhere
+//   (e.g. the real worker driven with a controllable clock). Naming that test
+//   establishes neither that this target's case ran nor that the test passed
+//   on this head, so the journey is SKIP, and the automated evidence is
+//   reported separately (its own lines in `reason` and its own section of
+//   the summary) — never a PASS.
 //   Cleanup steps (`rec.cleanup`) are recorded and shown, but a failed cleanup
 //   never fails the journey — the product assertions decide the status.
 
@@ -23,7 +30,7 @@ import type { Res } from './client.js';
 export type Status = 'PASS' | 'FAIL' | 'SKIP';
 
 export interface Step { name: string; ok: boolean; detail: string; cleanup?: boolean }
-export interface SkippedCase { case: string; reason: string; gate: 'device' | 'target' }
+export interface SkippedCase { case: string; reason: string; gate: 'device' | 'target' | 'automated' }
 
 export interface TargetInfo { deploymentId: string; environment: string; buildSha: string }
 
@@ -112,6 +119,15 @@ export class Recorder {
     this.skipped.push({ case: caseName, reason, gate: 'device' });
   }
 
+  /**
+   * [STG-DRILLS · AX324 R6] A server case that did not run on this target,
+   * whose proof is an automated gate elsewhere. `reason` names that evidence.
+   * It makes the journey SKIP (never PASS); the evidence is reported apart.
+   */
+  automatedCase(caseName: string, reason: string): void {
+    this.skipped.push({ case: caseName, reason, gate: 'automated' });
+  }
+
   /** The whole journey cannot run here. */
   skipAll(reason: string): void {
     this.wholeSkip = reason;
@@ -193,9 +209,13 @@ function finalize<C>(j: Journey<C>, rec: Recorder, startedAt: string, target: Ta
     // The defining case cannot run here; any steps that did run stay as evidence.
     status = 'SKIP';
     reason = rec.wholeSkip;
-  } else if (rec.skipped.some((c) => c.gate === 'target')) {
+  } else if (rec.skipped.some((c) => c.gate === 'target' || c.gate === 'automated')) {
     status = 'SKIP';
-    reason = `every executed step passed, but these cases cannot run on this target: ${rec.skipped.filter((c) => c.gate === 'target').map((c) => `${c.case} (${c.reason})`).join('; ')}`;
+    const listed = (gate: SkippedCase['gate']) => rec.skipped.filter((c) => c.gate === gate).map((c) => `${c.case} (${c.reason})`).join('; ');
+    reason = [
+      rec.skipped.some((c) => c.gate === 'target') ? `every executed step passed, but these cases cannot run on this target: ${listed('target')}` : '',
+      rec.skipped.some((c) => c.gate === 'automated') ? `server cases NOT executed on this target — automated evidence, reported separately and never a PASS here: ${listed('automated')}` : '',
+    ].filter(Boolean).join(' · ');
   } else if (steps.length === 0) {
     status = 'SKIP';
     reason = rec.wholeSkip ?? 'no step could run on this target';

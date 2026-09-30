@@ -3,7 +3,7 @@
 // for a one-shot run: the JSON is written last, so its presence means the
 // run finished writing.
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { JourneyResult, TargetInfo } from './journey.js';
 
@@ -41,7 +41,17 @@ export function summaryMarkdown(meta: RunMeta, results: JourneyResult[]): string
     lines.push(`## ${r.journeyId} — ${r.status}`);
     if (r.reason) lines.push(`Reason: ${r.reason}`);
     for (const s of r.steps) lines.push(`- ${s.ok ? 'ok  ' : s.cleanup ? 'warn' : 'FAIL'} ${s.name} — ${s.detail}`);
-    for (const s of r.skippedCases) lines.push(`- SKIP ${s.case} — ${s.reason}`);
+    for (const s of r.skippedCases) lines.push(`- ${s.gate === 'automated' ? 'NOT RUN HERE' : 'SKIP'} ${s.case} — ${s.reason}`);
+    lines.push('');
+  }
+  // [AX324 R6] Automated evidence stands apart from the staging verdicts: a
+  // case proven only by an automated gate did not run on this target, and its
+  // journey is SKIP above — this section is where that evidence is reported.
+  const automated = results.flatMap((r) => r.skippedCases.filter((s) => s.gate === 'automated').map((s) => ({ r, s })));
+  if (automated.length > 0) {
+    lines.push('## Automated evidence (reported separately — never a PASS on this target)');
+    lines.push('');
+    for (const { r, s } of automated) lines.push(`- ${r.journeyId} (${r.status}) · ${s.case} — ${s.reason}`);
     lines.push('');
   }
   return lines.join('\n');
@@ -54,4 +64,39 @@ export function writeResults(outDir: string, meta: RunMeta, results: JourneyResu
   writeFileSync(md, summaryMarkdown(meta, results));
   writeFileSync(json, JSON.stringify(results, null, 2) + '\n');
   return { json, md };
+}
+
+/**
+ * [STG-DRILLS D7] One journey's row, replaced by a later, separate proof of
+ * the same journey (the crash drill writes PLAT-02 after the run). Pure: the
+ * other rows and their order are untouched; a row the run never had is added
+ * at the end.
+ */
+export function replaceJourneyRow(results: JourneyResult[], row: JourneyResult): JourneyResult[] {
+  const at = results.findIndex((r) => r.journeyId === row.journeyId);
+  if (at < 0) return [...results, row];
+  return results.map((r, i) => (i === at ? row : r));
+}
+
+/**
+ * Write a separately proven row next to the run's results: `<file>` holds the
+ * row alone; when the run's journeys-result.json exists, its row for the same
+ * journey is replaced (the original file is kept once, as
+ * journeys-result.before-<file>), and journeys-summary.md is rewritten from
+ * the merged rows so its counts stay true.
+ */
+export function writeReplacedRow(outDir: string, file: string, row: JourneyResult, meta: Omit<RunMeta, 'startedAt' | 'finishedAt'>): { row: string; merged: string | null } {
+  mkdirSync(outDir, { recursive: true });
+  const rowPath = join(outDir, file);
+  writeFileSync(rowPath, JSON.stringify(row, null, 2) + '\n');
+  const json = join(outDir, 'journeys-result.json');
+  if (!existsSync(json)) return { row: rowPath, merged: null };
+  const backup = join(outDir, `journeys-result.before-${file}`);
+  if (!existsSync(backup)) copyFileSync(json, backup);
+  const results = replaceJourneyRow(JSON.parse(readFileSync(json, 'utf8')) as JourneyResult[], row);
+  const startedAt = results.map((r) => r.startedAt).sort()[0] ?? row.startedAt;
+  const finishedAt = results.map((r) => r.finishedAt).sort().at(-1) ?? row.finishedAt;
+  writeFileSync(join(outDir, 'journeys-summary.md'), summaryMarkdown({ ...meta, startedAt, finishedAt }, results));
+  writeFileSync(json, JSON.stringify(results, null, 2) + '\n');
+  return { row: rowPath, merged: json };
 }

@@ -29,7 +29,7 @@ const ORDERABLE = ['R1', 'R2', 'ST1', 'OV1']; // SERVICE (SV1) needs a licence g
 // calls it this way; the single-prefix path 404s). They FLIP the flag rather
 // than set it, so "ensure true" reads the returned state and toggles again only
 // if a prior run had already left it on.
-async function ensureFlag(token: string, path: string, field: 'isCurrentlyOpen' | 'acceptingOrders'): Promise<boolean> {
+export async function ensureFlag(token: string, path: string, field: 'isCurrentlyOpen' | 'acceptingOrders'): Promise<boolean> {
   let r = await PUT(path, {}, token);
   if (r.json?.data?.[field] === false) r = await PUT(path, {}, token);
   return r.json?.data?.[field] === true;

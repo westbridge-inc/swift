@@ -143,6 +143,17 @@ const PROVIDERS = [
   { id: 'SP1', phone: '+5920404071', first: 'Joiner', trade: 'carpenter', lat: 6.8105, lng: -58.1505 },
 ];
 
+/** [STG-DRILLS D7] One roster account's fixed facts (phone, position, kind), by roster id — for the crash drill, which signs in only what it needs. */
+export function rosterEntry(id: string): { id: string; phone: string; lat: number; lng: number; kind?: 'rider' | 'driver'; vendorType?: string } | null {
+  const c = JOURNEY_CUSTOMERS.find((x) => x.id === id);
+  if (c) return { id: c.id, phone: c.phone, lat: c.lat, lng: c.lng };
+  const v = JOURNEY_VENDORS.find((x) => x.id === id);
+  if (v) return { id: v.id, phone: v.phone, lat: v.lat, lng: v.lng, vendorType: v.type };
+  const m = JOURNEY_MOVERS.find((x) => x.id === id);
+  if (m) return { id: m.id, phone: m.phone, lat: m.lat, lng: m.lng, kind: m.kind };
+  return null;
+}
+
 /** Every journey account signed in (created on the first run). Movers and vendors hold their partner profile. */
 export async function seedJourneyRoster(log: (s: string) => void): Promise<Roster> {
   const roster: Roster = { customers: {}, vendors: {}, movers: {}, providers: {}, admin2: null };

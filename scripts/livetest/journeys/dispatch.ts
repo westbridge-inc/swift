@@ -196,21 +196,29 @@ export async function freeRider(ctx: Ctx, id: MoverId, customerId?: string): Pro
   const list = activeLegsOf((await GET('/rider/orders/active-legs', m.session.token)).json);
   const left: string[] = [];
   for (const o of list) {
-    const oid = o.id ?? o.orderId;
-    const status = o.status;
-    let last: Res;
-    if (['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) {
-      last = await POST(`/rider/orders/${oid}/handback`, { reason: 'journey runner cleanup: the job is handed back after the check' }, m.session.token);
-    } else {
-      // In custody: walk on from the rung the leg is on (a leg already carried
-      // past pickup cannot replay 'en-route-pickup'), then close it at the door.
-      // A courier job settles from any custody state and carries no door PIN.
-      if (o.orderType !== 'COURIER') await riderToDoorFrom(m.session, oid, status);
-      last = await handoverPaid(m.session, oid, doorOf(o, m), o.orderType === 'COURIER' ? null : await doorPinFromRoster(ctx, oid));
-    }
-    if (!last.ok) left.push(`${oid} (${status}) → ${last.status} ${codeOf(last)}`);
+    const last = await releaseLeg(ctx, id, o);
+    if (!last.ok) left.push(`${o.id ?? o.orderId} (${o.status}) → ${last.status} ${codeOf(last)}`);
   }
   if (left.length) ctx.log(`    ${id} still holds: ${left.join('; ')}`);
   void customerId; void customerOrder;
   return left;
+}
+
+/**
+ * Finish (or release) ONE leg a rider holds: handed back short of pickup, else
+ * walked on and closed paid at the door. The caller decides which legs are its
+ * to release (the crash drill releases only its own run's [AX370 A1]).
+ */
+export async function releaseLeg(ctx: Ctx, id: MoverId, o: any): Promise<Res> {
+  const m = mover(ctx, id);
+  const oid = o.id ?? o.orderId;
+  const status = o.status;
+  if (['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) {
+    return POST(`/rider/orders/${oid}/handback`, { reason: 'journey runner cleanup: the job is handed back after the check' }, m.session.token);
+  }
+  // In custody: walk on from the rung the leg is on (a leg already carried
+  // past pickup cannot replay 'en-route-pickup'), then close it at the door.
+  // A courier job settles from any custody state and carries no door PIN.
+  if (o.orderType !== 'COURIER') await riderToDoorFrom(m.session, oid, status);
+  return handoverPaid(m.session, oid, doorOf(o, m), o.orderType === 'COURIER' ? null : await doorPinFromRoster(ctx, oid));
 }

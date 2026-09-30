@@ -450,6 +450,138 @@ journey's staging gate with the run id. Re-runs reuse the roster (accounts in
 the +59204 block) and create new orders, bookings and rides; accounts a journey
 must create afresh (signup, deletion, onboarding) come from +592049xxxx.
 
+## 8b. Staging drills: the journeys staging cannot stage by itself
+
+Some journeys SKIP on a plain staging run because the test server cannot
+produce their conditions. The drills produce the ones that are safe to produce
+— on staging only, through scripts, never through a route: nothing is added to
+the public or admin API. A drill never touches data it did not make.
+
+| Journey | Why it skipped | Drill | What then runs |
+| --- | --- | --- | --- |
+| CUST-03 | convert-to-pickup answers 404 | D1: `DISPATCH_EXHAUSTION=1` in the staging deploy/.env (pilot ruling) | a cash delivery with a tip is switched to pickup: fee and tip off, a pickup code, no second switch |
+| VEND-04 | the bill needs a trial that ended days ago | **none — automated-only (AX324 R2).** The billing jobs sweep every due subscription on the database and cannot be scoped to drill accounts without a production parameter, so no drill may run them on staging | stays **SKIP** on staging; its automated evidence (GOLD-7 VEND-04, the real subscription worker through bill → dun → suspend → agent cash → reinstate → stop) is reported separately in the summary, never as a PASS |
+| MONEY-03 | partners pay the weekly fee only on the MMG checkout page (owner ruling 2026-09-29) | none: it passes only with the MMG sandbox | stays **SKIP**; its agent-receipt steps are the *dormant back-office rail* check (two operators, credited once, a replay credits nothing), recorded as evidence only |
+| ADMIN-04 | digests are written only by the Sunday 00:00 job | D4: `drill-run-job.sh settlement-digest` runs that SAME job now (one digest per store and calendar week, enforced by the database — it writes only what Sunday writes) | a digest **of a store the run owns** (a roster store whose owner confirms it) acknowledged (two operators), the duplicate refused, a correction as an ADJUSTMENT row; no such digest → SKIP (a digest of any other store is never touched) |
+| ADMIN-01 | no case about the reviewer exists | D5: a DRILL applicant who shares the test admin's phone (one identity-graph edge) | the admin cannot claim or decide the case; the second admin (+5920400001) decides it |
+| PLAT-01 | staging has one tenant | D6: a second tenant `swift-drill` (CRAWLER kind: synthetic, never shown to guests) with a store, a customer, an order and a partner | the cross-tenant denial matrix, both ways, and no foreign data in any response |
+| PLAT-02 | the runner cannot kill containers | D7: `drill-crash.sh` kills the worker mid-offer on the host | the cascade resumes within 120 s; nothing ran twice — watched live through completion AND proven from the order's durable rows; one completion; an empty dead-letter page |
+
+Every drill refuses twice before it acts. On the host, `deploy/drill-common.sh`
+refuses the root user, anything but `PILOT_ENV=staging` with
+`NODE_ENV=loadtest`, a deploy/.env without `SWIFT_STAGING_DRILLS=1`, a running
+worker that does not carry that marker, and a worker that is not the
+checked-out revision. Inside the worker container the drill code checks again
+(apps/api/src/modules/ops/drills/guard.ts): the marker, never
+`NODE_ENV=production`, the stack's own Postgres (`postgres:5432`,
+`POSTGRES_DB`, and the server must answer that name), EVERY connection the work
+can use — `SYSTEM_DATABASE_URL`, when set, must name that same database and
+answer with the same deployment identity (system work runs on it under
+`TENANT_RLS_BIND=1`), and Redis must be the stack's own — and the database's
+own deployment identity saying `staging` (never production, never absent).
+Each condition alone refuses production. The crash drill asks that second
+layer inside the very worker it will kill, before the setup and again right
+before the kill (`drill-guard.js`). Fixtures are named `DRILL-<run id>`, their
+accounts are `+592048…` numbers no subscriber can hold, a re-run with the same
+run id returns the same fixtures, and a re-run adopts only what its own run
+made (anything else in the way is refused).
+
+One-time settings, staging only (never in production): add
+`SWIFT_STAGING_DRILLS=1` and `DISPATCH_EXHAUSTION=1` to deploy/.env, then
+redeploy so the api and worker are recreated with them:
+
+    cd /opt/swift
+    ./deploy/pilot-up.sh "$APPROVED_SHA"
+
+`DISPATCH_EXHAUSTION=1` is also on the production launch checklist (the pilot
+ruling); `SWIFT_STAGING_DRILLS` never is.
+
+The order, as swift-deploy, when the owner is not testing:
+
+1. One run id for everything that follows:
+
+       RUN_ID="staging-$(date -u +%Y%m%dT%H%M%SZ)"
+
+2. Fixtures (D5, D6):
+
+       LIVETEST_ADMIN_PHONE=+5920400000 ./deploy/drill-fixtures.sh create "$RUN_ID"
+
+   Expect `drill fixtures for <run id>: ~/swift-journeys/drills/<run id>/drill-manifest.json`
+   and the next command printed. A refusal prints `REFUSED: [STG-DRILLS <code>] …`
+   and creates nothing.
+
+3. The settlement digest, once, now (D4):
+
+       ./deploy/drill-run-job.sh settlement-digest
+
+   It prints one JSON line naming the job it ran. The digest covers the most
+   recent complete calendar week: it needs one order completed at a roster
+   store in that week, which any journeys run in that week provides. It is the
+   ONLY job a drill can run: `convert-trials` and `billing-cycle` are refused
+   (exit 2) for good.
+
+4. The journeys, with the manifest:
+
+       LIVETEST_ADMIN_PHONE=+5920400000 LIVETEST_ADMIN2_PHONE=+5920400001 LIVETEST_RUN_ID="$RUN_ID" \
+         LIVETEST_DRILL_MANIFEST="$HOME/swift-journeys/drills/$RUN_ID/drill-manifest.json" ./deploy/journeys-run.sh
+
+   The manifest is copied into the run's results. Expect CUST-03, ADMIN-01,
+   ADMIN-04 and PLAT-01 to run their drill cases; VEND-04 and MONEY-03 to SKIP
+   (the summary's "Automated evidence" section names VEND-04's automated
+   gate — separate from the staging verdicts); and PLAT-02 to SKIP, pointing at
+   the crash drill. The runner refuses a manifest made on another deployment or
+   naming a live phone. Without `LIVETEST_DRILL_MANIFEST` the run is exactly as
+   before.
+
+5. The crash drill (D7), same run id, with the dead-letter page drained first
+   (PLAT-02 can pass only on an empty page; the setup refuses otherwise and
+   kills nothing). [AX370] The setup also refuses, before its first write and
+   with nothing killed, when a roster rider (DR1–DR3) holds any job the run
+   cannot prove its own (an order in the run's `crash-drill-orders.json`,
+   placed by C5 at R1; the refusal names the order), or when any rider other
+   than DR1–DR3 is online in the tenant (the drill order's candidate pool).
+   Take those riders offline, or finish those jobs, and run it again:
+
+       LIVETEST_ADMIN_PHONE=+5920400000 LIVETEST_RUN_ID="$RUN_ID" ./deploy/drill-crash.sh
+
+   It runs the guard inside the worker, starts the private instance (pinned to
+   the identity that guard judged), reaches mid-offer (an express delivery at
+   R1 offered to a roster rider), runs the guard again, then `docker kill`s the
+   worker, waits 15 s, `docker start`s it, and verifies: every rider's offers
+   and legs are watched through completion, then the order's durable rows are
+   read inside the worker (`drill-evidence.js`) and judged. Expect `worker …
+   killed at …, started again at …` and `PLAT-02 PASS`. Incomplete durable
+   evidence (the accepted attempt or an attempt a rider was seen holding has
+   no publication record, or the journal has no search or no assignment) is
+   `PLAT-02 SKIP — INCONCLUSIVE …`, never a PASS. The final cleanup releases
+   only the run's own jobs and names any other job a roster rider holds. It writes
+   `plat02-crash-drill.json`, replaces the PLAT-02 row of the run's
+   journeys-result.json (the original is kept as
+   `journeys-result.before-plat02-crash-drill.json`) and rewrites
+   journeys-summary.md. Whatever stops it, the worker is started again on exit.
+   It needs the roster provisioned, so it runs after the journeys.
+
+6. Cleanup:
+
+       ./deploy/drill-fixtures.sh cleanup "$RUN_ID"
+
+   Expect a report with `"kept":[]` and `"tenant":"removed"`, filed as
+   drill-cleanup.json beside the manifest; the exit status is 1 if anything
+   was kept, with the reason. [AX370] The tenant goes only when the row at
+   `swift-drill` is the drill's own (CRAWLER, its slug and name, not
+   purge-protected) and names this run in its record of drill runs: another
+   tenant there is `"tenant":"refused"` (exit 1) and is never deleted or
+   deactivated; a run that never used it leaves it `"kept"`. Removal goes through parent rows; append-only
+   evidence (audit, consent, deletion receipts, order status logs, the ledger,
+   receipts, agent-payment observations) is never deleted, and any SAN a
+   fixture store was given goes to the tombstone registry, never reused.
+
+Evidence for the record, per run: `~/swift-journeys/<run id>/` (journeys-result.json,
+journeys-summary.md, drill-manifest.json, crash-drill-state.json,
+crash-drill-host.json, crash-drill-verify.json, crash-drill-evidence.json,
+plat02-crash-drill.json) and `~/swift-journeys/drills/<run id>/`
+(drill-manifest.json, drill-cleanup.json).
+
 ## 9. Production go-live: the TLS pin on api.swiftgy.com
 
 The iOS and Android apps pin `api.swiftgy.com` (and its subdomains) to three CA roots: ISRG Root X1 and X2

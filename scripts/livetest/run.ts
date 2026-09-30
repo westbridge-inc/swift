@@ -19,6 +19,12 @@
 // Every phone the suite uses is +5920… (never a subscriber); the run is refused
 // before its first request otherwise (guard.ts gate p).
 //
+// [STG-DRILLS D7] `--suite=crash-drill --phase=setup|verify|finalize` is the
+// runner half of the PLAT-02 worker crash drill; deploy/drill-crash.sh kills
+// and restarts the worker between setup and verify, and reads the order's
+// durable evidence inside the worker before finalize (the runner has no Docker
+// socket and no database).
+//
 // Exit: 0 no journey failed · 1 a journey failed · 2 harness error · 3 target refused.
 
 import { tmpdir } from 'node:os';
@@ -32,6 +38,7 @@ import { requireAdminPhone } from './provision.js';
 import { fixturePhones } from './roster.js';
 import { freshPhone } from './journeys/common.js';
 import { UK_FICTIONAL } from './journeys/auth.js';
+import { loadDrillManifest, refuseForeignManifest } from './drills.js';
 
 const log = (s: string) => console.log(s);
 
@@ -85,6 +92,9 @@ async function journeys() {
   // Gate (p): no phone this suite uses can reach a real person.
   refusePhones();
   const adminPhone = requireAdminPhone(process.env.LIVETEST_ADMIN_PHONE);
+  // [STG-DRILLS] The server-side fixtures, if any: well formed and +5920… only
+  // (gate p, inside the parser), before the first request.
+  const drill = loadDrillManifest();
   // Gate (a): by name, then by resolution — no request to a public target, ever.
   await refusePublicTarget(ORIGIN);
   // Gates (b) and (c): the admin signs in only after the route proved to exist.
@@ -94,16 +104,24 @@ async function journeys() {
     async () => { admin = await login(adminPhone); return admin.token; },
   );
   log(`Target identity: deployment ${identity.deploymentId} · environment ${identity.environment} · build ${identity.buildSha} · data ${identity.dataClassification}\n`);
+  // Gate (b) for the fixtures: made on this very deployment, or refused.
+  if (drill) refuseForeignManifest(drill, identity);
 
   const { runJourneySuite } = await import('./journeys/index.js');
-  const code = await runJourneySuite({ runId, outDir, identity, admin: admin!, adminPhone, only: arg('only'), log });
+  const code = await runJourneySuite({ runId, outDir, identity, admin: admin!, adminPhone, only: arg('only'), log, drill });
   process.exit(code);
 }
 
+/** [STG-DRILLS D7] The PLAT-02 crash drill's runner half (deploy/drill-crash.sh drives the phases). */
+async function crash() {
+  const { crashDrill } = await import('./crash-drill.js');
+  process.exit(await crashDrill(arg('phase'), log));
+}
+
 const suite = arg('suite') ?? process.env.LIVETEST_SUITE ?? 'golden';
-const entry = suite === 'journeys' ? journeys : suite === 'golden' ? main : null;
+const entry = suite === 'journeys' ? journeys : suite === 'golden' ? main : suite === 'crash-drill' ? crash : null;
 if (!entry) {
-  console.error(`unknown --suite=${suite} (golden | journeys)`);
+  console.error(`unknown --suite=${suite} (golden | journeys | crash-drill)`);
   process.exit(2);
 }
 entry().catch((e) => {
