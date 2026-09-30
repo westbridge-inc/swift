@@ -18,6 +18,7 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
   const duringId = `gold7-during-${nanoid(12)}`;
   const peerId = `gold7-cleanup-${nanoid(16)}-${nanoid(12)}`;
   const peerAlertIds: string[] = [];
+  const peerNotificationIds: string[] = [];
   const ownedNotificationIds: string[] = [];
   const ownedAlertIds = [0, 1].map(() => `gold7-owned-${nanoid(16)}`);
   const data = { kind: 'ADMIN_OPS', subjectId: 'vendor_pending', recipientId };
@@ -30,6 +31,12 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
     peerAlertIds.push(...rows.map((row) => row.id));
     return result;
   }) as unknown as typeof createMany);
+  const createNotification = other.notification.create.bind(other.notification);
+  const peerNotificationTracking = vi.spyOn(other.notification, 'create').mockImplementation((async (args: Prisma.NotificationCreateArgs) => {
+    const result = await createNotification(args);
+    peerNotificationIds.push(result.id);
+    return result;
+  }) as unknown as typeof createNotification);
   let closed = false;
   try {
     // Same stable fixture label AND phone range, different run ownership.
@@ -116,12 +123,11 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
       if (!closed && h.app) await h.close();
     } finally {
       peerTracking.mockRestore();
+      peerNotificationTracking.mockRestore();
       try {
         await other.alertDelivery.deleteMany({ where: { id: { in: [beforeId, duringId, peerOfferId, ...peerAlertIds, ...ownedAlertIds] } } });
         const stores = await other.vendor.findMany({ where: { owner: { userId: peerId } }, select: { id: true } });
-        for (const store of stores) {
-          await other.notification.deleteMany({ where: { data: { path: ['vendorId'], equals: store.id } } });
-        }
+        await other.notification.deleteMany({ where: { id: { in: peerNotificationIds } } });
         await other.vendor.deleteMany({ where: { id: { in: stores.map((store) => store.id) } } });
         await other.vendorOwner.deleteMany({ where: { userId: peerId } });
         await other.user.deleteMany({ where: { id: peerId } });
