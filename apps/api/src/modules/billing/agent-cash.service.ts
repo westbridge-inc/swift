@@ -121,6 +121,15 @@ export function providerTxnKey(p: { mmgTxnId?: string | null; externalId: string
 }
 export const PROVIDER = 'MMG';
 
+/** [AX369] The key the identity backfill (20260902030000) wrote, exactly as its
+ *  SQL computed it: upper(trim(COALESCE(mmgTxnId, regexp_replace(externalId,
+ *  '^MANUAL:', '')))). Postgres trim() strips SPACES only, where
+ *  providerTxnKey strips all whitespace, so a tab-padded legacy id was keyed
+ *  differently; an identity is looked up under both before one is minted. */
+export function backfillTxnKey(p: { mmgTxnId?: string | null; externalId: string }): string {
+  return (p.mmgTxnId ?? p.externalId.replace(/^MANUAL:/, '')).replace(/^ +| +$/g, '').toUpperCase();
+}
+
 /** Channel-honest activation copy [spec 4.5 / SO-7]: the screen must state
  *  the LIVE channel's real latency — never "instant" in manual mode. */
 const ACTIVATION_COPY: Record<string, string> = {
@@ -307,23 +316,45 @@ export class AgentCashService {
    *  amount or currency disagrees with the identity is a CONFLICT: never
    *  credited, suspensed for a person, counted and paged. */
   private async identityFor(
-    row: { id: string; tenantId: string; channel: string; externalId: string; mmgTxnId: string | null; amount: Prisma.Decimal; currencyCode: string },
+    row: { id: string; tenantId: string; channel: string; externalId: string; mmgTxnId: string | null; amount: Prisma.Decimal; currencyCode: string; providerPaymentId: string | null },
     channel: string,
   ): Promise<{ payment: { id: string; status: string; creditedPaymentId: string | null }; conflict: boolean }> {
     const key = providerTxnKey(row);
-    const where = { provider_providerTxnId: { provider: PROVIDER, providerTxnId: key } };
-    let payment = await this.prisma.providerPayment.findUnique({ where });
+    // [AX369] An observation that already links its identity USES that link.
+    // A key recomputed today may be normalised differently from the one that
+    // linked it (the backfill's Postgres trim()), so it never re-points the
+    // observation and never mints a second credit authority for it. A link
+    // to nothing fails closed.
+    let payment = row.providerPaymentId
+      ? await this.prisma.providerPayment.findUniqueOrThrow({ where: { id: row.providerPaymentId } })
+      : null;
     if (!payment) {
-      try {
-        payment = await this.prisma.providerPayment.create({
-          data: { tenantId: row.tenantId, provider: PROVIDER, providerTxnId: key, amount: row.amount, currencyCode: row.currencyCode },
-        });
-      } catch (e) {
-        if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
-        payment = await this.prisma.providerPayment.findUniqueOrThrow({ where });
+      // Before minting, the identity is looked up under EVERY accepted form of
+      // the key: today's, and the one the backfill wrote.
+      const forms = [...new Set([key, backfillTxnKey(row)])];
+      const existing = await this.prisma.providerPayment.findMany({ where: { provider: PROVIDER, providerTxnId: { in: forms } }, orderBy: { createdAt: 'asc' } });
+      if (existing.length > 1) {
+        // Two authorities already stand for one transaction; nothing here may
+        // choose between them. Held for a person, never linked or credited.
+        agentCashProviderIdConflictsCounter.labels(channel).inc();
+        log().error({ paymentId: row.id, identities: existing.map((e) => e.id), forms }, '[AX369] one MMG transaction has two provider identities under different normalisations of its id — suspensed, never credited; a person must reconcile them');
+        await this.page('agent-cash-provider-id-ambiguous', 'One MMG transaction, two identities', `Transaction ${key} matches ${existing.length} provider identities under different normalisations of its id. Nothing is credited: reconcile them against the MMG statement.`, { variant: 'provider_id_ambiguous', paymentId: row.id, providerTxnId: key });
+        return { payment: existing[0]!, conflict: true };
       }
+      payment = existing[0] ?? null;
+      if (!payment) {
+        const where = { provider_providerTxnId: { provider: PROVIDER, providerTxnId: key } };
+        try {
+          payment = await this.prisma.providerPayment.create({
+            data: { tenantId: row.tenantId, provider: PROVIDER, providerTxnId: key, amount: row.amount, currencyCode: row.currencyCode },
+          });
+        } catch (e) {
+          if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
+          payment = await this.prisma.providerPayment.findUniqueOrThrow({ where });
+        }
+      }
+      await this.prisma.mmgAgentPayment.update({ where: { id: row.id }, data: { providerPaymentId: payment.id } });
     }
-    await this.prisma.mmgAgentPayment.update({ where: { id: row.id }, data: { providerPaymentId: payment.id } });
     const conflict = Number(payment.amount) !== Number(row.amount) || payment.currencyCode !== row.currencyCode;
     if (conflict) {
       agentCashProviderIdConflictsCounter.labels(channel).inc();

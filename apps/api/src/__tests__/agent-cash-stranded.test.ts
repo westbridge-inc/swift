@@ -655,3 +655,77 @@ describe('[AX363] every credit goes through the provider identity and stays insi
     expect(bound).toBeLessThan(sql.indexOf('ALTER TABLE'));
   });
 });
+
+describe('[AX369] one MMG transaction, one credit authority, whatever the key normalisation', () => {
+  /** The legacy pair: an MMG id padded with tabs, and the same id with spaces
+   *  around the tabs. The identity backfill (Postgres trim(): spaces only)
+   *  keyed both "\tID\t"; today's normalisation (all whitespace) keys "ID". */
+  const legacyPair = () => {
+    const core = `LEG${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    providerTxnIds.push(`\t${core}\t`, core, `\n\t${core}\t\n`);
+    return { core, tabbed: `\t${core}\t`, spaced: ` \t${core}\t ` };
+  };
+  /** The backfill's state: an identity under `key`, and a first observation
+   *  linked to it and credited THROUGH it. */
+  async function creditedLegacy(san: string, subscriptionId: string, key: string, externalId: string) {
+    const identity = await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: key, amount: 2100, currencyCode: 'GYD' } });
+    externalIds.push(externalId);
+    const first = await prisma.mmgAgentPayment.create({
+      data: { channel: 'MMG_AGENT_WEBHOOK', externalId, mmgTxnId: externalId, providerPaymentId: identity.id, sanRaw: san, amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'RECEIVED', raw: {} },
+    });
+    expect(await svc.credit(first.id, subscriptionId, { amount: 2100, channel: 'MMG_AGENT_WEBHOOK', externalId })).toMatchObject({ status: 'accepted' });
+    return identity;
+  }
+  /** A second observation the backfill linked to the same identity, parked in suspense. */
+  async function linkedInSuspense(san: string, identityId: string, receipt: string) {
+    externalIds.push(`MANUAL:${receipt}`);
+    return prisma.mmgAgentPayment.create({
+      data: { channel: 'MANUAL_ADMIN', externalId: `MANUAL:${receipt}`, providerPaymentId: identityId, sanRaw: san, amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'UNMATCHED', failureCode: 'SAN_UNKNOWN', raw: {} },
+    });
+  }
+  const identitiesFor = (core: string) => prisma.providerPayment.count({ where: { providerTxnId: { in: [`\t${core}\t`, core, `\n\t${core}\t\n`] } } });
+
+  it('the tab/space legacy pair: attach USES the identity the backfill linked, never re-mints; the second observation is reconciled, one credit', async () => {
+    const { sub, san } = await makeVendorSub();
+    const { core, tabbed, spaced } = legacyPair();
+    const legacy = await creditedLegacy(san, sub.id, tabbed, tabbed);
+    const second = await linkedInSuspense(san, legacy.id, spaced);
+    expect(await svc.attach(second.id, sub.id, 'admin-resolver')).toMatchObject({ status: 'reconciled', paymentId: second.id });
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: second.id } })).providerPaymentId).toBe(legacy.id);
+    expect(await identitiesFor(core)).toBe(1);
+    expect(await money(sub.id, [tabbed, `MANUAL:${spaced}`])).toEqual({ credits: 1, ledger: 1, observations: 2 });
+  });
+
+  it('a link is used even when no normalisation of the id today would find it (a newline-padded legacy id): reconciled, one credit', async () => {
+    const { sub, san } = await makeVendorSub();
+    const { core, tabbed } = legacyPair();
+    const legacy = await creditedLegacy(san, sub.id, tabbed, tabbed);
+    const newline = `\n\t${core}\t\n`; // trim() and the backfill form both miss "\tCORE\t" here
+    const second = await linkedInSuspense(san, legacy.id, newline);
+    expect(await svc.attach(second.id, sub.id, 'admin-resolver')).toMatchObject({ status: 'reconciled', paymentId: second.id });
+    expect(await identitiesFor(core)).toBe(1);
+    expect(await money(sub.id, [tabbed, `MANUAL:${newline}`])).toEqual({ credits: 1, ledger: 1, observations: 2 });
+  });
+
+  it("a new delivery of a legacy transaction finds the identity under the backfill's key before minting one: reconciled, one credit", async () => {
+    const { sub, san } = await makeVendorSub();
+    const { core, tabbed, spaced } = legacyPair();
+    await creditedLegacy(san, sub.id, tabbed, tabbed);
+    externalIds.push(spaced);
+    expect(await svc.ingest(webhookPayment(spaced, san))).toMatchObject({ status: 'reconciled' });
+    expect(await identitiesFor(core)).toBe(1);
+    expect(await money(sub.id, [tabbed, spaced])).toEqual({ credits: 1, ledger: 1, observations: 2 });
+  });
+
+  it('two identities already standing for one transaction (both normalisations) hold a new observation for a person, unlinked: nothing credited', async () => {
+    const { sub, san } = await makeVendorSub();
+    const { core, spaced } = legacyPair();
+    await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: `\t${core}\t`, amount: 2100, currencyCode: 'GYD' } });
+    await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: core, amount: 2100, currencyCode: 'GYD' } });
+    externalIds.push(spaced);
+    expect(await svc.ingest(webhookPayment(spaced, san))).toMatchObject({ status: 'received_unmatched', failureCode: 'PROVIDER_ID_CONFLICT' });
+    const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { channel_externalId: { channel: 'MMG_AGENT_WEBHOOK', externalId: spaced } } });
+    expect({ status: row.status, providerPaymentId: row.providerPaymentId }).toEqual({ status: 'UNMATCHED', providerPaymentId: null });
+    expect(await money(sub.id, [spaced])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+  });
+});
