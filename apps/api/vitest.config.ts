@@ -73,6 +73,8 @@ export default defineConfig({
       // its provider is never inherited from a dev .env.
       CARD_RAIL_V2: '',
       CARD_RAIL_PROVIDER: '',
+      // [TAXI multi-stop] Off unless a test switches it on per case.
+      TAXI_MAX_STOPS: '',
     },
     // All test files share ONE Postgres DB, so run files sequentially: parallel
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)

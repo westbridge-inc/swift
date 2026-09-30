@@ -38,6 +38,12 @@ function same(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
+/** A Prisma column reference (`prisma.order.fields.x`), as this double hands it out. */
+interface FieldRef { __fieldRef: string }
+function isFieldRef(v: unknown): v is FieldRef {
+  return typeof v === 'object' && v !== null && typeof (v as FieldRef).__fieldRef === 'string';
+}
+
 function ordinal(v: unknown): number | null {
   if (v instanceof Date) return v.getTime();
   if (typeof v === 'number') return v;
@@ -97,8 +103,13 @@ export function matchesWhere(row: Row, where: Where | undefined): boolean {
           }
           break;
         case 'lt': case 'lte': case 'gt': case 'gte': {
+          // A column reference compares against the same row's other column,
+          // which must be a graded column too.
+          if (isFieldRef(bound) && !(bound.__fieldRef in row)) {
+            throw new Error(`service-vertical-doubles: fixture row has no column "${bound.__fieldRef}" — add it so the column compare is graded`);
+          }
           const a = ordinal(value);
-          const b = ordinal(bound);
+          const b = ordinal(isFieldRef(bound) ? row[bound.__fieldRef] : bound);
           if (a === null || b === null) return false;
           if (op === 'lt' && !(a < b)) return false;
           if (op === 'lte' && !(a <= b)) return false;
@@ -155,6 +166,8 @@ export interface OrderStore {
     count: (args: { where?: Where }) => Promise<number>;
     updateMany: (args: { where: Where; data: Row }) => Promise<{ count: number }>;
     update: (args: { where: { id: string }; data: Row; select?: Record<string, unknown> }) => Promise<Row>;
+    /** Column references for column-to-column predicates (`prisma.order.fields`). */
+    fields: Record<string, FieldRef>;
   };
 }
 
@@ -225,6 +238,9 @@ export function orderStore(rows: Row[]): OrderStore {
         applyData(row, args.data);
         return project(row, args.select);
       },
+      fields: new Proxy({} as Record<string, FieldRef>, {
+        get: (_t, prop) => (typeof prop === 'string' ? { __fieldRef: prop } : undefined),
+      }),
     },
   };
   return store;

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { GUYANA_TZ } from '@swift/types';
-import { addAppointmentDays, appointmentDayKey, appointmentInstantOfWallClock, appointmentWeekday, formatAppointmentClock, formatAppointmentDay, formatAppointmentSlot, serviceJobScheduleSelection, upcomingAppointmentDays } from './appointmentTime';
+import { addAppointmentDays, appointmentDayKey, appointmentInstantOfWallClock, appointmentWeekday, formatAppointmentClock, formatAppointmentDate, formatAppointmentDay, formatAppointmentSlot, serviceJobScheduleSelection, upcomingAppointmentDays } from './appointmentTime';
 
 // Appointment wire values are TRUE UTC instants (a 09:00 Guyana slot travels as
 // 13:00Z). This module is the phone's ONE formatter for them: every chip, cart
@@ -47,6 +47,12 @@ describe('appointment time on a phone in any device zone', () => {
     expect(appointmentInstantOfWallClock('2026-09-24', 23, 30)).toBe('2026-09-25T03:30:00.000Z');
   });
 
+  it('names the day a service job was requested in the market zone — 23:30 on the 24th is the 24th [Q12]', () => {
+    expect(formatAppointmentDate('2026-09-25T03:30:00.000Z')).toBe('Sep 24');
+    expect(formatAppointmentDate('2026-09-24T13:00:00.000Z')).toBe('Sep 24');
+    expect(formatAppointmentDate('2026-09-25T04:00:00.000Z')).toBe('Sep 25'); // midnight in Guyana
+  });
+
   it('resolves and formats through the zone every app shares', () => {
     expect(GUYANA_TZ).toBe('America/Guyana');
   });
@@ -71,6 +77,10 @@ describe('one formatter per app', () => {
       expect(text, rel).toMatch(/from '(\.\.\/)+lib\/appointmentTime'/);
       expect(text, rel).not.toMatch(/timeZone: 'UTC'/);
     }
+  });
+
+  it('the services screen names no date in the device zone — a request made at 23:30 in Georgetown is not "tomorrow" on a phone set to UTC [Q12]', () => {
+    expect(src('modules/services/screens/ServiceJobsScreen.tsx')).not.toMatch(/toLocale(Date|Time)String\(|\.get(Hours|Date|Day)\(\)/);
   });
 
   it('no phone module carries a second zone or a hand-rolled offset', () => {

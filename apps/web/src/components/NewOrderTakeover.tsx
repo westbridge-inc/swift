@@ -61,6 +61,15 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     }
   }, [orders, seen]);
 
+  // [Q12] A queued order the latest poll shows is no longer PENDING — the
+  // customer cancelled it, another device answered it, the no-response timer
+  // reaped it — leaves the takeover: the chime is for an open decision.
+  useEffect(() => {
+    const settled = new Set(orders.filter((o) => (o.status || '').toUpperCase() !== 'PENDING').map((o) => o.id));
+    if (settled.size === 0) return;
+    setQueue((q) => (q.some((o) => settled.has(o.id)) ? q.filter((o) => !settled.has(o.id)) : q));
+  }, [orders]);
+
   // Chime + tab flash while the takeover is up.
   useEffect(() => {
     if (queue.length === 0) return;

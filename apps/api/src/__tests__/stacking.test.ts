@@ -224,12 +224,12 @@ describe('S4 — the rulebook judges every pairing', () => {
     await reserveRiderLeg(app.prisma, rider.id, legA.id, 2);
 
     const near = await makeOrder({ customerId: customer.id, dropLat: GEO.lat + 0.006, dropLng: GEO.lng + 0.006 });
-    const vNear = await stackVerdict(app.prisma, rider.id, near.id);
+    const vNear = await stackVerdict(app.prisma, rider.id, near.id, await riderStackingCapacity(app.prisma));
     expect(vNear).toMatchObject({ eligible: true, legs: 1 });
 
     // ~20 km away: outside any 1.5 km corridor.
     const far = await makeOrder({ customerId: customer.id, dropLat: GEO.lat + 0.2, dropLng: GEO.lng + 0.2 });
-    const vFar = await stackVerdict(app.prisma, rider.id, far.id);
+    const vFar = await stackVerdict(app.prisma, rider.id, far.id, await riderStackingCapacity(app.prisma));
     expect(vFar.eligible).toBe(false);
     if (!vFar.eligible) {
       expect(vFar.rule).toBe('R6'); // drop-off corridor
@@ -246,7 +246,7 @@ describe('S4 — the rulebook judges every pairing', () => {
     const legA = await makeOrder({ customerId: customer.id, riderId: rider.id, total: 4000 });
     await reserveRiderLeg(app.prisma, rider.id, legA.id, 2);
     const big = await makeOrder({ customerId: customer.id, total: 3000 });
-    const v = await stackVerdict(app.prisma, rider.id, big.id);
+    const v = await stackVerdict(app.prisma, rider.id, big.id, await riderStackingCapacity(app.prisma));
     expect(v.eligible).toBe(false);
     if (!v.eligible) expect(v.rule).toBe('R4');
   });
@@ -256,7 +256,7 @@ describe('S4 — the rulebook judges every pairing', () => {
     const { rider } = await makeRider();
     const customer = await makeCustomer();
     const solo = await makeOrder({ customerId: customer.id });
-    expect(await stackVerdict(app.prisma, rider.id, solo.id)).toEqual({ eligible: true, legs: 0 });
+    expect(await stackVerdict(app.prisma, rider.id, solo.id, await riderStackingCapacity(app.prisma))).toEqual({ eligible: true, legs: 0 });
   });
 });
 

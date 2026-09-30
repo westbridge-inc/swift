@@ -1449,7 +1449,7 @@ export class DispatchService {
           ? await (async () => {
               const legs = await riderLiveLegCount(this.prisma, top.riderId);
               if (legs === 0) return false;
-              const v = await stackVerdict(this.prisma, top.riderId, orderId);
+              const v = await stackVerdict(this.prisma, top.riderId, orderId, riderCap);
               return !v.eligible; // refused pairs are logged inside, rule-named
             })()
           : false;
@@ -1538,7 +1538,7 @@ export class DispatchService {
         // Revalidate after that await, not just before sending the command.
         const stackedPublicationBlocked = pool === 'RIDER' && riderCap > 1
           && await riderLiveLegCount(this.prisma, top.riderId) > 0
-          && !(await stackVerdict(this.prisma, top.riderId, orderId)).eligible;
+          && !(await stackVerdict(this.prisma, top.riderId, orderId, riderCap)).eligible;
         if (stackedPublicationBlocked || !(await this.canReceiveOffer(pool, top.riderId, riderCap))) {
           await this.removeOfferIfOwned(orderId, top.riderId, attemptId);
           return {};
@@ -2552,7 +2552,7 @@ export class DispatchService {
         if (claimCap > 1) {
           // Between legs, the pairing must satisfy the batching rulebook — a
           // refusal names its rule and rolls the claim CAS back with it.
-          const v = await stackVerdict(tx, moverId, orderId);
+          const v = await stackVerdict(tx, moverId, orderId, claimCap);
           if (!v.eligible && v.legs > 0) {
             throw new AppError(
               409,
